@@ -90,6 +90,8 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
     (SM100) only.
     """
 
+    activation_quant_key = kNvfp4DynamicToken
+
     def __init__(
         self,
         *,
@@ -103,8 +105,12 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=kNvfp4DynamicToken,
+            activation_key=self.activation_quant_key,
         )
+
+    @property
+    def per_token_activation(self) -> bool:
+        return self.activation_quant_key == kNvfp4DynamicToken
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -160,7 +166,8 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
             trtllm_hidden_alignment=trtllm_nvfp4_hidden_alignment(
-                per_token_activation=True, is_act_and_mul=self.moe.is_act_and_mul
+                per_token_activation=self.per_token_activation,
+                is_act_and_mul=self.moe.is_act_and_mul,
             ),
         )
 
@@ -182,7 +189,7 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 experts_cls=self.experts_cls,
                 backend=self.nvfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
-                per_token_activation=True,
+                per_token_activation=self.per_token_activation,
             )
         else:
             # Reload creates new scale tensors; derived kernel scales must use

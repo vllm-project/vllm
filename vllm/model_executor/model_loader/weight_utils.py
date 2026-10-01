@@ -200,6 +200,9 @@ def get_quant_config(
         QuantizationConfigArgs,
         resolve_quantization_config,
     )
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptQuantConfigBase,
+    )
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
@@ -219,6 +222,14 @@ def get_quant_config(
             online_args
         )
         return checkpoint_config
+
+    def make_checkpoint_config(config: dict[str, Any]) -> QuantizationConfig:
+        if issubclass(quant_cls, ModelOptQuantConfigBase):
+            assert online_args is None or isinstance(
+                online_args, QuantizationConfigArgs
+            )
+            config = {**config, "_online_quantization_args": online_args}
+        return maybe_compose_online_quantization(quant_cls.from_config(config))
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
@@ -260,9 +271,7 @@ def get_quant_config(
         ):
             pass  # fall through to file-based loading below
         else:
-            return maybe_compose_online_quantization(
-                quant_cls.from_config(hf_quant_config)
-            )
+            return make_checkpoint_config(hf_quant_config)
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
@@ -376,14 +385,14 @@ def get_quant_config(
 
         if model_config.quantization in ("modelopt", "modelopt_mixed"):
             if config.get("producer", {}).get("name") == "modelopt":
-                return maybe_compose_online_quantization(quant_cls.from_config(config))
+                return make_checkpoint_config(config)
             else:
                 raise ValueError(
                     f"Unsupported quantization config"
                     f" found for {model_config.quantization} in {f}."
                 )
 
-    return maybe_compose_online_quantization(quant_cls.from_config(config))
+    return make_checkpoint_config(config)
 
 
 def get_sparse_attention_config(

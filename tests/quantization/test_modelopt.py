@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
+from contextlib import nullcontext
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
 
@@ -17,6 +18,7 @@ from tests.quantization.utils import (
     load_model_without_vllm_runner,
 )
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.forward_context import set_forward_context
@@ -48,6 +50,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import get_quant_config
 from vllm.platforms import current_platform
 
 
@@ -116,16 +119,12 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
 
 
 @pytest.mark.parametrize("moe_activation", [None, "nvfp4_per_token"])
-def test_modelopt_nvfp4_quantizes_parallel_lm_head(moe_activation, default_vllm_config):
-    default_vllm_config.model_config = Mock(
-        spec=ModelConfig,
-        dtype=torch.bfloat16,
-        quantization_config=QuantizationConfigArgs(moe={"activation": moe_activation}),
-    )
+def test_modelopt_nvfp4_quantizes_parallel_lm_head(moe_activation):
     config = ModelOptNvFp4Config(
         is_checkpoint_nvfp4_serialized=True,
         kv_cache_quant_algo=None,
         exclude_modules=[],
+        quantization_args=QuantizationConfigArgs(moe={"activation": moe_activation}),
     )
 
     method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
@@ -693,19 +692,6 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
     assert method is sentinel  # bespoke builder wins over the generic path
 
 
-def _expected_auto_w4a16_kernel() -> type:
-    """Default W4A16 NVFP4 kernel: FlashInfer CuTe-DSL on SM100/103 when
-    available, Marlin everywhere else (see ``init_nvfp4_linear_kernel``)."""
-    capability = current_platform.get_device_capability()
-    compute_capability = capability.to_int() if capability is not None else None
-    cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
-        compute_capability
-    )
-    if compute_capability in (100, 103) and cutedsl_ok:
-        return FlashInferCuteDslNvFp4W4A16LinearKernel
-    return MarlinNvFp4LinearKernel
-
-
 @pytest.mark.parametrize(
     ("linear_backend", "kernel_cls"),
     [
@@ -811,112 +797,72 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is kNvfp4Dynamic
 
 
-@pytest.mark.parametrize(
-    "config_state,expected_per_token",
-    [
-        ("no_vllm_config", False),
-        ("no_model_config", False),
-        ("no_quant_config", False),
-        ("no_moe_spec", False),
-        ("no_activation", False),
-        ("static", False),
-        ("per_token", True),
-    ],
-)
-def test_modelopt_nvfp4_moe_activation_override(config_state, expected_per_token):
-    """Layer-only construction defaults to static activation scales."""
-    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
-        NvFp4MoeBackend,
+@pytest.mark.parametrize("quantization", ["modelopt_fp4", "modelopt_mixed"])
+@pytest.mark.parametrize("per_token", [False, True])
+def test_modelopt_nvfp4_moe_activation_override(quantization, per_token):
+    """Runtime overrides reach NVFP4 configs without changing HF metadata."""
+    hf_config = {
+        "quant_method": "modelopt",
+        "quant_algo": "MIXED_PRECISION"
+        if quantization == "modelopt_mixed"
+        else "NVFP4",
+        "quantized_layers": {"experts": {"quant_algo": "NVFP4"}},
+    }
+    args = (
+        QuantizationConfigArgs(moe={"activation": "nvfp4_per_token"})
+        if per_token
+        else None
     )
-    from vllm.model_executor.layers.quantization.modelopt import (
-        ModelOptNvFp4FusedMoE,
-    )
-
-    config = ModelOptNvFp4Config(
-        quant_method="NVFP4",
-        is_checkpoint_nvfp4_serialized=True,
-        kv_cache_quant_algo=None,
-        exclude_modules=[],
-        group_size=16,
-    )
-    vllm_config = None
-    if config_state != "no_vllm_config":
-        vllm_config = VllmConfig()
-        if config_state != "no_model_config":
-            args = None
-            if config_state == "no_moe_spec":
-                args = QuantizationConfigArgs(linear="fp8_per_tensor")
-            elif config_state == "static":
-                args = QuantizationConfigArgs(moe={"activation": kNvfp4Dynamic})
-            elif config_state != "no_quant_config":
-                args = QuantizationConfigArgs(
-                    moe={
-                        "activation": "nvfp4_per_token" if expected_per_token else None
-                    }
-                )
-            vllm_config.model_config = Mock(spec=ModelConfig, quantization_config=args)
-    moe_config = MagicMock()
-    moe_config.is_act_and_mul = False
-
-    experts_cls = MagicMock()
-    with (
-        patch(
-            "vllm.model_executor.layers.quantization.modelopt."
-            "get_current_vllm_config_or_none",
-            return_value=vllm_config,
+    config = get_quant_config(
+        Mock(
+            quantization=quantization,
+            quantization_config=args,
+            hf_config=Mock(quantization_config=hf_config),
         ),
-        patch(
-            "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
-            return_value=(NvFp4MoeBackend.FLASHINFER_TRTLLM, experts_cls),
-        ) as select_backend,
-        patch(
-            "vllm.model_executor.layers.quantization.modelopt."
-            "is_global_sf_supported_for_nvfp4_backend",
-            return_value=True,
-        ),
-    ):
-        method = ModelOptNvFp4FusedMoE(config, moe_config)
-
-    assert method.per_token_activation is expected_per_token
-    assert method.experts_cls is experts_cls
-    select_backend.assert_called_once_with(
-        config=moe_config,
-        weight_key=kNvfp4Static,
-        activation_key=kNvfp4DynamicToken if expected_per_token else kNvfp4Dynamic,
+        LoadConfig(),
     )
+    if isinstance(config, ModelOptMixedPrecisionConfig):
+        config = config.nvfp4_config
+    assert isinstance(config, ModelOptNvFp4Config)
+    assert config.moe_activation_override == (kNvfp4DynamicToken if per_token else None)
+    assert "_online_quantization_args" not in hf_config
 
 
 @pytest.mark.parametrize(
     "quant_method,activation,backend,error",
     [
-        ("W4A16_NVFP4", "nvfp4_per_token", "FLASHINFER_TRTLLM", "W4A4 checkpoint"),
-        ("NVFP4", "mxfp8", "FLASHINFER_TRTLLM", "Unsupported.*activation override"),
-        ("NVFP4", "nvfp4_per_token", "MARLIN", "requires the FlashInfer TRTLLM"),
-        ("NVFP4", "nvfp4_per_token", "VLLM_CUTLASS", "requires the FlashInfer TRTLLM"),
+        ("NVFP4", kNvfp4DynamicToken, "FLASHINFER_TRTLLM", None),
+        ("W4A16_NVFP4", kNvfp4DynamicToken, "FLASHINFER_TRTLLM", "W4A4 checkpoint"),
+        (
+            "NVFP4",
+            kMxfp8Dynamic,
+            "FLASHINFER_TRTLLM",
+            "Unsupported.*activation override",
+        ),
+        ("NVFP4", kNvfp4DynamicToken, "MARLIN", "requires the FlashInfer TRTLLM"),
     ],
 )
-def test_modelopt_nvfp4_moe_rejects_incompatible_activation_override(
+def test_modelopt_nvfp4_moe_validates_activation_override(
     quant_method, activation, backend, error
 ):
-    """An explicit activation override must not silently change or be ignored."""
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
     from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4FusedMoE
 
-    config = ModelOptNvFp4Config(quant_method=quant_method)
-    vllm_config = VllmConfig()
-    vllm_config.model_config = Mock(
-        spec=ModelConfig,
-        quantization_config=QuantizationConfigArgs(moe={"activation": activation}),
+    config = ModelOptNvFp4Config(
+        quant_method=quant_method,
+        quantization_args=QuantizationConfigArgs(moe={"activation": activation}),
     )
+    expected = pytest.raises(ValueError, match=error) if error else nullcontext()
     with (
-        set_current_vllm_config(vllm_config),
         patch(
             "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
-            return_value=(NvFp4MoeBackend[backend], MagicMock()),
-        ),
-        pytest.raises(ValueError, match=error),
+            return_value=(NvFp4MoeBackend[backend], Mock()),
+        ) as select_backend,
+        expected,
     ):
-        ModelOptNvFp4FusedMoE(config, MagicMock())
+        method = ModelOptNvFp4FusedMoE(config, Mock())
+        assert method.per_token_activation
+        assert select_backend.call_args.kwargs["activation_key"] == activation
 
 
 @pytest.mark.parametrize(
