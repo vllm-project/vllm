@@ -79,8 +79,9 @@ vllm preload --model /path/to/model --tensor-parallel-size 4
    meta device (no storage) and requests the tensors from the daemon on its
    GPU.
 3. Before serving anything, the engine and daemon compare a fingerprint of the
-   cached weights: checkpoint content (hashed from safetensors metadata, so
-   identical weights in different directories still match), model
+   cached weights: checkpoint content (hashed from safetensors metadata plus
+   sampled tensor bytes, so identical weights in different directories still
+   match, while a checkpoint whose weight values changed does not), model
    architecture, TP/DP size/rank, dtype, quantization method and config, text
    RoPE parameters, model revision, KV cache dtype and quantization skip layers,
    and vLLM version. On any mismatch the engine falls back to disk loading
