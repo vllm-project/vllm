@@ -344,7 +344,8 @@ class OnlineDerenderer:
                 plain detokenization would leak raw parser markup into `content`.
             prompt_tokens: Prompt token count for the usage chunk.
             prompt_token_ids: Prompt token IDs. Required on the parser path
-                (validated by the caller) and optional otherwise. See
+                (validated by the caller) and optional otherwise, falling
+                back to ``generate_chunk.prompt_token_ids``. See
                 `DerenderChatStreamRequest.prompt_token_ids`.
 
         Returns:
@@ -387,7 +388,11 @@ class OnlineDerenderer:
         # Seed on the first chunk only. A carried state already has the prompt.
         if state is None:
             state = _seed_stream_state(
-                tokenizer, prompt_token_ids, skip_special_tokens=skip_special
+                tokenizer,
+                prompt_token_ids
+                if prompt_token_ids is not None
+                else generate_chunk.prompt_token_ids,
+                skip_special_tokens=skip_special,
             )
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         updated_state = state

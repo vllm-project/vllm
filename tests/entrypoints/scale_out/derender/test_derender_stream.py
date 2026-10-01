@@ -632,14 +632,20 @@ class TestPromptSeededLeadingSpace:
         assert choices[0].text == expected
 
     @pytest.mark.asyncio
-    async def test_chat_stream_first_chunk_seeded(self, derenderer, leading_space_ids):
+    @pytest.mark.parametrize("from_generate_chunk", [False, True])
+    async def test_chat_stream_first_chunk_seeded(
+        self, derenderer, leading_space_ids, from_generate_chunk
+    ):
         prompt_ids, output_ids, expected = leading_space_ids
         mid = len(output_ids) // 2
 
         chunk1, state = await derenderer.derender_chat_stream(
             model=MODEL_NAME,
-            generate_chunk=_make_stream_chunk(output_ids[:mid]),
-            prompt_token_ids=prompt_ids,
+            generate_chunk=_make_stream_chunk(
+                output_ids[:mid],
+                prompt_token_ids=prompt_ids if from_generate_chunk else None,
+            ),
+            prompt_token_ids=None if from_generate_chunk else prompt_ids,
         )
         # Only needed on the first chunk; the carried state already holds
         # the seeded window from here on.
@@ -1520,6 +1526,40 @@ class TestDerenderStreamStateValidation:
             output_token_ids=[1, 2, 3], output_chunk_lens=[1, 2]
         )
         assert state.output_chunk_lens == [1, 2]
+
+
+_GEN = {"request_id": "t", "choices": []}
+_GEN_BAD = {**_GEN, "prompt_token_ids": [-1]}
+
+
+@pytest.mark.parametrize(
+    "model_cls,payload",
+    [
+        ("DerenderChatRequest", {"generate_response": _GEN, "prompt_token_ids": [-1]}),
+        ("DerenderChatRequest", {"generate_response": _GEN_BAD}),
+        (
+            "DerenderCompletionRequest",
+            {"generate_responses": [_GEN], "prompt_token_ids": [[-1]]},
+        ),
+        (
+            "DerenderChatStreamRequest",
+            {"stream": True, "generate_chunk": _GEN, "prompt_token_ids": [-1]},
+        ),
+        (
+            "DerenderCompletionStreamRequest",
+            {"stream": True, "generate_chunk": _GEN_BAD},
+        ),
+    ],
+)
+def test_negative_prompt_token_ids_rejected(model_cls, payload):
+    """Negative prompt ids would reach convert_ids_to_tokens, so they get a
+    400 at parse time like `GenerateRequest.token_ids` does."""
+    from pydantic import ValidationError
+
+    from vllm.entrypoints.scale_out.token_in_token_out import protocol
+
+    with pytest.raises(ValidationError, match="prompt_token_ids"):
+        getattr(protocol, model_cls).model_validate(payload)
 
 
 class TestServingDerenderStreamErrorHandling:
