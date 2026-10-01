@@ -12,6 +12,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     redact_sensitive_args,
     should_include_usage,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 @pytest.mark.parametrize(
@@ -105,15 +106,18 @@ class TestGetMaxTokens:
 
     def test_input_length_exceeds_max_model_len(self):
         with pytest.raises(
-            ValueError,
+            VLLMValidationError,
             match="Input length .* exceeds model's maximum context length .*",
-        ):
+        ) as exc_info:
             get_max_tokens(
                 max_model_len=100,
                 max_tokens=50,
                 input_length=150,
                 default_sampling_params={"max_tokens": 2048},
             )
+        # Callers such as /v1/messages read the prompt length from the error.
+        assert exc_info.value.parameter == "input_tokens"
+        assert exc_info.value.value == 150
 
 
 class TestRedactSensitiveArgs:
