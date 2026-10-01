@@ -25,7 +25,7 @@ Sorted alphabetically by GitHub handle:
 - [@linitra24](https://github.com/linitra24)
 - [@LopezCastroRoberto](https://github.com/LopezCastroRoberto): Kernels and quantization
 - [@mawong-amd](https://github.com/mawong-amd)
-- [@micah-wil](https://github.com/micah-wil)
+- [@micah-wil](https://github.com/micah-wil): ROCm / AMD GPU integration, CI
 - [@netanel-haber](https://github.com/netanel-haber): Nemotron/NVIDIA models, Mamba/Linear attention hybrids, VLMs
 - [@Rohan138](https://github.com/Rohan138)
 - [@simondanielsson](https://github.com/simondanielsson): ROCm performance (CDNA), MoRI-IO.
