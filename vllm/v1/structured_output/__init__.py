@@ -291,6 +291,28 @@ class StructuredOutputManager:
                 return i + 1
         return 1
 
+    def _get_grammar_start(
+        self,
+        request: "Request",
+        grammar: StructuredOutputGrammar,
+        tokens: Sequence[int],
+        constraint_start: int,
+    ) -> int:
+        """Index of the first token in `tokens` to feed the grammar: one before
+        `constraint_start` when the reasoning-end token is content
+        (`inclusive_reasoning_end_token_ids`) and the grammar accepts it."""
+        end = constraint_start - 1
+        if not 0 <= end < len(tokens):
+            return constraint_start
+        reasoner = self._get_reasoner(request)
+        if reasoner is None or (
+            tokens[end] not in reasoner.inclusive_reasoning_end_token_ids
+        ):
+            return constraint_start
+        if grammar.validate_tokens([tokens[end]]):
+            return end
+        return constraint_start
+
     def validate_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
         """Return the longest unconstrained or grammar-valid prefix of `spec_tokens`."""
         if not request.use_structured_output:
@@ -307,8 +329,11 @@ class StructuredOutputManager:
         grammar = structured_req.grammar
         if TYPE_CHECKING:
             assert isinstance(grammar, StructuredOutputGrammar)
-        prefix = spec_tokens[:constraint_start]
-        validated = grammar.validate_tokens(spec_tokens[constraint_start:])
+        grammar_start = self._get_grammar_start(
+            request, grammar, spec_tokens, constraint_start
+        )
+        prefix = spec_tokens[:grammar_start]
+        validated = grammar.validate_tokens(spec_tokens[grammar_start:])
         return prefix + validated
 
     def grammar_bitmask(
@@ -384,8 +409,10 @@ class StructuredOutputManager:
                     assert isinstance(grammar, StructuredOutputGrammar)
 
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, list())
-                constraint_start = self._get_constraint_start(
-                    request, strip_speculative_padding(req_tokens)
+                stripped_tokens = strip_speculative_padding(req_tokens)
+                constraint_start = self._get_constraint_start(request, stripped_tokens)
+                grammar_start = self._get_grammar_start(
+                    request, grammar, stripped_tokens, constraint_start
                 )
                 state_advancements = 0
                 seen_padding = False
@@ -402,7 +429,7 @@ class StructuredOutputManager:
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         seen_padding = True
-                    elif apply_bitmask:
+                    elif not seen_padding and i >= grammar_start:
                         if not grammar.is_terminated() and grammar.accept_tokens(
                             req_id, [token]
                         ):
@@ -461,9 +488,10 @@ class StructuredOutputManager:
         if constraint_start > len(new_token_ids):
             return True
         structured_req.reasoning_ended = True
-        return grammar.accept_tokens(
-            request.request_id, new_token_ids[constraint_start:]
+        grammar_start = self._get_grammar_start(
+            request, grammar, new_token_ids, constraint_start
         )
+        return grammar.accept_tokens(request.request_id, new_token_ids[grammar_start:])
 
     def clear_backend(self) -> None:
         if self.backend is not None:

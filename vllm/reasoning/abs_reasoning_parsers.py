@@ -57,6 +57,12 @@ class ReasoningParser:
         """
         return None
 
+    @property
+    def inclusive_reasoning_end_token_ids(self) -> frozenset[int]:
+        """Reasoning-end token ids that `extract_content_ids` keeps as
+        content, such as a tool-call start that ends reasoning implicitly."""
+        return frozenset()
+
     def has_engine_confirmed_reasoning_end(self) -> bool:
         """Whether the engine has confirmed the reasoning end transition.
 

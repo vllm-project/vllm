@@ -34,6 +34,8 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.glm47_moe import glm47_moe_config
+from vllm.parser.mistral import mistral_config
 from vllm.parser.parser_manager import ParserManager
 
 # ── Shared test configs ──────────────────────────────────────────────
@@ -158,11 +160,14 @@ class TestReasoningEndTokenIds:
                 (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
         )
-        assert _make_engine(cfg).reasoning_end_token_ids == {201, 202}
+        engine = _make_engine(cfg)
+        assert engine.reasoning_end_token_ids == {201, 202}
+        assert engine.inclusive_reasoning_end_token_ids == {202}
 
     def test_transition_staying_in_reasoning_is_ignored(self):
         cfg = _with_reasoning_exits(("THINK_START", ParserState.REASONING, ()))
         assert _make_engine(cfg).reasoning_end_token_ids == {201}
+        assert _make_engine(cfg).inclusive_reasoning_end_token_ids == frozenset()
 
     def test_unreported_exit_fails_closed(self):
         cfg = _with_reasoning_exits(
@@ -193,6 +198,29 @@ class TestReasoningEndTokenIds:
     def test_find_reasoning_end_offset_with_empty_set_returns_none(self):
         engine = _make_engine(_hermes_config())
         assert engine.find_reasoning_end_offset([201]) is None
+
+
+@pytest.mark.parametrize(
+    ("config", "inclusive"),
+    [
+        pytest.param(glm47_moe_config(), "<tool_call>", id="glm47_moe"),
+        pytest.param(
+            mistral_config(reasoning_encoding="special_token"),
+            "[TOOL_CALLS]",
+            id="mistral",
+        ),
+    ],
+)
+def test_inclusive_reasoning_end_token_ids_of_parsers(
+    config: ParserEngineConfig, inclusive: str
+):
+    literals = sorted(set(config.token_id_terminals.values()))
+    vocab = {literal: 1000 + i for i, literal in enumerate(literals)}
+    engine = _make_engine(config, vocab=vocab)
+    assert engine.inclusive_reasoning_end_token_ids == {vocab[inclusive]}
+    for token_id in engine.reasoning_end_token_ids:
+        kept = [token_id] if token_id == vocab[inclusive] else []
+        assert engine.extract_content_ids([5, token_id, 6]) == kept + [6]
 
 
 # ── TestEventsToDelta ────────────────────────────────────────────────
