@@ -33,6 +33,12 @@ class _LayerOuterBackend:
         return (KVCacheLayout.LBHNC,)
 
 
+class _Block128Backend(_BlockOuterBackend):
+    @staticmethod
+    def get_supported_kernel_block_sizes():
+        return [128]
+
+
 def _hybrid_config(
     *,
     layerwise: bool = True,
@@ -74,21 +80,23 @@ def test_layerwise_hybrid_keeps_backend_block_size(monkeypatch):
     assert config.cache_config.mamba_block_size == 64
 
 
+@pytest.mark.parametrize(
+    "backends", [[_LayerOuterBackend], [_BlockOuterBackend, _LayerOuterBackend]]
+)
 def test_layerwise_hybrid_uses_legacy_alignment_without_block_outer_layout(
     monkeypatch,
+    backends,
 ):
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     config = _hybrid_config()
 
     with (
-        patch.object(
-            Platform, "_find_non_ssm_backends", return_value=[_LayerOuterBackend]
-        ),
+        patch.object(Platform, "_find_non_ssm_backends", return_value=backends),
         patch.object(Platform, "_align_hybrid_block_size") as align_hybrid,
     ):
         Platform.update_block_size_for_backend(config)
 
-    align_hybrid.assert_called_once_with(config, _LayerOuterBackend)
+    align_hybrid.assert_called_once_with(config, backends[0])
 
 
 def test_layerwise_hybrid_honors_connector_required_layer_outer_layout(monkeypatch):
@@ -111,18 +119,22 @@ def test_layerwise_hybrid_honors_connector_required_layer_outer_layout(monkeypat
     align_hybrid.assert_called_once_with(config, _BlockOuterBackend)
 
 
-def test_layerwise_hybrid_rejects_unsupported_manager_block_size(monkeypatch):
+@pytest.mark.parametrize(
+    ("backends", "block_size"),
+    [([_BlockOuterBackend], 48), ([_BlockOuterBackend, _Block128Backend], 64)],
+)
+def test_layerwise_hybrid_rejects_unsupported_manager_block_size(
+    monkeypatch, backends, block_size
+):
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     config = _hybrid_config()
-    config.cache_config.block_size = 48
+    config.cache_config.block_size = block_size
 
     with (
-        patch.object(
-            Platform, "_find_non_ssm_backends", return_value=[_BlockOuterBackend]
-        ),
+        patch.object(Platform, "_find_non_ssm_backends", return_value=backends),
         pytest.raises(
             ValueError,
-            match="KV cache block size 48.*BLOCK_OUTER.*Omit --block-size",
+            match=f"KV cache block size {block_size}.*BLOCK_OUTER.*Omit --block-size",
         ),
     ):
         Platform.update_block_size_for_backend(config)
