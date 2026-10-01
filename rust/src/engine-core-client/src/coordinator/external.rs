@@ -79,8 +79,8 @@ impl ExternalCoordinatorService {
         Ok(())
     }
 
-    /// Drive the coordinator event loop until either side of the control plane
-    /// is closed or a fatal error is observed.
+    /// Drive the coordinator event loop until the task is aborted or a fatal
+    /// error is observed.
     pub(crate) async fn run(mut self, inner: Arc<ClientInner>) {
         let result: Result<()> = async {
             loop {

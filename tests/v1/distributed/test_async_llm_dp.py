@@ -626,7 +626,7 @@ async def test_dp_pause_keep_race_staggered_engines():
 
 @pytest.mark.asyncio
 async def test_dp_pause_barrier_request_deadlock():
-    """Test that start_dp_wave is ignored while paused.
+    """Test that a request sent while paused does not wake any engine.
 
     Sequence:
       1. Pause all engines (PAUSED_ALL).

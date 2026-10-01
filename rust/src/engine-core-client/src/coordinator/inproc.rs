@@ -139,8 +139,8 @@ impl InProcCoordinatorRunner {
         Ok(())
     }
 
-    /// Drive the coordinator event loop until either side of the control plane
-    /// is closed or a fatal error is observed.
+    /// Drive the coordinator event loop until the engine control output is
+    /// closed or a fatal error is observed.
     ///
     /// Any fatal error closes the main client registries so request streams and
     /// future calls observe a stable shutdown cause.
