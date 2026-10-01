@@ -37,6 +37,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import next_power_of_2
+from vllm.v1.worker.cp_utils import cp_global_to_local_block
 
 
 @triton.jit
@@ -242,6 +243,9 @@ class DequantizeAndGatherKCacheKernel(
         use_fnuz: bool
         has_gather_lens: bool
         offset: int
+        dcp_world_size: int = 1
+        dcp_rank: int = 0
+        cp_kv_cache_interleave_size: int = 1
 
     @staticmethod
     @triton.jit
@@ -267,6 +271,9 @@ class DequantizeAndGatherKCacheKernel(
         fp8_max: tl.constexpr,
         n_quant_blocks: tl.constexpr,  # 7 real blocks
         use_fnuz: tl.constexpr = False,
+        DCP_WORLD_SIZE: tl.constexpr = 1,
+        DCP_RANK: tl.constexpr = 0,
+        CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr = 1,
     ):
         batch_idx = tl.program_id(0)
         worker_id = tl.program_id(1)
@@ -285,83 +292,111 @@ class DequantizeAndGatherKCacheKernel(
             pos = start_pos + i
 
             # Calculate which block and position within block
-            block_in_seq = pos // cache_block_size
-            pos_in_block = pos % cache_block_size
-
-            # Get physical block index from block table
-            block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
-            physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)  # int32
-
-            # int64: physical_block_idx * block_stride can exceed 2^31 with many
-            # KV-cache blocks (e.g. >= 57K at block_stride ~37K).
-            cache_block_ptr = (
-                k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
-            )
-
-            # Token data pointer
-            token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
-
-            # Scale pointer: after all token data
-            token_scale_ptr = (
-                cache_block_ptr
-                + cache_block_size * token_data_size
-                + pos_in_block * scale_dim
-            )
-
-            # Token data layout: [0:448] fp8, [448:576] bf16
-            token_fp8_ptr = token_data_ptr
-            token_bf16_ptr = token_data_ptr + fp8_dim
-
+            if DCP_WORLD_SIZE == 1:
+                block_in_seq = pos // cache_block_size
+                pos_in_block = pos % cache_block_size
+                is_owned = True
+            else:
+                # Sharded cache: the local shard holds only the owned
+                # positions, addressed with the write path's interleave math.
+                # Non-owned rows are zeroed so an all-reduce(SUM) across the
+                # DCP group reassembles the full context on every rank.
+                block_in_seq, pos_in_block, is_owned = cp_global_to_local_block(
+                    pos,
+                    cache_block_size,
+                    DCP_WORLD_SIZE,
+                    DCP_RANK,
+                    CP_KV_CACHE_INTERLEAVE_SIZE,
+                )
             # Output pointer for this token (flattened)
             output_row_ptr = (
                 out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
             )
 
-            # ========== Dequantize FP8 portion using UE8M0 ==========
-            for qblock_idx in tl.static_range(n_quant_blocks):
-                qblock_start = qblock_idx * quant_block
+            if is_owned:
+                # Get physical block index from block table
+                block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+                physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
 
-                if qblock_start < fp8_dim:
-                    offsets = qblock_start + tl.arange(0, quant_block)
-                    mask = offsets < fp8_dim
+                # int64: physical_block_idx * block_stride can exceed 2^31 with
+                # many KV-cache blocks (e.g. >= 57K at block_stride ~37K).
+                cache_block_ptr = (
+                    k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+                )
 
-                    # Load quantized fp8 values (stored as uint8)
-                    x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+                # Token data pointer
+                token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
 
-                    # Bitcast uint8 back to fp8 (FNUZ on gfx942, OCP elsewhere).
-                    if use_fnuz:
-                        x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
-                    else:
-                        x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+                # Scale pointer: after all token data
+                token_scale_ptr = (
+                    cache_block_ptr
+                    + cache_block_size * token_data_size
+                    + pos_in_block * scale_dim
+                )
 
-                    # Convert fp8 to float32 for computation
-                    x_float = x_fp8.to(tl.float32)
+                # Token data layout: [0:448] fp8, [448:576] bf16
+                token_fp8_ptr = token_data_ptr
+                token_bf16_ptr = token_data_ptr + fp8_dim
 
-                    # Load and decode UE8M0 scale
-                    # UE8M0: scale = 2^(stored_value - 127)
-                    encoded_scale = tl.load(token_scale_ptr + qblock_idx)
-                    exponent = encoded_scale.to(tl.float32) - 127.0
-                    scale = tl.exp2(exponent)
+                # ========== Dequantize FP8 portion using UE8M0 ==========
+                for qblock_idx in tl.static_range(n_quant_blocks):
+                    qblock_start = qblock_idx * quant_block
 
-                    # Dequantize: bf16_value = fp8_value * scale
-                    x_dequant = x_float * scale
+                    if qblock_start < fp8_dim:
+                        offsets = qblock_start + tl.arange(0, quant_block)
+                        mask = offsets < fp8_dim
 
-                    # Store as bf16
+                        # Load quantized fp8 values (stored as uint8)
+                        x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+
+                        # Bitcast uint8 back to fp8 (FNUZ on gfx942, OCP
+                        # elsewhere).
+                        if use_fnuz:
+                            x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
+                        else:
+                            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+
+                        # Convert fp8 to float32 for computation
+                        x_float = x_fp8.to(tl.float32)
+
+                        # Load and decode UE8M0 scale
+                        # UE8M0: scale = 2^(stored_value - 127)
+                        encoded_scale = tl.load(token_scale_ptr + qblock_idx)
+                        exponent = encoded_scale.to(tl.float32) - 127.0
+                        scale = tl.exp2(exponent)
+
+                        # Dequantize: bf16_value = fp8_value * scale
+                        x_dequant = x_float * scale
+
+                        # Store as bf16
+                        tl.store(
+                            output_row_ptr + offsets,
+                            x_dequant.to(tl.bfloat16),
+                            mask=mask,
+                        )
+
+                # ========== Copy BF16 portion directly ==========
+                bf16_output_offset = fp8_dim  # After 448 elements in output
+
+                # Read bf16 from cache
+                bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+
+                # Process in chunks of 16
+                for j in tl.static_range(bf16_dim // 16):
+                    chunk_offsets = j * 16 + tl.arange(0, 16)
+                    bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
                     tl.store(
-                        output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask
+                        output_row_ptr + bf16_output_offset + chunk_offsets,
+                        bf16_vals,
                     )
-
-            # ========== Copy BF16 portion directly ==========
-            bf16_output_offset = fp8_dim  # After 448 elements in output
-
-            # Read bf16 from cache
-            bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
-
-            # Process in chunks of 16
-            for j in tl.static_range(bf16_dim // 16):
-                chunk_offsets = j * 16 + tl.arange(0, 16)
-                bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
-                tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+            else:
+                # Non-owned row: zero it so the cross-rank all-reduce(SUM)
+                # reassembles the full context (exactly one rank owns it).
+                zero_offsets = tl.arange(0, output_dim)
+                tl.store(
+                    output_row_ptr + zero_offsets,
+                    tl.zeros((output_dim,), dtype=tl.bfloat16),
+                )
 
     def dispatch(  # type: ignore[override]
         self,
@@ -395,6 +430,25 @@ class DequantizeAndGatherKCacheKernel(
             max(1, int(compress_ratio))
             for compress_ratio in vllm_config.model_config.hf_config.compress_ratios
         )
+        # Only the compressed-cache gathers (sharded under DCP) need the
+        # cp-aware variants; the SWA gathers read replicated storage.
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        cp_variants = [(1, 0, 1)]
+        if dcp_world_size > 1:
+            from vllm.distributed import get_dcp_group
+
+            try:
+                dcp_rank = get_dcp_group().rank_in_group
+            except AssertionError:
+                # DCP group not initialized (single-process warmup tracing).
+                dcp_rank = 0
+            cp_variants.append(
+                (
+                    dcp_world_size,
+                    dcp_rank,
+                    vllm_config.parallel_config.cp_kv_cache_interleave_size,
+                )
+            )
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(
@@ -403,6 +457,9 @@ class DequantizeAndGatherKCacheKernel(
                     use_fnuz=current_platform.is_fp8_fnuz(),
                     offset=1,
                     enabled=True,
+                    dcp_world_size=1,
+                    dcp_rank=0,
+                    cp_kv_cache_interleave_size=1,
                 ),
                 dict(
                     cache_block_size=block_size,
@@ -410,6 +467,9 @@ class DequantizeAndGatherKCacheKernel(
                     use_fnuz=current_platform.is_fp8_fnuz(),
                     offset=2,
                     enabled=True,
+                    dcp_world_size=1,
+                    dcp_rank=0,
+                    cp_kv_cache_interleave_size=1,
                 ),
                 dict(
                     cache_block_size=block_size,
@@ -417,20 +477,35 @@ class DequantizeAndGatherKCacheKernel(
                     use_fnuz=current_platform.is_fp8_fnuz(),
                     offset=16,
                     enabled=True,
+                    dcp_world_size=1,
+                    dcp_rank=0,
+                    cp_kv_cache_interleave_size=1,
                 ),
-                dict(
-                    cache_block_size=max(block_size // 4, 1),
-                    has_gather_lens=False,
-                    use_fnuz=False,
-                    offset=16,
-                    enabled=4 in compress_ratios,
+                *(
+                    dict(
+                        cache_block_size=max(block_size // 4, 1),
+                        has_gather_lens=False,
+                        use_fnuz=False,
+                        offset=16,
+                        enabled=4 in compress_ratios,
+                        dcp_world_size=world,
+                        dcp_rank=rank,
+                        cp_kv_cache_interleave_size=interleave,
+                    )
+                    for world, rank, interleave in cp_variants
                 ),
-                dict(
-                    cache_block_size=max(block_size // 128, 1),
-                    has_gather_lens=False,
-                    use_fnuz=False,
-                    offset=16,
-                    enabled=128 in compress_ratios,
+                *(
+                    dict(
+                        cache_block_size=max(block_size // 128, 1),
+                        has_gather_lens=False,
+                        use_fnuz=False,
+                        offset=16,
+                        enabled=128 in compress_ratios,
+                        dcp_world_size=world,
+                        dcp_rank=rank,
+                        cp_kv_cache_interleave_size=interleave,
+                    )
+                    for world, rank, interleave in cp_variants
                 ),
             ),
             max_model_len=max_model_len,
@@ -460,6 +535,9 @@ class DequantizeAndGatherKCacheKernel(
             block_size=compile_key.cache_block_size,
             offset=compile_key.offset,
             use_fnuz=compile_key.use_fnuz,
+            dcp_world_size=compile_key.dcp_world_size,
+            dcp_rank=compile_key.dcp_rank,
+            cp_kv_cache_interleave_size=compile_key.cp_kv_cache_interleave_size,
         )
 
     @kernel_launcher
@@ -474,6 +552,9 @@ class DequantizeAndGatherKCacheKernel(
         offset: int,
         *,
         use_fnuz: bool = False,
+        dcp_world_size: int = 1,
+        dcp_rank: int = 0,
+        cp_kv_cache_interleave_size: int = 1,
     ) -> LaunchSpec:
         num_reqs = seq_lens.shape[0]
         return (num_reqs, self.NUM_WORKERS), dict(
@@ -490,6 +571,9 @@ class DequantizeAndGatherKCacheKernel(
             output_dim=512,
             fp8_max=448.0,
             n_quant_blocks=7,
+            DCP_WORLD_SIZE=dcp_world_size,
+            DCP_RANK=dcp_rank,
+            CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
         )
 
 
@@ -507,6 +591,9 @@ def dequantize_and_gather_k_cache(
     block_size: int,
     offset: int,
     use_fnuz: bool = False,
+    dcp_world_size: int = 1,
+    dcp_rank: int = 0,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
 
@@ -514,8 +601,13 @@ def dequantize_and_gather_k_cache(
     ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
     ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
+
+    At ``dcp_world_size > 1`` the cache holds only this rank's shard: owned
+    rows land at their global positions, non-owned rows are zeroed, so an
+    all-reduce(SUM) over the output across the DCP group reassembles the
+    full context. Triton path only.
     """
-    if has_cutedsl():
+    if has_cutedsl() and dcp_world_size == 1:
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
             _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
@@ -541,6 +633,9 @@ def dequantize_and_gather_k_cache(
         block_size,
         offset,
         use_fnuz=use_fnuz,
+        dcp_world_size=dcp_world_size,
+        dcp_rank=dcp_rank,
+        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
     )
 
 

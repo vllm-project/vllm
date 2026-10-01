@@ -59,10 +59,11 @@ def _assert_cutedsl_dcp_merge_supported(
     topk_indices: torch.Tensor,
     k: int,
 ) -> None:
-    # The DCP merge only supports the CuteDSL path (Triton pack kernel + CuteDSL
-    # stable-topk selector); there is no PyTorch fallback. The first cut targets
-    # Blackwell/Hopper with index_topk in (512, 1024, 2048) (the selector's radix
-    # sizing); the Triton pack itself has no shape/topk constraints.
+    # CUDA-path requirements (Triton pack kernel + CuteDSL stable-topk
+    # selector); there is no PyTorch fallback, and ROCm dispatches to the
+    # selector's Triton twin instead. The first cut targets Blackwell/Hopper
+    # with index_topk in (512, 1024, 2048) (the selector's radix sizing); the
+    # Triton pack itself has no shape/topk constraints.
     if not has_cutedsl():
         raise RuntimeError(
             "DCP sparse-indexer merge requires CuteDSL; install it or disable DCP."
@@ -104,21 +105,43 @@ def _merge_dcp_topk_global(
     if dcp_world_size <= 1:
         return
 
-    # CuteDSL-only path (no PyTorch fallback): Triton-pack each rank's
-    # (score, global_id) candidates on-device, all-gather, then the CuteDSL
-    # stable-topk selector.
-    _assert_cutedsl_dcp_merge_supported(logits, topk_indices, topk_tokens)
-    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
-        pack_dcp_topk_candidates_cutedsl,
-        stable_topk_from_gathered_candidates_cutedsl,
+    # Triton-pack each rank's (score, global_id) candidates on-device,
+    # all-gather, then a stable-topk selector: CuteDSL on CUDA (unchanged,
+    # no PyTorch fallback), its portable Triton twin on ROCm.
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_topk import (
+        pack_dcp_topk_candidates,
     )
+
+    if current_platform.is_rocm():
+        from vllm.model_executor.kernels.attention.dsa.dcp_indexer_topk import (
+            stable_topk_from_gathered_candidates_triton as select_global_topk,
+        )
+
+        if logits.dtype != torch.float32 or topk_indices.dtype != torch.int32:
+            raise RuntimeError(
+                "DCP sparse-indexer merge requires fp32 logits and int32 "
+                "indices."
+            )
+        # The pack ships global ids through the fp32 candidate lane, which is
+        # exact only below 2^24.
+        if logits.shape[-1] * dcp_world_size > 1 << 24:
+            raise RuntimeError(
+                "DCP sparse-indexer merge transports candidate ids in fp32; "
+                f"{logits.shape[-1]} local candidates x {dcp_world_size} "
+                "ranks exceeds the exact 2^24 id range."
+            )
+    else:
+        _assert_cutedsl_dcp_merge_supported(logits, topk_indices, topk_tokens)
+        from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+            stable_topk_from_gathered_candidates_cutedsl as select_global_topk,
+        )
 
     packed = torch.empty(
         (*topk_indices.shape, 2),
         dtype=torch.float32,
         device=topk_indices.device,
     )
-    pack_dcp_topk_candidates_cutedsl(
+    pack_dcp_topk_candidates(
         logits,
         topk_indices,
         packed,
@@ -128,9 +151,7 @@ def _merge_dcp_topk_global(
         row_starts,
     )
     gathered = get_dcp_group().all_gather(packed, dim=1)
-    stable_topk_from_gathered_candidates_cutedsl(
-        gathered, topk_tokens, out=topk_indices
-    )
+    select_global_topk(gathered, topk_tokens, out=topk_indices)
 
 
 def dcp_gather_kv_rows(

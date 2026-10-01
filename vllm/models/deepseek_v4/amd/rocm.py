@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import cast
 
 import torch
+import torch.distributed as dist
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -657,8 +658,10 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             dtype=torch.int32,
             device=self.device,
         )
-        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
-            self.vllm_config.kv_transfer_config is not None
+        self._use_aiter_sparse_mla = (
+            _aiter_sparse_mla_enabled(self.vllm_config.kv_transfer_config is not None)
+            # Must match the attention layer's flag: DCP keeps Triton paths.
+            and self.vllm_config.parallel_config.decode_context_parallel_size == 1
         )
 
     def build(
@@ -769,7 +772,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         else:
             # Disable indexer inner overlap.
             self.indexer.aux_stream = None
-        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        # The Gluon kernels read the paged caches in place and fold the sink,
+        # so DCP (sharded caches, cross-rank merges) keeps the Triton paths:
+        # staged prefill and the LSE-returning split-K decode.
+        self._use_aiter_sparse_mla = (
+            _aiter_sparse_mla_enabled(self._has_kv_transfer)
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+        )
 
         parallel_config = vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
@@ -1585,6 +1594,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         num_decode_tokens = swa_metadata.num_decode_tokens
 
         seq_lens = swa_metadata.prefill_seq_lens
+        seq_lens_cpu = swa_metadata.prefill_seq_lens_cpu
         gather_lens = swa_metadata.prefill_gather_lens
         assert seq_lens is not None
         assert gather_lens is not None
@@ -1645,7 +1655,24 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
                     use_fnuz=False,
+                    dcp_world_size=self.dcp_world_size,
+                    dcp_rank=self.dcp_rank,
+                    cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
                 )
+                if self.dcp_world_size > 1:
+                    # Each rank staged only its owned compressed rows (the
+                    # rest zeroed); summing materializes the full context on
+                    # every rank, so the attention below runs the dcp=1 flow
+                    # (folded sink, OPUS-eligible) unchanged.
+                    assert seq_lens_cpu is not None
+                    max_rows = (
+                        int(seq_lens_cpu[chunk_start:chunk_end].max())
+                        // self.compress_ratio
+                    )
+                    if max_rows > 0:
+                        dcp_group = get_dcp_group().device_group
+                        for i in range(chunk_size):
+                            dist.all_reduce(kv[i, :max_rows], group=dcp_group)
 
             swa_block_table = swa_metadata.block_table[num_decodes:]
             dequantize_and_gather_k_cache(
