@@ -15,10 +15,6 @@ TAG_VARIANTS=("-${ROCM_STACK_VARIANT}")
 if [[ "${2:-}" == "--default" ]]; then
   TAG_VARIANTS=("" "-${ROCM_STACK_VARIANT}")
 fi
-INSTALL_SPEC="vllm"
-if [[ "$ROCM_STACK_THEROCK" == "1" ]]; then
-  INSTALL_SPEC='"vllm[device-<gfx>]"'
-fi
 ROCM_VERSION="$ROCM_STACK_VERSION"
 VARIANT="$ROCM_STACK_VARIANT"
 PYTHON_VERSION=$(sed -nE 's/^ARG PYTHON_VERSION="?([^" ]+)"?.*/\1/p' "$ROCM_STACK_BASE_DOCKERFILE")
@@ -65,9 +61,9 @@ buildkite-agent annotate --style 'success' --context "rocm-release-workflow-${VA
 
 \`\`\`bash
 # This build (by commit)
-pip install ${INSTALL_SPEC} --extra-index-url ${S3_URL}/rocm/${BUILDKITE_COMMIT}/${VARIANT}/ --trusted-host ${S3_HOST}
+pip install vllm --extra-index-url ${S3_URL}/rocm/${BUILDKITE_COMMIT}/${VARIANT}/ --trusted-host ${S3_HOST}
 # Nightly (if published)
-pip install ${INSTALL_SPEC} --extra-index-url ${S3_URL}/rocm/nightly/${VARIANT}/ --trusted-host ${S3_HOST}
+pip install vllm --extra-index-url ${S3_URL}/rocm/nightly/${VARIANT}/ --trusted-host ${S3_HOST}
 \`\`\`
 
 ### :floppy_disk: Download Wheels Directly
