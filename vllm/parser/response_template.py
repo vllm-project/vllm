@@ -141,7 +141,7 @@ def validate_tokenizer_response_template(
     template = resolve_response_template(tokenizer)
     if template is None:
         raise TypeError(
-            "The response_template parser requires `response_template` metadata "
+            "The hf parser requires `response_template` metadata "
             "in the tokenizer configuration"
         )
     try:
@@ -150,13 +150,11 @@ def validate_tokenizer_response_template(
         raise TypeError(f"Invalid response_template metadata: {exc}") from exc
     if reasoning and THINKING_FIELD not in fields:
         raise TypeError(
-            "--reasoning-parser response_template requires a response_template "
-            "with a thinking field"
+            "--reasoning-parser hf requires a response_template with a thinking field"
         )
     if tools and TOOL_FIELD not in fields:
         raise TypeError(
-            "--tool-call-parser response_template requires a response_template "
-            "with a tool_calls field"
+            "--tool-call-parser hf requires a response_template with a tool_calls field"
         )
 
 
@@ -326,7 +324,7 @@ class ResponseTemplateParser(ParserEngine):
         template = resolve_response_template(tokenizer, response_template)
         if template is None:
             raise ValueError(
-                "The response_template parser requires `response_template` "
+                "The hf parser requires `response_template` "
                 "metadata in the tokenizer configuration"
             )
         validate_response_template_for_serving(template)

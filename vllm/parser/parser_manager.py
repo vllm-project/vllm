@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-RESPONSE_TEMPLATE_PARSER = "response_template"
+HF_PARSER = "hf"
 
 
 class ParserManager:
@@ -98,7 +98,7 @@ class ParserManager:
             tool_strict_level: Server-side floor for tool-call structural
                 tags (``--tool-strict-level``).
             tokenizer: Tokenizer whose `response_template` metadata is
-                validated when the `response_template` parser is selected.
+                validated when the `hf` parser is selected.
 
         Returns:
             A Parser class, or None if neither parser is specified.
@@ -125,14 +125,14 @@ class ParserManager:
             HarmonyParser.tool_strict_level = strict_level
             return HarmonyParser
 
-        if RESPONSE_TEMPLATE_PARSER in (reasoning_parser_name, tool_parser_name):
+        if HF_PARSER in (reasoning_parser_name, tool_parser_name):
             if {reasoning_parser_name, tool_parser_name} - {
-                RESPONSE_TEMPLATE_PARSER,
+                HF_PARSER,
                 None,
                 "",
             }:
                 raise TypeError(
-                    "The response_template parser cannot be combined with other "
+                    "The hf parser cannot be combined with other "
                     "reasoning or tool call parsers"
                 )
             from vllm.parser.response_template import (

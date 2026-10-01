@@ -171,20 +171,21 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
-### Checkpoint Response Templates (`response_template`)
+### Checkpoint Response Templates (`hf`)
 
 Checkpoints can define a `response_template` in `tokenizer_config.json` to describe their reasoning, content, and tool-call wire format. Select the
-`response_template` parser to parse output from this metadata instead of a model-specific parser:
+`hf` parser to parse output from this metadata instead of a model-specific parser. Like `--tokenizer-mode hf`, it relies on the checkpoint's
+Hugging Face metadata rather than model-specific code:
 
 ```bash
 vllm serve <model> \
     --enable-auto-tool-choice \
-    --tool-call-parser response_template \
-    --reasoning-parser response_template
+    --tool-call-parser hf \
+    --reasoning-parser hf
 ```
 
 Either parser can be selected on its own. Startup fails if the tokenizer has no `response_template`, or if it lacks the `thinking` or `tool_calls`
-field the selected parser needs. The `response_template` parser cannot be combined with other reasoning or tool call parsers.
+field the selected parser needs. The `hf` parser cannot be combined with other reasoning or tool call parsers.
 
 Response templates currently provide parsing, not format-specific constrained decoding. The parser therefore rejects requests for strict tools,
 required or named tool choice, or `parallel_tool_calls=false`. A custom server or request chat template is allowed, but the parser still expects the

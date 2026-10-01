@@ -332,12 +332,9 @@ def test_resolve_response_template_from_tokenizer_configuration():
 
 
 def test_response_template_parsers_are_registered():
+    assert ToolParserManager.get_tool_parser("hf") is ResponseTemplateToolParser
     assert (
-        ToolParserManager.get_tool_parser("response_template")
-        is ResponseTemplateToolParser
-    )
-    assert (
-        ReasoningParserManager.get_reasoning_parser("response_template")
+        ReasoningParserManager.get_reasoning_parser("hf")
         is ResponseTemplateReasoningParser
     )
 
@@ -349,8 +346,8 @@ def test_response_template_parsers_are_registered():
 )
 def test_parser_manager_selects_response_template_by_name(reasoning, tools):
     parser_cls = ParserManager.get_parser(
-        tool_parser_name="response_template" if tools else None,
-        reasoning_parser_name="response_template" if reasoning else None,
+        tool_parser_name="hf" if tools else None,
+        reasoning_parser_name="hf" if reasoning else None,
         enable_auto_tools=tools,
         tokenizer=FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),
     )
@@ -364,12 +361,12 @@ def test_parser_manager_selects_response_template_by_name(reasoning, tools):
 def test_parser_manager_validates_checkpoint_metadata_at_startup():
     with pytest.raises(TypeError, match="requires `response_template` metadata"):
         ParserManager.get_parser(
-            reasoning_parser_name="response_template",
+            reasoning_parser_name="hf",
             tokenizer=FakeTokenizer(),
         )
     with pytest.raises(TypeError, match="Invalid response_template"):
         ParserManager.get_parser(
-            reasoning_parser_name="response_template",
+            reasoning_parser_name="hf",
             tokenizer=FakeTokenizer({"fields": {}}),
         )
 
@@ -377,13 +374,13 @@ def test_parser_manager_validates_checkpoint_metadata_at_startup():
     del template["fields"]["tool_calls"]
     with pytest.raises(TypeError, match="tool_calls field"):
         ParserManager.get_parser(
-            tool_parser_name="response_template",
+            tool_parser_name="hf",
             enable_auto_tools=True,
             tokenizer=FakeTokenizer(template),
         )
     assert (
         ParserManager.get_parser(
-            reasoning_parser_name="response_template",
+            reasoning_parser_name="hf",
             tokenizer=FakeTokenizer(template),
         )
         is not None
@@ -394,7 +391,7 @@ def test_response_template_parser_rejects_other_parsers():
     with pytest.raises(TypeError, match="cannot be combined"):
         ParserManager.get_parser(
             tool_parser_name="hermes",
-            reasoning_parser_name="response_template",
+            reasoning_parser_name="hf",
             enable_auto_tools=True,
             tokenizer=FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE),
         )

@@ -180,7 +180,7 @@ class OnlineRenderer:
             tool_strict_level=tool_strict_level,
             model_name=model_config.model,
             is_harmony=self.use_harmony,
-            tokenizer=renderer.get_tokenizer(),
+            tokenizer=renderer.tokenizer,
         )
 
         self.chat_template = chat_template

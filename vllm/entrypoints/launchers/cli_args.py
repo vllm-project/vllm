@@ -466,12 +466,12 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
-    if args.chat_template is not None and "response_template" in (
+    if args.chat_template is not None and "hf" in (
         args.tool_call_parser,
         getattr(args, "reasoning_parser", None),
     ):
         logger.warning(
-            "--chat-template is set; the response_template parser still expects "
+            "--chat-template is set; the hf parser still expects "
             "the checkpoint's output format."
         )
 
