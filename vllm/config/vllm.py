@@ -1822,9 +1822,6 @@ class VllmConfig:
                     "HiSparse does not support decode context parallelism."
                 )
             if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
-                # HiSparse picks its prefill path from per-step page residency and
-                # mirrors prefill KV to host outside CUDA graphs, so prefill
-                # batches cannot be captured.
                 raise ValueError(
                     "HiSparse does not support cudagraph_mode=FULL; use "
                     "FULL_AND_PIECEWISE (the default), which captures FULL graphs "
