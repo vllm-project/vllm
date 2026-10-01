@@ -29,7 +29,7 @@ class _AllocationScope(AbstractContextManager):
 
 
 @pytest.mark.parametrize("hisparse", [False, True])
-def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> None:
+def test_mrv2_kv_pool_wraps_all_cache_allocations(monkeypatch, hisparse) -> None:
     scope = _AllocationScope()
     kv_caches = {"layer": torch.empty(0)}
 
@@ -38,9 +38,15 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> No
         return kv_caches
 
     def bind(*args, **kwargs):
-        assert not scope.active
+        # bind_kv_cache allocates shared ReplaySSM tracker tensors.
+        assert scope.active
+
+    def allocate_replayssm(*args, **kwargs):
+        assert scope.active
+        return {}
 
     monkeypatch.setattr(attn_utils, "allocate_kv_cache", allocate)
+    monkeypatch.setattr(attn_utils, "allocate_replayssm_caches", allocate_replayssm)
     monkeypatch.setattr(attn_utils, "bind_kv_cache_to_layers", bind)
     monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda config: {})
 
@@ -91,7 +97,7 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> No
     assert not scope.active
 
 
-def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
+def test_mrv1_kv_pool_wraps_all_cache_allocations(monkeypatch) -> None:
     scope = _AllocationScope()
     kv_caches = {"layer": torch.empty(0)}
 
@@ -100,9 +106,16 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
         return kv_caches
 
     def bind(*args, **kwargs):
-        assert not scope.active
+        assert scope.active
+
+    def allocate_replayssm(*args, **kwargs):
+        assert scope.active
+        return {}
 
     monkeypatch.setattr(gpu_model_runner, "allocate_kv_cache", allocate)
+    monkeypatch.setattr(
+        gpu_model_runner, "allocate_replayssm_caches", allocate_replayssm
+    )
     monkeypatch.setattr(gpu_model_runner, "bind_kv_cache", bind)
 
     runner = SimpleNamespace(

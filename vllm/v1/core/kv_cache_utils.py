@@ -1044,9 +1044,9 @@ def check_enough_kv_cache_memory(
         )
         _check_enough_kv_cache_memory(
             check_memory,
-            lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
+            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
             vllm_config.model_config.max_model_len,
-            lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
+            partial(_estimate_max_model_len_from_groups, vllm_config, groups),
         )
 
 
@@ -1622,7 +1622,15 @@ def _get_per_layer_spec(
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
-    """Return the largest cache group's bytes per block."""
+    """Return canonical KV plus ReplaySSM bytes per physical block."""
+    return _get_kv_cache_main_bytes_per_block(
+        kv_cache_groups
+    ) + _get_replayssm_bytes_per_block(kv_cache_groups)
+
+
+def _get_kv_cache_main_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         _, _, mla_names, idx_names, mla_page, idx_page, _, _ = glm5_layout
         return len(mla_names) * mla_page + len(idx_names) * idx_page
@@ -1646,6 +1654,19 @@ def _get_kv_cache_bytes_per_block(
         for layer_name in group.layer_names
     )
     return round_up(bytes_per_block, math.lcm(*alignments))
+
+
+def _get_replayssm_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    # ReplaySSM ring tensors use standalone allocations, so unlike canonical
+    # cache groups their storage cannot overlay by physical block ID.
+    return sum(
+        spec.replayssm_size_bytes
+        for group in kv_cache_groups
+        for layer_name in group.layer_names
+        if isinstance((spec := _get_per_layer_spec(group, layer_name)), MambaSpec)
+    )
 
 
 def validate_kv_cache_layout(
@@ -1727,11 +1748,14 @@ def get_kv_cache_config_from_groups(
             tail_names,
             _,
         ) = glm5_layout
-        bytes_per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
+        main_bytes_per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
+        bytes_per_block = main_bytes_per_block + _get_replayssm_bytes_per_block(
+            kv_cache_groups
+        )
         num_blocks = may_override_num_blocks(
             vllm_config, available_memory // bytes_per_block
         )
-        size = bytes_per_block * num_blocks
+        size = main_bytes_per_block * num_blocks
         attn_specs = cast(
             UniformTypeKVCacheSpecs, attn_group.kv_cache_spec
         ).kv_cache_specs
@@ -1781,12 +1805,18 @@ def get_kv_cache_config_from_groups(
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
-    interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
+    main_bytes_per_block = _get_kv_cache_main_bytes_per_block(kv_cache_groups)
+    bytes_per_block = main_bytes_per_block + _get_replayssm_bytes_per_block(
+        kv_cache_groups
+    )
+    assert bytes_per_block > 0
+    interleaved_block_stride = (
+        main_bytes_per_block if layout.is_block_outermost else None
+    )
 
     num_blocks = available_memory // bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-    size = bytes_per_block * num_blocks
+    size = main_bytes_per_block * num_blocks
 
     # Groups alias from byte 0. Spec regions are laid out differently:
     #
@@ -2510,10 +2540,10 @@ def _max_memory_usage_bytes_from_groups(
         (
             attn_group,
             mamba_groups,
-            mla_names,
-            idx_names,
-            mla_page,
-            idx_page,
+            _,
+            _,
+            _,
+            _,
             tail_names,
             _,
         ) = glm5_layout
@@ -2528,7 +2558,7 @@ def _max_memory_usage_bytes_from_groups(
         )
         if tail_names:
             total_blocks += 1
-        return total_blocks * (len(mla_names) * mla_page + len(idx_names) * idx_page)
+        return total_blocks * _pool_bytes_per_block(kv_cache_groups)
 
     bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
     total_blocks = 0

@@ -3,7 +3,10 @@
 
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
+
+from vllm.config.mamba import MambaBackendEnum
 
 
 def test_nemotron_h_lm_head_receives_quant_config():
@@ -59,3 +62,38 @@ def test_relu2_fp8_fusion_uses_registry():
     maybe_fused.assert_called_once_with(act_fn, projected, down_proj)
     act_fn.assert_not_called()
     assert result is fused
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected_num_states"),
+    [
+        (MambaBackendEnum.TRITON, 5),
+        (MambaBackendEnum.FLASHINFER, 2),
+    ],
+)
+def test_nemotron_h_replayssm_platform_sizing_is_backend_scoped(
+    backend: MambaBackendEnum,
+    expected_num_states: int,
+):
+    from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
+
+    config = Mock()
+    config.cache_config.use_replayssm = True
+    config.cache_config.replayssm_buffer_len = 16
+    config.cache_config.mamba_cache_dtype = "auto"
+    config.cache_config.mamba_ssm_cache_dtype = "float32"
+    config.mamba_config.backend = backend
+    config.model_config.dtype = torch.bfloat16
+    config.model_config.hf_config.mamba_num_heads = 32
+    config.model_config.hf_config.mamba_head_dim = 64
+    config.model_config.hf_config.n_groups = 8
+    config.model_config.hf_config.ssm_state_size = 128
+    config.model_config.hf_config.conv_kernel = 4
+    config.parallel_config.tensor_parallel_size = 1
+    config.num_speculative_tokens = 0
+
+    shapes = NemotronHForCausalLM.get_mamba_state_shape_from_config(config)
+    dtypes = NemotronHForCausalLM.get_mamba_state_dtype_from_config(config)
+
+    assert len(shapes) == expected_num_states
+    assert len(dtypes) == expected_num_states

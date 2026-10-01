@@ -260,6 +260,7 @@ class _FakePrecopyContext:
         self.mamba_state_idx_buf = _FakeCpuGpuBuffer(n)
         self.precopy_src_col_buf = _FakeCpuGpuBuffer(n)
         self.precopy_token_bias_buf = _FakeCpuGpuBuffer(n)
+        self.replayssm = None
         self.calls = []
 
     def initialize_from_forward_context(self, *args, **kwargs):
