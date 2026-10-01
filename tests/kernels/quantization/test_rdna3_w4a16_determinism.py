@@ -35,8 +35,9 @@ Tolerances are derived from the kernel's rounding structure, not tuned to
 pass (measured max errors on W7900/gfx1100 in parentheses):
 
 * scalar bf16  — dequant keeps FP32 precision end-to-end (magic-value
-  v_dot2 path); the only rounding is the final cast, so
-  max_abs <= 0.5 * ulp_bf16(max|ref|) * 1.5 + 1e-3   (measured ~0.06).
+  v_dot2 path); the only rounding is the final cast. Measured max ~0.06
+  on the tested shapes (|ref| up to ~30); tolerance 0.10 with headroom
+  for larger |ref| at the final-cast ulp.
 * scalar fp16  — the dequant uses the exact factored form (magic values in
   fp16, (y, z) correction in fp32; see qdq_4_rdna3.cuh), so the only fp16
   roundings are the final output cast and the B-tile-free dot inputs:
@@ -110,10 +111,10 @@ TOL = {
 }
 
 
-def _build_layer(k, n, seed, dtype):
+def _build_layer(k, n, seed, dtype, group=GROUP):
     torch.manual_seed(seed)
     q_int4_kn = torch.randint(0, 16, (k, n), dtype=torch.int32)
-    scales_gn = (torch.randn(k // GROUP, n) * 0.01 + 0.02).to(dtype)
+    scales_gn = (torch.randn(k // group, n) * 0.01 + 0.02).to(dtype)
     qweight = pack_quantized_values_into_int32(q_int4_kn, WEIGHT_TYPE, packed_dim=0)
     no_loader = lambda *a, **kw: None  # noqa: E731
 
@@ -142,13 +143,13 @@ def _build_layer(k, n, seed, dtype):
     return layer, q_int4_kn, scales_gn
 
 
-def _prepare(layer, dtype, k, n):
+def _prepare(layer, dtype, k, n, group=GROUP):
     cfg = MPLinearLayerConfig(
         full_weight_shape=(k, n),
         partition_weight_shape=(k, n),
         weight_type=WEIGHT_TYPE,
         act_type=dtype,
-        group_size=GROUP,
+        group_size=group,
         zero_points=False,
     )
     kernel = RDNA3W4A16LinearKernel(
@@ -158,13 +159,13 @@ def _prepare(layer, dtype, k, n):
     return kernel._get_weight_params(layer)
 
 
-def _reference(m, k, dtype, seed, q_int4_kn, scales_gn):
+def _reference(m, k, dtype, seed, q_int4_kn, scales_gn, group=GROUP):
     torch.manual_seed(seed + 1)
     x = torch.randn(m, k, device=device, dtype=dtype)
     # FP32 reference; see module docstring for the dequant semantics.
     w_f32 = (q_int4_kn.to(device).float() - 8.0) * scales_gn.to(
         device
-    ).repeat_interleave(GROUP, dim=0).float()
+    ).repeat_interleave(group, dim=0).float()
     return x, x.float() @ w_f32
 
 
@@ -172,10 +173,10 @@ def _run_op(x, w_q, w_zp, w_s):
     return torch.ops._rocm_C.gptq_gemm_rdna3(x, w_q, w_zp, w_s, False)
 
 
-def _outputs_and_ref(M, K, N, seed, dtype, repeats=1):
-    layer, q_int4_kn, scales_gn = _build_layer(K, N, seed, dtype)
-    w_q, w_s, w_zp = _prepare(layer, dtype, K, N)
-    x, ref = _reference(M, K, dtype, seed, q_int4_kn, scales_gn)
+def _outputs_and_ref(M, K, N, seed, dtype, repeats=1, group=GROUP):
+    layer, q_int4_kn, scales_gn = _build_layer(K, N, seed, dtype, group)
+    w_q, w_s, w_zp = _prepare(layer, dtype, K, N, group)
+    x, ref = _reference(M, K, dtype, seed, q_int4_kn, scales_gn, group)
     outs = [_run_op(x, w_q, w_zp, w_s) for _ in range(repeats)]
     return outs, ref
 
@@ -288,13 +289,16 @@ def test_scalar_matches_fp32_reference(dist_init, dtype):
 
 
 @gfx1100_only
-@pytest.mark.parametrize("m", [4, 8])
-def test_scalar_fp16_multi_m_matches_fp32_reference(dist_init, m):
-    """The exact fp16 factored dequant across M_COUNT=4/8 instantiations:
-    the (y, z) correction and the nibble-slot activation sums must hold for
-    every tile width, not just the M=1 fast path."""
-    outs, ref = _outputs_and_ref(M=m, K=4096, N=512, seed=1247, dtype=torch.float16)
-    _assert_close_to_ref(outs[0], ref, "scalar", torch.float16)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("m", [2, 3, 4, 5, 8])
+def test_scalar_multi_m_matches_fp32_reference(dist_init, m, dtype):
+    """The exact factored dequant across every M_COUNT instantiation
+    (M=2,3 -> M_COUNT=2; M=4,5 -> M_COUNT=4 with a padded row; M=8 -> 8):
+    the (y, z) correction and the nibble-slot activation sums must hold
+    for every tile width, not just the M=1 fast path."""
+    outs, ref = _outputs_and_ref(M=m, K=4096, N=512, seed=1247, dtype=dtype)
+    _assert_repeatable(outs)
+    _assert_close_to_ref(outs[0], ref, _path_for(dtype, m), dtype)
 
 
 @gfx1100_only
@@ -367,8 +371,8 @@ def _compute_wmma_k_split_mn(m, n, k, m_tile, n_tile):
 
 def _assert_v7v8_no_split_routing(dtype, m, n, k):
     """Assert the shape deterministically routes to the V7/V8 128x64
-    kernel with k_split == 1: WMMA dispatch (bf16 M>=16 / fp16 M>=64),
-    the M >= 128 branch, and the no-split threshold."""
+    kernel with k_split == 1: WMMA dispatch (both dtypes M >= 12), the
+    M >= 128 branch, and the no-split threshold."""
     assert m >= 12, "not the WMMA path"
     assert m >= 128, "below the V7/V8 (128x64) branch"
     assert _compute_wmma_k_split_mn(m, n, k, 128, 64) == 1, (
@@ -408,10 +412,10 @@ def _launched_kernel_names(fn) -> set:
     from torch.profiler import ProfilerActivity, profile
 
     fn()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     with profile(activities=[ProfilerActivity.CUDA]) as prof:
         fn()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
     return {
         e.name
         for e in prof.events()
@@ -444,3 +448,138 @@ def test_dispatch_boundary(dist_init, dtype):
     _, ref12 = _outputs_and_ref(M=12, K=4096, N=512, seed=1248, dtype=dtype)
     _assert_close_to_ref(m11, ref11, "scalar", dtype)
     _assert_close_to_ref(m12, ref12, "wmma", dtype)
+
+
+# ---------------------------------------------------------------------------
+# E. In-kernel split-K reduction: stress the per-call ticket epilogue.
+#    The fused reduction must stay deterministic and correct under
+#    back-to-back unsynchronized calls, concurrent invocations on two
+#    streams (per-call tickets must never share state), and CUDA-graph
+#    capture/replay.
+# ---------------------------------------------------------------------------
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_scalar_splitk_100x_bit_repeatable(dist_init, dtype):
+    """100 back-to-back calls (no intermediate sync) on the split-K path."""
+    outs, _ = _outputs_and_ref(M=1, K=4096, N=512, seed=1249, dtype=dtype, repeats=100)
+    _assert_repeatable(outs)
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_scalar_multistream_concurrent(dist_init, dtype):
+    """Two concurrent invocations on separate streams, distinct weights and
+    activations: outputs must be bit-identical to the serial invocation of
+    each (the arrival tickets are per-call, so cross-stream interference
+    would show up here as a corrupted or unreduced output)."""
+    layer_a, q_a, s_a = _build_layer(4096, 512, 4321, dtype)
+    layer_b, q_b, s_b = _build_layer(4096, 512, 4322, dtype)
+    wq_a, ws_a, wz_a = _prepare(layer_a, dtype, 4096, 512)
+    wq_b, ws_b, wz_b = _prepare(layer_b, dtype, 4096, 512)
+    torch.manual_seed(4323)
+    x_a = torch.randn(1, 4096, device=device, dtype=dtype)
+    x_b = torch.randn(1, 4096, device=device, dtype=dtype)
+
+    serial_a = _run_op(x_a, wq_a, wz_a, ws_a)
+    serial_b = _run_op(x_b, wq_b, wz_b, ws_b)
+    torch.accelerator.synchronize()
+
+    s1, s2 = torch.cuda.Stream(), torch.cuda.Stream()
+    for _ in range(25):
+        with torch.cuda.stream(s1):
+            out_a = _run_op(x_a, wq_a, wz_a, ws_a)
+        with torch.cuda.stream(s2):
+            out_b = _run_op(x_b, wq_b, wz_b, ws_b)
+    torch.accelerator.synchronize()
+    assert torch.equal(out_a, serial_a), "concurrent stream A corrupted"
+    assert torch.equal(out_b, serial_b), "concurrent stream B corrupted"
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_scalar_graph_capture_replay(dist_init, dtype):
+    """The op must survive CUDA-graph capture: the replayed output must be
+    bit-identical to the eager output and stable across repeated replays."""
+    layer, q_int4, scales_gn = _build_layer(4096, 512, 4324, dtype)
+    wq, ws, wz = _prepare(layer, dtype, 4096, 512)
+    torch.manual_seed(4325)
+    x = torch.randn(1, 4096, device=device, dtype=dtype)
+
+    eager = _run_op(x, wq, wz, ws)
+    torch.accelerator.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    _run_op(x, wq, wz, ws)  # warm-up side streams/allocator on capture path
+    torch.accelerator.synchronize()
+    with torch.cuda.graph(graph):
+        captured = _run_op(x, wq, wz, ws)
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(captured, eager), "graph replay differs from eager"
+    graph.replay()
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert torch.equal(captured, eager), "repeated replay not repeatable"
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_scalar_multi_row_tile_bit_repeatable(dist_init, dtype):
+    """Row tiling with ticket reuse: N % 16 == 8 bypasses the WMMA
+    dispatch (N % 16 != 0), so M=100 runs scalar across two 64-row tiles
+    (the second with gy > 1 y-blocks). Every tile's tickets must be armed,
+    consumed, and re-armed correctly for all outputs to be written exactly
+    once — and the result must be bit-repeatable."""
+    outs, ref = _outputs_and_ref(
+        M=100, K=4096, N=2056, seed=1250, dtype=dtype, repeats=20
+    )
+    _assert_repeatable(outs)
+    _assert_close_to_ref(outs[0], ref, "scalar", dtype)
+
+
+# ---------------------------------------------------------------------------
+# F. Split-K geometry corners: clipped non-first z blocks, small split
+#    counts, and non-128 group sizes.
+# ---------------------------------------------------------------------------
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("k,group", [(4224, 128), (2112, 32)])
+def test_scalar_clipped_tail_splitk(dist_init, dtype, k, group):
+    """K % 256 != 0 with z_count > 1: the LAST z block is clipped by end_k,
+    its group prefetch guard (`k + 32 < end_k`) is what keeps the raw
+    zero/scale loads in bounds, and the reduce tail loop runs (z=17 -> one
+    remainder slice; z=9 -> one batch + one). K=2112/G=32 also puts two
+    group switches inside the clipped tail block."""
+    outs, ref = _outputs_and_ref(M=1, K=k, N=512, seed=1251, dtype=dtype, group=group)
+    _assert_repeatable(outs)
+    _assert_close_to_ref(outs[0], ref, "scalar", dtype)
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("group", [32, 64])
+def test_scalar_small_group_matches_fp32_reference(dist_init, dtype, group):
+    """Group sizes below 128 make the group constants change every 32-K
+    round (G=32) or three times per z block (G=64); the factored-dequant
+    correction must track every change. G=32 is also the production MoE
+    group size."""
+    outs, ref = _outputs_and_ref(
+        M=1, K=2048, N=512, seed=1252, dtype=dtype, group=group
+    )
+    _assert_repeatable(outs)
+    _assert_close_to_ref(outs[0], ref, "scalar", dtype)
+
+
+@gfx1100_only
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_scalar_two_way_split_bit_repeatable(dist_init, dtype):
+    """z_count == 2 (K=512): the minimal split-K configuration — the old
+    CAS bug's onset regime — and the pure-remainder reduce tail."""
+    outs, _ = _outputs_and_ref(
+        M=1, K=512, N=512, seed=1253, dtype=dtype, repeats=REPEATS
+    )
+    _assert_repeatable(outs)

@@ -6,12 +6,13 @@
 // kernel (csrc/quantization/gptq/q_gemm.cu) with the following changes:
 //
 //   1. Deterministic split-K epilogue. K is split across gridDim.z blocks;
-//      each block stores its FP32 block partial to a scratch tensor, and a
-//      separate pass reduces the z-slices in fixed ascending order with a
-//      single final cast to T (see launch_gemm_q4_deterministic). When
-//      gridDim.z == 1 each output element has exactly one writer and the
-//      kernel stores the rounded accumulator directly — no scratch, no
-//      reduce pass, no atomics.
+//      each block stores its FP32 block partial to a scratch tensor, and the
+//      last z block of each (x, y) tile reduces the z-slices in fixed
+//      ascending order with a single final cast to T — the reduction runs
+//      in the GEMM kernel itself, gated by a per-call ticket counter (no
+//      cross-launch state; see the epilogue). When gridDim.z == 1 each
+//      output element has exactly one writer and the kernel stores the
+//      rounded accumulator directly — no scratch, no reduce, no atomics.
 //      (Legacy design, pre-#54706: a packed CAS-loop atomic add on a 64-bit
 //      word emulating v_global_atomic_pk_add_{f16,bf16}, which gfx11 lacks.
 //      It narrowed every split partial to bf16/fp16 BEFORE accumulation, so
@@ -184,22 +185,26 @@ __forceinline__ __device__ void load4_scales(const T* scales_row, int n,
 // ---------------------------------------------------------------------------
 
 template <typename T, int M_COUNT>
-__global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
-                                     const uint32_t* __restrict__ b_q_weight,
-                                     const uint32_t* __restrict__ b_qzeros,
-                                     const T* __restrict__ b_scales,
-                                     T* __restrict__ c, const int size_m,
-                                     const int size_n, const int size_k,
-                                     const int groups, const int zero_offset,
-                                     // Deterministic split-K epilogue: when
-                                     // non-null, each split block stores its
-                                     // FP32 partial to
-                                     // partials[(z*size_m + m)*size_n + n]
-                                     // instead of CAS-atomically accumulating
-                                     // a low-precision partial into c. See the
-                                     // epilogue below for why the atomic path
-                                     // is order-dependent.
-                                     float* __restrict__ partials) {
+__global__ void gemm_q4_kernel_rdna3(
+    const T* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
+    const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
+    T* __restrict__ c, const int size_m, const int size_n, const int size_k,
+    const int groups, const int zero_offset,
+    // Deterministic split-K epilogue: when
+    // non-null, each split block stores its
+    // FP32 partial to
+    // partials[(z*size_m + m)*size_n + n]
+    // instead of CAS-atomically accumulating
+    // a low-precision partial into c. The
+    // last z block of each (x, y) tile then
+    // performs the fixed ascending-z
+    // reduction in-kernel (see the epilogue
+    // below). `tickets` (same length as the
+    // number of tiles) is a per-call
+    // zero-filled arrival counter array —
+    // one ticket per tile — so concurrent
+    // invocations never share state.
+    float* __restrict__ partials, int* __restrict__ tickets) {
   const int t = threadIdx.x;
   const int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
   const int offset_m = blockIdx.y * M_COUNT;
@@ -274,20 +279,15 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
   float z_b_f[4], y_b_f[4];
   float yf_h[4][2], zf_h[4][2];
 
+  // bf16-only group refresh (fp16 preps from prefetched raw words below).
   auto refresh_group = [&](int g) {
-    const uint32_t* qz_row = b_qzeros + g * (size_n / 8);
-    const T* sc_row = b_scales + g * size_n;
-    int zeros[4];
-    T scales[4];
-    load4_zeros(qz_row, n, zeros);
-    load4_scales<T>(sc_row, n, scales);
-    if constexpr (std::is_same<T, half>::value) {
-  #pragma unroll
-      for (int i = 0; i < 4; ++i) {
-        prep_zero_scale_fp16_f32((uint32_t)(zeros[i] + zero_offset), scales[i],
-                                 yf_h[i], zf_h[i]);
-      }
-    } else {
+    if constexpr (!std::is_same<T, half>::value) {
+      const uint32_t* qz_row = b_qzeros + g * (size_n / 8);
+      const T* sc_row = b_scales + g * size_n;
+      int zeros[4];
+      T scales[4];
+      load4_zeros(qz_row, n, zeros);
+      load4_scales<T>(sc_row, n, scales);
   #pragma unroll
       for (int i = 0; i < 4; ++i) {
         prep_zero_scale_bf16_f32((uint32_t)(zeros[i] + zero_offset), scales[i],
@@ -296,7 +296,32 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
     }
   };
 
-  refresh_group(group);
+  // fp16: the raw zero/scale words of the NEXT group are loaded during the
+  // round before the boundary, so a group change no longer stalls on a full
+  // memory round trip before the weights of the round are even issued.
+  uint32_t rz = 0;
+  T rs[4];
+  auto load_raw_group = [&](int g) {
+    rz = b_qzeros[g * (size_n / 8) + n / 8] >> ((n & 7) * 4);
+  #pragma unroll
+    for (int i = 0; i < 4; ++i) rs[i] = b_scales[g * size_n + n + i];
+  };
+  auto prep_raw_fp16 = [&]() {
+    if constexpr (std::is_same<T, half>::value) {
+  #pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        prep_zero_scale_fp16_f32(((rz >> (4 * i)) & 0xF) + zero_offset, rs[i],
+                                 yf_h[i], zf_h[i]);
+      }
+    }
+  };
+
+  if constexpr (std::is_same<T, half>::value) {
+    load_raw_group(group);
+    prep_raw_fp16();
+  } else {
+    refresh_group(group);
+  }
 
   float block_c[M_COUNT][4];
   #pragma unroll
@@ -306,11 +331,12 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
   }
 
   // Note on group-transition granularity: we check `k == nextgroup` at the
-  // start of each outer iteration (which advances K by 32). This is correct
-  // when group_size >= 32 OR group_size divides 32 evenly (groupsize is one
-  // of {1,2,4,8,16,32,64,128,...}). For group_size in {16, 8, 4, ...} the
-  // inner loop would cross a group boundary between j-iterations; we require
-  // group_size >= 32 here, mirroring exllama's assumption.
+  // start of each outer iteration (which advances K by 32), so a group
+  // boundary must never fall strictly inside a 32-K round: groupsize must
+  // be a multiple of 32 (all real GPTQ group sizes 32/64/128/256, or
+  // groups == 1). groupsize in {16, 8, ...} or non-multiples like 48 would
+  // skip the boundary check and silently use stale constants; the host-side
+  // TORCH_CHECK below enforces it. Same assumption as exllama.
   //
   // Software pipelining: we issue all 4 vectorized weight loads up front
   // before any dequant/FMA depends on them. This gives the AMDGPU backend
@@ -322,7 +348,11 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
     if (k == nextgroup) {
       group++;
       nextgroup += groupsize;
-      refresh_group(group);
+      if constexpr (std::is_same<T, half>::value) {
+        prep_raw_fp16();  // from the words prefetched in the previous round
+      } else {
+        refresh_group(group);
+      }
     }
 
     // Prefetch all four j-iterations' weight words. The compiler emits 4
@@ -334,12 +364,17 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
       b_w[j] = *(const int4*)(b_ptr + j * size_n);
     }
     b_ptr += 4 * size_n;
+    if constexpr (std::is_same<T, half>::value) {
+      if (k + 32 == nextgroup && k + 32 < end_k) load_raw_group(group + 1);
+    }
 
-    // fp16 exact factored form: sum_a per row, split by nibble slot, summed
-    // across the whole 32-K round. It depends on neither the output column
-    // nor the weights, so the z correction is applied once after the j loop
+    // fp16 exact factored form: raw dot products and activation sums, both
+    // split by nibble slot, accumulated across the whole 32-K round. Neither
+    // depends on the output column, and the (y, z) constants are group
+    // constants, so both corrections are applied once after the j loop
     // instead of four times inside it — see qdq_4_rdna3.cuh.
     float sum_lo[M_COUNT] = {}, sum_hi[M_COUNT] = {};
+    float acc_lo[M_COUNT][4] = {}, acc_hi[M_COUNT][4] = {};
 
   #pragma unroll
     for (int j = 0; j < 4; ++j) {
@@ -347,38 +382,36 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
 
       if constexpr (std::is_same<T, half>::value) {
         // Magic values with no bias folded in; the (y, z) correction is
-        // applied in fp32 — see the exact factored form in qdq_4_rdna3.cuh.
+        // applied in fp32 below — see the exact factored form in
+        // qdq_4_rdna3.cuh.
         half2 qm[4][4];
         magic_4bit_8_fp16((uint32_t)b_w[j].x, qm[0]);
         magic_4bit_8_fp16((uint32_t)b_w[j].y, qm[1]);
         magic_4bit_8_fp16((uint32_t)b_w[j].z, qm[2]);
         magic_4bit_8_fp16((uint32_t)b_w[j].w, qm[3]);
 
-        constexpr uint32_t FP16_ONES = 0x3C003C00u;  // half2(1.0, 1.0)
-        const half2 ones = *reinterpret_cast<const half2*>(&FP16_ONES);
+        const half2 ones = ones_half2_fp16();
 
   #pragma unroll
         for (int m = 0; m < M_COUNT; ++m) {
           const half2* a2 = reinterpret_cast<const half2*>(&block_a[m][a_off]);
-          // sum_a split by nibble slot (the high pairs carry a factor of 16).
-          // It does not depend on the output column, so one v_dot2 per pair is
-          // shared by the four columns this thread owns; and it does not depend
-          // on the weights, so it accumulates across the whole 32-K round and
-          // the z correction is applied once, after the j loop.
+          // sum_a split by nibble slot (the high pairs carry a factor of
+          // 16). It does not depend on the output column, so one v_dot2 per
+          // pair is shared by the four columns this thread owns.
           sum_lo[m] = __builtin_amdgcn_fdot2(a2[0], ones, sum_lo[m], false);
           sum_hi[m] = __builtin_amdgcn_fdot2(a2[1], ones, sum_hi[m], false);
           sum_lo[m] = __builtin_amdgcn_fdot2(a2[2], ones, sum_lo[m], false);
           sum_hi[m] = __builtin_amdgcn_fdot2(a2[3], ones, sum_hi[m], false);
   #pragma unroll
           for (int c = 0; c < 4; ++c) {
-            float pl = 0.0f, ph = 0.0f;
-            pl = __builtin_amdgcn_fdot2(qm[c][0], a2[0], pl, /*clamp=*/false);
-            ph = __builtin_amdgcn_fdot2(qm[c][1], a2[1], ph, /*clamp=*/false);
-            pl = __builtin_amdgcn_fdot2(qm[c][2], a2[2], pl, /*clamp=*/false);
-            ph = __builtin_amdgcn_fdot2(qm[c][3], a2[3], ph, /*clamp=*/false);
-            // Only the y half here: y and z are both group constants, but z
-            // multiplies sum_a, which is still being accumulated.
-            block_c[m][c] += yf_h[c][0] * pl + yf_h[c][1] * ph;
+            acc_lo[m][c] =
+                __builtin_amdgcn_fdot2(qm[c][0], a2[0], acc_lo[m][c], false);
+            acc_hi[m][c] =
+                __builtin_amdgcn_fdot2(qm[c][1], a2[1], acc_hi[m][c], false);
+            acc_lo[m][c] =
+                __builtin_amdgcn_fdot2(qm[c][2], a2[2], acc_lo[m][c], false);
+            acc_hi[m][c] =
+                __builtin_amdgcn_fdot2(qm[c][3], a2[3], acc_hi[m][c], false);
           }
         }
       } else if constexpr (M_COUNT == 1) {
@@ -546,15 +579,17 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
     }
 
     if constexpr (std::is_same<T, half>::value) {
-      // z is a group constant and sum_a is complete for this round: one pair
-      // of FMAs per (row, column) per round instead of one pair per
-      // j-iteration. Per-round z applications sum exactly to the per-group
-      // correction because z does not change inside a group.
+      // y and z are group constants and this round's dots and activation
+      // sums are complete: one pair of FMAs per (row, column) per round
+      // instead of per j-iteration. Per-round z applications sum exactly to
+      // the per-group correction because z does not change inside a group.
   #pragma unroll
       for (int m = 0; m < M_COUNT; ++m) {
   #pragma unroll
         for (int c = 0; c < 4; ++c) {
-          block_c[m][c] += zf_h[c][0] * sum_lo[m] + zf_h[c][1] * sum_hi[m];
+          block_c[m][c] += yf_h[c][0] * acc_lo[m][c] +
+                           yf_h[c][1] * acc_hi[m][c] + zf_h[c][0] * sum_lo[m] +
+                           zf_h[c][1] * sum_hi[m];
         }
       }
     }
@@ -567,8 +602,16 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
   //   partials[(blockIdx.z * size_m + m) * size_n + n]
   // (one writer per in-range slot; threads with n >= size_n returned before
   // the epilogue and rows past size_m are skipped — exactly the slots the
-  // fixed-order reduce pass never reads). n is a multiple of 4 and
-  // size_n % 8 == 0, so the 4-lane store never crosses the right edge.
+  // in-kernel fixed-order reduce below never reads). n is a multiple of 4
+  // and size_n % 8 == 0, so the 4-lane store never crosses the right edge.
+  // After the stores, the block publishes its arrival on the tile's ticket
+  // (a per-call zero-filled counter); the LAST z block of the tile then
+  // sums the z slices in fixed ascending order with a single final cast —
+  // the reduction order is a pure function of the launch shape, so the
+  // result stays bit-reproducible for identical inputs. Tickets are
+  // per-invocation state (see launch_gemm_q4_deterministic); nothing is
+  // shared across kernel launches, so concurrent invocations on other
+  // streams cannot interfere.
   //
   // partials == nullptr && gridDim.z == 1: single split block per output
   //   element — direct store of the rounded accumulator. No scratch, no
@@ -628,6 +671,67 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
       atomic_add_pk4_bf16(out, r01, r23);
     }
   }
+
+  // Deterministic in-kernel split-K reduction (fp16 only — on gfx1100 the
+  // bf16 scalar kernel measured neutral at M=1 and up to 10% slower at
+  // M=4-8 with the reduction fused, so bf16 keeps the separate reducer;
+  // see launch_gemm_q4_deterministic). Every (x, y) tile has gridDim.z
+  // producer blocks; the last one to finish sums the tile's z slices in
+  // fixed ascending order and writes the output with a single final cast.
+  // Memory ordering: each thread's partials stores precede its
+  // __threadfence() (release, device scope); the fence precedes the block
+  // barrier, so thread 0's ticket increment happens after every store of
+  // the block is device-visible. The last block's second __threadfence()
+  // pairs with the writers' fences (acquire side), making the other blocks'
+  // partials visible before they are read. The ticket is re-armed after the
+  // reduction so the same per-call array serves the next row tile
+  // (launches on a stream are ordered, so the re-arm is complete before any
+  // later launch reads the ticket).
+  if constexpr (std::is_same<T, half>::value) {
+    if (partials != nullptr) {
+      __shared__ int s_last;
+      __threadfence();
+      __syncthreads();
+      if (t == 0) {
+        s_last = atomicAdd(tickets + blockIdx.y * gridDim.x + blockIdx.x, 1) ==
+                 (int)gridDim.z - 1;
+      }
+      __syncthreads();
+      if (!s_last) return;
+      __threadfence();
+
+      typedef float f4v __attribute__((ext_vector_type(4)));
+      const long zs = ((long)size_m * size_n) / 4;  // z-slice stride, f4 units
+      const int zc = (int)gridDim.z;
+  #pragma unroll
+      for (int m = 0; m < M_COUNT; ++m) {
+        if (offset_m + m >= size_m) continue;  // skip padding rows past size_m
+        const f4v* p =
+            (const f4v*)(partials + (long)(offset_m + m) * size_n + n);
+        f4v acc = {};
+        int z = 0;
+        // Ascending-z accumulation with batched loads (one L2 round trip per
+        // eight slices); the addition order is fixed, so the result is
+        // bit-reproducible.
+        for (; z + 8 <= zc; z += 8) {
+          f4v v[8];
+  #pragma unroll
+          for (int u = 0; u < 8; ++u)
+            v[u] = __builtin_nontemporal_load(p + (long)(z + u) * zs);
+  #pragma unroll
+          for (int u = 0; u < 8; ++u) acc += v[u];
+        }
+        for (; z < zc; ++z) acc += __builtin_nontemporal_load(p + (long)z * zs);
+
+        T* out = c + (long)(offset_m + m) * size_n + n;
+        half2 packed[2] = {
+            __halves2half2(__float2half_rn(acc[0]), __float2half_rn(acc[1])),
+            __halves2half2(__float2half_rn(acc[2]), __float2half_rn(acc[3]))};
+        __builtin_memcpy(out, packed, sizeof(packed));
+      }
+      if (t == 0) *(tickets + blockIdx.y * gridDim.x + blockIdx.x) = 0;
+    }
+  }
 }
 
 #else  // non-RDNA3 device pass: empty __global__ for symbol parity.
@@ -635,7 +739,8 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
 template <typename T, int M_COUNT>
 __global__ void gemm_q4_kernel_rdna3(const T*, const uint32_t*, const uint32_t*,
                                      const T*, T*, const int, const int,
-                                     const int, const int, const int, float*) {}
+                                     const int, const int, const int, float*,
+                                     int*) {}
 
 #endif  // __HIP__RDNA3__ || !__HIP_DEVICE_COMPILE__
 
@@ -648,7 +753,7 @@ void launch_gemm_q4_for_mcount(const T* a, const uint32_t* b_q_weight,
                                const uint32_t* b_qzeros, const T* b_scales,
                                T* c, int size_m, int size_n, int size_k,
                                int groups, int zero_offset, float* partials,
-                               cudaStream_t stream) {
+                               int* tickets, cudaStream_t stream) {
   dim3 block(THREADS_X);
   dim3 grid((size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
             (size_m + M_COUNT - 1) / M_COUNT,
@@ -656,7 +761,15 @@ void launch_gemm_q4_for_mcount(const T* a, const uint32_t* b_q_weight,
 
   gemm_q4_kernel_rdna3<T, M_COUNT><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, partials);
+      zero_offset, partials, tickets);
+}
+
+// The M_COUNT template the launcher below picks for a given row count.
+static inline int mcount_for_rows(int rows) {
+  if (rows == 1) return 1;
+  if (rows <= 3) return 2;
+  if (rows <= 7) return 4;
+  return 8;
 }
 
 // Dispatch to the largest M_COUNT template that doesn't waste more than
@@ -674,35 +787,40 @@ template <typename T>
 void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
                     const uint32_t* b_qzeros, const T* b_scales, T* c,
                     int size_m, int size_n, int size_k, int groups,
-                    bool use_v2_format, float* partials, cudaStream_t stream) {
+                    bool use_v2_format, float* partials, int* tickets,
+                    cudaStream_t stream) {
   const int zero_offset = use_v2_format ? 0 : 1;
-
-  if (size_m == 1) {
-    launch_gemm_q4_for_mcount<T, 1>(a, b_q_weight, b_qzeros, b_scales, c,
-                                    size_m, size_n, size_k, groups, zero_offset,
-                                    partials, stream);
-  } else if (size_m <= 3) {
-    launch_gemm_q4_for_mcount<T, 2>(a, b_q_weight, b_qzeros, b_scales, c,
-                                    size_m, size_n, size_k, groups, zero_offset,
-                                    partials, stream);
-  } else if (size_m <= 7) {
-    launch_gemm_q4_for_mcount<T, 4>(a, b_q_weight, b_qzeros, b_scales, c,
-                                    size_m, size_n, size_k, groups, zero_offset,
-                                    partials, stream);
-  } else {
-    // M_COUNT=8 covers the whole scalar domain (M <= 11 in practice: the
-    // public dispatch routes M >= 12 to WMMA); this branch is only reached
-    // when the caller falls through, and still produces correct output.
-    launch_gemm_q4_for_mcount<T, 8>(a, b_q_weight, b_qzeros, b_scales, c,
-                                    size_m, size_n, size_k, groups, zero_offset,
-                                    partials, stream);
+  switch (mcount_for_rows(size_m)) {
+    case 1:
+      launch_gemm_q4_for_mcount<T, 1>(a, b_q_weight, b_qzeros, b_scales, c,
+                                      size_m, size_n, size_k, groups,
+                                      zero_offset, partials, tickets, stream);
+      break;
+    case 2:
+      launch_gemm_q4_for_mcount<T, 2>(a, b_q_weight, b_qzeros, b_scales, c,
+                                      size_m, size_n, size_k, groups,
+                                      zero_offset, partials, tickets, stream);
+      break;
+    case 4:
+      launch_gemm_q4_for_mcount<T, 4>(a, b_q_weight, b_qzeros, b_scales, c,
+                                      size_m, size_n, size_k, groups,
+                                      zero_offset, partials, tickets, stream);
+      break;
+    default:
+      // M_COUNT=8 covers the whole scalar domain (M <= 11 in practice: the
+      // public dispatch routes M >= 12 to WMMA); this branch is only reached
+      // when the caller falls through, and still produces correct output.
+      launch_gemm_q4_for_mcount<T, 8>(a, b_q_weight, b_qzeros, b_scales, c,
+                                      size_m, size_n, size_k, groups,
+                                      zero_offset, partials, tickets, stream);
+      break;
   }
 }
 
-// Deterministic split-K reduction: one thread per output element sums the
-// grid.z FP32 partial slices in fixed ascending-z order and rounds to the
-// output dtype exactly once. The order is a pure function of the launch
-// shape, so the result is bit-reproducible for identical inputs.
+// Deterministic split-K reduction for the bf16 launches: one thread per
+// output element sums the grid.z FP32 partial slices in fixed ascending-z
+// order and rounds to the output dtype exactly once. The order is a pure
+// function of the launch shape, so the result is bit-reproducible.
 template <typename T>
 __global__ void reduce_partials_rdna3(const float* __restrict__ partials,
                                       T* __restrict__ c, const int z_count,
@@ -722,16 +840,23 @@ __global__ void reduce_partials_rdna3(const float* __restrict__ partials,
 }
 
 // Deterministic scalar GEMM: split-K blocks write FP32 partials to scratch
-// (no atomics, no intermediate low-precision rounding), then one reduce pass
-// performs a fixed-order FP32 accumulation with a single final cast. The
-// scalar kernel writes every in-range (z, m, n) partial exactly once, so a
-// plain at::empty scratch suffices; row-tile bound:
+// (no atomics, no intermediate low-precision rounding), and the last z
+// block of each (x, y) tile performs the fixed ascending-z reduction
+// in-kernel with a single final cast (see the kernel epilogue). The scalar
+// kernel writes every in-range (z, m, n) partial exactly once, so a plain
+// at::empty scratch suffices; row-tile bound:
 //   scratch_bytes = z_count * TILE_M * size_n * 4
 // is independent of the caller's M (the scalar domain is M < 64, so a single
 // tile covers it). The PyTorch caching allocator (including its CUDA-graph
-// capture pool) owns scratch reuse and lifetime. When z_count == 1 the
-// kernel's direct-store epilogue (gridDim.z == 1) is already deterministic,
-// so the scratch allocation and the reduce pass are skipped entirely.
+// capture pool) owns scratch reuse and lifetime.
+//
+// The arrival tickets are per-call at::zeros state: every launch of this
+// call counts on tickets that start at zero (the kernel re-arms them for
+// the next row tile), and concurrent invocations get distinct allocations
+// from the stream-aware caching allocator, so no synchronization state is
+// ever shared between invocations. When z_count == 1 the kernel's
+// direct-store epilogue (gridDim.z == 1) is already deterministic, so the
+// scratch and ticket allocations are skipped entirely.
 template <typename T>
 void launch_gemm_q4_deterministic(const T* a, const uint32_t* b_q_weight,
                                   const uint32_t* b_qzeros, const T* b_scales,
@@ -743,25 +868,49 @@ void launch_gemm_q4_deterministic(const T* a, const uint32_t* b_q_weight,
   if (z_count == 1) {
     launch_gemm_q4(a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k,
                    groups, use_v2_format,
-                   /*partials=*/nullptr, stream);
+                   /*partials=*/nullptr, /*tickets=*/nullptr, stream);
     return;
   }
-  at::Tensor partials = at::empty(
-      {z_count, std::min(TILE_M, size_m), size_n},
-      at::TensorOptions()
-          .dtype(at::kFloat)
-          .device(at::Device(at::kCUDA, c10::cuda::current_device())));
+  at::TensorOptions dev_opts = at::TensorOptions().device(
+      at::Device(at::kCUDA, c10::cuda::current_device()));
+  at::Tensor partials = at::empty({z_count, std::min(TILE_M, size_m), size_n},
+                                  dev_opts.dtype(at::kFloat));
   float* partials_ptr = partials.data_ptr<float>();
-  for (int row0 = 0; row0 < size_m; row0 += TILE_M) {
-    const int rows = std::min(TILE_M, size_m - row0);
-    launch_gemm_q4(a + (long)row0 * size_k, b_q_weight, b_qzeros, b_scales,
-                   c + (long)row0 * size_n, rows, size_n, size_k, groups,
-                   use_v2_format, partials_ptr, stream);
-    const long total = (long)rows * size_n;
-    const int threads = 256;
-    const int blocks = (int)((total + threads - 1) / threads);
-    reduce_partials_rdna3<T><<<blocks, threads, 0, stream>>>(
-        partials_ptr, c + (long)row0 * size_n, z_count, rows, size_n);
+
+  int* tickets_ptr = nullptr;
+  if constexpr (std::is_same<T, half>::value) {
+    // fp16: the reduction runs in the kernel (see the epilogue). One
+    // ticket per (x, y) tile, sized for the widest row-tile launch.
+    const int gx = (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4);
+    int max_gy = 1;
+    for (int row0 = 0; row0 < size_m; row0 += TILE_M) {
+      const int rows = std::min(TILE_M, size_m - row0);
+      const int mc = mcount_for_rows(rows);
+      max_gy = std::max(max_gy, (rows + mc - 1) / mc);
+    }
+    at::Tensor tickets =
+        at::zeros({(long)gx * max_gy}, dev_opts.dtype(at::kInt));
+    for (int row0 = 0; row0 < size_m; row0 += TILE_M) {
+      const int rows = std::min(TILE_M, size_m - row0);
+      launch_gemm_q4(a + (long)row0 * size_k, b_q_weight, b_qzeros, b_scales,
+                     c + (long)row0 * size_n, rows, size_n, size_k, groups,
+                     use_v2_format, partials_ptr, tickets.data_ptr<int>(),
+                     stream);
+    }
+  } else {
+    // bf16: separate fixed-order reduce (measured faster than the fused
+    // form on this path).
+    for (int row0 = 0; row0 < size_m; row0 += TILE_M) {
+      const int rows = std::min(TILE_M, size_m - row0);
+      launch_gemm_q4(a + (long)row0 * size_k, b_q_weight, b_qzeros, b_scales,
+                     c + (long)row0 * size_n, rows, size_n, size_k, groups,
+                     use_v2_format, partials_ptr, tickets_ptr, stream);
+      const long total = (long)rows * size_n;
+      const int threads = 256;
+      const int blocks = (int)((total + threads - 1) / threads);
+      reduce_partials_rdna3<T><<<blocks, threads, 0, stream>>>(
+          partials_ptr, c + (long)row0 * size_n, z_count, rows, size_n);
+    }
   }
 }
 
@@ -803,8 +952,9 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
 //   5120/2048 bf16   0.64  0.73  0.89  1.00  1.00  1.00  1.01  1.00
 //   5120/8704 bf16   0.45  0.65  0.92  1.46  1.49  1.00  1.00  1.00
 //
-// At M >= 12 WMMA wins or ties on every shape for both dtypes (the one
-// sub-1.0 sample, bf16 4096/4096 at M=24, is 0.996 — within noise); below
+// At M >= 12 WMMA wins or ties on every shape for both dtypes (exact 1.00
+// cells and the one sub-1.0 sample, bf16 4096/4096 at M=24 = 0.996, are
+// within measurement noise); below
 // that the scalar path wins on most shapes (and is the more accurate of
 // the two since the exact fp16 factored dequant, so it keeps the band).
 // fp16 used to stay scalar until M=64 because the old baked-dequant
@@ -845,6 +995,10 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
 
   TORCH_CHECK(b_q_weight.size(0) * 8 == size_k,
               "b_q_weight first dim must be K/8");
+  TORCH_CHECK(size_k % (groups * 32) == 0,
+              "group size (K/groups = ", size_k / groups,
+              ") must be a multiple of 32: the kernel checks group "
+              "transitions at 32-K granularity");
   TORCH_CHECK(b_scales.size(0) == groups,
               "b_scales must have same group count as qzeros");
   TORCH_CHECK(b_scales.size(1) == size_n, "b_scales last dim must be N");

@@ -277,8 +277,7 @@ __global__ void moe_gemm_q4_kernel_rdna3(
         gptq_rdna3::magic_4bit_8_fp16((uint32_t)b_w[j].z, qm[2]);
         gptq_rdna3::magic_4bit_8_fp16((uint32_t)b_w[j].w, qm[3]);
 
-        constexpr uint32_t FP16_ONES = 0x3C003C00u;  // half2(1.0, 1.0)
-        const half2 ones = *reinterpret_cast<const half2*>(&FP16_ONES);
+        const half2 ones = gptq_rdna3::ones_half2_fp16();
 
   #pragma unroll
         for (int m = 0; m < BLOCK_SIZE_M; ++m) {
@@ -606,6 +605,10 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
   int size_k = (int)a.size(1);
   int size_n = (int)b_q_weight.size(2);
   int groups = (int)b_scales.size(1);
+  TORCH_CHECK(size_k % (groups * 32) == 0,
+              "group size (K/groups = ", size_k / groups,
+              ") must be a multiple of 32: the kernel checks group "
+              "transitions at 32-K granularity");
 
   // Per-expert strides
   int expert_weight_stride = (int)(b_q_weight.size(1) * b_q_weight.size(2));

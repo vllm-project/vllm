@@ -93,22 +93,34 @@ __forceinline__ __device__ void prep_zero_scale_fp16_f32(uint32_t zero,
 }
 
 // Magic values only, with no y/z folded in: low pairs land in [0] and [2],
-// high pairs in [1] and [3] — the same slot split dequant_4bit_8_fp16 uses.
+// high pairs in [1] and [3]. The lane mapping assumes the host-side
+// gptq_shuffle interleave (see shuffle_4bit_8 above): even elements sit in
+// the low nibbles, odd elements in the high nibbles.
 __forceinline__ __device__ void magic_4bit_8_fp16(uint32_t qa, half2 (&qm)[4]) {
   const uint32_t c0 = 0x64006400;
   union {
     uint32_t u;
     half2 h2;
   } t;
-  t.u = (qa & 0x000F000F) | c0;  // half2(1024 + q[0], 1024 + q[2])
+  t.u = (qa & 0x000F000F) | c0;  // half2(1024 + q[0], 1024 + q[1])
   qm[0] = t.h2;
-  t.u = (qa & 0x00F000F0) | c0;  // half2(1024 + q[1]*16, 1024 + q[3]*16)
+  t.u = (qa & 0x00F000F0) | c0;  // half2(1024 + q[2]*16, 1024 + q[3]*16)
   qm[1] = t.h2;
   const uint32_t qa_hi = qa >> 8;
-  t.u = (qa_hi & 0x000F000F) | c0;  // half2(1024 + q[4], 1024 + q[6])
+  t.u = (qa_hi & 0x000F000F) | c0;  // half2(1024 + q[4], 1024 + q[5])
   qm[2] = t.h2;
-  t.u = (qa_hi & 0x00F000F0) | c0;  // half2(1024 + q[5]*16, 1024 + q[7]*16)
+  t.u = (qa_hi & 0x00F000F0) | c0;  // half2(1024 + q[6]*16, 1024 + q[7]*16)
   qm[3] = t.h2;
+}
+
+// half2(1.0, 1.0) for the activation-sum v_dot2 in the exact factored form.
+__forceinline__ __device__ half2 ones_half2_fp16() {
+  union {
+    uint32_t u;
+    half2 h2;
+  } t;
+  t.u = 0x3C003C00u;
+  return t.h2;
 }
 
 // ---------------------------------------------------------------------------
