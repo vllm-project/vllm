@@ -678,14 +678,10 @@ def test_sparse_attn_decode_bf16_split_k_matches_ragged(
 
 
 @requires_split_decode_arch
-@pytest.mark.parametrize("sparse_len", [0, 2048], ids=["fallback", "splitk"])
+@pytest.mark.parametrize("num_splits", [1, 8])
 @torch.inference_mode()
-def test_sparse_attn_decode_bf16_writes_caller_output(sparse_len: int) -> None:
-    """The decode entry point writes the ragged result into the caller's out.
-
-    Both dispatch branches are covered: ``sparse_len`` below the split floor
-    falls through to the single-pass kernel, above it takes split-K.
-    """
+def test_sparse_attn_decode_bf16_writes_caller_output(num_splits: int) -> None:
+    """The decode entry point writes the ragged result into the caller's out."""
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _rocm_sparse_attn_prefill_ragged_triton,
         rocm_sparse_attn_decode_bf16,
@@ -722,7 +718,7 @@ def test_sparse_attn_decode_bf16_writes_caller_output(sparse_len: int) -> None:
         output=output,
         ragged_indices=indices,
         ragged_indptr=indptr,
-        sparse_len=sparse_len,
+        num_splits=num_splits,
     )
     torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
@@ -1139,9 +1135,10 @@ def test_sparse_decode_bf16_num_splits_floor_and_tile_clamp(monkeypatch) -> None
     monkeypatch.setattr(mod, "_decode_gfx950_num_splits", lambda *args: 32)
 
     floor = mod._SPARSE_DECODE_BF16_MIN_SPLIT_LEN
-    assert mod._sparse_decode_bf16_num_splits(1, 1, floor - 1, 32) == 1
-    assert mod._sparse_decode_bf16_num_splits(1, 1, floor, 32) == floor // 32
-    assert mod._sparse_decode_bf16_num_splits(1, 1, 2048, 32) == 32
+    block_k = mod._SPARSE_DECODE_BF16_BLOCK_K
+    assert mod.rocm_sparse_decode_bf16_num_splits(1, 1, floor - 1) == 1
+    assert mod.rocm_sparse_decode_bf16_num_splits(1, 1, floor) == floor // block_k
+    assert mod.rocm_sparse_decode_bf16_num_splits(1, 1, 2048) == 32
 
 
 @requires_split_decode_arch

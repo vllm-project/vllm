@@ -17,11 +17,10 @@ from vllm.triton_utils import triton
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _rocm_sparse_attn_decode_ragged_bf16_triton,
     _rocm_sparse_attn_prefill_ragged_triton,
-    _sparse_decode_bf16_num_splits,
+    rocm_sparse_decode_bf16_num_splits,
 )
 
 BLOCK_H = 16
-BLOCK_K = 32
 
 
 def make_inputs(rows: int, live: int, args):
@@ -52,9 +51,7 @@ def make_inputs(rows: int, live: int, args):
 def resolve_splits(spec: str, rows: int, live: int, args) -> int:
     if spec != "auto":
         return int(spec)
-    return _sparse_decode_bf16_num_splits(
-        rows, triton.cdiv(args.heads, BLOCK_H), live, BLOCK_K
-    )
+    return rocm_sparse_decode_bf16_num_splits(rows, args.heads, live)
 
 
 def benchmark(backend: str, rows: int, live: int, spec: str, args) -> dict:

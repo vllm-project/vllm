@@ -3844,25 +3844,28 @@ def _decode_gfx950_num_splits(
 # Empirically single-pass bf16 decode is faster than split-K below this number of
 # selected slots per query, so we do not split.
 _SPARSE_DECODE_BF16_MIN_SPLIT_LEN = 512
+_SPARSE_DECODE_BF16_BLOCK_H = 16
+_SPARSE_DECODE_BF16_BLOCK_K = 32
 
 
-def _sparse_decode_bf16_num_splits(
-    num_queries: int, heads_blocks: int, sparse_len: int, block_k: int
+def rocm_sparse_decode_bf16_num_splits(
+    num_queries: int, num_heads: int, sparse_len: int
 ) -> int:
     """Number or kv splits in splitK for the sparse bf16 decode, or 1 for single-pass.
 
     Args:
         num_queries: Decode rows in the batch.
-        heads_blocks: Head blocks per row, the second grid axis.
+        num_heads: Query heads per row.
         sparse_len: Longest selected KV run any decode row can walk.
-        block_k: KV tile width of the partial kernel.
 
     Returns:
-        The split count, or 1 to fall through to the single-pass kernel.
+        The split count, or 1 when the caller should use the single-pass kernel.
 
     """
     if sparse_len < _SPARSE_DECODE_BF16_MIN_SPLIT_LEN:
         return 1
+    block_k = _SPARSE_DECODE_BF16_BLOCK_K
+    heads_blocks = triton.cdiv(num_heads, _SPARSE_DECODE_BF16_BLOCK_H)
     select = _decode_gfx950_num_splits if _ON_GFX950 else _decode_num_splits
     num_splits = select(num_queries, heads_blocks, sparse_len, 0.0, block_k)
     # Number of splits cannot exceed the available k tiles
@@ -3932,9 +3935,9 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         f"expected out trailing dim {head_dim}, got {out.shape[-1]}"
     )
 
-    block_h = 16
+    block_h = _SPARSE_DECODE_BF16_BLOCK_H
     block_d = triton.next_power_of_2(head_dim)
-    block_k = 32
+    block_k = _SPARSE_DECODE_BF16_BLOCK_K
     heads_blocks = triton.cdiv(num_heads, block_h)
     comb_dim = nope_head_dim + rope_head_dim
 
@@ -4503,12 +4506,9 @@ def rocm_sparse_attn_decode_bf16(
     output: torch.Tensor,
     ragged_indices: torch.Tensor,
     ragged_indptr: torch.Tensor,
-    sparse_len: int,
+    num_splits: int,
 ) -> None:
-    """Run sparse attention over decode rows using an unquantized KV cache.
-
-    Dispatches to either splitK or single-pass kernel depending on maximum selected
-    kv len.
+    """Run split-K sparse attention over decode rows using an unquantized KV cache.
 
     Args:
         q: Decode queries laid out as ``[sq, h, d]``.
@@ -4521,8 +4521,8 @@ def rocm_sparse_attn_decode_bf16(
         output: Destination, written in place.
         ragged_indices: Flattened per-query KV slots.
         ragged_indptr: Segment offsets into ``ragged_indices``, ``[sq + 1]``.
-        sparse_len: Longest selected KV of any decode row, used to
-            pick the split count.
+        num_splits: KV splits per query, from
+            :func:`rocm_sparse_decode_bf16_num_splits`.
 
     """
     assert kv.ndim == 3 and kv.shape[1] == 1, (
@@ -4535,29 +4535,6 @@ def rocm_sparse_attn_decode_bf16(
         "rocm_sparse_attn_decode_bf16",
     )
     num_queries, num_heads = q.shape[0], q.shape[1]
-    num_splits = _sparse_decode_bf16_num_splits(
-        num_queries,
-        triton.cdiv(num_heads, 16),
-        sparse_len,
-        32,
-    )
-    if num_splits == 1:
-        rocm_sparse_attn_prefill(
-            q=q,
-            kv=kv,
-            indices=None,
-            topk_length=None,
-            scale=scale,
-            head_dim=head_dim,
-            nope_head_dim=nope_head_dim,
-            rope_head_dim=rope_head_dim,
-            attn_sink=attn_sink,
-            output=output,
-            ragged_indices=ragged_indices,
-            ragged_indptr=ragged_indptr,
-        )
-        return
-
     direct = output.shape[-1] == head_dim
     out = (
         output
