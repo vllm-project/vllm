@@ -223,8 +223,13 @@ def set_dummy_context(
     num_kv_blocks: int,
     max_model_len: int,
     input_block_tables: Sequence[torch.Tensor] | None = None,
+    context_groups: Sequence[bool] | None = None,
 ) -> None:
-    """Give each dummy request context_len of context, used when profiling step cost."""
+    """Give each dummy request context_len of context, used when profiling step cost.
+
+    context_groups marks the KV cache groups indexed by context tokens; the
+    others hold one recurrent-state slot per request. Defaults to every group.
+    """
     if input_block_tables is None:
         input_block_tables = block_tables.input_block_tables
     if not input_block_tables:
@@ -248,17 +253,49 @@ def set_dummy_context(
     input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
 
     seq_len = context_len + query_len
-    for block_table, block_size, bpk in zip(
+    if context_groups is None:
+        context_groups = [True] * len(input_block_tables)
+    # Hybrid models back every KV cache group with the same tensors, so block b
+    # is the same bytes in each group. Keep the groups' fabricated ids apart:
+    # context blocks count up from the first block past the null block, and
+    # recurrent-state slots count down from the top of the pool. Neither may be
+    # the null block: dummy runs write recurrent state there.
+    for block_table, block_size, bpk, is_context in zip(
         input_block_tables,
         block_tables.kernel_block_sizes,
         block_tables.blocks_per_kv_block,
+        context_groups,
+        strict=True,
     ):
+        num_usable = max(num_kv_blocks - 1, 1) * bpk
+        if not is_context:
+            # One state slot per request, in column 0. The spec columns stay on
+            # the null block: a dummy spec row has accepted one token, so it
+            # reads column 0, and the recurrent kernels skip null-block writes.
+            state_slots = (
+                num_kv_blocks * bpk
+                - 1
+                - (
+                    torch.arange(
+                        num_reqs, dtype=block_table.dtype, device=block_table.device
+                    )
+                    % num_usable
+                )
+            )
+            block_table[:num_reqs, 0] = state_slots
+            continue
         num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
         # Spans are disjoint until the pool runs out, then they wrap and share
         # blocks: profiling only needs the reads to be realistic, not distinct.
-        block_ids = torch.arange(
-            num_reqs * num_blocks, dtype=block_table.dtype, device=block_table.device
-        ) % (num_kv_blocks * bpk)
+        block_ids = (
+            bpk
+            + torch.arange(
+                num_reqs * num_blocks,
+                dtype=block_table.dtype,
+                device=block_table.device,
+            )
+            % num_usable
+        )
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 
 

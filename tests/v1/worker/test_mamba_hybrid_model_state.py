@@ -178,6 +178,7 @@ def test_zero_draft_decode_row_is_marked_as_a_speculative_row():
         num_scheduled_tokens=np.array([3, 1, 1], dtype=np.int32),
         num_draft_tokens_per_req=np.array([2, 0, 0], dtype=np.int32),
         is_prefilling=np.array([False, False, True]),
+        max_decode_query_len=8,
     )
 
     assert num_decode_draft_tokens.tolist() == [
@@ -197,6 +198,7 @@ def test_batch_without_any_drafts_still_marks_its_decode_rows():
         num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
         num_draft_tokens_per_req=None,
         is_prefilling=np.array([False, True]),
+        max_decode_query_len=8,
     )
 
     assert num_decode_draft_tokens.tolist() == [0, -1]
@@ -210,6 +212,7 @@ def test_padded_rows_keep_the_sentinel():
         num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
         num_draft_tokens_per_req=np.array([0, 0], dtype=np.int32),
         is_prefilling=np.array([False, False]),
+        max_decode_query_len=8,
     )
 
     assert num_decode_draft_tokens.tolist() == [0, 0, -1, -1]
@@ -221,9 +224,26 @@ def test_adaptive_verification_keeps_decode_rows_speculative():
         num_scheduled_tokens=np.array([2, 1, 0], dtype=np.int32),
         num_draft_tokens_per_req=np.array([5, 0, 0], dtype=np.int32),
         is_prefilling=np.array([False, False, False]),
+        max_decode_query_len=8,
     )
 
     assert num_decode_draft_tokens.tolist() == [5, 0, -1]
+
+
+def test_rows_wider_than_a_verify_block_keep_the_sentinel():
+    """Dummy runs schedule prefill-shaped rows without a prefill flag (adaptive
+    verification's cost profiling gives them fabricated context). A spec row's
+    state indices hold one slot per verified position, so a 12-token row on
+    the spec path would index past them; it must take the prefill path."""
+    num_decode_draft_tokens = compute_num_decode_draft_tokens(
+        num_padded_reqs=3,
+        num_scheduled_tokens=np.array([12, 12, 8], dtype=np.int32),
+        num_draft_tokens_per_req=None,
+        is_prefilling=np.array([False, False, False]),
+        max_decode_query_len=8,
+    )
+
+    assert num_decode_draft_tokens.tolist() == [-1, -1, 0]
 
 
 def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel():
@@ -234,6 +254,7 @@ def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel():
         num_scheduled_tokens=np.array([2, 3], dtype=np.int32),
         num_draft_tokens_per_req=np.array([0, 0], dtype=np.int32),
         is_prefilling=np.array([True, True]),
+        max_decode_query_len=8,
     )
 
     assert num_decode_draft_tokens.tolist() == [-1, -1]

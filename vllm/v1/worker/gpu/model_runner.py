@@ -610,6 +610,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
         dcp_sharded = []
+        # Token-indexed caches get fabricated context blocks; recurrent-state
+        # groups get one state slot per request (set_dummy_context).
+        self._dummy_context_groups = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
@@ -617,6 +620,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             )
             slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+            self._dummy_context_groups.append(not isinstance(layer_spec, MambaSpec))
             dcp_sharded.append(spec.dcp_sharded)
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
@@ -1818,6 +1822,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.kv_cache_config.num_blocks,
                         self.max_model_len,
                         input_block_tables=block_tables,
+                        context_groups=self._dummy_context_groups,
                     )
 
         if self.dcp_size > 1 and not (dummy_run and skip_attn_for_dummy_run):
