@@ -641,7 +641,7 @@ def test_sparse_attn_decode_bf16_split_k_matches_ragged(
     )
 
     device = torch.device("cuda")
-    torch.manual_seed(0)
+    set_random_seed(0)
     num_heads = 16
     q, kv, indices, indptr = _nope_only_ragged_inputs(
         _NOPE_ONLY_KV_LENS, num_heads, device
@@ -688,7 +688,7 @@ def test_sparse_attn_decode_bf16_writes_caller_output(num_splits: int) -> None:
     )
 
     device = torch.device("cuda")
-    torch.manual_seed(0)
+    set_random_seed(0)
     num_heads = 16
     q, kv, indices, indptr = _nope_only_ragged_inputs(
         _NOPE_ONLY_KV_LENS, num_heads, device
