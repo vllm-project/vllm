@@ -15,7 +15,14 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
 
         return ExtractHiddenStatesSpeculator(vllm_config, device)
     elif speculative_config.method == "dflash":
-        if "DFlash2DraftModel" in speculative_config.draft_model_config.architectures:
+        architectures = speculative_config.draft_model_config.architectures
+        if any("Qwen3XPressModel" in arch for arch in architectures):
+            from vllm.v1.worker.gpu.spec_decode.xpress.speculator import (
+                XPressSpeculator,
+            )
+
+            return XPressSpeculator(vllm_config, device)
+        if "DFlash2DraftModel" in architectures:
             from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import (
                 DFlash2Speculator,
             )
@@ -26,12 +33,6 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
         )
 
         return DFlashSpeculator(vllm_config, device)
-    elif speculative_config.method == "xpress":
-        from vllm.v1.worker.gpu.spec_decode.xpress.speculator import (
-            XPressSpeculator,
-        )
-
-        return XPressSpeculator(vllm_config, device)
     elif speculative_config.method == "dspark":
         from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
             DSparkSpeculator,

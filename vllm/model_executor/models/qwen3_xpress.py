@@ -128,7 +128,7 @@ class XPressRefinerHead(nn.Module):
         blk = torch.empty(N, B, dtype=torch.long, device=h_full.device)
         blk[:, 0] = anchor_ids
 
-        assert N <= self.max_num_reqs, (
+        assert self.max_num_reqs >= N, (
             f"{N} requests exceeds the max_num_reqs={self.max_num_reqs} the "
             "scratch buffers were sized for"
         )
@@ -177,9 +177,7 @@ class XPressRefinerHead(nn.Module):
                     buf["wu_t"],
                     buf["wd_t"],
                 )
-                bias_c = torch.bmm(w2c, lat0.view(rows, self.rank, 1)).view(
-                    N, B - 1, c
-                )
+                bias_c = torch.bmm(w2c, lat0.view(rows, self.rank, 1)).view(N, B - 1, c)
                 # One launch for add + argmax + the candidate-to-vocab gather.
                 kernels.fused_topc_argmax_to_blk(
                     base_c.view(N, B - 1, c), bias_c, cand.view(N, B - 1, c), blk

@@ -178,7 +178,16 @@ def _xpress_latent_kernel(
 
 
 def xpress_latent_pass(
-    blk, tok_am1, xh, lat_out, w1_weight, wlat_t, mix_kjc, wg_t, wu_t, wd_t,
+    blk,
+    tok_am1,
+    xh,
+    lat_out,
+    w1_weight,
+    wlat_t,
+    mix_kjc,
+    wg_t,
+    wu_t,
+    wd_t,
     do_mlp: bool = True,
 ) -> None:
     """Run ``_xpress_latent_kernel`` over N blocks; see its docstring for shapes.
@@ -296,6 +305,7 @@ def fused_add_argmax_to_blk(
         num_warps=1,
     )
 
+
 @triton.jit
 def _xpress_topc_argmax_to_blk_kernel(
     base_ptr,
@@ -306,7 +316,7 @@ def _xpress_topc_argmax_to_blk_kernel(
     B: tl.constexpr,
     BLOCK_C: tl.constexpr,
 ):
-    """argmax over a slot's C candidates, written straight back as a token id.
+    """Argmax over a slot's C candidates, written straight back as a token id.
 
     Grid: (N * (B - 1),), one program per draft slot. The candidate axis fits in one
     block at the C values this path uses, so unlike the full-vocab epilogue there is

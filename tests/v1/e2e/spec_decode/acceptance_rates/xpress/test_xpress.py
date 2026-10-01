@@ -70,7 +70,7 @@ def test_xpress_correctness_and_acceptance_rate(
         compilation_config=CompilationConfig(),
         speculative_config={
             "model": args.draft_model,
-            "method": "xpress",
+            "method": "dflash",
             "num_speculative_tokens": args.num_speculative_tokens,
         },
         max_num_seqs=args.max_num_seqs,
