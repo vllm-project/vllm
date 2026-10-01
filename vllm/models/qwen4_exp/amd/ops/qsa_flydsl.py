@@ -30,13 +30,8 @@ _ENABLED = os.getenv("VLLM_ROCM_QSA_FLYDSL", "0") == "1"
 def _flydsl_qsa() -> ModuleType | None:
     if not _ENABLED:
         return None
-    try:
-        from aiter.ops.flydsl import qsa
-    except ImportError as e:
-        raise RuntimeError(
-            "VLLM_ROCM_QSA_FLYDSL=1 requires an AITER build with the FlyDSL "
-            "QSA kernels (aiter.ops.flydsl.qsa)"
-        ) from e
+    from aiter.ops.flydsl import qsa
+
     logger.info_once("Using AITER FlyDSL QSA kernels where the shape is served.")
     return qsa
 
