@@ -315,6 +315,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     recurrent_event = events_by_group[1]
     assert recurrent_event.block_size == 0
     assert recurrent_event.token_ids == []
+    assert recurrent_event.kv_cache_spec_kind == "mamba"
     assert len(recurrent_event.block_hashes) == 1
     assert recurrent_event.parent_block_hash is None
 
