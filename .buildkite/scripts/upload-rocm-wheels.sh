@@ -121,7 +121,8 @@ INDEX_ARGS=(--version "$ROCM_SUBPATH" --wheel-dir "${WHEEL_SUBPATH#rocm/}")
 # TheRock's SDK, device kernels and torchvision/torchaudio are linked, not hosted
 if [[ "$ROCM_STACK_THEROCK" == "1" ]]; then
     $PYTHON tools/vllm-rocm/therock_wheels.py external-links \
-        --dockerfile "$ROCM_STACK_BASE_DOCKERFILE" > therock-external-links.txt
+        --dockerfile "$ROCM_STACK_BASE_DOCKERFILE" \
+        --torch-wheel "$(ls "$ROCM_STACK_BASE_WHEELS_DIR"/torch-*.whl)" > therock-external-links.txt
     cat therock-external-links.txt
     INDEX_ARGS+=(--external-links therock-external-links.txt)
 fi
