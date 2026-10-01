@@ -529,6 +529,19 @@ class HYV3ToolParser(ToolParser):
                 )
         return deltas
 
+    def get_remaining_unstreamed_args(self) -> str:
+        """At stream end, close out an in-flight tool call whose arguments
+        were partially streamed: emit the JSON tail that incremental
+        streaming intentionally withheld (e.g. the closing '}'), so a stream
+        truncated by max_tokens/stop still yields parseable arguments instead
+        of an unterminated JSON fragment."""
+        if self._streaming_tool_name is None or not self._completed_args:
+            return ""
+        final_json = json.dumps(self._completed_args, ensure_ascii=False)
+        if self._streamed_json_len < len(final_json):
+            return final_json[self._streamed_json_len:]
+        return ""
+
     def _extract_streaming_incremental(
         self,
         name_delta: DeltaMessage | None,

@@ -413,7 +413,7 @@ class HYV4ToolExtractor:
 
         self.func_args_regex = re.compile(
             rf"{re.escape(self.arg_key_start_token)}(.*?)"
-            rf"{re.escape(self.arg_key_end_token)}"
+            rf"{re.escape(self.arg_key_end_token)}\s*"
             rf"{re.escape(self.arg_value_start_token)}(.*?)"
             rf"{re.escape(self.arg_value_end_token)}",
             re.DOTALL,
@@ -1111,6 +1111,20 @@ class HYV4ToolParser(ToolParser):
                 for tc in result["tool_calls"]
             ],
         )
+
+    def get_remaining_unstreamed_args(self) -> str:
+        """At stream end, close out an in-flight tool call whose arguments
+        were partially streamed: emit the JSON tail that incremental
+        streaming intentionally withheld (e.g. the closing '}'), so a stream
+        truncated by max_tokens/stop still yields parseable arguments instead
+        of an unterminated JSON fragment."""
+        extractor = self._extractor
+        if extractor._streaming_tool_name is None or not extractor._completed_args:
+            return ""
+        final_json = json.dumps(extractor._completed_args, ensure_ascii=False)
+        if extractor._streamed_json_len < len(final_json):
+            return final_json[extractor._streamed_json_len:]
+        return ""
 
     def extract_tool_calls_streaming(
         self,
