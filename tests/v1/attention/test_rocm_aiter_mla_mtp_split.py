@@ -869,6 +869,80 @@ def test_triton_verify_empty_local_shard_merges_through_dcp_combine():
     torch.testing.assert_close(merged, reference, rtol=2e-2, atol=2e-2)
 
 
+# MI325X DCP8 verify at 128K context: 128 gathered heads, 16K local tokens.
+_SM_COUNT, _HEADS, _LOCAL_SEQ_LEN, _KV_LORA_RANK = 304, 128, 16384, 512
+
+
+def test_batch_aware_kv_splits_keep_small_batches_and_bound_large_ones():
+    def splits(rows):
+        return triton_mla._compute_batch_aware_num_kv_splits(
+            _LOCAL_SEQ_LEN, rows, _HEADS, _SM_COUNT
+        )
+
+    seq_only = triton_mla._compute_num_kv_splits(_LOCAL_SEQ_LEN, _SM_COUNT)
+    assert splits(4) == seq_only
+    counts = [splits(rows) for rows in range(1, 4097)]
+    assert counts == sorted(counts, reverse=True)
+    # Seq-only splits fault here: the kernel's attn_logits offsets are int32.
+    assert 1024 * _HEADS * seq_only * (_KV_LORA_RANK + 1) >= 2**31
+    for rows in (1024, 2048, 4096):
+        assert rows * _HEADS * splits(rows) * (_KV_LORA_RANK + 1) < 2**31
+
+
+def test_batch_aware_reservation_covers_every_smaller_batch(monkeypatch):
+    reserved = []
+    monkeypatch.setattr(triton_mla, "is_workspace_manager_initialized", lambda: True)
+    monkeypatch.setattr(
+        triton_mla,
+        "current_workspace_manager",
+        lambda: SimpleNamespace(get_simultaneous=lambda *specs: reserved.extend(specs)),
+    )
+    max_rows = 1024
+    triton_mla.reserve_triton_mla_decode_workspace(
+        max_rows,
+        _HEADS,
+        _LOCAL_SEQ_LEN,
+        _KV_LORA_RANK,
+        _SM_COUNT,
+        batch_aware_splits=True,
+    )
+
+    ((shape, dtype),) = reserved
+    assert dtype == torch.float32
+    for rows in range(1, max_rows + 1):
+        splits = triton_mla._compute_batch_aware_num_kv_splits(
+            _LOCAL_SEQ_LEN, rows, _HEADS, _SM_COUNT
+        )
+        assert rows * _HEADS * splits * (_KV_LORA_RANK + 1) <= math.prod(shape)
+    assert math.prod(shape) == max_rows * _HEADS * (_KV_LORA_RANK + 1)
+
+
+@pytest.mark.parametrize("batch_aware_splits", [False, True])
+def test_triton_decode_forward_split_count(monkeypatch, batch_aware_splits):
+    rows, seq_len = 64, 4096
+    kernel = mock.Mock()
+    monkeypatch.setattr(triton_mla, "decode_attention_fwd", kernel)
+    monkeypatch.setattr(triton_mla, "is_workspace_manager_initialized", lambda: False)
+    triton_mla.triton_mla_decode_forward(
+        torch.empty(rows, _HEADS, _KV_LORA_RANK + 64),
+        torch.empty(1, 16, _KV_LORA_RANK + 64),
+        torch.zeros(rows, 1, dtype=torch.int32),
+        torch.full((rows,), seq_len, dtype=torch.int32),
+        seq_len,
+        1.0,
+        _KV_LORA_RANK,
+        torch.tensor(1.0),
+        _SM_COUNT,
+        torch.bfloat16,
+        torch.float32,
+        batch_aware_splits=batch_aware_splits,
+    )
+
+    attn_logits, num_kv_splits = kernel.call_args.args[7:9]
+    assert num_kv_splits == (4 if batch_aware_splits else 8)
+    assert attn_logits.shape[2] == num_kv_splits
+
+
 def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
     """Exercise the target qlen>1 path and merge two rank-local results."""
     monkeypatch.setattr(rocm_aiter_mla, "_segmented_mla_decode_supported", lambda: True)
