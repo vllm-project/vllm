@@ -15,7 +15,7 @@ use super::serde_utils::AllowTrailingFields;
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
-use crate::protocol::sampling_mask::MaybeWireSamplingMask;
+use crate::protocol::sampling_mask::{MaybeWireSamplingMask, WireSamplingMask};
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
 use crate::protocol::tensor::WireNdArray;
 use crate::protocol::{OpaqueValue, decode_msgpack};
@@ -138,6 +138,12 @@ pub struct EngineCoreOutput {
     /// the first output of a request that asked for them.
     #[serde(default)]
     pub prompt_token_id_logprobs: Option<WireNdArray>,
+    /// First row of this output in the step-level `sampling_masks` block of
+    /// the enclosing `EngineCoreOutputs`; the output owns
+    /// `new_token_ids.len()` rows. Moved into `new_sampling_mask` by
+    /// [`decode_engine_core_outputs`].
+    #[serde(default)]
+    pub sampling_mask_row: Option<usize>,
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -224,6 +230,10 @@ struct WireEngineCoreOutputs {
     /// wave needs to start in other engines.
     #[serde(default)]
     start_wave: Option<u32>,
+    /// Sampling masks of all outputs in this step as one CSR block, one row per
+    /// generated position. Outputs reference their rows by `sampling_mask_row`.
+    #[serde(default)]
+    sampling_masks: Option<WireSamplingMask>,
 }
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
@@ -286,14 +296,43 @@ impl From<DpControlOutput> for EngineCoreOutputs {
     }
 }
 
-impl EngineCoreOutputs {
+impl WireEngineCoreOutputs {
     /// Resolve all wire-format fields in-place by looking up aux frames and
-    /// decoding raw-view payloads as needed.
+    /// decoding raw-view payloads as needed, and split the step-level sampling
+    /// masks into per-request `new_sampling_mask` values.
     fn resolve_in_place(&mut self, frames: &[Bytes]) -> Result<()> {
-        if let Self::RequestBatch(batch) = self {
-            for output in &mut batch.outputs {
-                output.resolve_in_place(frames)?;
+        for output in &mut self.outputs {
+            output.resolve_in_place(frames)?;
+        }
+
+        let sampling_masks = (self.sampling_masks.take())
+            .map(|value| value.resolve_batch(frames, "sampling_masks"))
+            .transpose()?;
+        for output in &mut self.outputs {
+            let Some(row) = output.sampling_mask_row.take() else {
+                continue;
+            };
+            let Some(sampling_masks) = sampling_masks.as_ref() else {
+                return Err(ext_value_decode!(
+                    "request {}: sampling_mask_row is set but sampling_masks is missing",
+                    output.request_id
+                ));
+            };
+            if output.new_sampling_mask.is_some() {
+                return Err(ext_value_decode!(
+                    "request {}: both new_sampling_mask and sampling_mask_row are set",
+                    output.request_id
+                ));
             }
+            let num_rows = output.new_token_ids.len();
+            let mask = sampling_masks.rows(row, num_rows).ok_or_else(|| {
+                ext_value_decode!(
+                    "request {}: sampling_masks rows {row}..{} are out of range",
+                    output.request_id,
+                    row + num_rows
+                )
+            })?;
+            output.new_sampling_mask = Some(MaybeWireSamplingMask::Direct(mask));
         }
         Ok(())
     }
@@ -304,6 +343,13 @@ impl TryFrom<WireEngineCoreOutputs> for EngineCoreOutputs {
     type Error = Error;
 
     fn try_from(value: WireEngineCoreOutputs) -> Result<Self> {
+        if value.sampling_masks.is_some() {
+            return Err(Error::Decode {
+                target_type: "EngineCoreOutputs",
+                message: "sampling_masks must be resolved by decode_engine_core_outputs"
+                    .to_string(),
+            });
+        }
         let has_request_payload = !value.outputs.is_empty()
             || value.scheduler_stats.is_some()
             || value.finished_requests.is_some();
@@ -408,9 +454,9 @@ impl<'de> Deserialize<'de> for EngineCoreOutputs {
 pub fn decode_engine_core_outputs(frames: &[Bytes]) -> Result<EngineCoreOutputs> {
     let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
 
-    let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
+    let mut outputs: WireEngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
     outputs.resolve_in_place(frames)?;
-    Ok(outputs)
+    outputs.try_into()
 }
 
 #[cfg(test)]
@@ -479,6 +525,95 @@ mod tests {
         assert_eq!(decoded.as_request_batch().unwrap().outputs, vec![output; 2]);
     }
 
+    fn wire_sampling_masks(token_ids: Vec<i64>, offsets: Vec<i64>) -> WireSamplingMask {
+        WireSamplingMask {
+            token_ids: WireNdArray::from_i64(vec![token_ids.len()], token_ids).unwrap(),
+            offsets: Some(WireNdArray::from_i64(vec![offsets.len()], offsets).unwrap()),
+            cu_num_generated_tokens: None,
+        }
+    }
+
+    fn output_with_mask_row(
+        request_id: &str,
+        new_token_ids: Vec<u32>,
+        sampling_mask_row: Option<usize>,
+    ) -> EngineCoreOutput {
+        EngineCoreOutput {
+            request_id: request_id.into(),
+            new_token_ids,
+            sampling_mask_row,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn decodes_step_sampling_masks_into_request_masks() {
+        let outputs = WireEngineCoreOutputs {
+            outputs: vec![
+                output_with_mask_row("req-0", vec![16], Some(0)),
+                output_with_mask_row("req-1", vec![], None),
+                output_with_mask_row("req-2", vec![17, 18], Some(1)),
+            ],
+            sampling_masks: Some(wire_sampling_masks(
+                vec![2, 12, 16, 17, 18],
+                vec![0, 3, 4, 5],
+            )),
+            ..Default::default()
+        };
+        let frames = [Bytes::from(encode_msgpack(&outputs).unwrap())];
+
+        let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+
+        assert!(decoded.outputs.iter().all(|output| output.sampling_mask_row.is_none()));
+        let masks = (decoded.outputs.iter())
+            .map(|output| output.new_sampling_mask.as_ref().map(|mask| mask.rows.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            masks,
+            vec![
+                Some(vec![vec![2, 12, 16]]),
+                None,
+                Some(vec![vec![17], vec![18]]),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_step_sampling_mask_rows() {
+        let mut with_both = output_with_mask_row("req-0", vec![16], Some(0));
+        with_both.new_sampling_mask = Some(MaybeWireSamplingMask::Direct(
+            crate::protocol::sampling_mask::SamplingMask {
+                rows: vec![vec![16]],
+            },
+        ));
+        for (output, sampling_masks, message) in [
+            (
+                output_with_mask_row("req-0", vec![16], Some(2)),
+                Some(wire_sampling_masks(vec![1, 2], vec![0, 1, 2])),
+                "out of range",
+            ),
+            (
+                output_with_mask_row("req-0", vec![16], Some(0)),
+                None,
+                "sampling_masks is missing",
+            ),
+            (
+                with_both,
+                Some(wire_sampling_masks(vec![16], vec![0, 1])),
+                "both new_sampling_mask and sampling_mask_row",
+            ),
+        ] {
+            let outputs = WireEngineCoreOutputs {
+                outputs: vec![output],
+                sampling_masks,
+                ..Default::default()
+            };
+            let frames = [Bytes::from(encode_msgpack(&outputs).unwrap())];
+            let error = decode_engine_core_outputs(&frames).unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
+
     #[test]
     fn engine_core_output_requires_valid_known_fields() {
         for fields in [
@@ -542,6 +677,7 @@ mod tests {
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
+                            sampling_mask_row: None,
                         },
                     ],
                     scheduler_stats: None,

@@ -117,6 +117,7 @@ class EngineCoreOutput(
     new_sampling_mask: object | None = None
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
+    sampling_mask_row: int | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -139,6 +140,7 @@ class EngineCoreOutputs(
     finished_requests: set[str] | None = None
     wave_complete: int | None = None
     start_wave: int | None = None
+    sampling_masks: object | None = None
 
 
 request = EngineCoreRequest(
@@ -257,12 +259,19 @@ extended_outputs_bytes = msgspec.msgpack.encode(extended_outputs)
 # The ordinary frontend's schema ignores even non-default extension values.
 assert msgspec.msgpack.decode(extended_outputs_bytes, type=EngineCoreOutputs) == outputs
 
-sampling_mask_wire = [
-    [
-        "<i4",
-        [5],
-        msgspec.msgpack.Ext(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
-    ],
+
+def ndarray_wire(array: np.ndarray) -> list[object]:
+    return [array.dtype.str, list(array.shape), msgspec.msgpack.Ext(3, array.tobytes())]
+
+
+# The scheduler sends one CSR block per step; outputs reference their rows.
+step_sampling_masks_wire = [
+    ndarray_wire(np.array([2, 12, 16, 17, 18], dtype=np.int32)),
+    ndarray_wire(np.array([0, 3, 4, 5], dtype=np.int64)),
+    None,
+]
+per_request_sampling_mask_wire = [
+    ndarray_wire(np.array([20, 21], dtype=np.int32)),
     None,
     None,
 ]
@@ -271,9 +280,21 @@ outputs_with_sampling_mask = EngineCoreOutputs(
         EngineCoreOutput(
             request_id="req-mask",
             new_token_ids=[16],
-            new_sampling_mask=sampling_mask_wire,
-        )
-    ]
+            sampling_mask_row=0,
+        ),
+        EngineCoreOutput(request_id="req-no-mask", new_token_ids=[]),
+        EngineCoreOutput(
+            request_id="req-multi-position",
+            new_token_ids=[17, 18],
+            sampling_mask_row=1,
+        ),
+        EngineCoreOutput(
+            request_id="req-per-request-mask",
+            new_token_ids=[20],
+            new_sampling_mask=per_request_sampling_mask_wire,
+        ),
+    ],
+    sampling_masks=step_sampling_masks_wire,
 )
 
 
