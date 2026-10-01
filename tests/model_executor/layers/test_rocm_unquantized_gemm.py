@@ -277,6 +277,19 @@ def test_rocm_unquantized_gemm_aiter_decode_gets_contiguous_activation(monkeypat
     torch.testing.assert_close(out, torch.nn.functional.linear(x, weight))
 
 
+def test_rocm_unquantized_gemm_aiter_decode_keeps_strided_activation(monkeypatch):
+    wide = torch.randn(4, 96, dtype=torch.bfloat16)
+    x = wide[:, :64]
+    weight = torch.randn(128, 64, dtype=torch.bfloat16)
+    tgemm, _ = _decode_branch_mocks(monkeypatch, capturing=True)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+
+    x_view = tgemm.mm.call_args.args[0]
+    assert x_view.data_ptr() == x.data_ptr() and x_view.stride() == (96, 1)
+    torch.testing.assert_close(out, torch.nn.functional.linear(x, weight))
+
+
 def test_rocm_unquantized_gemm_aiter_decode_skips_noncontiguous_weight(monkeypatch):
     x = torch.randn(4, 64, dtype=torch.bfloat16)
     weight = torch.randn(64, 128, dtype=torch.bfloat16).t()
