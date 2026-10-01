@@ -620,6 +620,35 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     assert exc_info.value.errno == errno.EIO
 
 
+def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
+    """Rows split over three shm files mapped back to back: each worker sees
+    the other's writes in every file, and the creator removes every file."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    regions = [
+        SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=5,
+            rank=rank,
+            kv_bytes_per_chunk=2 * PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            num_segments=3,
+        )
+        for rank in range(2)
+    ]
+    segments = regions[0]._segments
+    try:
+        assert [length // PAGE_SIZE for _, _, length in segments] == [4, 4, 2]
+        for rank, region in enumerate(regions):
+            region.create_next_worker_view(PAGE_SIZE).fill_(rank + 1)
+        rows = regions[0].base_tensor.view(5, 2, PAGE_SIZE)
+        assert (rows[:, 0] == 1).all() and (rows[:, 1] == 2).all()
+        del rows
+    finally:
+        for region in regions:
+            region.cleanup()
+    assert not any(os.path.exists(path) for path, _, _ in segments)
+
+
 # ---------------------------------------------------------------------------
 # Multi-worker race — concurrent construction
 # ---------------------------------------------------------------------------

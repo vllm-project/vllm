@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import ctypes
 import errno
+import functools
 import mmap
 import os
 import time
 from collections.abc import Callable
+from ctypes import c_int, c_long, c_size_t, c_void_p
 
 import numpy as np
 import torch
@@ -15,11 +18,16 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
+_MAP_FIXED = 0x10
+# Page-cache inserts are serialized per shm file, capping pre-faulting of one
+# file near 10 GiB/s; smaller segments are not worth a file.
+_MIN_SEGMENT_BYTES = 1 << 30
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -37,6 +45,14 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
             )
         time.sleep(0.005)
+
+
+@functools.cache
+def _libc_mmap() -> Callable[..., int | None]:
+    mmap_fn = ctypes.CDLL(None, use_errno=True).mmap
+    mmap_fn.argtypes = [c_void_p, c_size_t, c_int, c_int, c_int, c_long]
+    mmap_fn.restype = c_void_p
+    return mmap_fn
 
 
 def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
@@ -82,6 +98,8 @@ class SharedOffloadRegion:
 
     Creator-only population pre-faults the entire region before the barrier
     and requires that barrier to keep joiners from using unpopulated pages.
+    ``num_segments`` splits the rows over files ``<path>``, ``<path>.1``, ...
+    mapped back to back, so workers pre-fault them in parallel.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -97,6 +115,7 @@ class SharedOffloadRegion:
         *,
         creator_memory_check: Callable[[int], None] | None = None,
         populate_only_on_creator: bool = False,
+        num_segments: int = 1,
     ) -> None:
         if populate_only_on_creator and barrier is None:
             raise ValueError("Creator-only population requires a barrier.")
@@ -108,6 +127,17 @@ class SharedOffloadRegion:
         self.total_size_bytes = self.num_chunks * self._row_stride
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+        num_segments = min(num_segments, self.total_size_bytes // _MIN_SEGMENT_BYTES)
+        rows = max(1, cdiv(num_chunks, max(1, num_segments)))
+        # (path, offset, length) per file.
+        self._segments = [
+            (
+                f"{self.mmap_path}.{i}" if i else self.mmap_path,
+                row * self._row_stride,
+                min(rows, num_chunks - row) * self._row_stride,
+            )
+            for i, row in enumerate(range(0, max(num_chunks, 1), rows))
+        ]
         self._creator = False  # set True only if this worker creates the file
         self.rank = rank
         if rank is not None:
@@ -124,7 +154,7 @@ class SharedOffloadRegion:
                 # Joiner path — another worker won O_EXCL. Reopen and wait
                 # for the file to reach expected size.
                 self.fd = os.open(self.mmap_path, os.O_RDWR)
-                _wait_for_file_size(self.fd, self.total_size_bytes)
+                _wait_for_file_size(self.fd, self._segments[0][2])
                 logger.info("Opened existing mmap file %s", self.mmap_path)
             else:
                 # Creator path. We won O_EXCL, so we own the file: any
@@ -138,27 +168,34 @@ class SharedOffloadRegion:
                     self.total_size_bytes,
                     allocation_name="CPU KV offload shared region in /dev/shm",
                 )
-                os.ftruncate(self.fd, self.total_size_bytes)
+                for path, _, length in self._segments[1:]:
+                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+                    os.ftruncate(fd, length)
+                    os.close(fd)
+                # Joiners wait for the first file, so size it last.
+                os.ftruncate(self.fd, self._segments[0][2])
                 logger.info(
                     "Created mmap file %s (%.2f GB)",
                     self.mmap_path,
                     self.total_size_bytes / 1e9,
                 )
 
+            single = len(self._segments) == 1
             self.mmap_obj: mmap.mmap | None = mmap.mmap(
-                self.fd,
+                self.fd if single else -1,
                 self.total_size_bytes,
-                flags=mmap.MAP_SHARED,
+                flags=mmap.MAP_SHARED if single else mmap.MAP_PRIVATE,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
+            if not single:
+                self._map_segments()
 
             if populate_only_on_creator and self._creator:
                 populate_write_fn = _get_populate_write_fn(self.mmap_obj)
                 populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
         except Exception:
             if self._creator:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(self.mmap_path)
+                self._unlink()
                 self._creator = False
             if hasattr(self, "mmap_obj") and self.mmap_obj is not None:
                 self.mmap_obj.close()
@@ -188,8 +225,7 @@ class SharedOffloadRegion:
                 barrier()
             except Exception:
                 if self._creator:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(self.mmap_path)
+                    self._unlink()
                     self._creator = False
                 self.mmap_obj.close()
                 os.close(self.fd)
@@ -197,7 +233,7 @@ class SharedOffloadRegion:
                 self.fd = None
                 raise
             if self._creator:
-                os.unlink(self.mmap_path)
+                self._unlink()
                 self._creator = False
                 logger.info("Unlinked mmap file %s", self.mmap_path)
 
@@ -217,7 +253,12 @@ class SharedOffloadRegion:
             worker_offset = rank * cpu_page_size
             _t0 = time.perf_counter()
             page_size = self.page_size
-            for chunk in range(num_chunks):
+            first = 0
+            if len(self._segments) > 1:
+                # Start each worker on a different file.
+                first = rank * num_chunks // (self._row_stride // cpu_page_size)
+            for i in range(num_chunks):
+                chunk = (first + i) % num_chunks
                 raw_offset = chunk * self._row_stride + worker_offset
                 aligned_offset = (raw_offset // page_size) * page_size
                 end = raw_offset + cpu_page_size
@@ -235,6 +276,30 @@ class SharedOffloadRegion:
             logger.debug(
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )
+
+    def _map_segments(self) -> None:
+        """Replace the anonymous mapping with the segment files, back to back."""
+        assert self.mmap_obj is not None and self.fd is not None
+        base = ctypes.addressof(ctypes.c_char.from_buffer(self.mmap_obj))
+        for path, offset, length in self._segments:
+            fd = self.fd if offset == 0 else os.open(path, os.O_RDWR)
+            address = _libc_mmap()(
+                base + offset,
+                length,
+                mmap.PROT_READ | mmap.PROT_WRITE,
+                mmap.MAP_SHARED | _MAP_FIXED,
+                fd,
+                0,
+            )
+            if fd != self.fd:
+                os.close(fd)
+            if address != base + offset:
+                raise OSError(ctypes.get_errno(), f"Failed to map {path}")
+
+    def _unlink(self) -> None:
+        for path, _, _ in self._segments:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
 
     @property
     def base_tensor(self) -> torch.Tensor:
@@ -379,7 +444,7 @@ class SharedOffloadRegion:
             self.fd = None
         if self._creator and getattr(self, "mmap_path", None):
             try:
-                os.unlink(self.mmap_path)
+                self._unlink()
                 logger.info("Removed mmap file %s", self.mmap_path)
             except Exception:
                 logger.warning(
