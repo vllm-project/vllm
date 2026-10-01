@@ -601,12 +601,10 @@ class ElasticEPScalingExecutor:
         else:
             mapping = self.receive_expert_mapping()
             self.worker.model_runner.setup_eplb_from_mapping(mapping)
-        if not self._can_reuse_fused_moe_kernel():
-            # warm_and_capture's dummy run warms the deferred dp/ep groups.
-            self.warm_and_capture()
-        elif current_platform.is_rocm():
-            # Reuse path skips warm_and_capture; warm the deferred groups here.
+        if current_platform.is_rocm():
             self._warm_target_groups(get_dp_group(), get_ep_group())
+        if not self._can_reuse_fused_moe_kernel():
+            self.warm_and_capture()
         self._perform_eplb_reshuffle(async_op=True)
         if is_existing_worker:
             self._start_group_cleanup(retired_groups)
@@ -617,11 +615,10 @@ class ElasticEPScalingExecutor:
             self.switch_and_remove()
         else:
             retired_groups = self.switch_and_prepare()
+            if current_platform.is_rocm():
+                self._warm_target_groups(get_dp_group(), get_ep_group())
             if not self._can_reuse_fused_moe_kernel():
                 self.warm_and_capture()
-            elif current_platform.is_rocm():
-                # Reuse path skips warm_and_capture; warm the deferred groups here.
-                self._warm_target_groups(get_dp_group(), get_ep_group())
             self._start_group_cleanup(retired_groups)
 
     def perform_scale_down_eplb_reshuffle(self, new_dp_size: int) -> None:
