@@ -7,6 +7,8 @@ from starlette.datastructures import State
 
 import vllm.entrypoints.launchers.render.app_state as app_state_mod
 from vllm.config import ModelConfig, VllmConfig
+from vllm.entrypoints.launchers.cli_args import make_arg_parser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class _CaptureKwargs:
@@ -19,6 +21,15 @@ class _CaptureKwargs:
 
     def warmup(self):
         pass
+
+
+def _render_cli_args(*argv: str) -> Namespace:
+    """Parse ``argv`` the way ``vllm launch render`` does, so new serve flags
+    carry their defaults instead of needing a hand-maintained ``Namespace``."""
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(list(argv))
+    if args.model_tag is not None:
+        args.model = args.model_tag
+    return args
 
 
 @pytest.mark.asyncio
@@ -47,20 +58,7 @@ async def test_render_app_state_uses_config_resolved_reasoning_parser(monkeypatc
     monkeypatch.setattr(app_state_mod, "init_render_state", lambda *a, **kw: None)
     monkeypatch.setattr(app_state_mod, "init_endpoint_plugins_state", _noop_async)
 
-    args = Namespace(
-        model="openai/gpt-oss-20b",
-        served_model_name=None,
-        enable_log_requests=False,
-        chat_template=None,
-        chat_template_content_format="auto",
-        trust_request_chat_template=False,
-        enable_auto_tool_choice=False,
-        exclude_tools_when_tool_choice_none=False,
-        tool_call_parser=None,
-        reasoning_parser="",
-        default_chat_template_kwargs=None,
-        log_error_stack=False,
-    )
+    args = _render_cli_args("openai/gpt-oss-20b")
 
     await app_state_mod.init_render_app_state(vllm_config, State(), args)
 
