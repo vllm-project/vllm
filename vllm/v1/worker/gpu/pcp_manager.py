@@ -649,6 +649,7 @@ class PCPManager:
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
             is_prefilling_np=local_is_prefilling_np,
+            max_seq_len_np=None,
             has_prefill=local_has_prefill,
             decode_graph_eligible=not local_has_prefill,
             prefill_runs_as_decode_np=None,
