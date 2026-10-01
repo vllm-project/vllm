@@ -66,6 +66,8 @@ class _HiSparseRequestState:
     copies_recorded_blocks: int = 0
     pinned_clean: set[int] = field(default_factory=set)
     unpinned_pages: set[int] = field(default_factory=set)
+    # Prefix pages whose GPU copies are adopted after the admitting allocation.
+    pages_to_adopt: int = 0
 
 
 @dataclass
@@ -195,7 +197,9 @@ class HiSparseCoordinator:
         state = self._get_request_state(request_id)
         state.valid_pages.update(range(num_host_pages))
         state.ready_prefix_pages = max(num_host_pages, state.ready_prefix_pages)
-        self._adopt_copies(request_id, state, host_blocks[:num_host_pages])
+        # Adopting pins copies out of the free pool, so it must wait until the
+        # allocation admission counted on has run (see update_residency).
+        state.pages_to_adopt = max(state.pages_to_adopt, num_host_pages)
         state.copies_recorded_blocks = max(state.copies_recorded_blocks, num_host_pages)
 
     def take_host_block_copies(self) -> tuple[KVCacheBlockCopy, ...]:
@@ -345,7 +349,8 @@ class HiSparseCoordinator:
         return True
 
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
-        for page_idx in sorted(state.pinned_clean):
+        # Tail first, so a prefix loses its tail pages before its head.
+        for page_idx in sorted(state.pinned_clean, reverse=True):
             self._unpin_page(request_id, state, page_idx)
 
     def _page_became_clean(
@@ -391,6 +396,11 @@ class HiSparseCoordinator:
         if not self.resident_managers:
             return
         state = self._get_request_state(request_id)
+        if state.pages_to_adopt:
+            assert self.host_manager is not None
+            host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
+            self._adopt_copies(request_id, state, host_blocks[: state.pages_to_adopt])
+            state.pages_to_adopt = 0
         if not self._can_read_from_host(request_id):
             assert self.gpu_pool is not None
             if self.gpu_pool.get_num_free_blocks() >= self.transition_watermark:
@@ -791,7 +801,9 @@ class HiSparseCoordinator:
             blocks = manager.req_to_blocks.get(request_id)
             if not blocks:
                 continue
-            for page_idx, block in enumerate(blocks):
+            # Tail first, so a prefix loses its tail pages before its head.
+            for page_idx in reversed(range(len(blocks))):
+                block = blocks[page_idx]
                 if block.is_null:
                     continue
                 if page_idx in state.unpinned_pages:
