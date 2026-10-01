@@ -290,6 +290,8 @@ class _FakeKVTransferConfig:
 class _FakeModelConfig:
     model = "test-model"
     use_mla = False
+    enable_sleep_mode = False
+    enable_cumem_allocator = False
 
     def get_num_layers(self, parallel_config) -> int:
         return 1
@@ -308,7 +310,9 @@ def _make_vllm_config(
     kv_cache_layout: KVCacheLayout = KVCacheLayout.LBHNC,
     disable_hybrid_kv_cache_manager: bool = True,
 ) -> SimpleNamespace:
-    cache_config = SimpleNamespace(block_size=16, num_gpu_blocks=10)
+    cache_config = SimpleNamespace(
+        block_size=16, num_gpu_blocks=10, prefix_match_unit=None
+    )
     cache_config.get_resolved_kv_cache_layout = lambda: kv_cache_layout
     return SimpleNamespace(
         model_config=_FakeModelConfig(),
@@ -430,6 +434,64 @@ def _patch_worker_runtime(
     monkeypatch.setattr(worker, "get_dcp_group", lambda: dcp_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
     monkeypatch.setattr(worker, "LookupKeyServer", MagicMock())
+
+
+def test_create_mem_pool_returns_none_when_unconfigured():
+    assert worker.MooncakeStoreWorker._create_mem_pool({}, _FakeModelConfig()) is None
+
+
+def test_create_mem_pool_rejects_unknown_pool():
+    with pytest.raises(
+        ValueError,
+        match="Unsupported custom_mem_pool='UNKNOWN'",
+    ):
+        worker.MooncakeStoreWorker._create_mem_pool(
+            {"custom_mem_pool": "unknown"}, _FakeModelConfig()
+        )
+
+
+@pytest.mark.parametrize(
+    "conflicting_option", ["enable_sleep_mode", "enable_cumem_allocator"]
+)
+def test_create_mem_pool_rejects_cumem_conflicts(conflicting_option):
+    model_config = _FakeModelConfig()
+    setattr(model_config, conflicting_option, True)
+
+    with pytest.raises(ValueError, match="custom_mem_pool is incompatible"):
+        worker.MooncakeStoreWorker._create_mem_pool(
+            {"custom_mem_pool": "NVLINK"}, model_config
+        )
+
+
+@pytest.mark.parametrize(
+    ("pool_type", "allocator_name"),
+    [("nvlink", "NVLinkAllocator"), ("barex", "BarexAllocator")],
+)
+def test_create_mem_pool_uses_mooncake_allocator(
+    monkeypatch, pool_type, allocator_name
+):
+    allocator_cls = MagicMock()
+    allocator = allocator_cls.get_allocator.return_value
+    allocator_module = types.ModuleType("mooncake.allocator")
+    setattr(allocator_module, allocator_name, allocator_cls)
+    mooncake_module = types.ModuleType("mooncake")
+    mooncake_module.allocator = allocator_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mooncake", mooncake_module)
+    monkeypatch.setitem(sys.modules, "mooncake.allocator", allocator_module)
+
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 2)
+    mem_pool = MagicMock()
+    mem_pool_ctor = MagicMock(return_value=mem_pool)
+    monkeypatch.setattr(torch.cuda, "MemPool", mem_pool_ctor)
+
+    result = worker.MooncakeStoreWorker._create_mem_pool(
+        {"custom_mem_pool": pool_type}, _FakeModelConfig()
+    )
+
+    assert result is mem_pool
+    allocator_cls.get_allocator.assert_called_once_with(torch.device("cuda", 2))
+    allocator.allocator.assert_called_once_with()
+    mem_pool_ctor.assert_called_once_with(allocator.allocator.return_value)
 
 
 def test_pool_key_to_string_without_prefix_is_unchanged():
@@ -1481,7 +1543,7 @@ def test_store_sending_thread_reports_job_when_the_preamble_raises():
     # every dequeue leaves through the same exit.
     thread = _make_store_sending_thread(MagicMock())
     req = _make_store_req("req-a", [b"a0", b"a1"])
-    req.token_len_chunk = None  # type: ignore[assignment]
+    req.token_len_chunk = None
 
     with contextlib.suppress(TypeError):
         _run_store_req(thread, req)
