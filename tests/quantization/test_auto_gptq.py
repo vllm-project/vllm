@@ -134,7 +134,8 @@ def test_auto_gptq_drops_redundant_qzeros_before_kernel_processing():
             self.processed = True
 
     method = object.__new__(AutoGPTQLinearMethod)
-    method.kernel = Kernel()
+    kernel = Kernel()
+    method.kernel = kernel
     layer = torch.nn.Module()
     layer.register_parameter(
         "qzeros", torch.nn.Parameter(torch.ones(1), requires_grad=False)
@@ -142,8 +143,8 @@ def test_auto_gptq_drops_redundant_qzeros_before_kernel_processing():
 
     method.process_weights_after_loading(layer)
 
-    assert method.kernel.processed
-    assert method.kernel.w_zp_name == "qzeros"
+    assert kernel.processed
+    assert kernel.w_zp_name == "qzeros"
     torch.testing.assert_close(layer.qzeros, torch.zeros(1))
 
 
