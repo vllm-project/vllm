@@ -21,7 +21,11 @@ source .venv/bin/activate
 uv pip freeze
 
 echo ">>> Installing nightly torch packages"
-uv pip install --quiet torch torchvision torchaudio --pre --extra-index-url https://download.pytorch.org/whl/nightly/cu128
+# cu130 matches ARG CUDA_VERSION=13.0.3 in docker/Dockerfile. cu128 was stale:
+# CUDA 12.8 is no longer in PyTorch's binary build matrix and that index has
+# published nothing since 2.15.0.dev20260408, so this test has been asserting
+# against a six-month-old wheel.
+uv pip install --quiet torch torchvision torchaudio --pre --extra-index-url https://download.pytorch.org/whl/nightly/cu130
 
 echo ">>> Capturing torch-related versions before requirements install"
 uv pip freeze | grep -E '^torch|^torchvision|^torchaudio' | sort > before.txt
