@@ -1013,6 +1013,24 @@ def test_unclamped_mm_prefix_prunes_sliding_window_tiles(
     assert _mm_tile_bounds(ranges, 1024, False) == expected
 
 
+@pytest.mark.parametrize("clamp", [False, True])
+@pytest.mark.parametrize(
+    ("ranges", "expected"),
+    [
+        ([[0, 0], [0, 0]], [0, 36, 4096]),
+        ([[1024, 2303], [0, 0]], [0, 72, 4096]),
+        ([[0, 600], [0, 0]], [0, 36, 4096]),
+    ],
+)
+def test_mm_prefix_prunes_causal_tiles_on_full_attention_layers(
+    ranges: list[list[int]], expected: list[int], clamp: bool
+) -> None:
+    """Full-attention layers keep the causal upper bound, extended only by the
+    image ranges intersecting the Q-block, instead of scanning to seq_len. The
+    clamp flag only concerns sliding layers, so both settings agree here."""
+    assert _mm_tile_bounds(ranges, 0, clamp) == expected
+
+
 def ref_paged_unclamped_mm_attn(
     query: torch.Tensor,
     key_cache: torch.Tensor,

@@ -283,6 +283,46 @@ def compute_tile_loop_bounds(
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
+    # Full-attention layer with multimodal prefix ranges: keys past the causal
+    # bound are reachable only through a range containing the query, so the
+    # loop can stop at the farthest intersecting range end instead of seq_len.
+    # Keep the condition inline: Triton turns a constexpr assigned to a local
+    # into a runtime value, which would compile the range loads unconditionally.
+    if (
+        SLIDING_WINDOW <= 0
+        and USE_MM_PREFIX
+        and MAX_MM_RANGES > 0
+        and USE_CAUSAL
+        and (not USE_PER_SEQ_CAUSAL)
+        and (not USE_R_SWA)
+    ):
+        qpos_lo = q_block_local_idx * BLOCK_Q
+        qpos_hi = tl.minimum(
+            qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
+            cur_batch_query_len - 1,
+        )
+        query_abs_lo = context_len + qpos_lo
+        query_abs_hi = context_len + qpos_hi
+        last_allowed_key = query_abs_hi
+        for i in range(MAX_MM_RANGES):
+            range_start = tl.load(
+                mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
+            )
+            range_end = tl.load(
+                mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
+            )
+            intersects_query_block = (
+                (range_start < range_end)
+                & (range_start <= query_abs_hi)
+                & (range_end >= query_abs_lo)
+            )
+            last_allowed_key = tl.maximum(
+                last_allowed_key,
+                tl.where(intersects_query_block, range_end, last_allowed_key),
+            )
+        last_allowed_key = tl.minimum(last_allowed_key, seq_len - 1)
+        tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
+
     if IS_3D:
         loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
         loop_hi = min((segm_idx_or_0 + 1) * tiles_per_segment_or_0, tile_end)
