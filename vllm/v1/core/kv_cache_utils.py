@@ -2554,18 +2554,21 @@ def _estimate_max_model_len_from_groups(
         and bool(kv_cache_groups)
     )
 
+    # HiSparse's host-resident group has its own pool.
+    gpu_pool_groups = [group for group in kv_cache_groups if not group.host_resident]
+
     def fits(model_len: int) -> bool:
         vllm_config.model_config.max_model_len = model_len
         if hisparse_enabled:
+            # Building HiSparse's config checks that its host pool fits.
             try:
-                config = get_kv_cache_config_from_groups(
+                get_kv_cache_config_from_groups(
                     vllm_config, kv_cache_groups, available_memory
                 )
             except ValueError:
                 return False
-            return get_max_concurrency_for_kv_cache_config(vllm_config, config) >= 1
         return (
-            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+            _max_memory_usage_bytes_from_groups(vllm_config, gpu_pool_groups)
             <= available_memory
         )
 

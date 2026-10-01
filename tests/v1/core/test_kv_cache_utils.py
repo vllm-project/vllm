@@ -242,7 +242,13 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
 
 @pytest.mark.parametrize(
     "max_model_len,num_gpu_blocks,ok",
-    [(8192, 160, False), (8192, 1000, True), (32768, 656, False), (32768, 657, True)],
+    [
+        (8192, 160, False),
+        (8192, 1000, True),
+        (32768, 656, False),
+        (32768, 657, True),
+        (-1, 657, True),
+    ],
 )
 def test_hisparse_pool_must_fit_max_model_len(
     monkeypatch, max_model_len, num_gpu_blocks, ok
@@ -251,7 +257,8 @@ def test_hisparse_pool_must_fit_max_model_len(
     so a pool that fits only the indexer pages must be rejected at startup.
     Resident pages are capped at the in-flight window: at 32768 tokens with 2048
     in flight, one request needs 512 indexer + 4 x 32 resident + 16 hot blocks,
-    plus the null block."""
+    plus the null block. Auto-fit (-1) must pick a length that passes the same
+    check."""
     monkeypatch.setattr(
         hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
     )
@@ -274,6 +281,8 @@ def test_hisparse_pool_must_fit_max_model_len(
         )
     config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
     config.scheduler_config.max_num_batched_tokens = 2048
+    # Async scheduling doubles the in-flight window, and with it the bound.
+    config.scheduler_config.async_scheduling = False
     config.attention_config.hisparse_config = HiSparseConfig()
     config.model_config.hf_config.index_topk = 128
     config.cache_config.num_gpu_blocks_override = num_gpu_blocks
@@ -291,6 +300,53 @@ def test_hisparse_pool_must_fit_max_model_len(
     else:
         with pytest.raises(ValueError, match="max seq len"):
             kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
+
+
+def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
+    """Workers report HiSparse's resident/hot caches, which lay out their own raw
+    backing; KV cache layout resolution must skip them."""
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    specs: dict[str, KVCacheSpec] = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+    }
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_config.index_topk = 128
+    reported = specs | {
+        name: group.kv_cache_spec
+        for group in get_hisparse_kv_cache_groups(config, specs) or []
+        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        for name in group.layer_names
+    }
+    assert len(reported) > len(specs)
+
+    layouts = []
+    for worker_specs in (specs, reported):
+        config.cache_config.kv_cache_layout = None
+        layouts.append(
+            resolve_kv_cache_layout(
+                config, [["BLHNC", "LBNHC"]], list(worker_specs.values())
+            )
+        )
+    assert layouts[0] == layouts[1]
 
 
 def test_hisparse_rejects_deepseek_v4():
