@@ -12,7 +12,9 @@ NIXL_THREAD_SYNC_STRICT only when ``enable_listen`` is set, which this transport
 does not set, so the agent runs with NIXL_THREAD_SYNC_NONE -- under which NIXL's
 internal agent lock compiles down to no-ops, leaving every agent entry point
 unguarded. So the manager lock must cover all of them, and the lifetime of every
-handle passed between calls.
+handle passed between calls. The exception is peer registration moved onto a
+worker thread, as NixlConnector's handshake executor does: it runs outside the
+lock and relies, like that connector, on NIXL tolerating it beside transfers.
 
 Serialized use from a second thread is supported (checked against NIXL 1.4.1
 sources): NIXL never creates its UCX worker in UCS_THREAD_MODE_SINGLE, the only
