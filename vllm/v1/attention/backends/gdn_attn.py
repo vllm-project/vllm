@@ -131,8 +131,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and device.type == "cuda"
             # Not isinstance: KDA's RecoverSSM/checkpoint metadata is per group.
             and type(self) is GDNAttentionMetadataBuilder
-            # update_block_table() does not rebuild per-group checkpoints.
-            and kv_cache_spec.num_prefill_checkpoint_blocks == 0
         )
         if self.supports_update_block_table:
             # Opts into MRV2's CUDA-only aligned-index precompute.
@@ -619,6 +617,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         """Re-gather this group's state indices. The other fields are
         batch-level and stay shared with ``metadata``."""
         m = metadata
+        checkpoint = (
+            m.checkpoint.update_block_table(blk_table)
+            if m.checkpoint is not None
+            else None
+        )
         if self.vllm_config.cache_config.mamba_cache_mode == "align":
             assert self.mamba_aligned_state_indices is not None
             blk_table = self.mamba_aligned_state_indices
@@ -658,6 +661,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_state_indices_tensor=spec_indices,
             non_spec_state_indices_tensor=non_spec_indices,
             prefill_state_indices=prefill_indices,
+            checkpoint=checkpoint,
         )
 
     def build_for_cudagraph_capture(
