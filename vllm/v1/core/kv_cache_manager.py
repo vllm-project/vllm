@@ -391,6 +391,9 @@ class KVCacheManager:
                 hitting the prefix caching, excluding external tokens.
             new_computed_blocks: The cached blocks for the above new computed
                 tokens, grouped as a tuple by kv cache groups.
+                With delay_cache_blocks, these may belong to a shared async
+                load. The scheduler must wait for and publish that load before
+                allowing the request to run.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such
                 as eagle.

@@ -495,6 +495,8 @@ def test_kv_transfer_handshake(dist_init):
         # Pull connector advertises its transfer mode in kv_transfer_params so
         # an external router can distinguish it from a push producer.
         assert kv_connector_metadata["transfer_mode"] == "pull"
+        assert kv_connector_metadata["remote_block_size"] == BLOCK_SIZE
+        assert kv_connector_metadata["pcp_size"] == 1
 
         # Decode connector will be able to create handshake with the prefill connector.
         decode_connector = NixlConnector(
@@ -3588,6 +3590,12 @@ def test_failed_request_skips_kv_postprocessing(
         patch.object(worker, "post_process_device_kv_on_receive") as mock_postprocess,
     ):
         results = connector.get_transfer_results(finished_req_ids=set())
+        if failure_mode == "transfer_exception":
+            assert results.finished_recving == results.failed_recving == set()
+            assert connector.get_block_ids_with_load_errors() == set()
+            assert request_id in worker._recving_metadata
+            worker.nixl_wrapper.fail_transfer_exception = False
+            results = connector.get_transfer_results(finished_req_ids=set())
 
     assert request_id in results.finished_recving
     assert results.failed_recving == {request_id}
@@ -3629,11 +3637,81 @@ def test_recv_failure_waits_for_sibling_transfer(recv_worker, sibling_state):
     assert worker.get_block_ids_with_load_errors() == set()
 
 
-def test_recv_failure_waits_for_unpollable_handle_to_be_released(recv_worker):
-    """A polling exception and failed release do not prove that DMA has stopped."""
+@pytest.mark.parametrize("terminal_state", ["DONE", "ERR"])
+def test_poll_exception_keeps_receive_until_native_terminal(
+    recv_worker, terminal_state
+):
+    """An unobservable READ can still write even if release would return success."""
     worker = recv_worker
     worker._recving_transfers["request"] = [101]
-    worker.nixl_wrapper.check_xfer_state.side_effect = [RuntimeError("poll"), "DONE"]
+    worker.nixl_wrapper.check_xfer_state.side_effect = [
+        RuntimeError("poll"),
+        RuntimeError("poll again"),
+        "PROC",
+        terminal_state,
+    ]
+
+    for _ in range(3):
+        results = worker.get_transfer_results()
+        assert results.finished_recving == results.failed_recving == set()
+        assert worker.get_block_ids_with_load_errors() == set()
+        assert "request" in worker._recving_metadata
+        worker.nixl_wrapper.release_xfer_handle.assert_not_called()
+
+    results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == {"request"}
+    assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
+    worker.nixl_wrapper.release_xfer_handle.assert_called_once_with(101)
+    worker.nixl_wrapper.send_notif.assert_not_called()
+
+    results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == set()
+
+
+@pytest.mark.parametrize("release_fails", [False, True])
+def test_recv_failure_releases_native_disconnect(recv_worker, release_fails):
+    """Native disconnect is terminal, but completion still requires release."""
+
+    class RemoteDisconnectError(Exception):
+        pass
+
+    worker = recv_worker
+    worker._recving_transfers["request"] = [101]
+    worker.nixl_wrapper.check_xfer_state.side_effect = RemoteDisconnectError(
+        "NIXL_ERR_REMOTE_DISCONNECT"
+    )
+    worker.nixl_wrapper.release_xfer_handle.side_effect = (
+        [RuntimeError("release"), None] if release_fails else [None]
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker."
+        "nixlRemoteDisconnectError",
+        RemoteDisconnectError,
+        create=True,
+    ):
+        if release_fails:
+            results = worker.get_transfer_results()
+            assert results.finished_recving == results.failed_recving == set()
+            assert worker.get_block_ids_with_load_errors() == set()
+            assert "request" in worker._recving_metadata
+            worker.nixl_wrapper.release_xfer_handle.assert_called_once_with(101)
+
+        results = worker.get_transfer_results()
+        assert results.finished_recving == results.failed_recving == {"request"}
+        assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
+        assert "request" not in worker._recving_metadata
+        assert worker.nixl_wrapper.release_xfer_handle.call_count == 1 + release_fails
+        worker.nixl_wrapper.send_notif.assert_not_called()
+
+        results = worker.get_transfer_results()
+        assert results.finished_recving == results.failed_recving == set()
+
+
+def test_recv_failure_waits_for_terminal_handle_to_be_released(recv_worker):
+    """Even a terminal status cannot publish completion before release succeeds."""
+    worker = recv_worker
+    worker._recving_transfers["request"] = [101]
+    worker.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "ERR"]
     worker.nixl_wrapper.release_xfer_handle.side_effect = [
         RuntimeError("release"),
         None,

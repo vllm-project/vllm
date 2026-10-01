@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -30,6 +31,93 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Actual reads outlive client cancellation and keep the producer lease.
+        self._reqs_recving: set[str] = set()
+        assert vllm_config.kv_transfer_config is not None
+        self.enable_shared_prefix_loads = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "enable_shared_prefix_loads", False
+            )
+        )
+
+    def supports_shared_prefix_loads(self) -> bool:
+        parallel = self.vllm_config.parallel_config
+        return (
+            self.enable_shared_prefix_loads
+            and not self.use_host_buffer
+            and not self.is_bidirectional_kv_xfer_enabled
+            and parallel.tensor_parallel_size == 1
+            and parallel.pipeline_parallel_size == 1
+            and parallel.decode_context_parallel_size == 1
+            and parallel.prefill_context_parallel_size == 1
+        )
+
+    def is_shared_prefix_load_compatible(
+        self, request: "Request", owner: "Request", num_tokens: int
+    ) -> bool:
+        params, source = request.kv_transfer_params, owner.kv_transfer_params
+        if not params or not source or not params.get("do_remote_prefill"):
+            return False
+        if params.get("do_remote_decode") or source.get("do_remote_decode"):
+            return False
+        # Sharing does not turn a single-consumer producer lease into a
+        # multicast lease. Each follower must release its own producer request.
+        if (
+            not params.get("remote_request_id")
+            or not source.get("remote_request_id")
+            or params["remote_request_id"] == source["remote_request_id"]
+        ):
+            return False
+        for field in ("remote_engine_id", "remote_host", "remote_port"):
+            if params.get(field) is None or params.get(field) != source.get(field):
+                return False
+        for metadata in (params, source):
+            remote_num_tokens = metadata.get("remote_num_tokens")
+            if (
+                metadata.get("transfer_mode") != "pull"
+                or metadata.get("remote_block_size") != self.block_size
+                or metadata.get("tp_size") != 1
+                or metadata.get("dcp_size", 1) != 1
+                or metadata.get("pcp_size") != 1
+                or metadata.get("pp_size", 1) != 1
+                or not isinstance(remote_num_tokens, int)
+                or remote_num_tokens < num_tokens
+            ):
+                return False
+        # Matching tokens alone cannot attest external KV identity (for example
+        # across refits). Require the same still-leased physical source prefix.
+        num_blocks = num_tokens // self.block_size
+        request_blocks = params.get("remote_block_ids")
+        owner_blocks = source.get("remote_block_ids")
+        return bool(
+            num_blocks > 0
+            and isinstance(request_blocks, (list, tuple))
+            and isinstance(owner_blocks, (list, tuple))
+            and len(request_blocks) == len(owner_blocks) == 1
+            and isinstance(request_blocks[0], (list, tuple))
+            and isinstance(owner_blocks[0], (list, tuple))
+            and len(request_blocks[0]) >= num_blocks
+            and len(owner_blocks[0]) >= num_blocks
+            and request_blocks[0][:num_blocks] == owner_blocks[0][:num_blocks]
+        )
+
+    def on_shared_prefix_load(
+        self, request: "Request", owner: "Request", num_tokens: int
+    ) -> None:
+        assert self.is_shared_prefix_load_compatible(request, owner, num_tokens)
+        params = request.kv_transfer_params
+        assert params is not None
+        # The follower uses the owner's destination; notify every source rank
+        # that its distinct, unused producer lease can be released.
+        self._reqs_need_recv[request.request_id] = (request, (), (), False)
+        params["do_remote_prefill"] = False
+        params["_remote_blocks_processed"] = True
+        self._stop_heartbeat(request.request_id)
+
+    def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
+        for req_id in connector_output.finished_recving or ():
+            self._reqs_recving.discard(req_id)
+        super().update_connector_output(connector_output)
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -175,6 +263,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         # something to pull; a full local hit stays RUNNING.
                         num_external_tokens > 0,
                     )
+                    if num_external_tokens > 0:
+                        self._reqs_recving.add(request.request_id)
 
                 else:
                     logger.warning(
@@ -212,11 +302,24 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         is_p_node = bool(params.get("do_remote_decode"))
         is_d_node = not is_p_node
 
-        # Stop heartbeating for aborted requests that never reached finished_recving:
-        # normal path cleans up in update_connector_output.
-        self._stop_heartbeat(request.request_id)
+        # An aborted owner still pins a live read (possibly used by followers).
+        # Its producer lease must survive until worker completion.
+        if request.request_id not in self._reqs_recving:
+            self._stop_heartbeat(request.request_id)
 
         if params.get("do_remote_prefill"):
+            remote_lease = (
+                params.get("remote_engine_id"),
+                params.get("remote_request_id"),
+            )
+            if any(
+                self._heartbeat_req_engine.get(req_id) == remote_lease
+                for req_id in self._reqs_recving
+            ):
+                # HTTP cancellation can also submit a rejection-cleanup request.
+                # The active receive still owns this producer lease's release.
+                params["do_remote_prefill"] = False
+                return False, None
             # If do_remote_prefill is still True when the request is finished,
             # update_state_after_alloc must not have been called (the request
             # must have been aborted before it was scheduled, e.g. via the
@@ -285,8 +388,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_port=self.side_channel_port,
             tp_size=self.transfer_tp_size,
             dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
+            pcp_size=self.vllm_config.parallel_config.prefill_context_parallel_size,
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
+            remote_block_size=self.block_size,
             remote_blocks_expiry_time=blocks_expiry_time,
             transfer_mode=self._TRANSFER_MODE,
         )

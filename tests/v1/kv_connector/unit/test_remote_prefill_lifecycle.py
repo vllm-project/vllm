@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -26,6 +26,564 @@ pytestmark = pytest.mark.cpu_test
 
 def _num_waiting_requests(scheduler) -> int:
     return len(scheduler.waiting) + len(scheduler.kv_holding_waiting)
+
+
+def _shared_load_scheduler(monkeypatch, policy="recompute", matched_tokens=32):
+    config = create_vllm_config(
+        kv_connector="MockKVConnector",
+        kv_connector_extra_config={
+            "matched_tokens": matched_tokens,
+            "is_async": True,
+        },
+        kv_load_failure_policy=policy,
+    )
+    scheduler = create_scheduler(config, num_blocks=32)
+    connector = scheduler.connector
+    monkeypatch.setattr(connector, "supports_shared_prefix_loads", lambda: True)
+    connector.update_state_after_alloc = Mock()
+    return scheduler
+
+
+def _abort_scheduled_batch(scheduler, output, requests):
+    blocks = [
+        block
+        for request in requests
+        for block in scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[0]
+    ]
+    scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+    if scheduler.defer_block_free and blocks:
+        # Aborting cannot fence an already scheduled batch's GPU writes.
+        assert scheduler.deferred_frees
+        assert all(block.ref_cnt > 0 for block in blocks)
+    scheduler.update_from_output(output, create_model_runner_output(reqs=requests))
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.parametrize("cancel", [None, "owner", "follower", "both"])
+def test_shared_external_prefix_lifetime(monkeypatch, cancel):
+    """One transfer owns the write; aborting either reader preserves the other."""
+    scheduler = _shared_load_scheduler(monkeypatch)
+    owner, follower = [
+        create_request(num_tokens=48, common_prefix_len=32) for _ in range(2)
+    ]
+    for request in (owner, follower):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    manager = scheduler.kv_cache_manager
+    blocks = list(manager.get_blocks(owner.request_id).blocks[0])
+    assert manager.get_block_ids(owner.request_id) == manager.get_block_ids(
+        follower.request_id
+    )
+    assert len(blocks) == 2
+    assert all(block.ref_cnt == 2 and block.block_hash is None for block in blocks)
+    assert scheduler.connector.update_state_after_alloc.call_count == 1
+    assert not output.num_scheduled_tokens
+    assert not scheduler.reset_connector_cache()
+
+    if cancel in ("owner", "both"):
+        scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
+    if cancel in ("follower", "both"):
+        scheduler.finish_requests(follower.request_id, RequestStatus.FINISHED_ABORTED)
+    # The owner pins the destination until the transfer reports completion.
+    assert all(block.ref_cnt >= 1 for block in blocks)
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(reqs=[], finished_recving={owner.request_id}),
+    )
+    active = [r for r in (owner, follower) if not r.is_finished()]
+    output = scheduler.schedule()
+    assert set(output.num_scheduled_tokens) == {r.request_id for r in active}
+    for request in active:
+        assert manager.get_blocks(request.request_id).blocks[0][:2] == blocks
+        assert output.num_scheduled_tokens[request.request_id] == 16
+    assert all(block.ref_cnt == len(active) for block in blocks)
+    assert not scheduler._shared_prefix_loads
+    assert not scheduler._shared_load_followers
+    _abort_scheduled_batch(scheduler, output, active)
+
+
+@pytest.mark.parametrize("policy", ["recompute", "fail"])
+@pytest.mark.parametrize("abort_owner", [False, True])
+@pytest.mark.parametrize(
+    "error_kind,early_error",
+    [("blocks", False), ("blocks", True), ("request", False)],
+)
+def test_shared_external_prefix_load_failure(
+    monkeypatch, policy, abort_owner, error_kind, early_error
+):
+    """Failed shared destinations cannot become cache hits or shared writes."""
+    scheduler = _shared_load_scheduler(monkeypatch, policy)
+    owner, follower = [
+        create_request(num_tokens=48, common_prefix_len=32) for _ in range(2)
+    ]
+    for request in (owner, follower):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    blocks = list(scheduler.kv_cache_manager.get_blocks(owner.request_id).blocks[0])
+    if abort_owner:
+        scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
+    error = {blocks[1].block_id}
+    if early_error:
+        scheduler.update_from_output(
+            output, create_model_runner_output(reqs=[], invalid_block_ids=error)
+        )
+        output = scheduler.schedule()
+        assert not output.num_scheduled_tokens
+    result = create_model_runner_output(
+        reqs=[],
+        finished_recving={owner.request_id},
+        invalid_block_ids=error if error_kind == "blocks" and not early_error else None,
+    )
+    if error_kind == "request":
+        result.kv_connector_output.failed_recving = {owner.request_id}
+    scheduler.update_from_output(output, result)
+    assert not scheduler._shared_prefix_loads
+    assert not scheduler._shared_load_owners
+    assert not scheduler._shared_load_followers
+    assert all(block.ref_cnt == 0 for block in blocks)
+    assert all(block.block_hash is None for block in blocks)
+    assert not scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
+    if policy == "fail":
+        assert follower.status == RequestStatus.FINISHED_ERROR
+        scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+        scheduler.schedule()
+        assert_scheduler_empty(scheduler)
+    else:
+        assert follower.num_computed_tokens == 0
+        assert not scheduler.kv_cache_manager.get_block_ids(follower.request_id)[0]
+        assert all(block.ref_cnt == 0 for block in blocks)
+        assert all(block.block_hash is None for block in blocks)
+        output = scheduler.schedule()
+        assert follower.status == RequestStatus.RUNNING
+        assert scheduler.connector.update_state_after_alloc.call_count >= 2
+        assert all(
+            call.args[2] == 0
+            for call in scheduler.connector.update_state_after_alloc.call_args_list[1:]
+        )
+        active = [
+            r for r in (owner, follower) if r.request_id in output.num_scheduled_tokens
+        ]
+        _abort_scheduled_batch(scheduler, output, active)
+
+
+@pytest.mark.parametrize("num_tokens,matched_tokens", [(48, 31), (48, 48), (49, 49)])
+def test_shared_external_prefix_excludes_mutable_tail(
+    monkeypatch, num_tokens, matched_tokens
+):
+    """Full and unaligned loads share full blocks but never the writable tail."""
+    scheduler = _shared_load_scheduler(monkeypatch, matched_tokens=matched_tokens)
+    monkeypatch.setattr(
+        scheduler.connector, "supports_shared_prefix_load_slicing", lambda: True
+    )
+    owner, follower = [
+        create_request(num_tokens=num_tokens, common_prefix_len=num_tokens)
+        for _ in range(2)
+    ]
+    for request in (owner, follower):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    manager = scheduler.kv_cache_manager
+    shared_tokens = min(matched_tokens, num_tokens - 1) // 16 * 16
+    shared_blocks = manager.get_block_ids(follower.request_id)[0]
+    assert len(shared_blocks) == shared_tokens // 16
+    assert manager.get_block_ids(owner.request_id)[0][: len(shared_blocks)] == (
+        shared_blocks
+    )
+    assert scheduler.connector.update_state_after_alloc.call_count == 1
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(reqs=[], finished_recving={owner.request_id}),
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {
+        owner.request_id: max(1, num_tokens - matched_tokens),
+        follower.request_id: num_tokens - shared_tokens,
+    }
+    # Neither writer may reuse the other's tail, even after load completion.
+    assert set(
+        manager.get_block_ids(owner.request_id)[0][len(shared_blocks) :]
+    ).isdisjoint(manager.get_block_ids(follower.request_id)[0][len(shared_blocks) :])
+
+
+@pytest.mark.parametrize("matched_tokens", [31, 48])
+def test_shared_external_prefix_slicing_requires_opt_in(monkeypatch, matched_tokens):
+    scheduler = _shared_load_scheduler(monkeypatch, matched_tokens=matched_tokens)
+    for _ in range(2):
+        scheduler.add_request(create_request(num_tokens=48, common_prefix_len=48))
+    scheduler.schedule()
+    assert scheduler.connector.update_state_after_alloc.call_count == 2
+    assert not scheduler._shared_prefix_loads
+
+
+def test_shared_external_prefix_checks_connector_compatibility(monkeypatch):
+    scheduler = _shared_load_scheduler(monkeypatch)
+    connector = scheduler.connector
+    connector.is_shared_prefix_load_compatible = Mock(return_value=False)
+    connector.on_shared_prefix_load = Mock()
+    for _ in range(2):
+        scheduler.add_request(create_request(num_tokens=48, common_prefix_len=32))
+    scheduler.schedule()
+    connector.is_shared_prefix_load_compatible.assert_called_once()
+    connector.on_shared_prefix_load.assert_not_called()
+    assert connector.update_state_after_alloc.call_count == 2
+
+
+def _nixl_shared_requests(num_tokens):
+    requests = [
+        create_request(
+            num_tokens=num_tokens,
+            common_prefix_len=num_tokens,
+            do_remote_prefill=True,
+        )
+        for _ in range(2)
+    ]
+    for i, request in enumerate(requests):
+        request.kv_transfer_params.update(
+            remote_block_ids=[list(range(1, (num_tokens - 1) // 16 + 1)) + [10 + i]],
+            remote_num_tokens=num_tokens,
+            pcp_size=1,
+            remote_block_size=16,
+            transfer_mode="pull",
+        )
+    return requests
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "disabled",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "decode_context_parallel_size",
+        "prefill_context_parallel_size",
+        "host_staging",
+        "bidirectional",
+        "remote_pcp",
+        "remote_pcp_unknown",
+    ],
+)
+def test_nixl_unsupported_config_uses_independent_loads(monkeypatch, unsupported):
+    """Unsupported sharing keeps independent destinations and producer leases."""
+    config = create_vllm_config(
+        kv_connector_extra_config={
+            "enable_shared_prefix_loads": unsupported != "disabled"
+        }
+    )
+    scheduler = create_scheduler(config, num_blocks=32)
+    nixl_scheduler = scheduler.connector.connector_scheduler
+    # Exercise admission without initializing distributed groups or host buffers.
+    if unsupported.endswith("parallel_size"):
+        monkeypatch.setattr(config.parallel_config, unsupported, 2)
+    elif unsupported == "host_staging":
+        monkeypatch.setattr(nixl_scheduler, "use_host_buffer", True)
+    elif unsupported == "bidirectional":
+        monkeypatch.setattr(nixl_scheduler, "is_bidirectional_kv_xfer_enabled", True)
+    remote_config = unsupported.startswith("remote_")
+    if not remote_config:
+        assert scheduler.connector.supports_shared_prefix_loads() is False
+    owner, follower = _nixl_shared_requests(49)
+    if remote_config:
+        for request in (owner, follower):
+            if unsupported == "remote_pcp":
+                request.kv_transfer_params["pcp_size"] = 2
+            else:
+                request.kv_transfer_params.pop("pcp_size")
+    for request in (owner, follower):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert len(output.kv_connector_metadata.reqs_to_recv) == 2
+    assert all(
+        entry.awaiting_kvs and entry.local_block_ids
+        for entry in output.kv_connector_metadata.reqs_to_recv.values()
+    )
+    manager = scheduler.kv_cache_manager
+    assert set(manager.get_block_ids(owner.request_id)[0]).isdisjoint(
+        manager.get_block_ids(follower.request_id)[0]
+    )
+    if not remote_config:
+        assert not scheduler._shared_prefix_loads
+    assert not scheduler._shared_load_followers
+    assert set(nixl_scheduler._heartbeat_req_engine) == {
+        owner.request_id,
+        follower.request_id,
+    }
+    assert nixl_scheduler._reqs_recving == {owner.request_id, follower.request_id}
+    assert {
+        entry.remote.request_id
+        for entry in output.kv_connector_metadata.reqs_to_recv.values()
+    } == {
+        request.kv_transfer_params["remote_request_id"] for request in (owner, follower)
+    }
+
+
+@pytest.mark.parametrize("num_tokens", [48, 49])
+@pytest.mark.parametrize("cancel", [None, "owner", "follower", "both"])
+@pytest.mark.parametrize("local_tokens", [0, 16])
+def test_nixl_shared_full_prompt_lease_lifecycle(num_tokens, cancel, local_tokens):
+    """One real load, one unused-lease notification, and abort-safe heartbeats."""
+    config = create_vllm_config(
+        kv_connector_extra_config={"enable_shared_prefix_loads": True}
+    )
+    scheduler = create_scheduler(config, num_blocks=32)
+    manager = scheduler.kv_cache_manager
+    if local_tokens:
+        warm = create_request(num_tokens=num_tokens, common_prefix_len=num_tokens)
+        manager.allocate_slots(warm, local_tokens)
+        manager.free(warm)
+    owner, follower = _nixl_shared_requests(num_tokens)
+    for request in (owner, follower):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    meta = output.kv_connector_metadata
+    assert set(meta.reqs_to_recv) == {owner.request_id, follower.request_id}
+    assert meta.reqs_to_recv[owner.request_id].awaiting_kvs
+    assert meta.reqs_to_recv[owner.request_id].local_block_ids
+    assert meta.reqs_to_recv[owner.request_id].local_num_computed_blocks == (
+        local_tokens // 16,
+    )
+    assert len(meta.reqs_to_recv[owner.request_id].local_block_ids[0]) == (
+        (num_tokens + 15) // 16 - local_tokens // 16
+    )
+    assert not meta.reqs_to_recv[follower.request_id].awaiting_kvs
+    assert not meta.reqs_to_recv[follower.request_id].local_block_ids
+    nixl_scheduler = scheduler.connector.connector_scheduler
+    assert set(nixl_scheduler._heartbeat_req_engine) == {owner.request_id}
+    assert nixl_scheduler._reqs_recving == {owner.request_id}
+    prefix = list(manager.get_blocks(follower.request_id).blocks[0])
+    if cancel in ("owner", "both"):
+        scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
+    if cancel in ("follower", "both"):
+        scheduler.finish_requests(follower.request_id, RequestStatus.FINISHED_ABORTED)
+    assert set(nixl_scheduler._heartbeat_req_engine) == {owner.request_id}
+    assert all(block.ref_cnt > 0 for block in prefix)
+    # Cancellation must not enqueue a second release for either producer.
+    assert not nixl_scheduler._reqs_need_recv
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(reqs=[], finished_recving={owner.request_id}),
+    )
+    assert not nixl_scheduler._heartbeat_req_engine
+    assert not nixl_scheduler._reqs_recving
+    output = scheduler.schedule()
+    active = [r for r in (owner, follower) if not r.is_finished()]
+    assert set(output.num_scheduled_tokens) == {r.request_id for r in active}
+    assert all(block.ref_cnt == len(active) for block in prefix)
+    _abort_scheduled_batch(scheduler, output, active)
+
+
+@pytest.mark.parametrize("sharing", [False, True])
+@pytest.mark.parametrize("abort_owner", [False, True])
+def test_nixl_rejection_cleanup_preserves_an_active_receive_lease(sharing, abort_owner):
+    """HTTP cancellation cleanup cannot release a still-pending READ's lease."""
+    config = create_vllm_config(
+        kv_connector_extra_config={"enable_shared_prefix_loads": sharing}
+    )
+    scheduler = create_scheduler(config, num_blocks=32)
+    owner, follower = _nixl_shared_requests(49)
+    rejected = create_request(num_tokens=1)
+    rejected.kv_transfer_params = copy.deepcopy(owner.kv_transfer_params)
+    unused = create_request(num_tokens=1, do_remote_prefill=True)
+    for request in (owner, follower):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    awaiting = {
+        req_id
+        for req_id, entry in output.kv_connector_metadata.reqs_to_recv.items()
+        if entry.awaiting_kvs
+    }
+    blocks = list(scheduler.kv_cache_manager.get_blocks(owner.request_id).blocks[0])
+    if abort_owner:
+        scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
+    for request in (rejected, unused):
+        scheduler.add_request(request)
+        scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.update_from_output(output, create_model_runner_output(reqs=[]))
+    output = scheduler.schedule()
+    receives = output.kv_connector_metadata.reqs_to_recv
+    assert set(receives) == {unused.request_id}
+    assert not receives[unused.request_id].awaiting_kvs
+    assert not receives[unused.request_id].local_block_ids
+    nixl_scheduler = scheduler.connector.connector_scheduler
+    assert owner.request_id in nixl_scheduler._heartbeat_req_engine
+    assert all(block.ref_cnt > 0 for block in blocks)
+    scheduler.update_from_output(
+        output, create_model_runner_output(reqs=[], finished_recving=awaiting)
+    )
+    assert not nixl_scheduler._heartbeat_req_engine
+    assert not nixl_scheduler._reqs_recving
+    output = scheduler.schedule()
+    active = [r for r in (owner, follower) if not r.is_finished()]
+    _abort_scheduled_batch(scheduler, output, active)
+
+
+@pytest.mark.parametrize("abort_owner", [False, True])
+def test_nixl_failed_shared_load_recomputes_without_reusing_released_lease(abort_owner):
+    config = create_vllm_config(
+        kv_connector_extra_config={"enable_shared_prefix_loads": True},
+        kv_load_failure_policy="recompute",
+        max_num_batched_tokens=128,
+    )
+    scheduler = create_scheduler(config, num_blocks=32)
+    owner, follower = _nixl_shared_requests(49)
+    for request in (owner, follower):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    manager = scheduler.kv_cache_manager
+    failed_blocks = list(manager.get_blocks(owner.request_id).blocks[0])
+    if abort_owner:
+        scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
+    result = create_model_runner_output(reqs=[], finished_recving={owner.request_id})
+    result.kv_connector_output.failed_recving = {owner.request_id}
+    scheduler.update_from_output(output, result)
+    active = [r for r in (owner, follower) if not r.is_finished()]
+    assert all(not manager.get_block_ids(r.request_id)[0] for r in active)
+    assert all(r.num_computed_tokens == 0 for r in active)
+    assert all(
+        block.ref_cnt == 0 and block.block_hash is None for block in failed_blocks
+    )
+    assert not manager.block_pool.cached_block_hash_to_block
+    assert not scheduler._shared_prefix_loads
+    assert not scheduler._shared_load_owners
+    assert not scheduler._shared_load_followers
+    with patch.object(
+        scheduler.connector,
+        "update_state_after_alloc",
+        wraps=scheduler.connector.update_state_after_alloc,
+    ) as allocations:
+        output = scheduler.schedule()
+    assert allocations.call_count == len(active)
+    assert all(call.args[2] == 0 for call in allocations.call_args_list)
+    computed = {r.req_id: r.num_computed_tokens for r in output.scheduled_new_reqs}
+    if abort_owner:
+        assert output.num_scheduled_tokens == {follower.request_id: 49}
+        assert computed == {follower.request_id: 0}
+    else:
+        # The owner's new local prefill publishes full blocks within this batch.
+        # The follower may reuse that prefix, never the failed remote contents.
+        assert output.num_scheduled_tokens == {
+            owner.request_id: 49,
+            follower.request_id: 1,
+        }
+        assert computed == {owner.request_id: 0, follower.request_id: 48}
+        owner_blocks = manager.get_block_ids(owner.request_id)[0]
+        follower_blocks = manager.get_block_ids(follower.request_id)[0]
+        assert owner_blocks[:3] == follower_blocks[:3]
+        assert owner_blocks[3] != follower_blocks[3]
+    assert not output.kv_connector_metadata.reqs_to_recv
+    assert not scheduler.connector.connector_scheduler._heartbeat_req_engine
+    _abort_scheduled_batch(scheduler, output, active)
+
+
+def test_nixl_late_follower_can_use_an_aborted_owners_live_read():
+    config = create_vllm_config(
+        kv_connector_extra_config={"enable_shared_prefix_loads": True}
+    )
+    scheduler = create_scheduler(config, num_blocks=32)
+    owner, follower = _nixl_shared_requests(49)
+    scheduler.add_request(owner)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output(reqs=[]))
+    scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.add_request(follower)
+    output = scheduler.schedule()
+    recv = output.kv_connector_metadata.reqs_to_recv[follower.request_id]
+    assert not recv.awaiting_kvs and not recv.local_block_ids
+    assert set(scheduler.connector.connector_scheduler._heartbeat_req_engine) == {
+        owner.request_id
+    }
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(reqs=[], finished_recving={owner.request_id}),
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {follower.request_id: 1}
+
+
+@pytest.mark.parametrize("isolation", ["salt", "tokens", "skip", "opt_out"])
+def test_shared_external_prefix_preserves_isolation(monkeypatch, isolation):
+    scheduler = _shared_load_scheduler(monkeypatch)
+    owner = create_request(num_tokens=48, common_prefix_len=32)
+    follower = create_request(
+        num_tokens=48, common_prefix_len=0 if isolation == "tokens" else 32
+    )
+    if isolation == "salt":
+        follower.cache_salt = "another-tenant"
+        follower.block_hashes.clear()
+        follower.update_block_hashes()
+    elif isolation == "skip":
+        follower.skip_reading_prefix_cache = True
+    elif isolation == "opt_out":
+        monkeypatch.setattr(
+            scheduler.connector, "supports_shared_prefix_loads", lambda: False
+        )
+    for request in (owner, follower):
+        scheduler.add_request(request)
+    scheduler.schedule()
+    manager = scheduler.kv_cache_manager
+    assert set(manager.get_block_ids(owner.request_id)[0]).isdisjoint(
+        manager.get_block_ids(follower.request_id)[0]
+    )
+    assert scheduler.connector.update_state_after_alloc.call_count == 2
+
+
+def test_shared_external_prefix_late_follower_after_owner_abort(monkeypatch):
+    scheduler = _shared_load_scheduler(monkeypatch)
+    owner = create_request(num_tokens=48, common_prefix_len=32)
+    scheduler.add_request(owner)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output(reqs=[]))
+    blocks = list(scheduler.kv_cache_manager.get_blocks(owner.request_id).blocks[0])
+    scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
+    follower = create_request(num_tokens=48, common_prefix_len=32)
+    scheduler.add_request(follower)
+    output = scheduler.schedule()
+    assert scheduler.connector.update_state_after_alloc.call_count == 1
+    assert all(block.ref_cnt == 2 for block in blocks)
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(reqs=[], finished_recving={owner.request_id}),
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[follower.request_id] == 16
+    assert all(block.ref_cnt == 1 for block in blocks)
+
+
+def test_shared_external_prefix_extends_local_hit(monkeypatch):
+    """A locally cached leading block remains shared with the loaded suffix."""
+    scheduler = _shared_load_scheduler(monkeypatch)
+    monkeypatch.setattr(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        lambda request, local_tokens: (32 - local_tokens, True),
+    )
+    manager = scheduler.kv_cache_manager
+    warm = create_request(num_tokens=48, common_prefix_len=32)
+    manager.allocate_slots(warm, 16)
+    manager.free(warm)
+    owner, follower = [
+        create_request(num_tokens=48, common_prefix_len=32) for _ in range(2)
+    ]
+    for request in (owner, follower):
+        scheduler.add_request(request)
+    output = scheduler.schedule()
+    blocks = list(manager.get_blocks(owner.request_id).blocks[0])
+    assert manager.get_blocks(follower.request_id).blocks[0] == blocks
+    assert blocks[0].block_hash is not None
+    assert blocks[1].block_hash is None
+    assert all(block.ref_cnt == 2 for block in blocks)
+    scheduler.connector.update_state_after_alloc.assert_called_once()
+    assert scheduler.connector.update_state_after_alloc.call_args.args[2] == 16
+    scheduler.update_from_output(
+        output,
+        create_model_runner_output(reqs=[], finished_recving={owner.request_id}),
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {
+        owner.request_id: 16,
+        follower.request_id: 16,
+    }
+    assert all(block.block_hash is not None for block in blocks)
 
 
 def test_basic_lifecycle():

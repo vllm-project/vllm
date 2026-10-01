@@ -12,7 +12,11 @@ from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
 from vllm import RequestOutput
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import (
+    EngineClient,
+    KVTransferAdmissionState,
+    kv_transfer_admission,
+)
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     SpeculativeDecodingMetrics,
@@ -293,13 +297,13 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
         raw_request: Request | None,
     ) -> _T:
-        """Wrap a `create_*` coroutine so that, if it raises or returns an
-        ErrorResponse (i.e. the request never reached the engine), the KV
-        connector is notified to free any pinned remote-prefill blocks."""
+        """Release remote-prefill blocks on rejection before engine admission."""
         kv_transfer_params = self.has_kv_connector and request.kv_transfer_params
         if not kv_transfer_params or not kv_transfer_params.get("do_remote_prefill"):
             return await awaitable
 
+        admission = KVTransferAdmissionState()
+        token = kv_transfer_admission.set(admission)
         notify = True
         try:
             result = await awaitable
@@ -307,7 +311,8 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
                 notify = False
             return result
         finally:
-            if notify:
+            kv_transfer_admission.reset(token)
+            if notify and not admission.admitted:
                 try:
                     await self.engine_client.notify_kv_transfer_request_rejected(
                         request.request_id,
