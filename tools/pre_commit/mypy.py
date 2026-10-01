@@ -28,95 +28,85 @@ import regex as re
 # Fixing a directory means moving it from SEPARATE_GROUPS to here. Without that
 # move the fixes are not enforced because "tests" claims every file below it.
 SILENT_GROUPS = [
+    "tests/benchmarks",
     "tests/compile/correctness_e2e",
     "tests/compile/fullgraph",
     "tests/compile/fusions_e2e",
+    "tests/compile/passes",
     "tests/config",
+    "tests/entrypoints/anthropic",
     "tests/entrypoints/generate",
+    "tests/entrypoints/multimodal",
+    "tests/entrypoints/pooling",
+    "tests/entrypoints/serve",
     "tests/entrypoints/tool_parsers",
+    "tests/entrypoints/unit_tests",
     "tests/entrypoints/weight_transfer",
+    "tests/kernels/attention",
     "tests/kernels/core",
+    "tests/kernels/helion",
     "tests/kernels/mamba",
+    "tests/kernels/quantization",
+    "tests/model_executor/layers",
     "tests/models/language",
     "tests/models/quantization",
+    "tests/multimodal",
     "tests/plugins/bge_m3_sparse_plugin",
     "tests/plugins/prithvi_io_processor_plugin",
     "tests/plugins/vllm_add_dummy_platform",
     "tests/plugins/vllm_add_dummy_stat_logger",
-    "tests/plugins_tests/gguf",
-    "tests/plugins_tests/lora_resolvers",
+    "tests/plugins_tests",
+    "tests/quantization",
+    "tests/reasoning",
+    "tests/samplers",
     "tests/spec_decode",
+    "tests/tokenizers_",
+    "tests/tool_use",
     "tests/transformers_utils",
+    "tests/utils_",
+    "tests/v1/cudagraph",
+    "tests/v1/determinism",
     "tests/v1/distributed",
+    "tests/v1/executor",
+    "tests/v1/logits_processors",
+    "tests/v1/sample",
     "tests/v1/shutdown",
+    "tests/v1/simple_kv_offload",
+    "tests/v1/spec_decode",
+    "tests/v1/structured_output",
 ]
 
 # After fixing errors resulting from changing follow_imports
 # from "skip" to "silent", move its directory to SILENT_GROUPS.
 SEPARATE_GROUPS = [
     "tests",
-    "tests/benchmarks",
     "tests/compile",
-    "tests/compile/passes",
     "tests/distributed",
-    "tests/entrypoints/anthropic",
     "tests/entrypoints/llm",
-    "tests/entrypoints/multimodal",
     "tests/entrypoints/openai",
-    "tests/entrypoints/pooling",
-    "tests/entrypoints/serve",
     "tests/entrypoints/speech_to_text",
-    "tests/entrypoints/unit_tests",
     "tests/kernels",
-    "tests/kernels/attention",
-    "tests/kernels/helion",
     "tests/kernels/moe",
-    "tests/kernels/quantization",
     "tests/lora",
     "tests/model_executor",
-    "tests/model_executor/layers",
     "tests/model_executor/model_loader",
     "tests/models",
     "tests/models/test_initialization.py",
     "tests/models/multimodal",
-    "tests/multimodal",
     "tests/parser",
-    "tests/plugins_tests",
-    "tests/quantization",
-    "tests/reasoning",
     "tests/renderers",
-    "tests/samplers",
-    "tests/tokenizers_",
     "tests/tool_parsers",
-    "tests/tool_use",
-    "tests/utils_",
     "tests/v1",
     "tests/v1/attention",
     "tests/v1/core",
-    "tests/v1/cudagraph",
-    "tests/v1/determinism",
     "tests/v1/e2e",
     "tests/v1/ec_connector",
     "tests/v1/engine",
-    "tests/v1/executor",
     "tests/v1/kv_connector",
     "tests/v1/kv_offload",
-    "tests/v1/logits_processors",
     "tests/v1/metrics",
-    "tests/v1/sample",
-    "tests/v1/simple_kv_offload",
-    "tests/v1/spec_decode",
     "tests/v1/streaming_input",
-    "tests/v1/structured_output",
     "tests/v1/worker",
-]
-
-EXCLUDE = [
-    r"vllm/model_executor/models/[kK]",
-    r"vllm/model_executor/models/[uU]",
-    r"vllm/model_executor/models/[vV]",
-    r"vllm/model_executor/models/[wW]",
-    r"vllm/model_executor/models/[zZ]",
 ]
 
 
@@ -130,16 +120,12 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
         A dictionary mapping file group names to lists of changed files.
 
     """
-    exclude_pattern = re.compile(f"^{'|'.join(EXCLUDE)}.*")
     silent_pattern = re.compile(f"^({'|'.join(SILENT_GROUPS)}).*")
     file_groups: dict[str, list[str]] = {"": []}
     file_groups.update({k: [] for k in SEPARATE_GROUPS})
     # Longest path first so a sub-directory is not shadowed by its parent
     separate_groups = sorted(SEPARATE_GROUPS, key=len, reverse=True)
     for changed_file in changed_files:
-        # Skip files which should be ignored completely
-        if exclude_pattern.match(changed_file):
-            continue
         # Already-fixed paths go in the default group, which runs at the
         # stricter follow_imports setting from pyproject.toml
         if silent_pattern.match(changed_file):

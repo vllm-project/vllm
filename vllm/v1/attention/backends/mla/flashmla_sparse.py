@@ -317,7 +317,6 @@ class FlashMLASparseMetadataBuilder(
 ):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     require_uniform_decodes: ClassVar[bool] = True
-    hisparse_supports_multi_token_decode: ClassVar[bool] = True
     metadata_cls = FlashMLASparseMetadata
 
     def __init__(
@@ -818,10 +817,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
                 decode_topk, decode_lengths = (
-                    index_group.convert_decode_logical_to_physical_topk(
+                    index_group.convert_logical_to_physical_topk(
                         self.index_group_index,
                         topk_indices[:num_decode_tokens],
                         attn_metadata,
+                        block_stride_rows=None,
                         return_valid_counts=True,
                     )
                 )
@@ -1027,7 +1027,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     attn_metadata,
                     fp8_metadata.decode.kernel_metadata,
                     num_decodes,
-                    fp8_metadata.decode.decode_query_len,
                 )
             # Reshape q: (num_decode_tokens, num_heads, head_dim)
             #         -> (num_decodes, seq_len, num_heads, head_dim)
@@ -1267,16 +1266,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         attn_metadata: FlashMLASparseMetadata,
         kernel_metadata: FlashMLASparseMetadata.FP8KernelMetadata,
         num_decodes: int,
-        decode_query_len: int,
     ) -> torch.Tensor:
         assert isinstance(self.index_group, HiSparseMLAIndexGroup)
-        physical_topk = self.index_group.convert_decode_logical_to_physical_topk(
+        physical_topk = self.index_group.convert_logical_to_physical_topk(
             self.index_group_index,
             topk_indices,
             attn_metadata,
+            block_stride_rows=None,
             return_valid_counts=False,
-            num_decodes=num_decodes,
-            decode_query_len=decode_query_len,
         )
         assert isinstance(physical_topk, torch.Tensor)
         q = reshape_query_for_spec_decode(q, num_decodes)

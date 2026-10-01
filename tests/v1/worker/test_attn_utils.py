@@ -77,6 +77,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     layers = {}
     for name, sizes in zip(specs, [main_sizes, indexer_sizes, [block_size]]):
         backend = SimpleNamespace(
+            get_name=lambda name=name: name,
             customize_spec=AttentionBackend.customize_spec,
             get_supported_kernel_block_sizes=lambda sizes=sizes: sizes,
         )
@@ -134,7 +135,7 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
         _TargetBackend,
         ["target"],
         spec,
-        0,  # type: ignore[arg-type]
+        0,
     )
     target_group.metadata_builders = [
         _FakeMetadataBuilder(AttentionCGSupport.ALWAYS)  # type: ignore[list-item]
@@ -143,7 +144,7 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
         _DraftBackend,
         ["draft"],
         spec,
-        0,  # type: ignore[arg-type]
+        0,
     )
     draft_group.metadata_builders = [
         _FakeMetadataBuilder(AttentionCGSupport.UNIFORM_BATCH)  # type: ignore[list-item]
@@ -151,14 +152,14 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
     groups = [[target_group, draft_group]]
 
     # The runner-wide execution mode must still honor the drafter's limit.
-    unfiltered = get_attn_cg_support(groups, None)  # type: ignore[arg-type]
+    unfiltered = get_attn_cg_support(groups, None)
     assert unfiltered.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
     assert unfiltered.min_cg_attn_backend == "_DraftBackend"
 
     # Adaptive verification validates only the target's varlen graphs.
     target_only = get_attn_cg_support(
         groups,
-        None,  # type: ignore[arg-type]
+        None,
         checked_layer_names={"target"},
     )
     assert target_only.min_cg_support == AttentionCGSupport.ALWAYS
@@ -175,7 +176,7 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
     draft_group.layer_names.append("target")
     target_with_shared_group = get_attn_cg_support(
         groups,
-        None,  # type: ignore[arg-type]
+        None,
         checked_layer_names={"target"},
     )
     assert target_with_shared_group.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
