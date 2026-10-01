@@ -25,7 +25,7 @@ def _flashinfer_topk_topp_supported() -> bool:
 
     Mirrors the gate in `TopKTopPSampler.__init__`: CUDA + flashinfer
     importable + GPU compute capability supported by the FlashInfer
-    backend.
+    backend + more than 16 SMs.
     """
     if not current_platform.is_cuda():
         return False
@@ -38,7 +38,10 @@ def _flashinfer_topk_topp_supported() -> bool:
     capability = current_platform.get_device_capability()
     if capability is None:
         return False
-    return FlashInferBackend.supports_compute_capability(capability)
+    return FlashInferBackend.supports_compute_capability(capability) and (
+        current_platform.num_compute_units(torch.accelerator.current_device_index())
+        > 16
+    )
 
 
 FLASHINFER_TOPK_TOPP_SUPPORTED = _flashinfer_topk_topp_supported()
@@ -50,8 +53,7 @@ def _seed_default_generator(seed: int) -> None:
 
 @pytest.fixture(autouse=True)
 def reset_default_device():
-    """
-    Explicitly set the default device, which can affect subsequent tests.
+    """Explicitly set the default device, which can affect subsequent tests.
     Adding this fixture helps avoid this problem.
     """
     original_device = torch.get_default_device()
@@ -78,6 +80,10 @@ def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
         @staticmethod
         def is_cuda():
             return False
+
+        @staticmethod
+        def is_cuda_alike():
+            return True
 
         @staticmethod
         def is_cpu():
@@ -161,78 +167,42 @@ def test_topk_impl_equivalence():
     assert torch.allclose(result1, result2)
 
 
-@pytest.mark.skip(
-    reason="FlashInfer top-k/top-p renorm comparison fails; "
-    "needs investigation of tolerance threshold or "
-    "interface differences between Python and FlashInfer implementations"
+@pytest.mark.skipif(
+    not FLASHINFER_TOPK_TOPP_SUPPORTED,
+    reason="Requires CUDA and flashinfer",
 )
-def test_flashinfer_sampler():
+def test_flashinfer_sampler_fallback_when_jit_cannot_target_gpu(monkeypatch):
+    """FlashInfer swallows arch-detection errors (e.g. SM 12.x with a CUDA
+    toolkit older than 12.9), leaving an empty target-arch set that makes
+    every JIT spec fail with a misleading "requires sm75 or higher" error at
+    first use, killing the engine during startup profiling (issue #42393).
+    The sampler gate must detect this and fall back to native sampling, and
+    surface the real reason when the user explicitly opted in.
     """
-    This test verifies that the FlashInfer top-k and top-p sampling
-    implementation produces the same results as the Python implementation.
+    import flashinfer.jit.core
+    from flashinfer.compilation_context import CompilationContext
 
-    NOTE: FlashInfer did not directly expose an interface for fused top-k and
-    top-p prob renorm (it did provide fused sampling but we cannot compare
-    sampling results due to randomness), so we will compare the probability
-    renormed consequently by top-k and then top-p of FlashInfer implementation.
-    """
-    try:
-        from flashinfer.sampling import top_k_renorm_probs, top_p_renorm_probs
+    from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sampler_supported
 
-        is_flashinfer_available = True
-    except ImportError:
-        is_flashinfer_available = False
+    def fake_check_cuda_arch():
+        raise RuntimeError("FlashInfer requires GPUs with sm75 or higher")
 
-    FLASHINFER_ENABLED = current_platform.is_cuda() and is_flashinfer_available
+    def fake_normalize_cuda_arch(major, minor):
+        raise RuntimeError("SM 12.x requires CUDA >= 12.9")
 
-    if not FLASHINFER_ENABLED:
-        pytest.skip("FlashInfer not installed or not available on this platform.")
-
-    torch.set_default_device(DEVICE_TYPE)
-    generator = Generator(device=DEVICE_TYPE).manual_seed(42)
-
-    # Generate random logits
-    logits = torch.rand((BATCH_SIZE, VOCAB_SIZE), generator=generator)
-
-    # Generate various top-k and top-p values
-    k_values = torch.randint(1, 1000, (BATCH_SIZE,), generator=generator)
-    p_values = (
-        torch.rand((BATCH_SIZE,), generator=generator) * 0.5 + 0.5
-    )  # range in [0.5, 1.0]
-
-    # Sometimes disable top-k (k=vocab_size)
-    k_values.masked_fill_(
-        torch.randint(0, 2, (BATCH_SIZE,), generator=generator, dtype=torch.bool),
-        VOCAB_SIZE,
+    monkeypatch.setattr(flashinfer.jit.core, "check_cuda_arch", fake_check_cuda_arch)
+    monkeypatch.setattr(
+        CompilationContext,
+        "_normalize_cuda_arch",
+        staticmethod(fake_normalize_cuda_arch),
     )
 
-    # Sometimes disable top-p (p=1.0)
-    p_values.masked_fill_(
-        torch.randint(0, 2, (BATCH_SIZE,), generator=generator, dtype=torch.bool), 1.0
-    )
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    assert flashinfer_sampler_supported() is False
 
-    python_logits = apply_top_k_top_p_pytorch(
-        logits=logits.clone(),
-        k=k_values,
-        p=p_values,
-    )
-    python_probs = torch.softmax(python_logits, dim=-1)
-
-    # FlashInfer only exposed renorm interfaces for probs so convert first
-    flashinfer_probs = torch.softmax(logits.clone(), dim=-1)
-    flashinfer_probs = top_k_renorm_probs(
-        probs=flashinfer_probs,
-        top_k=k_values,
-    )
-    flashinfer_probs = top_p_renorm_probs(
-        probs=flashinfer_probs,
-        top_p=p_values,
-    )
-
-    # Compare the results
-    assert torch.allclose(python_probs, flashinfer_probs, atol=2e-2), (
-        "FlashInfer and Python sampling implementations do not match!"
-    )
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    with pytest.raises(RuntimeError, match="SM 12.x requires CUDA >= 12.9"):
+        flashinfer_sampler_supported()
 
 
 # =============================================================================

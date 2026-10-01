@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KpoolTailSpec,
     KVCacheConfig,
@@ -146,8 +147,7 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
 
 
 def test_e2e_swa_plus_full_save_then_lookup_hits():
-    """
-    E2E: build a SWA+Full hybrid worker, save all blocks via the sending
+    """E2E: build a SWA+Full hybrid worker, save all blocks via the sending
     thread (synchronously), then verify lookup returns the full hit length.
     Also verify that evicting SWA's early blocks (outside its window) still
     allows a full hit because the window covers the tail.
@@ -758,8 +758,9 @@ def test_worker_setup_tolerates_finer_scratch_group():
     worker.pp_size = 1
     worker.num_kv_head = 8
     assert worker.coord.enable_partial_hash_hits
-    # The scratch DB is keyed at its own block size and never probed.
-    assert worker.token_dbs[2].hash_block_size == 4
+    # Only the participating full-attention and Mamba groups are registered.
+    assert len(worker.token_dbs) == 2
+    assert all(db.hash_block_size == 8 for db in worker.token_dbs)
 
     for g_idx, db in enumerate(worker.token_dbs):
         db.set_kv_caches_base_addr([g_idx * 10_000])
@@ -771,11 +772,11 @@ def test_worker_setup_tolerates_finer_scratch_group():
         block_size=worker.block_size,
         coord=worker.coord,
         tp_rank=0,
-        group_put_steps=[1, 1, 1],
+        group_put_steps=[1, 1],
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
-        group_participates=[True, True, False],
+        group_participates=[True, True],
     )
 
     # Persist the sub-block partial tail at boundary 12 (keyed by hs[12//8-1]).
@@ -783,7 +784,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
     req = ReqMeta(
         req_id="r0",
         token_len_chunk=0,
-        block_ids=([1], [2], [3]),
+        block_ids=([1], [2]),
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=20,
@@ -796,5 +797,103 @@ def test_worker_setup_tolerates_finer_scratch_group():
     # A 13-token prompt sharing the prefix must hit the first hash unit.
     assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
     # The scratch group's namespace never enters the store.
-    scratch_prefix = worker.token_dbs[2].key_for(hs[0]).rsplit("@", 1)[0]
-    assert not any(key.startswith(scratch_prefix) for key in store._data)
+    assert not any("@group:2" in key for key in store._data)
+
+
+def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
+    """A per-request ring group (CircularBufferSpec, capacity as block_size)
+    sits beside the paged group: worker setup tolerates its block size (the
+    DeepSeek-V4.1 compressor ring is 8 rows), saving a request stores paged
+    blocks only, and lookup hits on the paged group alone."""
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    ring = CircularBufferSpec(
+        block_size=8, num_kv_heads=1, head_size=64, head_size_v=0, dtype=torch.uint8
+    )
+    cfg = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * full.page_size_bytes,
+                layers=["L0"],
+                layer_stride=4 * full.page_size_bytes,
+                block_stride=full.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=4 * ring.page_size_bytes,
+                layers=["L1"],
+                layer_stride=4 * ring.page_size_bytes,
+                block_stride=ring.page_size_bytes,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["L0"], full),
+            KVCacheGroupSpec(["L1"], ring),
+        ],
+    )
+    vllm_config = _minimal_vllm_config(cache_block_size=16)
+    store = _DictStore()
+
+    worker = _build_worker_with_dict_store(vllm_config, cfg, store)
+    worker.tp_size = 1
+    worker.pp_size = 1
+    worker.num_kv_head = 8
+    assert len(worker.token_dbs) == 1
+    assert worker.token_dbs[0].hash_block_size == 16
+
+    raw_full = torch.zeros(4 * full.page_size_bytes, dtype=torch.int8)
+    raw_ring = torch.zeros(4 * ring.page_size_bytes, dtype=torch.int8)
+    kv_caches = {
+        "L0": dense_kv_cache_views(raw_full, full, 4, 1, KVCacheLayout.LBNHC)[0],
+        "L1": dense_kv_cache_views(raw_ring, ring, 4, 1, KVCacheLayout.LBNHC)[0],
+    }
+
+    def _fake_thread_init(*args, **kwargs):
+        for v in list(args) + list(kwargs.values()):
+            if isinstance(v, threading.Event):
+                v.set()
+        m = MagicMock()
+        m.start = lambda: None
+        return m
+
+    with (
+        patch.object(
+            mooncake_store_worker,
+            "KVCacheStoreSendingThread",
+            side_effect=_fake_thread_init,
+        ),
+        patch.object(
+            mooncake_store_worker,
+            "KVCacheStoreRecvingThread",
+            side_effect=_fake_thread_init,
+        ),
+    ):
+        worker.register_kv_caches(kv_caches)
+
+    send_thread = KVCacheStoreSendingThread(
+        store=store,
+        token_databases=worker.token_dbs,
+        block_size=worker.block_size,
+        coord=worker.coord,
+        tp_rank=worker.tp_rank,
+        group_put_steps=worker._group_tp_replication_factors,
+        kv_role=worker.kv_role,
+        ready_event=threading.Event(),
+        enable_kv_event=False,
+        group_participates=[True],
+    )
+    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
+    save_req = ReqMeta(
+        req_id="r0",
+        token_len_chunk=64,
+        # Scheduler metadata is projected to the participating store groups.
+        block_ids=([1, 2, 3, 4],),
+        block_hashes=hs,
+        can_save=True,
+        store_job_id=1,
+    )
+    send_thread.add_request(save_req)
+    send_thread._handle_request(send_thread.request_queue.get())
+    worker.store = store
+
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
+    assert not any("@group:1" in key for key in store._data)

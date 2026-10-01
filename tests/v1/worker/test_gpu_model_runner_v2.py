@@ -3,11 +3,13 @@
 
 import contextlib
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -17,7 +19,43 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
+
+
+def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.is_last_pp_rank = False
+    local_batch = object()
+    global_batch = SimpleNamespace(idx_mapping=object())
+    runner.pcp_manager = SimpleNamespace(
+        global_batch=global_batch,
+        restore_for_sampling=Mock(),
+    )
+    runner.pp_handler = SimpleNamespace(receive=Mock(return_value=False))
+    runner.postprocess_num_computed_tokens = Mock()
+    runner.model_state = SimpleNamespace(postprocess_state=Mock())
+    runner.kv_connector = SimpleNamespace(post_forward=Mock(return_value=None))
+    runner.eplb = SimpleNamespace(step=Mock())
+    runner.execute_model_state = ExecuteModelState(
+        input_batch=local_batch,
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=None,
+        aux_hidden_states=None,
+        dp_sync=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        cudagraph_stats=None,
+    )
+
+    runner.sample_tokens(None)
+
+    runner.pp_handler.receive.assert_called_once_with(global_batch)
+    runner.postprocess_num_computed_tokens.assert_called_once_with(global_batch)
+    runner.model_state.postprocess_state.assert_called_once_with(
+        global_batch.idx_mapping, 0
+    )
+    runner.pcp_manager.restore_for_sampling.assert_not_called()
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
@@ -37,6 +75,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         parallel_config=parallel_config,
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
     )
+    runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.model_state = SimpleNamespace(
         get_additional_cg_support=lambda: (),
         num_new_sampled_tokens_per_step=1,
@@ -124,7 +163,6 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     expected: int,
 ):
     """Mamba/GDN block-table rows index global positions, unlike DCP KV."""
-
     max_model_len = 1_048_576
     attention_block_size = 1_536
     mamba_block_size = 16
@@ -237,6 +275,7 @@ def _make_capture_runner(captured: bool) -> GPUModelRunner:
     runner.attn_groups = None
     runner.kv_cache_config = None
     runner.use_aux_hidden_state_outputs = False
+    runner.kv_connector = model_runner_module.NO_OP_KV_CONNECTOR
     return runner
 
 

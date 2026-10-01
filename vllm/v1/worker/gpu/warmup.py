@@ -224,10 +224,20 @@ def warmup_kernels(
     # fixed draft counts here, then restore the manager for capture and serving.
     adaptive_verification = model_runner.adaptive_verification
     model_runner.adaptive_verification = None
+    rejection_sampler = model_runner.rejection_sampler
+    adaptive_sampling = (
+        rejection_sampler is not None and rejection_sampler.enable_adaptive_verification
+    )
+    if adaptive_sampling:
+        assert rejection_sampler is not None
+        rejection_sampler.enable_adaptive_verification = False
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
     finally:
         model_runner.adaptive_verification = adaptive_verification
+        if adaptive_sampling:
+            assert rejection_sampler is not None
+            rejection_sampler.enable_adaptive_verification = True
 
 
 def _warmup_kernels(
@@ -284,7 +294,11 @@ def _warmup_kernels(
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
     )
-    if max_blocks_per_req > 0:
+    block_tables = getattr(model_runner, "block_tables", None)
+    null_blocks = block_tables is not None and (
+        block_tables.redirect_writes_to_null_block
+    )
+    if max_blocks_per_req > 0 and not null_blocks:
         # Reserve block 0 (null block) and ensure we have enough blocks.
         # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
         num_reqs = min(
@@ -440,4 +454,6 @@ def _warmup_kernels(
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
+    if model_runner.kv_block_zeroer is not None:
+        model_runner.kv_block_zeroer.zero_block_ids([0])
     torch.accelerator.synchronize()

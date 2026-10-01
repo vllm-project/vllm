@@ -161,10 +161,14 @@ def mteb_test_embed_models(
     model_info: EmbedModelInfo,
     vllm_extra_kwargs=None,
     hf_model_callback=None,
-    atol=MTEB_EMBED_TOL,
+    atol: float | None = None,
     prompt_prefix: str | None = None,
     vllm_model_callback=None,
 ):
+    if atol is None:
+        atol = (
+            model_info.mteb_tol if model_info.mteb_tol is not None else MTEB_EMBED_TOL
+        )
     vllm_extra_kwargs = get_vllm_extra_kwargs(model_info, vllm_extra_kwargs)
 
     # Test embed_dims, isnan and whether to use normalize
@@ -268,4 +272,8 @@ def mteb_test_embed_models(
 
     # We are not concerned that the vllm mteb results are better
     # than SentenceTransformers, so we only perform one-sided testing.
-    assert st_main_score - vllm_main_score < atol
+    diff = st_main_score - vllm_main_score
+    assert diff < atol, (
+        f"diff={diff:.6g} tol={atol} model={model_info.name} "
+        f"(st={st_main_score}, vllm={vllm_main_score})"
+    )
