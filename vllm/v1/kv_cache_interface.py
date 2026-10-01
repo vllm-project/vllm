@@ -468,7 +468,6 @@ class HiSparseResidentSpec(KVCacheSpec):
     def max_admission_blocks_per_request(
         self, max_in_flight_tokens: int, max_model_len: int
     ) -> int:
-        """Resident blocks a request may hold; older pages are read from host."""
         num_tokens = min(max_in_flight_tokens, max_model_len)
         return cdiv(num_tokens, self.block_size)
 
