@@ -26,6 +26,7 @@ from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
@@ -765,7 +766,10 @@ class NemotronHForCausalLM(
             cache_config.mamba_cache_dtype,
             cache_config.mamba_ssm_cache_dtype,
         )
-        if cache_config.use_replayssm:
+        if (
+            cache_config.use_replayssm
+            and vllm_config.mamba_config.backend == MambaBackendEnum.TRITON
+        ):
             dtypes = (
                 *dtypes,
                 *MambaStateDtypeCalculator.replayssm_ring_dtypes(
@@ -788,7 +792,7 @@ class NemotronHForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
-            - packed x/dt/B ReplaySSM rings
+            - packed x/dt/B ReplaySSM rings for the Triton backend
 
         """
         parallel_config = vllm_config.parallel_config
@@ -806,7 +810,10 @@ class NemotronHForCausalLM(
             conv_kernel=hf_config.conv_kernel,
             num_spec=vllm_config.num_speculative_tokens,
         )
-        if cache_config.use_replayssm:
+        if (
+            cache_config.use_replayssm
+            and vllm_config.mamba_config.backend == MambaBackendEnum.TRITON
+        ):
             return (
                 *shapes,
                 *MambaStateShapeCalculator.replayssm_ring_shapes(

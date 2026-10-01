@@ -242,10 +242,9 @@ PREFIX_CACHING_PROMPTS = [
     _PC_PREFIX + "Surprisingly, the experiments showed that",
     _PC_PREFIX + "The most important conclusion was that",
 ]
-# MTP prefix caching must retain two full packed ReplaySSM state blocks: the
-# drafter drops the volatile trailing block before resuming from the preceding
-# boundary.
-_PC_MTP_PREFIX = _PC_SENTENCE * 280
+# MTP prefix caching must retain at least two full state blocks: the drafter drops
+# the volatile trailing block before resuming from the preceding boundary.
+_PC_MTP_PREFIX = _PC_SENTENCE * 240
 MTP_PREFIX_CACHING_PROMPTS = [
     _PC_MTP_PREFIX + prompt.removeprefix(_PC_PREFIX)
     for prompt in PREFIX_CACHING_PROMPTS
@@ -311,9 +310,13 @@ def _check_replayssm_prefix_caching(
         ) as llm:
             assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
             replay_block_size = llm.llm.llm_engine.vllm_config.cache_config.block_size
-            # Both backends retain a packed five-state page. Its rings may
-            # increase the attention block size needed to match that page.
-            assert replay_block_size >= baseline_block_size
+            if mamba_backend == "flashinfer":
+                # FlashInfer rings are auxiliary and cannot affect the shared page.
+                assert replay_block_size == baseline_block_size
+            else:
+                # Triton retains the original packed five-state page. Its rings may
+                # increase the attention block size needed to match that page.
+                assert replay_block_size >= baseline_block_size
             llm.generate_greedy_logprobs(
                 PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
             )

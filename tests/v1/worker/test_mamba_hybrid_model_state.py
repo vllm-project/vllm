@@ -91,16 +91,8 @@ def test_prepare_attn_forwards_positions_and_stages_replayssm_prefill(
     state._align_mode = False
     state._use_flashinfer_replayssm = True
     if staging_device == "cpu":
-        monkeypatch.setattr("vllm.v1.utils.PIN_MEMORY", False)
-    state._replayssm_prefilling = mamba_hybrid.CpuGpuBuffer(
-        1,
-        dtype=torch.bool,
-        device=torch.device(staging_device),
-        pin_memory=staging_device == "cuda",
-    )
-    state._replayssm_all_decode_gpu = torch.zeros(
-        1, dtype=torch.bool, device=staging_device
-    )
+        monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
+    state._is_prefilling_gpu = torch.zeros(1, dtype=torch.bool, device=staging_device)
     state._mamba_ctx = None
     state.num_accepted_tokens_gpu = torch.ones(1, dtype=torch.int32)
     state._get_mamba_group_info = Mock(return_value=([], None))
@@ -135,7 +127,6 @@ def test_prepare_attn_forwards_positions_and_stages_replayssm_prefill(
 
     prepare_attn = state.prepare_attn
     if staging_device == "cuda":
-        assert state._replayssm_prefilling.cpu.is_pinned()
         monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
         monkeypatch.setattr(gsd, "_sync_check_enabled", True)
         gsd.enable_gpu_sync_check()
@@ -152,7 +143,71 @@ def test_prepare_attn_forwards_positions_and_stages_replayssm_prefill(
 
     assert metadata is expected_metadata
     assert build_attn_metadata.call_args.kwargs["positions"] is positions
-    assert state._replayssm_step_is_prefilling.item() == expected_prefilling
+    assert state._is_prefilling_gpu.item() == expected_prefilling
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_replayssm_prefill_staging_retains_inflight_masks(monkeypatch) -> None:
+    """A ramp can stage another mask while the previous H2D is still queued."""
+    state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=3)
+    state.model_config = SimpleNamespace(max_model_len=8192)
+    state._align_mode = False
+    state._use_flashinfer_replayssm = True
+    state._is_prefilling_gpu = torch.zeros(2, dtype=torch.bool, device="cuda")
+    state._get_mamba_group_info = Mock(return_value=([], None))
+    state._ensure_mamba_postprocess_ctx = Mock()
+    state.num_accepted_tokens_gpu = torch.ones(2, dtype=torch.int32, device="cuda")
+    state.recoverssm = None
+    query_start_loc = torch.tensor([0, 8, 16], dtype=torch.int32)
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_tokens=16,
+        num_reqs_after_padding=2,
+        num_tokens_after_padding=16,
+        max_query_len=8,
+        prefill_runs_as_decode_np=None,
+        query_start_loc_np=query_start_loc.numpy(),
+        query_start_loc=query_start_loc.cuda(),
+        num_scheduled_tokens=np.array([8, 8], dtype=np.int32),
+        num_draft_tokens_per_req=np.array([0, 0], dtype=np.int32),
+        idx_mapping=torch.arange(2, device="cuda"),
+        seq_lens_cpu_upper_bound=torch.tensor([264, 264]),
+        seq_lens=torch.tensor([264, 264], device="cuda"),
+        is_prefilling_np=np.array([False, True]),
+        dcp_local_seq_lens=None,
+        positions=torch.arange(16, device="cuda"),
+        prompt_lens=torch.tensor([1024, 1024], device="cuda"),
+    )
+    monkeypatch.setattr(mamba_hybrid, "build_attn_metadata", Mock(return_value={}))
+    kwargs = dict(
+        cudagraph_mode=CUDAGraphMode.NONE,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64, device="cuda"),
+        attn_groups=[],
+        kv_cache_config=Mock(),
+    )
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    first = torch.empty(2, dtype=torch.bool, device="cuda")
+    second = torch.empty_like(first)
+    blocker = torch.cuda.Event()
+    with torch.cuda.stream(stream):
+        # Warm the sleep kernel before queuing the deliberate GPU backlog.
+        torch.cuda._sleep(1)
+        stream.synchronize()
+        torch.cuda._sleep(1_000_000_000)
+        blocker.record(stream)
+        state.prepare_attn(input_batch=input_batch, **kwargs)
+        first.copy_(state._is_prefilling_gpu)
+        input_batch.is_prefilling_np = np.array([True, False])
+        state.prepare_attn(input_batch=input_batch, **kwargs)
+        second.copy_(state._is_prefilling_gpu)
+        # Both CPU masks were staged before the first DMA could begin.
+        assert not blocker.query(), "GPU backlog ended before the staging overlap"
+    stream.synchronize()
+    assert first.tolist() == [False, True]
+    assert second.tolist() == [True, False]
 
 
 def test_padded_prompt_tail_builds_as_spec_decode(
@@ -263,9 +318,7 @@ def test_flashinfer_replayssm_prefix_uses_original_accepted_counts() -> None:
     state.recoverssm = None
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32, device="cuda")
     state._mamba_state_idx_gpu = torch.zeros(4, dtype=torch.int32, device="cuda")
-    state._replayssm_step_is_prefilling = torch.zeros(
-        4, dtype=torch.bool, device="cuda"
-    )
+    state._is_prefilling_gpu = torch.zeros(4, dtype=torch.bool, device="cuda")
     state._replayssm_query_start_loc = torch.tensor(
         [0, 4], dtype=torch.int32, device="cuda"
     )

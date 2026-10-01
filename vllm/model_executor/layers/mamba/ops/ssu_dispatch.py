@@ -106,7 +106,6 @@ def _postprocess_replayssm_kernel(
     dst_slots,
     plan_ring_start,
     plan_flush_count,
-    rand_seeds,
     block_table_stride_req: tl.int64,
     slot_table_stride_layer: tl.int64,
     MAMBA_BLOCK_SIZE: tl.constexpr,
@@ -119,15 +118,9 @@ def _postprocess_replayssm_kernel(
     HAS_IDX_MAPPING: tl.constexpr,
     MATERIALIZE_PREFIXES: tl.constexpr,
     LIVE_COL_IS_ZERO: tl.constexpr,
-    NUM_RAND_SEEDS: tl.constexpr,
 ) -> None:
     """Commit a completed step and prepare an optional prefix snapshot."""
     batch_idx = tl.program_id(0)
-
-    if NUM_RAND_SEEDS > 0 and batch_idx == 0:
-        for seed_idx in tl.static_range(0, NUM_RAND_SEEDS):
-            seed = tl.load(rand_seeds + seed_idx)
-            tl.store(rand_seeds + seed_idx, seed + 1)
 
     tl.store(plan_ring_start + batch_idx, 0)
     tl.store(plan_flush_count + batch_idx, -1)
@@ -304,7 +297,6 @@ class _ReplaySSMGroupContext:
     plan_ring_start: torch.Tensor
     plan_flush_count: torch.Tensor
     active_request_indices: torch.Tensor
-    rand_seeds: torch.Tensor
     max_num_reqs: int
     mamba_block_size: int
     logical_window: int
@@ -319,15 +311,12 @@ class _ReplaySSMGroupContext:
         cache_mode: str,
         mamba_block_size: int,
         max_num_reqs: int,
-        rand_seeds: torch.Tensor | None = None,
     ) -> "_ReplaySSMGroupContext":
         first = mixers[0]
         first_ssm = first.kv_cache[1]
         first_x = first.replayssm_cache[0]
 
         device = first_ssm.device
-        if rand_seeds is None:
-            rand_seeds = torch.empty(0, dtype=torch.int64, device=device)
         zero_table = torch.zeros(len(mixers), dtype=torch.int64, device=device)
         return cls(
             mixers=mixers,
@@ -374,7 +363,6 @@ class _ReplaySSMGroupContext:
             active_request_indices=torch.full(
                 (max_num_reqs,), -1, dtype=torch.int32, device=device
             ),
-            rand_seeds=rand_seeds,
             max_num_reqs=max_num_reqs,
             mamba_block_size=mamba_block_size,
             logical_window=int(first.replayssm_buffer_len),
@@ -435,7 +423,6 @@ class _ReplaySSMGroupContext:
             self.dst_slots,
             self.plan_ring_start,
             self.plan_flush_count,
-            self.rand_seeds,
             self.block_table.stride(0),
             self.src_slots.stride(0),
             MAMBA_BLOCK_SIZE=self.mamba_block_size,
@@ -448,7 +435,6 @@ class _ReplaySSMGroupContext:
             HAS_IDX_MAPPING=idx_mapping is not None,
             MATERIALIZE_PREFIXES=self.materialize_prefixes,
             LIVE_COL_IS_ZERO=live_cols is None,
-            NUM_RAND_SEEDS=self.rand_seeds.numel(),
         )
         if self.materialize_prefixes:
             _compact_replayssm_requests_kernel[(1,)](
@@ -463,12 +449,13 @@ class _ReplaySSMGroupContext:
         """Publish the canonical prefix snapshots prepared by ``postprocess``."""
         first = self.mixers[0]
         mamba_config = first.mamba_config
+        rand_seed = None
         philox_rounds = 0
         if mamba_config.enable_stochastic_rounding:
-            rand_seed = self.rand_seeds[-1:]
+            rand_seed = torch.randint(
+                0, 2**32, (1,), device=self.src_slots.device, dtype=torch.int64
+            )
             philox_rounds = mamba_config.stochastic_rounding_philox_rounds or 10
-        else:
-            rand_seed = None
         materialize_fn(
             *self.materialize_tables,
             self.src_slots,
@@ -547,21 +534,9 @@ class ReplaySSMModelContext:
                 f"got {sorted(modes)}"
             )
 
-        groups = []
-        for args in group_args:
-            mixers = args[0]
-            group_seeds = mixers[0]._replayssm_group_rand_seeds
-            expected_seeds = (
-                len(mixers) + int(args[2] == "align")
-                if mixers[0].mamba_config.enable_stochastic_rounding
-                else 0
-            )
-            assert group_seeds.numel() == expected_seeds
-            groups.append(
-                _ReplaySSMGroupContext.create(
-                    *args, max_num_reqs, rand_seeds=group_seeds
-                )
-            )
+        groups = [
+            _ReplaySSMGroupContext.create(*args, max_num_reqs) for args in group_args
+        ]
         return cls(groups=groups)
 
     def reset_new_slots(self, **kwargs: Any) -> None:
@@ -822,7 +797,6 @@ _mamba_ssu_backend: MambaSSUBackend | None = None
 
 
 _flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
-_flashinfer_replayssm_algorithm = "two-kernel"
 
 
 @cache
@@ -856,7 +830,7 @@ def selective_state_update_replayssm_flashinfer(
     state_batch_indices: torch.Tensor | None = None,
     null_block_id: int = NULL_BLOCK_ID,
     scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    rand_seed: torch.Tensor | None = None,
+    enable_stochastic_rounding: bool = False,
     stochastic_rounding_philox_rounds: int = 0,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: int | None = None,
@@ -885,6 +859,11 @@ def selective_state_update_replayssm_flashinfer(
     if scratch is not None:
         cb_scaled, cumAdt_vec, cb_old = scratch
 
+    rand_seed = (
+        torch.randint(0, 2**32, (1,), device=state.device, dtype=torch.int64)
+        if enable_stochastic_rounding
+        else None
+    )
     return _flashinfer_replayssm_kernel(
         state,
         x_cache,
@@ -908,60 +887,9 @@ def selective_state_update_replayssm_flashinfer(
         cu_seqlens=cu_seqlens,
         max_seqlen=max_seqlen,
         enable_pdl=enable_pdl,
-        algorithm=_flashinfer_replayssm_algorithm,
         cb_scaled=cb_scaled,
         cumAdt_vec=cumAdt_vec,
         cb_old=cb_old,
-    )
-
-
-def prepare_flashinfer_replayssm_runtime(
-    *,
-    state_dtype: torch.dtype,
-    input_dtype: torch.dtype,
-    dt_dtype: torch.dtype,
-    weight_dtype: torch.dtype,
-    matrix_a_dtype: torch.dtype,
-    state_index_dtype: torch.dtype,
-    dim: int,
-    dstate: int,
-    num_predicted_tokens: int,
-    max_window: int,
-    heads_per_group: int,
-    num_groups: int,
-    max_batch_size: int,
-    device: torch.device,
-    use_rand_seed: bool,
-    philox_rounds: int,
-) -> tuple[Callable[..., None] | None, tuple[tuple[bool, int, int, int, int], ...]]:
-    """Bind FlashInfer's raw kernel and serving tactics during warmup."""
-    try:
-        from flashinfer.mamba.checkpointing_ssu import (
-            prepare_checkpointing_ssu_runtime,
-        )
-    except ImportError:
-        # Released FlashInfer versions without preparation retain the public
-        # checkpointing wrapper. The lifecycle and packed layout are unchanged.
-        return None, ()
-    return prepare_checkpointing_ssu_runtime(
-        state_dtype,
-        input_dtype,
-        dt_dtype,
-        weight_dtype,
-        matrix_a_dtype,
-        state_index_dtype,
-        None,
-        dim,
-        dstate,
-        num_predicted_tokens,
-        max_window,
-        heads_per_group,
-        num_groups,
-        max_batch_size,
-        device,
-        use_rand_seed,
-        philox_rounds,
-        False,
     )
 
 
@@ -1034,8 +962,7 @@ def initialize_mamba_ssu_backend(
     ):
         return
 
-    global _flashinfer_replayssm_algorithm, _flashinfer_replayssm_kernel
-    global _mamba_ssu_backend
+    global _flashinfer_replayssm_kernel, _mamba_ssu_backend
     backend = mamba_config.backend
 
     if backend == MambaBackendEnum.TRITON:
@@ -1065,7 +992,6 @@ def initialize_mamba_ssu_backend(
         logger.info("Using %s Mamba SSU backend.", _mamba_ssu_backend.name)
 
     _flashinfer_replayssm_kernel = None
-    _flashinfer_replayssm_algorithm = "two-kernel"
     if use_replayssm and backend == MambaBackendEnum.FLASHINFER:
         try:
             from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu
@@ -1074,8 +1000,6 @@ def initialize_mamba_ssu_backend(
                 "FlashInfer ReplaySSM requires a compatible flashinfer-python package"
             ) from e
         _flashinfer_replayssm_kernel = checkpointing_ssu
-        if flashinfer_replayssm_autotune_supported():
-            _flashinfer_replayssm_algorithm = "auto"
     if use_replayssm:
         logger.info("Using %s ReplaySSM backend.", backend.value)
 

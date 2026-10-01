@@ -215,10 +215,6 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.replayssm_utils import (
-    ReplaySSMBlockCopier,
-    get_replayssm_block_copy_tensors,
-)
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -237,9 +233,11 @@ from .utils import (
     KVBlockZeroer,
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
+    allocate_replayssm_caches,
     bind_kv_cache,
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
+    get_replayssm_block_copy_tensors,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
 )
@@ -592,7 +590,6 @@ class GPUModelRunner(
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
         self.replayssm_block_copy_tensors: list[torch.Tensor] = []
-        self.replayssm_block_copier: ReplaySSMBlockCopier | None = None
         # indexes: [kv_cache_group_id][attn_group]
         self.attn_groups: list[list[AttentionGroup]] = []
         # self.kv_cache_config: KVCacheConfig
@@ -1250,14 +1247,11 @@ class GPUModelRunner(
         if scheduler_output.new_block_ids_to_zero:
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
         if scheduler_output.kv_cache_block_copies:
-            if self.replayssm_block_copier is None:
-                copy_kv_cache_blocks_inplace(
-                    self.kv_caches,
-                    self.kv_cache_config.num_blocks,
-                    scheduler_output.kv_cache_block_copies,
-                )
-            else:
-                self.replayssm_block_copier.copy(scheduler_output.kv_cache_block_copies)
+            copy_kv_cache_blocks_inplace(
+                [*self.kv_caches, *self.replayssm_block_copy_tensors],
+                self.kv_cache_config.num_blocks,
+                scheduler_output.kv_cache_block_copies,
+            )
 
         # Free the cached encoder outputs.
         self._process_encoder_cache_scheduler_output(scheduler_output)
@@ -6659,7 +6653,6 @@ class GPUModelRunner(
             self.kv_caches.clear()
         if hasattr(self, "replayssm_block_copy_tensors"):
             self.replayssm_block_copy_tensors.clear()
-        self.replayssm_block_copier = None
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
@@ -7394,6 +7387,7 @@ class GPUModelRunner(
                 self.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
             )
+            replayssm_caches = allocate_replayssm_caches(kv_cache_config, self.device)
 
             # Binding also allocates group-shared ReplaySSM trackers.
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
@@ -7409,18 +7403,13 @@ class GPUModelRunner(
                 self.kv_caches,
                 num_attn_module,
                 kv_cache_groups=kv_cache_config.kv_cache_groups,
+                replayssm_caches=replayssm_caches,
             )
         # Validate and cache optional ReplaySSM-owned state once cache binding
         # has populated every layer. Block copies are a per-step hot path.
         self.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
             self.compilation_config.static_forward_context
         )
-        self.replayssm_block_copier = None
-        if self.replayssm_block_copy_tensors:
-            self.replayssm_block_copier = ReplaySSMBlockCopier(
-                [*self.kv_caches, *self.replayssm_block_copy_tensors],
-                self.kv_cache_config.num_blocks,
-            )
         return kv_caches
 
     def maybe_add_kv_sharing_layers_to_kv_cache_groups(

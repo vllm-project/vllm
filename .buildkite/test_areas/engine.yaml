@@ -169,8 +169,7 @@ steps:
     - tests/kernels/mamba/test_ssu_dispatch.py
     - tests/model_executor/test_replayssm_warmup.py
     - tests/v1/worker/test_kv_cache_allocation_scope.py
-    - tests/v1/core/test_replayssm_packed_pages.py
-    - vllm/v1/worker/replayssm_utils.py
+    - tests/v1/worker/test_mamba_hybrid_model_state.py
     - vllm/v1/worker/utils.py
     - vllm/v1/core/kv_cache_coordinator.py
     - vllm/v1/core/single_type_kv_cache_manager.py
@@ -188,7 +187,8 @@ steps:
   commands:
     - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v -s v1/e2e/test_replayssm_decode.py
     - pytest -v kernels/mamba/test_ssu_dispatch.py -k replayssm
-    - pytest -v model_executor/test_replayssm_warmup.py v1/worker/test_kv_cache_allocation_scope.py v1/core/test_replayssm_packed_pages.py
+    - pytest -v v1/worker/test_mamba_hybrid_model_state.py -k replayssm
+    - pytest -v model_executor/test_replayssm_warmup.py v1/worker/test_kv_cache_allocation_scope.py
 
 - label: ":nvidia: (L4) V1 E2E"
   key: v1-e2e-2-gpus

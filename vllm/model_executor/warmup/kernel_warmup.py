@@ -35,7 +35,6 @@ from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
-    prepare_replayssm_runtime,
     replayssm_autotune_warmup,
 )
 from vllm.model_executor.warmup.watermark_sample_warmup import (
@@ -256,8 +255,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         logger.info_once("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
-
-    prepare_replayssm_runtime(worker.model_runner)
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups

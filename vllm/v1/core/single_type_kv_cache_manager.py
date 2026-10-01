@@ -1461,9 +1461,11 @@ class MambaManager(SingleTypeKVCacheManager):
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
-        # The running state must survive a move to a new private write slot.
-        self._copy_flashinfer_replayssm_live_state = (
-            kv_cache_spec.requires_live_state_copy
+        # FlashInfer ReplaySSM rings and trackers live outside the canonical
+        # cache page, so explicitly migrate them when the live block moves.
+        # Triton's packed five-state page follows the normal copy path.
+        self._copy_flashinfer_replayssm_live_state = bool(
+            kv_cache_spec.replayssm_shapes
         )
         if self._copy_flashinfer_replayssm_live_state:
             # ReplaySSM stores speculative history inside its ring. It must not

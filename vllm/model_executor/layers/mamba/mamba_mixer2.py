@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 
 import torch
 from torch import nn
@@ -43,7 +43,6 @@ from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    prepare_flashinfer_replayssm_runtime,
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
 )
@@ -542,9 +541,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
             raise ValueError(
                 "--use-replayssm requires tensor-parallel heads to divide evenly"
             )
-        # Both backends pack rings with the recurrent state so cache groups
-        # share their physical page storage.
-        num_states = 5 if self.use_replayssm else 2
+        # Keep Triton's established five-state packed page. FlashInfer's rings
+        # are auxiliary because its materializer addresses them independently.
+        num_states = 2 if not self.use_replayssm or self.use_flashinfer_replayssm else 5
         self.kv_cache = tuple(torch.tensor([]) for _ in range(num_states))
         self.replayssm_cache = (
             tuple(torch.tensor([]) for _ in range(3))
@@ -553,12 +552,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
-        self._replayssm_rand_seed = torch.empty(0, dtype=torch.int64)
-        self._replayssm_group_rand_seeds = torch.empty(0, dtype=torch.int64)
-        self._replayssm_runtime_kernel: Callable[..., None] | None = None
-        self._replayssm_runtime_policies: tuple[
-            tuple[bool, int, int, int, int], ...
-        ] = ()
 
         self.num_spec = vllm_config.num_speculative_tokens
 
@@ -908,30 +901,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 hidden_states_B_C_d
             )
 
-            # FlashInfer's packed varlen kernel consumes a collapsed leading
-            # batch dimension: (1, total_tokens, ...). Select that layout in
-            # the existing views below so the raw steady-state call does not
-            # need five additional per-layer unsqueeze operations.
-            flashinfer_varlen_replay = False
-            flashinfer_raw_replay = False
-            spec_query_len = decode_batch = 0
-            if self.use_flashinfer_replayssm and use_spec_decode:
-                assert replayssm_state_indices_d is not None
-                spec_query_len = 1 + self.num_spec
-                decode_batch = replayssm_state_indices_d.size(0)
-                flashinfer_varlen_replay = (
-                    num_decode_tokens != decode_batch * spec_query_len
-                )
-                # Cache sizing profiles the model before cache allocation and
-                # before the runtime kernel can be bound. Keep that startup
-                # pass on the public fallback. Once warmup binds the raw
-                # kernel, mixed scheduler steps avoid re-entering the public
-                # FlashInfer wrapper once per layer. Pure generation retains
-                # its fully captured, autotuned path.
-                flashinfer_raw_replay = self._replayssm_runtime_kernel is not None and (
-                    flashinfer_varlen_replay or attn_metadata.num_prefills > 0
-                )
-
             # 3. State Space Model sequence transformation
             n_groups = self.n_groups // self.tp_size
             A_d = (
@@ -939,36 +908,23 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 .expand(-1, self.head_dim, self.ssm_state_size)
                 .to(dtype=torch.float32)
             )
+            dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
             D_d = self.D[:, None, ...].expand(-1, self.head_dim)
-            if flashinfer_varlen_replay:
-                dt_d = dt_d[None, :, :, None].expand(-1, -1, -1, self.head_dim)
-                B_d = B_d.view(1, -1, n_groups, B_d.shape[1] // n_groups)
-                C_d = C_d.view(1, -1, n_groups, C_d.shape[1] // n_groups)
-                hidden_states_d = hidden_states_d.view(
-                    1, -1, self.num_heads // self.tp_size, self.head_dim
-                )
-            else:
-                dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
-                B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
-                C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
-                hidden_states_d = hidden_states_d.view(
-                    -1, self.num_heads // self.tp_size, self.head_dim
-                )
+            B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
+            C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
+            hidden_states_d = hidden_states_d.view(
+                -1, self.num_heads // self.tp_size, self.head_dim
+            )
 
             assert preallocated_ssm_out_d is not None
             # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor_d
             # NOTE: final output is an in-place update of out tensor
-            if flashinfer_varlen_replay:
-                preallocated_ssm_out_d = preallocated_ssm_out_d.view(
-                    1, num_decode_tokens, -1, self.head_dim
-                )
-            else:
-                preallocated_ssm_out_d = preallocated_ssm_out_d.view(
-                    num_decode_tokens, -1, self.head_dim
-                )
+            preallocated_ssm_out_d = preallocated_ssm_out_d.view(
+                num_decode_tokens, -1, self.head_dim
+            )
             if self.use_replayssm:
                 assert self.replayssm_buffer_len is not None
                 if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
@@ -978,8 +934,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     fi_cu_seqlens = query_start_loc_d
                     fi_max_seqlen = None
                     if use_spec_decode:
+                        spec_query_len = 1 + self.num_spec
                         fi_max_seqlen = spec_query_len
-                        if not flashinfer_varlen_replay:
+                        assert replayssm_state_indices_d is not None
+                        decode_batch = replayssm_state_indices_d.size(0)
+                        if num_decode_tokens == decode_batch * spec_query_len:
                             hidden_states_d = _view_mtp_decode_tensor(
                                 hidden_states_d, decode_batch, spec_query_len
                             )
@@ -999,84 +958,34 @@ class MambaMixer2(MambaBase, PluggableLayer):
                             )
                             fi_cu_seqlens = None
                             fi_max_seqlen = None
-                    rand_seed = (
-                        self._replayssm_rand_seed
-                        if self.mamba_config.enable_stochastic_rounding
-                        else None
+                    selective_state_update_replayssm_flashinfer(
+                        ssm_state,
+                        hidden_states_d,
+                        dt_d,
+                        A_d,
+                        B_d,
+                        C_d,
+                        preallocated_ssm_out_d,
+                        x_cache,
+                        B_cache,
+                        dt_cache,
+                        ring_start,
+                        prev_num_accepted,
+                        D=D_d,
+                        dt_bias=dt_bias,
+                        dt_softplus=True,
+                        state_batch_indices=replayssm_state_indices_d,
+                        scratch=attn_metadata.replayssm_scratch,
+                        enable_stochastic_rounding=(
+                            self.mamba_config.enable_stochastic_rounding
+                        ),
+                        stochastic_rounding_philox_rounds=(
+                            self.mamba_config.stochastic_rounding_philox_rounds
+                        ),
+                        cu_seqlens=fi_cu_seqlens,
+                        max_seqlen=fi_max_seqlen,
+                        enable_pdl=False,
                     )
-                    if flashinfer_raw_replay:
-                        assert self._replayssm_runtime_kernel is not None
-                        num_replay_reqs = (
-                            fi_cu_seqlens.numel() - 1
-                            if fi_cu_seqlens is not None
-                            else decode_batch
-                        )
-                        assert num_replay_reqs < len(self._replayssm_runtime_policies)
-                        (
-                            use_two_kernel,
-                            d_split,
-                            precompute_heads_per_cta,
-                            main_pipeline_stages,
-                            main_ctas_per_sm,
-                        ) = self._replayssm_runtime_policies[num_replay_reqs]
-                        cb_scaled, cumAdt_vec, cb_old = attn_metadata.replayssm_scratch
-                        self._replayssm_runtime_kernel(
-                            ssm_state,
-                            hidden_states_d,
-                            dt_d,
-                            A_d,
-                            B_d,
-                            C_d,
-                            preallocated_ssm_out_d,
-                            x_cache,
-                            B_cache,
-                            dt_cache,
-                            ring_start,
-                            prev_num_accepted,
-                            D_d,
-                            None,
-                            dt_bias,
-                            True,
-                            replayssm_state_indices_d,
-                            -1,
-                            None,
-                            rand_seed,
-                            d_split,
-                            fi_cu_seqlens,
-                            cb_scaled if use_two_kernel else None,
-                            cumAdt_vec if use_two_kernel else None,
-                            cb_old if use_two_kernel else None,
-                            precompute_heads_per_cta,
-                            main_pipeline_stages,
-                            main_ctas_per_sm,
-                        )
-                    else:
-                        selective_state_update_replayssm_flashinfer(
-                            ssm_state,
-                            hidden_states_d,
-                            dt_d,
-                            A_d,
-                            B_d,
-                            C_d,
-                            preallocated_ssm_out_d,
-                            x_cache,
-                            B_cache,
-                            dt_cache,
-                            ring_start,
-                            prev_num_accepted,
-                            D=D_d,
-                            dt_bias=dt_bias,
-                            dt_softplus=True,
-                            state_batch_indices=replayssm_state_indices_d,
-                            scratch=attn_metadata.replayssm_scratch,
-                            rand_seed=rand_seed,
-                            stochastic_rounding_philox_rounds=(
-                                self.mamba_config.stochastic_rounding_philox_rounds
-                            ),
-                            cu_seqlens=fi_cu_seqlens,
-                            max_seqlen=fi_max_seqlen,
-                            enable_pdl=False,
-                        )
                 else:
                     selective_state_update_replayssm_output_only(
                         ssm_state,
@@ -1123,44 +1032,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     is_blackwell=self.is_blackwell,
                 )
 
-    def prepare_replayssm_runtime_kernel(self, max_batch_size: int) -> None:
-        """Bind FlashInfer's kernel and cached tactics before serving."""
-        if (
-            not self.use_flashinfer_replayssm
-            or self.num_spec == 0
-            or self._replayssm_runtime_kernel is not None
-        ):
-            return
-
-        ssm_state = self.kv_cache[1]
-        x_cache, _, B_cache = self.replayssm_cache
-        if not ssm_state.numel() or not x_cache.numel():
-            raise RuntimeError(
-                "ReplaySSM runtime preparation requires allocated caches"
-            )
-        num_predicted_tokens = 1 + self.num_spec
-        (
-            self._replayssm_runtime_kernel,
-            self._replayssm_runtime_policies,
-        ) = prepare_flashinfer_replayssm_runtime(
-            state_dtype=ssm_state.dtype,
-            input_dtype=x_cache.dtype,
-            dt_dtype=x_cache.dtype,
-            weight_dtype=self.D.dtype,
-            matrix_a_dtype=self.A.dtype,
-            state_index_dtype=torch.int32,
-            dim=ssm_state.size(2),
-            dstate=ssm_state.size(3),
-            num_predicted_tokens=num_predicted_tokens,
-            max_window=x_cache.size(2) - num_predicted_tokens,
-            heads_per_group=ssm_state.size(1) // B_cache.size(1),
-            num_groups=B_cache.size(1),
-            max_batch_size=max_batch_size,
-            device=ssm_state.device,
-            use_rand_seed=self.mamba_config.enable_stochastic_rounding,
-            philox_rounds=(self.mamba_config.stochastic_rounding_philox_rounds or 10),
-        )
-
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
         assert self.cache_config is not None
@@ -1169,7 +1040,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
-        if self.use_replayssm:
+        if self.use_replayssm and not self.use_flashinfer_replayssm:
             dtypes = (
                 *dtypes,
                 *MambaStateDtypeCalculator.replayssm_ring_dtypes(
@@ -1192,16 +1063,22 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_spec=self.num_spec,
             )
         )
-        if self.use_replayssm:
+        if self.use_replayssm and not self.use_flashinfer_replayssm:
             shapes = (*shapes, *self._get_replayssm_ring_shapes(tp_world_size))
         return shapes
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        super().bind_kv_cache(kv_cache)
-        if self.use_flashinfer_replayssm:
-            # FlashInfer accepts independent pointers and outer-slot strides;
-            # its rings need not own independent allocations.
-            self.replayssm_cache = self.kv_cache[2:5]
+    def get_replayssm_state_dtype(self) -> tuple[torch.dtype, ...]:
+        if not self.use_flashinfer_replayssm:
+            return ()
+        assert self.model_config is not None
+        return MambaStateDtypeCalculator.replayssm_ring_dtypes(self.model_config.dtype)
+
+    def get_replayssm_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        if not self.use_flashinfer_replayssm:
+            return ()
+        assert self.replayssm_buffer_len is not None
+        tp_world_size = get_tensor_model_parallel_world_size()
+        return self._get_replayssm_ring_shapes(tp_world_size)
 
     def _get_replayssm_ring_shapes(
         self, tp_world_size: int
@@ -1259,8 +1136,6 @@ def share_replayssm_ring_trackers(
         namespace = layer_to_group.get(layer_name, layer_name)
         groups_by_namespace.setdefault(namespace, []).append(layer_name)
 
-    seed_base = None
-    seed_offset = 0
     for group_layer_names in groups_by_namespace.values():
         first_mixer = replayssm_mixers[group_layer_names[0]]
         first_state = first_mixer.kv_cache[1]
@@ -1274,33 +1149,10 @@ def share_replayssm_ring_trackers(
 
         ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
         prev_num_accepted = torch.zeros_like(ring_start)
-        if first_mixer.mamba_config.enable_stochastic_rounding:
-            # Bind seed storage before warmup/capture; lazy postprocessing must
-            # reuse these addresses rather than replacing graph inputs.
-            if seed_base is None:
-                seed_base = torch.randint(
-                    0, 2**32, (1,), dtype=torch.int64, device=device
-                )
-            assert first_mixer.cache_config is not None
-            stream_count = len(group_layer_names) + int(
-                first_mixer.cache_config.mamba_cache_mode == "align"
-            )
-            stream_ids = torch.arange(
-                seed_offset,
-                seed_offset + stream_count,
-                dtype=torch.int64,
-                device=device,
-            )
-            rand_seeds = seed_base + (stream_ids << 32)
-            seed_offset += stream_count
-        else:
-            rand_seeds = torch.empty(0, dtype=torch.int64, device=device)
-        for layer_idx, layer_name in enumerate(group_layer_names):
+        for layer_name in group_layer_names:
             mixer = replayssm_mixers[layer_name]
             mixer._replayssm_ring_start = ring_start
             mixer._replayssm_prev_num_accepted = prev_num_accepted
-            mixer._replayssm_group_rand_seeds = rand_seeds
-            mixer._replayssm_rand_seed = rand_seeds[layer_idx : layer_idx + 1]
 
 
 def mamba_mixer2(

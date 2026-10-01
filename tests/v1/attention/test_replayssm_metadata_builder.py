@@ -207,11 +207,13 @@ def _make_mamba_spec(
         (1, ring_buffer_len, 1),
     )
     base_shapes = ((1, 1), (1, 1, 1))
+    flashinfer = mamba_backend == MambaBackendEnum.FLASHINFER
     return MambaSpec(
         block_size=BLOCK_SIZE,
-        shapes=(*base_shapes, *replayssm_shapes),
-        dtypes=(torch.float32,) * 5,
-        requires_live_state_copy=mamba_backend == MambaBackendEnum.FLASHINFER,
+        shapes=base_shapes if flashinfer else (*base_shapes, *replayssm_shapes),
+        dtypes=(torch.float32,) * (2 if flashinfer else 5),
+        replayssm_shapes=replayssm_shapes if flashinfer else (),
+        replayssm_dtypes=(torch.float32,) * 3 if flashinfer else (),
         mamba_cache_mode=mamba_cache_mode,
     )
 
@@ -334,8 +336,6 @@ def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
     assert first_indices is not None
     assert first_indices.is_contiguous()
     first_ptr = first_indices.data_ptr()
-    assert first.replayssm_scratch is not None
-    first_scratch_ptrs = tuple(t.data_ptr() for t in first.replayssm_scratch)
 
     second = _build(
         builder,
@@ -353,5 +353,3 @@ def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
     assert second_indices is not None
     assert second_indices.data_ptr() == first_ptr
     assert torch.equal(second_indices, second.state_indices_tensor_d[:, 0])
-    assert second.replayssm_scratch is not None
-    assert tuple(t.data_ptr() for t in second.replayssm_scratch) == first_scratch_ptrs

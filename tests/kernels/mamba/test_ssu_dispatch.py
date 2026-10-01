@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,7 +11,6 @@ from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
-    ReplaySSMModelContext,
     TritonSSUBackend,
     _postprocess_replayssm_kernel,
     _ReplaySSMGroupContext,
@@ -38,24 +36,15 @@ try:
 except ImportError:
     HAS_FLASHINFER = False
 
-try:
-    from flashinfer.mamba.checkpointing_ssu import checkpointing_ssu  # noqa: F401
-
-    HAS_FLASHINFER_REPLAYSSM = True
-except ImportError:
-    HAS_FLASHINFER_REPLAYSSM = False
-
 
 @pytest.fixture(autouse=True)
 def restore_backend_state():
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
 
     old_backend = mod._mamba_ssu_backend
-    old_replayssm_algorithm = mod._flashinfer_replayssm_algorithm
     old_replayssm_kernel = mod._flashinfer_replayssm_kernel
     yield
     mod._mamba_ssu_backend = old_backend
-    mod._flashinfer_replayssm_algorithm = old_replayssm_algorithm
     mod._flashinfer_replayssm_kernel = old_replayssm_kernel
 
 
@@ -153,104 +142,6 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_
     assert mixer._replayssm_prev_num_accepted[2].item() == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_replayssm_persistent_seed_streams_survive_capture_before_context():
-    """Warmup/capture must see the same seed storage as lazy postprocessing."""
-    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-    from vllm.v1.worker.utils import bind_kv_cache_to_layers
-
-    def ints(values):
-        return torch.tensor(values, dtype=torch.int32, device="cuda")
-
-    config = MambaConfig(
-        backend=MambaBackendEnum.FLASHINFER,
-        enable_stochastic_rounding=True,
-        stochastic_rounding_philox_rounds=5,
-    )
-    shapes = ((1,), (2, 1, 1), (2, 20, 1), (2, 20), (1, 20, 1))
-    dtypes = (
-        torch.float32,
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
-        torch.bfloat16,
-    )
-    page_bytes = sum(
-        math.prod(shape) * dtype.itemsize for shape, dtype in zip(shapes, dtypes)
-    )
-    mixers = []
-    for _ in range(2):
-        mixer = MambaMixer2.__new__(MambaMixer2)
-        torch.nn.Module.__init__(mixer)
-        mixer.use_replayssm = mixer.use_flashinfer_replayssm = True
-        mixer.mamba_config = config
-        mixer.cache_config = SimpleNamespace(mamba_cache_mode="align")
-        mixer.replayssm_buffer_len = 16
-        mixer.A = torch.empty(2, device="cuda")
-        mixer.get_state_shape = lambda: shapes
-        mixer.get_state_dtype = lambda: dtypes
-        mixers.append(mixer)
-    names = ["layers.0.mixer", "layers.1.mixer"]
-    forward_context = dict(zip(names, mixers))
-    spec = MambaSpec(
-        block_size=16, shapes=shapes, dtypes=dtypes, mamba_cache_mode="align"
-    )
-    kv_config = KVCacheConfig(
-        num_blocks=2,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
-    )
-    bind_kv_cache_to_layers(
-        {
-            name: torch.empty((2, 1, 1, page_bytes), dtype=torch.uint8, device="cuda")
-            for name in names
-        },
-        forward_context,
-        kv_cache_groups=kv_config.kv_cache_groups,
-    )
-    scalar_seeds = [mixer._replayssm_rand_seed for mixer in mixers]
-    for seed in scalar_seeds:
-        assert seed.is_cuda and seed.dtype == torch.int64 and seed.numel() == 1
-    bound_seeds = mixers[0]._replayssm_group_rand_seeds
-    initial = bound_seeds.clone()
-    assert torch.equal(
-        initial[1:] - initial[:-1], torch.full_like(initial[1:], 1 << 32)
-    )
-
-    observed = torch.empty_like(scalar_seeds[0])
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        observed.copy_(scalar_seeds[0])
-
-    context = ReplaySSMModelContext.create(
-        kv_config, [0], forward_context, [ints([[0]])], 1
-    )
-    assert context is not None
-    group = context.groups[0]
-    assert group.rand_seeds is bound_seeds
-    assert all(
-        mixer._replayssm_rand_seed is seed for mixer, seed in zip(mixers, scalar_seeds)
-    )
-
-    kwargs = dict(
-        idx_mapping=ints([0]),
-        query_metadata=ints([0, 4]),
-        query_metadata_is_cumulative=True,
-        num_computed_tokens=ints([4]),
-        num_computed_is_post_step=True,
-        num_accepted_tokens=ints([1]),
-        is_prefilling=torch.ones(1, dtype=torch.bool, device="cuda"),
-        live_cols=ints([0]),
-        num_reqs=1,
-    )
-    group.postprocess(**kwargs)
-    graph.replay()
-    torch.testing.assert_close(observed, initial[:1] + 1)
-    assert torch.equal(group.rand_seeds.cpu(), initial.cpu() + 1)
-    group.postprocess(**kwargs)
-    assert torch.equal(group.rand_seeds.cpu(), initial.cpu() + 2)
-
-
 def test_default_backend_is_triton():
     initialize_mamba_ssu_backend(MambaConfig(), _kv_cache_config_with_ssu())
     backend = get_mamba_ssu_backend()
@@ -274,31 +165,6 @@ def test_flashinfer_backend_init():
     backend = get_mamba_ssu_backend()
     assert isinstance(backend, FlashInferSSUBackend)
     assert backend.name == "flashinfer"
-
-
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_REPLAYSSM, reason="FlashInfer ReplaySSM not installed"
-)
-@pytest.mark.parametrize(
-    ("autotune_supported", "expected_algorithm"),
-    [(False, "two-kernel"), (True, "auto")],
-)
-def test_flashinfer_replayssm_selects_compatible_algorithm(
-    autotune_supported: bool, expected_algorithm: str, monkeypatch
-):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    monkeypatch.setattr(
-        mod,
-        "flashinfer_replayssm_autotune_supported",
-        lambda: autotune_supported,
-    )
-    initialize_mamba_ssu_backend(
-        MambaConfig(backend=MambaBackendEnum.FLASHINFER),
-        _kv_cache_config_with_ssu(),
-        use_replayssm=True,
-    )
-    assert mod._flashinfer_replayssm_algorithm == expected_algorithm
 
 
 @pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
@@ -341,37 +207,6 @@ def test_flashinfer_forwards_ssu_algorithm(
     )
 
     assert kernel.call_args.kwargs["algorithm"] == expected
-
-
-@pytest.mark.parametrize("algorithm", ["auto", "two-kernel"])
-def test_flashinfer_replayssm_forwards_selected_dispatch(algorithm: str):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    kernel = Mock(return_value=torch.empty(1))
-    mod._flashinfer_replayssm_kernel = kernel
-    mod._flashinfer_replayssm_algorithm = algorithm
-    tensor = torch.empty(1, 1, 1, 1)
-    tracker = torch.empty(1, dtype=torch.int32)
-    rand_seed = torch.tensor([123], dtype=torch.int64)
-
-    selective_state_update_replayssm_flashinfer(
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tracker,
-        tracker,
-        rand_seed=rand_seed,
-    )
-
-    assert kernel.call_args.kwargs["algorithm"] == algorithm
-    assert kernel.call_args.kwargs["rand_seed"] is rand_seed
 
 
 def test_uninitialized_backend_raises():
@@ -526,7 +361,6 @@ def test_replayssm_postprocess_commits_staged_transition(
         slots,
         plan_start,
         plan_flush,
-        torch.empty(0, dtype=torch.int64, device="cuda"),
         block_table.stride(0),
         1,
         MAMBA_BLOCK_SIZE=256,
@@ -539,7 +373,6 @@ def test_replayssm_postprocess_commits_staged_transition(
         HAS_IDX_MAPPING=post_step,
         MATERIALIZE_PREFIXES=False,
         LIVE_COL_IS_ZERO=True,
-        NUM_RAND_SEEDS=0,
     )
     assert committed.tolist() == [expected, 9]
     assert ring_start.tolist() == [0 if prefilling else 3, 7]
@@ -615,7 +448,7 @@ def test_replayssm_flashinfer_call_forwards_mtp_layout(monkeypatch, layout):
     ("query_start_loc", "expected_shape", "expected_max_seqlen"),
     [
         pytest.param([0, 4, 8], (2, 4, 2, 4), None, id="dense"),
-        pytest.param([0, 4, 6], (1, 6, 2, 4), 4, id="packed"),
+        pytest.param([0, 4, 6], (6, 2, 4), 4, id="packed"),
     ],
 )
 def test_replayssm_mixer_selects_mtp_layout(
@@ -637,8 +470,6 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.use_replayssm = True
     mixer.use_flashinfer_replayssm = True
     mixer.replayssm_buffer_len = 16
-    mixer._replayssm_runtime_kernel = None
-    mixer._replayssm_rand_seed = torch.empty(0, dtype=torch.int64)
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
     mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
     mixer.conv_weights = torch.empty(0)
@@ -658,6 +489,7 @@ def test_replayssm_mixer_selects_mtp_layout(
     )
 
     mixer.replayssm_cache = mixer.kv_cache[2:]
+    mixer.kv_cache = mixer.kv_cache[:2]
 
     num_decode_tokens = query_start_loc[-1]
     query_start_loc_d = torch.tensor(query_start_loc, dtype=torch.int32)
@@ -708,33 +540,3 @@ def test_replayssm_mixer_selects_mtp_layout(
     else:
         assert kernel.call_args.kwargs["cu_seqlens"] is query_start_loc_d
     assert kernel.call_args.kwargs["max_seqlen"] == expected_max_seqlen
-
-
-def test_replayssm_prepare_falls_back_without_optional_api(monkeypatch):
-    import sys
-
-    from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-        prepare_flashinfer_replayssm_runtime,
-    )
-
-    monkeypatch.setitem(
-        sys.modules, "flashinfer.mamba.checkpointing_ssu", SimpleNamespace()
-    )
-    assert prepare_flashinfer_replayssm_runtime(
-        state_dtype=torch.float16,
-        input_dtype=torch.bfloat16,
-        dt_dtype=torch.bfloat16,
-        weight_dtype=torch.bfloat16,
-        matrix_a_dtype=torch.float32,
-        state_index_dtype=torch.int32,
-        dim=64,
-        dstate=128,
-        num_predicted_tokens=4,
-        max_window=16,
-        heads_per_group=16,
-        num_groups=2,
-        max_batch_size=32,
-        device=torch.device("cpu"),
-        use_rand_seed=True,
-        philox_rounds=5,
-    ) == (None, ())

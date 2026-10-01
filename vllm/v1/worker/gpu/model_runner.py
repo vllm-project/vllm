@@ -174,14 +174,11 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     maybe_build_ubatch_runner,
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.replayssm_utils import (
-    ReplaySSMBlockCopier,
-    get_replayssm_block_copy_tensors,
-)
 from vllm.v1.worker.utils import (
     KVBlockZeroer,
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
+    get_replayssm_block_copy_tensors,
     get_uniform_decode_token_count,
 )
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
@@ -207,7 +204,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         self.device = device
-        self.replayssm_block_copier: ReplaySSMBlockCopier | None = None
         self.dtype = self.model_config.dtype
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
@@ -782,12 +778,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
             self.compilation_config.static_forward_context
         )
-        self.replayssm_block_copier = None
-        if self.replayssm_block_copy_tensors:
-            self.replayssm_block_copier = ReplaySSMBlockCopier(
-                [*self.kv_caches, *self.replayssm_block_copy_tensors],
-                self.kv_cache_config.num_blocks,
-            )
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -1255,14 +1245,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
         if scheduler_output.kv_cache_block_copies:
-            if self.replayssm_block_copier is None:
-                copy_kv_cache_blocks_inplace(
-                    self.kv_caches,
-                    self.kv_cache_config.num_blocks,
-                    scheduler_output.kv_cache_block_copies,
-                )
-            else:
-                self.replayssm_block_copier.copy(scheduler_output.kv_cache_block_copies)
+            copy_kv_cache_blocks_inplace(
+                [*self.kv_caches, *self.replayssm_block_copy_tensors],
+                self.kv_cache_config.num_blocks,
+                scheduler_output.kv_cache_block_copies,
+            )
 
     def gather_batch_req_state(
         self, scheduler_output: SchedulerOutput, dummy_run: bool
@@ -2353,7 +2340,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_caches.clear()
         if hasattr(self, "replayssm_block_copy_tensors"):
             self.replayssm_block_copy_tensors.clear()
-        self.replayssm_block_copier = None
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):

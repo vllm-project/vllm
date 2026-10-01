@@ -23,7 +23,7 @@ class MambaBase(AttentionLayerBase):
     # Contains the KV cache (mamba state) for the layer
     # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
-    # ReplaySSM ring views may share storage with the canonical Mamba page.
+    # ReplaySSM rings are auxiliary backend state, not canonical Mamba pages.
     replayssm_cache: tuple[torch.Tensor, ...] = ()
     supports_dcp: bool = False
 
@@ -42,6 +42,9 @@ class MambaBase(AttentionLayerBase):
             states.append(state.view(-1, *shape))
             offset += nbytes
         self.kv_cache = tuple(states)
+
+    def bind_replayssm_cache(self, cache: tuple[torch.Tensor, ...]) -> None:
+        self.replayssm_cache = cache
 
     @abstractmethod
     def get_state_shape(self) -> Iterable[tuple[int, ...]]:
@@ -64,6 +67,12 @@ class MambaBase(AttentionLayerBase):
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         pass
 
+    def get_replayssm_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        return ()
+
+    def get_replayssm_state_dtype(self) -> tuple[torch.dtype, ...]:
+        return ()
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
@@ -71,7 +80,8 @@ class MambaBase(AttentionLayerBase):
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
-            requires_live_state_copy=getattr(self, "use_flashinfer_replayssm", False),
+            replayssm_shapes=self.get_replayssm_state_shape(),
+            replayssm_dtypes=self.get_replayssm_state_dtype(),
             block_size=mamba_block_size,
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,

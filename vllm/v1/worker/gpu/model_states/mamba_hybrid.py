@@ -12,6 +12,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.short_conv_attn import (
@@ -99,13 +100,9 @@ class MambaHybridModelState(DefaultModelState):
         )
         self._needs_prefix_state_migration = self._align_mode
         if self._use_flashinfer_replayssm:
-            self._replayssm_prefilling = CpuGpuBuffer(
+            self._is_prefilling_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.bool, device=self.device
             )
-            self._replayssm_all_decode_gpu = torch.zeros_like(
-                self._replayssm_prefilling.gpu
-            )
-            self._replayssm_step_is_prefilling = self._replayssm_all_decode_gpu
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
@@ -325,36 +322,27 @@ class MambaHybridModelState(DefaultModelState):
 
         if self._use_flashinfer_replayssm:
             self._replayssm_query_start_loc = input_batch.query_start_loc
-            if not is_prefilling_np.any():
-                self._replayssm_step_is_prefilling = self._replayssm_all_decode_gpu
-            else:
-                # Match Mamba attention using pre-step metadata: after acceptance,
-                # subtracting the scheduled length also subtracts rejected drafts.
-                query_lens = torch.diff(query_start_loc_cpu)
-                decode_rows = query_lens == 1
-                if num_decode_draft_tokens_cpu is not None:
-                    decode_rows |= (num_decode_draft_tokens_cpu >= 0) & (
-                        query_lens == num_decode_draft_tokens_cpu + 1
-                    )
-                replayssm_prefilling = is_prefilling & ~(
-                    (seq_lens_cpu_upper_bound[:num_reqs] > query_lens) & decode_rows
+            # Match Mamba attention using pre-step metadata: after acceptance,
+            # subtracting the scheduled length also subtracts rejected drafts.
+            query_lens = torch.diff(query_start_loc_cpu)
+            decode_rows = query_lens == 1
+            if num_decode_draft_tokens_cpu is not None:
+                decode_rows |= (num_decode_draft_tokens_cpu >= 0) & (
+                    query_lens == num_decode_draft_tokens_cpu + 1
                 )
-                self._replayssm_prefilling.cpu[:num_reqs].copy_(replayssm_prefilling)
-                self._replayssm_prefilling.copy_to_gpu(num_reqs)
-                self._replayssm_step_is_prefilling = self._replayssm_prefilling.gpu
-
-            replayssm_ctx = self._mamba_ctx
-            if replayssm_ctx is None or not replayssm_ctx.is_initialized:
-                mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
-                self._ensure_mamba_postprocess_ctx(
-                    kv_cache_config, mamba_group_ids, block_tables
-                )
-            else:
-                mamba_group_ids = self._mamba_group_ids
+            replayssm_prefilling = is_prefilling & ~(
+                (seq_lens_cpu_upper_bound[:num_reqs] > query_lens) & decode_rows
+            )
+            async_tensor_h2d(
+                replayssm_prefilling, out=self._is_prefilling_gpu[:num_reqs]
+            )
+            mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+            self._ensure_mamba_postprocess_ctx(
+                kv_cache_config, mamba_group_ids, block_tables
+            )
 
         if self._align_mode:
-            if not self._use_flashinfer_replayssm:
-                mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+            mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
             aligned_index_builders = []
             for group_idx, group_id in enumerate(mamba_group_ids):
                 for group in attn_groups[group_id]:
@@ -497,7 +485,7 @@ class MambaHybridModelState(DefaultModelState):
                 if self._needs_prefix_state_migration
                 else self.num_accepted_tokens_gpu
             ),
-            is_prefilling=self._replayssm_step_is_prefilling[:num_reqs],
+            is_prefilling=self._is_prefilling_gpu[:num_reqs],
             live_cols=(
                 self._mamba_state_idx_gpu
                 if self._needs_prefix_state_migration

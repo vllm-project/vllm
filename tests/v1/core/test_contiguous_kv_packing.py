@@ -41,7 +41,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
-from vllm.v1.worker.utils import allocate_kv_cache
+from vllm.v1.worker.utils import allocate_kv_cache, allocate_replayssm_caches
 
 MEMORY = 8 * 1024 * 1024
 
@@ -123,6 +123,80 @@ def _expected_bytes_per_block(groups) -> int:
 
 def _bind(config, layout: str):
     return allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout[layout], None)
+
+
+@pytest.mark.parametrize("num_groups", [1, 2])
+@pytest.mark.parametrize("layers_per_group", [1, 2])
+def test_replayssm_rings_do_not_expand_canonical_mamba_page(
+    num_groups: int, layers_per_group: int
+):
+    full_spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
+    )
+    mamba_spec = MambaSpec(
+        block_size=2,
+        shapes=((16,), (16,)),
+        dtypes=(torch.float32, torch.float32),
+        replayssm_shapes=((2,), (1,), (1,)),
+        replayssm_dtypes=(torch.float32,) * 3,
+    )
+    groups = [KVCacheGroupSpec(["full"], full_spec)]
+    for group_idx in range(num_groups):
+        layer_names = [
+            f"mamba_{group_idx}_{layer_idx}" for layer_idx in range(layers_per_group)
+        ]
+        groups.append(KVCacheGroupSpec(layer_names, mamba_spec))
+
+    assert full_spec.page_size_bytes == mamba_spec.page_size_bytes == 128
+    assert mamba_spec.replayssm_size_bytes == 16
+    canonical_bytes = 128 * layers_per_group
+    ring_bytes = 16 * num_groups * layers_per_group
+    # Trackers are allocated once per group, rather than once per layer.
+    tracker_bytes = 8 * num_groups
+    total_bytes = canonical_bytes + ring_bytes + tracker_bytes
+    assert _get_kv_cache_bytes_per_block(groups) == total_bytes
+
+    config = get_kv_cache_config_from_groups(
+        _mock_vllm_config("LBNHC"), groups, available_memory=4 * total_bytes
+    )
+    assert config.num_blocks == 4
+    assert (
+        get_kv_cache_config_from_groups(
+            _mock_vllm_config("LBNHC"), groups, available_memory=4 * total_bytes - 1
+        ).num_blocks
+        == 3
+    )
+    caches = allocate_kv_cache(
+        config,
+        torch.device("cpu"),
+        KVCacheLayout.LBNHC,
+    )
+    replayssm_caches = allocate_replayssm_caches(config, torch.device("cpu"))
+    layer_name = "mamba_0_0"
+    assert (
+        caches[layer_name].untyped_storage().data_ptr()
+        != replayssm_caches[layer_name][0].untyped_storage().data_ptr()
+    )
+    assert caches[layer_name].untyped_storage().nbytes() == 4 * canonical_bytes
+    assert (
+        sum(
+            state.numel() * state.element_size()
+            for states in replayssm_caches.values()
+            for state in states
+        )
+        == 4 * ring_bytes
+    )
+    assert [tuple(state.shape) for state in replayssm_caches[layer_name]] == [
+        (4, 2),
+        (4, 1),
+        (4, 1),
+    ]
+    replayssm_caches[layer_name][0].fill_(7)
+    assert torch.count_nonzero(caches[layer_name]) == 0
+    assert torch.count_nonzero(replayssm_caches[layer_name][1]) == 0
 
 
 MAIN_KV_PAGE_BYTES = 2_048
