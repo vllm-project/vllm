@@ -2,22 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SplitQ KV-cache format: layout, rotations and a PyTorch reference.
 
-Each (token, KV head) is stored in one byte slot. The head is split at the
-rotary boundary:
+Each (token, KV head) is stored in one byte slot. K is split at the rotary
+boundary and V is quantized whole:
 
-* RoPE dims ``[0, R)`` of K: symmetric int8 with a per-token-head scale.
-* NoPE dims ``[R, D)`` of K and all ``D`` dims of V: random sign flips plus
-  a block Walsh-Hadamard transform, then a uniform midrise quantizer with
-  ``2**bits`` levels. The rotated coordinates are close to Gaussian, so the
-  step is fixed relative to the vector RMS and refined per vector by least
-  squares. Everything is computed on the fly; there is no calibration.
+* K: random sign flips plus a Walsh-Hadamard transform over each 64-dim
+  block. The RoPE blocks get 4-bit codes, the NoPE blocks 3-bit codes, and
+  every block has its own scale.
+* V: sign flips plus one Hadamard transform over all dims, ``v_bits`` codes.
 
-Scores are computed in the rotated space (the query NoPE part is rotated the
-same way) and the attention output is rotated back once per query head.
+The rotated coordinates are close to Gaussian, so each code indexes a
+Lloyd-Max codebook for N(0, 1), stored as int8 (``LUT``): a code ``c`` of a
+block with scale ``s`` stands for ``LUT[c] * s / LUT_ONE``. The scale makes
+``x . x_hat = |x|^2``: a least-squares fit would shrink every reconstructed
+vector, which flattens the softmax and scales down the attention output.
+Everything is computed on the fly; there is no calibration.
+
+Scores are computed in the rotated space (the query is rotated like K) and
+the attention output is rotated back once per query head.
 
 Slot layout (bytes)::
 
-    [k_rope int8 R][k_nope codes][v codes][fp16 scales][pad to 8]
+    [k_rope codes][k_nope codes][v codes][fp16 scales][pad to 8]
 
 4-bit codes: each little-endian uint32 covers 8 dims; byte j holds dim j in
 its low nibble and dim j + 4 in its high nibble, so ``w & 0x0F0F0F0F`` and
@@ -27,7 +32,7 @@ its low nibble and dim j + 4 in its high nibble, so ``w & 0x0F0F0F0F`` and
 gives dims 4i..4i+3) followed by a 1-bit plane (uint32 per 32 dims;
 ``(w >> i) & 0x01010101`` gives dims 4i..4i+3). code = lo + 4 * hi.
 
-Scales (fp16): k_rope, one per 64-dim NoPE block, v.
+Scales (fp16): one per 64-dim K block, then V.
 """
 
 import functools
@@ -38,8 +43,18 @@ import torch
 
 HADAMARD_BLOCK = 64
 _SIGN_SEED = 0x5E17
-# MSE-optimal midrise step for N(0, 1) inputs.
-_GAUSSIAN_STEP = {3: 0.5865, 4: 0.3355}
+ROPE_BITS = 4
+NOPE_BITS = 3
+# Lloyd-Max codebooks for N(0, 1) as int8: LUT[bits][c] / LUT_MULT[bits]
+# approximates centroid c (the kernels map codes through the same tables).
+LUT = {
+    3: (-127, -79, -45, -14, 14, 45, 79, 127),
+    4: (-126, -95, -74, -58, -43, -30, -18, -6, 6, 18, 30, 43, 58, 74, 95, 126),
+}
+LUT_MULT = {3: 59.0, 4: 46.0}
+# Fixed point of the stored scales: a code stands for LUT[c] * scale / LUT_ONE,
+# which keeps small blocks' scales out of the fp16 subnormal range.
+LUT_ONE = 64.0
 
 _rope_dim_by_head_size: dict[int, int] = {}
 
@@ -83,60 +98,55 @@ def registered_rope_dim(head_size: int) -> int:
 class SplitQFormat:
     head_size: int
     rope_dim: int
-    bits: int
+    v_bits: int
 
     def __post_init__(self):
         d, r = self.head_size, self.rope_dim
-        if self.bits not in (3, 4):
-            raise ValueError(f"SplitQ supports 3 or 4 bits, got {self.bits}")
-        if r % 16 or (d - r) % HADAMARD_BLOCK or d % HADAMARD_BLOCK:
+        if self.v_bits not in (3, 4):
+            raise ValueError(f"SplitQ supports 3- or 4-bit V, got {self.v_bits}")
+        if r % HADAMARD_BLOCK or d % HADAMARD_BLOCK:
             raise ValueError(
-                f"SplitQ needs rope_dim % 16 == 0 and the NoPE part and "
-                f"head_size in multiples of {HADAMARD_BLOCK}; got "
-                f"head_size={d}, rope_dim={r}"
+                f"SplitQ needs head_size and rope_dim in multiples of "
+                f"{HADAMARD_BLOCK}; got head_size={d}, rope_dim={r}"
             )
 
     @classmethod
     def from_cache_dtype(cls, cache_dtype: str, head_size: int, rope_dim: int):
-        bits = {"splitq_k4v4": 4, "splitq_k3v3": 3}[cache_dtype]
-        return cls(head_size, rope_dim, bits)
+        v_bits = {"splitq_k3v4": 4, "splitq_k3v3": 3}[cache_dtype]
+        return cls(head_size, rope_dim, v_bits)
 
     @property
     def nope_dim(self) -> int:
         return self.head_size - self.rope_dim
 
     @property
-    def levels(self) -> int:
-        return 1 << self.bits
+    def num_k_blocks(self) -> int:
+        return self.head_size // HADAMARD_BLOCK
 
     @property
-    def num_nope_blocks(self) -> int:
-        return self.nope_dim // HADAMARD_BLOCK
+    def num_rope_blocks(self) -> int:
+        return self.rope_dim // HADAMARD_BLOCK
 
     @property
     def off_k_nope(self) -> int:
-        return self.rope_dim
+        return self.rope_dim * ROPE_BITS // 8
 
     @property
     def off_v(self) -> int:
-        return self.off_k_nope + self.nope_dim * self.bits // 8
+        return self.off_k_nope + self.nope_dim * NOPE_BITS // 8
 
     @property
     def off_scales(self) -> int:
-        return self.off_v + self.head_size * self.bits // 8
+        return self.off_v + self.head_size * self.v_bits // 8
 
     @property
     def num_scales(self) -> int:
-        return 2 + self.num_nope_blocks
+        return self.num_k_blocks + 1
 
     @property
     def slot_bytes(self) -> int:
         raw = self.off_scales + 2 * self.num_scales
         return (raw + 7) // 8 * 8
-
-    @property
-    def step(self) -> float:
-        return _GAUSSIAN_STEP[self.bits]
 
 
 @functools.cache
@@ -191,19 +201,25 @@ def v_block(head_size: int) -> int:
     return HADAMARD_BLOCK
 
 
-def _quantize_uniform(x: torch.Tensor, fmt: SplitQFormat):
-    """Midrise quantizer with a Gaussian step and a least-squares scale.
+@functools.cache
+def _lut(bits: int, device_str: str) -> torch.Tensor:
+    return torch.tensor(LUT[bits], dtype=torch.float32, device=device_str)
 
-    Returns (codes uint8 in [0, levels), scale) with x ≈ (codes - c0) * scale.
+
+def _quantize_lut(x: torch.Tensor, bits: int):
+    """Nearest Lloyd-Max code on the block RMS; the scale keeps
+    ``x . x_hat = |x|^2``.
+
+    Returns (codes uint8 in [0, 2**bits), scale) with
+    x ≈ LUT[codes] * scale / LUT_ONE.
     """
-    levels = fmt.levels
-    c0 = (levels - 1) / 2
-    rms = x.pow(2).mean(-1, keepdim=True).sqrt().clamp_min(1e-12)
-    step = rms * fmt.step
-    codes = torch.floor(x / step + levels / 2).clamp(0, levels - 1)
-    centered = codes - c0
-    denom = centered.pow(2).sum(-1, keepdim=True).clamp_min(1e-12)
-    scale = (x * centered).sum(-1, keepdim=True) / denom
+    lut = _lut(bits, str(x.device))
+    ss = x.pow(2).sum(-1, keepdim=True)
+    rms = (ss / x.shape[-1]).sqrt().clamp_min(1e-12)
+    y = x / rms * LUT_MULT[bits]
+    codes = torch.bucketize(y, (lut[1:] + lut[:-1]) / 2)
+    dot = (x * lut[codes]).sum(-1, keepdim=True)
+    scale = torch.where(dot > 0, ss / dot.clamp_min(1e-30), 0.0) * LUT_ONE
     return codes.to(torch.uint8), scale
 
 
@@ -244,28 +260,22 @@ def reference_quantize(
     t, h, d = key.shape
     r, dev = fmt.rope_dim, key.device
     out = torch.zeros(t, h, fmt.slot_bytes, dtype=torch.uint8, device=dev)
-    scales = torch.empty(t, h, fmt.num_scales, dtype=torch.float32, device=dev)
+    nkb = fmt.num_k_blocks
 
-    k = key.float()
-    k_rope = k[..., :r]
-    kr_scale = k_rope.abs().amax(-1, keepdim=True).clamp_min(1e-12) / 127.0
-    kr_q = torch.round(k_rope / kr_scale).clamp(-127, 127).to(torch.int8)
-    out[..., :r] = kr_q.view(torch.uint8)
-    scales[..., 0] = kr_scale[..., 0]
-
-    kn = rotate(k[..., r:], signs(fmt.nope_dim, str(dev)))
-    kn = kn.view(t, h, fmt.num_nope_blocks, HADAMARD_BLOCK)
-    kn_codes, kn_scale = _quantize_uniform(kn, fmt)
+    k = rotate(key, signs(d, str(dev))).view(t, h, nkb, HADAMARD_BLOCK)
+    nr = fmt.num_rope_blocks
+    kr_codes, kr_scale = _quantize_lut(k[:, :, :nr], ROPE_BITS)
+    kn_codes, kn_scale = _quantize_lut(k[:, :, nr:], NOPE_BITS)
+    out[..., : fmt.off_k_nope] = _pack(kr_codes.view(t, h, r), ROPE_BITS)
     out[..., fmt.off_k_nope : fmt.off_v] = _pack(
-        kn_codes.view(t, h, fmt.nope_dim), fmt.bits
+        kn_codes.view(t, h, fmt.nope_dim), NOPE_BITS
     )
-    scales[..., 1 : 1 + fmt.num_nope_blocks] = kn_scale[..., 0]
 
     vr = rotate(value, signs(d, str(dev)), v_block(d))
-    v_codes, v_scale = _quantize_uniform(vr, fmt)
-    out[..., fmt.off_v : fmt.off_scales] = _pack(v_codes, fmt.bits)
-    scales[..., -1] = v_scale[..., 0]
+    v_codes, v_scale = _quantize_lut(vr, fmt.v_bits)
+    out[..., fmt.off_v : fmt.off_scales] = _pack(v_codes, fmt.v_bits)
 
+    scales = torch.cat((kr_scale[..., 0], kn_scale[..., 0], v_scale), -1)
     sc = scales.to(torch.float16).view(torch.uint8).view(t, h, -1)
     out[..., fmt.off_scales : fmt.off_scales + sc.shape[-1]] = sc
     return out
@@ -276,30 +286,31 @@ def reference_dequantize(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """(T, H, slot) slots -> fp32 K and V of shape (T, H, D).
 
-    With ``rotated=True`` the NoPE part of K and all of V stay in the
-    rotated space, which is what the kernels consume.
+    With ``rotated=True`` K and V stay in the rotated space, which is what
+    the kernels consume.
     """
     t, h, _ = slots.shape
     r, d, dev = fmt.rope_dim, fmt.head_size, slots.device
-    c0 = (fmt.levels - 1) / 2
     sc = (
         slots[..., fmt.off_scales : fmt.off_scales + 2 * fmt.num_scales]
         .contiguous()
         .view(torch.float16)
         .float()
+        / LUT_ONE
     )
-    k_rope = slots[..., :r].contiguous().view(torch.int8).float() * sc[..., :1]
+    kr = _unpack(slots[..., : fmt.off_k_nope], r, ROPE_BITS)
+    kn = _unpack(slots[..., fmt.off_k_nope : fmt.off_v], fmt.nope_dim, NOPE_BITS)
+    k = torch.cat(
+        (_lut(ROPE_BITS, str(dev))[kr], _lut(NOPE_BITS, str(dev))[kn]), -1
+    ).view(t, h, fmt.num_k_blocks, HADAMARD_BLOCK)
+    k = (k * sc[..., : fmt.num_k_blocks, None]).view(t, h, d)
 
-    kn = _unpack(slots[..., fmt.off_k_nope : fmt.off_v], fmt.nope_dim, fmt.bits)
-    kn = (kn.float() - c0).view(t, h, fmt.num_nope_blocks, HADAMARD_BLOCK)
-    kn = (kn * sc[..., 1 : 1 + fmt.num_nope_blocks, None]).view(t, h, -1)
-
-    v = _unpack(slots[..., fmt.off_v : fmt.off_scales], d, fmt.bits)
-    v = (v.float() - c0) * sc[..., -1:]
+    v = _unpack(slots[..., fmt.off_v : fmt.off_scales], d, fmt.v_bits)
+    v = _lut(fmt.v_bits, str(dev))[v] * sc[..., -1:]
     if not rotated:
-        kn = unrotate(kn, signs(fmt.nope_dim, str(dev)))
+        k = unrotate(k, signs(d, str(dev)))
         v = unrotate(v, signs(d, str(dev)), v_block(d))
-    return torch.cat((k_rope, kn), -1), v
+    return k, v
 
 
 def reference_attention(

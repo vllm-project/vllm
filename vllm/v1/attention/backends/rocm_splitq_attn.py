@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""SplitQ attention backend for RDNA3 (HIP kernels).
+"""SplitQ attention backend for AMD GPUs (HIP kernels only).
 
 KV cache format and reference: ``vllm/v1/attention/ops/rocm_splitq.py``.
-Kernels: ``csrc/attention/splitq_attn_rdna3.cu``.
+Kernels: ``csrc/attention/splitq_attn.cu`` (portable) and the per-architecture
+tiers in ``_ARCH_TIERS``; see ``docs/design/rocm_splitq.md``.
 
 Decode, MTP verification and short continuation chunks (every request with
 at most ``_DECODE_MAX_QUERY_LEN`` query tokens) run the split-KV decode
 kernel over the packed cache; consecutive query tokens of one request share
-each K/V read. Longer prefills expand the request's cached prefix into int8
-per-token-head buffers and run the RDNA3 WMMA prefill kernel on them, with
-the current chunk's K/V unquantized.
+each K/V read. Longer prefills run the prefill kernel, which reads the cached
+prefix from the packed cache and the current chunk's K/V unquantized.
 """
 
 import contextlib
@@ -37,10 +37,26 @@ from vllm.v1.attention.ops import rocm_splitq as sq
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+# Per-architecture kernel tiers (gcnArchName prefix -> (decode, prefill)).
+# Decode always has the portable dot4 kernel; prefill needs a HIP kernel per
+# architecture and there is no Triton fallback.
+_ARCH_TIERS: dict[str, tuple[str, str | None]] = {
+    "gfx11": ("wmma", "wmma"),
+}
+_PORTABLE_TIERS: tuple[str, str | None] = ("dot4", None)
+
+
+def _arch_tiers() -> tuple[str, tuple[str, str | None]]:
+    arch = torch.cuda.get_device_properties().gcnArchName.split(":")[0]
+    for prefix, tiers in _ARCH_TIERS.items():
+        if arch.startswith(prefix):
+            return arch, tiers
+    return arch, _PORTABLE_TIERS
+
+
 _DECODE_MAX_QUERY_LEN = 128
 _KERNEL_HEAD_SIZE = 256
 _KERNEL_ROPE_DIM = 64
-_PREFILL_BLOCK = 16
 
 
 class RocmSplitQAttentionBackend(AttentionBackend):
@@ -49,7 +65,7 @@ class RocmSplitQAttentionBackend(AttentionBackend):
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "splitq_k4v4",
+        "splitq_k3v4",
         "splitq_k3v3",
     ]
 
@@ -149,6 +165,13 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
                 "ROCM_SPLITQ kernels need ROCm, head_size=256 and 64 rotary "
                 f"dims; got head_size={head_size}, rotary dims={rope_dim}"
             )
+        arch, (decode_tier, prefill_tier) = _arch_tiers()
+        if prefill_tier is None:
+            raise NotImplementedError(
+                f"ROCM_SPLITQ has no HIP prefill kernel for {arch} yet; see the "
+                "architecture contract in docs/design/rocm_splitq.md"
+            )
+        self._use_wmma = decode_tier == "wmma"
 
         self.max_num_kv_splits = (
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
@@ -156,16 +179,16 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
         self._max_capture_size = (
             vllm_config.compilation_config.max_cudagraph_capture_size or 4
         )
-        self._nope_signs: torch.Tensor | None = None
+        self._k_signs: torch.Tensor | None = None
         self._v_signs: torch.Tensor | None = None
         self._mid_o: torch.Tensor | None = None
 
     def _signs(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-        if self._nope_signs is None or self._nope_signs.device != device:
-            self._nope_signs = sq.sign_bits(self.fmt.nope_dim).to(device)
-            self._v_signs = sq.sign_bits(self.head_size).to(device)
+        if self._k_signs is None or self._k_signs.device != device:
+            self._k_signs = sq.sign_bits(self.head_size).to(device)
+            self._v_signs = self._k_signs
         assert self._v_signs is not None
-        return self._nope_signs, self._v_signs
+        return self._k_signs, self._v_signs
 
     def _mid_o_buffer(
         self, num_q: int, device: torch.device
@@ -206,16 +229,16 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
     ) -> None:
         if slot_mapping.numel() == 0:
             return
-        nope_signs, v_signs = self._signs(key.device)
+        k_signs, v_signs = self._signs(key.device)
         n = slot_mapping.shape[0]
         torch.ops._C.splitq_cache_store(
             key[:n],
             value[:n],
             kv_cache,
             slot_mapping,
-            nope_signs,
+            k_signs,
             v_signs,
-            self.fmt.bits,
+            self.fmt.v_bits,
         )
 
     def forward(
@@ -277,7 +300,7 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
         num_q = q.shape[0]
         if num_q == 0:
             return
-        nope_signs, v_signs = self._signs(q.device)
+        k_signs, v_signs = self._signs(q.device)
         mid_o, splits = self._mid_o_buffer(num_q, q.device)
         # Async scheduling can free and reuse an input's memory before this
         # kernel reads it; tell the allocator these are in use on the stream.
@@ -293,12 +316,13 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
             q_to_req,
             q_to_klen,
             mid_o,
-            nope_signs,
+            k_signs,
             v_signs,
             self.scale,
             splits,
-            self.fmt.bits,
+            self.fmt.v_bits,
             4 if md.max_query_len > 1 else 1,
+            self._use_wmma,
         )
 
     def _prefill(
@@ -311,66 +335,33 @@ class RocmSplitQAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
         md: TritonAttentionMetadata,
     ) -> None:
         """Requests after the decodes, in the rotated space, without host
-        syncs: their cached prefixes are expanded to int8 into a workspace
-        sized by ``max_seq_len`` and one WMMA prefill call covers them all."""
+        syncs: one call covers them all, reading the cached prefixes straight
+        from the packed cache and the chunks' own K/V unquantized."""
         nd, ndt, n = md.num_decodes, md.num_decode_tokens, md.num_actual_tokens
         num_reqs = md.query_start_loc.shape[0] - 1
-        num_p = num_reqs - nd
-        if num_p <= 0 or ndt >= n:
+        if num_reqs - nd <= 0 or ndt >= n:
             return
-        dev, fmt = q.device, self.fmt
-        nope_signs, v_signs = self._signs(dev)
-        q_rot = q[ndt:n].clone()
-        k_rot = key[ndt:n].clone()
-        v_rot = value[ndt:n].clone()
-        torch.ops._C.splitq_rotate(q_rot, nope_signs, True, False)
-        torch.ops._C.splitq_rotate(k_rot, nope_signs, True, False)
+        k_signs, v_signs = self._signs(q.device)
+        # The kernel runs in fp16; the rotated copies are made in fp16.
+        q_rot = q[ndt:n].to(torch.float16, copy=True)
+        k_rot = key[ndt:n].to(torch.float16, copy=True)
+        v_rot = value[ndt:n].to(torch.float16, copy=True)
+        torch.ops._C.splitq_rotate(q_rot, k_signs, True, False)
+        torch.ops._C.splitq_rotate(k_rot, k_signs, True, False)
         torch.ops._C.splitq_rotate(v_rot, v_signs, False, False)
-
-        qsl = (md.query_start_loc[nd:] - ndt).to(torch.int32)
-        seq_lens = md.seq_lens[nd:num_reqs].to(torch.int32)
-        max_ctx_pad = -(-md.max_seq_len // _PREFILL_BLOCK) * _PREFILL_BLOCK
-        nblk = max_ctx_pad // _PREFILL_BLOCK
-        hkv, hs = self.num_kv_heads, self.head_size
-        k8 = torch.empty(
-            num_p * nblk, _PREFILL_BLOCK, hkv, hs, dtype=torch.int8, device=dev
-        )
-        v8 = torch.empty_like(k8)
-        ks = torch.empty(
-            num_p * nblk, _PREFILL_BLOCK, hkv, dtype=torch.float32, device=dev
-        )
-        vs = torch.empty_like(ks)
-        torch.ops._C.splitq_to_int8(
-            kv_cache,
-            md.block_table[nd:num_reqs],
-            qsl,
-            seq_lens,
-            max_ctx_pad,
-            k8,
-            v8,
-            ks,
-            vs,
-            fmt.bits,
-        )
-        block_table = torch.arange(
-            num_p * nblk, dtype=torch.int32, device=dev
-        ).view(num_p, nblk)
         o_rot = torch.empty_like(q_rot)
-        torch.ops._C.paged_prefill_attn_rdna3_int8(
+        torch.ops._C.splitq_prefill(
             o_rot,
             q_rot,
             k_rot,
             v_rot,
-            k8,
-            v8,
-            ks,
-            vs,
-            block_table,
-            qsl,
-            seq_lens,
+            kv_cache,
+            md.block_table[nd:num_reqs],
+            (md.query_start_loc[nd:] - ndt).to(torch.int32),
+            md.seq_lens[nd:num_reqs].to(torch.int32),
             md.max_query_len,
             self.scale,
-            True,
+            self.fmt.v_bits,
         )
         torch.ops._C.splitq_rotate(o_rot, v_signs, False, True)
         out[ndt:n] = o_rot

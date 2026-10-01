@@ -7,16 +7,16 @@
 // sharing A fragments through a DPP swap); see the notes there. What changes is
 // the cache side:
 //
-//   QK  S^T[token][q] = K x Q^T over 16 k-steps of 16 dims. Steps 0-3 are the
-//       RoPE dims (int8, fed as x + 1152), steps 4-15 the rotated NoPE codes
-//       (fed as c + 1024). Each 64-dim segment has its own per-token scale,
-//       so the steps accumulate into four tiles that are scaled and debiased
-//       in the softmax.
-//   PV  O^T[dim][q] = V^T x P^T with the rotated V codes fed as c + 1024; the
-//       per-token V scale is folded into P, the bias removed with sum(P).
+//   QK  S^T[token][q] = K x Q^T over 16 k-steps of 16 dims: steps 0-3 the
+//       RoPE block (4-bit codes), 4-15 the NoPE blocks (3-bit codes). Codes
+//       are mapped to their int8 codebook values and fed as x + 1152. Each
+//       64-dim block has its own per-token scale, so the steps accumulate
+//       into four tiles that are scaled and debiased in the softmax.
+//   PV  O^T[dim][q] = V^T x P^T with the V codebook values fed as x + 1152;
+//       the per-token V scale is folded into P, the bias removed with sum(P).
 //
-// The query is rotated (NoPE part) while it is staged into LDS; the output
-// stays rotated and splitq_reduce rotates it back.
+// The query is rotated like K while it is staged into LDS; the output stays
+// rotated and splitq_reduce rotates it back.
 
 #include <cstdint>
 #include <torch/all.h>
@@ -26,6 +26,8 @@
   #include <hip/hip_runtime.h>
   #include <hip/hip_bf16.h>
   #include <hip/hip_fp16.h>
+
+  #include "splitq_format.cuh"
 
   #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1100__) && \
       !defined(__gfx1101__) && !defined(__gfx1102__) && !defined(__gfx1103__)
@@ -41,22 +43,16 @@ typedef float f8v __attribute__((ext_vector_type(8)));
 typedef uint32_t u8v __attribute__((ext_vector_type(8)));
 typedef const int __attribute__((address_space(4))) cint;
 
-constexpr int D = 256;
-constexpr int R = 64;
-constexpr int N = D - R;
+using splitq::D;
+using splitq::Format;
+using splitq::LUT_ONE;
+using splitq::N;
+using splitq::R;
 constexpr int QG = 4;          // query tokens per block
 constexpr int QROW = D + 8;    // padded LDS row (bank spread)
 constexpr float PSCALE = 256.0f;
-constexpr float RBIAS = 1152.0f;  // int8 byte x fed as x + 1152
+constexpr float BIAS = 1152.0f;  // int8 byte x fed as x + 1152
 constexpr uint32_t X = 0x80808080u;
-
-template <int BITS>
-struct Layout {
-  static constexpr int OFF_KN = R;
-  static constexpr int OFF_V = OFF_KN + N * BITS / 8;
-  static constexpr int OFF_SC = OFF_V + D * BITS / 8;
-  static constexpr float CBIAS = 1024.0f + ((1 << BITS) - 1) * 0.5f;
-};
 
 __device__ __forceinline__ uint32_t swap1(uint32_t v) {
   return (uint32_t)__builtin_amdgcn_update_dpp(0, (int)v, 0xB1, 0xF, 0xF,
@@ -103,28 +99,6 @@ __device__ __forceinline__ void tr4(uint32_t a0, uint32_t a1, uint32_t a2,
   o[3] = __builtin_amdgcn_perm(hi23, hi01, 0x07060302u);
 }
 
-// Codes of the 16 dims of chunk c of a packed region of `ndim` dims, as four
-// dwords of bytes: dims 0-3, 4-7, 8-11, 12-15 of the chunk.
-template <int BITS>
-__device__ __forceinline__ void chunk_codes(const uint8_t* region, int ndim,
-                                            int c, uint32_t o[4]) {
-  if constexpr (BITS == 4) {
-    const uint2 w = *(const uint2*)(region + 8 * c);
-    o[0] = w.x & 0x0F0F0F0Fu;
-    o[1] = (w.x >> 4) & 0x0F0F0F0Fu;
-    o[2] = w.y & 0x0F0F0F0Fu;
-    o[3] = (w.y >> 4) & 0x0F0F0F0Fu;
-  } else {
-    const uint32_t lo = *(const uint32_t*)(region + 4 * c);
-    const uint32_t hi =
-        *(const uint32_t*)(region + ndim / 4 + 4 * (c >> 1)) >> (4 * (c & 1));
-  #pragma unroll
-    for (int i = 0; i < 4; ++i)
-      o[i] = ((lo >> (2 * i)) & 0x03030303u) |
-             (((hi >> i) & 0x01010101u) << 2);
-  }
-}
-
 template <typename T>
 __device__ __forceinline__ float to_f(T x) {
   return (float)x;
@@ -138,18 +112,18 @@ __device__ __forceinline__ float sign_of(const int* bits, int i) {
   return ((bits[i >> 5] >> (i & 31)) & 1) ? -1.0f : 1.0f;
 }
 
-template <int BITS, int NSB, typename QT>
+template <int VB, int NSB, typename QT>
 __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     const QT* __restrict__ Q, const uint8_t* __restrict__ cache,
     const int* __restrict__ block_table, const int* __restrict__ q_to_req,
     const int* __restrict__ q_to_klen, float* __restrict__ mid_o,
-    const int* __restrict__ nope_signs, float sm_scale, int num_q,
+    const int* __restrict__ k_signs, float sm_scale, int num_q,
     int num_q_heads, int num_kv_heads, int block_size, int max_blocks,
     int num_reqs, int num_phys_blocks, int num_splits, int min_tps,
     int num_row_tiles, int64_t sq0, int64_t sq1, int64_t scb, int64_t sch, int64_t sct,
     int64_t smo, int64_t smh, int64_t sms) {
   #ifndef SPLITQ_WMMA_STUB
-  using L = Layout<BITS>;
+  using F = Format<VB>;
   const int grp = blockIdx.x;
   const int kvh = blockIdx.y;
   const int tid = threadIdx.x;
@@ -164,11 +138,11 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
   const int rr = useful ? j : (j ^ 1);
   const int hpk = num_q_heads / num_kv_heads;
   const int max_kv = max_blocks * block_size;
-  const float sm_log2 = sm_scale * 1.4426950408889634f;
+  const float sm_log2 = sm_scale * 1.4426950408889634f / LUT_ONE;
 
   __shared__ __attribute__((aligned(16))) _Float16 sQ[32][QROW];
 
-  // Stage the group's queries, NoPE part rotated: lane owns 8 dims.
+  // Stage the group's queries rotated like K: lane owns 8 dims.
   for (int v = w; v < 32; v += 2 * NSB) {
     const int r = v / hpk, g = v % hpk;
     const int qi = grp * QG + r;
@@ -179,10 +153,8 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       x[i] = live ? to_f<QT>(Q[(int64_t)qi * sq0 +
                               (int64_t)(kvh * hpk + g) * sq1 + lane * 8 + i])
                   : 0.0f;
-    if (lane >= R / 8) {
     #pragma unroll
-      for (int i = 0; i < 8; ++i) x[i] *= sign_of(nope_signs, lane * 8 + i - R);
-    }
+    for (int i = 0; i < 8; ++i) x[i] *= sign_of(k_signs, lane * 8 + i);
     #pragma unroll
     for (int hh = 1; hh < 8; hh <<= 1) {
     #pragma unroll
@@ -202,16 +174,8 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
         x[i] = hi ? o - x[i] : x[i] + o;
       }
     }
-    // RoPE lanes took part in the butterflies on their own 8-lane group;
-    // reload their raw values.
     #pragma unroll
-    for (int i = 0; i < 8; ++i) {
-      float raw = live ? to_f<QT>(Q[(int64_t)qi * sq0 +
-                                    (int64_t)(kvh * hpk + g) * sq1 +
-                                    lane * 8 + i])
-                       : 0.0f;
-      sQ[v][lane * 8 + i] = (_Float16)(lane >= R / 8 ? x[i] * 0.125f : raw);
-    }
+    for (int i = 0; i < 8; ++i) sQ[v][lane * 8 + i] = (_Float16)(x[i] * 0.125f);
   }
   __syncthreads();
 
@@ -251,10 +215,10 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       }
     }
     const float o0 = xhalf(s0), o1 = xhalf(s1);
-    bq[0] = (h ? o0 : s0) * RBIAS;
-    bq[1] = (h ? o1 : s1) * L::CBIAS;
-    bq[2] = (h ? s0 : o0) * L::CBIAS;
-    bq[3] = (h ? s1 : o1) * L::CBIAS;
+    bq[0] = (h ? o0 : s0) * BIAS;
+    bq[1] = (h ? o1 : s1) * BIAS;
+    bq[2] = (h ? s0 : o0) * BIAS;
+    bq[3] = (h ? s1 : o1) * BIAS;
   }
 
   int seg0 = 0;
@@ -312,13 +276,14 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       };
 
       // Raw K loads, one tile ahead. Each lane of a pair owns 8 of the 16
-      // k-steps of token rr: slots 0-1 are RoPE steps (16 bytes), slots 2-7
-      // NoPE chunks (8 bytes). The useful lane's slots are steps
-      // {0,1,4..9}, its partner's {2,3,10..15}; the partner's reach the
-      // useful lane through the DPP swap.
-      uint4 kr_raw[2];
+      // k-steps of token rr: slots 0-1 are RoPE steps (8 bytes of 4-bit
+      // codes), slots 2-7 NoPE steps (2-bit plane word, 1-bit plane word
+      // pre-shifted). The useful lane's slots are steps {0,1,4..9}, its
+      // partner's {2,3,10..15}; the partner's reach the useful lane through
+      // the DPP swap.
+      uint2 kr_raw[2];
       uint2 kn_raw[6];
-      // Scales of token j (lane j), raw fp16 pairs: {kr, k0}, {k1, k2}, {v}.
+      // Scales of token j (lane j), raw fp16 pairs: {k0, k1}, {k2, k3}, {v}.
       uint32_t sc_a = 0, sc_b = 0, sc_v = 0;
       auto load_k = [&](const uint8_t* tile, float dep) {
         uint32_t off = (uint32_t)(rr * (int)sct);
@@ -328,21 +293,16 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
         const int chunk0 = useful ? 0 : 6;
     #pragma unroll
         for (int k = 0; k < 2; ++k)
-          kr_raw[k] = *(const uint4*)__builtin_assume_aligned(
-              pk + 16 * (rope0 + k), 16);
+          kr_raw[k] = *(const uint2*)(pk + 8 * (rope0 + k));
     #pragma unroll
         for (int k = 0; k < 6; ++k) {
           const int c = chunk0 + k;
-          if constexpr (BITS == 4) {
-            kn_raw[k] = *(const uint2*)(pk + L::OFF_KN + 8 * c);
-          } else {
-            kn_raw[k].x = *(const uint32_t*)(pk + L::OFF_KN + 4 * c);
-            kn_raw[k].y =
-                *(const uint32_t*)(pk + L::OFF_KN + N / 4 + 4 * (c >> 1)) >>
-                (4 * (c & 1));
-          }
+          kn_raw[k].x = *(const uint32_t*)(pk + F::OFF_KN + 4 * c);
+          kn_raw[k].y =
+              *(const uint32_t*)(pk + F::OFF_KN + N / 4 + 4 * (c >> 1)) >>
+              (4 * (c & 1));
         }
-        const uint8_t* ps = tile + (int64_t)j * sct + L::OFF_SC;
+        const uint8_t* ps = tile + (int64_t)j * sct + F::OFF_SC;
         const uint2 u = *(const uint2*)ps;
         sc_a = u.x;
         sc_b = u.y;
@@ -353,11 +313,11 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       auto load_v = [&](const uint8_t* tile, float dep) {
         uint32_t off = (uint32_t)((useful ? 0 : 1) * (int)sct);
         asm volatile("" : "+v"(off) : "v"(dep));
-        const uint8_t* pv = tile + off + L::OFF_V;
+        const uint8_t* pv = tile + off + F::OFF_V;
     #pragma unroll
         for (int i = 0; i < 8; ++i) {
           const uint8_t* p = pv + (int64_t)(2 * i) * sct;
-          if constexpr (BITS == 4) {
+          if constexpr (VB == 4) {
             vraw[i] = *(const uint2*)(p + 8 * rr);
           } else {
             vraw[i].x = *(const uint32_t*)(p + 4 * rr);
@@ -365,20 +325,19 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
           }
         }
       };
-      // Byte codes of a 16-dim NoPE chunk from its raw words (4-bit: the two
-      // packed words; 3-bit: 2-bit plane word, 1-bit plane word pre-shifted).
-      auto codes4 = [&](uint2 raw, uint32_t o[4]) {
-        if constexpr (BITS == 4) {
-          o[0] = raw.x & 0x0F0F0F0Fu;
-          o[1] = (raw.x >> 4) & 0x0F0F0F0Fu;
-          o[2] = raw.y & 0x0F0F0F0Fu;
-          o[3] = (raw.y >> 4) & 0x0F0F0F0Fu;
-        } else {
+      // Biased codebook bytes (x + 128) of a 16-dim step from its raw words.
+      auto rope_bytes = [&](uint2 raw, uint32_t o[4]) {
+        o[0] = splitq::lut4(raw.x & 0x0F0F0F0Fu) ^ X;
+        o[1] = splitq::lut4((raw.x >> 4) & 0x0F0F0F0Fu) ^ X;
+        o[2] = splitq::lut4(raw.y & 0x0F0F0F0Fu) ^ X;
+        o[3] = splitq::lut4((raw.y >> 4) & 0x0F0F0F0Fu) ^ X;
+      };
+      auto nope_bytes = [&](uint2 raw, uint32_t o[4]) {
     #pragma unroll
-          for (int i = 0; i < 4; ++i)
-            o[i] = ((raw.x >> (2 * i)) & 0x03030303u) |
-                   (((raw.y >> i) & 0x01010101u) << 2);
-        }
+        for (int i = 0; i < 4; ++i)
+          o[i] = splitq::lut3(((raw.x >> (2 * i)) & 0x03030303u) |
+                              (((raw.y >> i) & 0x01010101u) << 2)) ^
+                 X;
       };
 
       if (start < end) {
@@ -408,14 +367,10 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     #pragma unroll
         for (int k = 0; k < 8; ++k) {
           uint32_t wd[4];
-          if (k < 2) {
-            wd[0] = kr_raw[k].x ^ X;
-            wd[1] = kr_raw[k].y ^ X;
-            wd[2] = kr_raw[k].z ^ X;
-            wd[3] = kr_raw[k].w ^ X;
-          } else {
-            codes4(kn_raw[k - 2], wd);
-          }
+          if (k < 2)
+            rope_bytes(kr_raw[k], wd);
+          else
+            nope_bytes(kn_raw[k - 2], wd);
           const int so = kStepOwn[k], sp = kStepPar[k];
           const int go = so < 4 ? 0 : (so - 4) / 4 + 1;
           const int gp = sp < 4 ? 0 : (sp - 4) / 4 + 1;
@@ -495,15 +450,17 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
         }
         const h16v pb16 = __builtin_bit_cast(h16v, pf);
 
-        // Codes of dims 4q..4q+3 of this lane's chunk, token i, as bytes.
+        // Biased codebook bytes of dims 4q..4q+3 of this lane's chunk,
+        // token i.
         auto vq = [&](int i, int q) -> uint32_t {
-          if constexpr (BITS == 4) {
+          if constexpr (VB == 4) {
             const uint32_t w = q < 2 ? vraw[i].x : vraw[i].y;
-            return (w >> (4 * (q & 1))) & 0x0F0F0F0Fu;
+            return splitq::lut4((w >> (4 * (q & 1))) & 0x0F0F0F0Fu) ^ X;
           } else {
             const uint32_t hi = vraw[i].y >> (4 * (rr & 1));
-            return ((vraw[i].x >> (2 * q)) & 0x03030303u) |
-                   (((hi >> q) & 0x01010101u) << 2);
+            return splitq::lut3(((vraw[i].x >> (2 * q)) & 0x03030303u) |
+                                (((hi >> q) & 0x01010101u) << 2)) ^
+                   X;
           }
         };
     #pragma unroll
@@ -533,17 +490,18 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
         float* op = mid_o + (int64_t)(grp * QG + qx / hpk) * smo +
                     (int64_t)(kvh * hpk + qx % hpk) * smh + (int64_t)si * sms;
         const bool any = m != -INFINITY;
-        const float corr = L::CBIAS * cp;
+        const float corr = BIAS * cp;
+        constexpr float kOut = 1.0f / (PSCALE * LUT_ONE);
     #pragma unroll
         for (int e = 0; e < 8; ++e) {
           float* dp = op + 16 * (2 * e + h);
     #pragma unroll
           for (int c = 0; c < 16; c += 4) {
             float4 v;
-            v.x = any ? (O[c][e] - corr) * (1.0f / PSCALE) : 0.0f;
-            v.y = any ? (O[c + 1][e] - corr) * (1.0f / PSCALE) : 0.0f;
-            v.z = any ? (O[c + 2][e] - corr) * (1.0f / PSCALE) : 0.0f;
-            v.w = any ? (O[c + 3][e] - corr) * (1.0f / PSCALE) : 0.0f;
+            v.x = any ? (O[c][e] - corr) * kOut : 0.0f;
+            v.y = any ? (O[c + 1][e] - corr) * kOut : 0.0f;
+            v.z = any ? (O[c + 2][e] - corr) * kOut : 0.0f;
+            v.w = any ? (O[c + 3][e] - corr) * kOut : 0.0f;
             *(float4*)(dp + c) = v;
           }
         }
@@ -571,7 +529,7 @@ constexpr int kSqWmmaNsb = 2;
 int splitq_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        torch::Tensor block_table, torch::Tensor q_to_req,
                        torch::Tensor q_to_klen, torch::Tensor mid_o,
-                       torch::Tensor nope_signs, double sm_scale,
+                       torch::Tensor k_signs, double sm_scale,
                        int64_t num_kv_splits, int64_t bits) {
   using namespace splitq_wmma;
   static const bool arch_ok = [] {
@@ -597,7 +555,7 @@ int splitq_decode_wmma(torch::Tensor query, torch::Tensor cache,
         (const T*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),         \
         block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),                \
         q_to_klen.data_ptr<int>(), mid_o.data_ptr<float>(),                   \
-        nope_signs.data_ptr<int>(), (float)sm_scale, num_q, num_q_heads,      \
+        k_signs.data_ptr<int>(), (float)sm_scale, num_q, num_q_heads,         \
         num_kv_heads, cache.size(2), block_table.size(1), block_table.size(0), \
         cache.size(0), ns, kSqWmmaMinTps, nrt, query.stride(0),               \
         query.stride(1),                                                      \

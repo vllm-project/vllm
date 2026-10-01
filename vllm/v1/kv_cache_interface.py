@@ -56,7 +56,7 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_3BIT_NC = 9
     NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
     # RoPE dims int8; NoPE K and V Hadamard-rotated uniform 4/3-bit, one slot.
-    SPLITQ_K4V4 = 11
+    SPLITQ_K3V4 = 11
     SPLITQ_K3V3 = 12
 
     @property
@@ -92,7 +92,7 @@ class KVQuantMode(IntEnum):
     @property
     def is_splitq(self) -> bool:
         """True for any SplitQ quantization mode."""
-        return self in (KVQuantMode.SPLITQ_K4V4, KVQuantMode.SPLITQ_K3V3)
+        return self in (KVQuantMode.SPLITQ_K3V4, KVQuantMode.SPLITQ_K3V3)
 
     @property
     def uses_per_query_maps(self) -> bool:

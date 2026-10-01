@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// SplitQ KV cache kernels for RDNA3 (gfx11), head_size 256 with 64 RoPE dims.
+// SplitQ KV cache kernels, head_size 256 with 64 RoPE dims. Portable across
+// the AMD targets vLLM builds (splitq_arch.cuh); the WMMA decode tier for
+// gfx11 lives in splitq_decode_wmma_rdna3.cu.
 // Format: vllm/v1/attention/ops/rocm_splitq.py (the PyTorch reference there
 // is the source of truth for the byte layout).
 //
 //   splitq_cache_store   quantize + pack K/V into slots (one wave per slot).
 //   splitq_decode        split-KV attention per query group; K dot products
-//                        with v_dot4_i32_iu8 on the packed codes, the query
-//                        quantized to int8 once per block. Consecutive query
-//                        tokens of one request (MTP verify) share the KV read.
-//   splitq_to_int8       expand a request's cached prefix into int8
-//                        per-token-head buffers for the WMMA prefill kernel.
+//                        with int8 dot4 on the codebook values of the packed
+//                        codes, the query quantized to int8 once per block.
+//                        Consecutive query tokens of one request (MTP verify)
+//                        share the KV read.
+//   splitq_rotate        the store-time rotations, for the prefill path.
 //
-// Everything is in the rotated space: NoPE K dims and V are sign-flipped and
-// Hadamard-rotated at store time; the query NoPE part is rotated the same way
-// and the attention output is rotated back in the reduce kernel.
+// Everything is in the rotated space: K and V are sign-flipped and
+// Hadamard-rotated at store time; the query is rotated like K and the
+// attention output is rotated back in the reduce kernel.
 
 #include <cstdint>
-#include <cstdlib>
-#include <string>
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -29,25 +29,13 @@
   #include <hip/hip_bf16.h>
   #include <hip/hip_fp16.h>
 
+  #include "splitq_arch.cuh"
+  #include "splitq_format.cuh"
+
 namespace splitq {
 
-constexpr int D = 256;       // head size
-constexpr int R = 64;        // RoPE dims (int8)
-constexpr int N = D - R;     // NoPE dims (rotated, packed)
-constexpr int NB = N / 64;   // NoPE Hadamard blocks
 constexpr int DPL = D / 32;  // dims per lane when a wave owns one slot
-
-template <int BITS>
-struct Layout {
-  static constexpr int OFF_KN = R;
-  static constexpr int OFF_V = OFF_KN + N * BITS / 8;
-  static constexpr int OFF_SC = OFF_V + D * BITS / 8;
-  static constexpr int NUM_SC = 2 + NB;
-  static constexpr int SLOT = (OFF_SC + 2 * NUM_SC + 7) / 8 * 8;
-  static constexpr int LEVELS = 1 << BITS;
-  static constexpr float C0 = (LEVELS - 1) * 0.5f;
-  static constexpr float STEP = BITS == 4 ? 0.3355f : 0.5865f;
-};
+constexpr int NB = N / 64;   // NoPE blocks
 
 template <typename T>
 __device__ __forceinline__ float to_f(T x) {
@@ -122,20 +110,15 @@ __device__ __forceinline__ float sign_of(const int* bits, int i) {
   return ((bits[i >> 5] >> (i & 31)) & 1) ? -1.0f : 1.0f;
 }
 
-// Rotate a lane's 8 dims: NoPE lanes (8..31) in 64-dim blocks, or all lanes
-// as one 256-dim block. RoPE lanes are left untouched in the NoPE case.
-__device__ __forceinline__ void rotate_nope(float (&x)[DPL], int lane,
-                                            const int* nope_signs) {
-  float y[DPL];
+// Rotate a lane's 8 dims like K (64-dim blocks) or like V (one 256-dim
+// block).
+__device__ __forceinline__ void rotate_k(float (&x)[DPL], int lane,
+                                         const int* signs) {
   #pragma unroll
-  for (int i = 0; i < DPL; ++i)
-    y[i] = lane >= R / DPL ? x[i] * sign_of(nope_signs, lane * DPL + i - R)
-                           : x[i];
-  fwht_wave<4>(y, lane);
-  if (lane >= R / DPL) {
+  for (int i = 0; i < DPL; ++i) x[i] *= sign_of(signs, lane * DPL + i);
+  fwht_wave<4>(x, lane);
   #pragma unroll
-    for (int i = 0; i < DPL; ++i) x[i] = y[i] * 0.125f;
-  }
+  for (int i = 0; i < DPL; ++i) x[i] *= 0.125f;
 }
 
 __device__ __forceinline__ void rotate_full(float (&x)[DPL], int lane,
@@ -147,32 +130,40 @@ __device__ __forceinline__ void rotate_full(float (&x)[DPL], int lane,
   for (int i = 0; i < DPL; ++i) x[i] *= 0.0625f;
 }
 
-// Uniform midrise quantizer over the lanes of one reduction group.
-// Returns the least-squares scale; codes in [0, LEVELS).
-template <int BITS, int MASK>
+// Midpoints of the int8 codebooks (rocm_splitq.LUT), in codebook units.
+__device__ constexpr float kThr3[7] = {-103.f, -62.f, -29.5f, 0.f,
+                                      29.5f, 62.f, 103.f};
+__device__ constexpr float kThr4[15] = {-110.5f, -84.5f, -66.f, -50.5f, -36.5f,
+                                       -24.f,   -12.f,  0.f,   12.f,   24.f,
+                                       36.5f,   50.5f,  66.f,  84.5f,  110.5f};
+
+// Nearest codebook entry on the group RMS (4- or 3-bit per lane), codes in
+// [0, 2^bits). Returns the stored scale, times LUT_ONE: the one that makes
+// x . x_hat = |x|^2, so quantization does not shrink scores or outputs.
+template <int MASK>
 __device__ __forceinline__ float quantize_group(const float (&x)[DPL],
                                                 int (&codes)[DPL],
-                                                float group_dims) {
-  using L = Layout<BITS>;
+                                                float group_dims, bool four) {
   float ss = 0.f;
   #pragma unroll
   for (int i = 0; i < DPL; ++i) ss += x[i] * x[i];
   ss = xor_sum<MASK>(ss);
-  const float step = fmaxf(sqrtf(ss / group_dims), 1e-12f) * L::STEP;
-  const float inv_step = 1.0f / step;
-  float num = 0.f, den = 0.f;
+  const float to_lut =
+      (four ? 46.0f : 59.0f) / fmaxf(sqrtf(ss / group_dims), 1e-12f);
+  float num = 0.f;
   #pragma unroll
   for (int i = 0; i < DPL; ++i) {
-    int c = (int)floorf(x[i] * inv_step + L::LEVELS * 0.5f);
-    c = min(max(c, 0), L::LEVELS - 1);
+    const float y = x[i] * to_lut;
+    int c = 0;
+  #pragma unroll
+    for (int k = 0; k < 15; ++k)
+      c += (four ? y > kThr4[k] : (k < 7 && y > kThr3[k])) ? 1 : 0;
     codes[i] = c;
-    const float cc = c - L::C0;
-    num += x[i] * cc;
-    den += cc * cc;
+    num += x[i] *
+           (float)(int8_t)(four ? lut4((uint32_t)c) : lut3((uint32_t)c));
   }
   num = xor_sum<MASK>(num);
-  den = xor_sum<MASK>(den);
-  return den > 0.f ? num / den : 0.f;
+  return num > 0.f ? ss / num * LUT_ONE : 0.f;
 }
 
 // 4-bit: one word per 8 dims (lane-local). 3-bit: this lane's contribution to
@@ -201,16 +192,16 @@ __device__ __forceinline__ void pack3(const int (&c)[DPL], int idx,
 // ---------------------------------------------------------------------------
 // Store: grid (num_tokens, num_kv_heads), block 32.
 // ---------------------------------------------------------------------------
-template <int BITS, typename KT>
+template <int VB, typename KT>
 __global__ void __launch_bounds__(32)
     store_kernel(const KT* __restrict__ key, const KT* __restrict__ value,
                  uint8_t* __restrict__ cache,
                  const int64_t* __restrict__ slot_mapping,
-                 const int* __restrict__ nope_signs,
+                 const int* __restrict__ k_signs,
                  const int* __restrict__ v_signs, int block_size, int64_t sk0,
                  int64_t sk1, int64_t sv0, int64_t sv1, int64_t scb,
                  int64_t sch, int64_t sct) {
-  using L = Layout<BITS>;
+  using F = Format<VB>;
   const int t = blockIdx.x;
   const int h = blockIdx.y;
   const int lane = threadIdx.x;
@@ -225,69 +216,51 @@ __global__ void __launch_bounds__(32)
     k[i] = to_f<KT>(key[t * sk0 + h * sk1 + lane * DPL + i]);
     v[i] = to_f<KT>(value[t * sv0 + h * sv1 + lane * DPL + i]);
   }
+
+  // K: rotate, then quantize per 64-dim block (8 lanes): the RoPE block at
+  // 4 bits, the NoPE blocks at 3.
   const bool rope_lane = lane < R / DPL;
-
-  // RoPE part: symmetric int8 per slot.
-  float amax = 0.f;
-  #pragma unroll
-  for (int i = 0; i < DPL; ++i) amax = fmaxf(amax, fabsf(k[i]));
-  amax = xor_max<4>(amax);
-  const float kr_scale = fmaxf(amax, 1e-12f) / 127.0f;
-  if (rope_lane) {
-    uint32_t w[2] = {0, 0};
-  #pragma unroll
-    for (int i = 0; i < DPL; ++i) {
-      int q = __float2int_rn(k[i] / kr_scale);
-      q = min(max(q, -127), 127);
-      w[i >> 2] |= (uint32_t)(q & 0xFF) << (8 * (i & 3));
-    }
-    *reinterpret_cast<uint2*>(dst + lane * DPL) = make_uint2(w[0], w[1]);
-  }
-
-  // NoPE part of K: rotate, then quantize per 64-dim block (8 lanes).
-  rotate_nope(k, lane, nope_signs);
+  rotate_k(k, lane, k_signs);
   int kc[DPL];
-  const float kn_scale = quantize_group<BITS, 4>(k, kc, 64.f);
+  const float k_scale = quantize_group<4>(k, kc, 64.f, rope_lane);
   const int nl = lane - R / DPL;  // NoPE lane index (valid when >= 0)
-  if constexpr (BITS == 4) {
-    if (!rope_lane)
-      *reinterpret_cast<uint32_t*>(dst + L::OFF_KN + 4 * nl) = pack4(kc);
-  } else {
+  {
     uint32_t lo, hi;
-    pack3(kc, nl, lo, hi);
+    pack3(kc, nl & 3, lo, hi);
     lo = xor_or<1>(lo);
     hi = xor_or<2>(hi);
-    if (!rope_lane && (nl & 1) == 0)
-      *reinterpret_cast<uint32_t*>(dst + L::OFF_KN + 4 * (nl >> 1)) = lo;
-    if (!rope_lane && (nl & 3) == 0)
-      *reinterpret_cast<uint32_t*>(dst + L::OFF_KN + N / 4 + 4 * (nl >> 2)) =
-          hi;
+    if (rope_lane) {
+      *reinterpret_cast<uint32_t*>(dst + 4 * lane) = pack4(kc);
+    } else {
+      if ((nl & 1) == 0)
+        *reinterpret_cast<uint32_t*>(dst + F::OFF_KN + 4 * (nl >> 1)) = lo;
+      if ((nl & 3) == 0)
+        *reinterpret_cast<uint32_t*>(dst + F::OFF_KN + N / 4 + 4 * (nl >> 2)) =
+            hi;
+    }
   }
 
   // V: rotate all 256 dims, one scale.
   rotate_full(v, lane, v_signs);
   int vc[DPL];
-  const float v_scale = quantize_group<BITS, 16>(v, vc, (float)D);
-  if constexpr (BITS == 4) {
-    *reinterpret_cast<uint32_t*>(dst + L::OFF_V + 4 * lane) = pack4(vc);
+  const float v_scale = quantize_group<16>(v, vc, (float)D, VB == 4);
+  if constexpr (VB == 4) {
+    *reinterpret_cast<uint32_t*>(dst + F::OFF_V + 4 * lane) = pack4(vc);
   } else {
     uint32_t lo, hi;
     pack3(vc, lane, lo, hi);
     lo = xor_or<1>(lo);
     hi = xor_or<2>(hi);
     if ((lane & 1) == 0)
-      *reinterpret_cast<uint32_t*>(dst + L::OFF_V + 4 * (lane >> 1)) = lo;
+      *reinterpret_cast<uint32_t*>(dst + F::OFF_V + 4 * (lane >> 1)) = lo;
     if ((lane & 3) == 0)
-      *reinterpret_cast<uint32_t*>(dst + L::OFF_V + D / 4 + 4 * (lane >> 2)) =
+      *reinterpret_cast<uint32_t*>(dst + F::OFF_V + D / 4 + 4 * (lane >> 2)) =
           hi;
   }
 
-  uint16_t* sc = reinterpret_cast<uint16_t*>(dst + L::OFF_SC);
-  if (lane == 0) {
-    sc[0] = f_to_half_bits(kr_scale);
-    sc[1 + NB] = f_to_half_bits(v_scale);
-  }
-  if (!rope_lane && (nl & 7) == 0) sc[1 + (nl >> 3)] = f_to_half_bits(kn_scale);
+  uint16_t* sc = reinterpret_cast<uint16_t*>(dst + F::OFF_SC);
+  if ((lane & 7) == 0) sc[lane >> 3] = f_to_half_bits(k_scale);
+  if (lane == 0) sc[NKB] = f_to_half_bits(v_scale);
 }
 
 // ---------------------------------------------------------------------------
@@ -299,22 +272,21 @@ __global__ void __launch_bounds__(32)
 constexpr int WAVES = 4;
 constexpr int CHUNK = 32 * WAVES;
 
-template <int BITS, int G, int QG, typename QT>
+template <int VB, int G, int QG, typename QT>
 __global__ void __launch_bounds__(128) decode_kernel(
     const QT* __restrict__ Q, const uint8_t* __restrict__ cache,
     const int* __restrict__ block_table, const int* __restrict__ q_to_req,
     const int* __restrict__ q_to_klen, float* __restrict__ mid_o,
-    const int* __restrict__ nope_signs, float sm_scale_log2, int num_q,
+    const int* __restrict__ k_signs, float sm_scale_log2, int num_q,
     int block_size, int max_blocks, int num_reqs, int num_phys_blocks,
     int num_splits, int64_t sq0, int64_t sq1, int64_t scb, int64_t sch,
     int64_t sct, int64_t smo, int64_t smh, int64_t sms) {
-  using L = Layout<BITS>;
+  using F = Format<VB>;
   constexpr int ROWS = QG * G;
   constexpr int QW = D / 4;  // int8 query words per row
 
   __shared__ int q8[ROWS][QW];
-  __shared__ float q_rs[ROWS], q_ns[ROWS];
-  __shared__ float q_sum[ROWS][NB];
+  __shared__ float q_bs[ROWS][NKB];  // query scale per K block
   __shared__ float S[ROWS][CHUNK];
   __shared__ float m_s[ROWS], l_s[ROWS], alpha_s[ROWS];
   __shared__ const uint8_t* tok_ptr[CHUNK];
@@ -371,7 +343,7 @@ __global__ void __launch_bounds__(128) decode_kernel(
     return;
   }
 
-  // Query: rotate the NoPE part, quantize RoPE and NoPE parts to int8.
+  // Query: rotate like K, quantize to int8 with one scale per 64-dim block.
   for (int r = wave; r < ROWS; r += WAVES) {
     const int j = r / G, g = r % G;
     float x[DPL];
@@ -383,31 +355,21 @@ __global__ void __launch_bounds__(128) decode_kernel(
   #pragma unroll
       for (int i = 0; i < DPL; ++i) x[i] = 0.f;
     }
-    rotate_nope(x, lane, nope_signs);
-    const bool rope_lane = lane < R / DPL;
+    rotate_k(x, lane, k_signs);
     float amax = 0.f;
   #pragma unroll
     for (int i = 0; i < DPL; ++i) amax = fmaxf(amax, fabsf(x[i]));
-    const float a_r = xor_max<16>(rope_lane ? amax : 0.f);
-    const float a_n = xor_max<16>(rope_lane ? 0.f : amax);
-    const float s = fmaxf(rope_lane ? a_r : a_n, 1e-20f) / 127.0f;
+    const float s = fmaxf(xor_max<4>(amax), 1e-20f) / 127.0f;
     uint32_t w[2] = {0, 0};
-    int isum = 0;
   #pragma unroll
     for (int i = 0; i < DPL; ++i) {
       int q = __float2int_rn(x[i] / s);
       q = min(max(q, -127), 127);
-      isum += q;
       w[i >> 2] |= (uint32_t)(q & 0xFF) << (8 * (i & 3));
     }
     q8[r][2 * lane] = (int)w[0];
     q8[r][2 * lane + 1] = (int)w[1];
-    const float bsum = xor_sum<4>((float)isum);
-    if (!rope_lane && (lane & 7) == 0) q_sum[r][(lane - R / DPL) >> 3] = bsum;
-    if (lane == 0) {
-      q_rs[r] = fmaxf(a_r, 1e-20f) / 127.0f;
-      q_ns[r] = fmaxf(a_n, 1e-20f) / 127.0f;
-    }
+    if ((lane & 7) == 0) q_bs[r][lane >> 3] = s;
   }
   __syncthreads();
 
@@ -435,82 +397,55 @@ __global__ void __launch_bounds__(128) decode_kernel(
           cache + pb * scb + kvh * sch + (int64_t)(tok - lb * block_size) * sct;
       tok_ptr[wave * 32 + lane] = p;
 
+      constexpr int KW = F::OFF_V / 4;  // K code words: RoPE 8, NoPE 18
+      uint32_t kw[KW];
       const uint2* p2 = reinterpret_cast<const uint2*>(p);
-      uint32_t kr[R / 4];
   #pragma unroll
-      for (int w = 0; w < R / 8; ++w) {
-        uint2 u = p2[w];
-        kr[2 * w] = u.x;
-        kr[2 * w + 1] = u.y;
+      for (int w = 0; w < KW / 2; ++w) {
+        const uint2 u = p2[w];
+        kw[2 * w] = u.x;
+        kw[2 * w + 1] = u.y;
       }
-      constexpr int KNW = N * BITS / 32;
-      uint32_t kn[KNW];
-      const uint2* pn = reinterpret_cast<const uint2*>(p + L::OFF_KN);
-  #pragma unroll
-      for (int w = 0; w < KNW / 2; ++w) {
-        uint2 u = pn[w];
-        kn[2 * w] = u.x;
-        kn[2 * w + 1] = u.y;
-      }
-      const uint2 sc2 = *reinterpret_cast<const uint2*>(p + L::OFF_SC);
-      const uint32_t sc_last =
-          *reinterpret_cast<const uint16_t*>(p + L::OFF_SC + 8);
-      const float kr_s = half_bits_to_f(sc2.x & 0xFFFF);
-      float kn_s[NB];
-      kn_s[0] = half_bits_to_f(sc2.x >> 16);
-      kn_s[1] = half_bits_to_f(sc2.y & 0xFFFF);
-      kn_s[2] = half_bits_to_f(sc2.y >> 16);
-      tok_vs[wave * 32 + lane] = half_bits_to_f(sc_last);
+      const uint32_t* kn = kw + F::OFF_KN / 4;
+      const uint2 sc2 = *reinterpret_cast<const uint2*>(p + F::OFF_SC);
+      float ks[NKB];
+      ks[0] = half_bits_to_f(sc2.x & 0xFFFF);
+      ks[1] = half_bits_to_f(sc2.x >> 16);
+      ks[2] = half_bits_to_f(sc2.y & 0xFFFF);
+      ks[3] = half_bits_to_f(sc2.y >> 16);
+      tok_vs[wave * 32 + lane] =
+          half_bits_to_f(*reinterpret_cast<const uint16_t*>(
+              p + F::OFF_SC + 2 * NKB)) *
+          (1.0f / LUT_ONE);
 
   #pragma unroll
       for (int r = 0; r < ROWS; ++r) {
         const int* qr = q8[r];
         int dr = 0;
   #pragma unroll
-        for (int w = 0; w < R / 4; ++w)
-          dr = __builtin_amdgcn_sudot4(true, qr[w], true, (int)kr[w], dr,
-                                       false);
-        float sn = 0.f;
+        for (int u = 0; u < R / 8; ++u) {
+          const uint32_t w = kw[u];
+          dr = dot4_i8(qr[2 * u], (int)lut4(w & 0x0F0F0F0Fu), dr);
+          dr = dot4_i8(qr[2 * u + 1], (int)lut4((w >> 4) & 0x0F0F0F0Fu), dr);
+        }
+        float sk = q_bs[r][0] * ks[0] * (float)dr;
   #pragma unroll
         for (int b = 0; b < NB; ++b) {
           int dn = 0;
-          if constexpr (BITS == 4) {
   #pragma unroll
-            for (int u = 0; u < 8; ++u) {
-              const uint32_t w = kn[8 * b + u];
-              const int qw = R / 4 + 16 * b + 2 * u;
-              dn = __builtin_amdgcn_sudot4(true, qr[qw], true,
-                                           (int)(w & 0x0F0F0F0Fu), dn, false);
-              dn = __builtin_amdgcn_sudot4(true, qr[qw + 1], true,
-                                           (int)((w >> 4) & 0x0F0F0F0Fu), dn,
-                                           false);
+          for (int v = 0; v < 4; ++v) {  // 2-bit plane word: 16 dims
+            const uint32_t lo = kn[4 * b + v];
+            const uint32_t hi = kn[N / 16 + 2 * b + (v >> 1)];
+  #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+              const uint32_t c = ((lo >> (2 * i)) & 0x03030303u) |
+                                 (((hi >> (4 * (v & 1) + i)) & 0x01010101u) << 2);
+              dn = dot4_i8(qr[R / 4 + 16 * b + 4 * v + i], (int)lut3(c), dn);
             }
-          } else {
-            int dh = 0;
-  #pragma unroll
-            for (int v = 0; v < 4; ++v) {  // 2-bit plane, 16 dims per word
-              const uint32_t w = kn[4 * b + v];
-  #pragma unroll
-              for (int i = 0; i < 4; ++i)
-                dn = __builtin_amdgcn_sudot4(
-                    true, qr[R / 4 + 16 * b + 4 * v + i], true,
-                    (int)((w >> (2 * i)) & 0x03030303u), dn, false);
-            }
-  #pragma unroll
-            for (int x = 0; x < 2; ++x) {  // 1-bit plane, 32 dims per word
-              const uint32_t w = kn[N / 16 + 2 * b + x];
-  #pragma unroll
-              for (int i = 0; i < 8; ++i)
-                dh = __builtin_amdgcn_sudot4(
-                    true, qr[R / 4 + 16 * b + 8 * x + i], true,
-                    (int)((w >> i) & 0x01010101u), dh, false);
-            }
-            dn += 4 * dh;
           }
-          sn += kn_s[b] * ((float)dn - L::C0 * q_sum[r][b]);
+          sk += q_bs[r][1 + b] * ks[1 + b] * (float)dn;
         }
-        const float sc =
-            (q_rs[r] * kr_s * (float)dr + q_ns[r] * sn) * sm_scale_log2;
+        const float sc = sk * (sm_scale_log2 / LUT_ONE);
         S[r][wave * 32 + lane] = tok < klen[r / G] ? sc : -INFINITY;
       }
     } else {
@@ -558,28 +493,30 @@ __global__ void __launch_bounds__(128) decode_kernel(
     const int n_valid = min(CHUNK, end - base);
     for (int t = 0; t < n_valid; ++t) {
       const uint8_t* p = tok_ptr[t];
-      float c0, c1;
-      if constexpr (BITS == 4) {
+      uint32_t c;  // codes of dims my_d, my_d + 1 in bytes 0, 1
+      if constexpr (VB == 4) {
         const uint32_t w =
-            *reinterpret_cast<const uint32_t*>(p + L::OFF_V + 4 * (my_d >> 3));
+            *reinterpret_cast<const uint32_t*>(p + F::OFF_V + 4 * (my_d >> 3));
         const int e = my_d & 7;  // even
-        c0 = (float)((w >> (8 * (e & 3) + 4 * (e >> 2))) & 15);
-        c1 = (float)((w >> (8 * ((e + 1) & 3) + 4 * ((e + 1) >> 2))) & 15);
+        c = ((w >> (8 * (e & 3) + 4 * (e >> 2))) & 15) |
+            (((w >> (8 * ((e + 1) & 3) + 4 * ((e + 1) >> 2))) & 15) << 8);
       } else {
         const uint32_t lo = *reinterpret_cast<const uint32_t*>(
-            p + L::OFF_V + 4 * (my_d >> 4));
+            p + F::OFF_V + 4 * (my_d >> 4));
         const uint32_t hi = *reinterpret_cast<const uint32_t*>(
-            p + L::OFF_V + D / 4 + 4 * (my_d >> 5));
+            p + F::OFF_V + D / 4 + 4 * (my_d >> 5));
         const int e16 = my_d & 15, e32 = my_d & 31;
-        c0 = (float)(((lo >> (8 * (e16 & 3) + 2 * (e16 >> 2))) & 3) |
-                     (((hi >> (8 * (e32 & 3) + (e32 >> 2))) & 1) << 2));
         const int f16 = e16 + 1, f32 = e32 + 1;
-        c1 = (float)(((lo >> (8 * (f16 & 3) + 2 * (f16 >> 2))) & 3) |
-                     (((hi >> (8 * (f32 & 3) + (f32 >> 2))) & 1) << 2));
+        c = (((lo >> (8 * (e16 & 3) + 2 * (e16 >> 2))) & 3) |
+             (((hi >> (8 * (e32 & 3) + (e32 >> 2))) & 1) << 2)) |
+            ((((lo >> (8 * (f16 & 3) + 2 * (f16 >> 2))) & 3) |
+              (((hi >> (8 * (f32 & 3) + (f32 >> 2))) & 1) << 2))
+             << 8);
       }
+      const uint32_t val = lut<VB>(c);
       const float vs = tok_vs[t];
-      c0 = (c0 - L::C0) * vs;
-      c1 = (c1 - L::C0) * vs;
+      const float c0 = (float)(int8_t)(val & 0xFF) * vs;
+      const float c1 = (float)(int8_t)((val >> 8) & 0xFF) * vs;
   #pragma unroll
       for (int r = 0; r < ROWS; ++r) {
         const float pr = S[r][t];
@@ -695,141 +632,25 @@ __global__ void __launch_bounds__(256)
 }
 
 // ---------------------------------------------------------------------------
-// Expand the cached prefix (seq_len - query_len tokens) of each request into
-// int8 per-token-head K/V (rotated space) for the WMMA prefill kernel.
-// grid (max_ctx_pad, num_kv_heads, num_reqs), block 32.
-// Output K/V: [num_reqs * max_ctx_pad, H, D] int8; scales [.., H].
-// ---------------------------------------------------------------------------
-template <int BITS>
-__global__ void __launch_bounds__(32)
-    to_int8_kernel(const uint8_t* __restrict__ cache,
-                   const int* __restrict__ block_table, int64_t sbt,
-                   const int* __restrict__ query_start_loc,
-                   const int* __restrict__ seq_lens, int max_ctx_pad,
-                   int block_size, int num_phys_blocks, int64_t scb,
-                   int64_t sch, int64_t sct, int8_t* __restrict__ k_out,
-                   int8_t* __restrict__ v_out, float* __restrict__ ks_out,
-                   float* __restrict__ vs_out, int num_kv_heads) {
-  using L = Layout<BITS>;
-  const int t = blockIdx.x;
-  const int h = blockIdx.y;
-  const int req = blockIdx.z;
-  const int lane = threadIdx.x;
-  const int ctx =
-      seq_lens[req] - (query_start_loc[req + 1] - query_start_loc[req]);
-  if (t >= ctx || t >= max_ctx_pad) return;
-  const int lb = t / block_size;
-  int pb = block_table[req * sbt + lb];
-  if (pb < 0 || pb >= num_phys_blocks) pb = 0;
-  const uint8_t* p = cache + pb * scb + h * sch + (int64_t)(t % block_size) * sct;
-  const uint16_t* sc = reinterpret_cast<const uint16_t*>(p + L::OFF_SC);
-
-  float k[DPL], v[DPL];
-  const bool rope_lane = lane < R / DPL;
-  if (rope_lane) {
-    const float kr_s = half_bits_to_f(sc[0]);
-    const uint2 u = *reinterpret_cast<const uint2*>(p + lane * DPL);
-  #pragma unroll
-    for (int i = 0; i < DPL; ++i) {
-      const uint32_t w = i < 4 ? u.x : u.y;
-      k[i] = (float)(int8_t)((w >> (8 * (i & 3))) & 0xFF) * kr_s;
-    }
-  } else {
-    const int nl = lane - R / DPL;
-    const float kn_s = half_bits_to_f(sc[1 + (nl >> 3)]);
-    if constexpr (BITS == 4) {
-      const uint32_t w =
-          *reinterpret_cast<const uint32_t*>(p + L::OFF_KN + 4 * nl);
-  #pragma unroll
-      for (int i = 0; i < DPL; ++i)
-        k[i] = ((float)((w >> (8 * (i & 3) + 4 * (i >> 2))) & 15) - L::C0) *
-               kn_s;
-    } else {
-      const uint32_t lo =
-          *reinterpret_cast<const uint32_t*>(p + L::OFF_KN + 4 * (nl >> 1));
-      const uint32_t hi = *reinterpret_cast<const uint32_t*>(
-          p + L::OFF_KN + N / 4 + 4 * (nl >> 2));
-  #pragma unroll
-      for (int i = 0; i < DPL; ++i) {
-        const int e16 = (nl & 1) * DPL + i, e32 = (nl & 3) * DPL + i;
-        const int c = ((lo >> (8 * (e16 & 3) + 2 * (e16 >> 2))) & 3) |
-                      (((hi >> (8 * (e32 & 3) + (e32 >> 2))) & 1) << 2);
-        k[i] = ((float)c - L::C0) * kn_s;
-      }
-    }
-  }
-  const float v_s = half_bits_to_f(sc[1 + NB]);
-  if constexpr (BITS == 4) {
-    const uint32_t w = *reinterpret_cast<const uint32_t*>(p + L::OFF_V + 4 * lane);
-  #pragma unroll
-    for (int i = 0; i < DPL; ++i)
-      v[i] = ((float)((w >> (8 * (i & 3) + 4 * (i >> 2))) & 15) - L::C0) * v_s;
-  } else {
-    const uint32_t lo =
-        *reinterpret_cast<const uint32_t*>(p + L::OFF_V + 4 * (lane >> 1));
-    const uint32_t hi =
-        *reinterpret_cast<const uint32_t*>(p + L::OFF_V + D / 4 + 4 * (lane >> 2));
-  #pragma unroll
-    for (int i = 0; i < DPL; ++i) {
-      const int e16 = (lane & 1) * DPL + i, e32 = (lane & 3) * DPL + i;
-      const int c = ((lo >> (8 * (e16 & 3) + 2 * (e16 >> 2))) & 3) |
-                    (((hi >> (8 * (e32 & 3) + (e32 >> 2))) & 1) << 2);
-      v[i] = ((float)c - L::C0) * v_s;
-    }
-  }
-
-  float ka = 0.f, va = 0.f;
-  #pragma unroll
-  for (int i = 0; i < DPL; ++i) {
-    ka = fmaxf(ka, fabsf(k[i]));
-    va = fmaxf(va, fabsf(v[i]));
-  }
-  ka = xor_max<16>(ka);
-  va = xor_max<16>(va);
-  const float ks = fmaxf(ka, 1e-12f) / 127.0f;
-  const float vs = fmaxf(va, 1e-12f) / 127.0f;
-  uint32_t kw[2] = {0, 0}, vw[2] = {0, 0};
-  #pragma unroll
-  for (int i = 0; i < DPL; ++i) {
-    const int kq = min(max(__float2int_rn(k[i] / ks), -127), 127);
-    const int vq = min(max(__float2int_rn(v[i] / vs), -127), 127);
-    kw[i >> 2] |= (uint32_t)(kq & 0xFF) << (8 * (i & 3));
-    vw[i >> 2] |= (uint32_t)(vq & 0xFF) << (8 * (i & 3));
-  }
-  const int64_t row =
-      ((int64_t)req * max_ctx_pad + t) * num_kv_heads + h;
-  *reinterpret_cast<uint2*>(k_out + row * D + lane * DPL) = make_uint2(kw[0], kw[1]);
-  *reinterpret_cast<uint2*>(v_out + row * D + lane * DPL) = make_uint2(vw[0], vw[1]);
-  if (lane == 0) {
-    ks_out[row] = ks;
-    vs_out[row] = vs;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// In-place rotation of [T, H, 256] vectors for the prefill path: the NoPE
-// dims (signs, then 64-dim Hadamard blocks) or all 256 dims (one block);
+// In-place rotation of [T, H, 256] vectors for the prefill path, like K
+// (signs, then 64-dim Hadamard blocks) or like V (one 256-dim block);
 // `inverse` applies the transform then the signs. grid (T, H), block 32.
 // ---------------------------------------------------------------------------
 template <typename T>
 __global__ void __launch_bounds__(32)
     rotate_kernel(T* __restrict__ x, const int* __restrict__ signs,
-                  bool nope_only, bool inverse, int64_t s0, int64_t s1) {
+                  bool k_layout, bool inverse, int64_t s0, int64_t s1) {
   const int lane = threadIdx.x;
   T* p = x + blockIdx.x * s0 + blockIdx.y * s1 + lane * DPL;
-  if (nope_only && lane < R / DPL) return;
   float v[DPL];
   #pragma unroll
   for (int i = 0; i < DPL; ++i) v[i] = to_f<T>(p[i]);
-  const int base = nope_only ? R : 0;
   if (!inverse) {
   #pragma unroll
-    for (int i = 0; i < DPL; ++i) v[i] *= sign_of(signs, lane * DPL + i - base);
+    for (int i = 0; i < DPL; ++i) v[i] *= sign_of(signs, lane * DPL + i);
   }
   float scale;
-  if (nope_only) {
-    // Lanes 0-7 returned; the xor partners of lanes 8-31 stay within their
-    // 8-lane group, so the shuffles never read an exited lane.
+  if (k_layout) {
     fwht_wave<4>(v, lane);
     scale = 0.125f;
   } else {
@@ -839,7 +660,7 @@ __global__ void __launch_bounds__(32)
   #pragma unroll
   for (int i = 0; i < DPL; ++i) {
     float y = v[i] * scale;
-    if (inverse) y *= sign_of(signs, lane * DPL + i - base);
+    if (inverse) y *= sign_of(signs, lane * DPL + i);
     p[i] = from_f<T>(y);
   }
 }
@@ -854,7 +675,8 @@ using namespace splitq;
 static void check_cache(const torch::Tensor& cache, int bits) {
   TORCH_CHECK(cache.dtype() == at::kByte && cache.dim() == 4,
               "splitq: cache must be uint8 [blocks, heads, block_size, slot]");
-  const int slot = bits == 4 ? Layout<4>::SLOT : Layout<3>::SLOT;
+  TORCH_CHECK(bits == 3 || bits == 4, "splitq: V bits must be 3 or 4");
+  const int slot = bits == 4 ? Format<4>::SLOT : Format<3>::SLOT;
   TORCH_CHECK(cache.size(3) == slot && cache.stride(3) == 1,
               "splitq: slot size mismatch, expected ", slot, " got ",
               cache.size(3));
@@ -862,7 +684,7 @@ static void check_cache(const torch::Tensor& cache, int bits) {
 
 void splitq_cache_store(torch::Tensor key, torch::Tensor value,
                         torch::Tensor cache, torch::Tensor slot_mapping,
-                        torch::Tensor nope_signs, torch::Tensor v_signs,
+                        torch::Tensor k_signs, torch::Tensor v_signs,
                         int64_t bits) {
   const int n = slot_mapping.size(0);
   if (n == 0) return;
@@ -878,7 +700,7 @@ void splitq_cache_store(torch::Tensor key, torch::Tensor value,
     store_kernel<B, T><<<grid, 32, 0, stream>>>(                             \
         (const T*)key.data_ptr(), (const T*)value.data_ptr(),                \
         (uint8_t*)cache.data_ptr(), slot_mapping.data_ptr<int64_t>(),        \
-        nope_signs.data_ptr<int>(), v_signs.data_ptr<int>(), cache.size(2),  \
+        k_signs.data_ptr<int>(), v_signs.data_ptr<int>(), cache.size(2),  \
         key.stride(0), key.stride(1), value.stride(0), value.stride(1),      \
         cache.stride(0), cache.stride(1), cache.stride(2))
   const bool bf = key.dtype() == at::kBFloat16;
@@ -890,34 +712,34 @@ void splitq_cache_store(torch::Tensor key, torch::Tensor value,
   #undef SQ_STORE
 }
 
-template <int BITS, int G, int QG, typename QT>
+template <int VB, int G, int QG, typename QT>
 static void launch_decode(torch::Tensor& query, torch::Tensor& cache,
                           torch::Tensor& block_table, torch::Tensor& q_to_req,
                           torch::Tensor& q_to_klen, torch::Tensor& mid_o,
-                          torch::Tensor& nope_signs, float sm_scale_log2,
+                          torch::Tensor& k_signs, float sm_scale_log2,
                           int ns, hipStream_t stream) {
   const int num_q = query.size(0);
   dim3 grid(num_q, cache.size(1), ns);
-  decode_kernel<BITS, G, QG, QT><<<grid, 128, 0, stream>>>(
+  decode_kernel<VB, G, QG, QT><<<grid, 128, 0, stream>>>(
       (const QT*)query.data_ptr(), (const uint8_t*)cache.data_ptr(),
       block_table.data_ptr<int>(), q_to_req.data_ptr<int>(),
       q_to_klen.data_ptr<int>(), mid_o.data_ptr<float>(),
-      nope_signs.data_ptr<int>(), sm_scale_log2, num_q, cache.size(2),
+      k_signs.data_ptr<int>(), sm_scale_log2, num_q, cache.size(2),
       block_table.size(1), block_table.size(0), cache.size(0), ns,
       query.stride(0), query.stride(1), cache.stride(0), cache.stride(1),
       cache.stride(2), mid_o.stride(0), mid_o.stride(1), mid_o.stride(2));
 }
 
-template <int BITS, typename QT>
+template <int VB, typename QT>
 static void dispatch_decode(int g, int qg, torch::Tensor& query,
                             torch::Tensor& cache, torch::Tensor& block_table,
                             torch::Tensor& q_to_req, torch::Tensor& q_to_klen,
-                            torch::Tensor& mid_o, torch::Tensor& nope_signs,
+                            torch::Tensor& mid_o, torch::Tensor& k_signs,
                             float sl2, int ns, hipStream_t stream) {
   #define SQ_DEC(GG, QQ)                                                    \
     if (g == GG && qg == QQ) {                                              \
-      launch_decode<BITS, GG, QQ, QT>(query, cache, block_table, q_to_req,  \
-                                      q_to_klen, mid_o, nope_signs, sl2, ns, \
+      launch_decode<VB, GG, QQ, QT>(query, cache, block_table, q_to_req,  \
+                                      q_to_klen, mid_o, k_signs, sl2, ns, \
                                       stream);                              \
       return;                                                               \
     }
@@ -930,15 +752,15 @@ static void dispatch_decode(int g, int qg, torch::Tensor& query,
 int splitq_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        torch::Tensor block_table, torch::Tensor q_to_req,
                        torch::Tensor q_to_klen, torch::Tensor mid_o,
-                       torch::Tensor nope_signs, double sm_scale,
+                       torch::Tensor k_signs, double sm_scale,
                        int64_t num_kv_splits, int64_t bits);
 
 void splitq_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
                    torch::Tensor block_table, torch::Tensor q_to_req,
                    torch::Tensor q_to_klen, torch::Tensor mid_o,
-                   torch::Tensor nope_signs, torch::Tensor v_signs,
+                   torch::Tensor k_signs, torch::Tensor v_signs,
                    double sm_scale, int64_t num_kv_splits, int64_t bits,
-                   int64_t query_group) {
+                   int64_t query_group, bool use_wmma) {
   const int num_q = query.size(0);
   if (num_q == 0) return;
   check_cache(cache, bits);
@@ -956,29 +778,30 @@ void splitq_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
   const at::cuda::OptionalCUDAGuard guard(device_of(query));
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const bool bf = query.dtype() == at::kBFloat16;
+  // Fast tier when the device and shapes allow it, else the portable kernel.
   const int wmma_splits =
-      std::getenv("VLLM_SPLITQ_WMMA") && std::string(std::getenv("VLLM_SPLITQ_WMMA")) == "0"
-          ? 0
-          : splitq_decode_wmma(query, cache, block_table, q_to_req, q_to_klen,
-                               mid_o, nope_signs, sm_scale, num_kv_splits, bits);
+      use_wmma ? splitq_decode_wmma(query, cache, block_table, q_to_req,
+                                    q_to_klen, mid_o, k_signs, sm_scale,
+                                    num_kv_splits, bits)
+               : 0;
   if (wmma_splits > 0) {
     ns = wmma_splits;
   } else if (bits == 4) {
     if (bf)
       dispatch_decode<4, __hip_bfloat16>(g, qg, query, cache, block_table,
                                          q_to_req, q_to_klen, mid_o,
-                                         nope_signs, sl2, ns, stream);
+                                         k_signs, sl2, ns, stream);
     else
       dispatch_decode<4, half>(g, qg, query, cache, block_table, q_to_req,
-                               q_to_klen, mid_o, nope_signs, sl2, ns, stream);
+                               q_to_klen, mid_o, k_signs, sl2, ns, stream);
   } else {
     if (bf)
       dispatch_decode<3, __hip_bfloat16>(g, qg, query, cache, block_table,
                                          q_to_req, q_to_klen, mid_o,
-                                         nope_signs, sl2, ns, stream);
+                                         k_signs, sl2, ns, stream);
     else
       dispatch_decode<3, half>(g, qg, query, cache, block_table, q_to_req,
-                               q_to_klen, mid_o, nope_signs, sl2, ns, stream);
+                               q_to_klen, mid_o, k_signs, sl2, ns, stream);
   }
   dim3 grid2(num_q, hq);
   if (bf)
@@ -993,36 +816,7 @@ void splitq_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
         mid_o.stride(2), out.stride(0), out.stride(1));
 }
 
-void splitq_to_int8(torch::Tensor cache, torch::Tensor block_table,
-                    torch::Tensor query_start_loc, torch::Tensor seq_lens,
-                    int64_t max_ctx_pad, torch::Tensor k_out,
-                    torch::Tensor v_out, torch::Tensor k_scale_out,
-                    torch::Tensor v_scale_out, int64_t bits) {
-  const int num_reqs = seq_lens.size(0);
-  if (num_reqs == 0 || max_ctx_pad == 0) return;
-  check_cache(cache, bits);
-  const int hkv = cache.size(1);
-  TORCH_CHECK(k_out.dtype() == at::kChar && k_out.is_contiguous() &&
-              v_out.is_contiguous() && k_scale_out.is_contiguous() &&
-              v_scale_out.is_contiguous());
-  TORCH_CHECK(k_out.numel() >= (int64_t)num_reqs * max_ctx_pad * hkv * D);
-  TORCH_CHECK(block_table.stride(1) == 1);
-  const at::cuda::OptionalCUDAGuard guard(device_of(cache));
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
-  dim3 grid(max_ctx_pad, hkv, num_reqs);
-  #define SQ_I8(B)                                                            \
-    to_int8_kernel<B><<<grid, 32, 0, stream>>>(                               \
-        (const uint8_t*)cache.data_ptr(), block_table.data_ptr<int>(),        \
-        block_table.stride(0), query_start_loc.data_ptr<int>(),               \
-        seq_lens.data_ptr<int>(), (int)max_ctx_pad, cache.size(2),            \
-        cache.size(0), cache.stride(0), cache.stride(1), cache.stride(2),     \
-        (int8_t*)k_out.data_ptr(), (int8_t*)v_out.data_ptr(),                 \
-        k_scale_out.data_ptr<float>(), v_scale_out.data_ptr<float>(), hkv)
-  if (bits == 4) SQ_I8(4); else SQ_I8(3);
-  #undef SQ_I8
-}
-
-void splitq_rotate(torch::Tensor x, torch::Tensor signs, bool nope_only,
+void splitq_rotate(torch::Tensor x, torch::Tensor signs, bool k_layout,
                    bool inverse) {
   if (x.numel() == 0) return;
   TORCH_CHECK(x.dim() == 3 && x.size(2) == D && x.stride(2) == 1,
@@ -1032,11 +826,11 @@ void splitq_rotate(torch::Tensor x, torch::Tensor signs, bool nope_only,
   dim3 grid(x.size(0), x.size(1));
   if (x.dtype() == at::kBFloat16)
     rotate_kernel<__hip_bfloat16><<<grid, 32, 0, stream>>>(
-        (__hip_bfloat16*)x.data_ptr(), signs.data_ptr<int>(), nope_only,
+        (__hip_bfloat16*)x.data_ptr(), signs.data_ptr<int>(), k_layout,
         inverse, x.stride(0), x.stride(1));
   else
     rotate_kernel<half><<<grid, 32, 0, stream>>>(
-        (half*)x.data_ptr(), signs.data_ptr<int>(), nope_only, inverse,
+        (half*)x.data_ptr(), signs.data_ptr<int>(), k_layout, inverse,
         x.stride(0), x.stride(1));
 }
 
@@ -1047,12 +841,7 @@ void splitq_cache_store(torch::Tensor, torch::Tensor, torch::Tensor,
 }
 void splitq_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                   torch::Tensor, double, int64_t, int64_t, int64_t) {
-  TORCH_CHECK(false, "splitq requires ROCm");
-}
-void splitq_to_int8(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-                    int64_t, torch::Tensor, torch::Tensor, torch::Tensor,
-                    torch::Tensor, int64_t) {
+                   torch::Tensor, double, int64_t, int64_t, int64_t, bool) {
   TORCH_CHECK(false, "splitq requires ROCm");
 }
 void splitq_rotate(torch::Tensor, torch::Tensor, bool, bool) {

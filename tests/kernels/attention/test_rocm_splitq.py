@@ -29,22 +29,21 @@ def _token_slots(cache: torch.Tensor, slots: torch.Tensor) -> torch.Tensor:
     return flat[slots]
 
 
-def _fill(cache, block_ids, k, v, nope_signs, v_signs, bits):
+def _fill(cache, block_ids, k, v, k_signs, v_signs, v_bits):
     n = k.shape[0]
     slots = (
         block_ids.long().repeat_interleave(BLOCK)[:n] * BLOCK
         + torch.arange(n, device=k.device) % BLOCK
     )
-    torch.ops._C.splitq_cache_store(k, v, cache, slots, nope_signs, v_signs, bits)
+    torch.ops._C.splitq_cache_store(k, v, cache, slots, k_signs, v_signs, v_bits)
     return slots
 
 
-@pytest.mark.parametrize("bits", [4, 3])
-def test_store_matches_reference(bits):
+@pytest.mark.parametrize("v_bits", [4, 3])
+def test_store_matches_reference(v_bits):
     torch.manual_seed(0)
-    dev, fmt = "cuda", sq.SplitQFormat(HEAD, ROPE, bits)
-    nsg = sq.sign_bits(fmt.nope_dim).to(dev)
-    vsg = sq.sign_bits(HEAD).to(dev)
+    dev, fmt = "cuda", sq.SplitQFormat(HEAD, ROPE, v_bits)
+    ksg = vsg = sq.sign_bits(HEAD).to(dev)
     t, hkv = 1024, 2
     k = torch.randn(t, hkv, HEAD, device=dev)
     k[..., 100] *= 8  # an outlier channel is spread by the rotation
@@ -52,28 +51,30 @@ def test_store_matches_reference(bits):
     v = torch.randn(t, hkv, HEAD, device=dev).bfloat16()
     nblk = t // BLOCK + 4
     cache = torch.zeros(nblk, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
-    slots = _fill(cache, torch.randperm(nblk, device=dev), k, v, nsg, vsg, bits)
+    slots = _fill(cache, torch.randperm(nblk, device=dev), k, v, ksg, vsg, v_bits)
 
     k_got, v_got = sq.reference_dequantize(_token_slots(cache, slots), fmt)
     ref = sq.reference_quantize(k.float(), v.float(), fmt)
     k_ref, v_ref = sq.reference_dequantize(ref, fmt)
     # Same codes up to rounding ties from a different summation order.
     assert _rel(k_got, k_ref) < 1e-2 and _rel(v_got, v_ref) < 1e-2
-    tol = 0.12 if bits == 4 else 0.22
-    assert _rel(k_got, k) < tol and _rel(v_got, v) < tol
+    # Lloyd-Max on Gaussian data: 4-bit RoPE / 3-bit NoPE K, v_bits V.
+    assert _rel(k_got, k) < 0.2
+    assert _rel(v_got, v) < (0.12 if v_bits == 4 else 0.22)
 
 
-@pytest.mark.parametrize("bits", [4, 3])
+@pytest.mark.parametrize("v_bits", [4, 3])
 @pytest.mark.parametrize("query_group", [1, 4])
 @pytest.mark.parametrize("num_splits", [1, 7, 64])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_decode_matches_reference(bits, query_group, num_splits, dtype):
+@pytest.mark.parametrize("use_wmma", [True, False])
+def test_decode_matches_reference(v_bits, query_group, num_splits, dtype, use_wmma):
     """Covers MTP verification: up to 4 consecutive query tokens per request,
-    each with its own causal length, plus a padded query with no request."""
+    each with its own causal length, plus a padded query with no request.
+    ``use_wmma=False`` forces the portable kernel every architecture runs."""
     torch.manual_seed(1)
-    dev, fmt = "cuda", sq.SplitQFormat(HEAD, ROPE, bits)
-    nsg = sq.sign_bits(fmt.nope_dim).to(dev)
-    vsg = sq.sign_bits(HEAD).to(dev)
+    dev, fmt = "cuda", sq.SplitQFormat(HEAD, ROPE, v_bits)
+    ksg = vsg = sq.sign_bits(HEAD).to(dev)
     hkv, group = 1, 6
     lens = [1, 16, 37, 700, 3000]
     cache = torch.zeros(
@@ -89,7 +90,7 @@ def test_decode_matches_reference(bits, query_group, num_splits, dtype):
         used += nb
         k = torch.randn(n, hkv, HEAD, device=dev).bfloat16()
         v = torch.randn(n, hkv, HEAD, device=dev).bfloat16()
-        _fill(cache, block_table[i, :nb], k, v, nsg, vsg, bits)
+        _fill(cache, block_table[i, :nb], k, v, ksg, vsg, v_bits)
         nq = min(query_group, n)
         for j in range(nq):
             q_to_req.append(i)
@@ -106,8 +107,8 @@ def test_decode_matches_reference(bits, query_group, num_splits, dtype):
         num_q, hkv * group, num_splits, HEAD + 2, dtype=torch.float32, device=dev
     )
     torch.ops._C.splitq_decode(
-        out, q, cache, block_table, q_to_req, q_to_klen, mid, nsg, vsg,
-        1 / 16, num_splits, bits, query_group,
+        out, q, cache, block_table, q_to_req, q_to_klen, mid, ksg, vsg,
+        1 / 16, num_splits, v_bits, query_group, use_wmma,
     )
     ref = sq.reference_attention(
         q.float(), cache, block_table, q_to_req.clamp(max=len(lens) - 1),
@@ -118,33 +119,65 @@ def test_decode_matches_reference(bits, query_group, num_splits, dtype):
     assert out[-1].abs().max().item() == 0
 
 
-@pytest.mark.parametrize("bits", [4, 3])
-def test_to_int8_matches_reference(bits):
-    torch.manual_seed(2)
-    dev, fmt = "cuda", sq.SplitQFormat(HEAD, ROPE, bits)
-    nsg = sq.sign_bits(fmt.nope_dim).to(dev)
-    vsg = sq.sign_bits(HEAD).to(dev)
-    n, hkv = 300, 2
-    cache = torch.zeros(64, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
-    blocks = torch.randperm(64, device=dev)[: math.ceil(n / BLOCK)].int()
-    k = torch.randn(n, hkv, HEAD, device=dev).bfloat16()
-    v = torch.randn(n, hkv, HEAD, device=dev).bfloat16()
-    slots = _fill(cache, blocks, k, v, nsg, vsg, bits)
+@pytest.mark.parametrize("v_bits", [4, 3])
+@pytest.mark.parametrize("query_lens", [[300], [129, 1, 517]])
+def test_prefill_matches_reference(v_bits, query_lens):
+    """Chunked prefill: each request's chunk attends causally to itself
+    (unquantized K/V) and to its cached prefix (packed cache), in the rotated
+    space the backend runs it in."""
+    torch.manual_seed(3)
+    dev, fmt = "cuda", sq.SplitQFormat(HEAD, ROPE, v_bits)
+    ksg = vsg = sq.sign_bits(HEAD).to(dev)
+    hkv, group = 1, 6
+    ctx_lens = [2500, 0, 4100][: len(query_lens)]
+    seq_lens = [c + n for c, n in zip(ctx_lens, query_lens)]
+    max_blocks = max(math.ceil(n / BLOCK) for n in seq_lens)
+    nblk = sum(math.ceil(n / BLOCK) for n in seq_lens) + 8
+    cache = torch.zeros(nblk, hkv, BLOCK, fmt.slot_bytes, dtype=torch.uint8, device=dev)
+    block_table = torch.zeros(len(seq_lens), max_blocks, dtype=torch.int32, device=dev)
+    free, used = torch.randperm(nblk, device=dev), 0
+    ks, vs = [], []
+    for i, n in enumerate(seq_lens):
+        nb = math.ceil(n / BLOCK)
+        block_table[i, :nb] = free[used : used + nb].int()
+        used += nb
+        k = torch.randn(n, hkv, HEAD, device=dev).half()
+        v = torch.randn(n, hkv, HEAD, device=dev).half()
+        _fill(cache, block_table[i, :nb], k, v, ksg, vsg, v_bits)
+        ks.append(k)
+        vs.append(v)
 
-    n_pad = math.ceil(n / BLOCK) * BLOCK
-    k8 = torch.empty(n_pad, hkv, HEAD, dtype=torch.int8, device=dev)
-    v8 = torch.empty_like(k8)
-    ks = torch.empty(n_pad, hkv, dtype=torch.float32, device=dev)
-    vs = torch.empty_like(ks)
-    # One request whose whole length is cached context (no query tokens).
-    query_start_loc = torch.zeros(2, dtype=torch.int32, device=dev)
-    seq_lens = torch.tensor([n], dtype=torch.int32, device=dev)
-    torch.ops._C.splitq_to_int8(
-        cache, blocks[None], query_start_loc, seq_lens, n_pad, k8, v8, ks, vs, bits
+    qsl = torch.tensor([0, *query_lens], device=dev).cumsum(0).int()
+    total = int(qsl[-1])
+    q = (torch.randn(total, hkv * group, HEAD, device=dev) * 2).half()
+    k_new = torch.cat([k[c:] for k, c in zip(ks, ctx_lens)])
+    v_new = torch.cat([v[c:] for v, c in zip(vs, ctx_lens)])
+    q_rot, k_rot, v_rot = q.clone(), k_new.clone(), v_new.clone()
+    torch.ops._C.splitq_rotate(q_rot, ksg, True, False)
+    torch.ops._C.splitq_rotate(k_rot, ksg, True, False)
+    torch.ops._C.splitq_rotate(v_rot, vsg, False, False)
+    out = torch.empty_like(q_rot)
+    torch.ops._C.splitq_prefill(
+        out, q_rot, k_rot, v_rot, cache, block_table, qsl,
+        torch.tensor(seq_lens, dtype=torch.int32, device=dev),
+        max(query_lens), 1 / 16, v_bits,
     )
-    k8, v8, ks, vs = k8[:n], v8[:n], ks[:n], vs[:n]
-    k_ref, v_ref = sq.reference_dequantize(
-        _token_slots(cache, slots), fmt, rotated=True
-    )
-    assert _rel(k8.float() * ks[..., None], k_ref) < 1e-2
-    assert _rel(v8.float() * vs[..., None], v_ref) < 1e-2
+    torch.ops._C.splitq_rotate(out, vsg, False, True)
+
+    ref = torch.empty(total, hkv * group, HEAD, device=dev)
+    for i, (c, n) in enumerate(zip(ctx_lens, query_lens)):
+        k_all, v_all = ks[i][c:].float(), vs[i][c:].float()
+        if c > 0:
+            pos = torch.arange(c, device=dev)
+            slots = cache[block_table[i, pos // BLOCK].long(), :, pos % BLOCK]
+            k_pre, v_pre = sq.reference_dequantize(slots, fmt)
+            k_all, v_all = torch.cat([k_pre, k_all]), torch.cat([v_pre, v_all])
+        k_all = k_all.repeat_interleave(group, 1)
+        v_all = v_all.repeat_interleave(group, 1)
+        qi = q[int(qsl[i]) : int(qsl[i + 1])].float()
+        s = torch.einsum("qhd,thd->hqt", qi, k_all) / 16
+        mask = torch.arange(c + n, device=dev)[None] > (c + torch.arange(n, device=dev))[:, None]
+        p = torch.softmax(s.masked_fill(mask, float("-inf")), -1)
+        ref[int(qsl[i]) : int(qsl[i + 1])] = torch.einsum("hqt,thd->qhd", p, v_all)
+    # Only the kernel's int8 query and fp16 P/V rounding differ.
+    assert _rel(out, ref) < 2e-2
