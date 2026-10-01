@@ -597,18 +597,15 @@ fn parse_next_event(
 ) -> ModalResult<HfEvent> {
     let markers: Vec<&str> = watch.markers.iter().map(String::as_str).collect();
     match safe_text_len_mul(input, &markers) {
-        Ok(0) => {}
         Ok(_) => return Ok(HfEvent::Text),
-        // At the end of the stream a partial marker is plain text.
-        Err(ErrMode::Incomplete(_)) if eof => {
-            let len = input.eof_offset();
-            input.next_slice(len);
-            return Ok(HfEvent::Text);
-        }
+        // A marker, complete or partial, starts here (or the input is empty).
+        Err(ErrMode::Incomplete(_)) => {}
         Err(error) => return Err(error),
     }
 
-    // Any pending boundary blocks the position; otherwise the preferred match wins.
+    // Any pending boundary blocks the position; otherwise the preferred match
+    // wins. At the end of the stream, a partial marker matches nothing and is
+    // released as text one character at a time.
     let text = **input;
     let mut best: Option<BoundaryMatch> = None;
     for &watch in &watch.boundaries {
