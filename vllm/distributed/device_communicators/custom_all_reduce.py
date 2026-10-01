@@ -10,8 +10,6 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config_or_none
-from vllm.device_allocator import cumem_cudagraph_pool_enabled
 from vllm.distributed.device_communicators.all_reduce_utils import (
     CUSTOM_ALL_REDUCE_MAX_SIZES,
     gpu_p2p_access_check,
@@ -149,23 +147,22 @@ class CustomAllreduce:
             _DEFAULT_MNNVL_MULTIMEM_REDUCE_SCATTER_MAX_SIZE
         ),
         symm_mem_enabled=False,
+        *,
+        register_graph_buffers: bool = True,
     ) -> None:
         """Args:
             group: the process group to work on. If None, it will use the
                 default process group.
             device: the device to bind the CustomAllreduce to. If None,
                 it will be bound to f"cuda:{local_rank}".
+            register_graph_buffers: whether graph capture IPC-registers its buffers.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
 
         """
         self._IS_CAPTURING = False
-        config = get_current_vllm_config_or_none()
-        # cuMem graph buffers cannot be IPC-registered; capture copies them instead.
-        self._capture_registered = config is None or not cumem_cudagraph_pool_enabled(
-            config
-        )
+        self._capture_registered = register_graph_buffers
         self._ptr = 0
         self.disabled = True
         self.mnnvl_buffer = None

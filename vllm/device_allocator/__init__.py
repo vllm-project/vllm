@@ -27,6 +27,7 @@ def cumem_cudagraph_pool_enabled(vllm_config: "VllmConfig") -> bool:
     offloads: Model Runner V2 with the cumem sleep backend on CUDA."""
     return (
         vllm_config.use_v2_model_runner
+        and vllm_config.model_config is not None
         and vllm_config.model_config.enable_sleep_mode
         and vllm_config.model_config.sleep_mode_backend == "cumem"
         and current_platform.is_cuda()
