@@ -75,6 +75,7 @@ from vllm.v1.kv_hints.protocol import KvHintAction, KvHintsEnvelope
 from vllm.v1.kv_hints.resources import KVResourceController, KVRetentionPriority
 from vllm.v1.kv_hints.retention import RetentionDeclarations
 from vllm.v1.kv_hints.state import SessionPrefixIndex
+from vllm.v1.kv_hints.transfers import KVTransferCompletion
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -6496,3 +6497,222 @@ def test_transfer_rejects_alias_without_claiming_exact_source_state():
     with pytest.raises(KVCacheTransferError, match="exact primary"):
         transfers.acquire("store", alias, 4, 10, scope="mooncake")
     assert block.ref_cnt == 0 and pool.get_num_free_blocks() == 3
+
+
+class QueuedControlTransfers:
+    tier = "mooncake"
+    actions = ("prefetch", "demote", "share")
+    limitations = ()
+
+    def __init__(self):
+        self.jobs = []
+        self.completions = []
+
+    def validate(self, direction, key, num_tokens):
+        pass
+
+    def submit(self, lease):
+        self.jobs.append(lease)
+
+    def poll(self):
+        result, self.completions = tuple(self.completions), []
+        return result
+
+    def finish(self, success=True):
+        self.completions.extend(
+            KVTransferCompletion(job.transfer_id, job.generation, success)
+            for job in self.jobs
+        )
+        self.jobs.clear()
+
+
+def make_movement_controller(num_blocks=4):
+    manager, _, request, keys = make_transfer_manager(num_blocks)
+    registry = OperationRegistry("engine", engine_epoch="epoch")
+    index = SessionPrefixIndex("namespace", "epoch")
+    declarations = RetentionDeclarations(index)
+    adapter = QueuedControlTransfers()
+    executor = KVResourceController(manager, registry, declarations, (adapter,))
+    controller = NativeKVController(registry, index, declarations, executor=executor)
+    target = {
+        "kind": "hashes",
+        "namespace": "namespace",
+        "blocks": [
+            {
+                "group_id": 0,
+                "block_hash": keys[0][:-4].hex(),
+                "start_token": 0,
+                "end_token": 4,
+            }
+        ],
+    }
+    return manager, request, controller, adapter, target
+
+
+def submit_movement(controller, message_id, action, payload):
+    return controller.submit(
+        KvHintsEnvelope("0.1", message_id, [KvHintAction("a", action, "1", payload)]),
+        ControlContext("engine", "epoch", "native"),
+    ).results[0]
+
+
+def test_native_shared_prefetch_survives_independent_task_cleanup():
+    manager, request, controller, adapter, target = make_movement_controller()
+    for session in ("a", "b"):
+        submit_movement(
+            controller,
+            f"associate-{session}",
+            "associate",
+            {
+                "session_id": session,
+                "continuation_id": "c",
+                "expected_revision": 0,
+                "target": target,
+            },
+        )
+        result = submit_movement(
+            controller,
+            session,
+            "prefetch",
+            {
+                "target": {"kind": "session", "session_id": session},
+                "source": "mooncake",
+            },
+        )
+        assert result.status == OperationStatus.RUNNING
+    assert len(adapter.jobs) == 1
+    block = manager.block_pool.blocks[adapter.jobs[0].block_id]
+    assert manager.get_computed_blocks(request)[1] == 0 and block.ref_cnt == 1
+    submit_movement(
+        controller,
+        "finish-a",
+        "finish_task",
+        {
+            "session_id": "a",
+            "expected_revision": controller.index.session_revision("a"),
+        },
+    )
+    assert controller.registry.get("a", "a").status == OperationStatus.CANCELLED
+    assert controller.registry.get("b", "a").status == OperationStatus.RUNNING
+    assert block.ref_cnt == 1
+    adapter.finish()
+    controller.executor.progress()
+    assert controller.registry.get("a", "a").status == OperationStatus.CANCELLED
+    assert controller.registry.get("b", "a").status == OperationStatus.COMPLETED
+    assert manager.get_computed_blocks(request)[1] == 4 and block.ref_cnt == 0
+
+
+@pytest.mark.parametrize("active_request", [False, True])
+@pytest.mark.parametrize("success", [False, True])
+def test_native_demote_distinguishes_storage_from_gpu_reclamation(
+    active_request, success
+):
+    manager, request, controller, adapter, target = make_movement_controller()
+    blocks = manager.allocate_slots(request, 4)
+    assert blocks is not None
+    manager.cache_blocks(request, 4)
+    if not active_request:
+        manager.free(request)
+    result = submit_movement(
+        controller,
+        "demote",
+        "demote",
+        {
+            "target": target,
+            "destination": "mooncake",
+        },
+    )
+    assert result.status == OperationStatus.RUNNING
+    assert manager.get_computed_blocks(request)[1] == 4
+    adapter.finish(success)
+    controller.executor.progress()
+    result = controller.registry.get("demote", "a")
+    if not success:
+        assert result.status == OperationStatus.FAILED
+        assert result.completed_steps == ()
+    elif active_request:
+        assert result.status == OperationStatus.PARTIAL and result.blocked_targets == 1
+        assert result.completed_steps == ("cold_copy_stored",)
+    else:
+        assert (
+            result.status == OperationStatus.COMPLETED and result.affected_blocks == 1
+        )
+        assert result.completed_steps == ("cold_copy_stored", "gpu_copies_reclaimed")
+    assert manager.get_computed_blocks(request)[1] == (
+        4 if active_request or not success else 0
+    )
+
+
+def test_native_prefetch_reports_partial_capacity_and_actual_registered_scope():
+    manager, request, controller, adapter, target = make_movement_controller(
+        num_blocks=2
+    )
+    target["blocks"].append(
+        {
+            "group_id": 0,
+            "block_hash": request.block_hashes[1].hex(),
+            "start_token": 4,
+            "end_token": 8,
+        }
+    )
+    result = submit_movement(
+        controller,
+        "prefetch",
+        "prefetch",
+        {
+            "target": target,
+            "source": "mooncake",
+        },
+    )
+    assert result.status == OperationStatus.RUNNING and len(adapter.jobs) == 1
+    adapter.finish()
+    controller.executor.progress()
+    result = controller.registry.get("prefetch", "a")
+    assert result.status == OperationStatus.PARTIAL
+    assert result.affected_blocks == 1 and result.blocked_targets == 1
+    assert manager.get_computed_blocks(request)[1] == 4
+
+
+def test_native_prefetch_reset_cancels_result_before_draining_worker():
+    manager, request, controller, adapter, target = make_movement_controller(
+        num_blocks=2
+    )
+    submit_movement(
+        controller,
+        "prefetch",
+        "prefetch",
+        {
+            "target": target,
+            "source": "mooncake",
+        },
+    )
+    assert not manager.reset_prefix_cache()
+    controller.executor.progress()
+    assert controller.registry.get("prefetch", "a").status == OperationStatus.CANCELLED
+    assert manager.block_pool.get_num_free_blocks() == 0
+    adapter.finish()
+    controller.executor.progress()
+    assert manager.block_pool.get_num_free_blocks() == 1
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert manager.reset_prefix_cache()
+
+
+def test_native_adapter_submission_failure_does_not_leak_reservation(monkeypatch):
+    manager, _, controller, adapter, target = make_movement_controller(num_blocks=2)
+
+    def fail(lease):
+        raise OSError("backend submission failed")
+
+    monkeypatch.setattr(adapter, "submit", fail)
+    result = submit_movement(
+        controller,
+        "prefetch",
+        "prefetch",
+        {
+            "target": target,
+            "source": "mooncake",
+        },
+    )
+    assert result.status == OperationStatus.FAILED
+    assert manager.block_pool.get_num_free_blocks() == 1
+    assert not manager.get_transfer_manager().has_pending

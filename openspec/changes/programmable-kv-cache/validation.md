@@ -403,3 +403,27 @@ injection. Native control dispatch, backend copies and all-rank completion are
 not connected by this substage; tasks 4.1 and 5.1 remain unchecked. Ordinary serving
 does not instantiate the transfer manager, so no model-output change is introduced
 by this foundation alone.
+
+## Native movement lifecycle
+
+Native physical execution now accepts initialized transfer adapters and correlates
+Demote/Prefetch/Share with the manager's shared leases. Explicit task cleanup drops
+only that task's interests; a reset cancels outcomes while worker-held buffers
+continue draining. Backend submission failure releases undispatched reservations.
+Demote reports cold storage separately from referenced-safe GPU reclamation;
+Prefetch rechecks registered residency before reporting its terminal scope.
+The engine's post-step path consumes progress even on a step without model tokens.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
+  tests/v1/core/test_prefix_caching.py tests/v1/test_kv_hint_control.py \
+  tests/v1/engine/test_kv_control.py -q
+```
+
+Result: **328 passed**, 98.90 seconds. Manual mypy 3.12 passed. The new tests inject
+an explicitly queued adapter into native control; they validate independent task
+cancellation of shared loads, partial capacity, backend failure cleanup, source
+references during Demote, and reset before worker acknowledgement. This phase
+introduces no advertised production transfer adapter yet. It does not establish
+actual byte transfer, connector liveness, all-rank readiness or model equivalence;
+those are the next integration gate, and tasks 4.1/5.1 remain open.

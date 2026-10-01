@@ -25,6 +25,11 @@ duplicate capacity charges, premature hits, cancelled-buffer reuse, stale reset
 completion, alias boundary confusion, and changes to active request references.
 Worker completion is injected only for this resource unit contract; actual copy
 correctness and all-rank completion require the subsequent adapter integration.
+Native movement maps a correlated action to shared transfer leases and terminal
+results. Extend the same core suite with a queued adapter to check independent
+task cancellation, capacity/partial failures, source preservation, and reset races
+through native submission and operation queries. This fake adapter verifies the
+engine contract only; Mooncake worker and live-model tests must prove real bytes.
 Request association consumes active request token/hash observations and produces
 the shared logical index plus an optional bounded growth subscription. Guard
 against rewrites below the first cache-block boundary, implicit growth of snapshot

@@ -723,6 +723,9 @@ class EngineCore:
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
+        service = getattr(self, "kv_control_service", None)
+        if service is not None and service.controller.executor is not None:
+            service.controller.executor.progress()
         self._observe_kv_requests()
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't

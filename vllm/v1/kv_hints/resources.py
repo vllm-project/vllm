@@ -19,10 +19,14 @@ from vllm.v1.kv_hints.controller import PhysicalPayload
 from vllm.v1.kv_hints.native import (
     NATIVE_ACTION_VERSION,
     ActionCapability,
+    DemotePayload,
     EvictPayload,
+    PrefetchPayload,
+    SharePayload,
 )
 from vllm.v1.kv_hints.retention import RetentionDeclarations
 from vllm.v1.kv_hints.state import LogicalResolution
+from vllm.v1.kv_hints.transfers import KVTransferAdapter, KVTransferOperations
 
 
 class KVRetentionPriority:
@@ -66,15 +70,23 @@ class KVResourceController:
         manager: KVCacheManager,
         registry: OperationRegistry,
         declarations: RetentionDeclarations,
+        adapters: tuple[KVTransferAdapter, ...] = (),
     ):
         self.manager = manager
         self.registry = registry
         self.declarations = declarations
         self.pool = manager.block_pool
         self.retention_priority = KVRetentionPriority(self.pool, declarations)
+        self.transfers = (
+            KVTransferOperations(
+                manager, registry, declarations.index.namespace, adapters
+            )
+            if adapters
+            else None
+        )
 
     def capabilities(self) -> tuple[ActionCapability, ...]:
-        return (
+        local = (
             ActionCapability(
                 "evict",
                 NATIVE_ACTION_VERSION,
@@ -83,6 +95,20 @@ class KVResourceController:
                 True,
                 ("Referenced copies and unaddressed aliases are preserved",),
             ),
+        )
+        if self.transfers is None:
+            return local
+        return local + tuple(
+            ActionCapability(
+                action,
+                NATIVE_ACTION_VERSION,
+                ("hashes", "session"),
+                ("gpu", adapter.tier),
+                True,
+                adapter.limitations,
+            )
+            for adapter in self.transfers.adapters.values()
+            for action in adapter.actions
         )
 
     def validate_scope(self, target: LogicalResolution) -> None:
@@ -143,6 +169,11 @@ class KVResourceController:
         target: LogicalResolution,
     ) -> None:
         self.validate_scope(target)
+        if isinstance(payload, (DemotePayload, PrefetchPayload, SharePayload)):
+            if self.transfers is None:
+                raise ControlError("unsupported", "No transfer adapter is configured")
+            self.transfers.submit(operation, payload, target)
+            return
         if not isinstance(payload, EvictPayload) or payload.tier != "gpu":
             raise ControlError(
                 "unsupported", "No transfer adapter is configured for this operation"
@@ -191,5 +222,9 @@ class KVResourceController:
         )
 
     def cancel_owners(self, owners: tuple[str, ...]) -> None:
-        # Local eviction completes synchronously and has no transfer interests.
-        pass
+        if self.transfers is not None:
+            self.transfers.cancel_owners(owners)
+
+    def progress(self) -> None:
+        if self.transfers is not None:
+            self.transfers.progress()
