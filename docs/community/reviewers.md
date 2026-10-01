@@ -10,7 +10,7 @@ Community members can reach out to the reviewers below for help with PRs in thei
 Sorted alphabetically by GitHub handle:
 
 - [@andylolu2](https://github.com/andylolu2)
-- [@bnellnm](https://github.com/bnellnm)
+- [@bnellnm](https://github.com/bnellnm) MoE, Quantization layers
 - [@BowenBao](https://github.com/BowenBao)
 - [@cjackal](https://github.com/cjackal)
 - [@divakar-amd](https://github.com/divakar-amd)
