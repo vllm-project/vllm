@@ -602,6 +602,7 @@ class ElasticEPScalingExecutor:
             mapping = self.receive_expert_mapping()
             self.worker.model_runner.setup_eplb_from_mapping(mapping)
         if current_platform.is_rocm():
+            torch.accelerator.empty_cache()
             self._warm_target_groups(get_dp_group(), get_ep_group())
         if not self._can_reuse_fused_moe_kernel():
             self.warm_and_capture()
@@ -616,6 +617,7 @@ class ElasticEPScalingExecutor:
         else:
             retired_groups = self.switch_and_prepare()
             if current_platform.is_rocm():
+                torch.accelerator.empty_cache()
                 self._warm_target_groups(get_dp_group(), get_ep_group())
             if not self._can_reuse_fused_moe_kernel():
                 self.warm_and_capture()

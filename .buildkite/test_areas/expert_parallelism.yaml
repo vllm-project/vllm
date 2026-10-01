@@ -89,4 +89,4 @@ steps:
       - requirements/kv_connectors_rocm.txt
       commands:
       - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-      - pytest -v -s distributed/test_elastic_ep.py
+      - NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,P2P,ALLOC pytest -v -s distributed/test_elastic_ep.py
