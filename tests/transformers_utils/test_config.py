@@ -174,6 +174,23 @@ def test_mistral_yarn_apply_scale_false_disables_yarn_magnitude_scaling():
     assert config.rope_parameters["attention_factor"] == 1.0
 
 
+def test_mistral_params_config_uses_native_loader():
+    """Mistral-format weights still need the native model's weight mapping."""
+    config = adapt_config_dict(
+        {
+            "dim": 128,
+            "n_layers": 2,
+            "hidden_dim": 256,
+            "n_heads": 4,
+            "n_kv_heads": 2,
+            "vocab_size": 1024,
+        },
+        defaults={},
+    )
+
+    assert config.architectures == ["MistralNativeForCausalLM"]
+
+
 def test_glm5_next_accepts_deepseek_sparse_attention_layers():
     layer_types = ["linear_attention", "deepseek_sparse_attention"]
 

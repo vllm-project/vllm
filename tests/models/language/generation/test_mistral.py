@@ -199,6 +199,9 @@ def test_mistral_format(
         load_format="mistral",
         config_format="mistral",
     ) as mistral_format_model:
+        assert not (
+            mistral_format_model.llm.llm_engine.model_config.using_transformers_backend()
+        )
         mistral_format_outputs = mistral_format_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
@@ -210,6 +213,7 @@ def test_mistral_format(
         load_format="safetensors",
         config_format="hf",
     ) as hf_format_model:
+        assert hf_format_model.llm.llm_engine.model_config.using_transformers_backend()
         hf_format_outputs = hf_format_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
