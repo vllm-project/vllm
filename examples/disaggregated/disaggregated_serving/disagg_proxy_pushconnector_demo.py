@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Push-mode disaggregated prefilling proxy demo.
+"""Push-mode disaggregated prefilling proxy demo.
 
 Companion to ``disagg_proxy_demo.py`` (pull mode). The client-facing API is
 the same; the difference is in how P and D coordinate the KV transfer:

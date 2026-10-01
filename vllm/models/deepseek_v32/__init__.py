@@ -7,9 +7,9 @@ MLA + a "lightning indexer" that selects the top-k tokens for a sparse MLA
 attend. The same model code serves any DSA checkpoint, including GLM-5.2
 (``glm_moe_dsa``), which reuses this architecture.
 
-The CUDA implementation selects capability-specific kernels internally and
-falls back when an optimization is unavailable. Other platforms use the
-generic implementation by default.
+The CUDA and ROCm implementations select capability-specific kernels
+internally and fall back when an optimization is unavailable. Other platforms
+use the generic implementation by default.
 """
 
 from vllm.platforms import current_platform
@@ -20,8 +20,12 @@ if current_platform.is_cuda():
     from .nvidia.model import DeepseekV32ForCausalLM
     from .nvidia.model import DeepseekV32ForCausalLM as GlmMoeDsaForCausalLM
     from .nvidia.mtp import DeepseekV32MTP
+elif current_platform.is_rocm():
+    from .amd.model import DeepseekV32ForCausalLM
+    from .amd.model import DeepseekV32ForCausalLM as GlmMoeDsaForCausalLM
+    from .amd.mtp import DeepseekV32MTP
 else:
-    # ROCm, XPU, and CPU keep the generic implementation.
+    # XPU and CPU keep the generic implementation.
     from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP as DeepseekV32MTP
     from vllm.model_executor.models.deepseek_v2 import (
         DeepseekV3ForCausalLM as DeepseekV32ForCausalLM,
