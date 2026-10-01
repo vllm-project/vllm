@@ -1590,26 +1590,19 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "has_mamba,is_hma_required,bounded_replay,expected_count",
-    [
-        (True, True, False, 9),
-        (False, False, False, 10),
-        (False, True, False, 10),
-        (False, True, True, 9),
-    ],
+    "has_mamba,is_hma_required,bounded_replay",
+    [(True, True, False), (False, False, False), (False, True, False), (False, True, True)],
     ids=["mamba", "fa_only", "swa_only", "swa_bounded_replay"],
 )
-def test_mamba_n1_d_side(has_mamba, is_hma_required, bounded_replay, expected_count):
-    """D-side: Mamba and SWA bounded replay get N-1 matched tokens, others N."""
+def test_mamba_n1_d_side(has_mamba, is_hma_required, bounded_replay):
+    """D-side: every model gets N-1 matched tokens; decode recomputes the last."""
     sched = make_nixl_scheduler(
-        has_mamba=has_mamba,
-        is_hma_required=is_hma_required,
-        bounded_replay=bounded_replay,
+        has_mamba=has_mamba, is_hma_required=is_hma_required, bounded_replay=bounded_replay
     )
     req = create_request(num_tokens=10, do_remote_prefill=True)
 
     count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
-    assert count == expected_count
+    assert count == 9
     assert is_async is True
 
 
@@ -1643,7 +1636,7 @@ def test_mamba_n1_p_side_truncation():
 
     Also verifies idempotency (calling again is a no-op) which is
     needed for preemption safety via the _p_side_truncated guard,
-    and that non-Mamba models skip truncation entirely.
+    and that full-attention models are truncated too.
     """
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     req = create_request(num_tokens=10, do_remote_decode=True)
@@ -1668,14 +1661,13 @@ def test_mamba_n1_p_side_truncation():
     sched.on_new_request(req)
     assert len(req.prompt_token_ids) == original_len - 1
 
-    # Non-Mamba: truncation is skipped
     fa_sched = make_nixl_scheduler(has_mamba=False, is_hma_required=False)
     fa_req = create_request(num_tokens=10, do_remote_decode=True)
     assert fa_req.prompt_token_ids is not None
     fa_original = len(fa_req.prompt_token_ids)
 
     fa_sched.on_new_request(fa_req)
-    assert len(fa_req.prompt_token_ids) == fa_original
+    assert len(fa_req.prompt_token_ids) == fa_original - 1
 
     # SWA bounded replay: the window is not replayed after the load, so the
     # prefiller stops short of the last token too.
@@ -1695,25 +1687,24 @@ def test_mamba_n1_p_side_truncation():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "swa_enabled,mamba_enabled,expected_has_mamba,expected_is_hma",
+    "swa_enabled,mamba_enabled,expected_is_hma",
     [
-        (True, True, True, True),
-        (True, False, False, True),
-        (False, False, False, False),
+        (True, True, True),
+        (True, False, True),
+        (False, False, False),
     ],
     ids=["fa_swa_mamba", "fa_swa_only", "fa_only"],
 )
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
 )
-def test_has_mamba_init(
+def test_is_hma_required_init(
     mock_platform,
     swa_enabled,
     mamba_enabled,
-    expected_has_mamba,
     expected_is_hma,
 ):
-    """Test _has_mamba / _is_hma_required derived from kv_cache_groups."""
+    """Test _is_hma_required derived from kv_cache_groups."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
     )
@@ -1735,7 +1726,6 @@ def test_has_mamba_init(
         engine_id="test-engine",
         kv_cache_config=kv_cache_config,
     )
-    assert scheduler._has_mamba is expected_has_mamba
     assert scheduler._is_hma_required is expected_is_hma
 
 
