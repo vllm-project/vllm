@@ -19,9 +19,7 @@ patch-amdsmi: rocm-sdk-core ships the amdsmi bindings under
 """
 
 import argparse
-import base64
 import hashlib
-import re
 import shutil
 import sys
 import tempfile
@@ -30,6 +28,9 @@ import zipfile
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urljoin
+
+import pybase64 as base64
+import regex as re
 
 
 def _record_hash(data: bytes) -> str:
