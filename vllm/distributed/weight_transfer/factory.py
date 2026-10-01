@@ -58,6 +58,7 @@ class WeightTransferEngineFactory:
 
         Raises:
             ValueError: If an engine with the same name is already registered
+
         """
         if name in cls._registry:
             raise ValueError(f"Weight transfer engine '{name}' is already registered.")
@@ -101,6 +102,7 @@ class WeightTransferEngineFactory:
 
         Raises:
             ValueError: If the backend is not registered
+
         """
         backend = config.backend
         if backend not in cls._registry:
@@ -190,6 +192,7 @@ class WeightTransferTrainerFactory:
 
         Raises:
             ValueError: If `init_info.backend` is not registered.
+
         """
         backend = init_info.backend
         if backend not in cls._registry:
@@ -240,6 +243,12 @@ WeightTransferEngineFactory.register_engine(
     "ShardedRDTWeightTransferEngine",
 )
 
+WeightTransferEngineFactory.register_engine(
+    "nccl_m2n",
+    "vllm.distributed.weight_transfer.m2n_engine",
+    "M2NWeightTransferEngine",
+)
+
 
 # Trainer-side engines, parallel to the worker registry above.
 WeightTransferTrainerFactory.register_engine(
@@ -264,4 +273,10 @@ WeightTransferTrainerFactory.register_engine(
     "sharded_rdt",
     "vllm.distributed.weight_transfer.sharded_rdt_trainer",
     "ShardedRDTTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "nccl_m2n",
+    "vllm.distributed.weight_transfer.m2n_trainer",
+    "M2NTrainerWeightTransferEngine",
 )

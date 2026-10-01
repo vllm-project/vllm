@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
+import hmac
 import pickle
+import secrets
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager, suppress
@@ -20,8 +23,7 @@ logger = init_logger(__name__)
 
 
 class SingleWriterShmRingBuffer:
-    """
-    A single-writer, multiple-reader ring buffer implementation using shared
+    """A single-writer, multiple-reader ring buffer implementation using shared
     memory. This class provides a thread-safe ring buffer where one process
     can write data while multiple processes/threads can read from it.
 
@@ -98,6 +100,9 @@ class SingleWriterShmRingBuffer:
     - Reader synchronization handled by is_free_fn callback
     - Writer handles garbage collection (free_buf) based on reader feedback
 
+    Shared Memory Layout:
+    `[32-byte handle-signing secret][ring buffer chunks...]`
+
     Memory Layout per Buffer Chunk:
     `[4-byte monotonic_id][4-byte chunk_size][actual_data...]`
     ^metadata_start                         ^data_start
@@ -120,6 +125,8 @@ class SingleWriterShmRingBuffer:
         self.SIZE_NBYTES = 4
         # 4 bytes for id, 4 bytes for buffer size
         self.MD_SIZE = self.ID_NBYTES + self.SIZE_NBYTES
+        self.AUTH_SECRET_BYTES = 32
+        self.DATA_OFFSET = self.AUTH_SECRET_BYTES
         self.monotonic_id_end = 0
         self.monotonic_id_start = 0
         self.data_buffer_start = 0
@@ -130,8 +137,11 @@ class SingleWriterShmRingBuffer:
             # we are creating a buffer
             self.metadata: dict[int, int] = {}  # monotonic_id -> start address
             self.shared_memory = shared_memory.SharedMemory(
-                create=True, size=self.data_buffer_size, name=name
+                create=True,
+                size=self.data_buffer_size + self.DATA_OFFSET,
+                name=name,
             )
+            self._init_auth_secret()
         else:
             # we are opening an existing buffer
             # fix to https://stackoverflow.com/q/62748654/9191338
@@ -147,7 +157,9 @@ class SingleWriterShmRingBuffer:
                 # so the shared memory block size may be larger or equal
                 # to the requested size. The size parameter is ignored
                 # when attaching to an existing block.
-                assert self.shared_memory.size >= self.data_buffer_size
+                assert (
+                    self.shared_memory.size >= self.data_buffer_size + self.DATA_OFFSET
+                )
 
         logger.debug(
             "Shared memory created/opened with name: %s, size: %d",
@@ -165,10 +177,24 @@ class SingleWriterShmRingBuffer:
         """Clear the ring buffer."""
         assert self.is_writer, "Only the writer can clear the buffer."
         self.metadata.clear()
-        self.monotonic_id_end = 0
-        self.monotonic_id_start = 0
+        # Keep IDs increasing so handles issued before the clear (e.g. for
+        # requests still draining) fail the ID check once their chunk is
+        # reused, instead of resolving to a different object.
+        self.monotonic_id_start = self.monotonic_id_end
         self.data_buffer_start = 0
         self.data_buffer_end = 0
+
+    def get_auth_secret(self) -> bytes:
+        """Return the current handle-signing secret."""
+        assert self.shared_memory.buf is not None, "Buffer has been closed"
+        return bytes(self.shared_memory.buf[: self.AUTH_SECRET_BYTES])
+
+    def _init_auth_secret(self) -> None:
+        assert self.is_writer, "Only the writer can set the auth secret."
+        assert self.shared_memory.buf is not None, "Buffer has been closed"
+        self.shared_memory.buf[: self.AUTH_SECRET_BYTES] = secrets.token_bytes(
+            self.AUTH_SECRET_BYTES
+        )
 
     def close(self) -> None:
         """Close the shared memory."""
@@ -190,8 +216,7 @@ class SingleWriterShmRingBuffer:
         return int.from_bytes(byte_data, "little", signed=True)
 
     def allocate_buf(self, size: int) -> tuple[int, int]:
-        """
-        Allocate a buffer `MD_SIZE` + `size` bytes in the shared memory.
+        """Allocate a buffer `MD_SIZE` + `size` bytes in the shared memory.
         Memory layout:
         `[4-byte monotonic_id][4-byte size][buffer data...]`
         """
@@ -221,13 +246,14 @@ class SingleWriterShmRingBuffer:
 
         # first 4 bytes as the monotonic id
         buf_idx = self.data_buffer_end % self.data_buffer_size
-        self.shared_memory.buf[buf_idx : buf_idx + self.ID_NBYTES] = self.int2byte(
-            self.monotonic_id_end
+        physical_idx = self.DATA_OFFSET + buf_idx
+        self.shared_memory.buf[physical_idx : physical_idx + self.ID_NBYTES] = (
+            self.int2byte(self.monotonic_id_end)
         )
         # next 4 bytes as the size of the data buffer
-        self.shared_memory.buf[buf_idx + self.ID_NBYTES : buf_idx + self.MD_SIZE] = (
-            self.int2byte(size)
-        )
+        self.shared_memory.buf[
+            physical_idx + self.ID_NBYTES : physical_idx + self.MD_SIZE
+        ] = self.int2byte(size)
 
         # record metadata
         self.metadata[self.monotonic_id_end % self.ID_MAX] = self.data_buffer_end
@@ -242,14 +268,19 @@ class SingleWriterShmRingBuffer:
     def access_buf(self, address: int):
         assert self.shared_memory.buf is not None, "Buffer has been closed"
         buf_idx = address % self.data_buffer_size
+        physical_idx = self.DATA_OFFSET + buf_idx
 
         # read metadata
-        metadata_buff = self.shared_memory.buf[buf_idx : buf_idx + self.MD_SIZE]
+        metadata_buff = self.shared_memory.buf[
+            physical_idx : physical_idx + self.MD_SIZE
+        ]
         id = self.byte2int(metadata_buff[: self.ID_NBYTES])
         size = self.byte2int(metadata_buff[self.ID_NBYTES : self.MD_SIZE])
 
         # yield the data buffer and metadata
-        data_buff = self.shared_memory.buf[buf_idx + self.MD_SIZE : buf_idx + size]
+        data_buff = self.shared_memory.buf[
+            physical_idx + self.MD_SIZE : physical_idx + size
+        ]
         with (
             memoryview(data_buff) as data_view,
         ):
@@ -260,8 +291,7 @@ class SingleWriterShmRingBuffer:
         is_free_fn: Callable[[int, memoryview], bool],
         nbytes: int | None = None,
     ) -> Iterable[int]:
-        """
-        Free a buffer of the given size. This is a no-op in shared memory,
+        """Free a buffer of the given size. This is a no-op in shared memory,
         but we need to keep track of the metadata.
 
         If freed memory spreads across the end and start of the ring buffer,
@@ -269,10 +299,13 @@ class SingleWriterShmRingBuffer:
         still might not be a contiguous space of `nbytes` available.
 
         Args:
+            is_free_fn (Callable[[int, memoryview], bool]): Predicate called with
+                a monotonic id and the buffer, returning True when that buffer
+                can be reclaimed.
             nbytes (int, optional): The size of the buffer to free. If None,
                 frees the maximum size of the ring buffer.
-        """
 
+        """
         assert self.is_writer, "Only the writer can free buffers."
         logger.debug(
             "Freeing up space in the ring buffer, "
@@ -412,8 +445,7 @@ class ShmObjectStorageHandle:
 
 
 class SingleWriterShmObjectStorage:
-    """
-    A single-writer, multiple-reader object storage system built on top of a
+    """A single-writer, multiple-reader object storage system built on top of a
     shared memory ring buffer. Provides key-value storage with automatic memory
     management and cross-process serialization support.
 
@@ -424,7 +456,8 @@ class SingleWriterShmObjectStorage:
 
     Architecture:
     - Single writer process can put(key, value) objects
-    - Multiple reader processes can get(address, monotonic_id) objects
+    - Multiple reader processes can get(address, monotonic_id, signature, key)
+      objects
     - Built on SingleWriterShmRingBuffer for efficient shared memory management
     - Thread-safe operations with reader synchronization via locks
 
@@ -439,6 +472,13 @@ class SingleWriterShmObjectStorage:
     - Cross-Process Safety: Uses shared memory with proper synchronization
     - Automatic Cleanup: Garbage collection happens transparently during
       allocation
+
+    Handle Signatures:
+    - Handles are signed with an HMAC of (key, address, monotonic_id), keyed by
+      a random secret stored at the start of the shared memory
+    - The writer signs the handles it issues and rejects stale or forged
+      handles supplied by requests
+    - Readers verify the signature in get/touch before reading shared memory
 
     Memory Layout per Object:
     `[4-byte reference_count][metadata_size][serialized_object_data]`
@@ -458,8 +498,7 @@ class SingleWriterShmObjectStorage:
         serde_class: type[ObjectSerde] = MsgpackSerde,
         reader_lock: LockType | None = None,
     ):
-        """
-        Initialize the object storage.
+        """Initialize the object storage.
 
         Args:
             max_object_size: Maximum size for a single object in bytes.
@@ -467,10 +506,11 @@ class SingleWriterShmObjectStorage:
             ring_buffer: The shared memory ring buffer for storing objects.
             serde_class: Serializer/deserializer for objects.
             reader_lock: Optional lock for synchronizing reader access.
+
         Raises:
             ValueError: If reader_lock is None for readers.
-        """
 
+        """
         self.max_object_size = max_object_size
         self.n_readers = n_readers
         self.serde_class = serde_class
@@ -522,6 +562,76 @@ class SingleWriterShmObjectStorage:
         else:
             raise ValueError(f"Unsupported data type for serialization: {type(data)}")
 
+    def _validate_monotonic_id(
+        self,
+        address: int,
+        monotonic_id: int,
+        buf_metadata: tuple[int, int],
+    ) -> None:
+        if buf_metadata[0] != monotonic_id:
+            raise ValueError(
+                f"Data for address:id '{address}:{monotonic_id}'"
+                " has been modified or is invalid."
+            )
+
+    def _verify_reader_signature(
+        self,
+        address: int,
+        monotonic_id: int,
+        signature: list[int] | None,
+        key: str | None,
+    ) -> None:
+        if signature is None or key is None:
+            raise ValueError("Missing SHM handle signature for cache key.")
+        if (
+            not isinstance(signature, list)
+            or len(signature) != hashlib.sha256().digest_size
+            or any(type(byte) is not int or not 0 <= byte <= 255 for byte in signature)
+            or not isinstance(key, str)
+        ):
+            raise ValueError("Invalid SHM handle signature for cache key.")
+
+        expected_signature = self._make_signature(key, address, monotonic_id)
+        if not hmac.compare_digest(bytes(signature), expected_signature):
+            raise ValueError("Invalid SHM handle signature for cache key.")
+
+    def verify_signature(
+        self,
+        key: str | None,
+        address: int,
+        monotonic_id: int,
+        signature: list[int] | None,
+    ) -> None:
+        """Verify that a handle was issued for the given key.
+
+        For writers: the handle must also be the key's current entry
+        For readers: only the signature is checked
+
+        Args:
+            key: String key the handle belongs to
+            address: Address of the object
+            monotonic_id: Monotonic ID of the object
+            signature: Signature issued with the handle
+
+        """
+        if self.is_writer and (
+            key is None or self.key_index.get(key) != (address, monotonic_id)
+        ):
+            raise ValueError("Invalid SHM handle signature for cache key.")
+        self._verify_reader_signature(address, monotonic_id, signature, key)
+
+    def _make_signature(self, key: str, address: int, monotonic_id: int) -> bytes:
+        payload = (
+            hashlib.sha256(key.encode("utf-8")).digest()
+            + address.to_bytes(8, "little", signed=False)
+            + monotonic_id.to_bytes(4, "little", signed=False)
+        )
+        return hmac.new(
+            self.ring_buffer.get_auth_secret(),
+            payload,
+            hashlib.sha256,
+        ).digest()
+
     def increment_writer_flag(self, id: int) -> None:
         """Set the in-use flag for the writer."""
         self.writer_flag[id] = self.writer_flag.get(id, 0) + 1
@@ -547,22 +657,22 @@ class SingleWriterShmObjectStorage:
             del self.writer_flag[freed_id]
 
     def is_cached(self, key: str) -> bool:
-        """
-        Check if the object with the given key is cached.
-        """
+        """Check if the object with the given key is cached."""
         return key in self.key_index
 
     def get_cached(self, key: str) -> tuple[int, int]:
-        """
-        Get the cached object by key if it exists.
-        """
+        """Get the cached object by key if it exists."""
         address, monotonic_id = self.key_index[key]
         self.increment_writer_flag(monotonic_id)
         return address, monotonic_id
 
+    def get_signature(self, key: str) -> list[int]:
+        """Sign the handle of a cached object so readers can verify it."""
+        address, monotonic_id = self.key_index[key]
+        return list(self._make_signature(key, address, monotonic_id))
+
     def put(self, key: str, value: Any) -> tuple[int, int]:
-        """
-        Store a key-value pair in the object storage.
+        """Store a key-value pair in the object storage.
         Attempts to free max_object_size bytes using FIFO order
         when the ring buffer runs out of space during a put() operation.
 
@@ -574,6 +684,7 @@ class SingleWriterShmObjectStorage:
             MemoryError: If there's not enough space in the buffer
             ValueError: If the serialized object is too large
             ValueError: If the key already exists in the storage
+
         """
         if key in self.key_index:
             raise ValueError(f"Key '{key}' already exists in the storage.")
@@ -610,15 +721,20 @@ class SingleWriterShmObjectStorage:
         self.id_index[monotonic_id] = key
         return address, monotonic_id
 
-    def get(self, address: int, monotonic_id: int) -> Any:
+    def get(
+        self,
+        address: int,
+        monotonic_id: int,
+        signature: list[int] | None = None,
+        key: str | None = None,
+    ) -> Any:
+        if not self.is_writer:
+            # Reject forged handles before dereferencing the supplied address.
+            self.verify_signature(key, address, monotonic_id, signature)
+
         # Read data from buffer
         with self.ring_buffer.access_buf(address) as (data_view, buf_metadata):
-            # check id from metadata
-            if buf_metadata[0] != monotonic_id:
-                raise ValueError(
-                    f"Data for address:id '{address}:{monotonic_id}'"
-                    " has been modified or is invalid."
-                )
+            self._validate_monotonic_id(address, monotonic_id, buf_metadata)
 
             obj = self.ser_de.deserialize(data_view[self.flag_bytes :])
 
@@ -638,9 +754,9 @@ class SingleWriterShmObjectStorage:
         key: str,
         address: int = 0,
         monotonic_id: int = 0,
+        signature: list[int] | None = None,
     ) -> None:
-        """
-        Touch an existing cached item to update its eviction status.
+        """Touch an existing cached item to update its eviction status.
 
         For writers (ShmObjectStoreSenderCache): Increment writer_flag
         For readers (ShmObjectStoreReceiverCache): Increment reader_count
@@ -649,6 +765,7 @@ class SingleWriterShmObjectStorage:
             key: String key of the object to touch
             address: Address of the object (only for readers)
             monotonic_id: Monotonic ID of the object (only for readers)
+            signature: Server-issued handle signature (only for readers)
 
         """
         if self._reader_lock is None:
@@ -658,10 +775,13 @@ class SingleWriterShmObjectStorage:
             # Writer side: increment writer_flag to raise eviction threshold
             self.increment_writer_flag(monotonic_id)
         else:
+            # Reject forged handles before dereferencing the supplied address.
+            self.verify_signature(key, address, monotonic_id, signature)
             with (
                 self._reader_lock,
-                self.ring_buffer.access_buf(address) as (data_view, _),
+                self.ring_buffer.access_buf(address) as (data_view, buf_metadata),
             ):
+                self._validate_monotonic_id(address, monotonic_id, buf_metadata)
                 reader_count = self.ring_buffer.byte2int(data_view[: self.flag_bytes])
 
                 # NOTE(Long):
@@ -700,8 +820,7 @@ class SingleWriterShmObjectStorage:
         )
 
     def default_is_free_check(self, id: int, buf: memoryview) -> bool:
-        """
-        Default is_free function that checks if the first 4 bytes are zero.
+        """Default is_free function that checks if the first 4 bytes are zero.
         This indicates that the buffer is free.
         """
         reader_count = int.from_bytes(buf[0:4], "little", signed=True)
