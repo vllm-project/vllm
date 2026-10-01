@@ -11,9 +11,9 @@ set -ex
 
 # shellcheck source=.buildkite/scripts/rocm/stack.sh
 source "$(dirname "${BASH_SOURCE[0]}")/rocm/stack.sh" "${1:?Usage: $0 <base-dockerfile> [--default]}"
-TAG_FLAVORS=("-${ROCM_STACK_FLAVOR}")
+TAG_VARIANTS=("-${ROCM_STACK_VARIANT}")
 if [[ "${2:-}" == "--default" ]]; then
-  TAG_FLAVORS=("" "-${ROCM_STACK_FLAVOR}")
+  TAG_VARIANTS=("" "-${ROCM_STACK_VARIANT}")
 fi
 INSTALL_SPEC="vllm"
 if [[ "$ROCM_STACK_THEROCK" == "1" ]]; then
@@ -39,8 +39,8 @@ WHEEL_PATH="rocm/${BUILDKITE_COMMIT}/${VARIANT}-wheels/"
 
 DOCKER_CMDS="docker pull ${ROCM_STACK_ECR_BASE}
 docker pull ${ROCM_STACK_ECR_IMAGE}"
-for flavor in "${TAG_FLAVORS[@]}"; do
-  for tag in "latest${flavor}" "v${RELEASE_VERSION}${flavor}"; do
+for suffix in "${TAG_VARIANTS[@]}"; do
+  for tag in "latest${suffix}" "v${RELEASE_VERSION}${suffix}"; do
     DOCKER_CMDS+="
 docker tag ${ROCM_STACK_ECR_BASE} vllm/vllm-openai-rocm:${tag}-base
 docker tag ${ROCM_STACK_ECR_IMAGE} vllm/vllm-openai-rocm:${tag}

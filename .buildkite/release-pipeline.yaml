@@ -747,7 +747,7 @@ steps:
   # - ROCm 10.0 (TheRock, docker/Dockerfile.rocm{,_base}) is the default: it owns the
   #   :nightly / :latest images and the root wheel index.
   # - ROCm 7.2 (docker/Dockerfile.rocm_72{,_base}) is kept for a transition period as
-  #   -rocm72 images and rocm723 wheels.
+  #   rocm72 images and wheels.
   #
   # vLLM version is determined by the Buildkite checkout (like the CUDA pipeline).
   # =============================================================================
