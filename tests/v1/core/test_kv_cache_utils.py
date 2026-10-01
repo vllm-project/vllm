@@ -2947,6 +2947,183 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     )
 
 
+def _glm5_kv_cache_spec_with_drafter() -> dict[str, KVCacheSpec]:
+    """GLM-5.3-Flash shape plus a block-diffusion drafter's 5 sliding-window
+    layers, which run with the draft worker's small block size."""
+    kv_cache_spec = _glm5_like_kv_cache_spec_with_tail()
+    for i in range(5):
+        kv_cache_spec[f"draft.layers.{i}.self_attn.attn"] = SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=2,
+            head_size=128,
+            head_size_v=128,
+            dtype=torch.bfloat16,
+            sliding_window=2048,
+        )
+    return kv_cache_spec
+
+
+def _glm5_drafter_grouping_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=0,
+            mamba_cache_mode="none",
+            get_resolved_kv_cache_layout=lambda: SimpleNamespace(
+                is_block_outermost=True
+            ),
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1, decode_context_parallel_size=1
+        ),
+        model_config=SimpleNamespace(max_model_len=8192),
+        max_in_flight_tokens=64,
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            use_eagle=lambda: True,
+            use_eagle_block_drop=lambda: True,
+        ),
+    )
+
+
+def _glm5_kv_cache_spec_with_drafter() -> dict[str, KVCacheSpec]:
+    """GLM-5.3-Flash shape plus a block-diffusion drafter's 5 sliding-window
+    layers, which run with the draft worker's small block size."""
+    kv_cache_spec = _glm5_like_kv_cache_spec_with_tail()
+    for i in range(5):
+        kv_cache_spec[f"draft.layers.{i}.self_attn.attn"] = SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=2,
+            head_size=128,
+            head_size_v=128,
+            dtype=torch.bfloat16,
+            sliding_window=2048,
+        )
+    return kv_cache_spec
+
+
+def _glm5_drafter_grouping_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=0,
+            mamba_cache_mode="none",
+            get_resolved_kv_cache_layout=lambda: SimpleNamespace(
+                is_block_outermost=True
+            ),
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1, decode_context_parallel_size=1
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=8192,
+            hf_config=SimpleNamespace(model_type="glm5_next"),
+        ),
+        max_in_flight_tokens=64,
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            use_eagle=lambda: True,
+            use_eagle_block_drop=lambda: True,
+        ),
+    )
+
+
+def test_glm5_next_drafter_gets_its_own_eagle_group():
+    """A drafter's uniform sliding-window layers must not drag the GLM-5.3
+    hybrid off its packed MLA/indexer layout: the builder declines only for
+    non-EAGLE spec configs; with a drafter enabled they get their own group
+    at the target block size, flagged as the draft group, and their regions
+    are appended after the packed MLA+indexer regions instead of going
+    through page unification (which cannot pad the MLA indexer)."""
+    vllm_config = _glm5_drafter_grouping_config()
+    kv_cache_spec = _glm5_kv_cache_spec_with_drafter()
+    mla_page = kv_cache_spec["layers.3.attn"].page_size_bytes
+    idx_page = kv_cache_spec["layers.3.indexer"].page_size_bytes
+
+    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+
+    draft_groups = [group for group in groups if group.is_eagle_group]
+    assert len(draft_groups) == 1
+    draft_group = draft_groups[0]
+    draft_names = sorted(n for n in kv_cache_spec if n.startswith("draft."))
+    assert sorted(draft_group.layer_names) == draft_names
+    assert not draft_group.enable_kv_transfer
+    # Draft pages are re-aligned to the target block size (single LCM block).
+    target_block_size = kv_cache_spec["layers.3.attn"].block_size
+    assert draft_group.kv_cache_spec.block_size == target_block_size
+    draft_page = draft_group.kv_cache_spec.page_size_bytes
+    assert draft_page == len(draft_names) * target_block_size * 2 * 256 * 2
+
+    assert kv_cache_utils._glm5_next_tensor_layout(groups) is not None
+    bytes_per_block = kv_cache_utils._pool_bytes_per_block(groups)
+    assert bytes_per_block == 11 * mla_page + 11 * idx_page + draft_page
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, bytes_per_block * 100 + 1
+    )
+    assert kv_cache_config.num_blocks == 100
+    tensors = _tensor_by_layer(kv_cache_config)
+    assert {t.size for t in kv_cache_config.kv_cache_tensors} == {bytes_per_block * 100}
+
+    # Draft regions live after the packed MLA+indexer regions and alias
+    # nothing (the mamba views all ride the MLA offsets).
+    packed_end = (11 * mla_page + 11 * idx_page) * kv_cache_config.num_blocks
+    draft_regions = []
+    for name in draft_names:
+        tensor = tensors[name]
+        lo = tensor.offset
+        hi = tensor.offset + tensor.block_stride * kv_cache_config.num_blocks
+        assert lo >= packed_end
+        assert hi <= tensor.size
+        draft_regions.append((name, lo, hi))
+    for name_a, lo_a, hi_a in draft_regions:
+        for tensor in kv_cache_config.kv_cache_tensors:
+            if tensor.layers[0] in draft_names:
+                continue
+            olo = tensor.offset
+            ohi = tensor.offset + tensor.block_stride * kv_cache_config.num_blocks
+            assert hi_a <= olo or ohi <= lo_a, f"overlap {name_a} vs {tensor.layers}"
+    for i, (na, lo_a, hi_a) in enumerate(draft_regions):
+        for nb, lo_b, hi_b in draft_regions[i + 1 :]:
+            assert hi_a <= lo_b or hi_b <= lo_a, f"overlap {na} vs {nb}"
+
+    # Accounting charges the draft group its own blocks at the packed stride.
+    attn_group = next(
+        group
+        for group in groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        and not group.is_eagle_group
+    )
+    attn_blocks = attn_group.kv_cache_spec.max_memory_usage_pages(vllm_config)
+    mamba_blocks_per_group = 1 + new_mamba_spec().num_speculative_blocks
+    draft_blocks = (
+        draft_group.kv_cache_spec.max_memory_usage_bytes(vllm_config) // draft_page
+    )
+    blocks_per_request = attn_blocks + 4 * mamba_blocks_per_group + 1 + draft_blocks
+    assert (
+        kv_cache_utils._max_memory_usage_bytes_from_groups(vllm_config, groups)
+        == blocks_per_request * bytes_per_block
+    )
+
+
+def test_glm5_next_drafter_gate_requires_eagle_family():
+    """Without an active EAGLE-family drafter the sliding-window layers must
+    not be absorbed into the GLM-5 grouping: their trailing blocks are
+    volatile draft state, so the builder declines and the generic path takes
+    over instead."""
+    vllm_config = _glm5_drafter_grouping_config()
+    vllm_config.speculative_config = None
+    kv_cache_spec = _glm5_kv_cache_spec_with_drafter()
+    assert (
+        kv_cache_utils._get_kv_cache_groups_glm5_next(vllm_config, kv_cache_spec)
+        is None
+    )
+
+
 def test_glm5_kpool_tail_does_not_drag_hash_block_size():
     """The tail's kpool-sized scratch block (4 tokens) must not constrain the
     prefix-cache hash granularity: participating groups alone decide it."""
