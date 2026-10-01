@@ -4,14 +4,17 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils import platform_utils
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 from vllm.v1.worker.gpu import buffer_utils
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
 
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+DEVICE_TYPE = current_platform.device_type
+DEVICES = [
+    f"{DEVICE_TYPE}:{i}"
+    for i in range(1 if torch.accelerator.device_count() == 1 else 2)
 ]
 
 
@@ -22,9 +25,9 @@ def _uva_available() -> bool:
     accelerator; before that it answers optimistically. Initialize first so the
     guards below reflect what the tests will actually see.
     """
-    if not CUDA_DEVICES:
+    if not DEVICES:
         return False
-    torch.zeros(1, device=CUDA_DEVICES[0])
+    torch.zeros(1, device=DEVICES[0])
     return is_uva_available()
 
 
@@ -32,43 +35,43 @@ UVA_AVAILABLE = _uva_available()
 
 
 @pytest.mark.skipif(not UVA_AVAILABLE, reason="UVA is not available.")
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_cpu_write(device):
     torch.set_default_device(device)
     cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
-    cuda_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
-    assert cuda_view.device.type == "cuda"
+    gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
+    assert gpu_view.device.type == DEVICE_TYPE
 
-    assert cuda_view[0, 0] == 0
-    assert cuda_view[2, 3] == 0
-    assert cuda_view[4, 5] == 0
+    assert gpu_view[0, 0] == 0
+    assert gpu_view[2, 3] == 0
+    assert gpu_view[4, 5] == 0
 
     cpu_tensor[0, 0] = 1
     cpu_tensor[2, 3] = 2
     cpu_tensor[4, 5] = -1
 
-    cuda_view.mul_(2)
-    assert cuda_view[0, 0] == 2
-    assert cuda_view[2, 3] == 4
-    assert cuda_view[4, 5] == -2
+    gpu_view.mul_(2)
+    assert gpu_view[0, 0] == 2
+    assert gpu_view[2, 3] == 4
+    assert gpu_view[4, 5] == -2
 
 
 @pytest.mark.skipif(not UVA_AVAILABLE, reason="UVA is not available.")
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_gpu_write(device):
     torch.set_default_device(device)
     cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
-    cuda_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
-    assert cuda_view.device.type == "cuda"
+    gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
+    assert gpu_view.device.type == DEVICE_TYPE
 
-    assert cuda_view[0, 0] == 0
-    assert cuda_view[2, 3] == 0
-    assert cuda_view[4, 5] == 0
+    assert gpu_view[0, 0] == 0
+    assert gpu_view[2, 3] == 0
+    assert gpu_view[4, 5] == 0
 
-    cuda_view[0, 0] = 1
-    cuda_view[2, 3] = 2
-    cuda_view[4, 5] = -1
-    cuda_view.mul_(2)
+    gpu_view[0, 0] = 1
+    gpu_view[2, 3] = 2
+    gpu_view[4, 5] = -1
+    gpu_view.mul_(2)
 
     assert cpu_tensor[0, 0] == 2
     assert cpu_tensor[2, 3] == 4
@@ -76,7 +79,7 @@ def test_gpu_write(device):
 
 
 @pytest.mark.skipif(not UVA_AVAILABLE, reason="UVA is not available.")
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_staged_write_uses_uva_contents_for_uva_target(device, monkeypatch):
     def fail_async_tensor_h2d(*args, **kwargs):
         pytest.fail("UVA-backed targets should not copy write contents to the GPU")
@@ -163,7 +166,7 @@ def test_uva_pool_copy_to_gpu_preserves_shape_and_out(use_out, input_type):
         )
         values = expected.numpy() if input_type == "numpy" else expected
         out = (
-            torch.empty(expected.shape, dtype=torch.int32, device="cuda")
+            torch.empty(expected.shape, dtype=torch.int32, device=DEVICE_TYPE)
             if use_out
             else None
         )
@@ -178,7 +181,7 @@ def test_uva_pool_copy_to_gpu_preserves_shape_and_out(use_out, input_type):
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64, torch.float32])
 def test_staged_write_inflight(uva_target, dtype):
     """Preserve every generation until its consumer finishes before slot reuse."""
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     with torch.accelerator.device_index(device.index):
         state = StagedWriteTensor(
             (4, 4096),
@@ -188,9 +191,9 @@ def test_staged_write_inflight(uva_target, dtype):
             uva_instead_of_gpu=uva_target,
         )
         assert (state.write_contents is not None) == uva_target
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        pending: list[tuple[torch.cuda.Event, torch.Tensor, torch.Tensor]] = []
+        stream = torch.Stream(device=device)
+        stream.wait_stream(torch.accelerator.current_stream())
+        pending: list[tuple[torch.Event, torch.Tensor, torch.Tensor]] = []
         expected = torch.zeros((4, 4096), dtype=dtype, device="cpu")
         for step in range(24):
             if len(pending) == 2:
@@ -205,18 +208,78 @@ def test_staged_write_inflight(uva_target, dtype):
                 values += 0.25
             expected[row, 2 : 2 + length] = values
             expected[3, 1:4] = step
-            with torch.cuda.stream(stream):
+            with stream:
                 state.stage_write(row, 2, values.tolist())
                 state.stage_write(3, 1, [step] * 3)
                 state.apply_write()
                 # A GPU consumer observes this generation before the next update.
                 snapshot = state.gpu.clone()
-                event = torch.cuda.Event()
+                event = torch.Event()
                 event.record(stream)
             pending.append((event, snapshot, expected.clone()))
         for event, snapshot, reference in pending:
             event.synchronize()
             torch.testing.assert_close(snapshot.cpu(), reference, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not UVA_AVAILABLE, reason="UVA is not available.")
+@pytest.mark.parametrize("device", DEVICES)
+def test_non_pinned_cpu_tensor(device):
+    # Non-pinned CPU tensors are internally copied into a pinned buffer,
+    # so the resulting gpu view reflects the values at creation time but
+    # is decoupled from further writes to the original `cpu_tensor`.
+    torch.set_default_device(device)
+    cpu_tensor = torch.arange(100, dtype=torch.int32, device="cpu").view(10, 10)
+    assert not cpu_tensor.is_pinned()
+    gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
+    assert gpu_view.device.type == DEVICE_TYPE
+
+    assert gpu_view[0, 0] == 0
+    assert gpu_view[2, 3] == 23
+    assert gpu_view[9, 9] == 99
+
+    # Writes to the original (unpinned) CPU tensor must not affect the view,
+    # since a private pinned copy was made.
+    cpu_tensor[0, 0] = -1
+    assert gpu_view[0, 0] == 0
+
+    # The view itself remains writable and independently usable.
+    gpu_view.mul_(2)
+    assert gpu_view[2, 3] == 46
+    assert gpu_view[9, 9] == 198
+
+
+@pytest.mark.skipif(not UVA_AVAILABLE, reason="UVA is not available.")
+@pytest.mark.skipif(
+    not current_platform.is_xpu(), reason="XPU non-contiguous UVA test."
+)
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("device", DEVICES)
+def test_non_contiguous_strided_view(device, pinned):
+    torch.set_default_device(device)
+    # Simulate scale_kn: a [32, 16] contiguous tensor
+    scale_kn = torch.arange(
+        512, dtype=torch.float32, device="cpu", pin_memory=pinned
+    ).view(32, 16)
+    # Transposed view: shape [16, 32], non-contiguous stride (1, 16)
+    cpu_view = scale_kn.t()
+    assert cpu_view.shape == (16, 32)
+    assert cpu_view.stride() == (1, 16)
+    assert not cpu_view.is_contiguous()
+
+    gpu_view = get_accelerator_view_from_cpu_tensor(cpu_view)
+    assert gpu_view.device.type == DEVICE_TYPE
+    assert gpu_view.shape == (16, 32)
+    assert gpu_view.stride() == (1, 16)
+    assert not gpu_view.is_contiguous()
+
+    # Transposing tensor_view back should yield a contiguous [32, 16] tensor
+    gpu_view_t = gpu_view.t()
+    assert gpu_view_t.shape == (32, 16)
+    assert gpu_view_t.is_contiguous()
+
+    # Correctness check: values match original transposed CPU tensor
+    assert torch.equal(gpu_view.cpu(), cpu_view)
 
 
 @pytest.fixture
@@ -227,7 +290,7 @@ def uncached_uva_probe():
 
 
 @pytest.mark.skipif(not UVA_AVAILABLE, reason="UVA is not available.")
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_uva_available_when_alias_is_live(device, uncached_uva_probe):
     """A working accelerator must keep UVA enabled."""
     torch.set_default_device(device)
@@ -236,7 +299,7 @@ def test_uva_available_when_alias_is_live(device, uncached_uva_probe):
     assert platform_utils.is_uva_available()
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_uva_unavailable_when_view_is_detached(device, monkeypatch, uncached_uva_probe):
     """A detached view silently feeds stale data to every kernel that reads it.
 
@@ -255,7 +318,7 @@ def test_uva_unavailable_when_view_is_detached(device, monkeypatch, uncached_uva
     assert not platform_utils.is_uva_available()
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_uva_unavailable_when_probe_raises(device, monkeypatch, uncached_uva_probe):
     """The probe fails closed: the fallback paths are correct, just slower."""
     torch.set_default_device(device)
