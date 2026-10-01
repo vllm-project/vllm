@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -14,10 +16,13 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearLayerConfig
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferCuteDslNvFp4W4A16LinearKernel,
+    FlashInferCutlassNvFp4LinearKernel,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
@@ -45,6 +50,52 @@ SHAPES.extend(PAD_SHAPES)
 
 SEEDS = [42]
 CUDA_DEVICES = ["cuda:0"]
+
+
+@pytest.mark.parametrize("token_shape", [(17,), (1, 17), (2, 17)])
+@torch.inference_mode()
+def test_flashinfer_cutlass_nvfp4_preserves_quantized_input_shape(
+    token_shape: tuple[int, ...],
+) -> None:
+    """Pre-quantized 3D inputs must match flat GEMM and retain token dimensions."""
+    supported, reason = FlashInferCutlassNvFp4LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+
+    set_random_seed(42)
+    hidden_size, output_size = 128, 128
+    x = torch.randn(*token_shape, hidden_size, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(output_size, hidden_size, dtype=x.dtype, device=x.device)
+    input_scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / x.abs().max()).float()
+    weight_scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / weight.abs().max()).float()
+    x_fp4, x_blockscale = ops.scaled_fp4_quant(x.reshape(-1, hidden_size), input_scale)
+    weight_fp4, weight_blockscale = ops.scaled_fp4_quant(weight, weight_scale)
+    flat_input = QuantizedActivation(
+        data=x_fp4,
+        scale=x_blockscale,
+        orig_dtype=x.dtype,
+        orig_shape=torch.Size((x_fp4.shape[0], hidden_size)),
+        quant_key=kNvfp4Dynamic,
+    )
+    shaped_input = replace(
+        flat_input,
+        data=x_fp4.reshape(*token_shape, hidden_size // 2),
+        orig_shape=x.shape,
+    )
+    layer = torch.nn.Module()
+    layer.input_size_per_partition = hidden_size
+    layer.output_size_per_partition = output_size
+    layer.weight = weight_fp4
+    layer.weight_scale = weight_blockscale
+    layer.alpha = (input_scale * weight_scale).reciprocal()
+    kernel = FlashInferCutlassNvFp4LinearKernel(NvFp4LinearLayerConfig())
+
+    expected = kernel.apply_weights(layer, flat_input)
+    actual = kernel.apply_weights(layer, shaped_input)
+
+    assert actual.shape == (*token_shape, output_size)
+    assert actual.dtype == x.dtype
+    torch.testing.assert_close(actual.reshape(expected.shape), expected)
 
 
 def get_ref_results(

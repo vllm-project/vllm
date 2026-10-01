@@ -219,6 +219,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
             x_fp4, x_blockscale = qa.data, qa.scale
+            x_fp4 = x_fp4.reshape(-1, x_fp4.shape[-1])
             x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_bytes)
             output_dtype = qa.orig_dtype
             output_shape = [*qa.orig_shape[:-1], output_size]
