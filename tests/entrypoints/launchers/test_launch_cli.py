@@ -238,6 +238,46 @@ def test_snapshot_environment_contract(
 
 
 @pytest.mark.parametrize(
+    ("configured", "expected"),
+    [(None, "1"), ("0", "0"), ("1", "1")],
+)
+def test_snapshot_child_defaults_nccl_ib_without_mutating_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str | None,
+    expected: str,
+):
+    if configured is None:
+        monkeypatch.delenv("NCCL_IB_DISABLE", raising=False)
+    else:
+        monkeypatch.setenv("NCCL_IB_DISABLE", configured)
+    parent_environment = os.environ.copy()
+    process = create_autospec(subprocess.Popen, instance=True)
+    process.pid = 100
+    popen = create_autospec(subprocess.Popen, return_value=process)
+    monkeypatch.setattr(snapshot_runtime.subprocess, "Popen", popen)
+
+    LocalSnapshotTools().launch_child(tmp_path, ("model",))
+
+    assert popen.call_args.kwargs["env"]["NCCL_IB_DISABLE"] == expected
+    assert os.environ == parent_environment
+
+
+def test_snapshot_environment_identity_applies_effective_nccl_ib_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("NCCL_IB_DISABLE", raising=False)
+    implicit = LocalSnapshotTools()._environment_identity()
+    monkeypatch.setenv("NCCL_IB_DISABLE", "1")
+    explicit_disabled = LocalSnapshotTools()._environment_identity()
+    monkeypatch.setenv("NCCL_IB_DISABLE", "0")
+    explicit_enabled = LocalSnapshotTools()._environment_identity()
+
+    assert implicit == explicit_disabled
+    assert explicit_enabled != implicit
+
+
+@pytest.mark.parametrize(
     "case",
     [
         (("--hf_token", "SECRET"), ("--hf_token", "***")),
@@ -1015,6 +1055,28 @@ def test_snapshot_rejects_unsafe_process_state_before_criu(
     if blocked_state == "tcp":
         assert "pid 101" in str(excinfo.value)
         assert "1.1.1.1:443" in str(excinfo.value)
+
+
+def test_snapshot_rejects_open_infiniband_device_before_criu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    tools = LocalSnapshotTools()
+    monkeypatch.setattr(tools, "_tree_pids", lambda _root_pid: (100, 101))
+    monkeypatch.setattr(tools, "_cuda_process_rows", lambda: ("101, GPU-abc",))
+    monkeypatch.setattr(
+        tools,
+        "_descriptor_targets",
+        lambda pid: ("/dev/infiniband/uverbs7",) if pid == 101 else (),
+    )
+    monkeypatch.setattr(tools, "_criu", lambda *_args: pytest.fail("CRIU called"))
+
+    with pytest.raises(SnapshotCreateError) as failure:
+        tools.inventory(100, tmp_path)
+
+    message = str(failure.value)
+    assert "pid 101" in message
+    assert "/dev/infiniband/uverbs7" in message
+    assert "NCCL_IB_DISABLE=1" in message
 
 
 def test_decode_endpoint_families():

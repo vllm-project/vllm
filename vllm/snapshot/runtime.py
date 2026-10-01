@@ -254,6 +254,7 @@ class LocalSnapshotTools:
         ]
         child_environment = os.environ.copy()
         child_environment.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        child_environment.setdefault("NCCL_IB_DISABLE", "1")
         with (workdir / "child.log").open("wb") as log_file:
             process = subprocess.Popen(
                 command,
@@ -357,6 +358,13 @@ class LocalSnapshotTools:
             if "anon_inode:[io_uring]" in targets:
                 io_uring_pids.append(pid)
             for target in targets:
+                if target.startswith("/dev/infiniband/"):
+                    raise SnapshotCreateError(
+                        "snapshot process has open InfiniBand/RDMA state that "
+                        f"CRIU cannot capture: pid {pid}, {target}. If NCCL owns "
+                        "it, use NCCL_IB_DISABLE=1. Close other RDMA clients "
+                        "before snapshot creation."
+                    )
                 if target.startswith("socket:[") and target.endswith("]"):
                     # Shared descriptors name one holder; any of them locates
                     # the connection for the operator.
@@ -764,6 +772,7 @@ class LocalSnapshotTools:
         prefixes = ("VLLM_", "CUDA_", "NCCL_", "TORCH_", "TRITON_")
         environment = os.environ.copy()
         environment.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        environment.setdefault("NCCL_IB_DISABLE", "1")
         selected = tuple(
             sorted(
                 (key, hashlib.sha256(key.encode() + b"\0" + value.encode()).hexdigest())
