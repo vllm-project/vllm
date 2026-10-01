@@ -798,6 +798,24 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return mixed_qkv_out, z_out, b_out, a_out
 
+    def split_mixed_qkv_views(self, mixed_qkv):
+        """Split packed qkv into (1, seq, heads, dim) views without copying."""
+        if mixed_qkv is None:
+            return None, None, None
+        q, k, v = mixed_qkv.split(
+            [
+                self.key_dim // self.tp_size,
+                self.key_dim // self.tp_size,
+                self.value_dim // self.tp_size,
+            ],
+            dim=-1,
+        )
+        return (
+            q.unflatten(-1, (-1, self.head_k_dim)).unsqueeze(0),
+            k.unflatten(-1, (-1, self.head_k_dim)).unsqueeze(0),
+            v.unflatten(-1, (-1, self.head_v_dim)).unsqueeze(0),
+        )
+
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Split packed qkv into contiguous (1, seq, heads, dim) tensors.
 
@@ -1459,7 +1477,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        # The recurrent kernel reads q/k/v straight out of the packed conv
+        # output, so the spec part needs no split kernel.
+        query_spec, key_spec, value_spec = self.split_mixed_qkv_views(mixed_qkv_spec)
+        # With spec decodes only, the kernel writes the readout in place.
+        spec_out = None
+        if (
+            spec_sequence_masks is not None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes == 0
+        ):
+            spec_out = core_attn_out[:num_actual_tokens].unsqueeze(0)
+            o_dtype = (
+                torch.float32 if ssm_state.dtype == torch.float32 else query_spec.dtype
+            )
+            if spec_out.dtype != o_dtype or not spec_out.is_contiguous():
+                spec_out = None
 
         # Split mixed non-spec-decode+prefill to process independently
         split_non_spec = (
@@ -1541,6 +1574,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
+                    out=spec_out,
                 )
             )
         else:
@@ -1654,7 +1688,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            if spec_out is None:
+                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 

@@ -52,6 +52,9 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
     stride_indices_tok: tl.constexpr,
+    stride_q_tok: tl.constexpr,
+    stride_k_tok: tl.constexpr,
+    stride_v_tok: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
@@ -81,9 +84,9 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
-    p_q = q + (bos * H + i_h) * K + o_k
-    p_k = k + (bos * H + i_h) * K + o_k
-    p_v = v + (bos * HV + i_hv) * V + o_v
+    p_q = q + bos * stride_q_tok + i_h * K + o_k
+    p_k = k + bos * stride_k_tok + i_h * K + o_k
+    p_v = v + bos * stride_v_tok + i_hv * V + o_v
 
     p_A_log = A_log + i_hv
     if not IS_KDA:
@@ -181,12 +184,25 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         # Update pointers for next timestep
-        p_q += H * K
-        p_k += H * K
+        p_q += stride_q_tok
+        p_k += stride_k_tok
         p_o += HV * V
-        p_v += HV * V
+        p_v += stride_v_tok
         p_b += HV
         p_a += HV
+
+
+def _token_strided(x: torch.Tensor) -> tuple[torch.Tensor, int]:
+    """[B, T, H, D] with each token's heads packed; returns it (copied only
+    if needed) and its token stride."""
+    B, T, H, D = x.shape
+    if (
+        x.stride(3) != 1
+        or x.stride(2) != D
+        or (B > 1 and x.stride(0) != T * x.stride(1))
+    ):
+        x = x.contiguous()
+    return x, x.stride(1)
 
 
 def fused_sigmoid_gating_delta_rule_update(
@@ -207,11 +223,16 @@ def fused_sigmoid_gating_delta_rule_update(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
+    out: torch.Tensor | None = None,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
     This function uses a single fused kernel that combines both sigmoid gating
     computation and the recurrent delta rule update for better performance.
+
+    q, k and v may be strided views over tokens (e.g. slices of a packed qkv
+    buffer) as long as each token's heads are contiguous. ``out``, when given,
+    receives the readout in place of a new tensor.
     """
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -250,7 +271,14 @@ def fused_sigmoid_gating_delta_rule_update(
         if initial_state is not None and initial_state.dtype == torch.float32
         else q.dtype
     )
-    o = q.new_empty(NK, *v.shape, dtype=o_dtype)
+    if out is not None:
+        assert out.shape == v.shape and out.dtype == o_dtype and out.is_contiguous()
+        o = out.unsqueeze(0)
+    else:
+        o = q.new_empty(NK, *v.shape, dtype=o_dtype)
+    q, stride_q_tok = _token_strided(q)
+    k, stride_k_tok = _token_strided(k)
+    v, stride_v_tok = _token_strided(v)
     if inplace_final_state:
         final_state = initial_state
     else:
@@ -274,9 +302,9 @@ def fused_sigmoid_gating_delta_rule_update(
         dt_bias=dt_bias,
         beta=beta,
         threshold=threshold,
-        q=q.contiguous(),
-        k=k.contiguous(),
-        v=v.contiguous(),
+        q=q,
+        k=k,
+        v=v,
         o=o,
         h0=initial_state,
         ht=final_state,
@@ -298,6 +326,9 @@ def fused_sigmoid_gating_delta_rule_update(
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
+        stride_q_tok=stride_q_tok,
+        stride_k_tok=stride_k_tok,
+        stride_v_tok=stride_v_tok,
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_KDA=is_kda,
