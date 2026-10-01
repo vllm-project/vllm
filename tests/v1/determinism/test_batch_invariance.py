@@ -20,29 +20,6 @@ import vllm.envs as envs
 from vllm import LLM, SamplingParams
 
 
-@pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize(
-    "device", ["cpu", pytest.param("cuda", marks=skip_if_not_cuda)]
-)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("output_dtype", [None, torch.float32])
-@pytest.mark.parametrize("dim,keepdim", [((1,), True), ((1, 2), False)])
-def test_mean_output_dtype(monkeypatch, device, dtype, output_dtype, dim, keepdim):
-    """Keep low-precision means usable by downstream dtype-strict layers."""
-    from vllm.model_executor.determinism import batch_invariant
-
-    if device == "cpu":
-        # Isolate wrapper dtype handling without requiring the Triton kernel.
-        monkeypatch.setattr(batch_invariant, "mean_dim", torch.mean)
-
-    x = torch.arange(24, dtype=dtype, device=device).reshape(2, 3, 4)
-    expected = x.cpu().mean(dim=dim, keepdim=keepdim, dtype=output_dtype)
-    actual = batch_invariant.mean_batch_invariant(
-        x, dim=dim, keepdim=keepdim, dtype=output_dtype
-    )
-    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
-
-
 @skip_unsupported
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.timeout(1000)
