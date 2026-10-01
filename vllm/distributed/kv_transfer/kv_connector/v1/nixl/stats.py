@@ -101,12 +101,14 @@ class NixlKVConnectorStats(KVConnectorStats):
         # and notification failures are grouped as sporadic
         # lower-transport-layer events, while KV expiry is reported separately
         # as it is an actionable autoscaler signal rather than a transport
-        # issue.
+        # issue. Notifications arriving after expiry are surfaced too, as the
+        # reader may have consumed KV blocks that were already reused.
         failure_counts = {
             "Num failed transfers": len(self.data["num_failed_transfers"])
             + len(self.data["num_failed_handshakes"])
             + len(self.data["num_failed_notifications"]),
             "Num KV expired reqs": len(self.data["num_kv_expired_reqs"]),
+            "Num notifs after expiry": len(self.data["num_notifications_after_expiry"]),
         }
         if self.num_successful_transfers == 0:
             # Timing / throughput stats only cover successful transfers. If
@@ -272,7 +274,8 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             name="vllm:nixl_num_notifications_after_expiry",
             documentation="Number of completion notifications for requests that "
             "were no longer tracked, usually because their KV lease expired. The "
-            "KV blocks may have been reused before the transfer finished.",
+            "KV blocks may have been reused before the transfer finished. Counted "
+            "per notification (one per remote rank), not per request.",
             labelnames=labelnames,
         )
         self.counter_nixl_num_notifications_after_expiry = create_metric_per_engine(

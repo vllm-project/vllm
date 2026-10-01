@@ -1695,6 +1695,7 @@ def test_kv_connector_stats_failure_grouping():
     stats.record_failed_handshake()
     stats.record_failed_notification()
     stats.record_kv_expired_req()
+    stats.record_notification_after_expiry()
     assert not stats.is_empty()
 
     # No successful transfers: latency stats are zero but the failure
@@ -1703,6 +1704,7 @@ def test_kv_connector_stats_failure_grouping():
     assert reduced["Num successful transfers"] == 0
     assert reduced["Num failed transfers"] == 3
     assert reduced["Num KV expired reqs"] == 1
+    assert reduced["Num notifs after expiry"] == 1
 
 
 def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
