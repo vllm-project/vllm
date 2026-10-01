@@ -56,12 +56,21 @@ class _ExpandPageIndicesKernel:
         self,
         page_indices,
         block_table_tensor,
-        stride,
+        stride_0,
+        stride_1,
         paged_kv_indptr,
         *,
         KERNEL_BLOCK_SIZE,
         BLOCK_SIZE,
     ):
+        # Both block-table strides are passed explicitly: the kernel no longer
+        # assumes the column stride is 1. This stand-in indexes the tensor
+        # directly so torch applies the strides for it, but the values are
+        # checked against the tensor actually handed in -- a caller passing the
+        # wrong stride is exactly the bug the parameter exists to prevent, and
+        # silently ignoring them here would hide it.
+        assert stride_0 == block_table_tensor.stride(0)
+        assert stride_1 == block_table_tensor.stride(1)
         self.kernel_block_size = KERNEL_BLOCK_SIZE
         for req_idx in range(self.grid[0]):
             out_start = int(paged_kv_indptr[req_idx].item())
@@ -1052,7 +1061,14 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
         metadata.paged_kv_indices[: expected_indices.numel()],
         expected_indices,
     )
-    assert expand_kernel.grid == (seq_lens.numel(),)
+    # The launch now carries a second grid dimension over token chunks, so
+    # the expansion is spread across the context instead of one workgroup
+    # walking it serially. The width comes from the block-table upper bound
+    # on tokens per request, which is available host-side and so costs no
+    # device sync; derived here rather than hard-coded so the assertion
+    # still describes the launch if the chunk size changes.
+    expected_chunks = max(1, -(-block_table.shape[1] * kernel_block_size // 1024))
+    assert expand_kernel.grid == (seq_lens.numel(), expected_chunks)
     assert expand_kernel.kernel_block_size == kernel_block_size
 
 
