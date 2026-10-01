@@ -97,6 +97,7 @@ def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
     object.__setattr__(model, "language_model", language_model)
     object.__setattr__(model, "mlp1", _AdapterModule())
     object.__setattr__(model, "vision_model", _MissingMultiModalModule())
+    object.__setattr__(model, "vision_final_layernorm", _MissingMultiModalModule())
     object.__setattr__(model, "sound_encoder", None)
 
     language_weight = object()
@@ -106,6 +107,8 @@ def test_nano_nemotron_vl_skips_multimodal_weights_in_text_only_mode():
             ("mlp1.0.weight", object()),
             ("vision_model.radio_model.encoder.weight", object()),
             ("sound_encoder.encoder.weight", object()),
+            ("vision_projector.vision_final_layernorm.weight", object()),
+            ("vision_projector.vision_final_layernorm.bias", object()),
         ]
     )
 
@@ -120,6 +123,7 @@ def test_nano_nemotron_vl_loads_vision_weights_without_sound_encoder():
     object.__setattr__(model, "language_model", language_model)
     object.__setattr__(model, "mlp1", _AdapterModule())
     object.__setattr__(model, "vision_model", vision_model)
+    object.__setattr__(model, "vision_final_layernorm", None)
     object.__setattr__(model, "sound_encoder", None)
 
     language_weight = object()
@@ -145,10 +149,63 @@ def test_nano_nemotron_vl_requires_sound_encoder_for_sound_weights():
     object.__setattr__(model, "language_model", language_model)
     object.__setattr__(model, "mlp1", _AdapterModule())
     object.__setattr__(model, "vision_model", vision_model)
+    object.__setattr__(model, "vision_final_layernorm", None)
     object.__setattr__(model, "sound_encoder", None)
 
     with pytest.raises(AssertionError):
         model.load_weights([("sound_encoder.encoder.weight", object())])
+
+
+def _vision_norm_model(use_layernorm=True):
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    torch.nn.Module.__init__(model)
+    model.model_config = _ImageOnlyModelConfig()
+    model.language_model = _LanguageModel()
+    model.vision_model = _VisionModel()
+    model.sound_encoder = None
+    model.mlp1 = torch.nn.Identity()
+    model.vision_final_layernorm = (
+        torch.nn.LayerNorm(4, eps=1e-6, dtype=torch.bfloat16) if use_layernorm else None
+    )
+    model.patch_size = 2
+    model.downsample_ratio = 0.5
+    model.ps_version = "v2"
+    model.video_temporal_patch_size = 2
+    return model
+
+
+@pytest.mark.parametrize("mode", ["image", "dynamic", "video"])
+@pytest.mark.parametrize("use_layernorm", [True, False])
+def test_vision_layernorm_is_loaded_and_applied_before_pixel_shuffle(
+    mode, use_layernorm
+):
+    model = _vision_norm_model(use_layernorm)
+    weight = torch.tensor([2.0, 3.0, 4.0, 5.0], dtype=torch.bfloat16)
+    bias = torch.tensor([0.5, -0.5, 1.0, -1.0], dtype=torch.bfloat16)
+    model.load_weights(
+        [
+            ("vision_projector.vision_final_layernorm.weight", weight),
+            ("vision_projector.vision_final_layernorm.bias", bias),
+        ]
+        if use_layernorm
+        else []
+    )
+    features = torch.arange(16, dtype=torch.bfloat16).reshape(1, 4, 4)
+    expected = (
+        torch.nn.functional.layer_norm(features, (4,), weight, bias, eps=1e-6)
+        if use_layernorm
+        else features
+    )
+    expected = model.pixel_shuffle(expected.reshape(1, 2, 2, 4)).reshape(1, 1, 16)
+    model.vision_model = lambda *args, **kwargs: (None, features)
+    pixels = torch.zeros(2 if mode == "video" else 1, 3, 4, 4)
+    if mode == "dynamic":
+        output = model.extract_feature_dynamic(pixels, imgs_sizes=[(4, 4)])
+    else:
+        output = model.extract_feature(
+            pixels, num_frames=2 if mode == "video" else None
+        )
+    torch.testing.assert_close(output, expected)
 
 
 def _make_mm_items_with_video_bytes(
