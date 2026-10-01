@@ -469,6 +469,18 @@ Use the checkpoint's chat template with `--tool-call-parser mimo --reasoning-par
 For schema-constrained tool arguments, set `strict: true` inside each tool's `function`, or use `--tool-strict-level parameter`.
 The parser supports `auto`, `required`, named tools, and `parallel_tool_calls=False`, preserving leading/trailing whitespace in string arguments.
 
+### Step-3.5 and Step-3.7 Models (`step3p5`)
+
+Supported models:
+
+* `stepfun-ai/Step-3.5-Flash`
+* `stepfun-ai/Step-3.5-Flash-FP8`
+* `stepfun-ai/Step-3.7-Flash`
+
+Flags: `--tool-call-parser step3p5 --reasoning-parser step3p5 --enable-auto-tool-choice`
+
+The parser supports `auto`, `required`, and named tools.
+
 ### Olmo 3 Models (`olmo3`)
 
 Olmo 3 models output tool calls in a format that is very similar to the one expected by the `pythonic` parser (see below), with a few differences. Each tool call is a pythonic string, but the parallel tool calls are newline-delimited, and the calls are wrapped within XML tags as `<function_calls>..</function_calls>`. In addition, the parser also allows JSON boolean and null literals (`true`, `false`, and `null`) in addition to the pythonic ones (`True`, `False`, and `None`).
