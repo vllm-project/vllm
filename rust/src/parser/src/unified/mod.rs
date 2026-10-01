@@ -5,12 +5,14 @@
 
 mod combined;
 mod gemma4;
+mod hf;
 mod hy;
 mod inkling;
 mod kimi_k3;
 
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
+pub use hf::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
 pub use hy::{HyV3UnifiedParser, HyV4UnifiedParser};
 pub use inkling::InklingUnifiedParser;
 pub use kimi_k3::{KimiK3StructuralTagBuilder, KimiK3UnifiedParser};
@@ -271,8 +273,13 @@ pub trait UnifiedParser: Send {
 #[derive(Debug, Error, Macro)]
 #[thiserror_ext(macro(path = "crate::unified", mangle))]
 pub enum UnifiedParserError {
-    #[error("combined parser is constructed from split parser instances")]
-    CombinedParserConstructor,
+    /// The parser is built from inputs other than tools and a tokenizer, so
+    /// [`UnifiedParser::create`] cannot construct it.
+    #[error("the `{parser}` unified parser is built from {built_from}, not by name")]
+    NoNamedConstructor {
+        parser: &'static str,
+        built_from: &'static str,
+    },
     #[error("tokenizer is missing unified parser token `{token}`")]
     MissingToken { token: String },
     #[error("unified parser parsing failed: {message}")]

@@ -23,6 +23,9 @@ pub struct HfTokenizerConfig {
     /// containing "Tiktoken" which can be used as a hint for backend
     /// selection.
     pub tokenizer_class: Option<String>,
+    /// The Hugging Face `response_template`: a declarative description of the
+    /// model's output protocol, executed by the `hf` unified parser.
+    pub response_template: Option<serde_json::Value>,
 }
 
 /// Hugging Face named special tokens may be serialized as a string or an
