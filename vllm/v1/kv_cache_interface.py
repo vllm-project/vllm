@@ -987,7 +987,12 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             "quantization method, tokens per state, model version, sliding "
             "window size, retained token count, and replay policy."
         )
-        merged_spec = cls(
+        cache_formats = {(spec.cache_dtype, spec.kv_quant_mode) for spec in specs}
+        assert len(cache_formats) == 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "logical cache dtype and KV quantization mode."
+        )
+        return cls(
             block_size=specs[0].block_size,
             block_stride_alignment=block_stride_alignment_set.pop(),
             num_kv_heads=specs[0].num_kv_heads,
@@ -1007,13 +1012,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             model_version=model_version_set.pop(),
             bounded_replay=bounded_replay_set.pop(),
         )
-        for spec in specs:
-            for f in fields(AttentionSpec):
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
-        return merged_spec
 
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]

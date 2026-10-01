@@ -3786,7 +3786,16 @@ def test_merge_mla_spec():
 
 
 @pytest.mark.skip_global_cleanup
-def test_merge_sliding_window_mla_spec_preserves_logical_cache_dtype():
+@pytest.mark.parametrize(
+    ("cache_dtype", "kv_quant_mode"),
+    [
+        ("nvfp4", KVQuantMode.FP8_PER_TENSOR),
+        ("fp8_e4m3", KVQuantMode.NVFP4),
+    ],
+)
+def test_merge_sliding_window_mla_spec_preserves_logical_cache_dtype(
+    cache_dtype, kv_quant_mode
+):
     specs = [
         SlidingWindowMLASpec(
             block_size=16,
@@ -3806,8 +3815,13 @@ def test_merge_sliding_window_mla_spec_preserves_logical_cache_dtype():
     assert merged.cache_dtype == "fp8_e4m3"
     assert merged.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
 
-    with pytest.raises(AssertionError):
-        SlidingWindowMLASpec.merge([specs[0], replace(specs[1], cache_dtype="nvfp4")])
+    with pytest.raises(AssertionError, match="logical cache dtype and KV quantization"):
+        SlidingWindowMLASpec.merge(
+            [
+                specs[0],
+                replace(specs[1], cache_dtype=cache_dtype, kv_quant_mode=kv_quant_mode),
+            ]
+        )
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
