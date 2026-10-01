@@ -419,8 +419,12 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.transformers_utils.config import uses_harmony
+
         structured_outputs_config = vllm_config.structured_outputs_config
-        if structured_outputs_config.reasoning_parser == "":
+        if structured_outputs_config.reasoning_parser == "" and uses_harmony(
+            vllm_config.model_config.hf_config
+        ):
             structured_outputs_config.reasoning_parser = "openai_gptoss"
 
         # Increase the max capture size from 512 to 1024 for performance.

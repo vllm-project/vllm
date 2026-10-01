@@ -64,6 +64,7 @@ from vllm.parser.abstract_parser import Parser
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.config import uses_harmony
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
@@ -164,7 +165,7 @@ class OpenAIServingChat(GenerateBaseServing):
             enable_auto_tools=enable_auto_tools,
             tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
-            is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            is_harmony=uses_harmony(self.model_config.hf_config),
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
