@@ -37,7 +37,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
     ReqId,
+    TransferId,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_transfer_id
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -88,6 +90,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self._finished_request_blocks: dict[ReqId, BlockIds] = {}
         # P-side: newly finished blocks to ship to P workers on next step.
         self._newly_finished_push_blocks: dict[ReqId, BlockIds] = {}
+        # P-side: router transfer_id of those requests, if one was set.
+        self._newly_finished_transfer_ids: dict[ReqId, TransferId] = {}
 
         # Soft watchdog timeout (seconds) for D-side registrations that
         # never receive a push completion. Defaults to the existing
@@ -176,6 +180,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # reverse handshake before WRITE-ing.
         self._push_pending_registrations[request.request_id] = {
             "request_id": request.request_id,
+            "transfer_id": get_transfer_id(params),
             "decode_engine_id": self.engine_id,
             "decode_host": self.side_channel_host,
             "decode_port": self.side_channel_port,
@@ -277,6 +282,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # registrations (via NIXL notifications).
             self._finished_request_blocks[request.request_id] = block_ids
             self._newly_finished_push_blocks[request.request_id] = block_ids
+            if (transfer_id := get_transfer_id(params)) is not None:
+                self._newly_finished_transfer_ids[request.request_id] = transfer_id
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -336,6 +343,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         if self._newly_finished_push_blocks:
             meta.push_finished_blocks = dict(self._newly_finished_push_blocks)
             self._newly_finished_push_blocks.clear()
+            meta.push_transfer_ids = dict(self._newly_finished_transfer_ids)
+            self._newly_finished_transfer_ids.clear()
 
         return meta
 
