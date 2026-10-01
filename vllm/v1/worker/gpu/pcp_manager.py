@@ -131,8 +131,6 @@ class PCPManager:
 
         if not model_config.use_mla:
             raise NotImplementedError("MRV2 PCP currently supports MLA models only.")
-        if parallel_config.pipeline_parallel_size > 1:
-            raise NotImplementedError("MRV2 PCP does not support PP yet.")
         if model_config.is_encoder_decoder:
             raise NotImplementedError(
                 "MRV2 PCP does not support encoder-decoder models yet."
@@ -406,6 +404,11 @@ class PCPManager:
         assert self._input_buffers is not None
         return self._input_buffers
 
+    @property
+    def global_batch(self) -> InputBatch:
+        assert self._global_batch is not None
+        return self._global_batch
+
     def partition_batch(
         self, input_batch: InputBatch, batch_desc: "BatchExecutionDescriptor"
     ) -> InputBatch:
@@ -646,6 +649,7 @@ class PCPManager:
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
             is_prefilling_np=local_is_prefilling_np,
+            max_seq_len_np=None,
             has_prefill=local_has_prefill,
             decode_graph_eligible=not local_has_prefill,
             prefill_runs_as_decode_np=None,
