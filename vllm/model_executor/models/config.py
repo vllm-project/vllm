@@ -878,11 +878,45 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
         Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
         text_config = vllm_config.model_config.hf_text_config
         if text_config.hc_count <= 1:
             raise ValueError("Qwen4Exp requires hc_count > 1")
         parallel_config = vllm_config.parallel_config
+        if (
+            current_platform.is_cuda()
+            and parallel_config.tensor_parallel_size > 1
+            and (
+                parallel_config.enable_hc_sp
+                or parallel_config.use_sequence_parallel_moe
+            )
+        ):
+            # MoE SP also enables HC SP without the explicit HC flag.
+            if (
+                parallel_config.use_sequence_parallel_moe
+                and parallel_config.pipeline_parallel_size != 1
+            ):
+                raise ValueError("Qwen4Exp MoE SP requires PP=1")
+            layer_indices = range(text_config.num_hidden_layers)
+            if vllm_config.model_config.architecture == "Qwen4ExpMTP":
+                # MTP decoder indices follow the target model's layers.
+                start_layer = text_config.num_hidden_layers
+                layer_indices = range(
+                    start_layer,
+                    start_layer + getattr(text_config, "mtp_num_hidden_layers", 1),
+                )
+            num_experts = getattr(text_config, "num_experts", 0) or 0
+            mlp_only_layers = getattr(text_config, "mlp_only_layers", [])
+            if any(
+                num_experts <= 0
+                or layer_idx in mlp_only_layers
+                or (layer_idx + 1) % text_config.decoder_sparse_step != 0
+                for layer_idx in layer_indices
+            ):
+                raise ValueError("Qwen4Exp SP does not support dense MLP layers")
+
         uses_ple_or_qsa = bool(text_config.ple_layer_ids) or (
             getattr(text_config, "indexer_n_heads", None) is not None
         )
