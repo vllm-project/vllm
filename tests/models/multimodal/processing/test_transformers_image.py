@@ -324,23 +324,9 @@ _SCOPED_SIZE = {"height": 768, "width": 768}
 
 def _probe_num_image_tokens(mm_processor_kwargs, request_kwargs=None) -> list[int]:
     """The per-image token counts vLLM predicts for a single image."""
-    from vllm.config import ModelConfig
-    from vllm.model_executor.models.transformers.multimodal import (
-        MultiModalDummyInputsBuilder,
-        MultiModalProcessingInfo,
+    mm_processor = create_processor(
+        _MODEL_ID, LegacyMultiModalProcessor, mm_processor_kwargs
     )
-    from vllm.multimodal.processing import InputProcessingContext
-    from vllm.tokenizers.registry import cached_tokenizer_from_config
-
-    model_config = ModelConfig(
-        model=_MODEL_ID,
-        model_impl="transformers",
-        mm_processor_kwargs=mm_processor_kwargs,
-    )
-    info = MultiModalProcessingInfo(
-        InputProcessingContext(model_config, cached_tokenizer_from_config(model_config))
-    )
-    mm_processor = LegacyMultiModalProcessor(info, MultiModalDummyInputsBuilder(info))
     image = ImageAsset("cherry_blossom").pil_image
     mm_items = mm_processor.info.parse_mm_data({"image": image})
     tokens = mm_processor._get_num_multimodal_tokens(mm_items, request_kwargs or {})

@@ -17,7 +17,7 @@
 """Transformers modeling backend mixin for multi-modal models."""
 
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -417,26 +417,6 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         ]
 
 
-def _num_multimodal_tokens_kwargs(
-    count_tokens: Callable[..., object],
-    merged_mm_kwargs: Mapping[str, object],
-) -> dict[str, Any]:
-    """The subset of `merged_mm_kwargs` that `count_tokens` accepts.
-
-    `_get_num_multimodal_tokens` is a sizing helper rather than `__call__`, so it
-    does not take every processor override. Filtering mirrors what
-    `call_hf_processor` does before splatting the same kwargs into the processor,
-    and keeps an override meant for `__call__` from turning the count into a
-    `TypeError`.
-    """
-    return get_allowed_kwarg_only_overrides(
-        count_tokens,
-        merged_mm_kwargs,
-        requires_kw_only=False,
-        allow_var_kwargs=True,
-    )
-
-
 class LegacyMultiModalProcessor(_MultiModalProcessorBase):
     """Locates placeholders by searching the prompt the HF processor has already
     expanded for the tokens of each modality.
@@ -536,9 +516,11 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         count_tokens = processor._get_num_multimodal_tokens
         return count_tokens(
             image_sizes=image_sizes,
-            **_num_multimodal_tokens_kwargs(
+            **get_allowed_kwarg_only_overrides(
                 count_tokens,
                 self.info.ctx.get_modality_mm_kwargs(hf_processor_mm_kwargs, "image"),
+                requires_kw_only=False,
+                allow_var_kwargs=True,
             ),
         )
 
@@ -831,11 +813,13 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
             sizes = [(image.height, image.width) for image in images]
             mm_tokens = count_tokens(
                 image_sizes=sizes,
-                **_num_multimodal_tokens_kwargs(
+                **get_allowed_kwarg_only_overrides(
                     count_tokens,
                     self.info.ctx.get_modality_mm_kwargs(
                         hf_processor_mm_kwargs, "image"
                     ),
+                    requires_kw_only=False,
+                    allow_var_kwargs=True,
                 ),
             )
             return list(mm_tokens["num_image_patches"])
