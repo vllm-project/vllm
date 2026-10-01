@@ -565,20 +565,24 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str]]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str, str]]:
     """Generate extra keys related to LoRA for block hash computation.
+
+    The adapter path is included so that re-pointing a LoRA name at a different
+    adapter does not reuse KV computed with the previous one.
 
     Args:
         request: The request object.
 
     Returns:
-        Return LoRA name of the request if it is a LoRA request. Return empty
-        list otherwise.
+        Return the LoRA name and path of the request if it is a LoRA request.
+        Return empty list otherwise.
 
     """
-    if not request.lora_request:
+    lora_request = request.lora_request
+    if not lora_request:
         return []
-    return [("lora", request.lora_request.lora_name)]
+    return [("lora", lora_request.lora_name, lora_request.lora_path)]
 
 
 def _gen_prompt_embeds_extra_hash_keys(
