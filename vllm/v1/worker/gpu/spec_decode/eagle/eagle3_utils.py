@@ -23,6 +23,9 @@ def set_eagle3_aux_hidden_state_layers(
     eagle3_model = cast(SupportsEagle3, model)
 
     aux_layers = get_eagle3_aux_layers_from_config(spec_config)
+    aux_layers = remap_cosmos3_edge_aux_layers(
+        aux_layers, getattr(model, "config", None)
+    )
     if aux_layers:
         logger.info("Using Eagle3 auxiliary layers from config: %s", aux_layers)
     else:
@@ -95,6 +98,39 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
         return tensors
 
     model.make_empty_intermediate_tensors = make_empty_with_aux
+
+
+def _is_cosmos3_edge_config(config: object | None) -> bool:
+    if config is None:
+        return False
+    model_type = getattr(config, "model_type", "") or ""
+    architectures = getattr(config, "architectures", None) or []
+    return model_type == "cosmos3_edge" or any(
+        "Cosmos3Edge" in str(architecture) for architecture in architectures
+    )
+
+
+def remap_cosmos3_edge_aux_layers(
+    layer_ids: tuple[int, ...] | list[int] | None,
+    hf_config: object | None,
+) -> tuple[int, ...] | None:
+    """Map DFlash aux ids onto Cosmos3-Edge's split vLLM layers.
+
+    Draft configs store Hugging Face block ids. The shared conversion adds 1,
+    which is correct when one HF block is one vLLM layer. Edge loads each HF
+    block as attention then MLP, so the verified capture is ``2 * (i + 1)``.
+    """
+    if not layer_ids:
+        return None
+    if not _is_cosmos3_edge_config(hf_config):
+        return tuple(layer_ids)
+    remapped = tuple(2 * int(layer_id) for layer_id in layer_ids)
+    logger.info(
+        "Cosmos3-Edge DFlash aux layers: %s -> %s",
+        tuple(layer_ids),
+        remapped,
+    )
+    return remapped
 
 
 def get_eagle3_aux_layers_from_config(
