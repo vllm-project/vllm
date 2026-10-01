@@ -48,7 +48,6 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_use_td_hw_supported,
 )
@@ -1446,7 +1445,10 @@ def _make_deepseek_moe_method(
     monkeypatch.setattr(
         mxfp4_oracle,
         "_get_priority_backends",
-        lambda: [Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN],
+        lambda: [
+            mxfp4_oracle.Mxfp4MoeBackend.MARLIN,
+            mxfp4_oracle.Mxfp4MoeBackend.BATCHED_MARLIN,
+        ],
     )
     hf_config = SimpleNamespace(model_type=model_type)
     monkeypatch.setattr(
@@ -1528,7 +1530,7 @@ def test_deepseek_v41_hopper_defaults_to_humming_fp8_indexed(
         dp_size=2 if layout == "dp_ep" else 1,
     )
 
-    assert method.mxfp4_backend == Mxfp4MoeBackend.HUMMING
+    assert method.mxfp4_backend == mxfp4_oracle.Mxfp4MoeBackend.HUMMING
     assert method.experts_cls.__name__ == expected_experts
     assert method.humming_activation_key == expected_key
     assert set(checked_keys) == {expected_key}
@@ -1566,7 +1568,7 @@ def test_deepseek_mxfp4_selection_unchanged_outside_v41_hopper_default(
 
     selected = select("deepseek_v41")
     assert selected == select("deepseek_v4")
-    assert selected is None or selected[0] != Mxfp4MoeBackend.HUMMING
+    assert selected is None or selected[0] != mxfp4_oracle.Mxfp4MoeBackend.HUMMING
 
 
 @pytest.mark.parametrize(

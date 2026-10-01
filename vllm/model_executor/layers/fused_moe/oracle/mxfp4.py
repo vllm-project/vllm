@@ -671,8 +671,9 @@ def use_deepseek_v41_hopper_humming(config: FusedMoEConfig) -> bool:
     ):
         return False
     vllm_config = get_current_vllm_config_or_none()
-    model_config = vllm_config.model_config if vllm_config is not None else None
-    model_type = getattr(getattr(model_config, "hf_config", None), "model_type", None)
+    if vllm_config is None or vllm_config.model_config is None:
+        return False
+    model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
     return model_type in ("deepseek_v41", "deepseek_v41_text")
 
 
