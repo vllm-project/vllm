@@ -27,12 +27,14 @@ class XPressRefinerHead(nn.Module):
         block_size: int,
         rank: int = 256,
         mlp_hidden: int = 512,
+        max_num_reqs: int = 256,
     ) -> None:
         super().__init__()
         self.vocab_size = int(vocab_size)
         self.hidden_size = int(hidden_size)
         self.block_size = int(block_size)
         self.rank = int(rank)
+        self.max_num_reqs = int(max_num_reqs)
         r = self.rank
         self.w1 = nn.Embedding(vocab_size, r)
         self.down_h = nn.Linear(hidden_size, r, bias=False)
@@ -46,7 +48,33 @@ class XPressRefinerHead(nn.Module):
         self.mlp_up = nn.Linear(r, mlp_hidden, bias=False)
         self.mlp_down = nn.Linear(mlp_hidden, r, bias=False)
         self.w2 = nn.Linear(r, vocab_size, bias=False)
-        self._scratch: dict = {}
+        self._scratch: dict | None = None
+        self._fused_buf: dict | None = None
+
+    def _scratch_buffers(
+        self, dtype: torch.dtype, device: torch.device, vocab: int
+    ) -> dict:
+        """Buffers for the fused Jacobi passes, allocated once at max_num_reqs.
+
+        Not allocated in the constructor: the dtype and device a head ends up
+        serving on are not known until it is called. The first call is the memory
+        profiling run, so the footprint is still accounted for before the KV cache
+        is sized.
+        """
+        if self._scratch is None:
+            B = self.block_size
+            rows = self.max_num_reqs * (B - 1)
+            nvb = (vocab + 4095) // 4096
+            self._scratch = {
+                "lat": torch.empty(
+                    self.max_num_reqs, B - 1, self.rank, dtype=dtype, device=device
+                ),
+                "bias": torch.empty(rows, vocab, dtype=dtype, device=device),
+                "base": torch.empty(rows, vocab, dtype=dtype, device=device),
+                "ov": torch.empty(rows, nvb, dtype=torch.float32, device=device),
+                "oi": torch.empty(rows, nvb, dtype=torch.int64, device=device),
+            }
+        return self._scratch
 
     @torch.no_grad()
     def fold_from_raw_(self, raw_L: torch.Tensor) -> None:
@@ -93,39 +121,21 @@ class XPressRefinerHead(nn.Module):
         blk[:, 0] = anchor_ids
         blk[:, 1:] = base_logits_full[:, 1:, :].argmax(dim=-1)
 
-        if not base_logits_full.is_cuda:
-            # Reference path for the CPU unit tests, which run the head in float64
-            # to pin the fold and causality invariants. Serving always takes the
-            # fused path below.
-            for _ in range(num_passes):
-                prev = blk.roll(shifts=1, dims=1)
-                prev[:, 0] = tok_am1_ids
-                refined = base_logits_full + self.refine_bias(prev, hcache)
-                blk[:, 1:] = refined[:, 1:, :].argmax(dim=-1)
-            return blk[:, 1:]
-
-        buf = self.fused_buffers()
+        buf = self._fused_buf
+        assert buf is not None, (
+            "the fused buffers are built from the loaded weights; call "
+            "build_fused_buffers() first"
+        )
         rows = N * (B - 1)
         v = base_logits_full.shape[-1]
-        # ONE scratch set sized for the largest N seen. vLLM captures many batch
-        # buckets, and a per-N cache would pin GBs that belong to the KV cache.
-        if self._scratch.get("cap", 0) < N:
-            nvb = (v + 4095) // 4096
-            dev = base_logits_full.device
-            dt = base_logits_full.dtype
-            self._scratch = {
-                "cap": N,
-                "lat": torch.empty(N, B - 1, self.rank, dtype=dt, device=dev),
-                "bias": torch.empty(rows, v, dtype=dt, device=dev),
-                "base": torch.empty(rows, v, dtype=dt, device=dev),
-                "ov": torch.empty(rows, nvb, dtype=torch.float32, device=dev),
-                "oi": torch.empty(rows, nvb, dtype=torch.int64, device=dev),
-            }
-        sc = {
-            k: (v_ if k == "cap" else v_[:N] if k == "lat" else v_[:rows])
-            for k, v_ in self._scratch.items()
-        }
-        sc["base"].copy_(base_logits_full[:, 1:, :].reshape(rows, v))
+        assert N <= self.max_num_reqs, (
+            f"{N} requests exceeds the max_num_reqs={self.max_num_reqs} the "
+            "scratch buffers were sized for"
+        )
+        sc = self._scratch_buffers(base_logits_full.dtype, base_logits_full.device, v)
+        lat, bias = sc["lat"][:N], sc["bias"][:rows]
+        base, ov, oi = sc["base"][:rows], sc["ov"][:rows], sc["oi"][:rows]
+        base.copy_(base_logits_full[:, 1:, :].reshape(rows, v))
         xh = torch.mm(hcache.view(N * B, -1), buf["whc_t"]).view(N, B, self.rank)
         # Three launches per pass: latent, the w2 GEMM, then add+argmax straight
         # into blk. The [N, B, V] sum is never materialized.
@@ -134,7 +144,7 @@ class XPressRefinerHead(nn.Module):
                 blk,
                 tok_am1_ids,
                 xh,
-                sc["lat"],
+                lat,
                 self.w1.weight,
                 buf["wlat_t"],
                 buf["mix_kjc"],
@@ -142,26 +152,28 @@ class XPressRefinerHead(nn.Module):
                 buf["wu_t"],
                 buf["wd_t"],
             )
-            torch.mm(sc["lat"].view(rows, self.rank), buf["w2_t"], out=sc["bias"])
-            kernels.fused_add_argmax_to_blk(
-                sc["base"], sc["bias"], sc["ov"], sc["oi"], blk
-            )
+            torch.mm(lat.view(rows, self.rank), buf["w2_t"], out=bias)
+            kernels.fused_add_argmax_to_blk(base, bias, ov, oi, blk)
         return blk[:, 1:]
 
-    def fused_buffers(self) -> dict:
-        if getattr(self, "_fused_buf", None) is None:
-            r = self.rank
-            w = self.in_proj.weight.detach()
-            self._fused_buf = {
-                "whc_t": w[:, : 2 * r].t().contiguous(),
-                "wlat_t": w[:, 2 * r :].t().contiguous(),
-                "mix_kjc": self.mix_L.detach().permute(1, 2, 0).contiguous(),
-                "wg_t": self.mlp_gate.weight.detach().t().contiguous(),
-                "wu_t": self.mlp_up.weight.detach().t().contiguous(),
-                "wd_t": self.mlp_down.weight.detach().t().contiguous(),
-                "w2_t": self.w2.weight.detach().t().contiguous(),
-            }
-        return self._fused_buf
+    @torch.no_grad()
+    def build_fused_buffers(self) -> None:
+        """Transposed, contiguous weight views the fused kernels index directly.
+
+        Called once weights are loaded, not in the constructor: mix_kjc is derived
+        from mix_L, which only takes its serving form in fold_from_raw_().
+        """
+        r = self.rank
+        w = self.in_proj.weight.detach()
+        self._fused_buf = {
+            "whc_t": w[:, : 2 * r].t().contiguous(),
+            "wlat_t": w[:, 2 * r :].t().contiguous(),
+            "mix_kjc": self.mix_L.detach().permute(1, 2, 0).contiguous(),
+            "wg_t": self.mlp_gate.weight.detach().t().contiguous(),
+            "wu_t": self.mlp_up.weight.detach().t().contiguous(),
+            "wd_t": self.mlp_down.weight.detach().t().contiguous(),
+            "w2_t": self.w2.weight.detach().t().contiguous(),
+        }
 
     HYBRID_KEY_MAP = {
         "w1.weight": "w1.weight",
@@ -174,21 +186,6 @@ class XPressRefinerHead(nn.Module):
         "mlp.down_proj.weight": "mlp_down.weight",
         "w2.weight": "w2.weight",
     }
-
-    @torch.no_grad()
-    def load_hybrid_state_dict(self, sd: dict) -> None:
-        raw_L = None
-        for src, dst in self.HYBRID_KEY_MAP.items():
-            if src not in sd:
-                raise KeyError(f"XPress head: missing key {src!r} in checkpoint")
-            if dst == "__raw_mix_L__":
-                raw_L = sd[src]
-            else:
-                p = dict(self.named_parameters())[dst]
-                p.copy_(sd[src].to(p.dtype))
-        if raw_L is None:
-            raise KeyError("XPress head: checkpoint has no mixer weight to fold")
-        self.fold_from_raw_(raw_L.to(self.mix_L.dtype))
 
 
 class Qwen3XPressModel(DFlashQwen3Model):
@@ -213,10 +210,11 @@ class Qwen3XPressModel(DFlashQwen3Model):
             or (getattr(config, "num_speculative_steps", 15) + 1),
             rank=getattr(config, "xpress_rank", 256),
             mlp_hidden=getattr(config, "xpress_mlp_hidden", 512),
+            max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
         )
         self.draft_vocab_size = draft_vocab_size
         if getattr(config, "xpress_compile_head", True):
-            self.xpress_head.refine_bias = torch.compile(  # type: ignore[method-assign]
+            self.xpress_head.refine_bias = torch.compile(
                 self.xpress_head.refine_bias, dynamic=False
             )
             logger.info("XPress head refine_bias wrapped with torch.compile")
@@ -260,18 +258,6 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
 
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.logits_processor(self.lm_head, hidden_states)
-
-    def jacobi_refine_greedy(
-        self,
-        base_logits_full: torch.Tensor,
-        h_full: torch.Tensor,
-        anchor_ids: torch.Tensor,
-        tok_am1_ids: torch.Tensor,
-        num_passes: int,
-    ) -> torch.Tensor:
-        return self.model.xpress_head.jacobi_refine_greedy(
-            base_logits_full, h_full, anchor_ids, tok_am1_ids, num_passes
-        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
@@ -317,4 +303,5 @@ class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
         self.model.xpress_head.fold_from_raw_(
             raw_mix_L.to(self.model.xpress_head.mix_L.dtype)
         )
+        self.model.xpress_head.build_fused_buffers()
         self.model._build_fused_kv_buffers()
