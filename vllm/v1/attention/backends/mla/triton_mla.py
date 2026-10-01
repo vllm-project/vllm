@@ -127,11 +127,12 @@ def triton_mla_decode_forward(
     fill the GPU. The caller must reserve the workspace with the same flag.
     """
     num_rows, num_heads = q.shape[:2]
-    output = torch.zeros(
+    # Stage 2 stores every output and LSE element, empty rows included.
+    output = torch.empty(
         num_rows, num_heads, kv_lora_rank, dtype=out_dtype, device=q.device
     )
-    # Zeros, matching the historical Triton MLA decode path.
-    lse = torch.zeros(num_rows, num_heads, dtype=lse_dtype, device=q.device)
+    lse = torch.empty(num_rows, num_heads, dtype=lse_dtype, device=q.device)
+    # For batch invariance, use only 1 split to ensure deterministic reduction
     if envs.VLLM_BATCH_INVARIANT:
         num_kv_splits = 1
     elif batch_aware_splits:
