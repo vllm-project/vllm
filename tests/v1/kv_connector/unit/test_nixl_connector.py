@@ -114,7 +114,7 @@ def get_default_xfer_telemetry(
     class AttributeDict(dict):
         __slots__ = ()
         __getattr__ = dict.__getitem__
-        __setattr__ = dict.__setitem__  # type: ignore[assignment]
+        __setattr__ = dict.__setitem__
 
     # We can't instantiate nixlXferTelemetry because it's read only and
     # ray env does not have NIXL, so we must fake it
@@ -3026,7 +3026,7 @@ def test_empty_recv_is_reported_only_when_awaited(
     request is named in neither _recving_transfers nor _failed_recv_reqs and
     never reaches finished_recving. The scheduler has no other way to release a
     WAITING_FOR_REMOTE_KVS request, and there is no timeout, so it sits in
-    skipped_waiting holding its blocks for the life of the process.
+    kv_holding_waiting holding its blocks for the life of the process.
 
     Notify-only (awaiting_kvs=False): request_finished seeding an empty recv to
     free P's blocks for a request aborted before it was scheduled, or a readback
