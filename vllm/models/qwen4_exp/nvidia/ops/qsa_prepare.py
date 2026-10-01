@@ -154,6 +154,7 @@ def _qsa_prepare_kernel(
     MROPE_H: tl.constexpr,
     MROPE_W: tl.constexpr,
     main_qkv_ptr,
+    main_qkv_stride_token,
     main_q_norm_weight_ptr,
     main_k_norm_weight_ptr,
     main_eps,
@@ -183,7 +184,7 @@ def _qsa_prepare_kernel(
         HALF: tl.constexpr = D // 4
         dims = tl.arange(0, MAIN_D)
         rot = tl.arange(0, HALF)
-        row = main_qkv_ptr + token * (2 * (MAIN_HQ + MAIN_HK) * MAIN_D)
+        row = main_qkv_ptr + token * main_qkv_stride_token
         is_k = head >= MAIN_HQ
         kv_head = head - MAIN_HQ
         if is_k:
@@ -567,7 +568,8 @@ def qsa_prepare(
     section = mrope_section if mrope_section is not None else (0, 0, 0)
     assert len(section) == 3
     qkv_width = 2 * (num_main_q_heads + num_main_kv_heads) * main_head_dim
-    assert main_qkv.shape == (num_tokens, qkv_width) and main_qkv.is_contiguous()
+    assert main_qkv.shape == (num_tokens, qkv_width)
+    assert main_qkv.stride(-1) == 1
     assert main_slot_mapping.shape == (num_tokens,)
 
     if num_tokens <= 4096:
@@ -622,6 +624,7 @@ def qsa_prepare(
         MROPE_H=section[1],
         MROPE_W=section[2],
         main_qkv_ptr=main_qkv,
+        main_qkv_stride_token=main_qkv.stride(0),
         main_q_norm_weight_ptr=main_q_norm_weight,
         main_k_norm_weight_ptr=main_k_norm_weight,
         main_eps=main_eps,
