@@ -728,6 +728,15 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
+            # A streaming session stays unfinished between chunks: a normal
+            # per-step finish is FinishReason.LENGTH and the session resumes
+            # with the next chunk. Only ERROR/ABORT terminates it here;
+            # genuine max_model_len caps arrive via _streaming_finish_outputs.
+            stream_continues = req_state.streaming_input and finish_reason not in (
+                FinishReason.ERROR,
+                FinishReason.ABORT,
+            )
+
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                 new_token_ids,
@@ -737,7 +746,7 @@ class OutputProcessor:
                 kv_transfer_params,
                 ec_transfer_params,
             ):
-                if req_state.streaming_input:
+                if stream_continues:
                     request_output.finished = False
 
                 if req_state.queue is not None:
@@ -749,7 +758,7 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
-                if req_state.streaming_input:
+                if stream_continues:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
                         req_state.apply_streaming_update(update)
