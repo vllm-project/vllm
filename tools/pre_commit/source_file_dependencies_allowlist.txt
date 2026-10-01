@@ -1,0 +1,28 @@
+# Allowlist for tools/pre_commit/check_source_file_dependencies.py
+#
+# Every path below is a `source_file_dependencies` entry that matched no tracked
+# file when the check was added, so its job cannot trigger on it. These are
+# pre-existing gaps, listed so the gate could start green. The list is meant to
+# only ever shrink: fix the path in the pipeline yaml, then delete the line.
+csrc/attention/mla/
+csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+csrc/mamba/
+csrc/quantization/cutlass_w8a8/moe/
+csrc/quantization/fp4/
+csrc/quantization/w8a8/cutlass/moe/
+requirements/rocm-test.txt
+scripts/
+tests/entrypoints/openai/completion/test_shutdown.py
+tests/entrypoints/openai/test_uds.py
+tests/plugins_tests/test_gguf_plugin.py
+tests/test_config/
+vllm/entrypoints/logger.py
+vllm/model_executor/layers/attention/pcp.py
+vllm/model_executor/layers/fla/ops/
+vllm/model_executor/layers/fused_moe/cutlass_moe.py
+vllm/sampling_metadata.py
+vllm/transformers_utils/configs/qwen4_exp.py
+vllm/v1/distributed/
+vllm/v1/kv_connector/
+vllm/v1/spec_decode/qwen4_exp.py
+vllm/worker/worker_base.py
