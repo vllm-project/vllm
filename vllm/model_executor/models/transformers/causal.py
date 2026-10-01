@@ -73,8 +73,8 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         def auto_load_lm_head_bias(weights):
             for name, weight in weights:
                 if name.endswith("lm_head.bias") and self.pp_group.is_last_rank:
-                    # The bias is created after the model, outside the loader's
-                    # target device context, so re-enter it
+                    # load_weights is called outside vLLM's device context,
+                    # so we must enter it again when registering the bias.
                     with torch.device(load_device):
                         self.lm_head._register_bias()
                     self.lm_head.bias.weight_loader(self.lm_head.bias, weight)
