@@ -25,10 +25,10 @@ This guide will help you quickly get started with vLLM to perform:
     uv venv --python 3.12 --seed
     source .venv/bin/activate
     uv pip install vllm --torch-backend=auto
-    flashinfer download-kernels
+    vllm download-kernels
     ```
 
-    `flashinfer download-kernels` installs precompiled kernels that vLLM otherwise downloads and compiles at startup, which can add several minutes on Hopper and newer GPUs. See the [installation guide](installation/gpu.md) for details.
+    `vllm download-kernels` installs precompiled kernels that vLLM otherwise downloads and compiles at startup, which can add several minutes on Hopper and newer GPUs. See the [installation guide](installation/gpu.md) for details.
 
     `uv` can [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu126`), set `--torch-backend=cu126` (or `UV_TORCH_BACKEND=cu126`).
 
@@ -45,7 +45,6 @@ This guide will help you quickly get started with vLLM to perform:
     conda activate myenv
     pip install --upgrade uv
     uv pip install vllm --torch-backend=auto
-    flashinfer download-kernels
     ```
 
 === "AMD ROCm"
@@ -334,4 +333,4 @@ Some of the available backend options include:
 - On Intel XPU: `FLASH_ATTN`, `TRITON_ATTN`, `TRITON_MLA`, `XPU_MLA_SPARSE`, `TORCH_SDPA` or `TURBOQUANT`.
 
 !!! tip
-    FlashInfer is installed with vLLM, but its precompiled kernels are not. Run `flashinfer download-kernels` after installing vLLM so they are not downloaded and compiled at startup.
+    FlashInfer is installed with vLLM, but its precompiled kernels are not. Run `vllm download-kernels` after installing or upgrading vLLM so they are not downloaded and compiled at startup.

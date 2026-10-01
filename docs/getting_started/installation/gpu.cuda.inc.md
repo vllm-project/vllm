@@ -23,33 +23,25 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 
 ```bash
 uv pip install vllm --torch-backend=auto
-flashinfer download-kernels
+vllm download-kernels
 ```
 
 ??? console "pip"
     ```bash
     # Install vLLM with CUDA 12.9.
     pip install vllm --extra-index-url https://download.pytorch.org/whl/cu129
-    flashinfer download-kernels
+    vllm download-kernels
     ```
 
-`flashinfer download-kernels` installs [FlashInfer](https://docs.flashinfer.ai/)'s
+`vllm download-kernels` installs [FlashInfer](https://docs.flashinfer.ai/)'s
 precompiled kernels for the installed FlashInfer and CUDA versions. Without them,
 vLLM downloads and compiles kernels at startup, which can add several minutes on
 Hopper and newer GPUs, **especially Blackwell**, and logs a warning. Run it in the
-same Python environment after every vLLM install below, and in custom container
-images. Use `flashinfer show-config` to check the result, and see the
-[FlashInfer CLI documentation](https://docs.flashinfer.ai/cli.html#download-kernels)
-for CUDA overrides and nightly kernels.
-
-!!! note "Upgrading vLLM"
-    Kernels are tied to the FlashInfer version, and FlashInfer refuses to import
-    when they do not match. After upgrading vLLM in an environment that already
-    has them, update them with:
-
-    ```bash
-    FLASHINFER_DISABLE_VERSION_CHECK=1 flashinfer download-kernels
-    ```
+same Python environment after every vLLM install or upgrade, and in custom
+container images. The kernels are tied to the FlashInfer version, and FlashInfer
+refuses to import when they do not match, so an upgrade needs them refreshed.
+For CUDA overrides and nightly kernels, use the
+[FlashInfer CLI](https://docs.flashinfer.ai/cli.html#download-kernels) directly.
 
 We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu130`), set `--torch-backend=cu130` (or `UV_TORCH_BACKEND=cu130`). If this doesn't work, try running `uv self update` to update `uv` first.
 
@@ -64,7 +56,6 @@ export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/rel
 export CUDA_VERSION=130 # or other
 export CPU_ARCH=$(uname -m) # x86_64 or aarch64
 uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl" --extra-index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION}"
-flashinfer download-kernels
 ```
 
 #### Install the latest code
@@ -80,7 +71,6 @@ To install from nightly index, run:
 uv pip install -U vllm \
     --torch-backend=auto \
     --extra-index-url https://wheels.vllm.ai/nightly # add variant subdirectory here if needed
-flashinfer download-kernels
 ```
 
 !!! warning "`pip` caveat"
@@ -116,7 +106,7 @@ If you only need to change Python code, you can build and install vLLM without c
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
-flashinfer download-kernels
+vllm download-kernels
 ```
 
 The install command will do the following:

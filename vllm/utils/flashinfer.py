@@ -126,7 +126,7 @@ def has_flashinfer() -> bool:
             "FlashInfer kernels are disabled: flashinfer-cubin is not installed "
             "and nvcc (CUDA_HOME, CUDA_PATH, PATH or /usr/local/cuda) or ninja "
             "(PATH) is missing. Set CUDA_HOME to a CUDA toolkit and put ninja on "
-            "PATH, or run `flashinfer download-kernels`."
+            "PATH, or run `vllm download-kernels`."
         )
         return False
     return True
@@ -149,37 +149,26 @@ def warn_if_flashinfer_kernels_missing() -> None:
     ):
         return
     flashinfer_version = _installed_version("flashinfer-python")
-    if flashinfer_version is None:
-        return
     packages = ["flashinfer-jit-cache"]
     if not envs.VLLM_HAS_FLASHINFER_CUBIN:
         packages.insert(0, "flashinfer-cubin")
     installed = {name: _installed_version(name) for name in packages}
-    stale = [
-        f"{name}=={version}"
-        for name, version in installed.items()
-        if version not in (None, flashinfer_version)
-    ]
-    missing = [name for name, version in installed.items() if version is None]
-    if stale:
-        # FlashInfer refuses to import with mismatched kernel packages, and its
-        # CLI imports FlashInfer, so the update needs the version check bypassed.
-        logger.warning_once(
-            "FlashInfer's precompiled kernels (%s) do not match "
-            "flashinfer-python==%s. Run `FLASHINFER_DISABLE_VERSION_CHECK=1 "
-            "flashinfer download-kernels` in this Python environment to update "
-            "them.",
-            ", ".join(stale),
-            flashinfer_version,
-        )
-    elif missing:
-        logger.warning_once(
-            "FlashInfer's precompiled kernels are not installed (missing %s), so "
-            "FlashInfer downloads and compiles kernels on first use, which can "
-            "add several minutes to startup. Run `flashinfer download-kernels` "
-            "in this Python environment to install them.",
-            ", ".join(missing),
-        )
+    if flashinfer_version is None or all(
+        version == flashinfer_version for version in installed.values()
+    ):
+        return
+    logger.warning_once(
+        "FlashInfer's precompiled kernels are missing or do not match "
+        "flashinfer-python %s (%s). FlashInfer then downloads and compiles "
+        "kernels at startup, which can take several minutes, or fails to import "
+        "mismatched ones. Run `vllm download-kernels` in this Python environment "
+        "to install them.",
+        flashinfer_version,
+        ", ".join(
+            f"{name} {version or 'not installed'}"
+            for name, version in installed.items()
+        ),
+    )
 
 
 @functools.cache

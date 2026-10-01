@@ -98,23 +98,24 @@ def kernel_warnings(
 
 
 @pytest.mark.parametrize(
-    ("kernels", "fix"),
+    ("kernels", "problem"),
     [
-        ({}, "Run `flashinfer download-kernels`"),
+        ({}, "flashinfer-cubin not installed, flashinfer-jit-cache not installed"),
         (
             {"flashinfer-cubin": "0.7.0", "flashinfer-jit-cache": "0.7.0+cu130"},
-            "Run `FLASHINFER_DISABLE_VERSION_CHECK=1 flashinfer download-kernels`",
+            "flashinfer-cubin 0.7.0, flashinfer-jit-cache 0.7.0",
         ),
     ],
     ids=["missing", "stale"],
 )
 def test_warns_when_kernels_not_preinstalled(
-    kernel_warnings, kernels: dict[str, str], fix: str
+    kernel_warnings, kernels: dict[str, str], problem: str
 ):
-    """Hopper and newer GPUs pay for missing or stale precompiled kernels with
-    downloads and compilation at startup, so the fix must be spelled out."""
+    """Hopper and newer GPUs pay for missing or stale precompiled kernels at
+    startup, so the warning must name the packages and the fix."""
     (warning,) = kernel_warnings(kernels, 90)
-    assert fix in warning
+    assert problem in warning
+    assert "Run `vllm download-kernels`" in warning
 
 
 @pytest.mark.parametrize(
