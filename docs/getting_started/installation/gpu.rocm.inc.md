@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD041 MD051 -->
 --8<-- [start:installation]
 
-vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 7.0 and ROCm 7.2.1.
+vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 10.0 (the default) and ROCm 7.2.
 
 #### Prebuilt Wheels
 
@@ -233,22 +233,33 @@ You can find more information about vLLM's wheels in
 #### Full build (with compilation) {#full-build}
 
 !!! tip
-    - If you found that the following installation step does not work for you, please refer to [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base). Dockerfile is a form of installation steps.
+    - The steps below follow [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base), which pins the validated version of every component. If a step does not work for you, refer to it; a Dockerfile is a form of installation steps.
+    - The legacy ROCm 7.2 stack uses a system ROCm installation instead; its steps are in [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base).
 
-0. Install prerequisites (skip if you are already in an environment/docker with the following installed):
+0. Install the ROCm SDK and PyTorch (skip if you are already in an environment or docker image with them installed, e.g. `vllm/vllm-openai-rocm:base-nightly`).
 
-    - [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html)
-    - [PyTorch](https://pytorch.org/)
-
-    For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm7.0_ubuntu22.04_py3.10_pytorch_release_2.8.0`, `rocm/pytorch-nightly`. If you are using docker image, you can skip to Step 3.
-
-    Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
+    ROCm 10.0 is installed from pip ([TheRock](https://github.com/ROCm/TheRock)), together with PyTorch and the GPU kernels for your GPU's architecture. In a Python 3.12 environment:
 
     ```bash
-    # Install PyTorch
-    pip uninstall torch -y
-    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm7.0
+    # Your GPU's architecture, e.g. gfx942 for MI300 or gfx950 for MI350
+    export GPU_ARCH=$(uvx --from rocm-bootstrap rocm-bootstrap-detect --unique)
+    export ROCM_INDEX=https://stable.repo.amd.com/rocm/whl-next/
+
+    pip install --index-url ${ROCM_INDEX} \
+        "rocm[libraries,devel,device-${GPU_ARCH}]==10.0.0" \
+        "torch[device-${GPU_ARCH}]==2.12.0+rocm10.0.0" \
+        "torchvision[device-${GPU_ARCH}]==0.27.0+rocm10.0.0"
+    rocm-sdk init
+
+    # Point builds at the pip-installed ROCm SDK
+    export ROCM_PATH=$(rocm-sdk path --root)
+    export ROCM_HOME=${ROCM_PATH} HIP_PATH=${ROCM_PATH}
+    export PATH=$(rocm-sdk path --bin):${PATH}
     ```
+
+    !!! note
+        - The validated `ROCM_SDK_VERSION`, `TORCH_VERSION` and `TORCHVISION_VERSION` can be found in [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+        - To support several GPU architectures, add a `device-<arch>` extra for each of them.
 
 1. Install [Triton for ROCm](https://github.com/ROCm/triton.git)
 
@@ -259,35 +270,31 @@ You can find more information about vLLM's wheels in
     pip uninstall -y triton
     git clone https://github.com/ROCm/triton.git
     cd triton
-    # git checkout $TRITON_BRANCH
-    git checkout f9e5bf54
+    git checkout $TRITON_BRANCH
     if [ ! -f setup.py ]; then cd python; fi
     python3 setup.py install
     cd ../..
     ```
 
     !!! note
-        - The validated `$TRITON_BRANCH` can be found in the [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base).
+        - The validated `$TRITON_BRANCH` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
         - If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
 
 2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/Dao-AILab/flash-attention.git)
 
-    Install ROCm's flash attention (v2.8.0) following the instructions from [ROCm/flash-attention](https://github.com/Dao-AILab/flash-attention#amd-rocm-support)
-
-    For example, for ROCm 7.0, suppose your gfx arch is `gfx942`. To get your gfx architecture, run `rocminfo |grep gfx`.
+    Install ROCm's flash attention following the instructions from [ROCm/flash-attention](https://github.com/Dao-AILab/flash-attention#amd-rocm-support)
 
     ```bash
     git clone https://github.com/Dao-AILab/flash-attention.git
     cd flash-attention
-    # git checkout $FA_BRANCH
-    git checkout 0e60e394
+    git checkout $FA_BRANCH
     git submodule update --init
-    GPU_ARCHS="gfx942" python3 setup.py install
+    GPU_ARCHS="${GPU_ARCH}" python3 setup.py install
     cd ..
     ```
 
     !!! note
-        - The validated `$FA_BRANCH` can be found in the [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base).
+        - The validated `$FA_BRANCH` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
 
 3. Optionally, if you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
 
@@ -297,42 +304,45 @@ You can find more information about vLLM's wheels in
     cd aiter
     git checkout $AITER_BRANCH_OR_COMMIT
     git submodule sync; git submodule update --init --recursive
-    python3 setup.py develop
+    # Keep the Triton installed in step 1
+    AITER_USE_SYSTEM_TRITON=1 python3 setup.py develop
     ```
 
     !!! note
         - You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
-        - The validated `$AITER_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base).
+        - The validated `$AITER_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
 
 4. Optionally, if you want to use MORI for EP or PD disaggregation, you can install [MORI](https://github.com/ROCm/mori) using the following steps:
 
     ```bash
+    pip install "setuptools_scm>=6.2"
     git clone https://github.com/ROCm/mori.git
     cd mori
     git checkout $MORI_BRANCH_OR_COMMIT
     git submodule sync; git submodule update --init --recursive
-    MORI_GPU_ARCHS="gfx942;gfx950" python3 setup.py install
+    # The ROCm SDK keeps its CMake configs for system dependencies (e.g. NUMA) under rocm_sysdeps
+    CMAKE_PREFIX_PATH="${ROCM_PATH}:${ROCM_PATH}/lib/rocm_sysdeps" \
+        MORI_GPU_ARCHS="gfx942;gfx950" python3 setup.py install
     ```
 
     !!! note
         - You will need to config the `$MORI_BRANCH_OR_COMMIT` for your purpose.
-        - The validated `$MORI_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base).
+        - The validated `$MORI_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
 
-5. Build vLLM. For example, vLLM on ROCM 7.0 can be built with the following steps:
+5. Build vLLM. For example, vLLM on ROCm 10.0 can be built with the following steps:
 
     ???+ console "Commands"
 
         ```bash
         pip install --upgrade pip
 
-        # Build & install AMD SMI
-        pip install /opt/rocm/share/amd_smi
+        # Install AMD SMI, which the ROCm SDK ships as sources
+        SDK_CORE=$(python3 -c "import _rocm_sdk_core, os; print(os.path.dirname(_rocm_sdk_core.__file__))")
+        pip install ${SDK_CORE}/share/amd_smi
+        # It loads the SDK's libamd_smi relative to its own directory
+        export PYTHONPATH=${SDK_CORE}/share/amd_smi
 
         # Install dependencies
-        pip install --upgrade numba \
-            scipy \
-            huggingface-hub \
-            setuptools_scm
         pip install -r requirements/rocm.txt
 
         # To build for a single architecture (e.g., MI300) for faster installation (recommended):
@@ -417,7 +427,7 @@ You can build and run vLLM from source via the provided [docker/Dockerfile.rocm]
 ??? info "(Optional) Build an image with ROCm software stack"
 
     Build a docker image from [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base) which setup ROCm software stack needed by the vLLM.
-    **This step is optional as this rocm_base image is usually prebuilt and store at [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev) under tag `rocm/vllm-dev:base` to speed up user experience.**
+    **This step is optional as this rocm_base image is usually prebuilt and store at [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev) under tag `rocm/vllm-dev:base` to speed up user experience.** For the legacy ROCm 7.2 stack, the base image is built from [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base) and published as `vllm/vllm-openai-rocm:base-nightly-rocm72`.
     If you choose to build this rocm_base image yourself, the steps are as follows.
 
     It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to set up buildkit in the docker daemon configuration `/etc/docker/daemon.json` as follows and restart the daemon:
@@ -430,7 +440,7 @@ You can build and run vLLM from source via the provided [docker/Dockerfile.rocm]
     }
     ```
 
-    To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default:
+    To build vllm on ROCm 10.0 for all supported GPUs, you can use the default:
 
     ```bash
     DOCKER_BUILDKIT=1 docker build \
@@ -452,12 +462,12 @@ It is important that the user kicks off the docker build using buildkit. Either 
 [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) uses ROCm 10.0 (installed from TheRock wheels) by default. The legacy ROCm 7.2 stack is available as [docker/Dockerfile.rocm_72](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72) with [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base); older vLLM branches support ROCm 5.7 through 7.0.
 It provides flexibility to customize the build of docker image using the following arguments:
 
-- `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base)
+- `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base). For [docker/Dockerfile.rocm_72](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72), the default is `vllm/vllm-openai-rocm:base-nightly-rocm72`
 - `ARG_PYTORCH_ROCM_ARCH`: Allows to override the gfx architecture values from the base docker image
 
 Their values can be passed in when running `docker build` with `--build-arg` options.
 
-To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default (which build a docker image with `vllm serve` as entrypoint):
+To build vllm on ROCm 10.0 for all supported GPUs, you can use the default (which build a docker image with `vllm serve` as entrypoint):
 
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vllm-openai-rocm .

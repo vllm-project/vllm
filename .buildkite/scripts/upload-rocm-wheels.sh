@@ -190,11 +190,11 @@ echo "Wheels available at:"
 echo "  s3://$BUCKET/$WHEEL_SUBPATH/"
 echo ""
 echo "Install command (by commit):"
-echo "  pip install vllm --extra-index-url https://${BUCKET}.s3.amazonaws.com/$ROCM_SUBPATH/"
+echo "  pip install vllm --extra-index-url https://${BUCKET}.s3.amazonaws.com/$ROCM_SUBPATH/$ROCM_STACK_VARIANT/"
 echo ""
 if [[ "${NIGHTLY:-0}" == "1" ]]; then
     echo "Install command (nightly):"
-    echo "  pip install vllm --extra-index-url https://${BUCKET}.s3.amazonaws.com/rocm/nightly/"
+    echo "  pip install vllm --extra-index-url https://${BUCKET}.s3.amazonaws.com/rocm/nightly/$ROCM_STACK_VARIANT/"
 fi
 echo ""
 echo "Wheel count: $WHEEL_COUNT"
