@@ -24,6 +24,9 @@ vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available fo
 The vLLM wheel bundles PyTorch and all required dependencies, and you should use the included PyTorch for compatibility. Because vLLM compiles many ROCm kernels to ensure a validated, high‑performance stack, the resulting binaries may not be compatible with other ROCm or PyTorch builds.
 If you need a different ROCm version or want to use an existing PyTorch installation, you’ll need to build vLLM from source.  See [below](#build-wheel-from-source) for more details.
 
+For the optional graph-only tensor-parallel backend on supported Radeon GPUs,
+see [RDNA HIP all-reduce](../../features/rdna_all_reduce.md).
+
 --8<-- [end:set-up-using-python]
 --8<-- [start:pre-built-wheels]
 
