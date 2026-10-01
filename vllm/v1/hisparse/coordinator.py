@@ -99,9 +99,11 @@ class HiSparseCoordinator:
         kv_cache_config: KVCacheConfig,
         managers: tuple[SingleTypeKVCacheManager, ...],
         max_model_len: int,
+        num_reprefillable_tokens: int = 0,
     ) -> None:
         self.managers = managers
         self.max_model_len = max_model_len
+        self.num_reprefillable_tokens = num_reprefillable_tokens
         groups = kv_cache_config.kv_cache_groups
 
         resident_managers: list[HiSparseResidentManager] = []
@@ -435,13 +437,17 @@ class HiSparseCoordinator:
     def advance_scheduled(self, requests: Iterable[tuple[str, int]]) -> None:
         """Run the per-step residency work for each scheduled request.
 
-        ``requests`` pairs a request id with the number of tokens that are
-        finalized once the step completes.
+        ``requests`` pairs a request id with the number of tokens computed
+        once the step completes. As in ``KVCacheCoordinator.cache_blocks``, the
+        last ``num_reprefillable_tokens`` are not final yet and are not written
+        back.
         """
         if not self.resident_managers:
             return
         for request_id, num_tokens in requests:
-            self.plan_prefix_materialization(request_id, num_tokens)
+            self.plan_prefix_materialization(
+                request_id, max(0, num_tokens - self.num_reprefillable_tokens)
+            )
             self.update_residency(request_id)
 
     def plan_prefix_materialization(
@@ -864,7 +870,10 @@ def get_hisparse_coordinator(
             assert isinstance(coordinator, HiSparseCoordinator)
             return coordinator
     coordinator = HiSparseCoordinator(
-        kv_cache_manager.kv_cache_config, managers, kv_cache_manager.max_model_len
+        kv_cache_manager.kv_cache_config,
+        managers,
+        kv_cache_manager.max_model_len,
+        kv_cache_manager.coordinator.num_reprefillable_tokens,
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")

@@ -2366,12 +2366,6 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
 
     coordinator: "HiSparseCoordinator | None" = None
 
-    def __init__(self, kv_cache_spec: KVCacheSpec, **kwargs) -> None:
-        # Never prefix-cached, but the per-step ``cache_blocks`` hook is where
-        # residency work runs, so stay opted in regardless of prefix caching.
-        kwargs["enable_caching"] = True
-        super().__init__(kv_cache_spec, **kwargs)
-
     def cache_blocks(
         self,
         request: Request,

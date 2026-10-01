@@ -234,6 +234,7 @@ def make_hisparse_kv_cache_manager(
     max_model_len: int = 128,
     max_in_flight_tokens: int | None = None,
     enable_caching: bool = False,
+    num_prefill_lookahead: int = 0,
     **config_kwargs,
 ) -> KVCacheManager:
     config = make_hisparse_kv_cache_config(num_blocks, host_num_blocks, **config_kwargs)
@@ -243,6 +244,7 @@ def make_hisparse_kv_cache_manager(
         max_in_flight_tokens=max_in_flight_tokens,
         enable_caching=enable_caching,
         hash_block_size=HISPARSE_BLOCK_SIZE,
+        num_prefill_lookahead=num_prefill_lookahead,
     )
 
 
@@ -266,6 +268,17 @@ def _allocate_scheduled(manager: KVCacheManager, request: Request, *args, **kwar
         [(request.request_id, num_tokens)]
     )
     return blocks
+
+
+def test_hisparse_does_not_write_back_reprefillable_tokens():
+    """Multi-module MTP re-prefills the last tokens, so they are not final."""
+    manager = make_hisparse_kv_cache_manager(32, 16, num_prefill_lookahead=3)
+    request = make_request(
+        "request", list(range(2 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert _allocate_scheduled(manager, request, 2 * HISPARSE_BLOCK_SIZE)
+    transfers = get_hisparse_coordinator(manager).build_offload_command().page_transfers
+    assert len(transfers) == 1
 
 
 def test_hisparse_builds_dma_row_mirrors_across_pages():
