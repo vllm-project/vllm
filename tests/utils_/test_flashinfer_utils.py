@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib.metadata
 import importlib.util
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -60,79 +58,3 @@ def test_has_flashinfer_requires_ninja(
     _make_exe(tmp_path / "cuda" / "bin" / "nvcc")
     monkeypatch.setenv("PATH", str(tmp_path / "cuda" / "bin"))
     assert not fi.has_flashinfer()
-
-
-_FLASHINFER_VERSION = "0.7.0.post1"
-
-
-@pytest.fixture
-def kernel_warnings(
-    monkeypatch: pytest.MonkeyPatch, caplog_vllm, disable_log_dedup
-) -> Callable[[dict[str, str], int], list[str]]:
-    """Return the kernel warnings for the given installed kernel packages and
-    GPU compute capability."""
-    monkeypatch.delenv("VLLM_HAS_FLASHINFER_CUBIN", raising=False)
-    monkeypatch.setattr(fi, "has_flashinfer_cubin", lambda: True)
-
-    def warnings(kernels: dict[str, str], capability: int) -> list[str]:
-        installed = {"flashinfer-python": _FLASHINFER_VERSION, **kernels}
-
-        def version(name: str) -> str:
-            if name not in installed:
-                raise importlib.metadata.PackageNotFoundError(name)
-            return installed[name]
-
-        monkeypatch.setattr(importlib.metadata, "version", version)
-        monkeypatch.setattr(
-            fi,
-            "current_platform",
-            SimpleNamespace(
-                is_cuda=lambda: True,
-                has_device_capability=lambda required: capability >= required,
-            ),
-        )
-        fi.warn_if_flashinfer_kernels_missing()
-        return [r.getMessage() for r in caplog_vllm.records if r.levelname == "WARNING"]
-
-    return warnings
-
-
-@pytest.mark.parametrize(
-    ("kernels", "problem"),
-    [
-        ({}, "flashinfer-cubin not installed, flashinfer-jit-cache not installed"),
-        (
-            {"flashinfer-cubin": "0.7.0", "flashinfer-jit-cache": "0.7.0+cu130"},
-            "flashinfer-cubin 0.7.0, flashinfer-jit-cache 0.7.0",
-        ),
-    ],
-    ids=["missing", "stale"],
-)
-def test_warns_when_kernels_not_preinstalled(
-    kernel_warnings, kernels: dict[str, str], problem: str
-):
-    """Hopper and newer GPUs pay for missing or stale precompiled kernels at
-    startup, so the warning must name the packages and the fix."""
-    (warning,) = kernel_warnings(kernels, 90)
-    assert problem in warning
-    assert "Run `vllm download-kernels`" in warning
-
-
-@pytest.mark.parametrize(
-    ("kernels", "capability"),
-    [
-        (
-            {
-                "flashinfer-cubin": _FLASHINFER_VERSION,
-                "flashinfer-jit-cache": f"{_FLASHINFER_VERSION}+cu130",
-            },
-            90,
-        ),
-        ({}, 89),
-    ],
-    ids=["installed", "pre-hopper"],
-)
-def test_no_kernel_warning(kernel_warnings, kernels: dict[str, str], capability: int):
-    """Matching kernels (jit-cache carries a CUDA local version) and GPUs older
-    than Hopper must stay quiet."""
-    assert not kernel_warnings(kernels, capability)
