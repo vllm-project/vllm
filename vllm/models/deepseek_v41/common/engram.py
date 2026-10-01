@@ -605,6 +605,13 @@ def _engram_head_shard_weight_loader(
     param.data.copy_(shard)
 
 
+# Branching on SORTED at runtime intermittently crashes Triton 3.8's
+# RemoveLayoutConversions.
+# TODO: Remove the 3.8 check once Triton ships
+# https://github.com/triton-lang/triton/pull/10706.
+_SORTED_IS_CONSTEXPR = tl.constexpr(triton.__version__.startswith("3.8"))
+
+
 @triton.jit(
     do_not_specialize=[
         "vocab_start",
@@ -613,7 +620,7 @@ def _engram_head_shard_weight_loader(
         "ids_stride_t",
         "ids_stride_h",
         "GRID",
-        "SORTED",
+        *(() if _SORTED_IS_CONSTEXPR else ("SORTED",)),
     ]
 )
 def _engram_lookup_kernel(
@@ -634,7 +641,7 @@ def _engram_lookup_kernel(
     QUANT_BLOCK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     GRID,
-    SORTED,
+    SORTED: tl.constexpr if _SORTED_IS_CONSTEXPR else None,  # type: ignore[valid-type]
 ):
     """Gather fp8 rows, apply their ue8m0 block scales, write bf16.
 
