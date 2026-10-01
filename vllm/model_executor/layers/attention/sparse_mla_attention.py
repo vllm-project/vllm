@@ -36,7 +36,7 @@ from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
     np_to_pinned_tensor,
 )
-from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.mla.index_group import (
     SparseMLAIndexGroup,
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
@@ -165,17 +165,6 @@ T = TypeVar("T", bound=SparseMLACommonMetadata)
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     metadata_cls: type[T]
     require_uniform_decodes: ClassVar[bool] = False
-
-    @classmethod
-    def get_cudagraph_support(
-        cls,
-        vllm_config: "VllmConfig",
-        kv_cache_spec: "KVCacheSpec",
-    ) -> AttentionCGSupport:
-        support = super().get_cudagraph_support(vllm_config, kv_cache_spec)
-        if vllm_config.attention_config.hisparse_config is None:
-            return support
-        return min(support, AttentionCGSupport.UNIFORM_BATCH, key=lambda s: s.value)
 
     def __init__(
         self,
