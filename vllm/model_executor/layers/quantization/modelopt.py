@@ -726,12 +726,18 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         kv_cache_quant_algo: str | None = None,
         exclude_modules: list[str] | None = None,
         group_size: int = 16,
+        *,
+        quantization_args: QuantizationConfigArgs | None = None,
     ) -> None:
         if exclude_modules is None:
             exclude_modules = []
         super().__init__(exclude_modules)
         self.quant_method = quant_method
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
+        moe_spec = quantization_args.moe if quantization_args is not None else None
+        self.moe_activation_override: QuantKey | None = (
+            moe_spec.activation if moe_spec is not None else None
+        )
         if is_checkpoint_nvfp4_serialized:
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
@@ -817,6 +823,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             kv_cache_quant_method,
             exclude_modules,
             group_size,
+            quantization_args=original_config.get("_online_quantization_args"),
         )
 
 
@@ -839,18 +846,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
         activation_key = None if self.use_a16 else kNvfp4Dynamic
-        model_config = getattr(get_current_vllm_config_or_none(), "model_config", None)
-        args = getattr(model_config, "quantization_config", None)
-        if (
-            isinstance(args, QuantizationConfigArgs)
-            and args.moe is not None
-            and args.moe.activation is not None
-        ):
+
+        if quant_config.moe_activation_override is not None:
             if self.use_a16:
                 raise ValueError(
                     "NVFP4 activation overrides require a W4A4 checkpoint."
                 )
-            activation_key = args.moe.activation
+            activation_key = quant_config.moe_activation_override
             if activation_key not in (kNvfp4Dynamic, kNvfp4DynamicToken):
                 raise ValueError(
                     "Unsupported ModelOpt NVFP4 MoE activation override: "
@@ -858,6 +860,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                     "'nvfp4_per_token' or omit the override."
                 )
         self.per_token_activation = activation_key == kNvfp4DynamicToken
+
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
@@ -1619,6 +1622,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         group_size: int | None,
         **kwargs: Any,
     ) -> "ModelOptMixedPrecisionConfig":
+        quantization_args = original_config.get("_online_quantization_args")
         if "quantization" in original_config:
             quantized_layers = original_config["quantization"].get(
                 "quantized_layers", {}
@@ -1657,6 +1661,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             kv_cache_quant_algo=kv_cache_quant_method,
             exclude_modules=[],
             group_size=group_size,
+            quantization_args=quantization_args,
         )
         # Sibling config for layers that declare quant_algo: "W4A16_NVFP4".
         # get_quant_method resolves this sub-config to the (kNvfp4Static, None)
@@ -1669,6 +1674,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             kv_cache_quant_algo=kv_cache_quant_method,
             exclude_modules=[],
             group_size=group_size,
+            quantization_args=quantization_args,
         )
 
         mxfp8_config = ModelOptMxFp8Config(

@@ -99,6 +99,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
     kMxfp8Dynamic,
+    kNvfp4DynamicToken,
+    kNvfp4Static,
     weight_amax,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -213,12 +215,19 @@ def test_qianfan_online_fp8_keeps_vision_layers_unquantized(
 def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     monkeypatch, is_act_and_mul, expected_hidden_alignment
 ) -> None:
-    method = object.__new__(Nvfp4OnlineMoEMethod)
-    method.moe = SimpleNamespace(is_act_and_mul=is_act_and_mul)
-    method.nvfp4_backend = object()
-    method.experts_cls = object
-    method.moe_quant_config = None
-    method.moe_kernel = None
+    monkeypatch.setattr(current_platform, "is_device_capability_family", lambda _: True)
+    select_backend = Mock(return_value=(object(), object))
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.nvfp4.select_nvfp4_moe_backend",
+        select_backend,
+    )
+    moe_config = SimpleNamespace(is_act_and_mul=is_act_and_mul)
+    method = Nvfp4OnlineMoEMethod(moe=moe_config)
+    select_backend.assert_called_once_with(
+        config=moe_config,
+        weight_key=kNvfp4Static,
+        activation_key=kNvfp4DynamicToken,
+    )
 
     layer = Mock()
     converted_weights = [
@@ -278,6 +287,7 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
         for call in convert_weights.call_args_list
     )
     make_kernel.assert_called_once()
+    assert make_kernel.call_args.kwargs["per_token_activation"] is True
     get_quant_config.assert_called_once()
     assert process_weights.call_count == 3
 

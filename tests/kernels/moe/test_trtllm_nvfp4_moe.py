@@ -16,8 +16,6 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import check_deferred_moe_finalize, make_test_quant_config
 from tests.kernels.quantization.nvfp4_utils import (
-    FLOAT4_E2M1_MAX,
-    FLOAT8_E4M3_MAX,
     convert_swizzled_to_linear,
     dequantize_nvfp4_to_dtype,
 )
@@ -44,6 +42,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_static_weights_for_trtllm_fp4_moe,
     reorder_w1w3_to_w3w1,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import next_power_of_2
@@ -69,7 +70,6 @@ MNK_FACTORS = [
 
 _SWIGLU_LIMIT = 0.1
 _LARGE_OUTPUT1_SCALE = 32768.0
-_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX)
 _CLAMP_OP_NAME = "test_silu_and_mul_with_clamp"
 _SITU_OP_NAME = "test_situ_and_mul"
 
@@ -325,7 +325,7 @@ def test_trtllm_fp4_moe_no_graph(
 
             a_fp4, a_scale_interleaved, per_token_scale = nvfp4_quantize(
                 a,
-                _PER_TOKEN_BASE_GLOBAL_SCALE,
+                NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
                 sfLayout=SfLayout.layout_linear,
                 per_token_activation=True,
             )
