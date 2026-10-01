@@ -112,6 +112,7 @@ def check_implementation(
     "model,model_impl,num_fused",
     [
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers", (1, 1)),
+        ("mistralai/Mistral-7B-v0.1", "auto", (1, 1)),
         ("hmellor/Ilama-3.2-1B", "auto", (1, 1)),  # CUSTOM CODE
         ("allenai/OLMoE-1B-7B-0924", "transformers", (0, 1)),  # MoE
     ],

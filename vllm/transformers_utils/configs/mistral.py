@@ -50,7 +50,7 @@ def adapt_config_dict(
     elif is_moe:
         config_dict["architectures"] = ["MixtralForCausalLM"]
     else:
-        config_dict["architectures"] = ["MistralForCausalLM"]
+        config_dict["architectures"] = ["MistralNativeForCausalLM"]
 
     if bool(config_dict.get("yarn")):
         config_dict = _remap_mistral_yarn_args(config_dict)
