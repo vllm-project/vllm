@@ -51,6 +51,9 @@ class ncclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
 
 
+NCCL_UNIQUE_ID_BYTES = ctypes.sizeof(ncclUniqueId)
+
+
 # Mirror of NCCL's versioned ncclCommProperties_t (nccl_device/core.h,
 # v2.31.2-1, 144 bytes). ncclCommQueryProperties fills fields gated by the
 # version the caller declares in props.version, not by props.size, so never

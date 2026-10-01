@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -28,6 +29,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
 )
+
+if TYPE_CHECKING:
+    from aiter import ActivationType
 
 
 class QuantMethod(IntEnum):
@@ -246,6 +250,11 @@ def rocm_aiter_fused_experts(
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
     moe_sorting_dispatch_policy: int = 0,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
@@ -253,6 +262,7 @@ def rocm_aiter_fused_experts(
 
     # Gate/up interleave hint; only the SWIGLUOAI activations override it.
     activation_interleave = None
+    activation_method: ActivationMethod | ActivationType
     if activation == MoEActivation.SILU:
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
@@ -266,6 +276,8 @@ def rocm_aiter_fused_experts(
         activation_method = rocm_aiter_ops.get_aiter_activation_type("situ")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
+    if activation_method is None:
+        raise ValueError(f"AITER does not support activation: {activation}")
 
     # All AITER Fused MoE kernels are expecting the following datatypes
     topk_weights = topk_weights.to(torch.float32)
@@ -363,26 +375,29 @@ def rocm_aiter_fused_experts(
                 intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
             )
 
-        # https://github.com/ROCm/aiter/pull/3123 specialized the AITER stage1 GEMMs
-        # for interleaved vs separated gate and up weights.
-        # For gpt-oss i.e. use_mxfp4_w4a16=True, the weights are shuffled by
-        # `rocm_aiter_ops.shuffle_weight_a16w4` in `oracle/mxfp4.py`,
-        # which always sets `is_guinterleave=True`.
-        # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
+        # AITER's stage1 GEMM needs gate_mode to match how weights were
+        # shuffled at load time (oracle/mxfp4.py). gpt-oss uses INTERLEAVE;
+        # DeepSeek V4.1 a4w4 uses SEPARATED (see below).
         from aiter.ops.flydsl.moe_common import GateMode
 
         gate_mode = ""
+        q_dtype_a = None
         if activation == MoEActivation.SITU:
-            # a8w4 (VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1) uses the gate/up-
-            # interleaved (_gui_) fp8 flydsl kernels; default a16w4 SiTU stays
-            # separated.
             gate_mode = (
                 GateMode.INTERLEAVE.value
-                if rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
+                if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
                 else GateMode.SEPARATED.value
             )
         elif quant_config.use_mxfp4_w4a16:
-            gate_mode = GateMode.INTERLEAVE.value
+            if moe_config.use_mxfp4_w4a4_dsv4:
+                # Opt-in a4w4 for DeepSeek V4.1 (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1).
+                # Must match the SEPARATED weight shuffle from load time.
+                from aiter import dtypes
+
+                gate_mode = GateMode.SEPARATED.value
+                q_dtype_a = dtypes.fp4x2
+            else:
+                gate_mode = GateMode.INTERLEAVE.value
         elif activation_interleave is not None:
             gate_mode = (
                 GateMode.INTERLEAVE.value
@@ -412,8 +427,19 @@ def rocm_aiter_fused_experts(
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
             moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
+            swiglu_limit=(
+                0.0
+                if moe_config.swiglu_limit is None
+                else float(moe_config.swiglu_limit)
+            ),
             beta=moe_config.activation_situ_beta,
             linear_beta=moe_config.activation_situ_linear_beta,
+            shared_w1=shared_w1,
+            shared_w2=shared_w2,
+            shared_w1_scale=shared_w1_scale,
+            shared_w2_scale=shared_w2_scale,
+            shared_expert_id=shared_expert_id,
+            q_dtype_a=q_dtype_a,
         )
 
 

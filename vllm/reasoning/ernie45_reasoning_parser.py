@@ -15,8 +15,7 @@ if TYPE_CHECKING:
 
 
 class Ernie45ReasoningParser(BaseThinkingReasoningParser):
-    """
-    Reasoning parser for Ernie45 thinking model.
+    """Reasoning parser for Ernie45 thinking model.
     The Ernie45 thinking model output format is
         abc\n</think>\n\n<response>\ndef\n</response>\n
     or  abc\n</think>\ndef
@@ -60,8 +59,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """
-        Extract reasoning content from a delta message.
+        """Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
         The Ernie45 thinking model output format is
@@ -138,8 +136,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
-        """
-        Extract reasoning content from the model output.
+        """Extract reasoning content from the model output.
         The Ernie45 thinking model output format is
             abc\n</think>\n\n\n<response>\ndef\n</response>\n
         or  abc\n</think>\ndef
