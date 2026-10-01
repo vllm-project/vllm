@@ -303,9 +303,9 @@ def test_uva_available_when_alias_is_live(device, uncached_uva_probe):
 def test_uva_unavailable_when_view_is_detached(device, monkeypatch, uncached_uva_probe):
     """A detached view silently feeds stale data to every kernel that reads it.
 
-    Under GPU Confidential Computing `pin_memory=True` can yield an unpinned
-    tensor, and the device view is then a one-time copy rather than a live
-    alias. Host writes made afterwards never reach the device.
+    Under GPU Confidential Computing a `pin_memory=True` allocation can report
+    `is_pinned()` as False, and the device view is then a one-time copy rather
+    than a live alias. Host writes made afterwards never reach the device.
     """
     torch.set_default_device(device)
     torch.zeros(1, device=device)

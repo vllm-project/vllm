@@ -91,10 +91,11 @@ def _uva_alias_is_coherent() -> bool:
     """Check that a device view of pinned host memory tracks later host writes.
 
     Pinned memory is necessary but not sufficient. Under GPU Confidential
-    Computing `pin_memory=True` can silently yield an unpinned tensor, so the
-    device view is a detached copy rather than a live alias: host writes made
-    after the view is created never reach the device and kernels read stale
-    zeros. Fails closed, since the fallback paths are correct but slower.
+    Computing a `pin_memory=True` allocation stays page-locked but can report
+    `is_pinned()` as False, so the device view is a detached copy rather than a
+    live alias: host writes made after the view is created never reach the
+    device and kernels read stale zeros. Fails closed, since the fallback paths
+    are correct but slower.
 
     Returns:
         True if the device view reflects a host write made after its creation.
