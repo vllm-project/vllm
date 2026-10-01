@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -74,6 +75,9 @@ def _request(*, block_hashes: list[BlockHash], token_count: int, req_id: str = "
     req.block_hashes = block_hashes
     req.all_token_ids = list(range(1, token_count + 1))
     req.lora_request = None
+    req.mm_features = []
+    req.cache_salt = None
+    req.prompt_embeds = None
     return req
 
 
@@ -246,6 +250,7 @@ def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
     assert event.parent_block_hash == _wire_hash(_hash(3))
     assert event.token_ids == list(range(17, 29))
     assert event.block_size == 4
+    assert event.extra_keys == [None] * 3
 
 
 def test_partial_tail_lookup_does_not_overwrite_store_metadata():
@@ -325,7 +330,7 @@ def test_take_events_publishes_routable_block_stored():
             assert event.parent_block_hash == _wire_hash(_hash(i - 1))
         assert event.lora_id is None
         assert event.lora_name is None
-        assert event.extra_keys is None
+        assert event.extra_keys == [None]
         assert event.group_idx == 0
         assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
         assert event.kv_cache_spec_sliding_window is None
@@ -335,6 +340,27 @@ def test_take_events_publishes_routable_block_stored():
     assert batch2[0].parent_block_hash == batch1[-1].block_hashes[-1]
 
     assert len(tracker._pending_event_metadata) == 6
+
+
+def test_rich_store_carries_per_block_extra_keys():
+    """Offloaded blocks carry the extra keys the GPU block pool publishes:
+    the adapter on every block, the cache salt on the first, and each
+    multimodal input with its offset in every block it spans."""
+    tracker = _tracker()
+    group_config = _group_config(block_size=4, blocks_per_chunk=2)
+    req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=16)
+    req.lora_request = MagicMock(adapter_id=7, lora_name="a", lora_path="/a")
+    req.lora_request.name = "a"
+    req.cache_salt = "salt"
+    image = SimpleNamespace(offset=2, length=8)
+    req.mm_features = [SimpleNamespace(identifier="img", mm_position=image)]
+    keys = _record_chunks(tracker, req, group_config, num_chunks=2)
+
+    first, second = tracker.take_events([_stored_event(keys)])
+
+    assert first.lora_id == 7 and first.lora_name == "a"
+    assert first.extra_keys == [("a", ("img", 2), "salt"), ("a", ("img", -2))]
+    assert second.extra_keys == [("a", ("img", -6)), ("a",)]
 
 
 def test_promotion_emits_full_cpu_stored_event():
@@ -350,7 +376,7 @@ def test_promotion_emits_full_cpu_stored_event():
     assert event.block_size == 4
     assert event.lora_id is None
     assert event.lora_name is None
-    assert event.extra_keys is None
+    assert event.extra_keys == [None]
     assert event.group_idx == 0
     assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert event.kv_cache_spec_sliding_window is None
