@@ -12,7 +12,7 @@ Example::
     python benchmarks/kernels/benchmark_minimax_m3_sparse_prefill.py \
       --original-source /tmp/original.py \
       --separate-source /tmp/separate.py \
-      --unified-source vllm/models/minimax_m3/common/ops/sparse_attn.py \
+      --tiled-source vllm/models/minimax_m3/nvidia/ops/sparse_prefill.py \
       --output /tmp/results.json
 """
 
@@ -25,18 +25,12 @@ from types import ModuleType
 
 import torch
 
-from vllm import envs
 from vllm.triton_utils import triton
 
 TOPK = 16
 BLOCK_SIZE = 128
 HEAD_DIM = 128
 GQA_GROUP_SIZE = 8
-
-# Historical source snapshots are loaded into the installed vLLM package. Add
-# the new option's default when that package predates the option; each loaded
-# module is subsequently assigned the tile under test by ``invoke``.
-envs.environment_variables.setdefault("VLLM_MINIMAX_SPARSE_PREFILL_TILE_Q", lambda: 0)
 
 
 @dataclass(frozen=True)
@@ -192,7 +186,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--original-source", type=Path, required=True)
     parser.add_argument("--separate-source", type=Path, required=True)
-    parser.add_argument("--unified-source", type=Path, required=True)
+    parser.add_argument("--tiled-source", type=Path, required=True)
     parser.add_argument("--tiles", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32])
     parser.add_argument("--shared", type=int, nargs="+", default=[16, 8, 0])
     parser.add_argument("--kv-dtypes", nargs="+", default=["bf16", "fp8"])
@@ -208,7 +202,7 @@ def main() -> None:
     modules = {
         "original": load_source("minimax_sparse_original", cli.original_source),
         "separate": load_source("minimax_sparse_separate", cli.separate_source),
-        "unified": load_source("minimax_sparse_unified", cli.unified_source),
+        "tiled": load_source("minimax_sparse_tiled", cli.tiled_source),
     }
     shapes = FULL_SHAPES if cli.suite == "full" else (FULL_SHAPES[1],)
     shared_values = cli.shared if cli.suite == "full" else [16, 0]
@@ -249,7 +243,7 @@ def main() -> None:
 
                 for tile in cli.tiles:
                     mean_union, max_union = union_stats(args["topk_idx"], shape, tile)
-                    for variant in ("separate", "unified"):
+                    for variant in ("separate", "tiled"):
                         invoke(modules[variant], tile, args)
                         output = args["output"]
                         assert isinstance(output, torch.Tensor)
@@ -294,7 +288,7 @@ def main() -> None:
         "sources": {
             "original": str(cli.original_source),
             "separate": str(cli.separate_source),
-            "unified": str(cli.unified_source),
+            "tiled": str(cli.tiled_source),
         },
         "results": results,
     }
