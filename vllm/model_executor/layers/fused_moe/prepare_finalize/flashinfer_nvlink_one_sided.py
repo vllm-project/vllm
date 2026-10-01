@@ -8,7 +8,10 @@ from vllm.distributed.device_communicators.base_device_communicator import (
     All2AllManagerBase,
 )
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
@@ -27,19 +30,18 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
-        top_k: int,
-        num_experts: int,
-        hidden_size: int,
         x_bytes_per_token: int,
         x_sf_bytes_per_token: int,
         num_dispatchers: int = 1,
     ):
-        super().__init__()
+        super().__init__(moe_config, quant_config)
         self.max_num_tokens = max_num_tokens
-        self.top_k = top_k
-        self.num_experts = num_experts
-        self.hidden_size = hidden_size
+        self.top_k = moe_config.experts_per_token
+        self.num_experts = moe_config.num_experts
+        self.hidden_size = moe_config.hidden_dim
         self.num_dispatchers_ = num_dispatchers
 
         device_communicator = get_ep_group().device_communicator

@@ -7,7 +7,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
@@ -17,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     swizzle_mxfp8_scale,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.worker.ubatching import (
@@ -106,26 +110,22 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         buffer: deep_ep.ElasticBuffer,
         num_dispatchers: int,
-        dp_size: int,
-        rank_expert_offset: int,
-        num_experts: int,
-        num_topk: int,
-        use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
-        sp_size: int = 1,
     ):
-        super().__init__()
+        super().__init__(moe_config, quant_config)
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
-        self.dp_size = dp_size
-        self.rank_expert_offset = rank_expert_offset
-        self.num_experts = num_experts
-        self.num_topk = num_topk
-        self.use_fp8_dispatch = use_fp8_dispatch
+        self.dp_size = moe_config.dp_size
+        self.rank_expert_offset = moe_config.ep_rank * moe_config.num_local_experts
+        self.num_experts = moe_config.num_experts
+        self.num_topk = moe_config.experts_per_token
+        self.use_fp8_dispatch = self.should_use_fp8_dispatch(quant_config)
         self.use_cudagraph = use_cudagraph
-        self.sp_size = sp_size
+        self.sp_size = moe_config.sp_size
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
@@ -133,6 +133,13 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # arange(num_local_experts) + rank_expert_offset. Rank-constant, so it
         # is built once per device instead of once per layer per step.
         self._global_expert_ids_cache: torch.Tensor | None = None
+
+    @staticmethod
+    def should_use_fp8_dispatch(quant_config: FusedMoEQuantConfig) -> bool:
+        return (
+            quant_config.quant_dtype == current_platform.fp8_dtype()
+            and quant_config.is_block_quantized
+        )
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_

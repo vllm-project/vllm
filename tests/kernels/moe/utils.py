@@ -145,12 +145,20 @@ def batched_moe(
     )
 
     if moe_config is None:
-        moe_config = make_dummy_moe_config()
+        moe_config = make_dummy_moe_config(
+            num_experts=w1.shape[0],
+            num_local_experts=w1.shape[0],
+            experts_per_token=topk_ids.shape[1],
+            hidden_dim=a.shape[1],
+            intermediate_size=w2.shape[2],
+            in_dtype=a.dtype,
+            max_num_tokens=max_num_tokens,
+        )
+    else:
+        max_num_tokens = moe_config.max_num_tokens
 
     fused_experts = FusedMoEKernel(
-        BatchedPrepareAndFinalize(
-            max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
-        ),
+        BatchedPrepareAndFinalize(moe_config, quant_config, num_dispatchers=1),
         BatchedTritonExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
@@ -197,12 +205,10 @@ def naive_batched_moe(
         a1_scale=a1_scale,
         a2_scale=a2_scale,
     )
-    moe_config = make_dummy_moe_config()
+    moe_config = make_dummy_moe_config(max_num_tokens=max_num_tokens)
 
     fused_experts = FusedMoEKernel(
-        BatchedPrepareAndFinalize(
-            max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
-        ),
+        BatchedPrepareAndFinalize(moe_config, quant_config, num_dispatchers=1),
         NaiveBatchedExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,

@@ -17,7 +17,10 @@ requires deep_ep to be importable.
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.config import FUSED_MOE_UNQUANTIZED_CONFIG
 from vllm.utils.import_utils import has_deep_ep_v2
+
+from .utils import make_dummy_moe_config
 
 requires_deep_ep_v2 = pytest.mark.skipif(
     not has_deep_ep_v2(),
@@ -65,13 +68,17 @@ class _FakeBuffer:
 
 
 def _make_pf(out: torch.Tensor):
+    moe_config = make_dummy_moe_config(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=out.shape[1],
+        max_num_tokens=1,
+    )
     pf = DeepEPV2PrepareAndFinalize(
+        moe_config,
+        FUSED_MOE_UNQUANTIZED_CONFIG,
         buffer=_FakeBuffer(out),
         num_dispatchers=1,
-        dp_size=1,
-        rank_expert_offset=0,
-        num_experts=8,
-        num_topk=2,
     )
     pf.handles[0] = object()
     return pf
