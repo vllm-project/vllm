@@ -1429,6 +1429,7 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("rocm.txt")
         if "develop" in sys.argv[1:] and "--no-deps" not in sys.argv[1:]:
             _check_requirements_preinstalled(requirements)
+        requirements += get_rocm_device_requirements()
     elif _is_tpu():
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
@@ -1440,27 +1441,22 @@ def get_requirements() -> list[str]:
     return requirements
 
 
-def get_rocm_device_extras() -> dict[str, list[str]]:
-    """Per-GPU extras for TheRock builds, e.g. ``vllm[device-gfx942]``.
+def get_rocm_device_requirements() -> list[str]:
+    """GPU kernel packages for TheRock builds.
 
     TheRock ships GPU kernels as separate per-arch wheels selected through
-    ``[device-<arch>]`` extras on torch, torchvision and rocm. Mirror that for
-    the arches this wheel was compiled for, plus ``device-all``.
+    ``[device-<arch>]`` extras on torch, torchvision and rocm. Require them for
+    every arch this wheel was compiled for, so ``pip install vllm`` works on
+    any supported GPU.
     """
     if not _is_hip() or importlib.util.find_spec("rocm_sdk") is None:
-        return {}
+        return []
     arches = [a for a in os.getenv("PYTORCH_ROCM_ARCH", "").split(";") if a]
-    extras = {
-        f"device-{arch}": [
-            f"torch[device-{arch}]",
-            f"torchvision[device-{arch}]",
-            f"rocm[device-{arch}]",
-        ]
+    return [
+        f"{pkg}[device-{arch}]"
+        for pkg in ("torch", "torchvision", "rocm")
         for arch in arches
-    }
-    if extras:
-        extras["device-all"] = [req for reqs in extras.values() for req in reqs]
-    return extras
+    ]
 
 
 ext_modules = []
@@ -1663,7 +1659,6 @@ setup(
         ],
         # extra quantization plugin
         "extra-quant": ["vllm-gguf-plugin>=0.0.2"],
-        **get_rocm_device_extras(),
     },
     cmdclass=cmdclass,
     package_data=package_data,
