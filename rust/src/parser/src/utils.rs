@@ -3,13 +3,22 @@
 
 //! Shared helpers for streaming parsers.
 
+use std::fmt::Debug;
+
+use vllm_tokenizer::DecodedText;
 use winnow::Parser;
 use winnow::error::{ContextError, ErrMode, ModalResult, Needed, StrContext, StrContextValue};
-use winnow::stream::{FindSlice, Offset, Partial, Stream};
+use winnow::stream::{Partial, Stream};
 
 use crate::tool::{Result, ToolParserError};
 
+pub(crate) mod marker;
 pub(crate) mod recursion;
+
+pub use marker::{
+    Attributed, AttributedExt, Marker, MarkerLike, MarkerStream, SpecialToken,
+    attributed_with_markers,
+};
 
 /// Return the byte length of the longest proper prefix of `token` that is also
 /// a suffix of `buffer`.
@@ -48,73 +57,94 @@ pub fn partial_prefix_len(buffer: &str, token: &str) -> usize {
     0
 }
 
+/// Where the next marker may be, in the coordinate system of
+/// [`MarkerStream::offset`].
+enum Scan {
+    /// A complete marker starts at this offset.
+    Found(usize),
+    /// A marker may start at this offset but needs more input to decide; text
+    /// from here on must be held back.
+    Pending(usize),
+    /// Every candidate before this offset (the end of the input) was rejected.
+    Clear(usize),
+}
+
+/// Scan for the earliest of `markers` at or after `from`.
+///
+/// Candidates come from the stream ([`MarkerStream::next_candidate`]): text
+/// occurrences for plain markers, visible anchors for markers guarded by a
+/// special token. Each candidate is decided by probing the marker's own parser
+/// on a cloned cursor, so the scanner and the consuming `alt` branch can never
+/// disagree; a rejected candidate (an ordinary lookalike) is skipped and the
+/// scan continues.
+fn scan_markers<'i, I: MarkerStream<'i>, M: MarkerLike>(
+    input: &I,
+    markers: &[M],
+    from: usize,
+) -> ModalResult<Scan> {
+    let start = input.offset();
+    let mut from = from.max(start);
+    while let Some(at) = input.next_candidate(markers, from) {
+        for marker in markers {
+            let mut probe = input.clone();
+            probe.next_slice(at - start);
+            match marker.as_marker().parse_next(&mut probe) {
+                Ok(_) => return Ok(Scan::Found(at)),
+                Err(ErrMode::Backtrack(_)) => {}
+                Err(ErrMode::Incomplete(_)) => return Ok(Scan::Pending(at)),
+                Err(error @ ErrMode::Cut(_)) => return Err(error),
+            }
+        }
+        from = at + 1;
+    }
+    Ok(Scan::Clear(start + input.eof_offset()))
+}
+
 /// Parse a safe text run before the next marker.
 /// This is the single-marker variant of [`safe_text_len_mul`].
 ///
 /// Returns the text length in bytes, and advances the input.
-pub fn safe_text_len(input: &mut Partial<&str>, marker: &str) -> ModalResult<usize> {
-    let text = **input;
-    if text.is_empty() {
-        return incomplete();
-    }
-
-    if let Some(start_idx) = text.find(marker) {
-        input.next_slice(start_idx);
-        return Ok(start_idx);
-    }
-
-    let keep_len = partial_prefix_len(text, marker);
-    let emit_len = text.len().saturating_sub(keep_len);
-    if emit_len == 0 {
-        return incomplete();
-    }
-
-    input.next_slice(emit_len);
-    Ok(emit_len)
+pub fn safe_text_len<'i, I: MarkerStream<'i>, M: MarkerLike>(
+    input: &mut I,
+    marker: M,
+) -> ModalResult<usize> {
+    safe_text_len_mul(input, &[marker])
 }
 
 /// Parse a safe text run before the earliest next marker.
 /// This is the multi-marker variant of [`safe_text_len`].
 ///
+/// Text that may still grow into a marker is held back: a partial spelling at
+/// the end of the input for plain markers, and only a genuine special token's
+/// incomplete marker for guarded ones.
+///
 /// Returns the text length in bytes, and advances the input.
-pub fn safe_text_len_mul(input: &mut Partial<&str>, markers: &[&str]) -> ModalResult<usize> {
-    let text = **input;
-    if text.is_empty() {
+pub fn safe_text_len_mul<'i, I: MarkerStream<'i>, M: MarkerLike>(
+    input: &mut I,
+    markers: &[M],
+) -> ModalResult<usize> {
+    if input.eof_offset() == 0 {
         return incomplete();
     }
 
-    if let Some(start_idx) = find_slice_mul(text, markers) {
-        input.next_slice(start_idx);
-        return Ok(start_idx);
-    }
-
-    let keep_len = markers.iter().map(|marker| partial_prefix_len(text, marker)).max().unwrap_or(0);
-    let emit_len = text.len().saturating_sub(keep_len);
+    let start = input.offset();
+    let stop = match scan_markers(input, markers, start)? {
+        Scan::Found(at) | Scan::Pending(at) | Scan::Clear(at) => at,
+    };
+    let emit_len = stop - start;
     if emit_len == 0 {
         return incomplete();
     }
 
     input.next_slice(emit_len);
     Ok(emit_len)
-}
-
-#[inline(always)]
-fn find_slice_mul(text: &str, markers: &[&str]) -> Option<usize> {
-    let range = match markers {
-        // Use the fast specialized `winnow::stream::FindSlice` impl for 1-3 markers.
-        [first] => text.find_slice(*first),
-        [first, second] => text.find_slice((*first, *second)),
-        [first, second, third] => text.find_slice((*first, *second, *third)),
-        // Fall back to a linear scan for 4+ markers.
-        _ => return markers.iter().filter_map(|marker| text.find(marker)).min(),
-    };
-    range.map(|range| range.start)
 }
 
 /// Streaming scan state for a buffered marker search [`take_until_marker`],
 /// so that we don't have to rescan the whole buffered prefix when resuming.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MarkerScanState {
+    /// Offset relative to the cursor at call time from which the scan resumes.
     scan_start: usize,
 }
 
@@ -128,55 +158,47 @@ impl MarkerScanState {
 ///
 /// This is the streaming-buffered variant of `winnow::token::take_until(0..,
 /// marker)`: it returns the slice before `marker` and leaves `marker` for the
-/// caller to consume. On incomplete input, it stores the earliest byte offset
-/// that can still match `marker` and returns `Incomplete` without consuming
-/// input, so the next parse can avoid rescanning the whole buffered prefix.
+/// caller to consume. On incomplete input, it stores the earliest offset that
+/// can still start `marker` and returns `Incomplete` without consuming input,
+/// so the next parse can avoid rescanning the whole buffered prefix.
 ///
 /// Use this for outer parser states that keep the full buffered input across
 /// chunks while waiting for a closing marker. Plain `take_until` is still a
 /// better fit for one-shot parsers over a complete body, and for `1..` cases
 /// where an empty slice before the marker should be rejected.
-pub fn take_until_marker<'i, 'a>(
-    marker: &'a str,
+pub fn take_until_marker<'i, 'a, I: MarkerStream<'i>, M: MarkerLike + 'a>(
+    marker: M,
     state: &'a mut MarkerScanState,
-) -> impl Parser<Partial<&'i str>, &'i str, ErrMode<ContextError>> + 'a {
-    move |input: &mut Partial<&'i str>| take_until_marker_(input, marker, state)
+) -> impl Parser<I, &'i str, ErrMode<ContextError>> + 'a {
+    move |input: &mut I| take_until_marker_(input, &marker, state)
 }
 
-fn take_until_marker_<'i>(
-    input: &mut Partial<&'i str>,
-    marker: &str,
+fn take_until_marker_<'i, I: MarkerStream<'i>, M: MarkerLike>(
+    input: &mut I,
+    marker: &M,
     state: &mut MarkerScanState,
 ) -> ModalResult<&'i str> {
-    debug_assert!(!marker.is_empty());
+    debug_assert!(!marker.as_marker().as_str().is_empty());
 
-    let text = **input;
-    if text.is_empty() {
+    if input.eof_offset() == 0 {
         return incomplete();
     }
 
-    // Normal updates store a char boundary; this keeps stale or misused state from panicking.
-    let scan_start = floor_char_boundary(text, state.scan_start);
-
-    if let Some(offset) = text[scan_start..].find(marker) {
-        let marker_start = scan_start + offset;
-        let body = &text[..marker_start];
-        input.next_slice(marker_start);
-        state.reset();
-        return Ok(body);
+    let start = input.offset();
+    match scan_markers(
+        input,
+        std::slice::from_ref(marker),
+        start + state.scan_start,
+    )? {
+        Scan::Found(at) => {
+            state.reset();
+            Ok(input.next_slice(at - start))
+        }
+        Scan::Pending(at) | Scan::Clear(at) => {
+            state.scan_start = at - start;
+            incomplete()
+        }
     }
-
-    let keep_len = partial_prefix_len(text, marker);
-    state.scan_start = text.len() - keep_len;
-    incomplete()
-}
-
-fn floor_char_boundary(text: &str, index: usize) -> usize {
-    let mut index = index.min(text.len());
-    while !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
 }
 
 /// Streaming lexical state for a top-level JSON object.
@@ -394,7 +416,26 @@ pub fn parse_buffered_event<E>(
     buffer: &str,
     parse: impl FnOnce(&mut Partial<&str>) -> ModalResult<E>,
 ) -> Result<Option<(E, usize)>> {
-    let mut input = Partial::new(buffer);
+    parse_buffered_stream_event(Partial::new(buffer), parse)
+}
+
+/// Parse one event from a buffered [`DecodedText`], for token-aware parsers.
+///
+/// Same contract as [`parse_buffered_event`]; the input also carries the
+/// buffer's token anchors and the parser's `markers` ([`Attributed`]).
+pub fn parse_buffered_event_attributed<M: Debug, E>(
+    buffer: &DecodedText,
+    markers: &M,
+    parse: impl FnOnce(&mut Attributed<'_, M>) -> ModalResult<E>,
+) -> Result<Option<(E, usize)>> {
+    parse_buffered_stream_event(attributed_with_markers(buffer, markers), parse)
+}
+
+fn parse_buffered_stream_event<'i, I: MarkerStream<'i>, E>(
+    mut input: I,
+    parse: impl FnOnce(&mut I) -> ModalResult<E>,
+) -> Result<Option<(E, usize)>> {
+    let buffer = input.remaining();
     let checkpoint = input.checkpoint();
     let event = match parse(&mut input) {
         Ok(event) => event,
