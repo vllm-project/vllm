@@ -98,7 +98,7 @@ def test_fetch_audio_rejects_unsupported_type(
     feature_extractor: MistralCommonFeatureExtractor,
 ):
     with pytest.raises(TypeError, match="only a numpy array"):
-        feature_extractor.fetch_audio(42)  # type: ignore[arg-type]
+        feature_extractor.fetch_audio(42)
 
 
 def test_fetch_audio_str_delegates_to_load_audio(

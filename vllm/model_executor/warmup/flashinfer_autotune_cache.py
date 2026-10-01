@@ -52,6 +52,10 @@ def use_flashinfer_autotune_v2(runner: "GPUModelRunner") -> bool:
     # save_configs/load_configs, which do not export managed-store winners.
     if runner.vllm_config.parallel_config.enable_elastic_ep:
         return False
+    # PP stages profile independently. Keep their group-scoped v1 files until
+    # managed-cache reads and publishes can be isolated across tuning groups.
+    if runner.vllm_config.parallel_config.pipeline_parallel_size > 1:
+        return False
     if not has_flashinfer_autotune_v2():
         return False
     # Use the initialized topology: Ray may span nodes with config.nnodes=1.
