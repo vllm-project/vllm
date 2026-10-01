@@ -36,23 +36,18 @@ from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
 _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
-_flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
 
 
-def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
-    workspace = _flashinfer_dsv4_workspace_by_device.get(device)
-    if workspace is None:
-        workspace = torch.zeros(
-            _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE,
-            dtype=torch.uint8,
-            device=device,
-        )
-        _flashinfer_dsv4_workspace_by_device[device] = workspace
+def _get_flashinfer_dsv4_workspace() -> torch.Tensor:
+    (workspace,) = current_workspace_manager().get_simultaneous(
+        ((_FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE,), torch.uint8)
+    )
     return workspace
 
 
@@ -305,8 +300,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            # Warmup dummy run: FlashInfer reads the cache directly and lazily
-            # allocates its workspace, so nothing to reserve here.
+            # Warmup dummy run: reserve the workspace before CUDA graph capture.
+            _get_flashinfer_dsv4_workspace()
             output.zero_()
             return
 
@@ -515,7 +510,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             padded_query[:, : query.shape[1], :] = query
             query = padded_query
 
-        workspace = _get_flashinfer_dsv4_workspace(q.device)
+        workspace = _get_flashinfer_dsv4_workspace()
         query_start_loc = swa_metadata.query_start_loc
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu
         assert query_start_loc is not None and query_start_loc_cpu is not None
@@ -595,8 +590,8 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
     use_fp8_ds_mla_layout: ClassVar[bool] = True
 
     @staticmethod
-    def _get_workspace(device: torch.device) -> torch.Tensor:
-        return _get_flashinfer_dsv4_workspace(device)
+    def _get_workspace() -> torch.Tensor:
+        return _get_flashinfer_dsv4_workspace()
 
     @staticmethod
     def _as_sparse_cache(kv_cache: torch.Tensor) -> torch.Tensor:
@@ -654,9 +649,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         self._flashinfer_fp8_bmm2_scale = fp8_kv_scale
 
     def _reserve_empty_forward_workspace(self) -> None:
-        self._get_workspace(
-            torch.device("cuda", torch.accelerator.current_device_index())
-        )
+        self._get_workspace()
 
     def _forward_sparse_impl(
         self,
@@ -815,7 +808,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
             query=q,
             swa_kv_cache=swa_cache,
-            workspace_buffer=self._get_workspace(q.device),
+            workspace_buffer=self._get_workspace(),
             sparse_indices=swa_indices,
             compressed_kv_cache=extra_cache,
             out=output,
@@ -930,7 +923,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
                 query=q_chunk,
                 swa_kv_cache=swa_kv_paged,
-                workspace_buffer=self._get_workspace(q.device),
+                workspace_buffer=self._get_workspace(),
                 sparse_indices=swa_indices_chunk,
                 compressed_kv_cache=extra_kv_paged,
                 out=output[query_start:query_end],

@@ -68,6 +68,7 @@ from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backends.mla import (
     flashattn_mla_sparse as flashattn_sparse_module,
 )
+from vllm.v1.attention.backends.mla import flashinfer_mla_sparse
 from vllm.v1.attention.backends.mla import index_group as index_group_module
 from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
     FlashAttnMLASparseImpl,
@@ -152,7 +153,9 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     impl.kv_cache_dtype = "auto"
     impl.topk_indices_buffer = topk
     impl.dcp_world_size = 1
-    impl._workspace_buffer = torch.empty(1)
+    monkeypatch.setattr(
+        flashinfer_mla_sparse, "_get_workspace_buffer", lambda: torch.empty(1)
+    )
     impl.bmm1_scale = None
     impl.bmm2_scale = None
     impl.is_nope_mla = True

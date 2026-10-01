@@ -102,7 +102,8 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         assert self.topk_indices_buffer is not None
 
         self.supports_quant_query_input = False
-        self._workspace_buffer: torch.Tensor | None = None
+        # Reserve before CUDA graph capture; re-requested on every call.
+        _get_workspace_buffer()
 
     def forward_mqa(
         self,
@@ -216,9 +217,6 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             dtype=q.dtype,
         )
 
-        if self._workspace_buffer is None:
-            self._workspace_buffer = _get_workspace_buffer(q.device)
-
         from vllm.utils.flashinfer import (
             flashinfer_trtllm_batch_decode_with_kv_cache_mla,
         )
@@ -227,7 +225,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         out = flashinfer_trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),
             kv_cache=kv_cache.view(torch.uint8).unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
+            workspace_buffer=_get_workspace_buffer(),
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
