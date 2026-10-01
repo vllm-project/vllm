@@ -1,18 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Batch derender must hide stop text the coupled server already hides."""
+"""Batch and streaming derender must hide stop text the coupled server hides."""
 
+import asyncio
 from types import SimpleNamespace
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    DerenderStreamState,
     GenerateResponse,
     GenerateResponseChoice,
+    GenerateResponseStreamChoice,
+    GenerateStreamResponse,
 )
 from vllm.renderers.online_derenderer import (
     OnlineDerenderer,
+    apply_streaming_stop,
     decode_with_stop,
     normalize_stop_strings,
     truncate_at_stop_string,
@@ -180,3 +185,114 @@ def test_stop_helpers_match_the_coupled_rule():
     text, reason = truncate_at_stop_string("one two three", ["three"], False)
     assert text == "one two "
     assert reason == "three"
+
+
+def test_stream_holds_a_stop_prefix_until_the_word_arrives():
+    state = DerenderStreamState()
+    emit, state, reason = apply_streaming_stop(
+        state,
+        "one two ",
+        stop=["three"],
+        include_in_output=False,
+        finished=False,
+        token_stripped=False,
+        token_stop_reason=None,
+    )
+    assert emit == "one "
+    assert state.held_text == "two "
+    assert reason is None
+
+    emit, state, reason = apply_streaming_stop(
+        state,
+        "three",
+        stop=["three"],
+        include_in_output=False,
+        finished=True,
+        token_stripped=False,
+        token_stop_reason=None,
+    )
+    assert emit == "two "
+    assert state.held_text == ""
+    assert state.stop_fired
+    assert reason == "three"
+
+    extra, state, extra_reason = apply_streaming_stop(
+        state,
+        "more",
+        stop=["three"],
+        include_in_output=False,
+        finished=False,
+        token_stripped=False,
+        token_stop_reason=None,
+    )
+    assert extra == ""
+    assert extra_reason is None
+
+
+def test_stream_finish_flushes_the_hold_when_the_stop_never_arrives():
+    state = DerenderStreamState(held_text="two ")
+    emit, state, reason = apply_streaming_stop(
+        state,
+        "",
+        stop=["three"],
+        include_in_output=False,
+        finished=True,
+        token_stripped=False,
+        token_stop_reason=None,
+    )
+    assert emit == "two "
+    assert state.held_text == ""
+    assert reason is None
+
+
+def _stream_chunk(token_ids, finish_reason=None):
+    return GenerateStreamResponse(
+        request_id="cmpl-stream-stop",
+        choices=[
+            GenerateResponseStreamChoice(
+                index=0,
+                token_ids=token_ids,
+                finish_reason=finish_reason,
+            )
+        ],
+    )
+
+
+def test_completion_stream_cuts_a_stop_word_split_across_chunks():
+    pieces = iter(["one two ", "three"])
+    seen: list[list[int]] = []
+
+    async def detok(tokenizer, delta_token_ids, stream_state, skip_special_tokens=True):
+        seen.append(list(delta_token_ids))
+        return next(pieces), stream_state
+
+    derenderer = SimpleNamespace(
+        _detokenize_delta_async=detok,
+        renderer=SimpleNamespace(get_tokenizer=lambda: _Tokenizer()),
+        model_config=None,
+    )
+    request = CompletionRequest(model="tiny", prompt="hi", stop=["three"])
+
+    async def run():
+        first, stream_state = await OnlineDerenderer.derender_completion_stream(
+            derenderer,
+            "tiny",
+            _stream_chunk([1, 2]),
+            completion_request=request,
+        )
+        second, stream_state = await OnlineDerenderer.derender_completion_stream(
+            derenderer,
+            "tiny",
+            _stream_chunk([3], finish_reason="stop"),
+            state=stream_state,
+            completion_request=request,
+        )
+        return first, second, stream_state
+
+    first, second, stream_state = asyncio.run(run())
+    assert first.choices[0].text == "one "
+    assert first.choices[0].stop_reason is None
+    assert second.choices[0].text == "two "
+    assert second.choices[0].stop_reason == "three"
+    assert stream_state.stop_fired
+    assert seen == [[1, 2], [3]]

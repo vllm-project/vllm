@@ -274,13 +274,15 @@ class ServingDerender(BaseServing):
                 "markup into content."
             )
 
-        if request.chat_request is not None and normalize_stop_strings(
-            request.chat_request.stop
+        if (
+            self.online_derenderer.parser is not None
+            and request.chat_request is not None
+            and normalize_stop_strings(request.chat_request.stop)
         ):
             return self.create_error_response(
-                "stop strings are not supported on streaming /derender. "
-                "Send the finished generate response to the non-streaming "
-                "derender endpoint."
+                "stop strings are not supported on streaming /derender when "
+                "a tool or reasoning parser is configured. Send the finished "
+                "generate response to the non-streaming derender endpoint."
             )
 
         if (
@@ -378,15 +380,6 @@ class ServingDerender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
-        if request.completion_request is not None and normalize_stop_strings(
-            request.completion_request.stop
-        ):
-            return self.create_error_response(
-                "stop strings are not supported on streaming /derender. "
-                "Send the finished generate response to the non-streaming "
-                "derender endpoint."
-            )
 
         model_name = request.model or self.models.model_name()
         try:

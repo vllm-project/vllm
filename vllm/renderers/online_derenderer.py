@@ -149,6 +149,97 @@ def truncate_at_stop_string(
     return text, stop_str
 
 
+def strip_finished_stop_token(
+    token_ids: Sequence[int],
+    *,
+    finish_reason: str | None,
+    include_in_output: bool,
+    stop_token_ids: Sequence[int] | None,
+    eos_token_id: int | None,
+    generation_eos: set[int],
+) -> tuple[list[int], int | None, bool]:
+    """Drop a trailing stop id on a finished chunk, matching the engine.
+
+    Returns the ids to detokenize, the stop_reason for a non-primary stop
+    id, and whether a token was removed. The primary EOS leaves the reason
+    empty. ``include_in_output`` keeps the id.
+    """
+    ids = list(token_ids)
+    if (
+        finish_reason != "stop"
+        or not ids
+        or include_in_output
+        or not is_stop_token(ids[-1], stop_token_ids, eos_token_id, generation_eos)
+    ):
+        return ids, None, False
+    token_id = ids[-1]
+    reason = (
+        None if eos_token_id is not None and token_id == eos_token_id else token_id
+    )
+    return ids[:-1], reason, True
+
+
+def apply_streaming_stop(
+    state: DerenderStreamState,
+    new_text: str,
+    *,
+    stop: str | Sequence[str] | None,
+    include_in_output: bool,
+    finished: bool,
+    token_stripped: bool,
+    token_stop_reason: int | None,
+) -> tuple[str, DerenderStreamState, int | str | None]:
+    """Hold back a possible stop-string prefix across streaming chunks.
+
+    The engine keeps ``max(len(stop)) - 1`` characters until the next chunk
+    or the finish. A matched stop string is cut here, and it wins over a
+    token stop. Once a stop has fired, later chunks emit nothing.
+    """
+    if state.stop_fired:
+        reason = state.matched_stop_reason if finished else None
+        return "", state, reason
+
+    combined = state.held_text + new_text
+    strings = normalize_stop_strings(stop)
+    matched: str | None = None
+    if strings:
+        combined, matched = truncate_at_stop_string(
+            combined, strings, include_in_output
+        )
+
+    fired = matched is not None or token_stripped
+    if matched is not None:
+        reason: int | str | None = matched
+        held = ""
+        emit = combined
+    elif fired or finished or not strings or include_in_output:
+        reason = token_stop_reason if token_stripped else None
+        held = ""
+        emit = combined
+    else:
+        buffer = max(len(item) for item in strings) - 1
+        reason = None
+        if buffer <= 0:
+            held = ""
+            emit = combined
+        elif len(combined) <= buffer:
+            held = combined
+            emit = ""
+        else:
+            emit = combined[:-buffer]
+            held = combined[-buffer:]
+
+    updated = state.model_copy(
+        update={
+            "held_text": held,
+            "stop_fired": fired,
+            "matched_stop_reason": reason if fired else None,
+        }
+    )
+    shown = reason if finished or matched is not None else None
+    return emit, updated, shown
+
+
 class OnlineDerenderer:
     def __init__(
         self,
@@ -478,13 +569,44 @@ class OnlineDerenderer:
         skip_special = (
             chat_request.skip_special_tokens if chat_request is not None else True
         )
+        stop = chat_request.stop if chat_request is not None else None
+        include_stop = (
+            chat_request.include_stop_str_in_output
+            if chat_request is not None
+            else False
+        )
+        stop_token_ids = (
+            chat_request.stop_token_ids if chat_request is not None else None
+        )
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        generation_eos = generation_eos_ids(getattr(self, "model_config", None))
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         updated_state = state
 
         for choice in generate_chunk.choices:
-            delta_tids = choice.token_ids or []
+            raw_tids = list(choice.token_ids or [])
+            decode_tids, token_reason, token_stripped = strip_finished_stop_token(
+                raw_tids,
+                finish_reason=choice.finish_reason,
+                include_in_output=include_stop,
+                stop_token_ids=stop_token_ids,
+                eos_token_id=eos_token_id,
+                generation_eos=generation_eos,
+            )
             new_text, updated_state = await self._detokenize_delta_async(
-                tokenizer, delta_tids, updated_state, skip_special_tokens=skip_special
+                tokenizer,
+                decode_tids,
+                updated_state,
+                skip_special_tokens=skip_special,
+            )
+            emit, updated_state, stop_reason = apply_streaming_stop(
+                updated_state,
+                new_text,
+                stop=stop,
+                include_in_output=include_stop,
+                finished=choice.finish_reason is not None,
+                token_stripped=token_stripped,
+                token_stop_reason=token_reason,
             )
 
             # NOTE: parser-configured servers dispatch to
@@ -507,14 +629,14 @@ class OnlineDerenderer:
                 update={
                     "role_sent": True,
                     "logprob_context_token_ids": _logprob_context_tail(
-                        state.logprob_context_token_ids, delta_tids
+                        state.logprob_context_token_ids, raw_tids
                     ),
                 }
             )
 
             delta = DeltaMessage(
                 role="assistant" if include_role else None,
-                content=new_text if new_text else None,
+                content=emit if emit else None,
             )
             stream_choices.append(
                 ChatCompletionResponseStreamChoice(
@@ -522,6 +644,7 @@ class OnlineDerenderer:
                     delta=delta,
                     logprobs=resolved_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=stop_reason,
                 )
             )
 
@@ -877,13 +1000,46 @@ class OnlineDerenderer:
             if completion_request is not None
             else True
         )
+        stop = completion_request.stop if completion_request is not None else None
+        include_stop = (
+            completion_request.include_stop_str_in_output
+            if completion_request is not None
+            else False
+        )
+        stop_token_ids = (
+            completion_request.stop_token_ids
+            if completion_request is not None
+            else None
+        )
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        generation_eos = generation_eos_ids(getattr(self, "model_config", None))
         stream_choices: list[CompletionResponseStreamChoice] = []
         updated_state = state
 
         for choice in generate_chunk.choices:
-            delta_tids = choice.token_ids or []
+            raw_tids = list(choice.token_ids or [])
+            decode_tids, token_reason, token_stripped = strip_finished_stop_token(
+                raw_tids,
+                finish_reason=choice.finish_reason,
+                include_in_output=include_stop,
+                stop_token_ids=stop_token_ids,
+                eos_token_id=eos_token_id,
+                generation_eos=generation_eos,
+            )
             new_text, updated_state = await self._detokenize_delta_async(
-                tokenizer, delta_tids, updated_state, skip_special_tokens=skip_special
+                tokenizer,
+                decode_tids,
+                updated_state,
+                skip_special_tokens=skip_special,
+            )
+            emit, updated_state, stop_reason = apply_streaming_stop(
+                updated_state,
+                new_text,
+                stop=stop,
+                include_in_output=include_stop,
+                finished=choice.finish_reason is not None,
+                token_stripped=token_stripped,
+                token_stop_reason=token_reason,
             )
 
             completion_logprobs = None
@@ -900,18 +1056,19 @@ class OnlineDerenderer:
             updated_state = updated_state.model_copy(
                 update={
                     "logprob_context_token_ids": _logprob_context_tail(
-                        state.logprob_context_token_ids, delta_tids
+                        state.logprob_context_token_ids, raw_tids
                     ),
-                    "logprob_text_offset": state.logprob_text_offset + len(new_text),
+                    "logprob_text_offset": state.logprob_text_offset + len(emit),
                 }
             )
 
             stream_choices.append(
                 CompletionResponseStreamChoice(
                     index=choice.index,
-                    text=new_text,
+                    text=emit,
                     logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=stop_reason,
                 )
             )
 
