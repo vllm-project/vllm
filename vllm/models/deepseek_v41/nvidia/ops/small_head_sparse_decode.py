@@ -15,17 +15,14 @@ V is the full 512-dim key, so one dequantized tile feeds both GEMMs.
 
 import torch
 
-from vllm import envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
 def small_head_decode_enabled(num_local_heads: int) -> bool:
-    return (
-        envs.VLLM_DSV41_SM90_SMALL_HEAD_DECODE
-        and current_platform.is_device_capability_family(90)
-        and num_local_heads in (8, 16)
-    )
+    if num_local_heads not in (8, 16):
+        return False
+    return current_platform.is_device_capability_family(90)
 
 
 @triton.jit

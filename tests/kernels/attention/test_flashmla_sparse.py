@@ -1063,15 +1063,10 @@ def test_small_head_sparse_decode_graph_replay_empty_kv(small_head_decode):
 
 
 @pytest.mark.parametrize("heads", [8, 16, 32])
-def test_small_head_sparse_decode_opt_in_gate(small_head_decode, monkeypatch, heads):
+def test_small_head_sparse_decode_enabled(small_head_decode, monkeypatch, heads):
     import sys
 
     mod = sys.modules[small_head_decode.__module__]
-    monkeypatch.setattr(
-        mod.envs, "VLLM_DSV41_SM90_SMALL_HEAD_DECODE", False, raising=False
-    )
-    assert not mod.small_head_decode_enabled(heads)
-    monkeypatch.setattr(mod.envs, "VLLM_DSV41_SM90_SMALL_HEAD_DECODE", True)
     assert mod.small_head_decode_enabled(heads) == (heads in (8, 16))
     monkeypatch.setattr(
         mod.current_platform, "is_device_capability_family", lambda family: False
