@@ -49,21 +49,13 @@ touch, what order to change them in, and which tests to run.
 Skills live in `.agents/skills/<name>/` and follow the
 [Agent Skills specification](https://agentskills.io/specification).
 
-- **Link it.** Claude Code does not read `.agents/`, so symlink each skill:
+- Claude Code does not read `.agents/`, so symlink each skill:
   `ln -s ../../.agents/skills/<name> .claude/skills/<name>`.
-- **Frontmatter.** `name` matches the directory. `description` says what the
+- Frontmatter: `name` matches the directory. `description` says what the
   skill does and when to use it; quote it if it contains a colon.
-- **Size.** Keep `SKILL.md` under **500 lines** and move detail into files it links to.
-- **`agents/openai.yaml`** is optional display metadata for Codex.
-
-## Enforcement
-
-`tools/pre_commit/check_agent_files.py` runs in pre-commit and checks the skill
-rules above, the line budgets (every nested `AGENTS.md` counts as a domain
-guide), and that relative links in `AGENTS.md` files and skills resolve.
-
-It also rejects `CLAUDE.md` files. Claude Code reads `AGENTS.md` directly, but
-not from or below a directory that has a `CLAUDE.md`.
+- Keep `SKILL.md` under 500 lines and move detail into files it links to.
+- `tools/pre_commit/check_agent_files.py` runs in pre-commit to check the
+  skill and `AGENTS.md` rules
 
 ## Keeping Docs Lean
 
