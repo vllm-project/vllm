@@ -139,7 +139,7 @@ def test_builder_emits_one_checkpoint_entry_per_prefill_row():
 
 
 def test_builder_emits_nothing_outside_align_mode():
-    builder = _create_mamba2_builder(mamba_cache_mode="all")
+    builder = _create_mamba2_builder(mamba_cache_mode="none")
     meta = _build(builder, seq_lens=[900], query_lens=[900])
 
     assert meta.checkpoint_chunk_idx is None
