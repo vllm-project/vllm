@@ -28,11 +28,13 @@ from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
 )
 from vllm.envs import enable_envs_cache
-from vllm.logger import init_logger
+from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import MultiModalCacheMissError
+from vllm.multimodal.cache import (
+    MultiModalCacheMissError,
+    engine_receiver_cache_from_config,
+)
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -85,7 +87,11 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
     EngineCoreSentinel,
     fault_tolerant_wrapper,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig, is_full_attention_spec
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    get_kv_cache_spec_kind,
+    is_full_attention_spec,
+)
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -178,10 +184,7 @@ class EngineCore:
         if self.scheduler.ec_connector is not None:  # type: ignore
             self.model_executor.init_ec_output_aggregator()
 
-        mm_registry = MULTIMODAL_REGISTRY
-        self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
-            vllm_config
-        )
+        self.mm_receiver_cache = engine_receiver_cache_from_config(vllm_config)
 
         # If a KV connector is initialized for scheduler, we want to collect
         # handshake metadata from all workers so the connector in the scheduler
@@ -216,10 +219,7 @@ class EngineCore:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
-        self.is_ec_consumer = (
-            vllm_config.ec_transfer_config is None
-            or vllm_config.ec_transfer_config.is_ec_consumer
-        )
+        self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
@@ -457,6 +457,32 @@ class EngineCore:
             supported_pooling_tasks,
         )
 
+    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
+        """Return serializable KV cache metadata for external event consumers
+        (e.g., Dynamo). This function has no call sites within vLLM but needs to
+        be kept.
+        """
+        kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
+        if kv_cache_config is None:
+            return []
+
+        kv_cache_manager = cast(Any, self.scheduler).kv_cache_manager
+        managers = kv_cache_manager.coordinator.single_type_managers
+        metadata: list[dict[str, int | str | None]] = []
+        for group_idx, (group, manager) in enumerate(
+            zip(kv_cache_config.kv_cache_groups, managers, strict=True)
+        ):
+            spec = group.kv_cache_spec
+            metadata.append(
+                {
+                    "group_idx": group_idx,
+                    "kind": get_kv_cache_spec_kind(spec).value,
+                    "block_size": manager.block_size,
+                    "sliding_window": getattr(spec, "sliding_window", None),
+                }
+            )
+        return metadata
+
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
 
@@ -598,8 +624,7 @@ class EngineCore:
 
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer new prefills this step (DP prefill balancing).
-        Overridden by the DP engine core; never throttles otherwise.
-        """
+        Overridden by the DP engine core; never throttles otherwise."""
         return False
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
@@ -674,7 +699,7 @@ class EngineCore:
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
-            if self.is_ec_consumer:
+            if not self.is_mm_encoder_only:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
             if self.is_pooling_model or not model_executed:
@@ -838,10 +863,11 @@ class EngineCore:
         # reset_connector=True so external connectors clear alongside
         # local caches, matching the pause_generation(clear_cache=True)
         # contract. No-op when no connector is configured.
-        self.reset_prefix_cache(
+        if not self.reset_prefix_cache(
             reset_running_requests=reset_running_requests,
             reset_connector=reset_connector,
-        )
+        ):
+            raise RuntimeError("Failed to reset the KV connector cache.")
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
@@ -928,11 +954,14 @@ class EngineCore:
         pause_future.add_done_callback(pause_complete)
         return future
 
-    def wake_up(self, tags: list[str] | None = None):
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         """Wake up the engine from sleep.
 
         Args:
             tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
+
+        Returns:
+            Whether all executor memory is resident again (fully awake).
 
         """
         if tags is not None and "scheduling" in tags:
@@ -944,8 +973,30 @@ class EngineCore:
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
-        if not self.model_executor.is_sleeping:
+        fully_awake = not self.model_executor.is_sleeping
+        if fully_awake:
             self.resume_scheduler()
+        return fully_awake
+
+    def release_kv_cache_memory(self) -> None:
+        """Discard KV cache physical memory. Requires a completed pause
+        and all executor memory to be resident. Kept requests are recomputed
+        after wake-up.
+        """
+        if not (
+            self.is_scheduler_paused()
+            and not self.scheduler.has_requests()
+            and not self.batch_queue
+        ):
+            raise RuntimeError(
+                "release_kv_cache_memory() requires a completed pause first"
+            )
+        if self.model_executor.is_sleeping:
+            raise RuntimeError(
+                "release_kv_cache_memory() requires all executor memory to be resident"
+            )
+        self._reset_caches()
+        self.model_executor.discard(("kv_cache",))
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -953,6 +1004,9 @@ class EngineCore:
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
+
+    def compute_weight_checksums(self) -> list[dict[str, str]]:
+        return self.collective_rpc("compute_weight_checksums")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
@@ -1296,6 +1350,10 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
+        vllm_config: VllmConfig = kwargs["vllm_config"]
+        if logging_config := getattr(vllm_config, "logging_config", None):
+            configure_logging(logging_config)
+
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
@@ -1303,7 +1361,6 @@ class EngineCoreProc(EngineCore):
         signal_callback: SignalCallback | None = None
         clean_shutdown = False
         try:
-            vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
             data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
             if data_parallel:
@@ -1623,8 +1680,7 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def _convert_msgspec_args(method, args):
         """If a provided arg type doesn't match corresponding target method
-        arg type, try converting to msgspec object.
-        """
+        arg type, try converting to msgspec object."""
         if not args:
             return args
         arg_types = signature(method).parameters.values()
@@ -1693,6 +1749,8 @@ class EngineCoreProc(EngineCore):
             enable_sleep_mode=self.vllm_config.model_config.enable_sleep_mode,
             supports_draft_weight_updates=(
                 self.model_executor.supports_draft_weight_updates()
+                if self.vllm_config.weight_transfer_config is not None
+                else False
             ),
         )
 
@@ -1946,8 +2004,12 @@ class EngineCoreProc(EngineCore):
             raise ValueError(f"Invalid pause mode: {mode}")
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
-            engine._finish_pause(clear_cache)
-            future.set_result(None)
+            try:
+                engine._finish_pause(clear_cache)
+            except Exception as e:
+                future.set_exception(e)
+            else:
+                future.set_result(None)
 
         if mode == "abort":
             aborted_reqs = self.scheduler.finish_requests(
@@ -2006,8 +2068,7 @@ class EngineCoreProc(EngineCore):
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
-    in a data parallel context.
-    """
+    in a data parallel context."""
 
     def __init__(
         self,
@@ -2415,6 +2476,9 @@ class EngineCoreActorMixin:
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
+        if logging_config := getattr(vllm_config, "logging_config", None):
+            configure_logging(logging_config)
+
         # Initialize tracer for distributed tracing if configured.
         maybe_init_worker_tracer(
             instrumenting_module_name="vllm.engine_core",

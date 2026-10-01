@@ -8,6 +8,7 @@ import pytest
 
 import vllm.entrypoints.launchers.cli_args as cli_args_module
 from tests.utils import VLLM_PATH
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.launchers.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
@@ -67,6 +68,27 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
         ]
     )
     assert args.port == 9000
+
+
+def test_logging_config_cli_args(serve_parser):
+    with pytest.warns(UserWarning, match="--log-config-file is deprecated"):
+        args = serve_parser.parse_args(
+            [
+                "--logging-config",
+                '{"log_level":"WARNING","pylogging_config_file":"/tmp/json.json"}',
+                "--logging-config.formatter",
+                "json",
+                "--log-level",
+                "DEBUG",
+                "--log-config-file",
+                "/tmp/flat.json",
+            ]
+        )
+
+    config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
+    assert config.log_level == "DEBUG"
+    assert config.formatter == "json"
+    assert config.pylogging_config_file == "/tmp/flat.json"
 
 
 ### Tests for LoRA module parsing
@@ -186,8 +208,7 @@ def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
 
 def test_passes_with_reasoning_parser(serve_parser):
     """Ensure validation passes if reasoning is enabled
-    with a reasoning parser
-    """
+    with a reasoning parser"""
     args = serve_parser.parse_args(
         args=[
             "--reasoning-parser",
@@ -382,8 +403,7 @@ def test_default_chat_template_kwargs_invalid_json(serve_parser):
 )
 def test_served_model_name_parsing(tmp_path, vllm_parser, args, raises):
     """Ensure that users don't misuse --served-model-name and end up with the default
-    model tag instead of the one they intended to serve.
-    """
+    model tag instead of the one they intended to serve."""
     # Call the serve subparser
     args.insert(0, "serve")
     # Create a dummy config file if the test case includes it

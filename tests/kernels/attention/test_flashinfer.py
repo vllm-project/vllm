@@ -162,8 +162,7 @@ def test_fast_decode_plan_importable() -> None:
 @torch.inference_mode
 def test_fast_plan_decode_warmup_uses_full_plan(dtype: torch.dtype) -> None:
     """On the first call fast_plan_decode must route through self.plan() and
-    flip vllm_first_call to False on the wrapper object.
-    """
+    flip vllm_first_call to False on the wrapper object."""
     from unittest.mock import patch
 
     from vllm.v1.attention.backends.flashinfer import fast_plan_decode

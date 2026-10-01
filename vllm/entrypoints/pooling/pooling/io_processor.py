@@ -44,8 +44,7 @@ class PluginWithoutIOProcessorPlugins(PoolingIOProcessor):
 
 class PluginWithIOProcessorPlugins(PoolingIOProcessor):
     """IO Processor plugins are a feature that allows pre- and post-processing
-    of the model input and output for pooling models.
-    """
+    of the model input and output for pooling models."""
 
     name = "plugin"
 
@@ -169,7 +168,7 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
             pooling_params = ctx.pooling_params
 
         params_seq: list[PoolingParams] = [
-            self.io_processor.merge_pooling_params(param)
+            self.io_processor.merge_pooling_params(param.clone())
             for param in self._params_to_seq(
                 pooling_params,
                 num_requests,

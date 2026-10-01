@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import regex as re
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -46,24 +46,21 @@ class QuantizeMethodBase(ABC):
     ):
         """Create weights for a layer.
 
-        The weights will be set as attributes of the layer.
-        """
+        The weights will be set as attributes of the layer."""
         raise NotImplementedError
 
     @abstractmethod
     def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
         """Apply the weights in layer to the input tensor.
 
-        Expects create_weights to have been called before on the layer.
-        """
+        Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
     # Not required functions
     def embedding(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
         """Gather embeddings in the layer based on indices in the input tensor.
 
-        Expects create_weights to have been called before on the layer.
-        """
+        Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
     # Not required functions
@@ -76,8 +73,7 @@ class QuantizeMethodBase(ABC):
         Quantization methods that need special weight handling (e.g. repacked
         weights) override this.
 
-        Expects create_weights to have been called before on the layer.
-        """
+        Expects create_weights to have been called before on the layer."""
         layer.weight = embed_tokens.weight
         return layer
 
@@ -269,7 +265,7 @@ class QuantizationConfig(ABC):
     def maybe_update_config(  # noqa: B027
         self,
         model_name: str,
-        hf_config: PretrainedConfig | None = None,
+        hf_config: PreTrainedConfig | None = None,
         revision: str | None = None,
     ):
         """Interface to update values after config initialization.

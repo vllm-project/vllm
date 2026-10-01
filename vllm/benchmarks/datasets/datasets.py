@@ -2148,7 +2148,9 @@ def get_samples(
             dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
         )
         # For the "sonnet" dataset, formatting depends on the backend.
-        if args.backend == "openai-chat":
+        # Chat-style backends leave templating to the server; completions
+        # backends need the prompt rendered client side.
+        if args.backend in ("openai-chat", "openai-responses"):
             input_requests = sonnet_dataset.sample(
                 num_requests=args.num_prompts,
                 input_len=args.sonnet_input_len,
@@ -4383,8 +4385,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
 
         def _generate_exact_length_tokens(target_length: int) -> tuple[list[int], int]:
             """Generate tokens that decode and re-encode to exactly
-            target_length.
-            """
+            target_length."""
             # Generate random tokens
             tokens = np.random.randint(0, vocab_size, size=target_length).tolist()
 

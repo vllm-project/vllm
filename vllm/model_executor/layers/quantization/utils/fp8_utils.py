@@ -69,8 +69,7 @@ def input_to_float8(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """This function quantizes input values to float8 values "
-    "with tensor-wise quantization.
-    """
+    "with tensor-wise quantization."""
     dtype = current_platform.fp8_dtype() if dtype is None else dtype
     finfo = torch.finfo(dtype)
     min_val, max_val = x.aminmax()
@@ -1195,8 +1194,7 @@ def prepare_fp8_moe_layer_for_deepgemm(
 
 def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
     """Pad the weight tensor. This is an optimization on ROCm platform, which
-    can benefit from tensors located far enough from one another in memory
-    """
+    can benefit from tensors located far enough from one another in memory"""
     if (
         envs.VLLM_ROCM_FP8_PADDING
         and current_platform.is_rocm()
@@ -1375,7 +1373,7 @@ def process_fp8_weight_tensor_strategy(
     logical_widths: list[int],
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Process weights for tensor-wise quantization strategy."""
+    """Requantize fused shards to one scale and return ``(K, N)`` weight."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
         requantize_with_max_scale,
@@ -1393,7 +1391,7 @@ def process_fp8_weight_tensor_strategy(
         logical_widths=logical_widths,
     )
 
-    weight = _maybe_pad_fp8_weight(weight)
+    weight = _maybe_pad_fp8_weight(weight).t()
     return weight, weight_scale, input_scale
 
 
@@ -1402,7 +1400,7 @@ def process_fp8_weight_channel_strategy(
     weight_scale: torch.Tensor,
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Process weights for channel-wise quantization strategy."""
+    """Normalize FNUZ if needed and return ``(K, N)`` weight."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )
@@ -1412,14 +1410,14 @@ def process_fp8_weight_channel_strategy(
             weight=weight, weight_scale=weight_scale, input_scale=input_scale
         )
 
-    return weight, weight_scale, input_scale
+    return weight.t(), weight_scale, input_scale
 
 
 def process_fp8_weight_block_strategy(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Process weights for block-wise quantization strategy."""
+    """Normalize FNUZ if needed and return ``(N, K)`` weight (no transpose)."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )

@@ -222,12 +222,19 @@ class MambaStateShapeCalculator:
     @classmethod
     def append_replayssm_ring(
         cls,
-        base_shapes: tuple[tuple[int, ...], ...],
+        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
         n_groups: int,
         tp_world_size: int,
         logical_window: int,
         backend: MambaBackendEnum,
-    ) -> tuple[tuple[int, ...], ...]:
+        num_speculative_tokens: int = 0,
+    ) -> tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+        tuple[int, int, int],
+    ]:
         """Append the physical ReplaySSM ring shapes.
 
         ``base_shapes[1]`` is ``(nheads // tp, head_dim, state_size)``;
@@ -235,8 +242,8 @@ class MambaStateShapeCalculator:
         """
         ring_buffer_len = logical_window
         if backend == MambaBackendEnum.FLASHINFER:
-            # FlashInfer keeps the live window and appended token together.
-            ring_buffer_len += 1
+            # FlashInfer keeps the live window and current verify window together.
+            ring_buffer_len += 1 + num_speculative_tokens
         local_nheads, head_dim, state_size = base_shapes[1]
         local_ngroups = divide(n_groups, tp_world_size)
         return (
@@ -261,8 +268,7 @@ class MambaStateShapeCalculator:
     @classmethod
     def extra_groups_for_head_shards(cls, ngroups: int, tp_size: int):
         """Compute the increase in group numbers to account for
-        replication in order to accompany the head shards.
-        """
+        replication in order to accompany the head shards."""
         # in the case ngoups % tp_size == 0, this will be zero
         if ngroups % tp_size == 0:
             return 0

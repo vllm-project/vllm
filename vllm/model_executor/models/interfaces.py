@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
+    from vllm.tokenizers import TokenizerLike
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
@@ -89,6 +90,13 @@ MambaStateShapes: TypeAlias = (
         tuple[int, int],
         tuple[int, int, int],
         tuple[int, int, int],
+        tuple[int, int, int],
+    ]
+    | tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
         tuple[int, int, int],
     ]
 )
@@ -892,8 +900,7 @@ def has_inner_state(
 @runtime_checkable
 class IsAttentionFree(Protocol):
     """The interface required for all models like Mamba that lack attention,
-    but do have state whose size is constant wrt the number of tokens.
-    """
+    but do have state whose size is constant wrt the number of tokens."""
 
     is_attention_free: ClassVar[Literal[True]] = True
     """
@@ -921,8 +928,7 @@ def is_attention_free(
 class IsHybrid(Protocol):
     """The interface required for all models like Jamba that have both
     attention and mamba blocks, indicates that
-    hf_config has 'layers_block_type'
-    """
+    hf_config has 'layers_block_type'"""
 
     is_hybrid: ClassVar[Literal[True]] = True
     """
@@ -1257,7 +1263,7 @@ class SupportsRealtime(Protocol):
     Override in subclasses based on the model's expected output length."""
 
     @classmethod
-    async def buffer_realtime_audio(
+    def buffer_realtime_audio(
         cls,
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
@@ -1338,8 +1344,7 @@ class SupportsTranscription(Protocol):
     ) -> "PromptType":
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
-        returns a valid PromptType.
-        """
+        returns a valid PromptType."""
         ...
 
     @classmethod
@@ -1445,7 +1450,7 @@ class SupportsTranscription(Protocol):
     def parse_language_detection_output(
         cls,
         token_ids: list[int],
-        tokenizer: object,
+        tokenizer: "TokenizerLike",
     ) -> str:
         """Parse the detected language from model output token IDs.
 
@@ -1457,7 +1462,7 @@ class SupportsTranscription(Protocol):
     @classmethod
     def get_language_token_ids(
         cls,
-        tokenizer: object,
+        tokenizer: "TokenizerLike",
     ) -> list[int] | None:
         """Return token IDs that represent valid language tokens.
 
@@ -1631,8 +1636,7 @@ class EagleModelMixin:
 @runtime_checkable
 class SupportsEagle(SupportsEagleBase, Protocol):
     """The interface required for models that support
-    EAGLE-1 and EAGLE-2 speculative decoding.
-    """
+    EAGLE-1 and EAGLE-2 speculative decoding."""
 
     supports_eagle: ClassVar[Literal[True]] = True
     """
@@ -1662,8 +1666,7 @@ def supports_eagle(
 @runtime_checkable
 class SupportsEagle3(SupportsEagleBase, Protocol):
     """The interface required for models that support
-    EAGLE-3 speculative decoding.
-    """
+    EAGLE-3 speculative decoding."""
 
     supports_eagle3: ClassVar[Literal[True]] = True
     """

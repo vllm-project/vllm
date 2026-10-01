@@ -4,6 +4,7 @@
 import copy
 import time
 import uuid
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -23,6 +24,7 @@ from vllm.config import (
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
@@ -394,6 +396,38 @@ def test_engine_core_concurrent_batches():
         req_id = (req_id + 1) % 2
 
 
+@pytest.mark.parametrize("encoder_only", [True, False])
+def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
+    """Encoder outputs are complete; only language-model steps need sampling."""
+    core = MagicMock()
+    core.batch_queue = deque()
+    core.batch_queue_size = 2
+    core.is_mm_encoder_only = encoder_only
+    core.is_pooling_model = False
+    core.scheduler.has_requests.side_effect = [True, False, False]
+    scheduled = core.scheduler.schedule.return_value
+    scheduled.total_num_scheduled_tokens = 16
+    scheduled.pending_structured_output_tokens = False
+
+    output = MagicMock()
+    executed: Future[ModelRunnerOutput | None] = Future()
+    executed.set_result(output if encoder_only else None)
+    sampled: Future[ModelRunnerOutput | None] = Future()
+    sampled.set_result(None if encoder_only else output)
+    core.model_executor.execute_model.return_value = executed
+    core.model_executor.sample_tokens.return_value = sampled
+
+    EngineCore.step_with_batch_queue(core)
+    if core.batch_queue:
+        EngineCore.step_with_batch_queue(core)
+
+    core.scheduler.update_from_output.assert_called_once_with(scheduled, output)
+    if encoder_only:
+        core.model_executor.sample_tokens.assert_not_called()
+    else:
+        core.model_executor.sample_tokens.assert_called_once()
+
+
 @multi_gpu_test(num_gpus=2)
 def test_engine_core_tp():
     """Test engine can initialize worker in tp properly."""
@@ -607,8 +641,7 @@ def _cadenced_dp_engine_core(
     monkeypatch, results: list[tuple[bool, bool]], dp_sync_interval: int = 32
 ):
     """A bare DPEngineCoreProc whose all-reduce is scripted by `results`;
-    returns the core and the step numbers at which the all-reduce ran.
-    """
+    returns the core and the step numbers at which the all-reduce ran."""
     core = object.__new__(DPEngineCoreProc)
     core.dp_group = object()
     core.dp_sync_interval = dp_sync_interval
@@ -627,8 +660,7 @@ def _cadenced_dp_engine_core(
 
 def test_dp_sync_interval_default_is_16():
     """Regression pin: lowering the default narrows the mid-wave pause tail
-    for async RL, where the engine is rarely idle when pause lands.
-    """
+    for async RL, where the engine is rarely idle when pause lands."""
     assert ParallelConfig.dp_sync_interval == 16
 
 
@@ -646,8 +678,7 @@ def test_dp_sync_interval_normal_wave(monkeypatch, dp_sync_interval: int):
 def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
     """A pause of an idle engine arms every rank before its kick-started
     first step, so the step-1 sync reaches consensus after one dummy batch
-    regardless of the configured cadence.
-    """
+    regardless of the configured cadence."""
     core, synced = _cadenced_dp_engine_core(
         monkeypatch, [(False, True)], dp_sync_interval=32
     )
@@ -670,11 +701,33 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     return core
 
 
+@pytest.mark.parametrize(
+    "pause_state,has_requests,has_batches",
+    [
+        pytest.param(PauseState.UNPAUSED, False, False, id="not-paused"),
+        pytest.param(PauseState.PAUSED_ALL, True, False, id="pending-requests"),
+        pytest.param(PauseState.PAUSED_ALL, False, True, id="pending-batches"),
+    ],
+)
+def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_batches):
+    """Reject release before touching caches or memory if work can still use KV."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = pause_state
+    core.scheduler.has_requests.return_value = has_requests
+    core.batch_queue = [object()] if has_batches else None
+    core._reset_caches = MagicMock()
+
+    with pytest.raises(RuntimeError, match="requires a completed pause"):
+        core.release_kv_cache_memory()
+
+    core._reset_caches.assert_not_called()
+    core.model_executor.discard.assert_not_called()
+
+
 @pytest.mark.parametrize("deferred", [False, True])
 def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     """A resolved pause promises an idle device: the barrier must run before
-    caches are cleared and before the caller is unblocked.
-    """
+    caches are cleared and before the caller is unblocked."""
     core = _pausable_engine_core_proc()
     core.engines_running = deferred
     order: list[str] = []

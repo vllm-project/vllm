@@ -690,7 +690,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1102,7 +1102,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1471,7 +1471,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1988,8 +1988,7 @@ class KNvfp4Static(QuantKeyScheme):
 
 class KNvfp4Dynamic(QuantKeyScheme):
     """NVFP4 activation scheme (W4A4). Has a static global input scale on disk;
-    the per-group scale is computed at runtime inside the kernel.
-    """
+    the per-group scale is computed at runtime inside the kernel."""
 
     key = kNvfp4Dynamic
 
@@ -2026,8 +2025,7 @@ class KNvfp4Dynamic(QuantKeyScheme):
 
 class KFp8StaticTensor(QuantKeyScheme):
     """Plain per-tensor static FP8 — bivalent: serves BOTH the weight slot and
-    the activation slot (W8A8). One key in both QuantSpec slots.
-    """
+    the activation slot (W8A8). One key in both QuantSpec slots."""
 
     key = kFp8StaticTensorSym
 
@@ -2097,8 +2095,7 @@ class KFp8StaticTensor(QuantKeyScheme):
 
 class KFp8StaticChannel(QuantKeyScheme):
     """Per-channel static FP8 weight (the 'PcPt' weight). Weight-role only —
-    there is no static per-channel *activation* today.
-    """
+    there is no static per-channel *activation* today."""
 
     key = kFp8StaticTokenSym
 
@@ -2132,15 +2129,14 @@ class KFp8StaticChannel(QuantKeyScheme):
         weight, weight_scale, _ = process_fp8_weight_channel_strategy(
             layer.weight, layer.weight_scale.data
         )
-        layer.weight = Parameter(weight.t(), requires_grad=False)
+        layer.weight = Parameter(weight, requires_grad=False)
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
 
 class KFp8Block128(QuantKeyScheme):
     """128x128 block-static FP8 weight ('PbWo'). Weight-role only. ModelOpt
     exports the scale 4-D [out_blk,1,in_blk,1]; process squeezes to 2-D.
-    No transpose (block kernel keeps [out,in]).
-    """
+    No transpose (block kernel keeps [out,in])."""
 
     key = kFp8Static128BlockSym
 
@@ -2196,8 +2192,7 @@ class KFp8Block128(QuantKeyScheme):
 
 class KMxfp8Static(QuantKeyScheme):
     """MXFP8 weight: fp8-e4m3 values + per-32-block e8m0 (uint8) scale.
-    Weight-role only. process is validate-only plus an idempotency guard.
-    """
+    Weight-role only. process is validate-only plus an idempotency guard."""
 
     key = kMxfp8Static
 
@@ -2272,8 +2267,7 @@ class KDynamicNoParam(QuantKeyScheme):
     """Dynamic activation with no stored scale (W8A8): quantized at runtime in
     the kernel. NOT the same as activation=None (weight-only) — init_fp8 needs a
     non-None activation key. Activation-role only. Serves the fp8 per-token, fp8
-    per-block, and mxfp8 dynamic activation keys.
-    """
+    per-block, and mxfp8 dynamic activation keys."""
 
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not ACT:
@@ -2326,7 +2320,8 @@ def select_linear_kernel(
         return init_nvfp4_linear_kernel(use_a16=spec.activation is None)
     if w.scale.dtype == MXFP8_SCALE_DTYPE:
         return init_mxfp8_linear_kernel(
-            bmm_batch_size=getattr(layer, "bmm_batch_size", None)
+            weight_shape=weight_shape or layer.weight.shape,
+            bmm_batch_size=getattr(layer, "bmm_batch_size", None),
         )
     # fp8 family: init_fp8 routes block-vs-plain itself off the activation key,
     # and needs a real key -- weight-only fp8 is not a ModelOpt format.
@@ -2488,9 +2483,16 @@ class ModelOptLinearMethod(LinearMethodBase):
 
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
-        # TODO(Isotr0py): support fp8/mxfp8 ModelOpt kernels transpose/repack.
+        # TODO(Isotr0py): support fp8 ModelOpt kernels transpose/repack.
         w = self.spec.weight
-        return isinstance(w, QuantKey) and w.dtype == FP4_DTYPE
+        return isinstance(w, QuantKey) and (
+            w.dtype == FP4_DTYPE
+            or (
+                w == kMxfp8Static
+                and self.kernel is not None
+                and self.kernel.supports_pre_processed_weights
+            )
+        )
 
     def create_weights(
         self,
@@ -2507,12 +2509,6 @@ class ModelOptLinearMethod(LinearMethodBase):
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = sum(output_partition_sizes)
-        # Humming reads both off the layer in
-        # prepare_humming_linear_layer_config. LinearBase sets them itself;
-        # ParallelLMHead does not, so supply them here.
-        layer.output_partition_sizes = output_partition_sizes
-        if not hasattr(layer, "has_bias"):
-            layer.has_bias = getattr(layer, "bias", None) is not None
         shapes = Shapes(output_partition_sizes, input_size_per_partition, params_dtype)
 
         self.wkey.create_weights(layer, WEIGHT, self.ctx, shapes, weight_loader)
@@ -2530,7 +2526,16 @@ class ModelOptLinearMethod(LinearMethodBase):
         expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer) -> None:
+        if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
+            self.kernel = init_mxfp8_linear_kernel(
+                weight_shape=(layer.weight.shape[-2], layer.weight.shape[-1]),
+                bmm_batch_size=layer.bmm_batch_size,
+            )
         if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    f"{type(self.kernel).__name__} cannot use pre-processed weights"
+                )
             return
         self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)
@@ -2562,8 +2567,6 @@ class ModelOptLinearMethod(LinearMethodBase):
                 persistent=False,
             )
             layer._nvfp4_group_size_for_gather = self.ctx.group_size
-        if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
-            self.kernel = init_mxfp8_linear_kernel(bmm_batch_size=layer.bmm_batch_size)
         self.kernel.process_weights_after_loading(layer)
 
     def apply(self, layer, x, bias=None):

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
+from unittest.mock import Mock
 
 import huggingface_hub.constants
 import pytest
@@ -9,6 +10,7 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
+    drop_checkpoint_cache,
     maybe_remap_kv_scale_name,
 )
 
@@ -57,8 +59,7 @@ class TestMaybeRemapKvScaleName:
 
     def test_qkv_proj_k_scale(self):
         """Qwen3-MoE / llm-compressor format: qkv_proj.k_scale -> attn.k_scale
-        Regression test for https://github.com/vllm-project/vllm/issues/25047
-        """
+        Regression test for https://github.com/vllm-project/vllm/issues/25047"""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.qkv_proj.k_scale", self.PARAMS_DICT
         )
@@ -66,8 +67,7 @@ class TestMaybeRemapKvScaleName:
 
     def test_qkv_proj_v_scale(self):
         """Qwen3-MoE / llm-compressor format: qkv_proj.v_scale -> attn.v_scale
-        Regression test for https://github.com/vllm-project/vllm/issues/25047
-        """
+        Regression test for https://github.com/vllm-project/vllm/issues/25047"""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.qkv_proj.v_scale", self.PARAMS_DICT
         )
@@ -110,8 +110,7 @@ class TestMaybeRemapKvScaleName:
     def test_nvfp4_modelopt_k_proj_k_scale(self):
         """ModelOpt NVFP4 format (e.g. nvidia/Qwen3-30B-A3B-NVFP4):
         k_proj.k_scale -> attn.k_scale.
-        Validates that NVFP4 checkpoints are not broken by this change.
-        """
+        Validates that NVFP4 checkpoints are not broken by this change."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.k_proj.k_scale", self.PARAMS_DICT
         )
@@ -120,8 +119,7 @@ class TestMaybeRemapKvScaleName:
     def test_nvfp4_modelopt_v_proj_v_scale(self):
         """ModelOpt NVFP4 format (e.g. nvidia/Qwen3-30B-A3B-NVFP4):
         v_proj.v_scale -> attn.v_scale.
-        Validates that NVFP4 checkpoints are not broken by this change.
-        """
+        Validates that NVFP4 checkpoints are not broken by this change."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.v_proj.v_scale", self.PARAMS_DICT
         )
@@ -129,8 +127,7 @@ class TestMaybeRemapKvScaleName:
 
     def test_qwen3_vl_moe_qkv_proj_k_scale(self):
         """Qwen3-VL-MoE uses the same fused qkv_proj naming as Qwen3-MoE.
-        Regression test for qwen3_vl_moe.py fix (same bug as #25047).
-        """
+        Regression test for qwen3_vl_moe.py fix (same bug as #25047)."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.qkv_proj.k_scale", self.PARAMS_DICT
         )
@@ -138,8 +135,7 @@ class TestMaybeRemapKvScaleName:
 
     def test_qwen3_vl_moe_qkv_proj_v_scale(self):
         """Qwen3-VL-MoE uses the same fused qkv_proj naming as Qwen3-MoE.
-        Regression test for qwen3_vl_moe.py fix (same bug as #25047).
-        """
+        Regression test for qwen3_vl_moe.py fix (same bug as #25047)."""
         result = maybe_remap_kv_scale_name(
             "model.layers.0.self_attn.qkv_proj.v_scale", self.PARAMS_DICT
         )
@@ -181,8 +177,7 @@ class TestKvCacheScaleMapper:
     """The `WeightsMapper` returned by `get_cache_scale_mapper` replaces the
     per-model `maybe_remap_kv_scale_name` calls. It must remap the same set of
     checkpoint formats (the non-`params_dict`-dependent ones) and be idempotent
-    so it composes safely with a model's own qkv/gate_up `hf_to_vllm_mapper`.
-    """
+    so it composes safely with a model's own qkv/gate_up `hf_to_vllm_mapper`."""
 
     def _mapper(self):
         # `get_cache_scale_mapper` does not use `self`; call it on the base
@@ -272,8 +267,7 @@ class TestKvCacheScaleMapper:
     def test_composes_with_qkv_mapper(self):
         """Applied together with a model's qkv/gate_up mapper, the regex scale
         rules run before the substr rename, so scales are normalized to `.attn.`
-        and regular projections are still fused correctly.
-        """
+        and regular projections are still fused correctly."""
         from vllm.model_executor.models.utils import WeightsMapper
 
         model_mapper = WeightsMapper(
@@ -298,6 +292,19 @@ class TestKvCacheScaleMapper:
             combined._map_name("model.layers.0.self_attn.k_scale")
             == "model.layers.0.self_attn.attn.k_scale"
         )
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_drop_checkpoint_cache_releases_local_weight_files(
+    tmp_path, monkeypatch, fails
+):
+    """Evict only weights; cache eviction errors must not prevent loading."""
+    for name in ("weights.safetensors", "config.json"):
+        (tmp_path / name).touch()
+    fadvise = Mock(side_effect=OSError("cache eviction failed") if fails else None)
+    monkeypatch.setattr("os.posix_fadvise", fadvise)
+    drop_checkpoint_cache(str(tmp_path))
+    fadvise.assert_called_once()
 
 
 if __name__ == "__main__":

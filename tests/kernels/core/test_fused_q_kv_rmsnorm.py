@@ -62,8 +62,7 @@ def test_fused_q_kv_rmsnorm_outputs_are_packed(num_tokens: int):
     a [1, q_size] slice of a [1, q_size + kv_size] buffer used to produce a
     qr_out with row stride q_size + kv_size. Downstream dispatchers that
     require packed row-major inputs then reject the tensor and silently fall
-    back to a slower GEMM path on every decode step.
-    """
+    back to a slower GEMM path on every decode step."""
     device = "cuda"
     dtype = torch.bfloat16
     q_size, kv_size = 192, 576
@@ -89,8 +88,7 @@ def test_fused_q_kv_rmsnorm_outputs_are_packed(num_tokens: int):
 def test_fused_q_kv_rmsnorm_launches_past_grid_y_cap(num_tokens: int):
     """Regression guard: grid used to be (2, num_tokens), hitting CUDA's
     65535 grid-y cap at num_tokens >= 65536. The new grid (num_tokens, 2)
-    lifts that bound to 2**31-1.
-    """
+    lifts that bound to 2**31-1."""
     device = "cuda"
     dtype = torch.bfloat16
     q_size, kv_size = 192, 576
@@ -225,7 +223,6 @@ def test_shared_query_quant_preserves_projection(
     with set_current_vllm_config(
         VllmConfig(compilation_config=CompilationConfig(mode=CompilationMode.NONE))
     ):
-        kernel = cls(Mxfp8LinearLayerConfig())
         # Match the checkpoint's TP4 attention and replicated indexer widths.
         if projection == "attention":
             linear = ColumnParallelLinear.__new__(ColumnParallelLinear)
@@ -249,6 +246,7 @@ def test_shared_query_quant_preserves_projection(
         )
         linear.weight = torch.nn.Parameter(w, requires_grad=False)
         linear.weight_scale = torch.nn.Parameter(ws, requires_grad=False)
+        kernel = cls(Mxfp8LinearLayerConfig(weight_shape=w.shape))
         quant_config = DeepseekV4FP8Config.from_config(
             {
                 "quant_method": "fp8",

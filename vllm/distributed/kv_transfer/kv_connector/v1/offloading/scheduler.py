@@ -156,7 +156,7 @@ def resolve_mamba_align_size(
     """Scan all KV cache groups in *spec* and return the single mamba alignment
     size, or None if no group requires mamba alignment.
 
-    For MambaSpec groups in "align" or "all" cache mode the hit window must be
+    For MambaSpec groups in "align" cache mode the hit window must be
     rounded down to a multiple of the offloaded chunk size. Asserts that all
     such groups agree on the same value.
     """
@@ -164,10 +164,7 @@ def resolve_mamba_align_size(
     for group in spec.config.groups:
         tokens_per_block = group.tokens_per_block
         kv_spec = kv_cache_config.kv_cache_groups[group.group_id].kv_cache_spec
-        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode in (
-            "align",
-            "all",
-        ):
+        if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
             tokens_per_chunk = tokens_per_block * spec.blocks_per_chunk
             assert mamba_align_size is None or mamba_align_size == tokens_per_chunk
             mamba_align_size = tokens_per_chunk
@@ -553,6 +550,7 @@ def _create_req_context(req: Request) -> ReqContext:
     return ReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
+        kv_hints=req.kv_hints,
         load_tier_filter=load_filter,
     )
 
@@ -676,8 +674,7 @@ class OffloadingConnectorScheduler:
         start_chunk_idx: int,
     ) -> int | None:
         """Return the number of consecutive offloaded chunks from the start,
-        or None if the backend deferred a lookup.
-        """
+        or None if the backend deferred a lookup."""
         hit_count = 0
         defer_lookup = False
         for local_idx, key in enumerate(keys):
@@ -712,8 +709,7 @@ class OffloadingConnectorScheduler:
         """Return the end index (in `keys`) of the last run of
         `sliding_window_size` consecutive hits, scanning from the end.
         The first run may need a larger window for a partial rightmost chunk.
-        Returns 0 on miss, None if the backend deferred a lookup.
-        """
+        Returns 0 on miss, None if the backend deferred a lookup."""
         defer_lookup = False
         pending_in_window = False
         consecutive_hits = 0

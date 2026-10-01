@@ -97,12 +97,8 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         output_size_per_partition = sum(output_partition_sizes)
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
-        # Set for kernels' weight prep; also covers ParallelLMHead, which does
-        # not set these in __init__.
         layer.output_partition_sizes = output_partition_sizes
         layer.params_dtype = params_dtype
-        if not hasattr(layer, "has_bias"):
-            layer.has_bias = False
 
         mp_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
@@ -211,8 +207,7 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
 
     def _pack_int_quantized_weight(self, layer: torch.nn.Module) -> None:
         """Normalize an int-quantized (plain int8) weight to the canonical
-        ``weight_packed`` int32 + ``weight_shape`` layout the MP kernels expect.
-        """
+        ``weight_packed`` int32 + ``weight_shape`` layout the MP kernels expect."""
         weight = layer.weight
         out_features, in_features = weight.shape
         packed = pack_to_int32(weight.data.contiguous(), self.num_bits)

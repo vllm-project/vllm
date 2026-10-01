@@ -22,6 +22,18 @@ from setuptools_rust.build import build_rust
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
+# Select vLLM release tags, excluding crate tags such as "proto-v0.3.0".
+VLLM_GIT_DESCRIBE_COMMAND = [
+    "git",
+    "describe",
+    "--dirty",
+    "--tags",
+    "--long",
+    "--abbrev=40",
+    "--match",
+    "v[0-9]*",
+]
+
 
 def load_module_from_path(module_name, path):
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -724,8 +736,7 @@ class precompiled_wheel_utils:
         wheels: list[dict], repo_url: str, arch: str
     ) -> None:
         """Warn if installed torch differs from the custom ROCm build on
-        wheels.vllm.ai and suggest the correct install command.
-        """
+        wheels.vllm.ai and suggest the correct install command."""
         try:
             installed = torch.__version__
         except Exception:
@@ -1250,9 +1261,15 @@ def get_vllm_version() -> str:
     if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
         print(f"Overriding VLLM version with {env_version} from VLLM_VERSION_OVERRIDE")
         os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
-        return get_version(write_to="vllm/_version.py")
+        return get_version(
+            write_to="vllm/_version.py",
+            git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
+        )
 
-    version = get_version(write_to="vllm/_version.py")
+    version = get_version(
+        write_to="vllm/_version.py",
+        git_describe_command=VLLM_GIT_DESCRIBE_COMMAND,
+    )
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if not envs.VLLM_SKIP_VERSION_SUFFIX:
@@ -1512,7 +1529,7 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch==2.13.0.0"],
+        "zen": ["zentorch==2.13.0.1"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],

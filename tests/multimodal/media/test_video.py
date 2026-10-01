@@ -53,12 +53,10 @@ def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
         imageio = ImageMediaIO()
 
         # Verify that different args pass/fail assertions as expected.
-        videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 1.0})
+        videoio = VideoMediaIO(imageio, num_frames=10, fps=1.0)
         _ = videoio.load_bytes(b"test")
 
-        videoio = VideoMediaIO(
-            imageio, **{"num_frames": 10, "fps": 1.0, "not_used": "not_used"}
-        )
+        videoio = VideoMediaIO(imageio, num_frames=10, fps=1.0, not_used="not_used")
         _ = videoio.load_bytes(b"test")
 
         with pytest.raises(AssertionError, match="bad num_frames"):
@@ -66,11 +64,11 @@ def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
             _ = videoio.load_bytes(b"test")
 
         with pytest.raises(AssertionError, match="bad num_frames"):
-            videoio = VideoMediaIO(imageio, **{"num_frames": 9, "fps": 1.0})
+            videoio = VideoMediaIO(imageio, num_frames=9, fps=1.0)
             _ = videoio.load_bytes(b"test")
 
         with pytest.raises(AssertionError, match="bad fps"):
-            videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 2.0})
+            videoio = VideoMediaIO(imageio, num_frames=10, fps=2.0)
             _ = videoio.load_bytes(b"test")
 
 
@@ -86,14 +84,14 @@ def test_opencv_video_io_colorspace(tmp_path, is_color: bool, fourcc: str, ext: 
     image = Image.open(image_path)
 
     if not is_color:
-        image_path = f"{tmp_path}/test_grayscale_image.png"
+        image_path = Path(tmp_path) / "test_grayscale_image.png"
         image = image.convert("L")
         image.save(image_path)
         # Convert to gray RGB for comparison
         image = image.convert("RGB")
     video_path = f"{tmp_path}/test_RGB_video.{ext}"
     create_video_from_image(
-        image_path,
+        str(image_path),
         video_path,
         num_frames=2,
         is_color=is_color,
@@ -385,7 +383,9 @@ def test_pynvvideocodec_unrelated_error_propagates(
 
     with pytest.raises(RuntimeError) as exc_info:
         PyNvVideoCodecVideoBackendMixin.decode_frames_pynvvideocodec(
-            None, b"video", None
+            None,
+            b"video",
+            None,
         )
 
     assert exc_info.value is original_error
@@ -398,8 +398,7 @@ def test_pynvvideocodec_unrelated_error_propagates(
 
 class TestMergeKwargsGpuBackendPolicy:
     """Verify that merge_kwargs blocks request-level GPU backend selection
-    when the static (engine-level) config did not configure that backend.
-    """
+    when the static (engine-level) config did not configure that backend."""
 
     def test_pynvvideocodec_requires_gpu(self):
         assert VIDEO_LOADER_REGISTRY.backend_requires_gpu(PYNVVIDEOCODEC_VIDEO_BACKEND)
@@ -492,8 +491,7 @@ class TestMergeKwargsGpuBackendPolicy:
 
     def test_static_pynv_with_different_runtime_gpu_backend(self):
         """If static sets pynv via video_backend but runtime tries to set it
-        via the codec-level 'backend' key (without a static match), strip it.
-        """
+        via the codec-level 'backend' key (without a static match), strip it."""
         result = VideoMediaIO.merge_kwargs(
             default_kwargs={"video_backend": "pynvvideocodec"},
             runtime_kwargs={"backend": "pynvvideocodec"},
@@ -532,8 +530,7 @@ class TestMergeKwargsGpuBackendPolicy:
     def test_strips_request_level_device(self):
         """The decode device is a startup-only knob: a request must not move
         decoding onto the GPU when the startup config did not opt in, nor off
-        it when it did.
-        """
+        it when it did."""
         result = VideoMediaIO.merge_kwargs(
             default_kwargs={"backend": "torchcodec"},
             runtime_kwargs={"device": "cuda"},
@@ -558,8 +555,7 @@ class TestMergeKwargsGpuBackendPolicy:
 def test_switching_backend_drops_stale_codec_options(default_kwargs):
     """Codec-specific options from the static config must not leak into a
     different codec backend selected per-request, where they would fail the
-    new backend's option validation.
-    """
+    new backend's option validation."""
     result = VideoMediaIO.merge_kwargs(
         default_kwargs={**default_kwargs, "num_frames": 8},
         runtime_kwargs={"backend": "opencv"},
@@ -581,8 +577,7 @@ def test_pynvvc_frames_normalized_to_nhwc(layout: str):
     """PyNvVideoCodec frame batches are normalized to NHWC regardless of the
     per-frame layout the decoder emits (it has varied across versions), so the
     HF video processors (which materialize a PIL image per frame) receive the
-    same NHWC shape as every other video backend.
-    """
+    same NHWC shape as every other video backend."""
     torch = pytest.importorskip("torch")
 
     n, h, w, c = 4, 5, 6, 3

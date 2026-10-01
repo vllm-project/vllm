@@ -495,8 +495,7 @@ def test_pynccl_suspend_resume_idempotent():
 
 def test_pynccl_suspend_noop_without_symbol():
     """RCCL / NCCL < 2.29.7 lack ncclCommSuspend; suspend() must no-op, not
-    crash, and resume() must then no-op too since nothing was suspended.
-    """
+    crash, and resume() must then no-op too since nothing was suspended."""
     from unittest.mock import Mock
 
     comm = object.__new__(PyNcclCommunicator)

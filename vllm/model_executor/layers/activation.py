@@ -129,8 +129,11 @@ class SiluAndMul(CustomOp):
         super().__init__(compile_native=compile_native)
         if (
             current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
             or current_platform.is_xpu()
+            or (
+                current_platform.is_cpu()
+                and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+            )
         ):
             self.op = torch.ops._C.silu_and_mul
 
@@ -230,12 +233,8 @@ class SiluAndMulWithClamp(CustomOp):
         self.swiglu_limit = float(swiglu_limit)
         self.alpha = float(alpha)
         self.beta = float(beta)
-        if current_platform.is_rocm() or current_platform.is_xpu():
-            self._forward_method = self.forward_native
-        elif current_platform.is_cuda_alike():
+        if current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul_with_clamp
-        elif current_platform.is_cpu():
-            self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
@@ -250,7 +249,11 @@ class SiluAndMulWithClamp(CustomOp):
         self.op(out, x, self.swiglu_limit, self.alpha, self.beta)
         return out
 
-    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
+        # Limit the ROCm _C path to the default case to avoid the
+        # precision loss MiniMax saw without fp32 intermediates.
+        if self.alpha == 1.0 and self.beta == 0.0:
+            return self.forward_cuda(x)
         return self.forward_native(x)
 
     def extra_repr(self) -> str:
@@ -424,8 +427,11 @@ class GeluAndMul(CustomOp):
             raise ValueError(f"Unknown approximate mode: {approximate}")
         if (
             current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
             or current_platform.is_xpu()
+            or (
+                current_platform.is_cpu()
+                and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+            )
         ):
             if approximate == "none":
                 self.op = torch.ops._C.gelu_and_mul
@@ -804,8 +810,7 @@ _ACTIVATION_REGISTRY = LazyDict(
 
 def _get_gelu_pytorch_tanh() -> nn.Module:
     """Get PyTorch GELU with tanh approximation, with ROCm fallback
-    and fast GELU for ARM.
-    """
+    and fast GELU for ARM."""
     if current_platform.is_rocm():
         # TODO:[ROCm] PyTorch native GELU with tanh is unstable with torch.compile
         logger.warning_once(

@@ -216,8 +216,7 @@ class AsyncLookupManager(ABC):
     def mark_miss(self, keys: Collection[OffloadKey]) -> None:
         """Force the cached verdict for ``keys`` to False after a failed load, so
         the scheduler stops re-issuing the doomed promotion (livelock, #49176).
-        Keys with no cached entry are skipped.
-        """
+        Keys with no cached entry are skipped."""
         for key in keys:
             state = self._lookup_state.get(key)
             if state is not None:

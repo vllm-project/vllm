@@ -24,12 +24,12 @@ import torch.nn as nn
 from transformers import (
     BatchFeature,
     CLIPVisionConfig,
-    PretrainedConfig,
+    PreTrainedConfig,
     ProcessorMixin,
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -95,7 +95,7 @@ CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(
 
 
 def _init_img_processor(
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     quant_config: QuantizationConfig | None,
     prefix: str = "",
 ) -> CLIPVisionModel:
@@ -165,7 +165,7 @@ class Phi3HDImageEmbedding(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> None:
@@ -371,46 +371,23 @@ class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
 
 class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
-
-    def _postprocess_hf_mm_data(
-        self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-        processed_data: BatchFeature,
-    ) -> BatchFeature:
-        if not mm_data:
-            return processed_data
-
-        input_ids = processed_data["input_ids"]
-        assert isinstance(input_ids, torch.Tensor)
-
-        # Phi3v processor has inserted -1, -2 etc as placeholder in prompt_ids,
-        # which will cause OverflowError when decoding the prompt_ids.
-        # Therefore, we need to do an early replacement here
-        input_ids.masked_fill_(input_ids < 0, _IMAGE_TOKEN_ID)
-
-        return processed_data
 
     def _get_mm_fields_config(
         self,

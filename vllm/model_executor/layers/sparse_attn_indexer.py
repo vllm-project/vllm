@@ -285,8 +285,7 @@ def _gather_workspace_shapes(
     """Return ((values_shape, values_dtype), (scales_shape, scales_dtype)) for
     the K-gather workspace. FP8 path: (T, head_dim) fp8 + (T, 4) uint8 fp32
     scales. MXFP4 path: (T, head_dim // 2) uint8 packed mxfp4 +
-    (T, head_dim // MXFP4_BLOCK_SIZE) uint8 ue8m0 scales.
-    """
+    (T, head_dim // MXFP4_BLOCK_SIZE) uint8 ue8m0 scales."""
     if use_fp4_cache:
         return (
             ((total_seq_lens, head_dim // 2), torch.uint8),
@@ -304,8 +303,7 @@ def kv_cache_as_quant_view(
     use_fp4_cache: bool,
 ) -> torch.Tensor:
     """4D ``[num_blocks, block_size, 1, head_width]`` view expected by
-    DeepGEMM, from the 3D indexer kv-cache allocation.
-    """
+    DeepGEMM, from the 3D indexer kv-cache allocation."""
     if use_fp4_cache:
         assert kv_cache.ndim == 3 and kv_cache.dtype == torch.uint8
         num_blocks, block_size, _ = kv_cache.shape
@@ -644,6 +642,19 @@ def sparse_attn_indexer(
         assert decode_metadata is not None
         kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
         decode_lens = decode_metadata.decode_lens
+        # requires_padding can be computed False for ragged warmup/mixed
+        # batches (seen on SM120 TP=2: 8 tokens over 6 seqs -> uniform
+        # reshape below would crash). The token-count/batch-size divisibility
+        # check is a necessary-but-not-sufficient proxy for "uniform batch"
+        # (e.g. decode_lens=[1, 2, 3] divides evenly by 3 but isn't uniform);
+        # it catches the specific case seen in practice without requiring a
+        # device sync to inspect decode_lens directly, which would break
+        # CUDA-graph-capture safety on this path. Shared by both the pack
+        # branch below and the matching unpack branch further down — they
+        # must agree on which path was taken.
+        needs_padded_path = decode_metadata.requires_padding or (
+            num_decode_tokens % decode_lens.shape[0] != 0
+        )
         if num_decode_tokens == 0:
             padded_q_quant_decode_tokens = q_quant[:1].reshape(1, 1, *q_quant.shape[1:])
             padded_q_scale = (
@@ -651,7 +662,7 @@ def sparse_attn_indexer(
                 if q_scale is not None
                 else None
             )
-        elif decode_metadata.requires_padding:
+        elif needs_padded_path:
             # pad in edge case where we have short chunked prefill length <
             # decode_threshold since we unstrictly split
             # prefill and decode by decode_threshold
@@ -775,7 +786,7 @@ def sparse_attn_indexer(
                 cp_kv_cache_interleave_size,
             )
 
-        if decode_metadata.requires_padding:
+        if needs_padded_path:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
             topk_indices = unpack_seq_triton(

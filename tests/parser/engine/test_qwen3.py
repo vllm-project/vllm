@@ -318,8 +318,7 @@ class TestStreaming:
 
     def test_streaming_args_arrive_incrementally(self, parser, mock_request):
         """Arguments must stream as intermediate deltas, not batch at
-        tool-end.
-        """
+        tool-end."""
         chunks = [
             "<tool_call>\n",
             "<function=get_weather>\n",
@@ -524,8 +523,7 @@ class TestStreaming:
 
     def test_streaming_split_tool_call_tag(self, parser, mock_request):
         """<tool_call> arrives as a single special token; the rest of
-        the content is split into fine-grained chunks.
-        """
+        the content is split into fine-grained chunks."""
         chunks = [
             "<tool_call>\n",
             "<function=test>\n",
@@ -702,8 +700,7 @@ class TestArgConverter:
 
 class TestSchemaAwareTypeCoercion:
     """Verify that _fix_arg_types corrects miscoerced values using the
-    tool schema.
-    """
+    tool schema."""
 
     @pytest.fixture
     def tools(self):
@@ -845,8 +842,7 @@ class TestAnyOfTypeCoercion:
 
     def test_anyof_string_param_not_coerced(self, parser_with_anyof, mock_request):
         """A param with anyOf including 'string' must not be coerced
-        to integer.
-        """
+        to integer."""
         text = (
             "<tool_call>\n"
             "<function=set_config>\n"
@@ -862,8 +858,7 @@ class TestAnyOfTypeCoercion:
 
 class TestSchemaCoercionBoolNumberNull:
     """Verify that _fix_arg_types coerces string values to non-string
-    schema types using coerce_to_schema_type.
-    """
+    schema types using coerce_to_schema_type."""
 
     @pytest.fixture
     def tools(self):
@@ -1180,3 +1175,27 @@ class TestNestedSchemaCoercion:
         assert questions[0]["question"] == "Pick a color"
         assert questions[0]["multiSelect"] is False
         assert questions[0]["answer"] is None
+
+
+@pytest.mark.parametrize("value", ["\n北京 &amp;\n", "null", "42", "", "a\nb"])
+@pytest.mark.parametrize("chunk_size", [1, 7, 1000])
+def test_mimo_preserves_verbatim_parameter_values(
+    mock_tokenizer, mock_request, value, chunk_size
+):
+    from vllm.parser.mimo import MiMoParser
+
+    text = (
+        f"<tool_call><function=run><parameter=text>{value}</parameter>"
+        "</function></tool_call>"
+    )
+    parser = MiMoParser(mock_tokenizer, chat_template_kwargs={"enable_thinking": False})
+    result = parser.extract_tool_calls(text, mock_request)
+    assert json.loads(result.tool_calls[0].function.arguments) == {"text": value}
+    parser = MiMoParser(mock_tokenizer, chat_template_kwargs={"enable_thinking": False})
+    results = simulate_tool_streaming(
+        parser,
+        mock_request,
+        [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)],
+    )
+    assert collect_function_name(results) == "run"
+    assert json.loads(collect_tool_arguments(results)) == {"text": value}

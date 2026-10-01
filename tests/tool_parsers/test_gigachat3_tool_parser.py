@@ -18,8 +18,7 @@ from vllm.tool_parsers import ToolParser, ToolParserManager
 @pytest.fixture(scope="function")
 def default_tokenizer() -> TokenizerLike:
     """Override module-scoped default_tokenizer because gigachat tests
-    mutate the tokenizer via ``add_tokens``.
-    """
+    mutate the tokenizer via ``add_tokens``."""
     return AutoTokenizer.from_pretrained("openai-community/gpt2")
 
 

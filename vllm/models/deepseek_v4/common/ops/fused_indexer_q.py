@@ -312,8 +312,7 @@ class FusedIndexerQRopeQuantTritonKernel(
 def _indexer_weights_out_dtypes(vllm_config: Any) -> tuple[torch.dtype, ...]:
     """Weights dtypes the model's indexer layers ask for: fp32 for the dense
     scoring kernels, plus bf16 when the DeepSeek V4.1 sparse-logits indexer
-    (`SparseMQAIndexer`) is enabled.
-    """
+    (`SparseMQAIndexer`) is enabled."""
     if vllm_config.attention_config.indexer_sparse_logits:
         return (torch.float32, torch.bfloat16)
     return (torch.float32,)

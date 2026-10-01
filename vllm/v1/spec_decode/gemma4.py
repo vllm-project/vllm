@@ -221,8 +221,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """Draft layers span multiple KV cache groups (sliding + full
         attention with different head dimensions), so skip the base
-        class single-group assertion.
-        """
+        class single-group assertion."""
 
     def initialize_attn_backend(
         self,
@@ -230,8 +229,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         kernel_block_sizes: list[int] | None = None,
     ) -> None:
         """Create separate AttentionGroup objects per KV cache spec
-        so that each head-dim variant gets its own metadata builder.
-        """
+        so that each head-dim variant gets its own metadata builder."""
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]

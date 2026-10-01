@@ -23,7 +23,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
+from transformers import BaseImageProcessor, BatchFeature, PreTrainedConfig
 from transformers.activations import GELUActivation
 from transformers.image_utils import ChannelDimension
 from transformers.modeling_outputs import (
@@ -32,7 +32,7 @@ from transformers.modeling_outputs import (
 from transformers.utils import torch_int
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -223,19 +223,16 @@ class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         max_image_size = self.info.get_image_size_with_most_features()
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=max_image_size.width,
                 height=max_image_size.height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -243,36 +240,37 @@ class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessing
 class PaddleOCRVLMultiModalProcessor(
     BaseMultiModalProcessor[PaddleOCRVLProcessingInfo]
 ):
-    def _apply_hf_processor_main(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _call_hf_processor(
         self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        final_mm_kwargs = dict(hf_processor_mm_kwargs or {})
+        final_mm_kwargs = dict(hf_kwargs or {})
         final_mm_kwargs.setdefault("images_kwargs", {})
         # vLLM use PIL.Image, always set channel_last
         final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
-        processed_data = self.info.ctx.call_hf_processor(
+        return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**final_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
+            hf_data,
+            hf_kwargs,
         )
+
+    def _postprocess_hf_mm_data(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not hf_data:
+            return processed_data
+
         num_patches_per_image = processed_data["image_grid_thw"].prod(-1)
         processed_data["pixel_values"] = processed_data["pixel_values"].split(
             num_patches_per_image.tolist()
         )
-        processed_data.update(passthrough_data)
-
         return processed_data
 
     def _get_mm_fields_config(
@@ -320,8 +318,8 @@ class PaddleOCRVLMultiModalProcessor(
 class Projector(nn.Module):
     def __init__(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         prefix: str = "",
     ):
         super().__init__()
@@ -394,7 +392,7 @@ class PaddleOCRImagePixelInputs(TensorSchema):
 
 
 class SiglipVisionEmbeddings(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -684,7 +682,7 @@ class SigLIPRotaryEmbedding(nn.Module):
 class SiglipEncoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -737,7 +735,7 @@ class SiglipEncoderLayer(nn.Module):
 class SiglipEncoder(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -839,7 +837,7 @@ class SiglipEncoder(nn.Module):
 class SiglipVisionTransformer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):

@@ -18,7 +18,6 @@
 # limitations under the License.
 import math
 from collections.abc import Hashable, Iterable, Mapping
-from itertools import tee
 from typing import Annotated, Any, Literal
 
 import torch
@@ -26,7 +25,7 @@ from torch import nn
 from transformers import BatchFeature, Llama4Config, Llama4VisionConfig
 from transformers.image_utils import SizeDict
 from transformers.models.llama4 import Llama4Processor
-from transformers.models.llama4.image_processing_llama4_fast import (
+from transformers.models.llama4.image_processing_llama4 import (
     find_supported_resolutions,
     get_best_fit,
 )
@@ -36,7 +35,7 @@ from vllm.compilation.decorators import (
     support_torch_compile,
 )
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -555,9 +554,7 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(Llama4Config)
 
     def get_hf_processor(self, **kwargs: object) -> Llama4Processor:
-        return self.ctx.get_hf_processor(
-            Llama4Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
-        )
+        return self.ctx.get_hf_processor(Llama4Processor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # Although vLLM can support more images from an infra capability
@@ -589,7 +586,7 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
 
 
 class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -709,20 +706,16 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         (target_width, target_height) = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -1045,25 +1038,6 @@ class Llama4ForConditionalGeneration(
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
-    def separate_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-        prefix: str,
-    ) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str, torch.Tensor]]]:
-        weights1, weights2 = tee(weights, 2)
-
-        def get_prefix_weights() -> Iterable[tuple[str, torch.Tensor]]:
-            for name, data in weights1:
-                if name.startswith(prefix):
-                    yield (name, data)
-
-        def get_other_weights() -> Iterable[tuple[str, torch.Tensor]]:
-            for name, data in weights2:
-                if not name.startswith(prefix):
-                    yield (name, data)
-
-        return get_prefix_weights(), get_other_weights()
-
     def _consolidate_qkv_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
@@ -1090,8 +1064,7 @@ class Llama4ForConditionalGeneration(
 
     def _rename_weight_for_modelopt_checkpoint(self, name: str) -> str:
         """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM
-        format.
-        """
+        format."""
         if name.startswith("model.") or name.startswith("language_model.model."):
             renamed = (
                 name.replace("model.", "language_model.model.", 1)

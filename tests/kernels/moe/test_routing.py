@@ -87,6 +87,21 @@ def test_multiple_expert_groups_use_grouped_topk() -> None:
     )
 
     assert isinstance(router, GroupedTopKRouter)
+    assert not router.skip_padding
+
+
+def test_grouped_topk_padding_skip_must_be_enabled() -> None:
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=8,
+        topk_group=4,
+        skip_padding=True,
+    )
+
+    assert isinstance(router, GroupedTopKRouter)
+    assert router.skip_padding
 
 
 def test_degenerate_grouped_config_with_bias_uses_topk_bias() -> None:
@@ -150,6 +165,38 @@ def test_single_expert_group_with_non_unit_scale_uses_grouped_topk() -> None:
     )
 
     assert isinstance(router, GroupedTopKRouter)
+
+
+def test_sigmoid_bias_routing_with_routed_scale_is_minimax2() -> None:
+    """FlashInfer's MiniMax2 routing applies routed_scaling_factor, so a
+    non-unit scale (MiniMax-M3 uses 2.0) must not block fused routing."""
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        scoring_func="sigmoid",
+        renormalize=True,
+        routed_scaling_factor=2.0,
+        e_score_correction_bias=torch.empty(128),
+    )
+
+    assert isinstance(router, FusedTopKBiasRouter)
+    assert router.routing_method_type == RoutingMethodType.MiniMax2
+
+
+def test_zero_expert_routing_is_unspecified() -> None:
+    """Zero experts are resolved in the router, so kernels with built-in
+    routing must never be selected for them."""
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        scoring_func="sigmoid",
+        renormalize=True,
+        e_score_correction_bias=torch.empty(160),
+        zero_expert_type="identity",
+        num_logical_experts=160,
+    )
+
+    assert router.routing_method_type == RoutingMethodType.Unspecified
 
 
 def setup_eplb_state(
@@ -250,8 +297,7 @@ def assert_aiter_routing_valid(
     the Python baseline (different group selection, scoring internals),
     so numerical comparison is not meaningful. Instead we verify the
     outputs satisfy the routing contract: correct shapes, valid expert
-    IDs, non-negative weights, and proper normalization.
-    """
+    IDs, non-negative weights, and proper normalization."""
     n_tokens = topk_weights.shape[0]
 
     # Shape

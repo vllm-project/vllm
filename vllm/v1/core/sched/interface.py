@@ -178,8 +178,7 @@ class SchedulerInterface(ABC):
 
     def has_unfinished_requests(self) -> bool:
         """Returns True if there are unfinished requests in the scheduler's
-        internal queue.
-        """
+        internal queue."""
         return self.get_num_unfinished_requests() > 0
 
     @abstractmethod
@@ -199,8 +198,7 @@ class SchedulerInterface(ABC):
 
     def has_requests(self) -> bool:
         """Returns True if there are unfinished requests, or finished requests
-        not yet returned in SchedulerOutputs.
-        """
+        not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
 
     @property

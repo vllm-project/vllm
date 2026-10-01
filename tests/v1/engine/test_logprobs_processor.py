@@ -11,8 +11,10 @@ row), the trailing positions are populated with sentinel values
 """
 
 import numpy as np
+import torch
 
 from vllm.logprobs import create_sample_logprobs
+from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.outputs import LogprobsLists
 
@@ -30,8 +32,7 @@ def _make_processor(num_logprobs: int) -> LogprobsProcessor:
 
 def test_drops_trailing_sentinel_columns():
     """A request that asked for 3 custom token logprobs but ended up in a
-    batch padded to width 5 must not surface the trailing -inf entries.
-    """
+    batch padded to width 5 must not surface the trailing -inf entries."""
     processor = _make_processor(num_logprobs=3)
 
     sampled = 42
@@ -65,3 +66,24 @@ def test_accepts_exactly_sized_row():
 
     pos = processor.logprobs[0]
     assert set(pos.keys()) == {7, 11, 13}
+
+
+def test_prompt_token_id_logprobs_are_popped_once():
+    """DELTA outputs carry fixed-ID prompt scores exactly once."""
+    processor = _make_processor(num_logprobs=1)
+    assert processor.pop_prompt_token_id_logprobs() is None
+
+    processor.update_from_output(
+        EngineCoreOutput(
+            request_id="req-0",
+            new_token_ids=[],
+            prompt_token_id_logprobs=torch.tensor(
+                [[-0.5, -1.5], [-2.5, -3.5]], dtype=torch.float32
+            ),
+        )
+    )
+
+    scores = processor.pop_prompt_token_id_logprobs()
+    assert scores is not None
+    assert scores.tolist() == [[-0.5, -1.5], [-2.5, -3.5]]
+    assert processor.pop_prompt_token_id_logprobs() is None

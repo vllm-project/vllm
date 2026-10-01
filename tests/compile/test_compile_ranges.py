@@ -129,8 +129,7 @@ def test_compile_config_get_compile_ranges():
 
 class PostGradStaticShapeChecker(InductorPass):
     """Asserts that compile_sizes entries produce graphs with fully concrete
-    (non-symbolic) shapes, and compile_ranges entries have symbolic shapes.
-    """
+    (non-symbolic) shapes, and compile_ranges entries have symbolic shapes."""
 
     def __init__(self):
         self.num_static_calls = 0
@@ -171,8 +170,7 @@ class PostGradStaticShapeChecker(InductorPass):
 
 def test_compile_sizes_produce_static_shapes(disable_vllm_compile_cache):
     """Verify that compile_sizes entries are compiled with fully concrete
-    shapes (no SymInts), while compile_ranges entries retain dynamic shapes.
-    """
+    shapes (no SymInts), while compile_ranges entries retain dynamic shapes."""
     checker = PostGradStaticShapeChecker()
     torch.set_default_device("cuda")
     vllm_config = VllmConfig(

@@ -17,6 +17,7 @@ from vllm.config import (
     KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -53,6 +54,8 @@ def assert_scheduler_empty(scheduler: Scheduler):
     # Scheduler Metadata.
     assert len(scheduler.requests) == 0
     assert len(scheduler.waiting) == 0
+    assert len(scheduler.kv_holding_waiting) == 0
+    assert not scheduler.deferred_waiting
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
@@ -106,6 +109,7 @@ def create_vllm_config(
     kv_connector_module_path: str | None = None,
     kv_role: str = "kv_consumer",
     disable_hybrid_kv_cache_manager: bool | None = None,
+    num_speculative_tokens: int | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -141,6 +145,11 @@ def create_vllm_config(
         kv_load_failure_policy=kv_load_failure_policy,
     )
     attention_config = AttentionConfig(backend=attention_backend)
+    speculative_config = (
+        SpeculativeConfig(model="ngram", num_speculative_tokens=num_speculative_tokens)
+        if num_speculative_tokens is not None
+        else None
+    )
     return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
@@ -148,6 +157,7 @@ def create_vllm_config(
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),
         attention_config=attention_config,
+        speculative_config=speculative_config,
     )
 
 
@@ -464,7 +474,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
-    mamba_cache_mode: Literal["all", "align", "none"] = "none",
+    mamba_cache_mode: Literal["align", "none"] = "none",
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(
@@ -624,3 +634,29 @@ def make_nixl_push_scheduler(
     sched.blocks_per_sw = []
 
     return sched
+
+
+def make_moriio_writer(fake_worker: Any) -> Any:
+    """Build a MoRIIOWriter with internals stubbed for unit tests.
+
+    Bypasses ``__init__`` and wires only the write/finalize state the tests
+    touch, including the deferred-task fields used by the routing suite.
+    """
+    import threading
+    from queue import Queue
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+        MoRIIOWriter,
+    )
+
+    writer = MoRIIOWriter.__new__(MoRIIOWriter)
+    writer._worker_ref = lambda: fake_worker
+    writer._write_task_q = Queue()
+    writer._write_state_lock = threading.Lock()
+    writer._scheduled_writes = defaultdict(int)
+    writer._scheduled_layers = defaultdict(set)
+    writer._sealed_writes = {}
+    writer._deferred_tasks = []
+    writer._defer_timeout = 60.0
+    writer.ensure_worker_started = lambda: None
+    return writer

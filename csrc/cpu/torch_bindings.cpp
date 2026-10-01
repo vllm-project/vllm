@@ -73,6 +73,7 @@ void fused_experts_cpu(at::Tensor& out, at::Tensor& hidden_states,
                        const std::optional<at::Tensor>& w2_scale,
                        const std::optional<at::Tensor>& w1_zero,
                        const std::optional<at::Tensor>& w2_zero,
+                       const std::optional<at::Tensor>& a1_scale,
                        const std::optional<std::vector<int64_t>> block_size,
                        const std::optional<at::Tensor>& w1_bias,
                        const std::optional<at::Tensor>& w2_bias,
@@ -90,6 +91,18 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
                              std::vector<int64_t> block_size,
                              const std::optional<at::Tensor>& bias,
                              at::ScalarType out_dtype, bool is_vnni);
+
+// Adapted from sglang: FP8 W8A8 kernels
+std::tuple<at::Tensor, at::Tensor> float8_linear_prepack_impl(
+    const at::Tensor& weight, const at::Tensor& scales);
+at::Tensor fp8_scaled_mm_with_quant(const at::Tensor& act,
+                                    const std::optional<at::Tensor>& act_scales,
+                                    bool channelwise, const at::Tensor& weight,
+                                    const at::Tensor& weight_scales,
+                                    const std::optional<at::Tensor>& bias,
+                                    at::ScalarType output_dtype);
+std::tuple<at::Tensor, at::Tensor> quantize_fp8e4m3_vec(
+    const at::Tensor& t, bool channelwise, c10::optional<at::Tensor> scale_opt);
 
 // Adapted from sglang: MLA CPU kernels (AMX-only)
 void decode_attention_cpu(at::Tensor& query, at::Tensor& k_buffer,
@@ -268,19 +281,20 @@ at::Tensor causal_conv1d_fwd_cpu(
     const std::optional<at::Tensor>& query_start_loc,
     const std::optional<at::Tensor>& cache_indices,
     const std::optional<at::Tensor>& has_initial_state, bool silu_activation,
-    int64_t pad_slot_id, bool is_vnni);
+    int64_t pad_slot_id, bool is_weight_packed);
 
 at::Tensor causal_conv1d_update_cpu(
     const at::Tensor& x, const at::Tensor& conv_states,
     const at::Tensor& weight, const std::optional<at::Tensor>& bias,
     bool silu_activation, const std::optional<at::Tensor>& num_accepted_tokens,
     const std::optional<at::Tensor>& conv_state_indices, int64_t pad_slot_id,
-    bool is_vnni);
+    bool is_weight_packed);
 
 void activation_lut_bf16(torch::Tensor& out, torch::Tensor& input,
                          const std::string& activation);
 
 bool cpu_attn_has_isa(const std::string& isa);
+bool cpu_has_amx_fp8();
 
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
@@ -378,6 +392,11 @@ void mamba_chunk_scan_fwd_cpu_impl(at::Tensor& out, at::Tensor& final_states,
                                    const c10::optional<at::Tensor>& D,
                                    const c10::optional<at::Tensor>& z,
                                    const at::Tensor& cu_seqlens);
+
+torch::Tensor fused_gumbel_argmax(const torch::Tensor& logits,
+                                  const torch::Tensor& seeds);
+
+torch::Tensor greedy_argmax(const torch::Tensor& logits);
 
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
@@ -498,6 +517,33 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
 #endif  // (defined(__aarch64__) && !defined(__APPLE__))
 
+#if (defined(__aarch64__) && defined(ARM_BF16_SUPPORT) && \
+     !defined(__APPLE__)) ||                              \
+    (defined(__AVX512BF16__) && defined(__AVX512F__) &&   \
+     defined(__AVX512VNNI__))
+
+  // Adapted from sglang: casual_conv1d kernels
+  ops.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
+  ops.impl("causal_conv1d_weight_pack", torch::kCPU,
+           &causal_conv1d_weight_pack);
+
+  ops.def(
+      "causal_conv1d_fwd_cpu(Tensor x, Tensor weight, Tensor? bias, Tensor? "
+      "conv_states, Tensor? query_start_loc,"
+      "Tensor? cache_indices, Tensor? has_initial_state, bool silu_activation, "
+      "int pad_slot_id, bool is_weight_packed) -> "
+      "Tensor");
+  ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
+
+  ops.def(
+      "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
+      "weight, Tensor? bias, bool silu_activation,"
+      "Tensor? num_accepted_tokens, Tensor? conv_state_indices, int "
+      "pad_slot_id, "
+      "bool is_weight_packed) -> Tensor");
+  ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
+#endif
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
@@ -611,7 +657,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_experts_cpu(Tensor(a0!) out, Tensor hidden_states, Tensor w1, "
       "Tensor w2, Tensor topk_weights, Tensor topk_ids, "
       "int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
-      "Tensor? w1_zero, Tensor? w2_zero, int[]? block_size, "
+      "Tensor? w1_zero, Tensor? w2_zero, Tensor? a1_scale, int[]? block_size, "
       "Tensor? w1_bias, Tensor? w2_bias, float? alpha, float? limit, "
       "bool is_vnni) -> "
       "()");
@@ -629,24 +675,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool is_vnni) -> Tensor");
   ops.impl("fp8_scaled_mm_cpu", torch::kCPU, &fp8_scaled_mm_cpu);
 
-  // Adapted from sglang: casual_conv1d kernels
-  ops.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
-  ops.impl("causal_conv1d_weight_pack", torch::kCPU,
-           &causal_conv1d_weight_pack);
+  // Adapted from sglang: FP8 W8A8 kernels
   ops.def(
-      "causal_conv1d_fwd_cpu(Tensor x, Tensor weight, Tensor? bias, Tensor? "
-      "conv_states, Tensor? query_start_loc,"
-      "Tensor? cache_indices, Tensor? has_initial_state, bool silu_activation, "
-      "int pad_slot_id, bool is_vnni) -> "
-      "Tensor");
-  ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
+      "float8_linear_prepack_cpu(Tensor weight, Tensor scales) -> (Tensor, "
+      "Tensor)");
+  ops.impl("float8_linear_prepack_cpu", torch::kCPU,
+           &float8_linear_prepack_impl);
   ops.def(
-      "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
-      "weight, Tensor? bias, bool silu_activation,"
-      "Tensor? num_accepted_tokens, Tensor? conv_state_indices, int "
-      "pad_slot_id, "
-      "bool is_vnni) -> Tensor");
-  ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
+      "fp8_scaled_mm_with_quant(Tensor act, Tensor? act_scales, bool "
+      "channelwise, "
+      "Tensor weight, Tensor weight_scales, Tensor? bias, ScalarType "
+      "output_dtype) -> Tensor");
+  ops.impl("fp8_scaled_mm_with_quant", torch::kCPU, &fp8_scaled_mm_with_quant);
+  ops.def(
+      "quantize_fp8e4m3_vec(Tensor input, bool channelwise, Tensor? scale_opt) "
+      "-> (Tensor, Tensor)");
+  ops.impl("quantize_fp8e4m3_vec", torch::kCPU, &quantize_fp8e4m3_vec);
 
   // Adapted from sglang: MLA CPU kernels (AMX-only, DeepSeek V2/V3/R1)
   ops.def(
@@ -832,6 +876,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> (Tensor, Tensor)");
   ops.impl("fused_gdn_gating_cpu", torch::kCPU, &fused_gdn_gating_cpu);
 
+  // Pure runtime CPU ISA capability check.
+  ops.def("cpu_has_amx_fp8() -> bool", &cpu_has_amx_fp8);
+
   // CPU attention kernels
   ops.def("cpu_attn_has_isa(str isa) -> bool", &cpu_attn_has_isa);
   ops.def(
@@ -864,7 +911,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("dynamic_per_token_scaled_fp8_quant() -> ()", placeholder_op);
 
   // WNA16
-#if defined(__AVX512F__) || defined(__riscv_v) || defined(__s390x__)
+#if defined(__AVX512F__) || defined(__riscv_v) || defined(__s390x__) || \
+    defined(__powerpc__)
   ops.def(
       "cpu_gemm_wna16(Tensor input, Tensor q_weight, Tensor(a2!) output, "
       "Tensor scales, Tensor? zeros, Tensor? bias, SymInt "
@@ -883,8 +931,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
-#if defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
-    !defined(__APPLE__)
+
+#if (defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
+     !defined(__APPLE__)) ||                                   \
+    defined(__powerpc64__)
   ops.def(
       "prepack_moe_weight_int8(Tensor weight, Tensor(a1!) packed_weight, "
       "str isa) -> ()");
@@ -895,8 +945,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, bool "
       "skip_weighted, str act, str isa) -> ()");
   ops.impl("cpu_fused_moe_int8", torch::kCPU, &cpu_fused_moe_int8);
-#endif  // #if defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) &&
-        // !defined(__APPLE__)
+#endif  // ARM_I8MM+BF16 or __powerpc64__
   ops.def(
       "mla_decode_kvcache("
       "   Tensor! out, Tensor query, Tensor kv_cache,"
@@ -934,6 +983,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &mamba_chunk_scan_fwd_cpu_impl);
 
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
+
+  // Fused sampling kernels
+  ops.def("fused_gumbel_argmax(Tensor logits, Tensor seeds) -> Tensor");
+  ops.impl("fused_gumbel_argmax", torch::kCPU, &fused_gumbel_argmax);
+
+  ops.def("greedy_argmax(Tensor logits) -> Tensor");
+  ops.impl("greedy_argmax", torch::kCPU, &greedy_argmax);
 
   // Speculative decoding kernels
   ops.def(

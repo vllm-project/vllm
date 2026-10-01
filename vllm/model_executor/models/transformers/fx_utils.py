@@ -15,17 +15,19 @@ import operator
 import textwrap
 from collections.abc import Callable
 from itertools import chain
+from typing import Any
 from unittest import mock
 
 import torch
 from torch import fx, nn
 from torch.nn import functional as F
+from typing_extensions import TypeIs
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_UNKNOWN = object()
+_UNKNOWN: Any = object()
 """Sentinel meta value for proxies whose concrete value could not be inferred.
 Distinct from `None`, which is a valid concrete value (e.g. `attn_weights`)."""
 
@@ -34,7 +36,7 @@ _MODULE_CALL = nn.Module.__call__
 `call_module` nodes; meta execution must call modules for real."""
 
 
-def is_leaf_call(node: object) -> bool:
+def is_leaf_call(node: object) -> TypeIs[fx.Node]:
     """Is node a call recorded by `_as_leaf_call` (e.g. an attention interface)."""
     return isinstance(node, fx.Node) and node.meta.get("leaf_call", False)
 
@@ -43,8 +45,7 @@ def _reference_weight(module: nn.Module) -> torch.Tensor | None:
     """A weight whose trailing dim is the module's hidden size.
 
     Linears and 2-D gate weights are `[out, hidden]`; norm weights are
-    `[hidden]`. Used to fabricate a placeholder input of matching size/dtype.
-    """
+    `[hidden]`. Used to fabricate a placeholder input of matching size/dtype."""
     for child in module.modules():
         if isinstance(child, nn.Linear):
             return child.weight
@@ -59,10 +60,9 @@ class _MetaProxy(fx.Proxy):
 
     Shape questions (`len`, iteration, `.shape` unpacks) are answered by
     executing each op on the meta values, so PyTorch's meta kernels are the
-    single source of shape inference — no per-op rules.
-    """
+    single source of shape inference — no per-op rules."""
 
-    meta: object = _UNKNOWN
+    meta: Any = _UNKNOWN
 
     def __len__(self) -> int:
         if self.meta is not _UNKNOWN:
@@ -84,8 +84,7 @@ class _MetaAttribute(_MetaProxy, fx.proxy.Attribute):
     """Attribute proxy (e.g. `x.shape`) carrying its meta value.
 
     `Proxy.__getattr__` constructs `Attribute` directly, bypassing
-    `Tracer.proxy`, so the meta value must be grafted on here too.
-    """
+    `Tracer.proxy`, so the meta value must be grafted on here too."""
 
     def __init__(self, root: fx.Proxy, attr: str):
         super().__init__(root, attr)
@@ -152,6 +151,7 @@ class _AllLeafTracer(fx.Tracer):
         if unknown:
             return _UNKNOWN
         if kind == "call_function":
+            assert callable(target)
             return target(*meta_args, **meta_kwargs)
         if kind == "call_method":
             receiver, *rest = meta_args
@@ -221,8 +221,7 @@ def _leaf_attention_interfaces():
     """Patch `AttentionInterface.get_interface` so traced forwards see a leaf node.
 
     `vllm_attention_function` needs runtime context so it is untraceable.
-    Every interface returns `(attn_output, attn_weights)`.
-    """
+    Every interface returns `(attn_output, attn_weights)`."""
     from transformers.modeling_utils import AttentionInterface
 
     original = AttentionInterface.get_interface
@@ -300,8 +299,7 @@ def forward_parameters(cls: type[nn.Module]) -> dict[str, inspect.Parameter]:
 def forward_input_count(cls: type[nn.Module]) -> int:
     """The number of tensor inputs `cls.forward` declares, excluding `self` and
     any `*args`/`**kwargs`. Read from the signature, so it is independent of
-    whether the trace completes (unlike counting placeholders).
-    """
+    whether the trace completes (unlike counting placeholders)."""
     params = list(forward_parameters(cls).values())
     if not params:
         return 1  # uninspectable: assume a single input and let matching decide
@@ -378,8 +376,7 @@ def _in_boolean_context(funcdef: ast.FunctionDef, ref: ast.expr) -> bool:
 
     In these positions the object's identity never escapes, so a reference that
     is always truthy can be replaced by `True`. `and`/`or` are excluded: they
-    yield an operand, so the module could escape (`x and self.<name>`).
-    """
+    yield an operand, so the module could escape (`x and self.<name>`)."""
     for node in ast.walk(funcdef):
         if (
             isinstance(node, (ast.If, ast.IfExp, ast.While, ast.Assert))
@@ -412,8 +409,7 @@ def bypass_existence_guard(
       `not self.<name>`): the reference itself to `True`.
 
     Any other surviving reference escapes the projection's value, which no longer
-    exists after fusion, so refuse rather than change semantics.
-    """
+    exists after fusion, so refuse rather than change semantics."""
     for node in ast.walk(funcdef):
         # `self.<name> is (not) None`, either operand order.
         if not (isinstance(node, ast.Compare) and len(node.ops) == 1):
@@ -474,8 +470,7 @@ def _base_name(node: ast.expr) -> str | None:
 def _rebound_names(region: list[ast.stmt]) -> set[str]:
     """Names rebound outright within `region` (`x = ...`, `del x`).
 
-    These are `Name` nodes in a `Store`/`Del` context.
-    """
+    These are `Name` nodes in a `Store`/`Del` context."""
     return {
         node.id
         for stmt in region
@@ -489,8 +484,7 @@ def _inplace_target(node: ast.AST) -> str | None:
 
     A write through the name (`x[i] = ...`, `x.attr = ...`) or an in-place method
     call (`x.mul_(...)`) leaves the base name in a `Load` context, so it is not a
-    plain `Name` store (see `_rebound_names`).
-    """
+    plain `Name` store (see `_rebound_names`)."""
     if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(
         node.ctx, (ast.Store, ast.Del)
     ):
@@ -585,7 +579,7 @@ def _aliasing_reads(node: ast.expr) -> set[str]:
     would taint nearly every later name.
     """
     names: set[str] = set()
-    stack = [node]
+    stack: list[ast.AST] = [node]
     while stack:
         current = stack.pop()
         if isinstance(current, ast.Attribute) and current.attr in _METADATA_ATTRS:
@@ -655,7 +649,7 @@ def aliasing_names(
     """
     names = set(seed)
     assigns = [
-        node
+        (node, node.value)
         for node in ast.walk(funcdef)
         if isinstance(node, (ast.Assign, ast.AnnAssign))
         and node.value is not None
@@ -664,10 +658,10 @@ def aliasing_names(
     changed = True
     while changed:
         changed = False
-        for node in assigns:
-            if not _aliasing_reads(node.value) & names:
+        for node, value in assigns:
+            if not _aliasing_reads(value) & names:
                 continue
-            targets = getattr(node, "targets", None) or [node.target]
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             stores = {
                 child.id
                 for target in targets
@@ -711,8 +705,7 @@ def upstream_linear(node: object, module: nn.Module) -> fx.Node | None:
     Non-linear submodules are transparent too (e.g. the dropout GPT-style
     attentions apply after their output projection). Never walks through a leaf
     call (e.g. an attention interface): its inputs are what attention consumes,
-    not what produced the value.
-    """
+    not what produced the value."""
     stack = [node]
     seen: set[fx.Node] = set()
     while stack:
@@ -735,8 +728,7 @@ def downstream_linear(node: fx.Node, module: nn.Module) -> fx.Node | None:
     """Nearest linear consuming `node`'s output, walking through casts/scalings.
 
     Never walks through a leaf call (e.g. an attention interface): what crosses
-    it is consumed by the attention computation, not projected.
-    """
+    it is consumed by the attention computation, not projected."""
     queue = list(node.users)
     seen: set[fx.Node] = set()
     while queue:
@@ -781,7 +773,7 @@ def peel(node: object) -> object:
     return node
 
 
-def is_fn(node: object, target: Callable) -> bool:
+def is_fn(node: object, target: object) -> TypeIs[fx.Node]:
     """Is node `<target>()`."""
     return (
         isinstance(node, fx.Node)
@@ -790,14 +782,14 @@ def is_fn(node: object, target: Callable) -> bool:
     )
 
 
-def is_method(node: object, name: str) -> bool:
+def is_method(node: object, name: str) -> TypeIs[fx.Node]:
     """Is node `.<name>()`."""
     return (
         isinstance(node, fx.Node) and node.op == "call_method" and node.target == name
     )
 
 
-def is_op(node: object, name: str) -> bool:
+def is_op(node: object, name: str) -> TypeIs[fx.Node]:
     """Is node `<mod>.<name>()` for torch, F, operator, or Tensor."""
     return any(
         is_fn(node, getattr(module, name, None)) for module in (torch, F, operator)

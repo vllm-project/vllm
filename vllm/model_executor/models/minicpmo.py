@@ -40,7 +40,7 @@ from transformers.models.whisper.modeling_whisper import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
@@ -402,22 +402,18 @@ class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder[MiniCPMOProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_audios = mm_counts.get("audio", 0)
         audio_len = (
             self.info.get_max_audio_chunks_with_most_features()
             * self.info.get_default_audio_sampling_rate()
         )
 
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
-
         audio_mm_data = {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -445,7 +441,7 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
-        if (audios := mm_data.get("audios")) is None:
+        if (audios := mm_data.get("audio")) is None:
             return {}
 
         mm_items = self.info.parse_mm_data({"audio": audios}, validate=False)

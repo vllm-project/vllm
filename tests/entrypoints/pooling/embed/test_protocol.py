@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for Cohere embed protocol: build_typed_embeddings and its
-underlying packing helpers, plus Cohere-specific serving helpers.
-"""
+underlying packing helpers, plus Cohere-specific serving helpers."""
 
 import struct
 

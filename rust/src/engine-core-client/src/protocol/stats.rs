@@ -278,9 +278,9 @@ pub use kv_connector::*;
 pub struct SchedulerStats {
     /// Number of requests in model execution batches.
     pub num_running_reqs: u64,
-    /// Length of the "waiting" request queue.
+    /// Number of waiting requests not deferred.
     pub num_waiting_reqs: u64,
-    /// Length of the "skipped waiting" queue.
+    /// Number of waiting requests deferred by transient constraints or a blocked status.
     #[serde(default)]
     pub num_skipped_waiting_reqs: u64,
     /// Internal DP load-balancing step counter.

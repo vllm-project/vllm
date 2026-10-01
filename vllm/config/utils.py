@@ -84,8 +84,7 @@ def config(
 
 def get_field(cls: ConfigType, name: str) -> Any:
     """Get the default factory field of a dataclass by name. Used for getting
-    default factory fields in `EngineArgs`.
-    """
+    default factory fields in `EngineArgs`."""
     if not is_dataclass(cls):
         raise TypeError("The given class is not a dataclass.")
     try:
@@ -122,8 +121,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 def replace(dataclass_instance: ConfigT, /, **kwargs) -> ConfigT:
     """Like [`dataclasses.replace`](https://docs.python.org/3/library/dataclasses.html#dataclasses.replace),
     but compatible with Pydantic dataclasses which use `pydantic.fields.Field` instead
-    of `dataclasses.field`
-    """
+    of `dataclasses.field`"""
     cls = type(dataclass_instance)
     dataclass_dict = dataclass_instance.__dict__
     dataclass_dict = {k: v for k, v in dataclass_dict.items() if is_init_field(cls, k)}
@@ -140,7 +138,7 @@ def getattr_iter(
 ) -> Any:
     """A helper function that retrieves an attribute from an object which may
     have multiple possible names. This is useful when fetching attributes from
-    arbitrary `transformers.PretrainedConfig` instances.
+    arbitrary `transformers.PreTrainedConfig` instances.
 
     In the case where the first name in `names` is the preferred name, and
     any other names are deprecated aliases, setting `warn=True` will log a
@@ -316,7 +314,7 @@ def normalize_value(x):
         except Exception:
             return str(x)
 
-    # PretrainedConfig (must be before dataclass branch as these are now dataclasses)
+    # PreTrainedConfig (must be before dataclass branch as these are now dataclasses)
     if hasattr(x, "to_json_string") and callable(x.to_json_string):
         try:
             return x.to_json_string()

@@ -267,9 +267,11 @@ def test_skipped_k_cache_insert_accepts_no_k(
 
 
 @pytest.mark.parametrize("fp8_query", [False, True])
+@pytest.mark.parametrize("prepared_mha", [False, True])
 def test_deepseek_v32_dispatches_selected_mha(
     monkeypatch: pytest.MonkeyPatch,
     fp8_query: bool,
+    prepared_mha: bool,
 ) -> None:
     attn_metadata = SimpleNamespace(num_actual_tokens=2)
     kv_cache = torch.empty(1)
@@ -301,7 +303,11 @@ def test_deepseek_v32_dispatches_selected_mha(
     q_nope = torch.randn(2, 1, 2)
     q_pe = torch.randn(2, 1, 2)
     mqa_q = torch.randn(2, 1, 2)
-    mha_q = torch.cat((q_nope, q_pe + 1 if fp8_query else mqa_q), dim=-1)
+    if fp8_query and not prepared_mha:
+        mqa_q = mqa_q.to(torch.float8_e4m3fn)
+    mha_q = torch.cat(
+        (q_nope, q_pe + 1 if fp8_query and not prepared_mha else mqa_q), dim=-1
+    )
     kv_c = torch.empty(2, 2)
     k_pe = torch.empty(2, 2)
     output = torch.empty(2, 2)
@@ -346,8 +352,7 @@ def test_deepseek_v32_dispatches_selected_mha(
 def test_select_candidate_blocks_tolerates_empty_rows():
     """Full-cudagraph decode pads the batch with seq_len-0 rows. The newest
     block pin must not index -1 for them (device-side assert); they select
-    no candidate blocks and real rows still pin their newest block.
-    """
+    no candidate blocks and real rows still pin their newest block."""
     block_size, topk_blocks = 8, 3
     logits = torch.zeros(3, 64, device="cuda")
     logits[0, 3] = 5.0  # block 0 scores highest for row 0
@@ -364,6 +369,26 @@ def test_select_candidate_blocks_tolerates_empty_rows():
     assert out[0, 0].item() == 4 and 0 in out[0].tolist()  # newest block pinned
     assert out[2, 0].item() == 2 and 1 in out[2].tolist()
     assert (out[0] >= 0).all() and (out[2, :2] >= 0).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("score", [0.0, float("nan")])
+@pytest.mark.parametrize("start", [0, 3])
+def test_candidate_selection_keeps_valid_blocks_with_nan_scores(score, start):
+    """NaN warmup scores must not turn real blocks into repeated sparse padding."""
+    logits = torch.full((3, 64), score, device="cuda")
+    starts = torch.full((3,), start, device="cuda", dtype=torch.int32)
+    lengths = torch.tensor([0, 17, 35], device="cuda", dtype=torch.int32)
+    out = torch.empty(3, 8, device="cuda", dtype=torch.int32)
+
+    sparse_indexer._select_candidate_blocks(logits, starts, starts + lengths, 8, 8, out)
+
+    for row, count in enumerate([0, 3, 5]):
+        valid = out[row][out[row] >= 0].sort().values
+        torch.testing.assert_close(
+            valid, torch.arange(count, device="cuda", dtype=torch.int32)
+        )
+        assert (out[row] == -1).sum().item() == 8 - count
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -414,7 +439,7 @@ def test_candidate_kernels_preserve_packed_bounds_and_padding(
     top = reduced.topk(min(k, nblocks), dim=-1)
     expected = torch.full((rows, k), -1, device="cuda", dtype=torch.int32)
     expected[:, : top.indices.shape[1]] = torch.where(
-        top.values > -torch.inf, top.indices, -1
+        top.values != -torch.inf, top.indices, -1
     ).int()
     actual = torch.empty(rows, k * 2, device="cuda", dtype=torch.int32)[:, ::2]
     select_candidate_blocks(logits, starts, ends, k, block_size, actual, repeat)
@@ -458,8 +483,7 @@ def test_candidate_kernels_preserve_packed_bounds_and_padding(
 
 def _make_candidates(lens: torch.Tensor, num_candidates: int, cbk: int):
     """Production-faithful candidates: top min(avail, K) blocks per row —
-    full coverage for lens <= K*cbk, a fixed-size subset beyond that.
-    """
+    full coverage for lens <= K*cbk, a fixed-size subset beyond that."""
     avail = ((lens.cpu() + cbk - 1) // cbk).tolist()
     rows = []
     for a in avail:
@@ -495,8 +519,7 @@ def _candidate_token_mask(
 
 def _reference_topk(masked: torch.Tensor, topk: int) -> torch.Tensor:
     """Plain ``torch.topk`` over -inf-masked logits; slots past a row's valid
-    count are -1 (the indexer's "no token" sentinel).
-    """
+    count are -1 (the indexer's "no token" sentinel)."""
     values, indices = masked.topk(topk, dim=1)
     return torch.where(values > float("-inf"), indices.int(), -1)
 
@@ -509,8 +532,7 @@ def _assert_same_selection(
 ) -> None:
     """Both top-k index sets must pick the same multiset of logit values per
     row (-1 padding must match too). Indices themselves may differ: the
-    top-k kernels break ties among equal values in nondeterministic order.
-    """
+    top-k kernels break ties among equal values in nondeterministic order."""
     for r in range(logits.shape[0]):
         base = int(row_starts[r]) if row_starts is not None else 0
         g, e = got[r][got[r] >= 0], expected[r][expected[r] >= 0]
@@ -522,8 +544,7 @@ def _assert_same_selection(
 
 def _sparse_scratch(rows: int, num_sparse: int, topk: int) -> dict:
     """Caller-owned buffers the sparse path writes into (the metadata builder
-    owns these in production).
-    """
+    owns these in production)."""
     i32 = dict(dtype=torch.int32, device="cuda")
     return dict(
         sparse_indices=torch.zeros(rows, num_sparse, **i32),
@@ -538,8 +559,7 @@ def _expand_candidates_reference(
     """PyTorch reference for `candidate_blocks_to_sparse_indices`: expand
     each candidate block into ``cbk // sbk`` sparse blocks, keep those inside
     ``[0, ke - ks)``, sort ascending, anchor at ``ks // sbk``, pad by
-    repeating the last valid block, and count the valid sparse columns.
-    """
+    repeating the last valid block, and count the valid sparse columns."""
     ratio = cbk // sbk
     rows, num_candidates = candidates.shape
     num_sparse = num_candidates * ratio
@@ -565,8 +585,7 @@ def _expand_candidates_reference(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel")
 def test_candidate_blocks_to_sparse_indices_math():
     """Candidate->sparse-block expansion: ks anchoring, range filtering,
-    repeat-last padding, and the per-row valid column count (``end``).
-    """
+    repeat-last padding, and the per-row valid column count (``end``)."""
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
         candidate_blocks_to_sparse_indices,
     )
@@ -615,11 +634,13 @@ def test_candidate_blocks_to_sparse_indices_math():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel")
 @pytest.mark.parametrize("cbk,sbk", [(8, 8), (16, 8), (16, 16)])
-def test_candidate_blocks_to_sparse_indices_matches_reference(cbk: int, sbk: int):
+@pytest.mark.parametrize("end_offset", [0, 1])
+def test_candidate_blocks_to_sparse_indices_matches_reference(
+    cbk: int, sbk: int, end_offset: int
+):
     """The Triton expansion equals the PyTorch reference on production-shaped
     random inputs, including strided (column-sliced) candidate rows and
-    strided output buffers.
-    """
+    strided output buffers."""
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
         candidate_blocks_to_sparse_indices,
     )
@@ -651,7 +672,7 @@ def test_candidate_blocks_to_sparse_indices_matches_reference(cbk: int, sbk: int
         ke,
         cbk,
         sbk,
-        out=(si_buf[:, : num_candidates * ratio], end_buf[::2]),
+        out=(si_buf[:, : num_candidates * ratio], end_buf[end_offset::2]),
     )
     assert torch.equal(got_indices, ref_indices)
     assert torch.equal(got_end, ref_end)
@@ -659,7 +680,41 @@ def test_candidate_blocks_to_sparse_indices_matches_reference(cbk: int, sbk: int
         cand_buf[:, num_candidates:], torch.full_like(cand_buf[:, num_candidates:], -7)
     )
     assert not si_buf[:, num_candidates * ratio :].any()
-    assert not end_buf[1::2].any()
+    assert not end_buf[1 - end_offset :: 2].any()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_sparse_topk_remap_bounds_nan_rows():
+    """DeepSelect writes an out-of-range sentinel to slot 0 of NaN rows (the
+    rest is left untouched); the remap turns it into -1."""
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        has_deep_select,
+        sparse_topk_remap,
+    )
+
+    if not has_deep_select():
+        pytest.skip("DeepSelect extension (vllm._deepselect_C) required")
+    rows, num_sparse, sbk, topk = 4, 128, 8, 512
+    width = num_sparse * sbk
+    logits = torch.randn(rows, width, dtype=torch.bfloat16, device="cuda")
+    logits[1:, :16] = float("nan")
+    sparse_indices = torch.arange(num_sparse, dtype=torch.int32, device="cuda")
+    end = torch.full((rows,), width, dtype=torch.int32, device="cuda")
+    out = torch.empty(rows, topk, dtype=torch.int32, device="cuda")
+    cols = torch.zeros_like(out)
+
+    sparse_topk_remap(
+        logits,
+        sparse_indices.repeat(rows, 1),
+        end,
+        torch.zeros_like(end),
+        sbk,
+        topk,
+        out,
+        col_indices=cols,
+    )
+    assert (cols[1:, 0] >= width).all() and (out[1:, 0] == -1).all()
+    assert (out[0] >= 0).all()
 
 
 def _skip_unless_sm100_sparse_kernels():
@@ -689,8 +744,7 @@ def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool):
     ``torch.topk`` over dense bf16 logits masked to the candidates (the two
     DeepGEMM kernels agree bitwise on candidate columns), incl. under CUDA
     graph capture, and a later layer reusing the step's expansion/schedule
-    selects the same values.
-    """
+    selects the same values."""
     deep_gemm = _skip_unless_sm100_sparse_kernels()
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
         sparse_mqa_logits_prefill_chunk,
@@ -780,8 +834,7 @@ def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool):
 
 def _build_fp4_paged_cache(req_lens: torch.Tensor, page_kv: int, head_dim: int):
     """MXFP4 paged cache in DeepGEMM's fused layout: per page, all tokens'
-    fp4 data first, then their packed UE8M0 scales.
-    """
+    fp4 data first, then their packed UE8M0 scales."""
     device = req_lens.device
     pages_per = (req_lens + page_kv - 1) // page_kv
     num_pages, max_pages = int(pages_per.sum()), int(pages_per.max())
@@ -817,8 +870,7 @@ def test_sparse_mqa_logits_paged_matches_dense_masked(next_n: int, capture: bool
     """Paged sparse-MQA decode selects exactly the values ``torch.topk`` picks
     from the dense bf16 masked logits, incl. MTP rows (next_n > 1 flattened to
     one query row each), CUDA graph capture/replay and schedule reuse by a
-    later layer.
-    """
+    later layer."""
     deep_gemm = _skip_unless_sm100_sparse_kernels()
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
         sparse_mqa_logits_paged_decode,
@@ -927,8 +979,7 @@ def test_sparse_mqa_logits_paged_matches_dense_masked(next_n: int, capture: bool
 
 def test_sparse_mqa_logits_accuracy_vs_torch():
     """Sparse-kernel numerics vs a PyTorch fp32 reference on the dequantized
-    MXFP4 inputs.
-    """
+    MXFP4 inputs."""
     _skip_unless_sm100_sparse_kernels()
     from deep_gemm.utils import cast_back_from_fp4
 
