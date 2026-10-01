@@ -135,6 +135,9 @@ API_AUTONAV_EXCLUDE=vllm mkdocs serve  # API ref off (~15 seconds)
 Once you see a `Serving on http://<address>:<port>/` line in the logs, the live preview is ready!
 Open that address in your browser to see it — `http://127.0.0.1:8000/` by default, or whichever host/port you passed to `-a`.
 
+On pull requests, Read the Docs builds a documentation preview only if the PR changes files that affect the docs (e.g. `docs/`, `examples/` or `mkdocs.yaml`) and the `pre-commit` checks have not failed.
+Changes to `vllm/` alone do not trigger a build, so if your PR changes the API or CLI reference, add the `build-docs` label to force one.
+
 For additional features and advanced configurations, refer to the:
 
 - [MkDocs documentation](https://www.mkdocs.org/)

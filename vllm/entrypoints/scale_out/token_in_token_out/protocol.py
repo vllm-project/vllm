@@ -381,6 +381,7 @@ class GenerateResponse(BaseModel):
     choices: list[GenerateResponseChoice]
     usage: UsageInfo | None = Field(default=None)
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+    prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[int] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
     metrics: PerRequestMetrics | None = None
@@ -544,6 +545,17 @@ class DerenderStreamState(BaseModel):
     Prevents re-emitting the role on subsequent chunks even when the detok
     window is transiently empty (e.g. usage only final chunk).
     """
+
+    logprob_context_token_ids: list[int] = Field(default_factory=list, max_length=4)
+    """Trailing sampled token IDs carried across chunks so byte-fallback
+    (U+FFFD) correction during logprob placeholder resolution has context
+    at chunk boundaries. Bounded to the 4-token window that
+    ``_correct_decoded_token`` reads."""
+
+    logprob_text_offset: int = Field(default=0, ge=0)
+    """Cumulative emitted text length. Seeds ``text_offset`` for completion
+    streaming logprobs so offsets stay absolute across chunks, mirroring
+    ``initial_text_offset`` in the generate streaming path."""
 
     output_token_ids: list[int] = Field(default_factory=list)
     """All output tokens seen so far. Parser path only.

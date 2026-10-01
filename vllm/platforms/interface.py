@@ -939,13 +939,6 @@ class Platform:
         if mamba_page_size == 0:
             return
 
-        # mamba_block_size here should either be user specified value or None
-        mamba_block_size = (
-            cache_config.mamba_block_size
-            if cache_config.user_specified_mamba_block_size
-            else None
-        )
-
         # Get kernel block alignment from the backend's supported sizes
         with set_current_vllm_config(vllm_config):
             kernel_block_alignment_size = max(
@@ -962,27 +955,15 @@ class Platform:
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
 
-        if cache_config.mamba_cache_mode == "all":
-            # With prefix caching, align to mamba chunk size for kernel perf
-            # TODO(tdoublep): this constraint can be relaxed fairly
-            # easily by changing the way we layout chunks in the
-            # mamba2 kernels.
-            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
-            assert base_chunk_size is not None
-            attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
-            chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
-            attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
-            cache_config.mamba_block_size = attn_block_size
-        else:
-            # Without prefix caching, use minimum block size that satisfies
-            # both backend alignment and mamba page size compatibility
-            attn_block_size = kernel_block_alignment_size * cdiv(
-                mamba_page_size,
-                kernel_block_alignment_size * attn_page_size_1_token,
-            )
-            indexer_align = cls._get_indexer_block_alignment(vllm_config)
-            if indexer_align:
-                attn_block_size = indexer_align * cdiv(attn_block_size, indexer_align)
+        # Use minimum block size that satisfies both backend alignment and
+        # mamba page size compatibility
+        attn_block_size = kernel_block_alignment_size * cdiv(
+            mamba_page_size,
+            kernel_block_alignment_size * attn_page_size_1_token,
+        )
+        indexer_align = cls._get_indexer_block_alignment(vllm_config)
+        if indexer_align:
+            attn_block_size = indexer_align * cdiv(attn_block_size, indexer_align)
 
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
@@ -1118,6 +1099,16 @@ class Platform:
         cudaMemGetInfo may underreport free memory because it does not
         account for reclaimable OS memory (page cache, buffers).
         """
+        return False
+
+    @classmethod
+    def enable_multi_stream_overlap(
+        cls,
+        aux_stream_list: list[torch.cuda.Stream] | None,
+        attn_metadata: object,
+    ) -> bool:
+        """Whether the current platform should enable multi-stream overlap
+        for the given aux streams and attention metadata."""
         return False
 
     @classmethod

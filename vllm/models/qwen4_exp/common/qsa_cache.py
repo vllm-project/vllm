@@ -825,15 +825,18 @@ class QSAKeyStateCache(_QSAStateCache):
             )
         super().__init__(head_size=storage_head_size, **kwargs)
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        super().bind_kv_cache(kv_cache)
-        qsa_cache = self.kv_cache
-        self.key_cache = qsa_cache[..., : self.key_head_size]
-        if self.cache_rope_positions:
-            position_tail = qsa_cache[..., self.rope_position_offset :]
-            self.rope_position_cache = position_tail.view(torch.int64)
-        else:
-            self.rope_position_cache = None
+    # Derived on access so `kv_cache` stays the only reference to the bound
+    # storage: clearing it (e.g. after CUDA graph memory profiling) must free
+    # the cache, or the freed block stays pinned in the allocator.
+    @property
+    def key_cache(self) -> torch.Tensor:
+        return self.kv_cache[..., : self.key_head_size]
+
+    @property
+    def rope_position_cache(self) -> torch.Tensor | None:
+        if not self.cache_rope_positions:
+            return None
+        return self.kv_cache[..., self.rope_position_offset :].view(torch.int64)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Hold the open group's committed keys plus every row a speculative
