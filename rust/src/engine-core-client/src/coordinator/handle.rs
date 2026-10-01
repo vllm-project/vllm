@@ -130,11 +130,11 @@ impl CoordinatorHandle {
     ///
     /// The handle sets `wake_pending` so concurrent request submissions coalesce
     /// behind one `START_DP_WAVE` broadcast instead of all trying to trigger the
-    /// wave independently. Returns whether this call sent the wake.
-    pub(crate) fn notify_first_request(&self, target_engine_id: EngineId) -> Result<bool> {
+    /// wave independently.
+    pub(crate) fn notify_first_request(&self, target_engine_id: EngineId) -> Result<()> {
         let mut state = self.state.lock();
         if state.engines_running || state.wake_pending {
-            return Ok(false);
+            return Ok(());
         }
 
         let command = CoordinatorCommand::FirstRequest {
@@ -146,7 +146,7 @@ impl CoordinatorHandle {
         }
 
         state.wake_pending = true;
-        Ok(true)
+        Ok(())
     }
 }
 
@@ -162,8 +162,8 @@ mod tests {
         let (handle, state, mut command_rx) = CoordinatorHandle::new_parts();
         let engine = EngineId::from_engine_index(1);
 
-        assert!(handle.notify_first_request(engine.clone()).unwrap());
-        assert!(!handle.notify_first_request(engine).unwrap());
+        handle.notify_first_request(engine.clone()).unwrap();
+        handle.notify_first_request(engine).unwrap();
 
         assert!(command_rx.try_recv().is_ok());
         assert!(

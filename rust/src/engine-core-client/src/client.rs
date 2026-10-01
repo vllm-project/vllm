@@ -643,7 +643,7 @@ impl EngineCoreClient {
                 let snapshot = coordinator.snapshot();
                 req.current_wave = snapshot.current_wave;
                 if !snapshot.engines_running {
-                    req.wake_sent = coordinator.notify_first_request(engine_id.clone())?;
+                    coordinator.notify_first_request(engine_id.clone())?;
                 }
             }
 

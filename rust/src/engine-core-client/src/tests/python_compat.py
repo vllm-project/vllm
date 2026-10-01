@@ -92,7 +92,6 @@ class EngineCoreRequest(
     abort_immediately: bool = False
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
-    wake_sent: bool = False
 
 
 class EngineCoreOutput(

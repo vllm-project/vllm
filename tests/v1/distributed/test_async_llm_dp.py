@@ -19,6 +19,7 @@ from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.engine import EngineCoreRequestType
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.metrics.loggers import StatLoggerBase
@@ -398,6 +399,47 @@ async def test_dp_pause_late_request_does_not_block_drain():
             ),
             timeout=60,
         )
+
+
+@pytest.mark.asyncio
+async def test_dp_request_reaching_rank_after_resume_wakes_peers():
+    """The front-end's wake can reach a peer that is still paused, which drops
+    it, while the request itself reaches its rank only after resume (e.g. from
+    another API server). That rank must wake its peers itself, or it steps
+    alone. Modelled here by holding the request's ADD on the client side."""
+    with ExitStack() as after:
+        engine = AsyncLLM.from_engine_args(
+            _get_dp_pause_engine_args(expert_parallel=True)
+        )
+        after.callback(engine.shutdown)
+        client = engine.engine_core
+        params = SamplingParams(max_tokens=5)
+
+        await _consume(engine.generate(DP_PAUSE_PROMPT, params, "warmup"))
+        await engine.pause_generation(mode="abort")
+        assert await _poll_flag(engine, False, timeout=30)
+
+        held: list[tuple] = []
+        send_input = client._send_input
+
+        def hold_add(request_type, request, engine_id=None):
+            if request_type == EngineCoreRequestType.ADD:
+                held.append((request_type, request, engine_id))
+                return asyncio.sleep(0)
+            return send_input(request_type, request, engine_id)
+
+        client._send_input = hold_add
+        task = asyncio.create_task(
+            _consume(engine.generate(DP_PAUSE_PROMPT, params, "late"))
+        )
+        # The front-end has sent its wake; let the paused peer drop it.
+        await asyncio.sleep(2)
+        assert held
+
+        await engine.resume_generation()
+        client._send_input = send_input
+        await send_input(*held[0])
+        await asyncio.wait_for(task, timeout=60)
 
 
 @pytest.mark.asyncio
