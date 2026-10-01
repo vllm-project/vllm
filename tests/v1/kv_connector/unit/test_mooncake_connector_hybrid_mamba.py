@@ -974,6 +974,55 @@ def test_hetero_tp_keeps_sharded_gdn_states_uncoalesced(monkeypatch):
         connector.connector_worker = None
 
 
+def test_register_kv_caches_keeps_replicated_conv_state_whole(monkeypatch):
+    """Under DS, only sharded conv states split into sub-projections; a
+    TP-replicated short conv (e.g. a per-layer embedding cache) registers as
+    one region, and the sub-projection split does not support it."""
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        get_conv_state_layout,
+    )
+
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+    get_conv_state_layout.cache_clear()
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+    )
+    spec = MambaSpec(
+        block_size=vllm_config.cache_config.block_size,
+        shapes=((4, 3),),
+        dtypes=(torch.float16,),
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        tp_replicated=True,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["model.layers.0.ple"], spec)],
+    )
+    try:
+        with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+            connector = MooncakeConnector(
+                vllm_config,
+                KVConnectorRole.WORKER,
+                kv_cache_config,
+            )
+            worker = connector.connector_worker
+            raw = torch.empty(16 * spec.page_size_bytes, dtype=torch.int8)
+            cache = raw.view(16, spec.page_size_bytes)
+            worker.register_kv_caches({"model.layers.0.ple": cache})
+
+            assert worker.kv_caches_base_addr == [cache.data_ptr()]
+            assert worker.kv_block_len_per_layer == [4 * 3 * 2]
+
+            worker.shutdown()
+            worker.shutdown = noop_shutdown
+            connector.connector_worker = None
+    finally:
+        get_conv_state_layout.cache_clear()
+
+
 def test_hetero_tp_requires_ds_conv_layout_for_sharded_mamba(monkeypatch):
     from vllm.model_executor.layers.mamba.mamba_utils import (
         get_conv_state_layout,

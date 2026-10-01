@@ -2028,14 +2028,14 @@ class MooncakeConnectorWorker:
                 conv_bytes = prod(layer_spec.shapes[0]) * get_dtype_size(
                     layer_spec.dtypes[0]
                 )
-                if is_conv_state_dim_first():
+                if is_conv_state_dim_first() and not layer_spec.tp_replicated:
                     # The conv state concatenates sub-projections (GDN: Q, K,
                     # V) along the dim axis, and each sub-projection shards
                     # across TP independently. Register one region per
                     # sub-projection so the per-region heterogeneous-TP split
                     # never cuts across a projection boundary. Only the DS
                     # (dim, state_len) layout keeps each sub-projection
-                    # contiguous.
+                    # contiguous. A TP-replicated state is copied whole.
                     split = derive_mamba_conv_split(layer_spec, self.tp_size)
                     region_entries = [
                         (offset, size) for offset, size in split.local_conv_offsets
