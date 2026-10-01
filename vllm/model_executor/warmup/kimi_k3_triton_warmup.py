@@ -20,8 +20,7 @@ logger = init_logger(__name__)
 
 
 def _get_kda_layer(worker: Worker) -> KimiK3DeltaAttention | None:
-    # Kimi model construction already imports kda. Avoid importing it here:
-    # the Kimi package initializes a numba cache even for non-Kimi models.
+    # Kimi model construction already imports kda. Avoid importing it here.
     kda = sys.modules.get("vllm.models.kimi_k3.nvidia.kda")
     if kda is None:
         return None
