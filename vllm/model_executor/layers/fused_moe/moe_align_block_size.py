@@ -124,7 +124,6 @@ def moe_align_block_size_radix(
     sorted_ids, expert_ids, num_tokens_post_pad = _allocate_outputs(
         topk_ids, block_size, num_experts, pad_sorted_ids
     )
-    numel = topk_ids.numel()
     ops.moe_align_block_size_radix(
         topk_ids,
         num_experts,
@@ -133,10 +132,10 @@ def moe_align_block_size_radix(
         expert_ids,
         num_tokens_post_pad,
         scratch.sort_workspace,
-        scratch.sorted_expert_ids[:numel],
-        scratch.compact_sorted_token_ids[:numel],
-        scratch.token_indices[:numel],
-        scratch.topk_ids_for_sort[:numel],
+        scratch.sorted_expert_ids,
+        scratch.compact_sorted_token_ids,
+        scratch.token_indices,
+        scratch.topk_ids_for_sort,
         scratch.padded_expert_offsets,
         scratch.unpadded_expert_offsets,
         expert_map,

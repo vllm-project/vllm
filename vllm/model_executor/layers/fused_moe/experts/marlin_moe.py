@@ -612,20 +612,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             num_dispatchers=num_dispatchers,
         )
 
-        self._align_radix_scratch = MoEAlignRadixScratch(
-            max_num_tokens=self.moe_config.max_num_tokens,
-            topk=self.moe_config.experts_per_token,
-            num_experts=self.moe_config.num_experts,
-            device=torch.device(self.moe_config.device),
-        )
-
-    def _get_align_radix_scratch(
-        self, topk_ids: torch.Tensor
-    ) -> MoEAlignRadixScratch | None:
-        if topk_ids.numel() < RADIX_SORT_MIN_ROUTED_ENTRIES:
-            return None
-        return self._align_radix_scratch
-
     @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
@@ -719,6 +705,28 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
     """Marlin-based fused MoE expert implementation."""
 
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
+        # Only the standard (non-batched) path consumes moe_align_block_size
+        # radix alignment, so only this class owns the reusable scratch.
+        self._align_radix_scratch = MoEAlignRadixScratch(
+            max_num_tokens=self.moe_config.max_num_tokens,
+            topk=self.moe_config.experts_per_token,
+            num_experts=self.moe_config.num_experts,
+            device=torch.device(self.moe_config.device),
+        )
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
@@ -811,7 +819,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 intermediate_cache13=workspace2,
                 intermediate_cache2=workspace13,
                 input_dtype=self.input_dtype,
-                align_radix_scratch=self._get_align_radix_scratch(topk_ids),
+                align_radix_scratch=self._align_radix_scratch,
             )
             return
 
@@ -922,7 +930,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             intermediate_cache13=workspace2,
             intermediate_cache2=workspace13,
             input_dtype=self.input_dtype,
-            align_radix_scratch=self._get_align_radix_scratch(topk_ids),
+            align_radix_scratch=self._align_radix_scratch,
         )
 
     def moe_sum(
