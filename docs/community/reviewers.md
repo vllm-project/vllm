@@ -18,7 +18,7 @@ Sorted alphabetically by GitHub handle:
 - [@Fangzhou-Ai](https://github.com/Fangzhou-Ai)
 - [@fxmarty-amd](https://github.com/fxmarty-amd)
 - [@GirasoleY](https://github.com/GirasoleY)
-- [@itayalroy](https://github.com/itayalroy)
+- [@itayalroy](https://github.com/itayalroy): MoE serving (kernels, EP, All2All, EPLB, elasticity/fault tolerance); KV connectors and NIXL integrations
 - [@JartX](https://github.com/JartX): ROCm / HIP on Radeon (RDNA3), quantization (W4A16/GPTQ, MXFP4), KV cache quantization
 - [@kliuae](https://github.com/kliuae)
 - [@lengrongfu](https://github.com/lengrongfu)
