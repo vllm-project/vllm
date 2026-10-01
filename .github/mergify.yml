@@ -660,6 +660,30 @@ pull_request_rules:
       add:
         - kv-connector
 
+- name: label-mooncake
+  description: Automatically apply mooncake label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+      # Covers the mooncake/ connector dir, mooncake_store_embedding/ and
+      # mooncake_ec_connector.py.
+      - files~=^vllm/distributed/ec_transfer/ec_connector/mooncake
+      - files=vllm/distributed/mooncake_store.py
+      - files~=^tests/v1/kv_connector/.*mooncake
+      - files~=^tests/v1/ec_connector/.*mooncake
+      - files~=^docs/features/mooncake.*\.md
+      - files=.buildkite/test_areas/disaggregated_mooncake.yaml
+      - title~=(?i)mooncake
+  actions:
+    label:
+      add:
+        - mooncake
+    assign:
+      users:
+        - "stmatengss"
+        - "LCAIZJ"
+
 - name: label-scheduler
   description: Automatically apply scheduler label
   conditions:
@@ -724,3 +748,19 @@ pull_request_rules:
     label:
       add:
         - vllm-ir
+
+- name: label-agents
+  description: Automatically apply agents label
+  conditions:
+    - label != stale
+    - or:
+      - files~=(?:^|/)AGENTS\.md$
+      - files~=^\.agents/
+      - files~=^\.claude/
+      # The [Agents] title tag only: a bare "agents" also matches CI, K8s and
+      # NIXL agents.
+      - title~=(?i)\[agents\]
+  actions:
+    label:
+      add:
+        - agents
