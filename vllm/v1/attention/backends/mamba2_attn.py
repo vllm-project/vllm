@@ -177,17 +177,16 @@ class Mamba2AttentionMetadataBuilder(
                 prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
 
             checkpoint_offsets_p = None
-            if self.vllm_config.cache_config.mamba_cache_mode == "align":
-                first = common.num_reqs - common.num_prefills
-                checkpoint = self.checkpoint_builder.build(
-                    common_attn_metadata,
-                    list(range(first, common.num_reqs)),
-                )
-                if checkpoint is not None:
-                    # The host offsets place the chunk boundary below; the
-                    # tensors are handed to the exporter untouched.
-                    checkpoint_offsets_p = checkpoint.offsets
-                    checkpoint_meta = checkpoint
+            first = common.num_reqs - common.num_prefills
+            checkpoint = self.checkpoint_builder.build(
+                common_attn_metadata,
+                list(range(first, common.num_reqs)),
+            )
+            if checkpoint is not None:
+                # The host offsets place the chunk boundary below; the
+                # tensors are handed to the exporter untouched.
+                checkpoint_offsets_p = checkpoint.offsets
+                checkpoint_meta = checkpoint
 
             (
                 cu_chunk_seqlen_p,
