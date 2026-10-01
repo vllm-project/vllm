@@ -56,8 +56,10 @@ def _trtllm_gen_mla_decode_supports_num_heads(num_heads: int) -> bool:
     return num_heads % min(num_heads, tile) == 0
 
 
-def _select_mla_decode_backend(num_heads: int) -> str | None:
-    """cute-dsl for head counts trtllm-gen cannot tile, else None (=> auto)."""
+def _select_mla_decode_backend(num_heads: int, backend: str = "auto") -> str | None:
+    """Honor explicit selection, falling back to CuTe DSL for unsupported heads."""
+    if backend == "cute-dsl":
+        return "cute-dsl"
     if not _trtllm_gen_mla_decode_supports_num_heads(num_heads):
         logger.warning_once(
             "trtllm-gen MLA decode does not support num_heads=%d "
@@ -303,6 +305,9 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
 
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
+        self._mla_decode_backend = (
+            get_current_vllm_config().attention_config.flashinfer_mla_decode_backend
+        )
         # Worst-case decode batch for the persistent trtllm-gen multi-CTA-KV
         # counter buffer (see _get_multi_ctas_kv_counter_buffer). Captured here
         # (config is in scope during construction) so the byte size can be
@@ -399,7 +404,9 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
         else:
             # trtllm-gen rejects MLA head counts it can't tile (e.g. 96);
             # fall back to cute-dsl for those.
-            decode_backend = _select_mla_decode_backend(runtime_num_heads)
+            decode_backend = _select_mla_decode_backend(
+                runtime_num_heads, self._mla_decode_backend
+            )
         if cum_seq_lens_q is not None:
             # Neither decode backend returns LSE on the ragged path
             # (flashinfer #3238); DCP, the only LSE consumer, took the uniform

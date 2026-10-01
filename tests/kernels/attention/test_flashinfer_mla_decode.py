@@ -36,7 +36,9 @@ QK_HEAD_DIM = KV_LORA_RANK + QK_ROPE_HEAD_DIM
 SCALE = (QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM) ** -0.5
 
 
-def _make_decode_inputs(bs: int, block_size: int, dtype: torch.dtype):
+def _make_decode_inputs(
+    bs: int, block_size: int, dtype: torch.dtype, num_heads: int = NUM_HEADS
+):
     """Build valid trtllm MLA decode inputs on the current CUDA device."""
     max_seq_len_cap = 1024
     seq_lens = [torch.randint(2, max_seq_len_cap, (1,)).item() for _ in range(bs)]
@@ -61,7 +63,7 @@ def _make_decode_inputs(bs: int, block_size: int, dtype: torch.dtype):
         block_id += num_blocks_needed
 
     kv_cache = torch.randn(block_tables.numel(), block_size, QK_HEAD_DIM).to(dtype)
-    q = torch.randn(bs, NUM_HEADS, QK_HEAD_DIM).to(dtype)
+    q = torch.randn(bs, num_heads, QK_HEAD_DIM).to(dtype)
     return q, kv_cache, block_tables, seq_lens_tensor, max_seq_len
 
 
@@ -89,30 +91,60 @@ def ref_mla(
     return out
 
 
+@pytest.mark.parametrize("backend", ["auto", "cute-dsl"])
+@pytest.mark.parametrize("ragged", [False, True], ids=["decode", "ragged"])
+@pytest.mark.parametrize("num_heads", [32, 128])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("bs", [1, 2, 4, 16])
 @pytest.mark.parametrize("block_size", [32, 64])
 @requires_sm10x
-def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
+def test_flashinfer_mla_decode(
+    dtype: torch.dtype,
+    bs: int,
+    block_size: int,
+    backend: str,
+    ragged: bool,
+    num_heads: int,
+):
     torch.set_default_device("cuda")
     torch.manual_seed(42)
 
     q, kv_cache, block_tables, seq_lens_tensor, max_seq_len = _make_decode_inputs(
-        bs, block_size, dtype
+        bs, block_size, dtype, num_heads
     )
 
-    out_ref = q.new_zeros(bs, NUM_HEADS, KV_LORA_RANK)
-    ref_mla(out_ref, q, kv_cache, SCALE, block_tables, seq_lens_tensor)
+    extra_kwargs = {}
+    ref_block_tables, ref_seq_lens = block_tables, seq_lens_tensor
+    if ragged:
+        query_lens = [1 + (i + 1) % 3 for i in range(bs)]
+        offsets = torch.tensor([0, *query_lens], dtype=torch.int32).cumsum(
+            0, dtype=torch.int32
+        )
+        q = torch.randn(sum(query_lens), num_heads, QK_HEAD_DIM, dtype=dtype)
+        seq_lens_tensor.clamp_(min=max(query_lens))
+        repeats = torch.tensor(query_lens)
+        ref_block_tables = block_tables.repeat_interleave(repeats, dim=0)
+        ref_seq_lens = torch.cat(
+            [
+                seq_lens_tensor[i] - length + torch.arange(1, length + 1)
+                for i, length in enumerate(query_lens)
+            ]
+        )
+        extra_kwargs = {"cum_seq_lens_q": offsets, "max_q_len": max(query_lens)}
+
+    out_ref = q.new_zeros(q.shape[0], num_heads, KV_LORA_RANK)
+    ref_mla(out_ref, q, kv_cache, SCALE, ref_block_tables, ref_seq_lens)
 
     workspace_buffer = torch.zeros(
         FLASHINFER_WORKSPACE_BUFFER_SIZE,
-        dtype=torch.uint8,
+        dtype=torch.int8,
         device=q.device,
     )
     # Flashinfer MLA expects the query to be of shape
     # (bs, q_len_per_request, num_heads, qk_head_dim),
     # where q_len_per_request is the MTP query length (=1 without MTP)
-    q = q.unsqueeze(1)
+    if not ragged:
+        q = q.unsqueeze(1)
 
     out_ans = trtllm_batch_decode_with_kv_cache_mla(
         query=q,
@@ -125,6 +157,8 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
         seq_lens=seq_lens_tensor,
         max_seq_len=max_seq_len,
         bmm1_scale=SCALE,
+        backend=backend,
+        **extra_kwargs,
     )
     out_ans = out_ans.squeeze(1)
     torch.testing.assert_close(out_ans, out_ref, atol=1e-2, rtol=1e-2)
