@@ -465,9 +465,10 @@ def test_flashinfer_forward_reads_kv_cache_layout_from_metadata(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+@pytest.mark.parametrize("q_scale", [1.0, 64.0])
 @pytest.mark.parametrize("layout", ["NHD", "HND"])
 def test_nvfp4_slot_write_then_native_prefill_matches_dequantized_reference(
-    monkeypatch, layout
+    monkeypatch, layout, q_scale
 ) -> None:
     """Drive the SM8x NVFP4 contract end to end.
 
@@ -543,7 +544,8 @@ def test_nvfp4_slot_write_then_native_prefill_matches_dequantized_reference(
 
     one = torch.ones((), dtype=torch.float32, device="cuda")
     layer = SimpleNamespace(_k_scale=one, _v_scale=one)
-    layer._q_scale_float = 1.0
+    # The query stays in the model dtype, so a calibrated q_scale must not reach it.
+    layer._q_scale_float = q_scale
     layer._k_scale_float = 1.0
     layer._v_scale_float = 1.0
 

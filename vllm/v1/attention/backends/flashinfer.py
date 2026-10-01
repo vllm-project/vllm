@@ -2360,7 +2360,7 @@ class FlashInferImpl(AttentionImpl):
         prefill_wrapper.run(
             prefill_query,
             nvfp4_kv_data,
-            q_scale=layer._q_scale_float,
+            q_scale=self.query_scale(layer, prefill_query),
             k_scale=layer._k_scale_float,
             v_scale=layer._v_scale_float,
             out=output,
@@ -2374,6 +2374,13 @@ class FlashInferImpl(AttentionImpl):
                 bmm1_scale *= layer._q_scale_float
             bmm1_scale *= layer._k_scale_float
         return bmm1_scale
+
+    @staticmethod
+    def query_scale(layer: torch.nn.Module, query: torch.Tensor) -> float:
+        """q_scale belongs to an FP8 query; a model-dtype one was never scaled."""
+        if query.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            return layer._q_scale_float
+        return 1.0
 
     # SM90 may need FP8-Q for native prefill and BF16/FP16-Q for XQA decode,
     # so quantize only the slice whose target dtype differs.
@@ -2798,6 +2805,7 @@ class FlashInferImpl(AttentionImpl):
                 attn_metadata.q_data_type_decode,
                 layer._q_scale,
             )
+            decode_q_scale = self.query_scale(layer, decode_query)
 
             if not decode_with_flashinfer_trtllm_api:
                 assert isinstance(attn_metadata.decode, FIDecode)
@@ -2830,7 +2838,7 @@ class FlashInferImpl(AttentionImpl):
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_for_fi,
-                        q_scale=layer._q_scale_float,
+                        q_scale=decode_q_scale,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=output_tmp,
@@ -2848,7 +2856,7 @@ class FlashInferImpl(AttentionImpl):
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_for_fi,
-                        q_scale=layer._q_scale_float,
+                        q_scale=decode_q_scale,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=out_decode,
