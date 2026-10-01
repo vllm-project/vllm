@@ -521,6 +521,106 @@ fn attribution_incomplete_utf8_tokens_share_replacement_anchor_on_flush() {
 }
 
 #[test]
+fn attribution_special_token_after_incomplete_utf8_anchors_at_its_own_spelling() {
+    // A stray incomplete byte followed by a special token: the joint decode is
+    // exactly `decode([0xe4]) ++ decode([special])`, so the special token owns
+    // its own first byte instead of sharing the group's anchor at 0.
+    let tokenizer = tokenizer_with_special_token();
+    run_attribution_case(AttributionCase {
+        tokenizer: &tokenizer,
+        prompt_token_ids: vec![],
+        token_ids: vec![0xe4, SPECIAL_TOKEN_ID],
+        skip_special_tokens: false,
+        min_bytes_to_buffer: 0,
+        truncate_output_to: None,
+        expected_chunks: vec![decoded(
+            "�<special>",
+            &[0xe4, SPECIAL_TOKEN_ID],
+            &[visible(0), visible(3)],
+        )],
+        expected_full: decoded(
+            "�<special>",
+            &[0xe4, SPECIAL_TOKEN_ID],
+            &[visible(0), visible(3)],
+        ),
+    });
+}
+
+#[test]
+fn attribution_ascii_token_after_incomplete_utf8_anchors_at_its_own_byte() {
+    // Same rule for an ordinary token: the split is decided by the non-merge
+    // equality, not by the token being special.
+    let tokenizer = TestTokenizer::new();
+    run_attribution_case(AttributionCase {
+        tokenizer: &tokenizer,
+        prompt_token_ids: vec![],
+        token_ids: vec![0xe4, b'a' as u32],
+        skip_special_tokens: false,
+        min_bytes_to_buffer: 0,
+        truncate_output_to: None,
+        expected_chunks: vec![decoded(
+            "�a",
+            &[0xe4, b'a' as u32],
+            &[visible(0), visible(3)],
+        )],
+        expected_full: decoded("�a", &[0xe4, b'a' as u32], &[visible(0), visible(3)]),
+    });
+}
+
+#[test]
+fn attribution_byte_fallback_completion_keeps_shared_anchor_before_special_token() {
+    // The completing byte merges with the pending group (no split); the special
+    // token that follows a complete character is an ordinary independent token.
+    let tokenizer = tokenizer_with_special_token();
+    run_attribution_case(AttributionCase {
+        tokenizer: &tokenizer,
+        prompt_token_ids: vec![],
+        token_ids: vec![0xe4, 0xbd, 0xa0, SPECIAL_TOKEN_ID],
+        skip_special_tokens: false,
+        min_bytes_to_buffer: 0,
+        truncate_output_to: None,
+        expected_chunks: vec![
+            decoded(
+                "你",
+                &[0xe4, 0xbd, 0xa0],
+                &[visible(0), visible(0), visible(0)],
+            ),
+            decoded("<special>", &[SPECIAL_TOKEN_ID], &[visible(0)]),
+        ],
+        expected_full: decoded(
+            "你<special>",
+            &[0xe4, 0xbd, 0xa0, SPECIAL_TOKEN_ID],
+            &[visible(0), visible(0), visible(0), visible(3)],
+        ),
+    });
+}
+
+#[test]
+fn attribution_filtered_special_between_incomplete_utf8_and_independent_token() {
+    // A skipped special token sits between the pending byte and the independent
+    // token; it stays zero-width in generation order and the split still applies.
+    let tokenizer = tokenizer_with_special_token();
+    run_attribution_case(AttributionCase {
+        tokenizer: &tokenizer,
+        prompt_token_ids: vec![],
+        token_ids: vec![0xe4, SPECIAL_TOKEN_ID, b'a' as u32],
+        skip_special_tokens: true,
+        min_bytes_to_buffer: 0,
+        truncate_output_to: None,
+        expected_chunks: vec![decoded(
+            "�a",
+            &[0xe4, SPECIAL_TOKEN_ID, b'a' as u32],
+            &[visible(0), zero_width(0), visible(3)],
+        )],
+        expected_full: decoded(
+            "�a",
+            &[0xe4, SPECIAL_TOKEN_ID, b'a' as u32],
+            &[visible(0), zero_width(0), visible(3)],
+        ),
+    });
+}
+
+#[test]
 fn attribution_truncation_converts_fully_removed_token_to_zero_width() {
     run_attribution_case(AttributionCase {
         tokenizer: &PieceBackend,
