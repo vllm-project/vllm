@@ -142,5 +142,5 @@ Each position then carries the sampled token's logprob and the top-128
 - **Engine-level flag:** `--return-sampling-mask` globally disables the
   FlashInfer fused sampler. All requests pay the cost of the PyTorch sampling
   path, even if they don't need the mask.
-- **No streaming support:** The mask is returned only in the final response,
-  not in intermediate streaming chunks.
+- **Streaming:** Each streamed chunk carries the masks of the tokens it emits;
+  non-streaming responses return all of them at once.

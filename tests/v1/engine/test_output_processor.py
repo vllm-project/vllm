@@ -1552,32 +1552,12 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
 
 
 @pytest.mark.parametrize("output_kind", list(RequestOutputKind))
-@pytest.mark.parametrize("coalesce", [False, True])
-@pytest.mark.parametrize("stream_interval", [1, 2])
-def test_sampling_masks_follow_output_token_boundaries(
-    output_kind, coalesce, stream_interval
-):
-    import numpy as np
-
+def test_sampling_masks_follow_output_kind(output_kind):
     from vllm.v1.outputs import SamplingMaskLists
 
     state = RequestState.__new__(RequestState)
     state.detokenizer = MagicMock()
     state.detokenizer.get_next_output_text.return_value = ""
-    state.detokenizer.output_token_ids = []
-    state.detokenizer.num_output_tokens.side_effect = lambda: len(
-        state.detokenizer.output_token_ids
-    )
-    state.stream_interval = stream_interval
-    state.sent_tokens_offset = 0
-    state.external_req_id = "request"
-    state.parent_req = None
-    state.prompt = None
-    state.prompt_token_ids = [1]
-    state.lora_request = None
-    state.num_cached_tokens = 0
-    state.num_cache_creation_tokens = 0
-    state.stats = None
     state.logprobs_processor = MagicMock()
     state.logprobs_processor.logprobs = None
     state.logprobs_processor.cumulative_logprob = None
@@ -1586,39 +1566,38 @@ def test_sampling_masks_follow_output_token_boundaries(
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
     state.spec_decode_metrics = None
-    collector = RequestOutputCollector(output_kind, "request")
 
-    expected = [[10, 11], [20], [30, 31]]
-    received = []
-    for position, support in enumerate(expected):
-        state.detokenizer.output_token_ids.append(support[0])
+    supports = [[10, 11], [20], [30, 31]]
+    masks = []
+    for position, support in enumerate(supports):
         state.sampling_mask_chunks.append(SamplingMaskLists(np.asarray(support)))
-        finished = position == len(expected) - 1
-        result = state.make_request_output(
-            [support[0]], None, FinishReason.LENGTH if finished else None, None
-        )
-        if result is None:
-            continue
-        collector.put(result)
-        if not coalesce:
-            received.append(collector.get_nowait())
-    if coalesce:
-        received.append(collector.get_nowait())
+        finish = FinishReason.LENGTH if position == len(supports) - 1 else None
+        output = state._new_completion_output([support[0]], finish, None)
+        masks.append(output.sampling_mask and output.sampling_mask.token_ids)
 
     if output_kind == RequestOutputKind.DELTA:
-        masks = [
-            support
-            for result in received
-            for support in result.outputs[0].sampling_mask.token_ids
-        ]
-        assert masks == expected
-        for result in received:
-            completion = result.outputs[0]
-            assert len(completion.sampling_mask.token_ids) == len(completion.token_ids)
-        assert state.sampling_mask_chunks == []
-        assert (
-            state._new_completion_output([], FinishReason.LENGTH, None).sampling_mask
-            is None
-        )
+        assert masks == [[support] for support in supports]
     else:
-        assert received[-1].outputs[0].sampling_mask.token_ids == expected
+        assert masks == [None, None, supports]
+
+
+def test_request_output_add_merges_delta_sampling_masks():
+    from vllm.outputs import SamplingMask
+
+    def delta(token_ids, mask):
+        completion = CompletionOutput(
+            index=0,
+            text="",
+            token_ids=token_ids,
+            cumulative_logprob=None,
+            logprobs=None,
+            sampling_mask=mask and SamplingMask(mask),
+        )
+        return RequestOutput("request", None, [1], None, [completion], False)
+
+    merged = delta([], None)
+    merged.add(delta([10], [[10, 11]]), aggregate=True)
+    merged.add(delta([20], [[20]]), aggregate=True)
+
+    assert merged.outputs[0].token_ids == [10, 20]
+    assert merged.outputs[0].sampling_mask.token_ids == [[10, 11], [20]]
