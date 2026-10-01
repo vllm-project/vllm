@@ -1317,6 +1317,10 @@ def _check_requirements_preinstalled(requirements: list[str]) -> None:
     against the running Python's headers, e.g.
     https://github.com/vllm-project/vllm/issues/34073. Fail fast with an
     actionable message instead of a cryptic compiler error.
+
+    Skipped under `--no-deps`, which makes setuptools skip `install_requires`
+    processing entirely, so the easy_install path this guards against is
+    unreachable anyway.
     """
     from importlib.metadata import PackageNotFoundError
     from importlib.metadata import version as installed_version
@@ -1398,7 +1402,7 @@ def get_requirements() -> list[str]:
         requirements = modified_requirements
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
-        if "develop" in sys.argv[1:]:
+        if "develop" in sys.argv[1:] and "--no-deps" not in sys.argv[1:]:
             _check_requirements_preinstalled(requirements)
     elif _is_tpu():
         requirements = _read_requirements("tpu.txt")
