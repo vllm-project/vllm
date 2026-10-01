@@ -13,6 +13,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -518,6 +519,47 @@ def test_register_kv_caches(backend):
             assert actual.page_size_bytes == expected.page_size_bytes
             # Every layer gets a canonical mapping, certified or opaque
             assert actual.mapping is not None
+
+
+def test_register_packed_kv_caches_skips_scratch_group():
+    attn_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    page = attn_spec.page_size_bytes
+    layers = ["layer0", "layer1"]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * page * NUM_BLOCKS,
+                layers=layers,
+                layer_stride=page,
+                block_stride=2 * page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layers, attn_spec),
+            KVCacheGroupSpec(
+                ["scratch"],
+                CircularBufferSpec(
+                    block_size=4, num_kv_heads=1, head_size=1, dtype=DTYPE
+                ),
+            ),
+        ],
+    )
+    kv_caches = _allocate_kv_caches(
+        kv_cache_config, [], device=torch.device(f"{DEVICE_TYPE}:0")
+    )
+    worker, spec = _make_worker(kv_cache_config)
+    worker.register_kv_caches(kv_caches)
+
+    canonical = spec.get_worker.call_args[0][0]
+    assert len(canonical.tensors) == 1
+    assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, 2 * page)
+    assert canonical.group_data_refs == [[CanonicalKVCacheRef(0, 2 * page)]]
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
