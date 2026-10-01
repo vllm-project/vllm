@@ -135,10 +135,16 @@ def _uses_dense_virtual_transfer_pages(
     physical_page_size: int,
     num_blocks: int,
 ) -> bool:
-    """Return whether a compressed kernel view can be split into NIXL pages."""
+    """Return whether a contiguous MLA kernel row can be split into NIXL pages.
+
+    A kernel row spans several NIXL pages when MLA states are compressed
+    (``tokens_per_state > 1``), or when the model runner picked a larger kernel
+    block for a KV cache group than the block size NIXL selects across all
+    attention backends (e.g. a drafter on a backend with smaller blocks).
+    MLA rows are token-major and contiguous, so NIXL pages tile them exactly.
+    """
     if not (
-        isinstance(layer_spec, MLAAttentionSpec)
-        and layer_spec.tokens_per_state > 1
+        isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec))
         and cache.ndim == 4
         and cache.shape[1] == 1
         and cache.is_contiguous()
@@ -1640,7 +1646,7 @@ class NixlBaseConnectorWorker:
                     and is_mla_region
                 )
                 if virtual_transfer_pages:
-                    # A compressed kernel row can contain multiple NIXL transfer pages.
+                    # A contiguous MLA kernel row can contain multiple NIXL pages.
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, physical_page_size)
                     ]
