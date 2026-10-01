@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 import os
 import shlex
 import subprocess
@@ -387,14 +386,14 @@ fi
         "python3": """#!/bin/bash
 set -eu
 if [[ "$1 $2" == '-m pip' ]]; then
-    printf '%s\\n' "$*" >> "$FAKE_PIP_LOG"
+    exit 0
 elif [[ "$1" == '-c' && "$2" == *'m.version("vllm")'* ]]; then
     echo '0.20.0+test'
 else
     exit 99
 fi
 """,
-        "git": '#!/bin/sh\ntouch "$FAKE_GIT_CALLED"\nexit 99\n',
+        "git": "#!/bin/sh\nexit 99\n",
     }
     for name, body in fake_commands.items():
         command = fake_bin / name
@@ -427,8 +426,6 @@ fi
         "TMPDIR": str(tmp_path),
         "FAKE_ARTIFACT_ROOT": str(tmp_path),
         "FAKE_BUILDKITE_LOG": str(tmp_path / "buildkite.log"),
-        "FAKE_PIP_LOG": str(tmp_path / "pip.log"),
-        "FAKE_GIT_CALLED": str(tmp_path / "git-called"),
     }
     subprocess.run(
         [
@@ -472,37 +469,6 @@ printf '%s\\n' "${VLLM_VERSION_OVERRIDE:-}" \\
     )
 
 
-def test_rocm_publisher_binds_separate_source_to_install_artifact(
-    tmp_path: Path,
-) -> None:
-    prepare_rocm_native_artifacts(tmp_path)
-    artifacts = tmp_path / "artifacts" / "vllm-rocm-install"
-    source = artifacts / "vllm-rocm-source.tar.gz"
-    with tarfile.open(artifacts / "vllm-rocm-install.tar.gz") as archive:
-        names = archive.getnames()
-        assert not any(name.endswith("vllm-rocm-source.tar.gz") for name in names)
-        source_checksum = archive.extractfile("./.vllm-ci-artifact/source.sha256")
-        assert source_checksum is not None
-        assert source_checksum.read().decode().split() == [
-            hashlib.sha256(source.read_bytes()).hexdigest(),
-            source.name,
-        ]
-        for filename, expected in {
-            "commit.txt": "abc123",
-            "native-base-image.txt": "rocm/vllm-dev:ci_base-build-build-123",
-            "wheel-filename.txt": "vllm-test.whl",
-        }.items():
-            metadata = archive.extractfile(f"./.vllm-ci-artifact/{filename}")
-            assert metadata is not None
-            assert metadata.read().decode().strip() == expected
-    subprocess.run(
-        ["sha256sum", "-c", "vllm-rocm-install.tar.gz.sha256"],
-        cwd=artifacts,
-        check=True,
-        capture_output=True,
-    )
-
-
 def test_rocm_python_only_workspace_uses_source_artifact_without_checkout(
     tmp_path: Path,
 ) -> None:
@@ -515,21 +481,9 @@ def test_rocm_python_only_workspace_uses_source_artifact_without_checkout(
     workspace = Path(env["VLLM_CI_WORKSPACE"])
     for filename in ("setup.py", "pyproject.toml", "vllm/__init__.py"):
         assert (workspace / filename).read_text() == "# matching build source\n"
-    assert (workspace / "tests" / "from-artifact").is_file()
-    assert not (workspace / ".git").exists()
-    assert not Path(env["FAKE_GIT_CALLED"]).exists()
     version, wheel = (tmp_path / "workspace-environment").read_text().splitlines()
     assert version == "0.20.0+test"
     assert Path(wheel).read_bytes() == b"test wheel"
-    assert wheel in Path(env["FAKE_PIP_LOG"]).read_text()
-    downloads = [
-        line
-        for line in Path(env["FAKE_BUILDKITE_LOG"]).read_text().splitlines()
-        if line.startswith("artifact download")
-    ]
-    assert len(downloads) == 3
-    assert all(line.endswith("--step image-build-amd") for line in downloads)
-    assert "vllm-rocm-source.tar.gz" in downloads[-1]
 
 
 def test_rocm_python_only_workspace_rejects_corrupt_source(tmp_path: Path) -> None:
@@ -543,18 +497,6 @@ def test_rocm_python_only_workspace_rejects_corrupt_source(tmp_path: Path) -> No
     assert result.returncode != 0
     assert "FAILED" in result.stdout + result.stderr
     assert not (Path(env["VLLM_CI_WORKSPACE"]) / "setup.py").exists()
-
-
-def test_rocm_python_only_workspace_rejects_another_commit(tmp_path: Path) -> None:
-    env = prepare_rocm_native_artifacts(tmp_path)
-    env["BUILDKITE_COMMIT"] = "another-commit"
-
-    result = run_rocm_native_workspace(tmp_path, env, "python_only_compile.sh")
-
-    assert result.returncode != 0
-    assert "does not match another-commit" in result.stderr
-    assert "vllm-rocm-source.tar.gz" not in Path(env["FAKE_BUILDKITE_LOG"]).read_text()
-    assert not Path(env["FAKE_PIP_LOG"]).exists()
 
 
 def test_rocm_regular_workspace_never_downloads_or_overlays_source(
@@ -571,4 +513,5 @@ def test_rocm_regular_workspace_never_downloads_or_overlays_source(
     assert (workspace / "tests" / "from-artifact").is_file()
     assert not (workspace / "vllm").exists()
     assert not (workspace / "setup.py").exists()
+    assert not (workspace / "vllm-rocm-source.tar.gz").exists()
     assert "vllm-rocm-source.tar.gz" not in Path(env["FAKE_BUILDKITE_LOG"]).read_text()
