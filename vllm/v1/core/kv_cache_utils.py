@@ -1152,8 +1152,7 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
     """Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
-    capacity once `num_gpu_blocks_override` is applied. Host-resident groups
-    have their own pool.
+    capacity once `num_gpu_blocks_override` is applied.
     """
     return _get_kv_cache_bytes_per_block(
         [group for group in kv_cache_groups if not group.host_resident]
@@ -2501,7 +2500,6 @@ def _max_memory_usage_bytes_from_groups(
 
     Each group independently claims blocks from the shared pool, so a request consumes
     the sum of the per-group block counts, i.e. ``bytes_per_block * total_blocks``.
-    Host-resident groups have their own pool.
     """
     kv_cache_groups = [group for group in kv_cache_groups if not group.host_resident]
     if not kv_cache_groups:
