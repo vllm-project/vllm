@@ -221,7 +221,7 @@ class TieringOffloadingManager(OffloadingManager):
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
             tier_poll_interval_s: Pause between control-plane rounds for
-                tiers that set needs_control_plane_thread. Zero or negative
+                tiers that set serves_external_requests. Zero or negative
                 disables the thread, leaving those tiers serviced once per
                 engine step as before.
 
@@ -272,11 +272,12 @@ class TieringOffloadingManager(OffloadingManager):
             tier: i for i, tier in enumerate(self.secondary_tiers)
         }
 
-        # Tiers whose control plane must be serviced between engine steps.
-        self._control_plane_tiers: list[tuple[int, SecondaryTierManager]] = [
+        # Tiers that serve external requests, and so must also be serviced
+        # between engine steps.
+        self._external_serving_tiers: list[tuple[int, SecondaryTierManager]] = [
             (i, tier)
             for i, tier in enumerate(self.secondary_tiers)
-            if tier.needs_control_plane_thread
+            if tier.serves_external_requests
         ]
         self._tier_poll_interval_s = tier_poll_interval_s
         self._control_plane_stop = threading.Event()
@@ -294,7 +295,7 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _start_control_plane(self) -> None:
         """Start the control-plane thread, if any tier asked for one."""
-        if not self._control_plane_tiers or self._tier_poll_interval_s <= 0:
+        if not self._external_serving_tiers or self._tier_poll_interval_s <= 0:
             return
         self._control_plane_thread = threading.Thread(
             target=self._control_plane_loop,
@@ -304,7 +305,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._control_plane_thread.start()
         logger.info(
             "KV offload control-plane thread started for tier(s) %s, interval %.3fs",
-            [tier.tier_type for _, tier in self._control_plane_tiers],
+            [tier.tier_type for _, tier in self._external_serving_tiers],
             self._tier_poll_interval_s,
         )
 
@@ -385,8 +386,8 @@ class TieringOffloadingManager(OffloadingManager):
         relies on that: it establishes lookup() HITs and then pins them, and the
         two must not be separated by an eviction.
         """
-        self._process_finished_jobs(self._control_plane_tiers)
-        for _, tier in self._control_plane_tiers:
+        self._process_finished_jobs(self._external_serving_tiers)
+        for _, tier in self._external_serving_tiers:
             tier.serve_external_requests(self._tier_parents[tier])
 
     @property

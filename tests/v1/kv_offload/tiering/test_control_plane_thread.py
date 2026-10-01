@@ -52,7 +52,7 @@ class _FakeTier(SecondaryTierManager):
     """Tier that records which thread serviced it, and when."""
 
     medium: ClassVar[Medium] = Medium.CPU
-    needs_control_plane_thread: ClassVar[bool] = True
+    serves_external_requests: ClassVar[bool] = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -101,7 +101,7 @@ class _FakeTier(SecondaryTierManager):
 class _QuietTier(_FakeTier):
     """Tier that does not want servicing between steps."""
 
-    needs_control_plane_thread: ClassVar[bool] = False
+    serves_external_requests: ClassVar[bool] = False
 
 
 def _make_manager(tier_cls=_FakeTier, num_chunks: int = 8, **kwargs):

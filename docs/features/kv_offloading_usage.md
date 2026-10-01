@@ -155,7 +155,7 @@ Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the ti
 
 Tier methods run in the scheduler process, under the tiering manager's lock, so they are never entered concurrently. They are not always called from the same thread, though.
 
-Most tiers only ever see the scheduler thread, which holds the lock for the length of one engine step. A tier whose counterpart is not driven by the engine — the `p2p` tier, answering a remote peer — needs servicing while the engine is busy running the model, because otherwise a peer's lookup or fetch waits for the next step boundary. On a saturated rank that wait can be seconds, dwarfing the transfer it gates. Such tiers set `needs_control_plane_thread`, and the tiering manager runs one thread that polls them and lets them serve, once per `tier_poll_interval_s`.
+Most tiers only ever see the scheduler thread, which holds the lock for the length of one engine step. A tier whose counterpart is not driven by the engine — the `p2p` tier, answering a remote peer — needs servicing while the engine is busy running the model, because otherwise a peer's lookup or fetch waits for the next step boundary. On a saturated rank that wait can be seconds, dwarfing the transfer it gates. Such tiers set `serves_external_requests`, and the tiering manager runs one thread that, once per `tier_poll_interval_s`, polls them for finished jobs and lets them serve external requests. A tier that implements `serve_external_requests()` without setting the flag is served once per engine step only.
 
 Two consequences worth knowing:
 
