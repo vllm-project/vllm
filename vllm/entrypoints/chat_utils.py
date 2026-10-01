@@ -25,7 +25,6 @@ from typing import (
     get_origin,
 )
 
-import regex as re
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
@@ -2036,17 +2035,13 @@ _AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
 _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 
 
-# Claude Code opens its system prompt with an attribution block such as
-# "x-anthropic-billing-header: cc_version=...; cc_entrypoint=...; cch=...;".
-_CLAUDE_CODE_BILLING_HEADER = re.compile(
-    r"x-anthropic-billing-header:(?:[ \t]*[\w.-]+=[^;\n]*;)*[ \t]*\n?"
-)
+_CLAUDE_CODE_BILLING_HEADER = "x-anthropic-billing-header"
 
 
 def _strip_claude_code_billing_header(
     parts: Iterable[ChatCompletionContentPartParam],
 ) -> list[ChatCompletionContentPartParam]:
-    """Drop Claude Code's attribution header from system text parts.
+    """Drop Claude Code's attribution header line from system text parts.
 
     Its ``cch`` value changes on every request, so a prompt that keeps it
     misses the prefix cache from the header on. Gateways that translate
@@ -2061,13 +2056,10 @@ def _strip_claude_code_billing_header(
             text = part.get("text")
         else:
             text = None
-        match = (
-            _CLAUDE_CODE_BILLING_HEADER.match(text) if isinstance(text, str) else None
-        )
-        if match is None:
+        if not (isinstance(text, str) and text.startswith(_CLAUDE_CODE_BILLING_HEADER)):
             out.append(part)
             continue
-        rest = cast(str, text)[match.end() :]
+        rest = text.partition("\n")[2]
         if not rest:
             continue
         out.append(

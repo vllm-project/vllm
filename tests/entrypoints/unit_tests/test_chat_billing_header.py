@@ -23,12 +23,19 @@ def _parse(message, content_format="openai"):
 
 
 @pytest.mark.skip_global_cleanup
-def test_system_header_part_is_dropped():
+@pytest.mark.parametrize(
+    "header",
+    [
+        HEADER,
+        "x-anthropic-billing-header: cc_version=2.1.286.99b; cc_entrypoint=sdk-cli;",
+    ],
+)
+def test_system_header_part_is_dropped(header):
     (msg,) = _parse(
         {
             "role": "system",
             "content": [
-                {"type": "text", "text": HEADER},
+                {"type": "text", "text": header},
                 {"type": "text", "text": "You are a Claude agent."},
             ],
         }
@@ -37,10 +44,9 @@ def test_system_header_part_is_dropped():
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("separator", ["", "\n", " "])
-def test_system_header_prefix_is_stripped_from_string(separator):
+def test_system_header_line_is_stripped_from_string():
     (msg,) = _parse(
-        {"role": "system", "content": HEADER + separator + "You are a Claude agent."},
+        {"role": "system", "content": HEADER + "\nYou are a Claude agent."},
         content_format="string",
     )
     assert msg["content"] == "You are a Claude agent."
@@ -51,7 +57,7 @@ def test_requests_differing_only_in_cch_parse_identically():
     def system(cch):
         return {
             "role": "system",
-            "content": HEADER.replace("7adab", cch) + "You are a Claude agent.",
+            "content": HEADER.replace("7adab", cch) + "\nYou are a Claude agent.",
         }
 
     assert _parse(system("7adab")) == _parse(system("986dd"))
