@@ -560,7 +560,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
 
         self.gauge_kv_fetch_by_stage: dict[str, dict[int, Gauge]] = {}
-        if vllm_config.kv_transfer_config is not None:
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer:
             gauge_kv_fetch_by_stage = self._gauge_cls(
                 name="vllm:num_requests_kv_fetch_by_stage",
                 documentation=(

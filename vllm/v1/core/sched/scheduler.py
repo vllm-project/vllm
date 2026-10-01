@@ -416,9 +416,12 @@ class Scheduler(SchedulerInterface):
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
 
-        self._kv_fetch_reqs: dict[str, set[Request]] = {
-            stage: set() for stage in KV_FETCH_STAGES
-        }
+        # Requests with an async KV load, by stage (KV_FETCH_STAGES).
+        # None when not tracked (stats disabled or no KV connector).
+        self._kv_fetch_stages: dict[Request, str] | None = (
+            {} if self.log_stats and self.connector is not None else None
+        )
+        self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
 
     def _mamba_block_aligned_split(
         self,
@@ -1047,7 +1050,6 @@ class Scheduler(SchedulerInterface):
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
                         )
-
                     self._set_kv_fetch_stage(
                         request, KV_FETCH_WAITING_TO_START if load_kv_async else None
                     )
@@ -2602,7 +2604,8 @@ class Scheduler(SchedulerInterface):
                 )
             if self.connector is not None:
                 self.connector.on_new_request(request)
-                if (request.kv_transfer_params or {}).get("do_remote_prefill"):
+                kv_transfer_params = request.kv_transfer_params
+                if kv_transfer_params and kv_transfer_params.get("do_remote_prefill"):
                     # Count P/D requests on arrival: connector matching is
                     # skipped while all run slots are taken.
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
@@ -2908,9 +2911,7 @@ class Scheduler(SchedulerInterface):
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
-            num_kv_fetch_reqs_by_stage={
-                stage: len(reqs) for stage, reqs in self._kv_fetch_reqs.items()
-            },
+            num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
@@ -3051,10 +3052,14 @@ class Scheduler(SchedulerInterface):
         )
 
     def _set_kv_fetch_stage(self, request: Request, stage: str | None) -> None:
-        for reqs in self._kv_fetch_reqs.values():
-            reqs.discard(request)
-        if stage is not None:
-            self._kv_fetch_reqs[stage].add(request)
+        kv_fetch_stages = self._kv_fetch_stages
+        if kv_fetch_stages is not None:
+            prev_stage = kv_fetch_stages.pop(request, None)
+            if prev_stage is not None:
+                self._kv_fetch_counts[prev_stage] -= 1
+            if stage is not None:
+                kv_fetch_stages[request] = stage
+                self._kv_fetch_counts[stage] += 1
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""

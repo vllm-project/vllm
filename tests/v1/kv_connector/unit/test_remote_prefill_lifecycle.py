@@ -31,9 +31,7 @@ def _num_waiting_requests(scheduler) -> int:
 
 def _kv_fetch_stages(scheduler) -> tuple[int, ...]:
     """(waiting_to_start, in_progress, completed_waiting) request counts."""
-    stats = scheduler.make_stats()
-    assert stats is not None
-    return tuple(stats.num_kv_fetch_reqs_by_stage[s] for s in KV_FETCH_STAGES)
+    return tuple(scheduler._kv_fetch_counts[s] for s in KV_FETCH_STAGES)
 
 
 def test_basic_lifecycle():
