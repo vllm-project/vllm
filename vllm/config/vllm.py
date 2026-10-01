@@ -1272,9 +1272,15 @@ class VllmConfig:
             return
         if not self.use_v2_model_runner:
             raise ValueError("sampling distribution replay requires Model Runner V2")
-        if self.speculative_config is not None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.enable_adaptive_verification
+        ):
             raise ValueError(
-                "sampling distribution replay does not support speculative decoding"
+                "sampling distribution replay with speculative decoding "
+                "requires fixed verification boundaries; disable adaptive "
+                "verification"
             )
         if model_config.is_diffusion:
             raise ValueError(
@@ -1351,13 +1357,6 @@ class VllmConfig:
                     "share of output tokens supplied by accepted drafts.",
                     scope="global",
                 )
-            if watermark_config.deduplicate_contexts != "none":
-                logger.warning_once(
-                    "Context deduplication is not supported with speculative "
-                    "decoding and will not be applied to accepted drafts, "
-                    "rejection-recovery tokens, or bonus tokens.",
-                    scope="global",
-                )
             if watermark_config.algorithm == "dual_key_gumbel" and (
                 watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
             ):
@@ -1377,8 +1376,6 @@ class VllmConfig:
 
     def _resolve_and_verify_engram_config(self) -> None:
         """Resolve defaults and validate n-gram embedding settings."""
-        from vllm.platforms import current_platform
-
         model_config = self.model_config
         speculative_config = self.speculative_config
         # Draft configs inherit the target's communication groups and settings.
@@ -1399,9 +1396,7 @@ class VllmConfig:
                 "Disable --enable-dbo and set --ubatch-size to 0."
             )
         if self.engram_config is None:
-            if not current_platform.is_cuda_alike() or not model_has_engram_layers(
-                model_config
-            ):
+            if not model_has_engram_layers(model_config):
                 return
             self.engram_config = EngramConfig()
         self.engram_config.verify_model_config(model_config)
@@ -1833,6 +1828,14 @@ class VllmConfig:
                 raise ValueError(
                     "HiSparse does not support decode context parallelism."
                 )
+            if not self.scheduler_config.scheduler_reserve_full_isl:
+                # Without it, async loads admitted against free host blocks can
+                # each wait on host pages the others hold, and waiting requests
+                # are never preempted to free them.
+                raise ValueError(
+                    "HiSparse requires --scheduler-reserve-full-isl; remove "
+                    "--no-scheduler-reserve-full-isl."
+                )
             if self.model_config is not None and not hasattr(
                 self.model_config.hf_config, "index_topk"
             ):
@@ -2031,11 +2034,15 @@ class VllmConfig:
         # After the platform hook, which has the last word on async scheduling.
         if (
             self.diffusion_config is not None
-            and self.scheduler_config.async_scheduling
             and self.scheduler_config.scheduler_cls is None
         ):
+            scheduler_name = (
+                "DiffusionAsyncScheduler"
+                if self.scheduler_config.async_scheduling
+                else "DiffusionScheduler"
+            )
             self.scheduler_config.scheduler_cls = (
-                "vllm.v1.core.sched.diffusion_scheduler.DiffusionAsyncScheduler"
+                f"vllm.v1.core.sched.diffusion_scheduler.{scheduler_name}"
             )
 
         self._normalize_piecewise_cudagraph_mode(
@@ -2048,6 +2055,7 @@ class VllmConfig:
         self._validate_mm_processor_device()
 
         if self.use_v2_model_runner:
+            self._disable_cudagraphs_for_v2_stock_torch_compile()
             self._validate_v2_model_runner()
         else:
             self._validate_v1_model_runner()
@@ -3052,9 +3060,6 @@ class VllmConfig:
         unsupported: list[str] = []
         speculative_config = self.speculative_config
 
-        if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
-            unsupported.append("stock torch.compile")
-
         if (
             self.compilation_config.pass_config.enable_sp
             and self.parallel_config.tensor_parallel_size > 1
@@ -3074,8 +3079,6 @@ class VllmConfig:
                 # https://github.com/vllm-project/vllm/pull/40704
                 "ngram",
                 "ngram_gpu",
-                # https://github.com/vllm-project/vllm/pull/43091
-                "draft_model",
                 "suffix",
                 "medusa",
                 "mlp_speculator",
@@ -3094,9 +3097,6 @@ class VllmConfig:
 
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
-
-        if self.parallel_config.enable_elastic_ep:
-            unsupported.append("elastic expert parallelism")
 
         if self.cache_config.mamba_cache_mode == "all":
             unsupported.append("mamba cache mode 'all'")
@@ -3313,6 +3313,28 @@ class VllmConfig:
                 "Enable attribution or use --enforce-eager."
             )
 
+    def _disable_cudagraphs_for_v2_stock_torch_compile(self) -> None:
+        """Run stock torch.compile without CUDA graphs in Model Runner V2.
+
+        V1 never wraps a stock-compiled model in CUDAGraphWrapper, so it runs
+        without CUDA graphs. V2's CUDA graph manager would otherwise capture
+        FULL graphs around the stock-compiled model, so disable them to match.
+        """
+        compilation_config = self.compilation_config
+        if (
+            compilation_config.mode != CompilationMode.STOCK_TORCH_COMPILE
+            or compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        ):
+            return
+        logger.info_once(
+            "CUDA graphs are not supported with stock torch.compile in Model "
+            "Runner V2. Overriding cudagraph_mode %s to NONE.",
+            compilation_config.cudagraph_mode.name,
+        )
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        compilation_config.max_cudagraph_capture_size = 0
+        compilation_config.cudagraph_capture_sizes = []
+
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
         if not HAS_TRITON:
@@ -3449,7 +3471,22 @@ class VllmConfig:
         if not self.cache_config.use_replayssm:
             self.cache_config.use_recoverssm = False
             return self
-        self.cache_config.use_recoverssm = self.num_speculative_tokens > 0
+
+        recoverssm_architectures = (
+            "KimiLinearForCausalLM",
+            "KimiK3ForConditionalGeneration",
+            *_QWEN4EXP_RECOVERSSM_ARCHS,
+        )
+        is_recoverssm_model = (
+            self.model_config is not None
+            and self.model_config.architecture in recoverssm_architectures
+        )
+        self.cache_config.use_recoverssm = (
+            self.num_speculative_tokens > 0 and is_recoverssm_model
+        )
+        use_mamba_replayssm_spec = (
+            self.num_speculative_tokens > 0 and not self.cache_config.use_recoverssm
+        )
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
@@ -3467,15 +3504,14 @@ class VllmConfig:
                 "--use-replayssm on Qwen4Exp selects GDN RecoverSSM and requires "
                 "speculative decoding (num_speculative_tokens > 0)"
             )
+        if (
+            self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            and self.cache_config.replayssm_buffer_len > 16
+        ):
+            raise ValueError(
+                "FlashInfer ReplaySSM requires --replayssm-buffer-len <= 16"
+            )
         if self.cache_config.use_recoverssm:
-            if self.model_config is not None and self.model_config.architecture not in (
-                "KimiLinearForCausalLM",
-                "KimiK3ForConditionalGeneration",
-                *_QWEN4EXP_RECOVERSSM_ARCHS,
-            ):
-                raise ValueError(
-                    "RecoverSSM is only supported for Kimi-K3 KDA and Qwen4Exp GDN"
-                )
             if self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(
                     "RecoverSSM supports bfloat16/float32 "
@@ -3499,6 +3535,25 @@ class VllmConfig:
                 )
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
+        elif use_mamba_replayssm_spec:
+            if self.cache_config.mamba_cache_mode != "none":
+                raise ValueError(
+                    "FlashInfer ReplaySSM speculative decoding requires "
+                    "--mamba-cache-mode none"
+                )
+            query_len = 1 + self.num_speculative_tokens
+            if self.cache_config.replayssm_buffer_len < query_len:
+                raise ValueError(
+                    "FlashInfer ReplaySSM speculative decoding requires "
+                    "--replayssm-buffer-len >= 1 + num_speculative_tokens "
+                    f"({query_len}); got "
+                    f"{self.cache_config.replayssm_buffer_len}"
+                )
+            if self.mamba_config.backend != MambaBackendEnum.FLASHINFER:
+                raise ValueError(
+                    "Mamba2 ReplaySSM speculative decoding requires "
+                    "--mamba-backend flashinfer"
+                )
         elif self.cache_config.mamba_cache_mode == "all":
             raise ValueError(
                 "--use-replayssm supports prefix caching only in align mode; "
