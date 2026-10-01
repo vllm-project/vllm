@@ -51,7 +51,7 @@ def pids_that_recorded(multiproc_dir: Path) -> set[str]:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="IPC weight transfer uses CUDA IPC."
+    current_platform.is_xpu(), reason="IPC weight transfer is not supported on XPU."
 )
 def test_weight_sync_metrics_aggregate_across_api_servers(tmp_path):
     args = [
