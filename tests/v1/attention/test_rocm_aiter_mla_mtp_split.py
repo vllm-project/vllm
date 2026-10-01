@@ -137,7 +137,11 @@ def _builder(
         _supports_segmented_dcp_verify=supports_segmented_dcp_verify,
         _supports_triton_dcp_verify=supports_triton_dcp_verify,
         # Derived once in the real constructor, so derive it once here too.
-        _segmented_page_size=rocm_aiter_mla._segmented_mla_page_size(kernel_block_size),
+        _dcp_verify_page_size=(
+            kernel_block_size
+            if supports_triton_dcp_verify
+            else rocm_aiter_mla._segmented_mla_page_size(kernel_block_size)
+        ),
         _dcp_verify_buffers=None,
         _graph_seq_lens=None,
         _kv_cache_dtype_str=kv_cache_dtype,
