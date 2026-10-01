@@ -474,7 +474,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
-    mamba_cache_mode: Literal["all", "align", "none"] = "none",
+    mamba_cache_mode: Literal["align", "none"] = "none",
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(
