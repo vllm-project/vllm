@@ -92,33 +92,21 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
                 NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
             )
         self.autotune_use_cuda_graph = moe_config.max_capture_size > 0
+        self._localized_kwargs: dict = {}
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
-        # apply() reads shards lazily because it has no layer argument.
-        self._localized_layer = layer
-
-    def _localized_call_kwargs(self, w1: torch.Tensor) -> dict:
-        """Cache FlashInfer locality arguments, or an empty dict without shards."""
-        cached = getattr(self, "_localized_kwargs", None)
-        if cached is not None:
-            return cached
-
+        self._localized_kwargs = {}
         res = get_localized_resources()
-        shards = getattr(
-            getattr(self, "_localized_layer", None),
-            "localized_shards",
-            None,
-        )
+        shards = getattr(layer, "localized_shards", None)
         if res is None or not shards:
             if res is not None:
                 logger.warning(
                     "[locality domains] localization enabled but this layer has "
                     "no per-die shards; falling back to the full-width MoE path"
                 )
-            self._localized_kwargs = {}
-            return self._localized_kwargs
+            return
 
         logger.info_once(
             "[locality domains] localized MoE wired: %d per-die shards", len(shards)
@@ -154,7 +142,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
                 else {}
             ),
         }
-        return self._localized_kwargs
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -309,5 +296,5 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             **swiglu_kwargs,
             **per_token_kwargs,
             # Full-width weight metadata is retained even when storage is released.
-            **self._localized_call_kwargs(w1),
+            **self._localized_kwargs,
         )

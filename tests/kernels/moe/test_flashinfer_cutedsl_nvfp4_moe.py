@@ -3,6 +3,7 @@
 """Tests for FlashInfer CuTeDSL NVFP4 MoE."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -355,3 +356,92 @@ def test_flashinfer_cutedsl_fp4_moe(
             cutedsl_output.flatten().float(), torch_output.flatten().float(), dim=0
         )
         assert cosine > 0.99, f"cosine similarity {cosine:.4f} below 0.99"
+
+
+@pytest.mark.parametrize("localized", [False, True])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_localization_arguments_initialized_after_loading(
+    monkeypatch, localized, overlap
+):
+    import vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe as mod
+
+    scale = torch.ones(1)
+    config = FusedMoEConfig(
+        num_experts=2,
+        experts_per_token=1,
+        hidden_dim=128,
+        intermediate_size=128,
+        num_local_experts=2,
+        num_logical_experts=2,
+        activation=MoEActivation.SILU,
+        device="cpu",
+        in_dtype=torch.bfloat16,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        routing_method=RoutingMethodType.TopK,
+    )
+    experts = FlashInferCuteDSLExperts(
+        config,
+        nvfp4_moe_quant_config(
+            g1_alphas=scale,
+            g2_alphas=scale,
+            a1_gscale=scale,
+            a2_gscale=scale,
+            w1_scale=scale,
+            w2_scale=scale,
+        ),
+    )
+    shard = {
+        name: torch.ones(1)
+        for name in ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
+    }
+    layer = SimpleNamespace(
+        w13_weight_scale_2=scale.clone(),
+        w2_weight_scale_2=scale.clone(),
+        w13_input_scale=scale,
+        w2_input_scale=scale,
+        localized_shards=[shard] if localized else [],
+    )
+    resources = SimpleNamespace(
+        split_streams=[object()],
+        split_sm_counts=[8],
+        aux_stream=object(),
+    )
+    lookup = Mock(return_value=resources)
+    monkeypatch.setattr(mod, "get_localized_resources", lookup)
+    monkeypatch.setenv("VLLM_MOE_LOCALIZE_MEMSET_OVERLAP", str(int(overlap)))
+    monkeypatch.setenv("VLLM_MOE_LOCALIZE_FREE_FULL_WEIGHTS", "1")
+    experts.process_weights_after_loading(layer)
+    lookup.assert_called_once_with()
+    lookup.side_effect = AssertionError(
+        "apply must not discover localization resources"
+    )
+    backend = Mock()
+    monkeypatch.setattr(mod, "flashinfer_cute_dsl_fused_moe_nvfp4", backend)
+    experts.apply(
+        output=scale,
+        hidden_states=scale,
+        w1=scale,
+        w2=scale,
+        topk_weights=scale,
+        topk_ids=scale.int(),
+        activation=MoEActivation.SILU,
+        global_num_experts=2,
+        expert_map=None,
+        a1q_scale=scale,
+        a2_scale=None,
+        workspace13=None,
+        workspace2=None,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    kwargs = backend.call_args.kwargs
+    if localized:
+        assert kwargs["localized_weights"][0]["w1_weight"] is shard["w13_weight"]
+        assert kwargs["localized_streams"] is resources.split_streams
+        assert kwargs["localized_sm_count"] == 8
+        assert kwargs["localized_allow_nonlocalized"] is False
+        assert ("localized_memset_stream" in kwargs) == overlap
+        if overlap:
+            assert kwargs["localized_memset_stream"] is resources.aux_stream
+    else:
+        assert not any(key.startswith("localized_") for key in kwargs)
