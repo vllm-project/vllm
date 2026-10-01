@@ -15,10 +15,10 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
-from vllm.model_executor.layers.batch_invariant import (
+from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,
 )
+from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
