@@ -6,7 +6,7 @@
 torch==2.13.0+rocm10.0.0
 torchvision==0.28.0+rocm10.0.0
 torchaudio==2.11.0+rocm10.0.0
-triton==3.8.0+git4cff872c.rocm10.0.0
+triton==3.8.0+git669b31ac
 cmake>=3.26.1,<4
 packaging>=26.2
 setuptools>=78.1.1,<80.0.0
