@@ -245,6 +245,15 @@ class AnthropicMessagesRequest(BaseModel):
         return self
 
 
+AnthropicStopReason = Literal[
+    "end_turn",
+    "max_tokens",
+    "stop_sequence",
+    "tool_use",
+    "model_context_window_exceeded",
+]
+
+
 class AnthropicDelta(BaseModel):
     """Delta for streaming responses."""
 
@@ -258,9 +267,7 @@ class AnthropicDelta(BaseModel):
     signature: str | None = None
 
     # Message delta
-    stop_reason: (
-        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None
-    ) = None
+    stop_reason: AnthropicStopReason | None = None
     stop_sequence: str | None = None
 
 
@@ -293,9 +300,7 @@ class AnthropicMessagesResponse(BaseModel):
     role: Literal["assistant"] = "assistant"
     content: list[AnthropicContentBlock]
     model: str
-    stop_reason: (
-        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None
-    ) = None
+    stop_reason: AnthropicStopReason | None = None
     stop_sequence: str | None = None
     usage: AnthropicUsage | None = None
 
