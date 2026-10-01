@@ -34,7 +34,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
 from vllm.renderers import renderer_from_config
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
@@ -1159,8 +1159,6 @@ async def test_stream_prompt_tokens_details_zero_cached():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_mask", [False, True])
 async def test_stream_sampling_mask_matches_each_token_chunk(with_mask):
-    from vllm.outputs import SamplingMask
-
     engine = _mock_engine()
 
     async def generate(*args, **kwargs):

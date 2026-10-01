@@ -439,7 +439,7 @@ class RequestState:
             logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
 
         sampling_mask = None
-        if self.sampling_mask_chunks and (delta or finished):
+        if (delta or finished) and self.sampling_mask_chunks:
             sampling_mask = SamplingMask(
                 [chunk.token_ids.tolist() for chunk in self.sampling_mask_chunks]
             )
