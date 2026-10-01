@@ -1,13 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 from transformers import AutoTokenizer
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.detokenizer import (
+    IncrementalDetokenizer,
+    InvalidTokenIDError,
+)
 
 # ruff: noqa: E501
+
+
+def _make_request(prompt_token_ids):
+    return EngineCoreRequest(
+        request_id="test",
+        external_req_id="test-ext",
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        sampling_params=SamplingParams(skip_special_tokens=True),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+
+@pytest.mark.parametrize("bad_id", [-1, -1120453120, 2**31, 2**40])
+def test_fast_inc_detok_out_of_range_token_id(bad_id):
+    """An out-of-range token id (corrupt model output) must raise a clear
+    InvalidTokenIDError rather than silently emitting an empty token or a
+    cryptic Rust ``StreamInput`` TypeError."""
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    detokenizer = IncrementalDetokenizer.from_new_request(
+        tokenizer, _make_request([1, 2, 3])
+    )
+    assert detokenizer.__class__.__name__ == "FastIncrementalDetokenizer"
+
+    # A valid id detokenizes fine.
+    detokenizer.update([100], False)
+
+    # An out-of-range id is surfaced as InvalidTokenIDError.
+    with pytest.raises(InvalidTokenIDError):
+        detokenizer.update([bad_id], False)
 
 
 def test_fast_inc_detok_invalid_utf8_err_case():
