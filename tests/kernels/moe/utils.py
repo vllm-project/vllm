@@ -65,6 +65,8 @@ def make_dummy_moe_config(
     in_dtype: torch.dtype = torch.bfloat16,
     max_num_tokens: int = 512,
     activation: MoEActivation = MoEActivation.SILU,
+    device: torch.device | str | None = None,
+    moe_parallel_config: FusedMoEParallelConfig | None = None,
 ) -> FusedMoEConfig:
     """This is a dummy config for the mk constructor interface
     as most kernels like DeepGEMM, CUTLASSFp4, Triton, MARLIN
@@ -72,6 +74,11 @@ def make_dummy_moe_config(
 
     CUTLASSFp8 needs to set some params for workshapes.
     """
+    if device is None:
+        device = DEVICE
+    if moe_parallel_config is None:
+        moe_parallel_config = FusedMoEParallelConfig.make_no_parallel()
+
     return FusedMoEConfig(
         num_experts=num_experts,
         experts_per_token=experts_per_token,
@@ -81,10 +88,10 @@ def make_dummy_moe_config(
         if num_local_experts is not None
         else num_experts,
         num_logical_experts=num_experts,
-        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        moe_parallel_config=moe_parallel_config,
         activation=activation,
         in_dtype=in_dtype,
-        device=DEVICE,
+        device=device,
         routing_method=RoutingMethodType.TopK,
         max_num_tokens=max_num_tokens,
     )

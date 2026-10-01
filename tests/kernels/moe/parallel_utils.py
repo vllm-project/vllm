@@ -13,17 +13,17 @@ from torch.distributed import ProcessGroup
 from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import ParamSpec
 
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    RoutingMethodType,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
+
+from .utils import make_dummy_moe_config
 
 if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
@@ -68,31 +68,20 @@ def make_test_moe_config(
     experts_per_token: int = 1,
     all2all_backend: str = "deepep_high_throughput",
 ) -> FusedMoEConfig:
-    return FusedMoEConfig(
+    return make_dummy_moe_config(
         num_experts=num_experts,
         experts_per_token=experts_per_token,
         hidden_dim=hidden_size,
         intermediate_size=hidden_size,
-        num_local_experts=num_local_experts,
-        num_logical_experts=num_experts,
-        activation=MoEActivation.SILU,
         device=pgi.device,
-        routing_method=RoutingMethodType.TopK,
-        moe_parallel_config=FusedMoEParallelConfig(
-            tp_size=1,
-            pcp_size=1,
+        moe_parallel_config=dataclasses.replace(
+            FusedMoEParallelConfig.make_no_parallel(),
             dp_size=dp_size,
             ep_size=pgi.world_size,
-            tp_rank=0,
-            pcp_rank=0,
-            dp_rank=0,
             ep_rank=pgi.rank,
-            sp_size=1,
             use_ep=True,
             all2all_backend=all2all_backend,
-            enable_eplb=False,
         ),
-        in_dtype=torch.bfloat16,
         max_num_tokens=max_num_tokens,
     )
 
