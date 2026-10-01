@@ -11,7 +11,16 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
-pytestmark = pytest.mark.skip_global_cleanup
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1x
+
+pytestmark = [
+    pytest.mark.skip_global_cleanup,
+    pytest.mark.skipif(
+        not (current_platform.is_rocm() and on_gfx1x()),
+        reason="Segmented attention requires RDNA GPUs",
+    ),
+]
 
 
 def _make_paged_attention_case(
