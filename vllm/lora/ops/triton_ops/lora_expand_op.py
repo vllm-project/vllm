@@ -237,9 +237,9 @@ def _lora_expand(
     ]:
         CAST_TYPE = True
 
-    # TODO (varun): This grid formulation maximizes parallelization at the
-    # cost of wasteful thread block launch when only a few input tokens require
-    # LoRA. This might not be the best in all cases.
+    # The grid uses the maximum number of tokens assigned to any active LoRA.
+    # Using the global token count can result in excessive thread block launches
+    # for fragmented Multi-LoRA workloads.
     grid = (
         triton.cdiv(MAX_LORA_M, BLOCK_M) * triton.cdiv(MAX_N, BLOCK_N),
         NUM_SLICES,
