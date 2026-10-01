@@ -48,6 +48,8 @@ def dequant_fp8(
 class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """Prepare/Finalize using NIXL EP kernels."""
 
+    uses_batched_compaction = True
+
     # NIXL EP kernels are compiled only for certain specific hidden sizes.
     # NOTE: Keep this list sorted, maybe_roundup_layer_hidden_size depends
     # on it.
@@ -73,13 +75,14 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         buffer: nixl_ep.Buffer,
         max_tokens_per_rank: int,
         num_dispatchers: int,
-        expert_capacity: int,
+        num_physical_experts: int,
         use_fp8_dispatch: bool = False,
         global_to_physical: torch.Tensor | None = None,
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
+        expert_capacity: int | None = None,
     ):
-        super().__init__()
+        super().__init__(expert_capacity=expert_capacity)
 
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
@@ -89,7 +92,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # combine function.
         self.handles: list[tuple | None] = [None, None]
         self.num_dispatchers_ = num_dispatchers
-        self.expert_capacity = expert_capacity
+        self.num_physical_experts = num_physical_experts
 
         topk_indices_dtype = self.topk_indices_dtype()
 
@@ -109,13 +112,6 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_ue8m0_dispatch = False
 
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
-        self._configure_batched_compaction(
-            fused_experts,
-            self.max_tokens_per_rank,
-            self.num_dispatchers_,
-            self.supports_token_dropping,
-            self.use_fp8_dispatch,
-        )
         if not fused_experts.supports_packed_ue8m0_act_scales():
             # Early exit.
             return
@@ -260,7 +256,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             a1,
             dispatch_topk_ids,
             self.max_tokens_per_rank,
-            self.expert_capacity,
+            self.num_physical_experts,
             use_fp8=self.use_fp8_dispatch,
             # round_scale needs to be set to dispatch in ue8m0
             round_scale=self.use_ue8m0_dispatch,

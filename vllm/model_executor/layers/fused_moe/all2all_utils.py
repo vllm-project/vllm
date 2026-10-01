@@ -187,6 +187,7 @@ def maybe_make_prepare_finalize(
                 num_local_experts=moe.num_local_experts,
                 num_dispatchers=1,
                 rank=moe.moe_parallel_config.ep_rank,
+                expert_capacity=moe.expert_capacity,
             )
 
         # For DP/TP case, fall back to naive P/F.
@@ -201,9 +202,13 @@ def maybe_make_prepare_finalize(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
                 num_dispatchers=all2all_manager.world_size,
                 use_monolithic=use_monolithic,
+                expert_capacity=moe.expert_capacity,
             )
         else:
-            return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
+            return make_moe_prepare_and_finalize_no_dp_ep(
+                use_monolithic,
+                expert_capacity=moe.expert_capacity,
+            )
 
     if all2all_manager is None:
         all2all_manager = get_ep_all2all_manager()
@@ -220,6 +225,7 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
             dp_size=all2all_manager.dp_world_size,
             rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
+            expert_capacity=moe.expert_capacity,
         )
 
     elif moe.use_deepep_ll_kernels:
@@ -255,6 +261,7 @@ def maybe_make_prepare_finalize(
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
+            expert_capacity=moe.expert_capacity,
         )
     elif moe.use_deepep_v2_kernels:
         assert moe.dp_size == all2all_manager.dp_world_size
@@ -285,6 +292,7 @@ def maybe_make_prepare_finalize(
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
             sp_size=moe.moe_parallel_config.sp_size,
+            expert_capacity=moe.expert_capacity,
         )
 
     elif moe.use_moonep_kernels:
@@ -307,6 +315,7 @@ def maybe_make_prepare_finalize(
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             num_global_experts=moe.num_experts,
+            expert_capacity=moe.expert_capacity,
         )
 
     elif moe.use_mori_kernels:
@@ -353,12 +362,14 @@ def maybe_make_prepare_finalize(
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
+            expert_capacity=moe.expert_capacity,
         )
 
     elif moe.use_fi_nvl_two_sided_kernels:
         assert quant_config is not None
         prepare_finalize = FlashInferNVLinkTwoSidedPrepareAndFinalize(
             num_dispatchers=all2all_manager.world_size,
+            expert_capacity=moe.expert_capacity,
         )
 
     elif moe.use_fi_nvl_one_sided_kernels:
@@ -377,6 +388,7 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
             x_bytes_per_token=dispatch_layout.x_bytes_per_token,
             x_sf_bytes_per_token=dispatch_layout.x_sf_bytes_per_token,
+            expert_capacity=moe.expert_capacity,
         )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
@@ -384,6 +396,7 @@ def maybe_make_prepare_finalize(
             use_monolithic=use_monolithic,
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             num_dispatchers=all2all_manager.world_size,
+            expert_capacity=moe.expert_capacity,
         )
 
     elif moe.use_nixl_ep_kernels:
@@ -413,11 +426,14 @@ def maybe_make_prepare_finalize(
             handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.max_num_ep_ranks,
-            expert_capacity=(moe.num_local_experts * all2all_manager.max_num_ep_ranks),
+            num_physical_experts=(
+                moe.num_local_experts * all2all_manager.max_num_ep_ranks
+            ),
             use_fp8_dispatch=use_fp8_dispatch,
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
+            expert_capacity=moe.expert_capacity,
         )
 
     return prepare_finalize

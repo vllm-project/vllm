@@ -6,11 +6,6 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEActivationFormat,
-    FusedMoEExperts,
-)
-
 
 @dataclass
 class _StandardCompactionState:
@@ -27,14 +22,10 @@ class StandardTokenRowCompaction:
 
     def configure(
         self,
-        experts: FusedMoEExperts,
+        expert_capacity: int | None,
         supports_token_dropping: bool,
     ) -> None:
-        self._enabled = (
-            supports_token_dropping
-            and experts.expert_capacity is not None
-            and experts.activation_format() == FusedMoEActivationFormat.Standard
-        )
+        self._enabled = supports_token_dropping and expert_capacity is not None
 
     def compact_dispatch_input(
         self,
@@ -67,30 +58,33 @@ class StandardTokenRowCompaction:
             topk_weights.index_select(0, rows).contiguous(),
         )
 
-    def is_compacted(self, ubatch_id: int) -> bool:
-        return self._states[ubatch_id] is not None
-
-    def scatter_output(
+    def scatter_or_copy_output(
         self,
         output: torch.Tensor,
-        compact_output: torch.Tensor,
+        source_output: torch.Tensor,
         ubatch_id: int,
     ) -> Callable[[], None]:
         state = self._states[ubatch_id]
         if state is None:
-            return lambda: None
+            if output is not source_output:
+                output.copy_(source_output, non_blocking=True)
 
-        assert output.shape[0] == state.original_rows
-        assert compact_output.shape[0] == state.retained_rows.numel()
-        assert output.shape[1:] == compact_output.shape[1:]
-        assert output.dtype == compact_output.dtype
-        assert output.device == compact_output.device
-        output.zero_()
-        if compact_output.numel() != 0:
-            output.index_copy_(0, state.retained_rows, compact_output)
+            def receiver():
+                _ = source_output
 
-        def receiver():
-            _ = compact_output
-            self._states[ubatch_id] = None
+            return receiver
+        else:
+            assert output.shape[0] == state.original_rows
+            assert source_output.shape[0] == state.retained_rows.numel()
+            assert output.shape[1:] == source_output.shape[1:]
+            assert output.dtype == source_output.dtype
+            assert output.device == source_output.device
+            output.zero_()
+            if source_output.numel() != 0:
+                output.index_copy_(0, state.retained_rows, source_output)
 
-        return receiver
+            def receiver():
+                _ = source_output
+                self._states[ubatch_id] = None
+
+            return receiver

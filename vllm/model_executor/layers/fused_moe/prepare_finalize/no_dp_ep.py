@@ -40,16 +40,8 @@ def _quantize_input(
 class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
     supports_token_dropping = True
 
-    def __init__(self):
-        super().__init__()
-        self.expert_capacity: int | None = None
-
-    def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
-        self.expert_capacity = fused_experts.expert_capacity
-        self._configure_standard_compaction(
-            fused_experts,
-            self.supports_token_dropping,
-        )
+    def __init__(self, expert_capacity: int | None = None):
+        super().__init__(expert_capacity=expert_capacity)
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -107,29 +99,23 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
     ) -> None:
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceContiguous()
-        if self._is_standard_compacted(0):
-            compact_output = weight_and_reduce_impl.apply(
-                output=None,
-                fused_expert_output=fused_expert_output,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
-            receiver = self._scatter_standard_output(output, compact_output, 0)
-            receiver()
-        else:
-            weight_and_reduce_impl.apply(
-                output=output,
-                fused_expert_output=fused_expert_output,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
+        compact_output = weight_and_reduce_impl.apply(
+            output=None,
+            fused_expert_output=fused_expert_output,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
+        receiver = self._scatter_or_copy_output(output, compact_output, 0)
+        receiver()
 
 
 class MoEPrepareAndFinalizeNoDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):
     def supports_deferred_moe_finalize(self) -> bool:
         return True
+
+    def __init__(self, expert_capacity: int | None = None):
+        super().__init__(expert_capacity=expert_capacity)
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -166,9 +152,10 @@ class MoEPrepareAndFinalizeNoDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolit
 
 def make_moe_prepare_and_finalize_no_dp_ep(
     use_monolithic: bool,
+    expert_capacity: int | None = None,
 ) -> MoEPrepareAndFinalizeNoDPEPModular | MoEPrepareAndFinalizeNoDPEPMonolithic:
     return (
-        MoEPrepareAndFinalizeNoDPEPMonolithic()
+        MoEPrepareAndFinalizeNoDPEPMonolithic(expert_capacity=expert_capacity)
         if use_monolithic
-        else MoEPrepareAndFinalizeNoDPEPModular()
+        else MoEPrepareAndFinalizeNoDPEPModular(expert_capacity=expert_capacity)
     )

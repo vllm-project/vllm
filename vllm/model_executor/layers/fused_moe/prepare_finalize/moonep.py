@@ -220,8 +220,9 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_dispatchers: int,
         num_global_experts: int,
         weight_layout: MoonEPExpertWeightLayout | None = None,
+        expert_capacity: int | None = None,
     ):
-        super().__init__()
+        super().__init__(expert_capacity=expert_capacity)
         self.buffer_pool = buffer_pool
         self.max_tokens_per_rank = max_tokens_per_rank
         self.num_dispatchers_ = num_dispatchers

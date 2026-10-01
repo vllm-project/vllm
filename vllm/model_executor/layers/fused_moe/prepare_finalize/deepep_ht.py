@@ -53,16 +53,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_dispatchers: int,
         dp_size: int,
         rank_expert_offset: int,
+        expert_capacity: int | None = None,
     ):
-        super().__init__()
+        super().__init__(expert_capacity=expert_capacity)
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
         self.async_prepare = True
         self.sync_dbo_comm = current_platform.is_rocm()
-        self.expert_capacity: int | None = None
-
         # The dispatch function returns a handle that the combine function
         # requires. Under DBO microbatching we must track one handle per
         # micro-batch to avoid races between threads.
@@ -70,13 +69,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
-
-    def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
-        self.expert_capacity = fused_experts.expert_capacity
-        self._configure_standard_compaction(
-            fused_experts,
-            self.supports_token_dropping,
-        )
 
     def _sync_dbo_comm_if_needed(self) -> None:
         if self.sync_dbo_comm and dbo_enabled():
@@ -411,15 +403,12 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 if event.event is not None:
                     event.current_stream_wait()
                 dbo_switch_to_comm()
-                if self._is_standard_compacted(a2a_idx):
-                    receiver = self._scatter_standard_output(
-                        output,
-                        combined_x,
-                        a2a_idx,
-                    )
-                    receiver()
-                else:
-                    output.copy_(combined_x, non_blocking=True)
+                receiver = self._scatter_or_copy_output(
+                    output,
+                    combined_x,
+                    a2a_idx,
+                )
+                receiver()
 
                 # TODO(lucas): refactor the modular kernel so this will be
                 # handled there
@@ -429,15 +418,12 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             # TODO(lucas): support this case with the refactored modular kernel
             assert not dbo_enabled()
-            if self._is_standard_compacted(a2a_idx):
-                receiver = self._scatter_standard_output(
-                    output,
-                    combined_x,
-                    a2a_idx,
-                )
-                receiver()
-            else:
-                output.copy_(combined_x, non_blocking=True)
+            receiver = self._scatter_or_copy_output(
+                output,
+                combined_x,
+                a2a_idx,
+            )
+            receiver()
             return None
 
     def finalize_async(

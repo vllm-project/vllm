@@ -52,6 +52,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     # DeepEP low-latency kernels are compiled only for certain
     # specific hidden sizes.
+    uses_batched_compaction = True
     # NOTE: Keep this list sorted, maybe_roundup_layer_hidden_size depends
     # on it.
     SUPPORTED_HIDDEN_SIZES = [2048, 2560, 3072, 4096, 5120, 6144, 7168, 8192]
@@ -87,8 +88,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         global_to_physical: torch.Tensor | None = None,
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
+        expert_capacity: int | None = None,
     ):
-        super().__init__()
+        super().__init__(expert_capacity=expert_capacity)
 
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
@@ -98,8 +100,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # combine function.
         self.handles: list[tuple | None] = [None, None]
         self.num_dispatchers_ = num_dispatchers
-        self.expert_capacity: int | None = None
-
         topk_indices_dtype = self.topk_indices_dtype()
 
         def _maybe_cast(tensor: torch.Tensor | None) -> torch.Tensor | None:
@@ -118,13 +118,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_ue8m0_dispatch = False
 
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
-        self._configure_batched_compaction(
-            fused_experts,
-            self.max_tokens_per_rank,
-            self.num_dispatchers_,
-            self.supports_token_dropping,
-            self.use_fp8_dispatch,
-        )
         if not fused_experts.supports_packed_ue8m0_act_scales():
             # Early exit.
             return
@@ -140,8 +133,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"activations despite ({fused_experts.__class__.__name__}) being able "
                 "to support quantized activations.",
             )
-
-        self.expert_capacity = fused_experts.expert_capacity
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_

@@ -16,6 +16,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.batched_compaction im
 from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
     MoEPrepareAndFinalizeNoDPEPModular,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.standard_compaction import (
+    StandardTokenRowCompaction,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -25,7 +28,7 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 def make_kernel(monkeypatch, capacity, prepare_finalize=None):
     if prepare_finalize is None:
-        prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular()
+        prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular(expert_capacity=capacity)
     experts = SimpleNamespace(
         moe_config=SimpleNamespace(
             expert_capacity=capacity,
@@ -41,7 +44,11 @@ def make_kernel(monkeypatch, capacity, prepare_finalize=None):
         prepare_finalize,
         experts,
     )
-    prepare_finalize.post_init_setup(experts)
+    if (
+        kernel.expert_capacity is not None
+        and prepare_finalize.activation_format == experts.activation_format()
+    ):
+        kernel._configure_compaction()
     observed: dict[str, torch.Tensor] = {}
 
     def expert_output(**kwargs):
@@ -150,7 +157,9 @@ def test_dropping_preserves_rows_after_async_finalize_and_shared_input(
 
             return receiver
 
-    kernel, _ = make_kernel(monkeypatch, capacity, AsyncPrepareFinalize())
+    kernel, _ = make_kernel(
+        monkeypatch, capacity, AsyncPrepareFinalize(expert_capacity=capacity)
+    )
     states = torch.ones(3, 2)
     shared_input = torch.ones(3, 4)
     shared = Mock()
@@ -171,7 +180,7 @@ def test_dropping_preserves_rows_after_async_finalize_and_shared_input(
 
 
 def test_unsupported_dispatch_leaves_routing_unchanged(monkeypatch):
-    prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular()
+    prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular(expert_capacity=1)
     prepare_finalize.supports_token_dropping = False
     kernel, observed = make_kernel(monkeypatch, 1, prepare_finalize)
     states = torch.ones(3, 2)
@@ -183,6 +192,17 @@ def test_unsupported_dispatch_leaves_routing_unchanged(monkeypatch):
     torch.testing.assert_close(output, states * weights)
     assert observed["ids"] is ids
     assert observed["weights"] is weights
+
+
+def test_standard_compaction_copies_output_when_not_compacted():
+    compaction = StandardTokenRowCompaction()
+    output = torch.zeros(3, 2)
+    source = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+
+    receiver = compaction.scatter_or_copy_output(output, source, 0)
+    receiver()
+
+    torch.testing.assert_close(output, source)
 
 
 @pytest.mark.parametrize("supports_dropping", [False, True])
@@ -205,7 +225,7 @@ def test_dispatch_support_controls_batched_workspace_capacity(supports_dropping)
         max_num_tokens=128,
     )
     config.expert_capacity = 7
-    dispatcher = BatchedPrepareAndFinalize(128, 2, 1, 0)
+    dispatcher = BatchedPrepareAndFinalize(128, 2, 1, 0, expert_capacity=7)
     dispatcher.supports_token_dropping = supports_dropping
     experts = BatchedTritonExperts(config, FusedMoEQuantConfig.make(None), 128, 1)
     mk.FusedMoEKernelModularImpl(dispatcher, experts)
@@ -236,9 +256,8 @@ def test_batched_dispatch_uses_expert_capacity_without_changing_rank_limit(monke
         BatchedPrepareAndFinalize,
     )
 
-    prepare_finalize = BatchedPrepareAndFinalize(8, 2, 1, 0)
+    prepare_finalize = BatchedPrepareAndFinalize(8, 2, 1, 0, expert_capacity=1)
     kernel, _ = make_kernel(monkeypatch, 1, prepare_finalize)
-    prepare_finalize.post_init_setup(kernel.fused_experts)
     states, _, metadata, _, _ = prepare_finalize.prepare(
         torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
         torch.tensor([[0.9, 0.0], [0.0, 0.8]]),
@@ -281,10 +300,12 @@ def test_dropping_triton_matches_retained_expert_contributions(
     )
     config.expert_capacity = capacity
     if batched:
-        prepare_finalize = BatchedPrepareAndFinalize(4, 2, 1, 0)
+        prepare_finalize = BatchedPrepareAndFinalize(
+            4, 2, 1, 0, expert_capacity=capacity
+        )
         experts = BatchedTritonExperts(config, FusedMoEQuantConfig.make(None), 4, 1)
     else:
-        prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular()
+        prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular(expert_capacity=capacity)
         experts = TritonExperts(config, FusedMoEQuantConfig.make(None))
     kernel = mk.FusedMoEKernel(prepare_finalize, experts)
     torch.manual_seed(0)
@@ -448,8 +469,11 @@ def test_batched_compaction_handles_fp8_dispatch_scale_layout(
     experts.quant_config = SimpleNamespace(is_quantized=True, use_fp8_w8a8=True)
 
     compaction = BatchedExpertCompaction()
-    compaction.configure(experts, 8, 2, True, True)
-    assert experts.max_num_tokens == 2
+    tokens_per_expert = compaction.configure(
+        2, 8, 2, True, True, expert_name == "humming"
+    )
+    assert tokens_per_expert == 2
+    assert experts.max_num_tokens == 8
 
     num_experts, full_rows = 2, 16
     hidden_dim = 512
@@ -534,7 +558,7 @@ def test_batched_compaction_feeds_deep_gemm_fp8(workspace_init):
     experts.expert_capacity = 2
 
     compaction = BatchedExpertCompaction()
-    compaction.configure(experts, 8, 2, True, True)
+    experts.max_num_tokens = compaction.configure(2, 8, 2, True, True, False)
     states = (
         torch.randn(
             num_experts, full_rows, hidden_dim, device="cuda", dtype=torch.bfloat16
@@ -623,11 +647,25 @@ def test_batched_compaction_restores_combine_layout(
     experts.expert_capacity = capacity
     buffer = Mock()
     if backend == "nixl":
-        dispatcher = pf.NixlEPPrepareAndFinalize(buffer, 8, 2, 4)
+        dispatcher = pf.NixlEPPrepareAndFinalize(
+            buffer, 8, 2, 4, expert_capacity=capacity
+        )
         combine = buffer.combine
     else:
-        dispatcher = pf.DeepEPLLPrepareAndFinalize(buffer, 8, 2)
+        dispatcher = pf.DeepEPLLPrepareAndFinalize(
+            buffer, 8, 2, expert_capacity=capacity
+        )
         combine = buffer.low_latency_combine
+    compact_tokens = dispatcher._configure_batched_compaction(
+        capacity,
+        BatchedExpertCompaction.supports_experts(
+            experts,
+            dispatcher.use_fp8_dispatch,
+        ),
+        BatchedExpertCompaction.uses_contiguous_scales(experts),
+    )
+    if compact_tokens is not None:
+        experts.max_num_tokens = compact_tokens
     dispatcher.post_init_setup(experts)
     received = torch.arange(2 * 16 * 128).reshape(2, 16, 128).to(torch.bfloat16)
     counts = torch.tensor([4, 1] if capacity is None else [min(4, capacity * 2), 0])

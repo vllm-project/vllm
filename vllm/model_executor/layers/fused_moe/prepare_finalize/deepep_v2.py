@@ -117,8 +117,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
         sp_size: int = 1,
+        expert_capacity: int | None = None,
     ):
-        super().__init__()
+        super().__init__(expert_capacity=expert_capacity)
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
@@ -131,18 +132,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
-        self.expert_capacity: int | None = None
-
         # arange(num_local_experts) + rank_expert_offset. Rank-constant, so it
         # is built once per device instead of once per layer per step.
         self._global_expert_ids_cache: torch.Tensor | None = None
-
-    def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
-        self.expert_capacity = fused_experts.expert_capacity
-        self._configure_standard_compaction(
-            fused_experts,
-            self.supports_token_dropping,
-        )
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -506,27 +498,21 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             def _receiver():
                 if event.event is not None:
                     event.current_stream_wait()
-                if self._is_standard_compacted(a2a_idx):
-                    receiver = self._scatter_standard_output(
-                        output,
-                        combined_x,
-                        a2a_idx,
-                    )
-                    receiver()
-                else:
-                    output.copy_(combined_x, non_blocking=True)
-
-            return _receiver
-        else:
-            if self._is_standard_compacted(a2a_idx):
-                receiver = self._scatter_standard_output(
+                receiver = self._scatter_or_copy_output(
                     output,
                     combined_x,
                     a2a_idx,
                 )
                 receiver()
-            else:
-                output.copy_(combined_x, non_blocking=True)
+
+            return _receiver
+        else:
+            receiver = self._scatter_or_copy_output(
+                output,
+                combined_x,
+                a2a_idx,
+            )
+            receiver()
             return None
 
     def finalize_async(

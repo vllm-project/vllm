@@ -34,8 +34,9 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         x_bytes_per_token: int,
         x_sf_bytes_per_token: int,
         num_dispatchers: int = 1,
+        expert_capacity: int | None = None,
     ):
-        super().__init__()
+        super().__init__(expert_capacity=expert_capacity)
         self.max_num_tokens = max_num_tokens
         self.top_k = top_k
         self.num_experts = num_experts

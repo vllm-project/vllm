@@ -179,7 +179,7 @@ class SupportsStandardCompaction(Protocol):
 
     def configure(
         self,
-        experts: "FusedMoEExperts",
+        expert_capacity: int | None,
         supports_token_dropping: bool,
     ) -> None: ...
 
@@ -191,12 +191,10 @@ class SupportsStandardCompaction(Protocol):
         ubatch_id: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
-    def is_compacted(self, ubatch_id: int) -> bool: ...
-
-    def scatter_output(
+    def scatter_or_copy_output(
         self,
         output: torch.Tensor,
-        compact_output: torch.Tensor,
+        source_output: torch.Tensor,
         ubatch_id: int,
     ) -> Callable[[], None]: ...
 
@@ -206,12 +204,13 @@ class SupportsBatchedCompaction(Protocol):
 
     def configure(
         self,
-        experts: "FusedMoEExperts",
+        expert_capacity: int | None,
         max_tokens_per_rank: int,
         num_dispatchers: int,
         supports_token_dropping: bool,
-        use_fp8_dispatch: bool,
-    ) -> None: ...
+        supports_compaction: bool,
+        contiguous_scales: bool,
+    ) -> int | None: ...
 
     def compact(
         self,
@@ -239,6 +238,9 @@ class FusedMoEPrepareAndFinalize(ABC):
     * FusedMoEPrepareAndFinalizeModular - this operates on topk ids and weights
     * FusedMoEPrepareAndFinalizeMonolithic - the operates on router_logits
     """
+
+    def __init__(self, expert_capacity: int | None = None) -> None:
+        self.expert_capacity = expert_capacity
 
     def post_init_setup(self, fused_experts: "FusedMoEExperts"):
         """Initialize FusedMoEPrepareAndFinalizeModular settings that depend on
@@ -300,6 +302,7 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     """
 
     supports_token_dropping: bool = False
+    uses_batched_compaction: bool = False
     _standard_compaction: SupportsStandardCompaction | None = None
     _batched_compaction: SupportsBatchedCompaction | None = None
 
@@ -340,10 +343,13 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
 
     def _configure_standard_compaction(
         self,
-        experts: "FusedMoEExperts",
+        expert_capacity: int | None,
         supports_token_dropping: bool,
     ) -> None:
-        self._get_standard_compaction().configure(experts, supports_token_dropping)
+        self._get_standard_compaction().configure(
+            expert_capacity,
+            supports_token_dropping,
+        )
 
     def _compact_standard_dispatch_input(
         self,
@@ -359,35 +365,31 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
             ubatch_id,
         )
 
-    def _is_standard_compacted(self, ubatch_id: int) -> bool:
-        return self._get_standard_compaction().is_compacted(ubatch_id)
-
-    def _scatter_standard_output(
+    def _scatter_or_copy_output(
         self,
         output: torch.Tensor,
-        compact_output: torch.Tensor,
+        source_output: torch.Tensor,
         ubatch_id: int,
     ) -> Callable[[], None]:
-        return self._get_standard_compaction().scatter_output(
+        return self._get_standard_compaction().scatter_or_copy_output(
             output,
-            compact_output,
+            source_output,
             ubatch_id,
         )
 
     def _configure_batched_compaction(
         self,
-        experts: "FusedMoEExperts",
-        max_tokens_per_rank: int,
-        num_dispatchers: int,
-        supports_token_dropping: bool,
-        use_fp8_dispatch: bool,
-    ) -> None:
-        self._get_batched_compaction().configure(
-            experts,
-            max_tokens_per_rank,
-            num_dispatchers,
-            supports_token_dropping,
-            use_fp8_dispatch,
+        expert_capacity: int | None,
+        supports_compaction: bool,
+        contiguous_scales: bool,
+    ) -> int | None:
+        return self._get_batched_compaction().configure(
+            expert_capacity,
+            self.max_num_tokens_per_rank() or 0,
+            self.num_dispatchers(),
+            self.supports_token_dropping,
+            supports_compaction,
+            contiguous_scales,
         )
 
     def _compact_batched_experts(
@@ -1310,10 +1312,14 @@ class FusedMoEKernelModularImpl:
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self._workspace_peaks: tuple[int, ...] = (0, 0, 0, 0, 0)
+        configured_capacity = fused_experts.moe_config.expert_capacity
+        if prepare_finalize.expert_capacity != configured_capacity:
+            raise ValueError(
+                "prepare_finalize expert_capacity must match the MoE config "
+                f"({prepare_finalize.expert_capacity!r} != {configured_capacity!r})"
+            )
         self.expert_capacity = (
-            fused_experts.moe_config.expert_capacity
-            if prepare_finalize.supports_token_dropping
-            else None
+            configured_capacity if prepare_finalize.supports_token_dropping else None
         )
         fused_experts.expert_capacity = self.expert_capacity
         if self.expert_capacity is not None:
@@ -1329,6 +1335,31 @@ class FusedMoEKernelModularImpl:
             and moe_parallel_config.dp_size > 1
             and moe_parallel_config.use_ep
         )
+
+    def _configure_compaction(self) -> None:
+        if self.prepare_finalize.activation_format == FusedMoEActivationFormat.Standard:
+            self.prepare_finalize._configure_standard_compaction(
+                self.expert_capacity,
+                self.prepare_finalize.supports_token_dropping,
+            )
+            return
+
+        if not self.prepare_finalize.uses_batched_compaction:
+            return
+
+        from .prepare_finalize.batched_compaction import BatchedExpertCompaction
+
+        use_fp8_dispatch = getattr(self.prepare_finalize, "use_fp8_dispatch", False)
+        compact_tokens = self.prepare_finalize._configure_batched_compaction(
+            self.expert_capacity,
+            BatchedExpertCompaction.supports_experts(
+                self.fused_experts,
+                use_fp8_dispatch,
+            ),
+            BatchedExpertCompaction.uses_contiguous_scales(self.fused_experts),
+        )
+        if compact_tokens is not None:
+            self.fused_experts.max_num_tokens = compact_tokens
 
     def _record_workspace_usage(
         self,
@@ -1997,6 +2028,11 @@ class FusedMoEKernel:
                 prepare_finalize,
                 fused_experts,
             )
+            assert (
+                prepare_finalize.activation_format == fused_experts.activation_format()
+            )
+            if self.impl.expert_capacity is not None:
+                self.impl._configure_compaction()
 
         elif isinstance(
             prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic

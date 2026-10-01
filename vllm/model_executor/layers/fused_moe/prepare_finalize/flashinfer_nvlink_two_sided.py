@@ -28,8 +28,9 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
     def __init__(
         self,
         num_dispatchers: int = 1,
+        expert_capacity: int | None = None,
     ):
-        super().__init__()
+        super().__init__(expert_capacity=expert_capacity)
         self.num_dispatchers_ = num_dispatchers
         device_communicator = get_ep_group().device_communicator
         assert device_communicator is not None

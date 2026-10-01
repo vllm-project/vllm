@@ -79,8 +79,9 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         self,
         is_sequence_parallel: bool = False,
         num_dispatchers: int = 1,
+        expert_capacity: int | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(expert_capacity=expert_capacity)
         self.is_sequence_parallel = is_sequence_parallel
         self._num_dispatchers = num_dispatchers
         # Set by FusedMoEWithLoRA.set_mapping() when LoRA is active. When
@@ -218,8 +219,9 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         self,
         is_sequence_parallel: bool = False,
         num_dispatchers: int = 1,
+        expert_capacity: int | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(expert_capacity=expert_capacity)
         self.is_sequence_parallel = is_sequence_parallel
         self._num_dispatchers = num_dispatchers
 
@@ -283,15 +285,18 @@ def make_moe_prepare_and_finalize_naive_dp_ep(
     use_monolithic: bool,
     is_sequence_parallel: bool = False,
     num_dispatchers: int = 1,
+    expert_capacity: int | None = None,
 ) -> MoEPrepareAndFinalizeNaiveDPEPModular | MoEPrepareAndFinalizeNaiveDPEPMonolithic:
     return (
         MoEPrepareAndFinalizeNaiveDPEPMonolithic(
             is_sequence_parallel=is_sequence_parallel,
             num_dispatchers=num_dispatchers,
+            expert_capacity=expert_capacity,
         )
         if use_monolithic
         else MoEPrepareAndFinalizeNaiveDPEPModular(
             is_sequence_parallel=is_sequence_parallel,
             num_dispatchers=num_dispatchers,
+            expert_capacity=expert_capacity,
         )
     )

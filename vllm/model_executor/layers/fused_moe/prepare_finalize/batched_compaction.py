@@ -21,35 +21,34 @@ class BatchedExpertCompaction:
 
     def configure(
         self,
-        experts: FusedMoEExperts,
+        expert_capacity: int | None,
         max_tokens_per_rank: int,
         num_dispatchers: int,
         supports_token_dropping: bool,
-        use_fp8_dispatch: bool,
-    ) -> None:
-        supported_experts = self._supports_experts(experts, use_fp8_dispatch)
-
+        supports_compaction: bool,
+        contiguous_scales: bool,
+    ) -> int | None:
         if (
             supports_token_dropping
-            and experts.expert_capacity is not None
-            and supported_experts
+            and expert_capacity is not None
+            and supports_compaction
         ):
-            self._contiguous_scales = self._uses_contiguous_scales(experts)
-            tokens_per_dispatcher = max(
-                1, min(max_tokens_per_rank, experts.expert_capacity)
-            )
+            self._contiguous_scales = contiguous_scales
+            tokens_per_dispatcher = max(1, min(max_tokens_per_rank, expert_capacity))
             self._compact_tokens = tokens_per_dispatcher * num_dispatchers
-            # The communication input-rank limit is unchanged.
-            experts.max_num_tokens = tokens_per_dispatcher
             logger.info_once(
                 "Compact expert layout: at most %d rows per expert; "
                 "dispatch limit remains %d tokens per rank.",
                 self._compact_tokens,
                 max_tokens_per_rank,
             )
+            return tokens_per_dispatcher
+
+        self._compact_tokens = None
+        return None
 
     @staticmethod
-    def _supports_experts(experts: FusedMoEExperts, use_fp8_dispatch: bool) -> bool:
+    def supports_experts(experts: FusedMoEExperts, use_fp8_dispatch: bool) -> bool:
         from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
             BatchedDeepGemmExperts,
         )
@@ -70,7 +69,7 @@ class BatchedExpertCompaction:
         return isinstance(experts, supported_types)
 
     @staticmethod
-    def _uses_contiguous_scales(experts: FusedMoEExperts) -> bool:
+    def uses_contiguous_scales(experts: FusedMoEExperts) -> bool:
         from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
             BatchedHummingGroupedExperts,
         )

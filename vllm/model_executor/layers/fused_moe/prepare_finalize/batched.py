@@ -29,16 +29,13 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_local_experts: int,
         num_dispatchers: int,
         rank: int,
+        expert_capacity: int | None = None,
     ):
-        super().__init__()
+        super().__init__(expert_capacity=expert_capacity)
         self.max_num_tokens = max_num_tokens
         self.num_local_experts = num_local_experts
         self.rank = rank
         self.num_dispatchers_ = num_dispatchers
-        self.expert_capacity: int | None = None
-
-    def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
-        self.expert_capacity = fused_experts.expert_capacity
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
