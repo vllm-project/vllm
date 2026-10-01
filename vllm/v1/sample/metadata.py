@@ -50,6 +50,8 @@ class SamplingMetadata:
 
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+    # -1 inherits the server default, 0 uses real acceptance, >=1 is synthetic AL.
+    synthetic_acceptance_length: float = -1.0
     # When non-None, use ``holder.has_tracked_requests()`` to see if this batch applies
     # thinking-token-budget logits (holder may exist with an empty tracking set).
     thinking_budget_state_holder: ThinkingBudgetStateHolder | None = None
