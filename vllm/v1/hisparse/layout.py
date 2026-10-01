@@ -235,6 +235,14 @@ def create_hisparse_layout(
     host_num_blocks = host_budget // host_block_stride
     if host_num_blocks <= 0:
         raise ValueError("HiSparse has no allocatable host blocks.")
+    # Every computed page needs a host block, so one request at max_model_len
+    # must fit alongside the pool's null block and a copy-on-write tail.
+    min_host_blocks = cdiv(vllm_config.model_config.max_model_len, gpu_block_size) + 2
+    if host_num_blocks < min_host_blocks:
+        raise ValueError(
+            f"HiSparse host pool has {host_num_blocks} blocks but max_model_len "
+            f"needs {min_host_blocks}; increase host_pool_gib."
+        )
 
     return HiSparseLayout(
         source_group=source_group,

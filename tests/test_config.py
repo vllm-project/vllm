@@ -153,6 +153,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
             use_replayssm=True,
             use_kda_recoverssm=False,
             mamba_cache_mode="none",
+            replayssm_buffer_len=16,
         ),
         num_speculative_tokens=3,
         model_config=SimpleNamespace(
@@ -184,8 +185,9 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.cache_config.mamba_cache_mode = "none"
 
     config.model_config.architecture = "NemotronHForCausalLM"
-    with pytest.raises(ValueError, match="only supported for Kimi-K3 KDA"):
-        VllmConfig.validate_mamba_cached_kernel(config)
+    config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    VllmConfig.validate_mamba_cached_kernel(config)
+    assert not config.cache_config.use_kda_recoverssm
 
     config.model_config.architecture = "KimiLinearForCausalLM"
     config.parallel_config.pipeline_parallel_size = 2
@@ -416,6 +418,19 @@ def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
                 max_model_len=2048,
                 is_encoder_decoder=False,
                 disable_hybrid_kv_cache_manager=True,
+            ),
+        )
+
+
+def test_hisparse_rejects_disabled_full_isl_reservation(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    with pytest.raises(ValueError, match="requires --scheduler-reserve-full-isl"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            scheduler_config=SchedulerConfig(
+                max_model_len=2048,
+                is_encoder_decoder=False,
+                scheduler_reserve_full_isl=False,
             ),
         )
 
@@ -1588,14 +1603,14 @@ def test_engram_dp_shared_memory_config_validation(
         ("DeepseekV41ForCausalLM", [1], "cuda", True),
         ("DeepseekV41ForCausalLM", [1], "rocm", True),
         ("DeepseekV41ForCausalLM", [], "cuda", False),
-        ("DeepseekV41ForCausalLM", [1], "cpu", False),
+        ("DeepseekV41ForCausalLM", [1], "cpu", True),
         ("Qwen4ExpForCausalLM", [1], "cuda", True),
         ("Qwen4ExpForCausalLM", [1], "rocm", True),
         ("Qwen4ExpForConditionalGeneration", [1], "cuda", True),
         ("Qwen4ExpForConditionalGeneration", [1], "rocm", True),
         ("Qwen4ExpForCausalLM", [], "cuda", False),
         ("Qwen4ExpForCausalLM", None, "cuda", False),
-        ("Qwen4ExpForCausalLM", [1], "cpu", False),
+        ("Qwen4ExpForCausalLM", [1], "cpu", True),
         ("LlamaForCausalLM", [1], "cuda", False),
         ("Qwen4ExpMTP", [], "cuda", False),
         (None, None, "cuda", False),
@@ -3513,7 +3528,6 @@ def test_target_only_gumbel_allows_speculative_decoding(caplog_vllm, disable_log
         config._check_watermarking_unsupported()
 
     assert "Target-only watermarking leaves accepted draft tokens" in caplog_vllm.text
-    assert "Context deduplication is not supported" in caplog_vllm.text
 
 
 def test_speculative_watermarking_without_context_dedup_does_not_warn(
@@ -3530,10 +3544,32 @@ def test_speculative_watermarking_without_context_dedup_does_not_warn(
         parallel_drafting=False,
     )
 
+    caplog_vllm.clear()
     with caplog_vllm.at_level(logging.WARNING):
         config._check_watermarking_unsupported()
 
-    assert "Context deduplication is not supported" not in caplog_vllm.text
+    assert "dedup" not in caplog_vllm.text.lower()
+
+
+def test_speculative_context_dedup_logs_no_unsupported_warning(
+    caplog_vllm, disable_log_dedup
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="dual_key_gumbel", key=42, deduplicate_contexts="single_turn"
+    )
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    caplog_vllm.clear()
+    with caplog_vllm.at_level(logging.WARNING):
+        config._check_watermarking_unsupported()
+
+    assert "dedup" not in caplog_vllm.text.lower()
 
 
 def test_gumbel_rejects_speculative_decoding_without_target_only():
