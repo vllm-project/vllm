@@ -175,9 +175,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         support = super().get_cudagraph_support(vllm_config, kv_cache_spec)
         if vllm_config.attention_config.hisparse_config is None:
             return support
-        # HiSparse picks its prefill path from per-step page residency and
-        # mirrors prefill KV to host outside CUDA graphs, so it can only
-        # capture uniform decode batches.
         return min(support, AttentionCGSupport.UNIFORM_BATCH, key=lambda s: s.value)
 
     def __init__(
