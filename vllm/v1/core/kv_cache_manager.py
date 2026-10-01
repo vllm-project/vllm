@@ -4,7 +4,7 @@
 import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, overload
+from typing import TYPE_CHECKING, Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
@@ -27,6 +27,9 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_transfer import KVCacheTransferManager
 
 logger = init_logger(__name__)
 
@@ -195,6 +198,7 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        self.transfer_manager: KVCacheTransferManager | None = None
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -661,6 +665,13 @@ class KVCacheManager:
         """
         self.block_pool.evict_blocks(block_ids)
 
+    def get_transfer_manager(self) -> "KVCacheTransferManager":
+        if self.transfer_manager is None:
+            from vllm.v1.core.kv_cache_transfer import KVCacheTransferManager
+
+            self.transfer_manager = KVCacheTransferManager(self)
+        return self.transfer_manager
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,
@@ -671,6 +682,8 @@ class KVCacheManager:
             False otherwise.
 
         """
+        if self.transfer_manager is not None:
+            self.transfer_manager.invalidate()
         if not self.coordinator.reset_prefix_cache():
             return False
         if self.log_stats:

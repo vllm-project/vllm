@@ -18,6 +18,13 @@ failures and skipped capabilities; distinguish mocks from real transfers.
 | Serving | Python/HTTP targeting → same engine records | Wrong engine/epoch, version errors, ingress mismatch | Existing engine and OpenAI serving suites plus control endpoint integration |
 
 State tests use a fake monotonic clock, bounded capacities, and observable queries.
+Request-free transfer approval maps a group/hash/boundary and caller interest to
+an existing source reference or an unpublished destination allocation. Extend
+`test_prefix_caching.py` with actual KVCacheManager instances to guard against
+duplicate capacity charges, premature hits, cancelled-buffer reuse, stale reset
+completion, alias boundary confusion, and changes to active request references.
+Worker completion is injected only for this resource unit contract; actual copy
+correctness and all-rank completion require the subsequent adapter integration.
 Request association consumes active request token/hash observations and produces
 the shared logical index plus an optional bounded growth subscription. Guard
 against rewrites below the first cache-block boundary, implicit growth of snapshot

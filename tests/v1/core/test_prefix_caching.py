@@ -41,6 +41,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, Request
+from vllm.v1.core.kv_cache_transfer import KVCacheTransferError
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -6321,3 +6322,177 @@ def test_retention_allocation_interleavings_match_priority_then_existing_queue_o
         else:
             now[0] += 1
         assert pool.get_num_free_blocks() + len(allocated) == 12
+
+
+def make_transfer_manager(num_blocks=4, watermark=0.0):
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(4, num_blocks),
+        max_model_len=64,
+        hash_block_size=4,
+        watermark=watermark,
+    )
+    request = make_request("transfer", list(range(13)), 4, sha256)
+    keys = [make_block_hash_with_group_id(h, 0) for h in request.block_hashes]
+    return manager, manager.get_transfer_manager(), request, keys
+
+
+def test_request_free_load_is_shared_and_visible_only_after_completion():
+    manager, transfers, request, keys = make_transfer_manager()
+    lease, created = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert lease is not None and created
+    shared, created = transfers.acquire("load", keys[0], 4, 11, scope="cpu")
+    assert shared is lease and not created
+    transfers.acquire("load", keys[0], 4, 11, scope="cpu")
+    assert manager.block_pool.get_num_free_blocks() == 2
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert transfers.start(lease)
+    assert not transfers.start(lease)
+    transfers.cancel(lease, 10)
+    assert transfers.complete(lease, success=True)
+    assert manager.get_computed_blocks(request)[1] == 4
+    assert manager.block_pool.get_num_free_blocks() == 3
+    assert transfers.acquire("load", keys[0], 4, 12, scope="cpu") == (None, False)
+    assert not transfers.complete(lease, success=True)
+    assert manager.block_pool.blocks[lease.block_id].ref_cnt == 0
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_cancelled_load_retains_worker_buffer_until_drained(started):
+    manager, transfers, request, keys = make_transfer_manager(num_blocks=2)
+    lease, _ = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert lease is not None
+    if started:
+        assert transfers.start(lease)
+    transfers.cancel(lease, 10)
+    assert manager.block_pool.get_num_free_blocks() == (0 if started else 1)
+    if started:
+        with pytest.raises(KVCacheTransferError, match="draining"):
+            transfers.acquire("load", keys[0], 4, 11, scope="cpu")
+    assert not transfers.complete(lease, success=True)
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert manager.block_pool.get_num_free_blocks() == 1
+    replacement, _ = transfers.acquire("load", keys[0], 4, 12, scope="cpu")
+    assert replacement is not None and replacement.transfer_id != lease.transfer_id
+    assert not transfers.complete(lease, success=True)
+    assert manager.block_pool.get_num_free_blocks() == 0
+    transfers.cancel(replacement, 12)
+
+
+def test_reset_invalidates_transfer_but_does_not_reuse_its_buffer():
+    manager, transfers, request, keys = make_transfer_manager(num_blocks=2)
+    lease, _ = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert lease is not None and transfers.start(lease)
+    assert not manager.reset_prefix_cache()
+    assert manager.block_pool.get_num_free_blocks() == 0
+    assert not transfers.complete(lease, success=True)
+    assert manager.get_computed_blocks(request)[1] == 0
+    assert manager.reset_prefix_cache()
+    assert not transfers.has_pending
+    assert manager.block_pool.get_num_free_blocks() == 1
+
+
+def test_transfer_sources_keep_request_references_and_independent_destinations():
+    manager, transfers, request, keys = make_transfer_manager()
+    blocks = manager.allocate_slots(request, 4)
+    assert blocks is not None
+    manager.cache_blocks(request, 4)
+    block = blocks.blocks[0][0]
+    lease, _ = transfers.acquire("store", keys[0], 4, 10, scope="cpu")
+    other, created = transfers.acquire("store", keys[0], 4, 11, scope="mooncake")
+    assert lease is not None and other is not None and created
+    assert lease.block_id == other.block_id and lease.transfer_id != other.transfer_id
+    assert block.ref_cnt == 3
+    assert transfers.start(lease) and transfers.start(other)
+    transfers.cancel(lease, 10)
+    manager.free(request)
+    assert block.ref_cnt == 2
+    assert manager.block_pool.evict_unreferenced({keys[0]}).blocked == {keys[0]}
+    assert not transfers.complete(lease, success=True)
+    assert block.ref_cnt == 1
+    assert transfers.complete(other, success=True)
+    assert block.ref_cnt == 0
+    assert manager.get_computed_blocks(request)[1] == 4
+
+
+def test_transfer_admission_respects_watermark_and_competing_source():
+    manager, transfers, _, keys = make_transfer_manager(num_blocks=4, watermark=0.5)
+    lease, _ = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert lease is not None
+    with pytest.raises(KVCacheTransferError, match="Another source"):
+        transfers.acquire("load", keys[0], 4, 11, scope="mooncake")
+    with pytest.raises(KVCacheTransferError, match="capacity"):
+        transfers.acquire("load", keys[1], 8, 12, scope="cpu")
+    with pytest.raises(KVCacheTransferError, match="Conflicting coordinates"):
+        transfers.acquire("load", keys[0], 8, 13, scope="cpu")
+    assert manager.block_pool.get_num_free_blocks() == 2
+    transfers.cancel(lease, 10)
+    assert manager.block_pool.get_num_free_blocks() == 3
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_transfer_publication_preserves_concurrently_computed_copy(success):
+    manager, transfers, request, keys = make_transfer_manager()
+    lease, _ = transfers.acquire("load", keys[0], 4, 10, scope="cpu")
+    assert lease is not None and transfers.start(lease)
+    blocks = manager.allocate_slots(request, 4)
+    assert blocks is not None
+    manager.cache_blocks(request, 4)
+    computed = blocks.blocks[0][0]
+    assert transfers.complete(lease, success=success) == success
+    assert computed.ref_cnt == 1 and computed.block_hash == keys[0]
+    assert len(manager.block_pool.cached_block_hash_to_block.get_blocks(keys[0])) == (
+        2 if success else 1
+    )
+    manager.free(request)
+    assert manager.get_computed_blocks(request)[1] == 4
+    assert manager.block_pool.get_num_free_blocks() == 3
+
+
+@pytest.mark.parametrize("group,num_tokens", [(1, 4), (0, 0), (0, 3), (0, 68)])
+def test_invalid_transfer_scope_does_not_allocate(group, num_tokens):
+    manager, transfers, request, _ = make_transfer_manager()
+    key = make_block_hash_with_group_id(request.block_hashes[0], group)
+    with pytest.raises(KVCacheTransferError):
+        transfers.acquire("load", key, num_tokens, 10, scope="cpu")
+    assert manager.block_pool.get_num_free_blocks() == 3
+    assert not transfers.has_pending
+
+
+@pytest.mark.parametrize("last_group_success", [False, True])
+def test_transferred_hybrid_prefix_requires_each_group(last_group_success):
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(4, 8, 2, second_spec_type="mamba"),
+        max_model_len=64,
+        hash_block_size=4,
+    )
+    transfers = manager.get_transfer_manager()
+    request = make_request("hybrid-transfer", list(range(9)), 4, sha256)
+    for group, boundary in ((0, 4), (0, 8), (1, 8), (2, 8)):
+        key = make_block_hash_with_group_id(
+            request.block_hashes[boundary // 4 - 1], group
+        )
+        lease, _ = transfers.acquire("load", key, boundary, 10, scope="mooncake")
+        assert lease is not None and transfers.start(lease)
+        assert manager.get_computed_blocks(request)[1] == 0
+        transfers.complete(lease, success=group != 2 or last_group_success)
+    assert manager.get_computed_blocks(request)[1] == (8 if last_group_success else 0)
+    assert manager.block_pool.get_num_free_blocks() == 7
+
+
+def test_transfer_rejects_alias_without_claiming_exact_source_state():
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(8, 4, 2, second_spec_type="mamba"),
+        max_model_len=64,
+        hash_block_size=4,
+    )
+    request = make_request("alias-transfer", list(range(9)), 4, sha256)
+    pool = manager.block_pool
+    block = pool.get_new_blocks(1)[0]
+    pool.cache_full_blocks(request, [block], 0, 1, 8, 0)
+    alias = pool.cache_partial_block(request, block, 4, 0, 8)
+    assert alias is not None
+    pool.free_blocks([block])
+    transfers = manager.get_transfer_manager()
+    with pytest.raises(KVCacheTransferError, match="exact primary"):
+        transfers.acquire("store", alias, 4, 10, scope="mooncake")
+    assert block.ref_cnt == 0 and pool.get_num_free_blocks() == 3

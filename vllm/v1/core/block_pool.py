@@ -706,6 +706,19 @@ class BlockPool:
         if self._retention_queue is not None:
             self._retention_queue.cache_changed(block)
 
+    def cache_transferred_block(
+        self,
+        block: KVCacheBlock,
+        key: BlockHashWithGroupId,
+        num_tokens: int,
+    ) -> None:
+        """Publish an exclusively reserved destination after worker completion."""
+        assert self.enable_caching and self.blocks[block.block_id] is block
+        assert block.ref_cnt == 1 and not block.is_null
+        assert block.block_hash is None
+        assert block.block_id not in self.cached_block_hashes_by_block
+        self._insert_block_hash(key, block, num_tokens=num_tokens)
+
     def move_block_hashes(
         self,
         src_block: KVCacheBlock,

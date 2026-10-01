@@ -358,15 +358,48 @@ The reproducible script, command and compressed per-question results are in
 baseline; it does not complete the hint-to-worker, policy or cross-engine serving
 evaluation tasks. The external GPT-OSS/DeepSeek evaluations remain unexecuted.
 
-## Next implementation dependency
+## Current implementation dependency
 
-The user's continuation-rewrite choice remains pending: require a new
-continuation ID for changed prefixes, or support explicit replacement while
-freezing older following declarations. Settle this before request-lifecycle
-binding and stale-update integration. Existing DP utility calls broadcast, so the
-control ingress must also add explicit engine selection rather than reuse the
-broadcast helper. Startup/serving wiring, independent CPU/Mooncake execution,
-policy composition and workload integrations are still pending.
+The user selected append-only continuation identity (option A). Request observation,
+explicit DP engine selection, and Python/HTTP serving are implemented and validated
+above. The next dependency is engine-owned transfer reservations and buffer holds,
+followed by request-free CPU/Mooncake execution, policy composition, and workload
+integration. Existing native Store Put/Get tests do not establish this control
+path's readiness or subsequent model reuse.
 
 The selected verl Agent Loop source is cloned at `../verl`, revision
 `fbb4b3a8bf636f290c9c59fc346f756849e9c241`; it has not been modified or validated.
+
+## Request-independent transfer resource foundation
+
+Added a lazily created KVCacheManager transfer manager. It acquires existing
+BlockPool source references or unpublished destination allocations, shares equal
+content/direction/backend work without merging caller lifetimes, and observes the
+ordinary allocation watermark. Different cold destinations retain independent
+holds; competing loads from different sources cannot allocate the same target
+concurrently. Cancelled dispatched work retains its buffer until worker completion.
+Reset invalidates publication, retains in-flight buffers and returns false until
+they drain; callers must retry reset. Lease identities prevent late duplicate
+completion from affecting a newer allocation.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
+  tests/v1/core/test_prefix_caching.py tests/v1/core/test_kv_cache_utils.py \
+  tests/v1/core/test_single_type_kv_cache_manager.py \
+  tests/v1/core/test_deferred_block_free.py \
+  tests/v1/test_kv_hint_state.py tests/v1/test_kv_hint_control.py -q
+```
+
+Result: **518 passed**, 203.94 seconds. Added group-completeness and alias tests
+subsequently; the final complete `test_prefix_caching.py` run passes **192 tests**
+in 59.06 seconds. An initial alias fixture incorrectly used different hash/cache
+block sizes with a unitary coordinator; it was corrected to a supported hybrid
+configuration. Existing request references and concurrent computed copies survive
+transfer completion/failure; incomplete Mamba/attention groups cannot produce a
+full prefix hit. Normal pre-commit and manual mypy 3.12 passed.
+
+These are resource/metadata correctness tests, with explicit worker-completion
+injection. Native control dispatch, backend copies and all-rank completion are
+not connected by this substage; tasks 4.1 and 5.1 remain unchecked. Ordinary serving
+does not instantiate the transfer manager, so no model-output change is introduced
+by this foundation alone.
