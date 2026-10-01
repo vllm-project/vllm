@@ -710,7 +710,21 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # (e.g. 16 with Eagle3), we expand block-level indices into per-token
         # flat indices since the aiter kernel always uses page_size=1 internally.
         self.kernel_block_size = kv_cache_spec.block_size
-        self._segmented_page_size = _segmented_mla_page_size(self.kernel_block_size)
+        # Generic Triton indexes physical KV blocks; segmented MLA indexes
+        # TILE subpages of them.
+        self._dcp_verify_page_size = (
+            kv_cache_spec.block_size
+            if self._supports_triton_dcp_verify
+            else _segmented_mla_page_size(kv_cache_spec.block_size)
+        )
+        # A DCP rank's shard of the longest sequence bounds every verify row.
+        dcp_local_max_seq_len = (
+            cdiv(
+                vllm_config.model_config.max_model_len,
+                self.dcp_world_size * self.cp_kv_cache_interleave_size,
+            )
+            * self.cp_kv_cache_interleave_size
+        )
 
         # In the flat view (.view(-1,1,1,H)), each token is its own page,
         # so max_num_pages_per_req = max_model_len regardless of
@@ -878,23 +892,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             ) and self._mtp_decode_qlen > 1:
                 # Allocate even when CPRR is the preferred route: a later
                 # replay can fall below _MIN_CPRR_QLEN and needs these
-                # addresses. A DCP rank's shard of the longest sequence
-                # bounds every verify row, and full graphs need that bound
-                # to be constant.
-                num_dcp_partitions = (
-                    self.dcp_world_size * self.cp_kv_cache_interleave_size
-                )
-                graph_max_kv_seq_len = (
-                    cdiv(vllm_config.model_config.max_model_len, num_dcp_partitions)
-                    * self.cp_kv_cache_interleave_size
-                )
+                # addresses. Full graphs need the row bound to be constant.
                 max_verify_rows = max_num_reqs * self._mtp_decode_qlen
-                verify_page_size = (
-                    self.kernel_block_size
-                    if self._supports_triton_dcp_verify
-                    else self._segmented_page_size
+                max_local_pages = cdiv(
+                    dcp_local_max_seq_len, self._dcp_verify_page_size
                 )
-                max_local_pages = cdiv(graph_max_kv_seq_len, verify_page_size)
                 self._dcp_verify_buffers = AiterMLADCPVerifyMetadata(
                     row_lens=torch.zeros(
                         max_verify_rows, dtype=torch.int32, device=device
@@ -907,26 +909,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                     qo_indptr=torch.arange(
                         max_verify_rows + 1, dtype=torch.int32, device=device
                     ),
-                    page_size=verify_page_size,
-                    max_kv_seq_len=graph_max_kv_seq_len,
+                    page_size=self._dcp_verify_page_size,
+                    max_kv_seq_len=dcp_local_max_seq_len,
                 )
         # gfx942 DCP verify launches the generic split-KV kernel, which draws
         # its partials from the shared workspace. TRITON_MLA reserves this in
         # its own builder; this process selected AITER, so reserve it here
         # before warmup locks the pool.
         if self._supports_triton_dcp_verify and self._mtp_decode_qlen > 1:
-            num_dcp_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
-            max_local_seq_len = (
-                cdiv(
-                    vllm_config.model_config.max_model_len,
-                    num_dcp_partitions,
-                )
-                * self.cp_kv_cache_interleave_size
-            )
             reserve_triton_mla_decode_workspace(
                 max_num_reqs * self._mtp_decode_qlen,
                 self._decode_num_heads,
-                max_local_seq_len,
+                dcp_local_max_seq_len,
                 self.mla_dims.kv_lora_rank,
                 current_platform.num_compute_units(),
             )
@@ -1231,12 +1225,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             if buffers is not None
             else max(1, int(row_lens.max().item()))
         )
-        page_size = (
-            self.kernel_block_size
-            if self._supports_triton_dcp_verify
-            else self._segmented_page_size
-        )
-        assert page_size is not None
+        page_size = self._dcp_verify_page_size
         max_local_pages = cdiv(max_kv_seq_len, page_size)
         if buffers is not None:
             row_block_table = buffers.block_table[:num_rows]
