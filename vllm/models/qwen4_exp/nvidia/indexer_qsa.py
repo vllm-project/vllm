@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen4Exp weight-free QSA indexer."""
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
@@ -17,13 +17,16 @@ from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
 
-from ..common.ops.qsa_pre_indexer import qsa_pre_indexer, supports_fused_pre_indexer
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
     QSAForwardMetadata,
     QSAKeyStateCache,
     canonical_qsa_rope_positions,
 )
+from .ops.qsa_prepare import qsa_prepare
+
+if TYPE_CHECKING:
+    from .qsa import Qwen4ExpQSAAttention
 
 
 def apply_qsa_rope(
@@ -60,6 +63,32 @@ def apply_qsa_rope(
     return torch.cat((rotated, tensor[..., rotary_dim:]), dim=-1)
 
 
+def _supports_fused_pre_indexer(
+    rotary_emb: nn.Module,
+    head_dim: int,
+    num_kv_heads: int,
+    compress_ratio: int,
+) -> bool:
+    rotary_dim = int(rotary_emb.rotary_dim)
+    mrope_section = getattr(rotary_emb, "mrope_section", None)
+    return (
+        bool(getattr(rotary_emb, "is_neox_style", False))
+        and (
+            not mrope_section
+            or (
+                len(mrope_section) == 3
+                and sum(mrope_section) == rotary_dim // 2
+                and bool(getattr(rotary_emb, "mrope_interleaved", False))
+            )
+        )
+        and head_dim == 128
+        and rotary_dim == 64
+        and num_kv_heads == 1
+        and compress_ratio > 1
+        and compress_ratio & (compress_ratio - 1) == 0
+    )
+
+
 class QSAIndexer(nn.Module):
     """QSA projection weights, side caches, and paged, weight-free selection.
 
@@ -91,7 +120,7 @@ class QSAIndexer(nn.Module):
         self.token_topk = int(config.indexer_budget)
         self.compress_ratio = int(config.indexer_compress_ratio)
         self.rotary_emb = rotary_emb
-        self.use_fused_pre_indexer = supports_fused_pre_indexer(
+        self.use_fused_pre_indexer = _supports_fused_pre_indexer(
             rotary_emb,
             self.index_head_dim,
             self.index_kv_heads,
@@ -209,7 +238,11 @@ class QSAIndexer(nn.Module):
         projected_qk: torch.Tensor,
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        *,
+        attn: "Qwen4ExpQSAAttention",
+        qkv: torch.Tensor | None = None,
+        slot_mapping: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """Update side caches and select token indices from pre-projected Q/K.
 
         Returns the packed buffer of shape [num_tokens, output_width + 1]:
@@ -217,12 +250,17 @@ class QSAIndexer(nn.Module):
         request-relative token indices, and the trailing column is the row's
         valid-entry count (the attention kernel's loop bound, never a token
         index).
+
+        With ``attn.use_fused_qsa_prepare``, the same launch also writes
+        ``attn``'s K/V into ``attn.kv_cache`` at ``slot_mapping`` and prepares
+        its Q and gate from ``qkv``, returned as the second element (None
+        otherwise). ``qkv`` and ``slot_mapping`` are only read in that mode.
         """
         metadata = self._metadata()
         if metadata is None:
             # Preserve step-0 indices when later MTP steps reuse the buffer.
             if self.skip_topk and out is not None:
-                return out
+                return out, None
             result = torch.full(
                 (projected_qk.shape[0], self.packed_output_width),
                 -1,
@@ -233,8 +271,8 @@ class QSAIndexer(nn.Module):
             result[:, -1] = 0
             if out is not None:
                 out.copy_(result)
-                return out
-            return result
+                return out, None
+            return result, None
 
         from .ops.qsa import qsa_compress_groups_with_ratio, qsa_store_cache_rows
         from .ops.qsa_indexer import (
@@ -258,14 +296,20 @@ class QSAIndexer(nn.Module):
         raw_key_state_cache = self.raw_key_cache
         compressed_key_cache = self.compressed_key_cache.kv_cache
 
-        if self.use_fused_pre_indexer:
+        main_outputs: tuple[torch.Tensor, torch.Tensor] | None = None
+        if attn.use_fused_qsa_prepare:
+            if qkv is None or slot_mapping is None:
+                raise ValueError("fused QSA prepare requires qkv and slot_mapping")
             q = projected_q.new_empty(
                 num_tokens,
                 self.index_n_heads,
                 self.index_head_dim,
                 dtype=self.indexer_dtype,
             )
-            qsa_pre_indexer(
+            main_kv_cache = attn.kv_cache.transpose(1, 2)
+            if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+                main_kv_cache = main_kv_cache.view(torch.float8_e4m3fn)
+            main_outputs = qsa_prepare(
                 projected_q,
                 raw_keys,
                 positions,
@@ -289,6 +333,14 @@ class QSAIndexer(nn.Module):
                     if raw_key_state_cache.rope_position_cache is not None
                     else None
                 ),
+                main_qkv=qkv[:num_tokens],
+                main_q_norm_weight=attn.q_norm.weight,
+                main_k_norm_weight=attn.k_norm.weight,
+                main_eps=attn.q_norm.variance_epsilon,
+                main_kv_cache=main_kv_cache,
+                main_slot_mapping=slot_mapping[:num_tokens],
+                main_k_scale=attn._k_scale_float,
+                main_v_scale=attn._v_scale_float,
             )
         else:
             # Unfused reference path
@@ -359,7 +411,7 @@ class QSAIndexer(nn.Module):
         if self.skip_topk:
             if out is None:
                 raise RuntimeError("QSA top-k reuse requires an output buffer")
-            return out
+            return out, main_outputs
 
         if out is None:
             out = torch.empty(
@@ -422,7 +474,7 @@ class QSAIndexer(nn.Module):
             self.token_topk,
             out,
         )
-        return out
+        return out, main_outputs
 
 
 __all__ = ["QSAIndexer", "apply_qsa_rope"]
