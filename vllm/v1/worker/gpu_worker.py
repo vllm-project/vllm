@@ -532,6 +532,8 @@ class Worker(WorkerBase):
             self.device,
             num_ubatches,
             _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
+            # Scratch holds no state across steps: discard it on sleep.
+            alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
         self.model_runner: GPUModelRunner = self._make_model_runner()
         if self.rank == 0:

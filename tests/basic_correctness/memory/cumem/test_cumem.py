@@ -235,6 +235,53 @@ def test_discard_tags():
     assert torch.allclose(weights, torch.ones_like(weights))
 
 
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_workspace_scratch_discarded_on_sleep():
+    """Workspace scratch lives in the sleep-mode pool: sleep discards it, any
+    (selective) wake remaps it at the same address so captured graphs replay,
+    and a buffer outgrown by a resize stays usable until it is released."""
+    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+    from vllm.v1.worker.workspace import WorkspaceManager
+
+    allocator = get_mem_allocator_instance()
+    manager = WorkspaceManager(
+        torch.device(DEVICE_TYPE),
+        alloc_context=lambda: allocator.use_memory_pool("workspace"),
+    )
+    (small,) = manager.get_simultaneous(((32 << 20,), torch.uint8))
+    # Resize while a view of the old buffer is alive: the tag is re-entered.
+    (scratch,) = manager.get_simultaneous(((64 << 20,), torch.uint8))
+    assert len(allocator.allocator_and_pools["workspace"]) == 2
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        scratch.add_(1)
+
+    backend = CuMemBackend()
+    backend.suspend(level=1)
+    assert mapped_usage(allocator) == 0
+    # Discarded, not copied.
+    assert all(
+        d.tag == "workspace" and d.cpu_backup_tensor is None
+        for d in allocator.pointer_to_data.values()
+    )
+
+    backend.resume(tags=["kv_cache"])
+    assert mapped_usage(allocator) == small.nbytes + scratch.nbytes
+    scratch.zero_()
+    graph.replay()
+    assert int(scratch.sum()) == scratch.numel()
+    small.fill_(1)
+
+    # The next resize releases the outgrown buffer; wake does not remap it.
+    del small
+    (big,) = manager.get_simultaneous(((128 << 20,), torch.uint8))
+    assert mapped_usage(allocator) == scratch.nbytes + big.nbytes
+    backend.suspend(level=1)
+    backend.resume(tags=["weights"])
+    assert mapped_usage(allocator) == scratch.nbytes + big.nbytes
+
+
 @pytest.mark.parametrize("free_x_early", [True, False], ids=["x-freed", "x-alive"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")

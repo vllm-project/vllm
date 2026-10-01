@@ -33,6 +33,9 @@ logger = init_logger(__name__)
 
 SleepModeState = Literal["RUNNING", "SUSPENDED", "RESUMING"]
 
+# These tags back every forward pass, so any wake restores them.
+_ALWAYS_RESTORED: tuple[str, ...] = ("workspace",)
+
 
 class SleepModeBackend(ABC):
     """Interface for a mechanism that frees and restores GPU state.
@@ -136,6 +139,8 @@ class CuMemBackend(SleepModeBackend):
 
         self._state = "RESUMING"
         allocator = get_mem_allocator_instance()
+        if tags is not None:
+            tags = [*tags, *_ALWAYS_RESTORED]
         allocator.wake_up(tags)
         self._state = "RUNNING"
 
