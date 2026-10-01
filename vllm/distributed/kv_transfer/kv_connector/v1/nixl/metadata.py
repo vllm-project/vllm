@@ -17,6 +17,8 @@ logger = init_logger(__name__)
 
 TransferHandle = int
 ReqId = str
+# Router-assigned id shared by the prefill and decode request of one dispatch.
+TransferId = str
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -284,6 +286,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # Push mode (P side): newly finished request blocks to be matched
         # against pending D registrations on the P worker.
         self.push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # Push mode (P side): router-assigned transfer_id of those requests.
+        self.push_transfer_ids: dict[ReqId, TransferId] = {}
 
     def _add_new_req(
         self,
