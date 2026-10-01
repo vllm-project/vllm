@@ -141,7 +141,8 @@ mod tests {
         let tokenizer = TestTokenizer::new()
             .with_regular_token("<|open|>", 1001)
             .with_regular_token("<|close|>", 1002)
-            .with_regular_token("<|sep|>", 1003);
+            .with_regular_token("<|sep|>", 1003)
+            .with_regular_token("<|end_of_msg|>", 1004);
 
         assert!(factory.contains(names::KIMI_K3));
         assert_eq!(
