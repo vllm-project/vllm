@@ -25,7 +25,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950
+from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
@@ -738,6 +738,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
     _use_aiter_sparse_mla = False
+
+    @classmethod
+    def _dcp_platform_supported(cls) -> bool:
+        # The DCP decode flow needs the LSE-returning split-K reduce, which
+        # only the gfx942/gfx950 Triton decode path implements.
+        return _ON_GFX950 or _ON_GFX942
 
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]

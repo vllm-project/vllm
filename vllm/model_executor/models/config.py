@@ -343,6 +343,11 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # DeepSeek-V4 DCP decode merges with gathered queries over a2a.
+        vllm_config.parallel_config.set_dcp_defaults(comm_backend="a2a")
+
+    @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
         if quant_config is not None and quant_config.get("quant_method") == "fp8":

@@ -155,6 +155,50 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     PREFILL_CHUNK_SIZE: ClassVar[int] = 4
 
     @classmethod
+    def _dcp_platform_supported(cls) -> bool:
+        """Whether this platform subclass implements the DCP decode flow
+        (LSE-returning local attend + cross-rank merge + deferred sink)."""
+        return False
+
+    @classmethod
+    def _check_dcp_support(cls, vllm_config: VllmConfig) -> None:
+        parallel_config = vllm_config.parallel_config
+        if not cls._dcp_platform_supported():
+            raise NotImplementedError(
+                "Decode Context Parallelism for DeepSeek-V4 attention is "
+                f"not supported by {cls.__name__}: it does not implement "
+                "the LSE-returning decode and cross-rank merge."
+            )
+        if parallel_config.cp_kv_cache_interleave_size != 1:
+            raise NotImplementedError(
+                "DeepSeek-V4 DCP only supports "
+                "cp_kv_cache_interleave_size == 1, got "
+                f"{parallel_config.cp_kv_cache_interleave_size}."
+            )
+        if vllm_config.speculative_config is not None:
+            raise NotImplementedError(
+                "Speculative decoding with DCP is not yet supported for "
+                "DeepSeek-V4 attention."
+            )
+        if not vllm_config.model_config.enforce_eager:
+            raise NotImplementedError(
+                "DeepSeek-V4 DCP does not yet support CUDA graph capture; "
+                "pass --enforce-eager."
+            )
+        if parallel_config.prefill_context_parallel_size > 1:
+            raise NotImplementedError(
+                "Prefill Context Parallelism is not supported for "
+                "DeepSeek-V4 attention."
+            )
+        # Decode is DCP-wired (gather-Q -> sink-free LSE attend -> merge ->
+        # sink once); prefill attention still reads the sharded caches with
+        # the dcp=1 flow. Drop this once prefill DCP lands.
+        raise NotImplementedError(
+            "DeepSeek-V4 DCP prefill attention is not wired yet; decode "
+            "context parallelism cannot be enabled."
+        )
+
+    @classmethod
     @abstractmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         """Q head count the q/output buffers are allocated at.
@@ -207,11 +251,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # check_attention_cp_compatibility LSE gate never sees these layers;
         # without an explicit check dcp > 1 serves unmerged per-rank partials.
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError(
-                "Decode Context Parallelism is not yet supported for "
-                "DeepSeek-V4 attention: per-rank partial attention outputs "
-                "are not merged across DCP ranks."
-            )
+            self._check_dcp_support(vllm_config)
         tp_size = get_tensor_model_parallel_world_size()
         layer_id = extract_layer_index(prefix)
 
