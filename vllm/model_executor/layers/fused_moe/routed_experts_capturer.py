@@ -8,17 +8,15 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from functools import partial
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.platforms import current_platform
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
 logger = logging.getLogger(__name__)
 
@@ -190,12 +188,8 @@ class RoutedExpertsCapturer:
 
 
 class RoutedExpertsSink:
-    """Where a monolithic MoE kernel writes the expert ids it routed to.
-
-    Owned by the MoE layer, not by the kernel. The kernel is rebuilt on every
-    weight reload; the sink, and the buffer address that CUDA graphs captured,
-    live as long as the layer.
-    """
+    """Layer-owned buffer and callback for the expert ids a monolithic kernel
+    routes to; it outlives kernel rebuilds on weight reload."""
 
     def __init__(
         self, moe_config: FusedMoEConfig, capture_fn: Callable[[torch.Tensor], None]

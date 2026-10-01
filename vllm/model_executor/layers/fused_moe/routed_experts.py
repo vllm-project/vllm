@@ -20,6 +20,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsSink,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -30,9 +33,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-        RoutedExpertsSink,
-    )
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 
