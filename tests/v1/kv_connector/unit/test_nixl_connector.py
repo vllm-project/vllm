@@ -1432,6 +1432,10 @@ class TestNixlHandshake:
         worker.block_stride_per_layer = [mla_len, draft_len]
         worker._region_is_mla = [True, False]
         worker._region_num_kv_heads = [None, max(1, 8 // tp_size)]
+        worker.region_names = [
+            "model.layers.0.self_attn",
+            "draft_model.model.layers.0.self_attn",
+        ]
         worker.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
         worker.src_blocks_data = np.array(
@@ -1458,6 +1462,31 @@ class TestNixlHandshake:
             physical_blocks_per_logical_kv_block=1,
         )
         return worker, meta, mla_len, draft_len
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_head_sharded_draft_region_checks_layer_identity(
+        self, default_vllm_config, dist_init
+    ):
+        worker, _, _, _ = self._mla_target_with_gqa_draft(4, 0, 1)
+        assert worker._is_head_sharded_draft_region(1)
+        worker.region_names[1] = "model.layers.1.self_attn"
+        worker._region_num_kv_heads[1] = 1
+        assert not worker._is_head_sharded_draft_region(1)
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_handshake_mla_target_rejects_push_draft(
+        self, default_vllm_config, dist_init
+    ):
+        worker, meta, _, _ = self._mla_target_with_gqa_draft(1, 0, 4)
+        worker._TRANSFER_MODE = "push"
+        with pytest.raises(NotImplementedError, match="push mode"):
+            worker.add_remote_agent(meta, remote_tp_size=4)
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
