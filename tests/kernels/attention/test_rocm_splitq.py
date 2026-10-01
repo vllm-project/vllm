@@ -66,7 +66,8 @@ def test_store_matches_reference(bits):
 @pytest.mark.parametrize("bits", [4, 3])
 @pytest.mark.parametrize("query_group", [1, 4])
 @pytest.mark.parametrize("num_splits", [1, 7, 64])
-def test_decode_matches_reference(bits, query_group, num_splits):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_decode_matches_reference(bits, query_group, num_splits, dtype):
     """Covers MTP verification: up to 4 consecutive query tokens per request,
     each with its own causal length, plus a padded query with no request."""
     torch.manual_seed(1)
@@ -99,7 +100,7 @@ def test_decode_matches_reference(bits, query_group, num_splits):
     q_to_klen = torch.tensor(q_to_klen, dtype=torch.int32, device=dev)
 
     num_q = q_to_req.numel()
-    q = (torch.randn(num_q, hkv * group, HEAD, device=dev) * 2).bfloat16()
+    q = (torch.randn(num_q, hkv * group, HEAD, device=dev) * 2).to(dtype)
     out = torch.zeros_like(q)
     mid = torch.empty(
         num_q, hkv * group, num_splits, HEAD + 2, dtype=torch.float32, device=dev
@@ -112,7 +113,7 @@ def test_decode_matches_reference(bits, query_group, num_splits):
         q.float(), cache, block_table, q_to_req.clamp(max=len(lens) - 1),
         q_to_klen, fmt, 1 / 16,
     )
-    # The kernel quantizes the query to int8; nothing else differs.
+    # Only the kernel's query precision (fp16 or int8) differs.
     assert _rel(out[:-1], ref[:-1]) < 2e-2
     assert out[-1].abs().max().item() == 0
 
@@ -130,11 +131,18 @@ def test_to_int8_matches_reference(bits):
     v = torch.randn(n, hkv, HEAD, device=dev).bfloat16()
     slots = _fill(cache, blocks, k, v, nsg, vsg, bits)
 
-    k8 = torch.empty(n, hkv, HEAD, dtype=torch.int8, device=dev)
+    n_pad = math.ceil(n / BLOCK) * BLOCK
+    k8 = torch.empty(n_pad, hkv, HEAD, dtype=torch.int8, device=dev)
     v8 = torch.empty_like(k8)
-    ks = torch.empty(n, hkv, dtype=torch.float32, device=dev)
+    ks = torch.empty(n_pad, hkv, dtype=torch.float32, device=dev)
     vs = torch.empty_like(ks)
-    torch.ops._C.splitq_to_int8(cache, blocks, n, k8, v8, ks, vs, bits)
+    # One request whose whole length is cached context (no query tokens).
+    query_start_loc = torch.zeros(2, dtype=torch.int32, device=dev)
+    seq_lens = torch.tensor([n], dtype=torch.int32, device=dev)
+    torch.ops._C.splitq_to_int8(
+        cache, blocks[None], query_start_loc, seq_lens, n_pad, k8, v8, ks, vs, bits
+    )
+    k8, v8, ks, vs = k8[:n], v8[:n], ks[:n], vs[:n]
     k_ref, v_ref = sq.reference_dequantize(
         _token_slots(cache, slots), fmt, rotated=True
     )

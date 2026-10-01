@@ -18,6 +18,8 @@
 // and the attention output is rotated back in the reduce kernel.
 
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -604,51 +606,92 @@ __global__ void __launch_bounds__(128) decode_kernel(
 
 // ---------------------------------------------------------------------------
 // Decode stage 2: combine splits, rotate V back. grid (num_q, num_q_heads),
-// block 256 (one thread per dim).
+// block 256. Up to 1024 splits: their weights at once, then 8 waves take the
+// splits round-robin (lane = 8 dims) and skip the ones that weigh zero.
 // ---------------------------------------------------------------------------
 template <typename OT>
 __global__ void __launch_bounds__(256)
     reduce_kernel(const float* __restrict__ mid_o, OT* __restrict__ out,
                   const int* __restrict__ v_signs, int num_splits, int64_t smo,
                   int64_t smh, int64_t sms, int64_t soo, int64_t soh) {
-  __shared__ float x[D];
-  const int qi = blockIdx.x;
-  const int hi = blockIdx.y;
-  const int d = threadIdx.x;
+  __shared__ float sw[1024], swm[8], swl[8];
+  __shared__ float so[8][D];
+  const int qi = blockIdx.x, hi = blockIdx.y;
+  const int tid = threadIdx.x, w = tid >> 5, lane = tid & 31;
   const float* base = mid_o + qi * smo + hi * smh;
 
+  float ms[4], ls[4];
   float m = -INFINITY;
-  for (int s = 0; s < num_splits; ++s) m = fmaxf(m, base[s * sms + D]);
-  float o = 0.f, l = 0.f;
-  if (m != -INFINITY) {
-    for (int s = 0; s < num_splits; ++s) {
-      const float* sp = base + s * sms;
-      const float ms = sp[D];
-      if (ms == -INFINITY) continue;
-      const float a = exp2f(ms - m);
-      o += sp[d] * a;
-      l += sp[D + 1] * a;
-    }
+  #pragma unroll
+  for (int k = 0; k < 4; ++k) {
+    const int s = tid + 256 * k;
+    ms[k] = s < num_splits ? base[s * sms + D] : -INFINITY;
+    ls[k] = s < num_splits ? base[s * sms + D + 1] : 0.0f;
+    m = fmaxf(m, ms[k]);
   }
-  x[d] = o;
+  m = xor_max<16>(m);
+  if (lane == 0) swm[w] = m;
   __syncthreads();
-  for (int h = 1; h < D; h <<= 1) {
+  float mg = swm[0];
+  #pragma unroll
+  for (int i = 1; i < 8; ++i) mg = fmaxf(mg, swm[i]);
+  float l = 0.0f;
+  #pragma unroll
+  for (int k = 0; k < 4; ++k) {
+    const float a = ms[k] == -INFINITY ? 0.0f : exp2f(ms[k] - mg);
+    if (tid + 256 * k < 1024) sw[tid + 256 * k] = a;
+    l += ls[k] * a;
+  }
+  l = xor_sum<16>(l);
+  if (lane == 0) swl[w] = l;
+  __syncthreads();
+
+  float o[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  for (int s = w; s < num_splits; s += 8) {
+    const float as = sw[s];
+    if (as == 0.0f) continue;
+    const float4* v = (const float4*)(base + s * sms + lane * 8);
+    const float4 x = v[0], y = v[1];
+    o[0] += x.x * as;
+    o[1] += x.y * as;
+    o[2] += x.z * as;
+    o[3] += x.w * as;
+    o[4] += y.x * as;
+    o[5] += y.y * as;
+    o[6] += y.z * as;
+    o[7] += y.w * as;
+  }
+  #pragma unroll
+  for (int d = 0; d < 8; ++d) so[w][lane * 8 + d] = o[d];
+  __syncthreads();
+  float lg = 0.0f;
+  #pragma unroll
+  for (int i = 0; i < 8; ++i) lg += swl[i];
+  float acc = 0.0f;
+  #pragma unroll
+  for (int i = 0; i < 8; ++i) acc += so[i][tid];
+  __syncthreads();
+  // Inverse rotation of V over the 256 dims (so[0] reused as scratch).
+  float* x = so[0];
+  x[tid] = acc;
+  __syncthreads();
+  for (int hh = 1; hh < D; hh <<= 1) {
     float a = 0.f, b = 0.f;
-    const bool lo = (d & h) == 0;
+    const bool lo = (tid & hh) == 0;
     if (lo) {
-      a = x[d];
-      b = x[d + h];
+      a = x[tid];
+      b = x[tid + hh];
     }
     __syncthreads();
     if (lo) {
-      x[d] = a + b;
-      x[d + h] = a - b;
+      x[tid] = a + b;
+      x[tid + hh] = a - b;
     }
     __syncthreads();
   }
-  const float inv_l = l > 0.f ? 1.0f / l : 0.f;
-  out[qi * soo + hi * soh + d] =
-      from_f<OT>(x[d] * 0.0625f * sign_of(v_signs, d) * inv_l);
+  const float inv_l = lg > 0.f ? 1.0f / lg : 0.f;
+  out[qi * soo + hi * soh + tid] =
+      from_f<OT>(x[tid] * 0.0625f * sign_of(v_signs, tid) * inv_l);
 }
 
 // ---------------------------------------------------------------------------
@@ -846,6 +889,12 @@ static void dispatch_decode(int g, int qg, torch::Tensor& query,
   TORCH_CHECK(false, "splitq_decode: unsupported GQA group ", g);
 }
 
+int splitq_decode_wmma(torch::Tensor query, torch::Tensor cache,
+                       torch::Tensor block_table, torch::Tensor q_to_req,
+                       torch::Tensor q_to_klen, torch::Tensor mid_o,
+                       torch::Tensor nope_signs, double sm_scale,
+                       int64_t num_kv_splits, int64_t bits);
+
 void splitq_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
                    torch::Tensor block_table, torch::Tensor q_to_req,
                    torch::Tensor q_to_klen, torch::Tensor mid_o,
@@ -858,16 +907,25 @@ void splitq_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
   TORCH_CHECK(query.size(2) == D && query.stride(2) == 1);
   TORCH_CHECK(out.dtype() == query.dtype());
   TORCH_CHECK(mid_o.size(2) >= num_kv_splits && mid_o.size(3) >= D + 2);
+  TORCH_CHECK(num_kv_splits <= 1024 &&
+              mid_o.stride(3) == 1);
   const int hq = query.size(1), hkv = cache.size(1);
   TORCH_CHECK(hq % hkv == 0);
   const int g = hq / hkv;
   const int qg = query_group > 1 ? 4 : 1;
-  const int ns = (int)num_kv_splits;
+  int ns = (int)num_kv_splits;
   const float sl2 = (float)sm_scale * 1.4426950408889634f;
   const at::cuda::OptionalCUDAGuard guard(device_of(query));
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const bool bf = query.dtype() == at::kBFloat16;
-  if (bits == 4) {
+  const int wmma_splits =
+      std::getenv("VLLM_SPLITQ_WMMA") && std::string(std::getenv("VLLM_SPLITQ_WMMA")) == "0"
+          ? 0
+          : splitq_decode_wmma(query, cache, block_table, q_to_req, q_to_klen,
+                               mid_o, nope_signs, sm_scale, num_kv_splits, bits);
+  if (wmma_splits > 0) {
+    ns = wmma_splits;
+  } else if (bits == 4) {
     if (bf)
       dispatch_decode<4, __hip_bfloat16>(g, qg, query, cache, block_table,
                                          q_to_req, q_to_klen, mid_o,

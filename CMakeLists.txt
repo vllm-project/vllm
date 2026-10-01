@@ -392,6 +392,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # RDNA3 SplitQ KV cache (store, decode, int8 expansion for prefill)
   list(APPEND VLLM_EXT_SRC
     "csrc/attention/splitq_attn_rdna3.cu"
+    "csrc/attention/splitq_decode_wmma_rdna3.cu"
   )
 
   message(STATUS "Enabling C extension.")
