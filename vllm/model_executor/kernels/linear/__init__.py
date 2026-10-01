@@ -135,6 +135,7 @@ from vllm.model_executor.kernels.linear.nvfp4 import (
 )
 from vllm.model_executor.kernels.linear.nvfp4.b12x import (
     B12xNvFp4LinearKernel,
+    B12xNvFp4W4A16LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
     CutlassNvFp4LinearKernel,
@@ -260,6 +261,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         B12xMxFp4LinearKernel,
         B12xMxfp8LinearKernel,
         B12xNvFp4LinearKernel,
+        B12xNvFp4W4A16LinearKernel,
         B12xTensorFP8ScaledMMLinearKernel,
     },
     "cutlass": {
@@ -567,6 +569,7 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         FlashInferCudnnNvFp4LinearKernel,
         FbgemmNvFp4LinearKernel,
         B12xNvFp4LinearKernel,
+        B12xNvFp4W4A16LinearKernel,
         TorchNvFp4LinearKernel,
         EmulationNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
@@ -1085,6 +1088,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     current platform."""
     config = NvFp4LinearLayerConfig()
     a16_kernels = (
+        B12xNvFp4W4A16LinearKernel,
         FlashInferCuteDslNvFp4W4A16LinearKernel,
         MarlinNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
@@ -1298,6 +1302,7 @@ __all__ = [
     "B12xMxfp8LinearKernel",
     "B12xMxFp4LinearKernel",
     "B12xNvFp4LinearKernel",
+    "B12xNvFp4W4A16LinearKernel",
     "init_mxfp4_linear_kernel",
     "MxFp4LinearKernel",
     "MxFp4LinearLayerConfig",
