@@ -152,10 +152,13 @@ impl OpenAICompletionsBackend {
                             }
                             // Separate `if` (not `else if`) — Dynamo may send
                             // both choices and usage in the same chunk.
-                            if let Some(ref usage) = data.usage
-                                && let Some(ct) = usage.completion_tokens
-                            {
-                                output.output_tokens = ct as usize;
+                            if let Some(ref usage) = data.usage {
+                                if let Some(ct) = usage.completion_tokens {
+                                    output.output_tokens = ct as usize;
+                                }
+                                if let Some(pt) = usage.prompt_tokens {
+                                    output.prompt_len = pt as usize;
+                                }
                             }
                         }
                     }

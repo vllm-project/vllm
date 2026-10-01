@@ -27,7 +27,7 @@ fn log_failed_requests(outputs: &[RequestFuncOutput]) {
 ///
 /// Mirrors Python's `calculate_metrics()` from serve.py:392-599.
 pub fn calculate_metrics(
-    input_requests: &[SampleRequest],
+    _input_requests: &[SampleRequest],
     outputs: &[RequestFuncOutput],
     dur_s: f64,
     selected_percentiles: &[f64],
@@ -44,7 +44,7 @@ pub fn calculate_metrics(
     let mut ttfts: Vec<f64> = Vec::new();
     let mut e2els: Vec<f64> = Vec::new();
 
-    for (i, output) in outputs.iter().enumerate() {
+    for output in outputs.iter() {
         if output.success {
             let output_len = if output.output_tokens > 0 {
                 output.output_tokens
@@ -57,7 +57,7 @@ pub fn calculate_metrics(
             };
 
             actual_output_lens.push(output_len);
-            total_input += input_requests[i].prompt_len;
+            total_input += output.prompt_len;
 
             if output_len > 1 {
                 let latency_minus_ttft = output.latency - output.ttft;
@@ -507,5 +507,39 @@ mod tests {
         let data: Vec<f64> = (0..100).map(|i| i as f64).collect();
         let p99 = percentile_sorted(&data, 99.0);
         assert!((p99 - 98.01).abs() < 0.1);
+    }
+
+    /// Input-token totals come from each output's `prompt_len` (server-reported
+    /// via `usage.prompt_tokens`), not the client-side request estimate.
+    /// Mirrors Python's `serve.py`.
+    #[test]
+    fn test_total_input_uses_output_prompt_len() {
+        let requests = vec![
+            SampleRequest {
+                prompt_len: 100,
+                ..Default::default()
+            };
+            2
+        ];
+        let outputs = vec![
+            RequestFuncOutput {
+                success: true,
+                prompt_len: 128,
+                output_tokens: 3,
+                ..Default::default()
+            };
+            2
+        ];
+
+        let (metrics, _) = calculate_metrics(
+            &requests,
+            &outputs,
+            1.0,
+            &[],
+            false,
+            &GoodputConfig::default(),
+        );
+
+        assert_eq!(metrics.total_input, 256);
     }
 }
