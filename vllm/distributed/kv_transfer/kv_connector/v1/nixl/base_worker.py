@@ -3510,13 +3510,12 @@ class NixlBaseConnectorWorker:
                 if _is_ssm_spec(self._group_spec_types[i]):
                     if num_decode_blocks == num_prefill_blocks:
                         continue
-                    # Only state-bearing slots reach here, single-state modes
-                    # just one (see get_exchange_clipped_blocks), so differing
-                    # counts mean position-indexed "all"-mode lists. A longer
-                    # prefill list carries earlier positions the decode side
-                    # already has (prefix hit) -> take its tail; a longer decode
-                    # list holds the position D recomputes itself, which gets
-                    # no prefill state.
+                    # Only state-bearing slots reach here, normally just one
+                    # (see get_exchange_clipped_blocks). A longer prefill list
+                    # carries earlier positions the decode side already has
+                    # (prefix hit) -> take its tail; a longer decode list holds
+                    # the position D recomputes itself, which gets no prefill
+                    # state.
                     assert num_decode_blocks - num_prefill_blocks <= 1, (
                         f"Group {i}: unpairable SSM state slots, "
                         f"decode={num_decode_blocks} prefill={num_prefill_blocks}"
