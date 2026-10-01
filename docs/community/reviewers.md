@@ -26,7 +26,7 @@ Sorted alphabetically by GitHub handle:
 - [@LopezCastroRoberto](https://github.com/LopezCastroRoberto): Kernels and quantization
 - [@mawong-amd](https://github.com/mawong-amd)
 - [@micah-wil](https://github.com/micah-wil)
-- [@netanel-haber](https://github.com/netanel-haber)
+- [@netanel-haber](https://github.com/netanel-haber): Nemotron/NVIDIA models, Mamba/Linear attention hybrids, VLMs
 - [@Rohan138](https://github.com/Rohan138)
 - [@simondanielsson](https://github.com/simondanielsson): ROCm performance (CDNA), MoRI-IO.
 - [@taneem-ibrahim](https://github.com/taneem-ibrahim): Pooling models
