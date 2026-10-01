@@ -390,8 +390,12 @@ class RequestState:
         if self.output_kind == RequestOutputKind.DELTA:
             # Side effect: logprobs processor forgets prompt logprobs
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
+            prompt_token_id_logprobs = (
+                self.logprobs_processor.pop_prompt_token_id_logprobs()
+            )
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
+            prompt_token_id_logprobs = self.logprobs_processor.prompt_token_id_logprobs
 
         return RequestOutput(
             request_id=external_req_id,  # request_id is what was provided externally
@@ -399,6 +403,7 @@ class RequestState:
             prompt=self.prompt,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
+            prompt_token_id_logprobs=prompt_token_id_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
@@ -434,10 +439,16 @@ class RequestState:
             logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
 
         sampling_mask = None
-        if finished and self.sampling_mask_chunks:
+        if (delta or finished) and self.sampling_mask_chunks:
             sampling_mask = SamplingMask(
-                [chunk.token_ids.tolist() for chunk in self.sampling_mask_chunks]
+                [
+                    position
+                    for chunk in self.sampling_mask_chunks
+                    for position in chunk.to_nested_list()
+                ]
             )
+            if delta:
+                self.sampling_mask_chunks.clear()
 
         # Concatenate routed experts on finish
         routed_experts = None

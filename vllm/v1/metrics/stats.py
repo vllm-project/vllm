@@ -188,8 +188,9 @@ class SchedulerStats:
 
     num_running_reqs: int = 0
 
-    num_waiting_reqs: int = 0  # length of the "waiting" request queue
-    num_skipped_waiting_reqs: int = 0  # length of the "skipped waiting" queue
+    num_waiting_reqs: int = 0  # waiting requests not deferred
+    # waiting requests deferred by transient constraints or a blocked status
+    num_skipped_waiting_reqs: int = 0
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0
