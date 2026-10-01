@@ -17,6 +17,7 @@ import torch
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
+    _SHARED_REGION_GROUP_ID,
     KVConnectorRole,
     MooncakeConnector,
     MooncakeConnectorScheduler,
@@ -710,70 +711,125 @@ def test_get_transfer_regions_tolerates_peer_pp_stage_layers(monkeypatch):
         connector.connector_worker = None
 
 
-def test_transfer_plan_full_copy_for_replicated_consumer_kv():
-    # P TP2 -> D TP4 with 2 KV heads: every consumer rank holds a full replica
-    # of its head group's attention region instead of a slice of the
-    # producer's.
+def test_transfer_rule_follows_plain_head_mapping_for_hybrid_attention(monkeypatch):
+    """Hybrid attention follows the head mapping of plain models; Mamba/GDN
+    states shard by TP ratio, or copy whole when replicated across TP."""
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+    )
+    base = make_hybrid_gdn_kv_cache_config(vllm_config.cache_config.block_size)
+    replicated_spec = MambaSpec(
+        block_size=vllm_config.cache_config.block_size,
+        shapes=((4, 3),),
+        dtypes=(torch.float16,),
+        mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
+        tp_replicated=True,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=base.num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            *base.kv_cache_groups,
+            KVCacheGroupSpec(["model.layers.2.ple"], replicated_spec),
+        ],
+    )
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            kv_cache_config,
+        )
+        worker = connector.connector_worker
+
+        attention_rule = (False, worker.transfer_topo.total_num_kv_heads)
+        assert worker._transfer_rule(0) == attention_rule
+        # Packed rows shared by several groups only hold attention pages.
+        assert worker._transfer_rule(_SHARED_REGION_GROUP_ID) == attention_rule
+        assert worker._transfer_rule(1) == (False, None)
+        assert worker._transfer_rule(2) == (True, None)
+
+        worker.shutdown()
+        worker.shutdown = noop_shutdown
+        connector.connector_worker = None
+
+    # P TP2 -> D TP4 with 2 KV heads: each consumer rank holds a whole replica
+    # of the head its producer rank owns, which the head mapping copies whole.
+    for remote_tp_rank in range(4):
+        assert _compute_sender_transfer_plan(
+            local_tp_rank=remote_tp_rank // 2,
+            local_tp_size=2,
+            remote_tp_rank=remote_tp_rank,
+            remote_tp_size=4,
+            local_kv_block_len=1000,
+            remote_kv_block_len=1000,
+            producer_cache_replicated=False,
+            total_num_kv_heads=2,
+        ) == (True, 0, 0, 1000)
+    # Mamba/GDN states keep ratio slicing.
     assert _compute_sender_transfer_plan(
         local_tp_rank=0,
         local_tp_size=2,
-        remote_tp_rank=3,
-        remote_tp_size=4,
-        local_kv_block_len=1000,
-        remote_kv_block_len=1000,
-        producer_cache_replicated=False,
-        consumer_kv_replicated=True,
-    ) == (True, 0, 0, 1000)
-    # Mamba/GDN states shard by head count and keep ratio slicing.
-    assert _compute_sender_transfer_plan(
-        local_tp_rank=0,
-        local_tp_size=2,
-        remote_tp_rank=3,
+        remote_tp_rank=1,
         remote_tp_size=4,
         local_kv_block_len=2000,
         remote_kv_block_len=1000,
         producer_cache_replicated=False,
-        consumer_kv_replicated=False,
     ) == (True, 1000, 0, 1000)
 
 
-def test_validate_region_lengths_allows_replicated_consumer_attention():
-    kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
-    local_regions = [
-        TransferRegion("model.layers.0.self_attn", 0, 0x1000, 2000, 1000, 0),
-        TransferRegion("model.layers.1.linear_attn", 1, 0x5000, 2000, 2000, 1),
+def test_validate_region_lengths_per_rule_for_replicated_consumer_attention():
+    # P TP2 -> D TP4 with 2 KV heads. The worker validates each rule's regions
+    # separately: attention by head mapping (one whole head per rank), Mamba/GDN
+    # by TP ratio (local == 2x remote).
+    attention_local = [
+        TransferRegion("model.layers.0.self_attn", 0, 0x1000, 2000, 1000, 0)
     ]
-    remote_regions = [
-        TransferRegion("model.layers.0.self_attn", 0, 0x2000, 2000, 1000, 0),
-        TransferRegion("model.layers.1.linear_attn", 1, 0x6000, 2000, 1000, 1),
+    attention_remote = [
+        TransferRegion("model.layers.0.self_attn", 0, 0x2000, 2000, 1000, 0)
     ]
-    # Replicated consumer KV: attention regions must match exactly, Mamba/GDN
-    # regions keep the TP-ratio rule (local == 2x remote for TP2 -> TP4).
+    mamba_local = [
+        TransferRegion("model.layers.1.linear_attn", 1, 0x5000, 2000, 2000, 1)
+    ]
+    mamba_remote = [
+        TransferRegion("model.layers.1.linear_attn", 1, 0x6000, 2000, 1000, 1)
+    ]
     assert (
         _validate_asymmetric_region_lengths(
-            local_regions,
-            remote_regions,
+            attention_local,
+            attention_remote,
             local_tp_size=2,
             remote_tp_size=4,
             producer_cache_replicated=False,
-            group_specs=kv_cache_config.kv_cache_groups,
             total_num_kv_heads=2,
         )
         is None
     )
-
+    assert (
+        _validate_asymmetric_region_lengths(
+            mamba_local,
+            mamba_remote,
+            local_tp_size=2,
+            remote_tp_size=4,
+            producer_cache_replicated=False,
+        )
+        is None
+    )
     mismatched_remote = [
-        TransferRegion("model.layers.0.self_attn", 0, 0x2000, 2000, 500, 0),
-        remote_regions[1],
+        TransferRegion("model.layers.0.self_attn", 0, 0x2000, 2000, 500, 0)
     ]
-    assert "replicated consumer KV" in _validate_asymmetric_region_lengths(
-        local_regions,
-        mismatched_remote,
-        local_tp_size=2,
-        remote_tp_size=4,
-        producer_cache_replicated=False,
-        group_specs=kv_cache_config.kv_cache_groups,
-        total_num_kv_heads=2,
+    assert (
+        _validate_asymmetric_region_lengths(
+            attention_local,
+            mismatched_remote,
+            local_tp_size=2,
+            remote_tp_size=4,
+            producer_cache_replicated=False,
+            total_num_kv_heads=2,
+        )
+        is not None
     )
 
 
@@ -793,6 +849,7 @@ def test_transfer_plan_shards_mamba_when_only_attention_is_replicated():
         local_kv_block_len=1000,
         remote_kv_block_len=1000,
         producer_cache_replicated=True,
+        total_num_kv_heads=2,
     ) == (False, 0, 0, 1000)
     assert _compute_sender_transfer_plan(
         local_tp_rank=2,
@@ -802,6 +859,7 @@ def test_transfer_plan_shards_mamba_when_only_attention_is_replicated():
         local_kv_block_len=1000,
         remote_kv_block_len=1000,
         producer_cache_replicated=True,
+        total_num_kv_heads=2,
     ) == (True, 0, 0, 1000)
     # Mamba region: producer not replicated -> every rank pushes its shard
     # into the paired consumer rank's region (rank 1 -> dst offset 1000).
@@ -817,48 +875,141 @@ def test_transfer_plan_shards_mamba_when_only_attention_is_replicated():
 
 
 def test_validate_region_lengths_shards_mamba_when_producer_attn_replicated():
-    kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
-    # P TP4 -> D TP2 (tp_ratio=2): the attention group is replicated on the
-    # producer (4 > 2 KV heads) so its regions copy whole and must match
-    # exactly; the mamba group still shards, so the consumer region must be
-    # tp_ratio times the producer region.
-    local_regions = [
-        TransferRegion("model.layers.0.self_attn", 0, 0x1000, 2000, 1000, 0),
-        TransferRegion("model.layers.1.linear_attn", 1, 0x5000, 2000, 1000, 1),
+    # P TP4 -> D TP2 with 2 KV heads: attention replicates on the producer
+    # (4 > 2 KV heads) and copies whole heads, while the Mamba group still
+    # shards, so its consumer region must be tp_ratio times the producer's. A
+    # single engine-wide replication rule would skip the Mamba check.
+    attention_local = [
+        TransferRegion("model.layers.0.self_attn", 0, 0x1000, 2000, 1000, 0)
     ]
-    remote_regions = [
-        TransferRegion("model.layers.0.self_attn", 0, 0x2000, 2000, 1000, 0),
-        TransferRegion("model.layers.1.linear_attn", 1, 0x6000, 2000, 2000, 1),
+    attention_remote = [
+        TransferRegion("model.layers.0.self_attn", 0, 0x2000, 2000, 1000, 0)
+    ]
+    mamba_local = [
+        TransferRegion("model.layers.1.linear_attn", 1, 0x5000, 2000, 1000, 1)
     ]
     assert (
         _validate_asymmetric_region_lengths(
-            local_regions,
-            remote_regions,
+            attention_local,
+            attention_remote,
             local_tp_size=4,
             remote_tp_size=2,
             producer_cache_replicated=True,
-            group_specs=kv_cache_config.kv_cache_groups,
             total_num_kv_heads=2,
         )
         is None
     )
-
-    # Before per-group replication, producer_cache_replicated=True skipped all
-    # validation; a mamba region violating the TP-ratio rule must still error.
-    bad_remote = [
-        remote_regions[0],
-        TransferRegion("model.layers.1.linear_attn", 1, 0x6000, 2000, 1000, 1),
-    ]
+    assert (
+        _validate_asymmetric_region_lengths(
+            mamba_local,
+            [TransferRegion("model.layers.1.linear_attn", 1, 0x6000, 2000, 2000, 1)],
+            local_tp_size=4,
+            remote_tp_size=2,
+            producer_cache_replicated=False,
+        )
+        is None
+    )
     err = _validate_asymmetric_region_lengths(
-        local_regions,
-        bad_remote,
+        mamba_local,
+        [TransferRegion("model.layers.1.linear_attn", 1, 0x6000, 2000, 1000, 1)],
         local_tp_size=4,
         remote_tp_size=2,
-        producer_cache_replicated=True,
-        group_specs=kv_cache_config.kv_cache_groups,
-        total_num_kv_heads=2,
+        producer_cache_replicated=False,
     )
     assert err is not None and "TP ratio" in err
+
+
+def test_hetero_tp_keeps_sharded_gdn_states_uncoalesced(monkeypatch):
+    """Adjacent conv and ssm regions must not merge under heterogeneous TP,
+    even when the attention KV is replicated: the ratio split of a merged
+    region would cut across the conv/ssm boundary."""
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+    )
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(
+        vllm_config.cache_config.block_size
+    )
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            kv_cache_config,
+        )
+        worker = connector.connector_worker
+        gdn_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+        stride = 128
+        packed = torch.empty(kv_cache_config.num_blocks * stride, dtype=torch.int8)
+        gdn_cache = packed.view(-1, stride)[:, : gdn_spec.page_size_bytes]
+        worker.register_kv_caches({"model.layers.1.linear_attn": gdn_cache})
+        assert worker.kv_block_len_per_layer == [36, 8]
+        worker._producer_cache_is_replicated = lambda: True
+
+        # The consumer at twice the TP holds half of each state.
+        remote_base = 0x100000
+        meta = MooncakeXferMetadata(
+            remote_hostname="consumer-host",
+            remote_port=54321,
+            remote_tp_size=worker.tp_size * 2,
+            remote_tp_rank=0,
+            req_blocks={},
+            kv_caches_base_addr=[remote_base, remote_base + 18],
+            block_lens=[stride, stride],
+            kv_block_lens=[18, 4],
+            registered_layer_names=["model.layers.1.linear_attn"] * 2,
+            registered_layer_indices=[1, 1],
+            registered_group_indices=[1, 1],
+            registered_shared_group_ids=[[1], [1]],
+            registered_row_offsets=[-1, -1],
+        )
+        local_regions, remote_regions, err = worker._prepare_transfer_regions(meta)
+        assert err is None
+        assert [region.kv_block_len for region in local_regions] == [36, 8]
+        assert [region.kv_block_len for region in remote_regions] == [18, 4]
+
+        worker.shutdown()
+        worker.shutdown = noop_shutdown
+        connector.connector_worker = None
+
+
+def test_hetero_tp_requires_ds_conv_layout_for_sharded_mamba(monkeypatch):
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        get_conv_state_layout,
+    )
+
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+    )
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(
+        vllm_config.cache_config.block_size
+    )
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            kv_cache_config,
+        )
+        worker = connector.connector_worker
+        try:
+            monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "SD")
+            get_conv_state_layout.cache_clear()
+            err = worker._hetero_tp_mamba_layout_error(worker.tp_size * 2)
+            assert err is not None and "VLLM_SSM_CONV_STATE_LAYOUT=DS" in err
+            # Homogeneous TP copies whole states, so SD is fine.
+            assert worker._hetero_tp_mamba_layout_error(worker.tp_size) is None
+
+            monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+            get_conv_state_layout.cache_clear()
+            assert worker._hetero_tp_mamba_layout_error(worker.tp_size * 2) is None
+        finally:
+            get_conv_state_layout.cache_clear()
+            worker.shutdown()
+            worker.shutdown = noop_shutdown
+            connector.connector_worker = None
 
 
 @pytest.mark.cpu_test
@@ -974,7 +1125,6 @@ def test_gdn_conv_sub_projection_regions_align_across_het_tp(monkeypatch):
                     local_kv_block_len=p_len,
                     remote_kv_block_len=d_len,
                     producer_cache_replicated=False,
-                    consumer_kv_replicated=False,
                 ) == (True, (d_rank % 2) * d_len, 0, d_len)
     finally:
         get_conv_state_layout.cache_clear()

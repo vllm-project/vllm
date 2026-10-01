@@ -245,7 +245,6 @@ def _compute_sender_transfer_plan(
     local_kv_block_len: int,
     remote_kv_block_len: int,
     producer_cache_replicated: bool,
-    consumer_kv_replicated: bool = False,
     total_num_kv_heads: int | None = None,
 ) -> tuple[bool, int, int, int]:
     """Plan one producer-rank to one consumer-rank copy for heterogeneous TP."""
@@ -284,12 +283,6 @@ def _compute_sender_transfer_plan(
     if producer_cache_replicated:
         return True, 0, 0, local_kv_block_len
 
-    if consumer_kv_replicated:
-        # The consumer TP group is wider than the KV-head count, so each
-        # consumer rank holds a full replica of its head group's region rather
-        # than a shard of the producer's region. Copy the region whole.
-        return True, 0, 0, local_kv_block_len
-
     ratio_abs = -tp_ratio
     return (
         True,
@@ -321,7 +314,6 @@ def _validate_asymmetric_region_lengths(
     local_tp_size: int,
     remote_tp_size: int,
     producer_cache_replicated: bool,
-    group_specs: list | None = None,
     total_num_kv_heads: int | None = None,
 ) -> str | None:
     """Validate transfer-region metadata for a fixed producer/consumer pair.
@@ -336,56 +328,17 @@ def _validate_asymmetric_region_lengths(
             "producer and consumer."
         )
 
-    if group_specs is None and total_num_kv_heads is not None:
+    if total_num_kv_heads is not None:
         # TP ranks beyond the KV-head count replicate existing shards.
         local_tp_size = min(local_tp_size, total_num_kv_heads)
         remote_tp_size = min(remote_tp_size, total_num_kv_heads)
-    elif producer_cache_replicated and group_specs is None:
+    elif producer_cache_replicated:
         return None
 
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
-    consumer_kv_replicated = (
-        total_num_kv_heads is not None and remote_tp_size > total_num_kv_heads
-    )
     for idx, (local_region, remote_region) in enumerate(
         zip(local_regions, remote_regions)
     ):
-        # Replication is a per-group property: an attention group replicates
-        # when TP > KV-head count, while Mamba/GDN states always shard by
-        # head count. A global flag would wrongly apply attention replication
-        # to mamba regions (e.g. Falcon-H1 P TP4 -> D TP2 with 2 KV heads and
-        # 24 mamba heads silently scrambles the mamba state).
-        is_mamba = group_specs is not None and isinstance(
-            group_specs[local_region.group_index].kv_cache_spec,
-            MambaSpec,
-        )
-        if group_specs is not None and producer_cache_replicated and not is_mamba:
-            # Producer ranks hold whole replicated attention regions; each
-            # sending rank copies its region whole, so lengths must match.
-            if local_region.kv_block_len != remote_region.kv_block_len:
-                return (
-                    "Mooncake KV region length mismatch for replicated "
-                    f"producer KV at region {idx}: "
-                    f"local={local_region.kv_block_len}, "
-                    f"remote={remote_region.kv_block_len}."
-                )
-            continue
-        # Consumer ranks replicate whole head groups instead of sharding
-        # the producer region; Mamba/GDN states still shard by head count.
-        if (
-            group_specs is not None
-            and tp_ratio < 0
-            and consumer_kv_replicated
-            and not is_mamba
-        ):
-            if local_region.kv_block_len != remote_region.kv_block_len:
-                return (
-                    "Mooncake KV region length mismatch for replicated "
-                    f"consumer KV at region {idx}: "
-                    f"local={local_region.kv_block_len}, "
-                    f"remote={remote_region.kv_block_len}."
-                )
-            continue
         if tp_ratio == 1:
             if local_region.kv_block_len != remote_region.kv_block_len:
                 return (
@@ -1572,25 +1525,33 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        validation_err = _validate_asymmetric_region_lengths(
-            local_regions=local_regions,
-            remote_regions=remote_regions,
-            local_tp_size=self.tp_size,
-            remote_tp_size=meta.remote_tp_size,
-            producer_cache_replicated=self._producer_cache_is_replicated(),
-            # Hybrid GDN/Mamba models need per-group replication rules; plain
-            # attention models follow the head-clamping path from #52516.
-            group_specs=(
-                list(self.kv_cache_config.transfer_groups)
-                if self.kv_cache_config.has_mamba_layers
-                else None
-            ),
-            total_num_kv_heads=(
-                None
-                if self.use_mla and not self.kv_cache_config.has_mamba_layers
-                else self.transfer_topo.total_num_kv_heads
-            ),
-        )
+        validation_err = self._hetero_tp_mamba_layout_error(meta.remote_tp_size)
+        if validation_err is None:
+            # Attention and Mamba/GDN regions follow different TP rules.
+            regions_by_rule: dict[
+                tuple[bool, int | None],
+                tuple[list[TransferRegion], list[TransferRegion]],
+            ] = {}
+            for local_region, remote_region in zip(local_regions, remote_regions):
+                local_group, remote_group = regions_by_rule.setdefault(
+                    self._transfer_rule(local_region.group_index), ([], [])
+                )
+                local_group.append(local_region)
+                remote_group.append(remote_region)
+            for (replicated, num_kv_heads), (
+                local_group,
+                remote_group,
+            ) in regions_by_rule.items():
+                validation_err = _validate_asymmetric_region_lengths(
+                    local_regions=local_group,
+                    remote_regions=remote_group,
+                    local_tp_size=self.tp_size,
+                    remote_tp_size=meta.remote_tp_size,
+                    producer_cache_replicated=replicated,
+                    total_num_kv_heads=num_kv_heads,
+                )
+                if validation_err is not None:
+                    break
         if validation_err is not None:
             response = MooncakeXferResponse(
                 status=MooncakeXferResponseStatus.ERROR,
@@ -1908,21 +1869,7 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
-                    producer_kv_replicated=(
-                        not isinstance(
-                            group_specs[local_region.group_index].kv_cache_spec,
-                            MambaSpec,
-                        )
-                        and self._producer_cache_is_replicated()
-                    ),
-                    consumer_kv_replicated=(
-                        not isinstance(
-                            group_specs[local_region.group_index].kv_cache_spec,
-                            MambaSpec,
-                        )
-                        and agent_meta.remote_tp_size
-                        > self.transfer_topo.total_num_kv_heads
-                    ),
+                    group_index=local_region.group_index,
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -2775,9 +2722,13 @@ class MooncakeConnectorWorker:
         # multi-layer span would land that offset on the wrong layer.
         # Replicated KV keeps that offset at 0. MLA is replicated in practice;
         # gating on use_mla alone would promote and then fail the length check
-        # for a non-replicated MLA rank with tp_ratio != 1.
+        # for a non-replicated MLA rank with tp_ratio != 1. Each region's own
+        # rule decides: sharded Mamba/GDN states must not merge even when the
+        # attention KV is replicated.
         tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if tp_ratio == 1 or self._producer_cache_is_replicated():
+        if tp_ratio == 1 or all(
+            self._transfer_rule(region.group_index)[0] for region in local_regions
+        ):
             covered_both_sides = len(local_regions) == len(pre_align_local) and len(
                 remote_regions
             ) == len(pre_align_remote)
@@ -2851,15 +2802,51 @@ class MooncakeConnectorWorker:
             row_offsets=row_offsets,
         )
 
+    def _hetero_tp_mamba_layout_error(self, remote_tp_size: int) -> str | None:
+        """Reject heterogeneous TP for sharded Mamba/GDN state without the DS
+        conv layout, which is the only one that keeps each conv
+        sub-projection contiguous (the NIXL connector requires it too)."""
+        if (
+            self.tp_size != remote_tp_size
+            and not is_conv_state_dim_first()
+            and any(
+                isinstance(group.kv_cache_spec, MambaSpec)
+                and not group.kv_cache_spec.tp_replicated
+                for group in self.kv_cache_config.transfer_groups
+            )
+        ):
+            return (
+                "Mooncake heterogeneous-TP transfer of Mamba/GDN state requires "
+                "DS conv state layout. Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
+            )
+        return None
+
+    def _transfer_rule(self, group_index: int) -> tuple[bool, int | None]:
+        """Replication rule for a KV group's regions under heterogeneous TP.
+
+        Returns (producer_cache_replicated, total_num_kv_heads). Attention
+        follows the head mapping of plain models, also in hybrid models (packed
+        rows shared by several groups are attention-only). Mamba/GDN states
+        shard by the TP ratio, or are copied whole when replicated across TP.
+        """
+        if group_index != _SHARED_REGION_GROUP_ID:
+            spec = self.kv_cache_config.transfer_groups[group_index].kv_cache_spec
+            if isinstance(spec, MambaSpec):
+                return spec.tp_replicated, None
+        return (
+            self._producer_cache_is_replicated(),
+            None if self.use_mla else self.transfer_topo.total_num_kv_heads,
+        )
+
     def _get_sender_transfer_plan(
         self,
         local_kv_block_len: int,
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
-        producer_kv_replicated: bool = False,
-        consumer_kv_replicated: bool = False,
+        group_index: int,
     ) -> tuple[bool, int, int, int]:
+        producer_cache_replicated, total_num_kv_heads = self._transfer_rule(group_index)
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
             local_tp_size=self.tp_size,
@@ -2867,15 +2854,8 @@ class MooncakeConnectorWorker:
             remote_tp_size=remote_tp_size,
             local_kv_block_len=local_kv_block_len,
             remote_kv_block_len=remote_kv_block_len,
-            producer_cache_replicated=producer_kv_replicated,
-            consumer_kv_replicated=consumer_kv_replicated,
-            # Head re-sharding (#52516) only applies to plain attention
-            # models; MLA/hybrid layouts keep the per-group flags above.
-            total_num_kv_heads=(
-                None
-                if self.use_mla or self.kv_cache_config.has_mamba_layers
-                else self.transfer_topo.total_num_kv_heads
-            ),
+            producer_cache_replicated=producer_cache_replicated,
+            total_num_kv_heads=total_num_kv_heads,
         )
 
     def _log_debug_cache_registration(
