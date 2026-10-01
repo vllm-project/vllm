@@ -163,10 +163,13 @@ def test_reference_completion_mismatch_fails(bench):
 def test_unstructured_request_keeps_parseability_semantics(bench):
     # Under --structured-output-ratio < 1 the unstructured share was never
     # asked to follow a schema; grading stays at parseability for them.
+    # xgrammar_bench rows always carry a reference completion, so use one
+    # here and make the response disagree with it: an unstructured row must
+    # still pass on parseability alone.
     ret = [
         {
             "generated": 'here you go: {"anything": "free-form"}',
-            "expected": None,
+            "expected": '{"name": "John Smith", "age": 34}',
             "schema": SCHEMA,
             "structured": False,
         }

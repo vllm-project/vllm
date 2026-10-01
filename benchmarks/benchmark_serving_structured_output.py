@@ -715,11 +715,13 @@ async def benchmark(
 
 
 def _eval_correctness_json(expected, actual, schema=None, structured=True):
-    # A parseable object is necessary but not sufficient. When the dataset
-    # carries a reference completion the response must match it (semantic
-    # equality, so key order and whitespace do not matter); when the request
-    # asked for structured output the response must validate against the
-    # schema it was given.
+    # A parseable object is necessary but not sufficient. For a structured
+    # request whose dataset row carries a reference completion the response
+    # must also match it (semantic equality, so key order and whitespace do
+    # not matter); it must also validate against the schema it was given.
+    # The unstructured share under --structured-output-ratio keeps the old
+    # parseability semantics: it was never asked to follow the schema, and
+    # its free-form JSON is not comparable to the reference completion.
     import regex as re
 
     match = re.search(r"\{.*\}", actual, re.DOTALL)
@@ -730,7 +732,7 @@ def _eval_correctness_json(expected, actual, schema=None, structured=True):
     except Exception:
         return False
 
-    if expected is not None:
+    if structured and expected is not None:
         try:
             return actual_obj == json.loads(expected)
         except Exception:
