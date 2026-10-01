@@ -75,7 +75,7 @@ class MambaPrefillCheckpointMetadata:
     request_rows: torch.Tensor | None = None
     block_cols: torch.Tensor | None = None
 
-    def update_block_table(
+    def regather_state_indices(
         self, block_table: torch.Tensor
     ) -> "MambaPrefillCheckpointMetadata":
         assert self.request_rows is not None and self.block_cols is not None

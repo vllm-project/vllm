@@ -618,7 +618,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         batch-level and stay shared with ``metadata``."""
         m = metadata
         checkpoint = (
-            m.checkpoint.update_block_table(blk_table)
+            m.checkpoint.regather_state_indices(blk_table)
             if m.checkpoint is not None
             else None
         )
