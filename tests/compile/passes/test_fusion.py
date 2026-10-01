@@ -842,11 +842,13 @@ class TestGatedMxfp4Model(torch.nn.Module):
         eps: float,
         activation: str,
         flatten_heads: bool,
+        out_flatten: bool = False,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.flatten_heads = flatten_heads
+        self.out_flatten = out_flatten
         self.norm = RMSNormGated(
             head_dim,
             eps=eps,
@@ -864,12 +866,17 @@ class TestGatedMxfp4Model(torch.nn.Module):
             x = x.reshape(-1, self.head_dim)
             z = z.reshape(-1, self.head_dim)
         normed = self.norm(x, z)
+        if self.out_flatten:
+            # GDN's _output_projection: a reshape to the symbolic token count.
+            return self.out_proj(normed.flatten(-2))
         return self.out_proj(normed.reshape(-1, self.num_heads * self.head_dim))
 
 
 @pytest.mark.parametrize("num_tokens", [8, 64])
 @pytest.mark.parametrize("activation", ["swish", "sigmoid"])
-@pytest.mark.parametrize("flatten_heads", [True, False])
+@pytest.mark.parametrize(
+    "flatten_heads, out_flatten", [(True, False), (False, False), (False, True)]
+)
 @pytest.mark.skipif(
     (not current_platform.is_rocm() or not IS_AITER_FOUND),
     reason="Only test on ROCm with aiter package installed",
@@ -878,6 +885,7 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
     num_tokens: int,
     activation: str,
     flatten_heads: bool,
+    out_flatten: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     if not rocm_aiter_ops.is_fused_rms_gated_mxfp4_quant_available():
@@ -917,7 +925,13 @@ def test_aiter_fusion_rmsnorm_gated_mxfp4_gemm(
         torch.manual_seed(1)
 
         model = TestGatedMxfp4Model(
-            num_heads, head_dim, out_features, eps, activation, flatten_heads
+            num_heads,
+            head_dim,
+            out_features,
+            eps,
+            activation,
+            flatten_heads,
+            out_flatten,
         )
         assert model.out_proj.quant_method.kernel.use_asm_gemm
 

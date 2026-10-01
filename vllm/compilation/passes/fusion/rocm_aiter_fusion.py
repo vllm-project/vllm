@@ -31,6 +31,7 @@ from ..vllm_inductor_pass import (
     _fx_view_to_reshape,
     fold_consecutive_reshapes,
     remove_noop_reshapes,
+    reshape_symbolic_dim_to_minus_one,
 )
 from .matcher_utils import (
     MatcherQuantFP8,
@@ -825,6 +826,9 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
+        # The gated-norm patterns flatten heads with reshape(-1, hidden); GDN
+        # does it with flatten(-2), a reshape to the symbolic token count.
+        reshape_symbolic_dim_to_minus_one(graph)
         self.matched_count = self.patterns.apply(graph)
         logger.debug(
             "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
