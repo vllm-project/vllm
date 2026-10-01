@@ -111,7 +111,7 @@ def test_commit_matches_native_per_token_state(accepted):
     ctx.commit(acc, inp["state_indices"], inp["query_start_loc"])
     for i, blk in enumerate(inp["state_indices"].tolist()):
         tok = int(inp["query_start_loc"][i]) + int(acc[i]) - 1
-        torch.testing.assert_close(ckpt[blk], states[tok], rtol=1e-5, atol=1e-6)
+        assert torch.equal(ckpt[blk], states[tok])
     others = [b for b in range(ckpt.shape[0]) if b not in inp["state_indices"].tolist()]
     assert torch.equal(ckpt[others], inp["checkpoint_state"][others])
 
@@ -301,7 +301,7 @@ def test_commit_maps_noncontiguous_requests_in_align_mode():
         c0 = int(nc[r])
         final_blk = int(bt[r, max(c0 + n - 1, 0) // bs])
         tok = int(inp["query_start_loc"][i]) + n - 1
-        torch.testing.assert_close(ckpt[final_blk], states[tok], rtol=1e-5, atol=1e-6)
+        assert torch.equal(ckpt[final_blk], states[tok])
 
 
 # (num_computed, accepted, block size): boundary after 1 / after 2 / ending exactly on
@@ -343,12 +343,8 @@ def test_align_boundary_and_final_state_match_native(nc, accepted, bs):
     if (
         nc + accepted >= next_boundary
     ):  # crosses: the boundary state goes into the source block
-        torch.testing.assert_close(
-            ckpt[int(src)], states[next_boundary - nc - 1], rtol=1e-5, atol=1e-6
-        )
-    torch.testing.assert_close(
-        ckpt[final_blk], states[accepted - 1], rtol=1e-5, atol=1e-6
-    )
+        assert torch.equal(ckpt[int(src)], states[next_boundary - nc - 1])
+    assert torch.equal(ckpt[final_blk], states[accepted - 1])
 
 
 @pytest.mark.parametrize("gate", list(GATES))
@@ -367,7 +363,7 @@ def test_commit_matches_native_under_extreme_gates(gate, seed):
         ctx.commit(acc, inp["state_indices"], inp["query_start_loc"])
         for i, blk in enumerate(inp["state_indices"].tolist()):
             tok = int(inp["query_start_loc"][i]) + int(acc[i]) - 1
-            torch.testing.assert_close(ckpt[blk], states[tok], rtol=1e-5, atol=1e-6)
+            assert torch.equal(ckpt[blk], states[tok])
 
 
 @pytest.mark.parametrize("batch", [1, 2, 4])

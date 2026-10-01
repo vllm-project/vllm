@@ -9,7 +9,7 @@ GDN port of the Kimi-K3 KDA RecoverSSM path
 scalar per value head (g = -exp(A_log) * softplus(a + dt_bias)), q/k heads are grouped
 over value heads (HV // H), and q/k are L2-normalised inside the kernel when requested.
 The verify step caches, per token, the delta-rule correction c_t = beta_t * (v_t - S'_t
-k_t) (V floats), the normalised key (K floats) and the log-decay g_t (1 float) in one
+k_t) (V floats), the normalised key (K floats) and the decay exp(g_t) (1 float) in one
 fp32 "replay" record. Recovery folds the accepted prefix: S_n = exp(sum_t g_t) S_0 +
 sum_t exp(sum_{s>t} g_s) c_t k_t^T and writes the checkpoint once (plus the
 block-boundary state in align mode)."""
@@ -150,7 +150,8 @@ def _gdn_recoverssm_verify_kernel(
             q = q * tl.rsqrt(tl.sum(q * q) + 1e-6)
             k = k * tl.rsqrt(tl.sum(k * k) + 1e-6)
         q = q * scale
-        new_state = state * tl.exp(g)
+        decay = tl.exp(g)
+        new_state = state * decay
         corr = (v - tl.sum(new_state * k[None, :], 1)) * beta
         new_state = new_state + corr[:, None] * k[None, :]
         state = tl.where(valid, new_state, state)
@@ -164,7 +165,8 @@ def _gdn_recoverssm_verify_kernel(
         tl.store(rec + offs_v * stride_replay_dim, corr, mask=valid & mask_v)
         if pid_v == 0:
             tl.store(rec + (V + offs_k) * stride_replay_dim, k, mask=valid & mask_k)
-            tl.store(rec + (V + K) * stride_replay_dim, g, mask=valid)
+            # the decay as multiplied here, so the commit replays this exact float
+            tl.store(rec + (V + K) * stride_replay_dim, decay, mask=valid)
 
 
 def gdn_recoverssm_verify(
@@ -399,19 +401,19 @@ def _commit_gdn_state_kernel(
         mask=mask_state,
         other=0.0,
     ).to(tl.float32)
-    decay = 1.0
-    corr = tl.zeros([BV, BK], tl.float32)
-    for r in range(n):
-        t = n - r - 1
+    # Forward over the accepted tokens with the verify step's own update, so the committed
+    # state is the per-token state bit for bit (the decay and corr stored are the floats
+    # the verify kernel used).
+    h = s0
+    for t in range(n):
         rec = rec_base + t * stride_replay_pos
         c = tl.load(rec + offs_v * stride_replay_dim, mask=mask_v, other=0.0)
         kk = tl.load(rec + (V + offs_k) * stride_replay_dim, mask=mask_k, other=0.0)
-        g = tl.load(rec + (V + K) * stride_replay_dim)
-        corr += (c[:, None] * kk[None, :]) * decay
-        decay *= tl.exp(g)
+        decay = tl.load(rec + (V + K) * stride_replay_dim)
+        h = tl.fma(c[:, None], kk[None, :], h * decay)
     tl.store(
         state_ptr + dst_idx * sbs + pid_h * stride_state_head + sp,
-        (s0 * decay + corr).to(state_ref_ptr.dtype.element_ty),
+        h.to(state_ref_ptr.dtype.element_ty),
         mask=mask_state,
     )
 
