@@ -34,28 +34,58 @@ chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
   cache for the rest.
 """
 
+import ctypes
+import mmap
+import os
+import tempfile
 import weakref
+from contextlib import ExitStack
 
 import numpy as np
 import torch
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
+    get_dp_group,
+    get_engram_dp_group,
+    get_engram_dp_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.distributed.device_communicators.shm_broadcast import (
+    SHM_PATH,
+    check_shm_free_space,
+)
+from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import is_uva_available
+from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
 
 # Cache value for tokens that take no part in an n-gram (image spans).
 DEAD_ID = -1
+
+
+def _engram_lookup_thresholds(device: torch.device) -> tuple[int | None, int | None]:
+    """Host lookup thresholds on `device`: the rows from which to sort, and the
+    tokens (max over DP ranks) from which to run inline. None disables that path."""
+    if current_platform.is_cuda() and current_platform.is_device_capability_family(
+        100, device.index or 0
+    ):
+        # Measured on GB200.
+        return 36864, 4096
+    # TODO: Add hand-tuned thresholds for other GPU families.
+    return None, None
 
 
 def _is_prime(n: int) -> bool:
@@ -583,12 +613,14 @@ def _engram_head_shard_weight_loader(
         "ids_stride_t",
         "ids_stride_h",
         "GRID",
+        "SORTED",
     ]
 )
 def _engram_lookup_kernel(
     weight,
     scales,
     ids,
+    sorted_dst,
     out,
     vocab_start,
     vocab_end,
@@ -602,27 +634,37 @@ def _engram_lookup_kernel(
     QUANT_BLOCK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     GRID,
+    SORTED,
 ):
     """Gather fp8 rows, apply their ue8m0 block scales, write bf16.
 
     Only this rank's heads are read; padded heads write zeros for all-gather.
-    `weight`/`scales` may address pinned host memory through UVA.
+    `weight`/`scales` may address pinned host memory through UVA. If SORTED,
+    `ids` holds rows relative to vocab_start in table order and `sorted_dst`
+    their output rows.
     """
     cols = tl.arange(0, DIM)
     scale_cols = cols // QUANT_BLOCK
     for base in tl.range(tl.program_id(0) * BLOCK_R, num_rows, GRID * BLOCK_R):
         rows = base + tl.arange(0, BLOCK_R)
         valid = rows < num_rows
-        head = HEAD_START + rows % LOCAL_HEADS
-        token = (rows // LOCAL_HEADS).to(tl.int64)
-        index = tl.load(
-            ids + token * ids_stride_t + head * ids_stride_h,
-            mask=valid & (head < TOTAL_HEADS),
-            other=-1,
-        ).to(tl.int64)
-        owned = valid & (head < TOTAL_HEADS)
-        owned &= (index >= vocab_start) & (index < vocab_end)
-        local = tl.where(owned, index - vocab_start, 0)
+        if SORTED:
+            local = tl.load(ids + rows, mask=valid, other=-1).to(tl.int64)
+            dst = tl.load(sorted_dst + rows, mask=valid, other=0).to(tl.int32)
+            owned = (local >= 0) & (local < vocab_end - vocab_start)
+        else:
+            head = HEAD_START + rows % LOCAL_HEADS
+            token = (rows // LOCAL_HEADS).to(tl.int64)
+            index = tl.load(
+                ids + token * ids_stride_t + head * ids_stride_h,
+                mask=valid & (head < TOTAL_HEADS),
+                other=-1,
+            ).to(tl.int64)
+            dst = rows
+            owned = valid & (head < TOTAL_HEADS)
+            owned &= (index >= vocab_start) & (index < vocab_end)
+            local = index - vocab_start
+        local = tl.where(owned, local, 0)
         values = tl.load(
             weight + local[:, None] * DIM + cols[None, :],
             mask=owned[:, None],
@@ -636,16 +678,240 @@ def _engram_lookup_kernel(
         # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
         scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
         tl.store(
-            out + rows[:, None] * DIM + cols[None, :],
+            out + dst[:, None] * DIM + cols[None, :],
             (values.to(tl.float32) * scale).to(tl.bfloat16),
             mask=valid[:, None],
         )
 
 
+def engram_head_shard_rank() -> int:
+    """This rank's slot among the hash-head shards of one engram table.
+
+    TP-major, so the shards a DP gather brings in are contiguous heads and
+    the following TP gather completes the head order.
+    """
+    dp_group = get_engram_dp_group()
+    dp_size = dp_group.world_size if dp_group is not None else 1
+    dp_rank = dp_group.rank_in_group if dp_group is not None else 0
+    return get_tensor_model_parallel_rank() * dp_size + dp_rank
+
+
+def engram_gathered_num_tokens() -> int:
+    """Per-replica token slot for the node-local Engram DP group."""
+    dp_metadata = get_forward_context().dp_metadata
+    if dp_metadata is None:
+        raise RuntimeError("a DP-shared engram table needs DP token metadata")
+    group = get_engram_dp_group()
+    assert group is not None
+    # Engram groups are contiguous slices of the full DP group.
+    start = get_dp_group().rank_in_group - group.rank_in_group
+    return int(
+        dp_metadata.num_tokens_across_dp_cpu[start : start + group.world_size].max()
+    )
+
+
+def gather_engram_hashes(
+    hash_ids: torch.Tensor, *, dp_shared_memory: bool = False
+) -> torch.Tensor:
+    """Collect the n-gram ids of every DP replica sharing one table.
+
+    Replicas are padded to a common token slot, so the gathered shape is
+    static under CUDA graph capture (where DP already pads alike).
+    """
+    dp_group = get_engram_dp_group()
+    if dp_group is None or dp_shared_memory:
+        return hash_ids
+    slot = engram_gathered_num_tokens()
+    if hash_ids.shape[0] > slot:
+        raise ValueError("Engram token count exceeds the DP token slot")
+    if hash_ids.shape[0] < slot:
+        pad = hash_ids.new_full(
+            (slot - hash_ids.shape[0], *hash_ids.shape[1:]), DEAD_ID
+        )
+        hash_ids = torch.cat((hash_ids, pad))
+    return dp_group.all_gather(hash_ids, dim=0)
+
+
+class DPSharedEngramStorage:
+    """Registered host weights shared by a node-local DP group with one writer."""
+
+    def __init__(
+        self, num_rows: int, dim: int, block_size: int, group: GroupCoordinator
+    ) -> None:
+        self.group = group
+        weight_bytes = num_rows * dim
+        storage = self._allocate(weight_bytes + weight_bytes // block_size)
+        self.weight = storage[:weight_bytes].view(torch.float8_e4m3fn).view(-1, dim)
+        self.weight_scale_inv = storage[weight_bytes:].view(-1, dim // block_size)
+        self._views: tuple[torch.Tensor, torch.Tensor] | None = None
+
+    def _allocate(self, num_bytes: int) -> torch.Tensor:
+        """Map and register one physical allocation across a node-local DP group."""
+        group = self.group
+        with ExitStack() as stack:
+            path = error = None
+            if group.rank_in_group == 0:
+                try:
+                    check_shm_free_space(num_bytes)
+                    backing_file = stack.enter_context(
+                        tempfile.NamedTemporaryFile(prefix="vllm_engram_", dir=SHM_PATH)
+                    )
+                    backing_file.truncate(num_bytes)
+                    path = backing_file.name
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+            path, error = group.broadcast_object((path, error))
+            if error is not None:
+                raise RuntimeError(
+                    "Engram shared-memory creation failed on EDP rank 0: " + error
+                )
+
+            mapping = owner = tensor = None
+            try:
+                with open(path, "r+b") as file:
+                    mapping = mmap.mmap(file.fileno(), num_bytes, flags=mmap.MAP_SHARED)
+                owner = np.frombuffer(mapping, dtype=np.uint8)
+                pointer = owner.ctypes.data
+                tensor = torch.from_numpy(owner)
+                result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
+                if result.value != 0:
+                    raise RuntimeError(f"cudaHostRegister failed: {result}")
+                finalizer = weakref.finalize(owner, self._unregister, mapping, pointer)
+                finalizer.atexit = False  # type: ignore[misc]
+                # The UVA helper otherwise allocates a private pinned copy.
+                if not tensor.is_pinned():
+                    raise RuntimeError(
+                        "cudaHostRegister did not pin the shared Engram mapping"
+                    )
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+
+            # Also fences peer mappings before the leader unlinks the file.
+            errors: list[str | None] = [None] * group.world_size
+            torch.distributed.all_gather_object(errors, error, group=group.cpu_group)
+            failures = "; ".join(
+                f"EDP rank {rank}: {error}"
+                for rank, error in enumerate(errors)
+                if error is not None
+            )
+            if failures:
+                # Dropping the owner runs the finalizer; the mapping then unmaps.
+                del tensor, owner, mapping
+                raise RuntimeError(
+                    "Engram shared-memory initialization failed: " + failures
+                )
+            assert tensor is not None
+            return tensor
+
+    @staticmethod
+    def _unregister(mapping: mmap.mmap, pointer: int) -> None:
+        # Torch storage retains the numpy owner, including through cached UVA views.
+        # Keep its mmap alive until CUDA has released the registration.
+        result = torch.cuda.cudart().cudaHostUnregister(pointer)
+        if result.value != 0:
+            logger.warning("Engram cudaHostUnregister failed: %s", result)
+
+    def load_weight(
+        self, param: torch.nn.Parameter, loaded_weight: torch.Tensor
+    ) -> None:
+        if self.group.rank_in_group == 0:
+            _engram_head_shard_weight_loader(param, loaded_weight)
+        # Read order may differ across ranks. Equal load counts ensure all shared
+        # weights are ready after the last weight-loader call returns.
+        torch.distributed.barrier(group=self.group.cpu_group)
+
+    def get_views(
+        self, weight: torch.Tensor, scales: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if (weight.data_ptr(), scales.data_ptr()) != (
+            self.weight.data_ptr(),
+            self.weight_scale_inv.data_ptr(),
+        ):
+            raise RuntimeError("Shared Engram parameter storage must not be replaced")
+        if self._views is None:
+            self._views = (
+                get_accelerator_view_from_cpu_tensor(self.weight),
+                get_accelerator_view_from_cpu_tensor(self.weight_scale_inv),
+            )
+        return self._views
+
+
+def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
+    """Whether co-located DP replicas exist and /dev/shm can hold the full tables."""
+    if get_engram_dp_size() == 1:
+        logger.warning_once(
+            "Engram DP replicas are not co-located on one node; "
+            "storing the offloaded tables per rank instead of sharing them."
+        )
+        return False
+    num_bytes = sum(layout.num_embeddings) * (
+        layout.head_dim + layout.head_dim // block_size
+    )
+    group = get_engram_dp_group()
+    assert group is not None
+    # Only the leader allocates, so every replica follows its check.
+    error = None
+    if group.rank_in_group == 0:
+        if not os.path.isdir(SHM_PATH):
+            error = f"{SHM_PATH} is not mounted"
+        else:
+            try:
+                check_shm_free_space(num_bytes, allocation_name="Engram tables")
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+    error = group.broadcast_object(error)
+    if error is not None:
+        logger.warning_once(
+            "Sharding the offloaded Engram tables across DP replicas: %s", error
+        )
+    return error is None
+
+
+def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
+    """Register prefaulted huge pages, or return None for pinned-memory fallback."""
+    try:
+        mapping = mmap.mmap(-1, num_bytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+        mapping.madvise(mmap.MADV_HUGEPAGE)
+    except OSError as exc:
+        logger.warning(
+            "Engram huge-page allocation failed (%s); using pinned memory.", exc
+        )
+        return None
+
+    owner = np.frombuffer(mapping, dtype=np.uint8)
+    # Fault the pages in before CUDA pins them, so they can be huge.
+    owner[:: mmap.PAGESIZE] = 0
+    tensor = torch.from_numpy(owner)
+    pointer = tensor.data_ptr()
+    result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
+    if result.value != 0:
+        logger.warning(
+            "Engram cudaHostRegister failed (%s); using pinned memory.", result
+        )
+        return None
+    # Tensor views retain owner; its finalizer retains mapping until unregister.
+    finalizer = weakref.finalize(
+        owner, DPSharedEngramStorage._unregister, mapping, pointer
+    )
+    finalizer.atexit = False  # type: ignore[misc]
+    if not tensor.is_pinned():
+        logger.warning(
+            "CUDA did not recognize Engram registration; using pinned memory."
+        )
+        return None
+    return tensor
+
+
 class ParallelEngramEmbedding(nn.Module):
-    """TP-sharded hash heads with FP8 rows and per-block E8M0 scales."""
+    """Hash heads with FP8 rows and per-block E8M0 scales.
+
+    Heads are TP-sharded, and additionally DP-sharded across a node-local
+    group unless the table lives in (DP-shared) pinned host memory.
+    """
 
     _weight_loader = staticmethod(_engram_head_shard_weight_loader)
+    _shared_memory: DPSharedEngramStorage | None = None
+    _packed: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -653,10 +919,32 @@ class ParallelEngramEmbedding(nn.Module):
         dim: int,
         head_sizes: tuple[int, ...],
         block_size: int = 32,
+        cpu_offload: bool = False,
+        dp_shared_memory: bool = False,
+        use_thp: bool = False,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
         assert sum(head_sizes) <= num_embeddings
+        self.cpu_offload = cpu_offload
+        self.dp_shared_memory = dp_shared_memory
+        self.use_thp = use_thp
+        self.dp_size = get_engram_dp_size()
+        if dp_shared_memory:
+            if not cpu_offload:
+                raise ValueError("dp_shared_memory requires cpu_offload=True")
+            if self.dp_size <= 1:
+                raise ValueError(
+                    "dp_shared_memory requires a node-local Engram DP "
+                    f"group with size > 1; effective Engram DP size is {self.dp_size}. "
+                    "Check that the node layout and rank placement allow complete "
+                    "DP replicas to be co-located."
+                )
+            self.dp_size = 1
+        if cpu_offload and not is_uva_available():
+            raise RuntimeError("Engram CPU offload requires UVA support")
+        self._views: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._view_src: tuple[int, int] | None = None
         self.num_embeddings = num_embeddings
         self.dim = dim
         self.block_size = block_size
@@ -688,20 +976,99 @@ class ParallelEngramEmbedding(nn.Module):
                     "engram_vocab_start": self.vocab_start_idx,
                 },
             )
+        if cpu_offload:
+            # Constant dummy values avoid randomizing huge CPU lookup tables.
+            set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
+            # The ue8m0 encoding of scale 1.0 is exponent byte 127.
+            set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 127})
+            logger.info(
+                "Engram table offloaded to pinned host memory: %d rows x %d, "
+                "%.2f GiB %s",
+                self.part_num_embeddings,
+                dim,
+                self.part_num_embeddings * (dim + dim // block_size) / 1024**3,
+                "shared across DP replicas" if dp_shared_memory else "per rank",
+            )
 
     def _get_shard_info(self) -> tuple[int, int]:
-        return self.tp_size, get_tensor_model_parallel_rank()
+        if self.dp_size == 1:
+            return self.tp_size, get_tensor_model_parallel_rank()
+        return self.tp_size * self.dp_size, engram_head_shard_rank()
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.dp_shared_memory:
+            group = get_engram_dp_group()
+            assert group is not None
+            storage = DPSharedEngramStorage(
+                self.part_num_embeddings, self.dim, self.block_size, group
+            )
+            self._shared_memory = storage
+            self._weight_loader = storage.load_weight
+            return storage.weight, storage.weight_scale_inv
+        scale_dim = self.dim // self.block_size
+        if not self.cpu_offload:
+            return (
+                torch.empty(
+                    self.part_num_embeddings, self.dim, dtype=torch.float8_e4m3fn
+                ),
+                torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
+            )
+        if self.use_thp:
+            weight_bytes = self.part_num_embeddings * self.dim
+            packed = _allocate_huge_page_storage(
+                weight_bytes + weight_bytes // self.block_size
+            )
+            if packed is not None:
+                self._packed = packed
+                return (
+                    packed[:weight_bytes].view(torch.float8_e4m3fn).view(-1, self.dim),
+                    packed[weight_bytes:].view(-1, scale_dim),
+                )
+        # Model initialization may be inside a CUDA device context.
         return (
-            torch.empty(self.part_num_embeddings, self.dim, dtype=torch.float8_e4m3fn),
             torch.empty(
-                self.part_num_embeddings, self.dim // self.block_size, dtype=torch.uint8
+                self.part_num_embeddings,
+                self.dim,
+                dtype=torch.float8_e4m3fn,
+                device="cpu",
+                pin_memory=True,
+            ),
+            torch.empty(
+                self.part_num_embeddings,
+                scale_dim,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=True,
             ),
         )
 
+    def collapse_huge_pages(self) -> None:
+        """Best-effort MADV_COLLAPSE (Linux >= 6.1) of pages that faulted small."""
+        if self._packed is None:
+            return
+        addr, num_bytes = self._packed.data_ptr(), self._packed.nbytes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.madvise.argtypes = (ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+        if libc.madvise(addr, num_bytes, 25) != 0:
+            logger.warning(
+                "Engram MADV_COLLAPSE failed; keeping existing pages: %s",
+                os.strerror(ctypes.get_errno()),
+            )
+
     def _storage(self) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.weight.data, self.weight_scale_inv.data
+        if self._shared_memory is not None:
+            return self._shared_memory.get_views(self.weight, self.weight_scale_inv)
+        if not self.cpu_offload:
+            return self.weight.data, self.weight_scale_inv.data
+        src = (self.weight.data_ptr(), self.weight_scale_inv.data_ptr())
+        if self._view_src != src:
+            self._views = (
+                get_accelerator_view_from_cpu_tensor(self.weight.data),
+                get_accelerator_view_from_cpu_tensor(self.weight_scale_inv.data),
+            )
+            self._view_src = src
+        assert self._views is not None
+        return self._views
 
     def lookup(
         self, indices: torch.Tensor, out: torch.Tensor, background: bool = False
@@ -714,6 +1081,24 @@ class ParallelEngramEmbedding(nn.Module):
         if not rows:
             return
         weight, scales = self._storage()
+        ids_stride_t, ids_stride_h = indices.stride()
+        sort_min_rows, _ = _engram_lookup_thresholds(indices.device)
+        sort = (
+            self.cpu_offload
+            and self._packed is None
+            and sort_min_rows is not None
+            and rows >= sort_min_rows
+        )
+        dst = indices
+        if sort:
+            # Small-page host tables miss the TLB per row; in table order, rows on
+            # one page share it.
+            head_end = self.head_start + self.part_n_hash_cols
+            local = indices[:, self.head_start : head_end] - self.vocab_start_idx
+            if (pad := self.part_n_hash_cols - local.shape[1]) > 0:
+                local = nn.functional.pad(local, (0, pad), value=-1)
+            indices, dst = local.flatten().sort()
+            dst = dst.int()
         # The table dwarfs TLB reach, so a persistent grid near the SM count
         # beats one program per row; halve it to leave SMs for the main stream.
         tiles = triton.cdiv(rows, 16)
@@ -722,12 +1107,13 @@ class ParallelEngramEmbedding(nn.Module):
             weight,
             scales,
             indices,
+            dst,
             out,
             self.vocab_start_idx,
             self.vocab_end_idx,
             rows,
-            indices.stride(0),
-            indices.stride(1),
+            ids_stride_t,
+            ids_stride_h,
             HEAD_START=self.head_start,
             LOCAL_HEADS=self.part_n_hash_cols,
             TOTAL_HEADS=self.n_hash_cols,
@@ -735,17 +1121,23 @@ class ParallelEngramEmbedding(nn.Module):
             QUANT_BLOCK=self.block_size,
             BLOCK_R=16,
             GRID=grid,
+            SORTED=sort,
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
         """indices: [num_tokens, n_hash_cols] -> [num_tokens, n_hash_cols, dim]
         bf16, gathered from all shards for this replica's tokens."""
+        num_tokens = indices.shape[0]
+        if self.dp_size > 1:
+            indices = gather_engram_hashes(indices)
         out = torch.empty(
             (indices.shape[0], self.part_n_hash_cols, self.dim),
             dtype=torch.bfloat16,
             device=indices.device,
         )
         self.lookup(indices, out)
+        if self.dp_size > 1:
+            out = _gather_engram_rows(out, num_tokens)
         if self.tp_size > 1:
             out = tensor_model_parallel_all_gather(out, dim=1)
         return out[:, : self.n_hash_cols]
@@ -891,6 +1283,25 @@ def _engram_select_rows(
     )
 
 
+def _gather_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
+    """Exchange DP tokens for heads, retaining only this replica's tokens."""
+    dp_group = get_engram_dp_group()
+    assert dp_group is not None
+    slot, remainder = divmod(staged.shape[0], dp_group.world_size)
+    assert remainder == 0 and 0 <= num_tokens <= slot
+    gathered = dp_group.all_gather(staged, dim=0)
+    local_heads, dim = staged.shape[1:]
+    rows = staged.new_empty((num_tokens, dp_group.world_size * local_heads, dim))
+    _engram_select_rows(
+        gathered,
+        rows,
+        staged.shape[0],
+        dp_group.rank_in_group * slot,
+        local_heads * dim,
+    )
+    return rows
+
+
 class Engram(nn.Module):
     """Writes an n-gram lookup into the residual stream, gated by how well it
     matches that stream.
@@ -901,6 +1312,9 @@ class Engram(nn.Module):
     training kernel).
     """
 
+    _prefetch_stream: torch.cuda.Stream | None = None
+    _prefetch_done: torch.cuda.Event | None = None
+
     def __init__(
         self,
         config,
@@ -909,8 +1323,12 @@ class Engram(nn.Module):
         layer_hash_index: int,
         use_sequence_parallel: bool,
         prefix: str,
+        prefetch_stream: torch.cuda.Stream | None = None,
     ) -> None:
         super().__init__()
+        # Layers sharing one stream serialize their offloaded lookups, so they
+        # take turns instead of jointly starving decoder compute of SMs.
+        self._prefetch_stream = prefetch_stream
         self.layer_hash_index = layer_hash_index
         self.dim = config.hidden_size
         self.hc_mult = config.hc_mult
@@ -950,28 +1368,78 @@ class Engram(nn.Module):
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
     ) -> ParallelEngramEmbedding:
+        engram_config = get_current_vllm_config().engram_config
+        assert engram_config is not None
         return ParallelEngramEmbedding(
             layout.num_embeddings[layer_hash_index],
             layout.head_dim,
             tuple(size for order in layout.primes[layer_hash_index] for size in order),
+            cpu_offload=engram_config.cpu_offload,
+            dp_shared_memory=bool(engram_config.dp_shared_memory),
+            use_thp=engram_config.use_thp,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
         # Persistent storage keeps lookup addresses stable across graph replays.
         self.staged_rows = torch.empty(
-            max_tokens,
+            max_tokens * self.embed_tokens.dp_size,
             self.embed_tokens.part_n_hash_cols,
             head_dim,
             dtype=torch.bfloat16,
         )
+        if not self.embed_tokens.cpu_offload:
+            self._prefetch_stream = None
+            return
+        if self._prefetch_stream is None:
+            self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
+        self._prefetch_done = torch.cuda.Event()
 
     def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
-        """Look up rows before the decoder layers consume them."""
+        """Look up, or prefetch from host memory, rows before the decoder layers
+        consume them; DP-sharded tables take the group's gathered hash IDs."""
         rows = self.staged_rows[: hash_ids.shape[0]]
         assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
-        self.embed_tokens.lookup(hash_ids, rows)
+        if self._prefetch_stream is None:
+            self.embed_tokens.lookup(hash_ids, rows)
+        else:
+            self._start_prefetch(hash_ids, rows)
+
+    @eager_break_during_capture
+    def _start_prefetch(self, hash_ids: torch.Tensor, rows: torch.Tensor) -> None:
+        # Eager boundaries let the lookup span piecewise graph segments, and
+        # decide per replay (on the replay stream) whether it runs inline.
+        num_tokens = hash_ids.shape[0]
+        # All DP ranks must agree, or EP collectives wait on the slowest one.
+        if is_forward_context_available() and (dp := get_forward_context().dp_metadata):
+            num_tokens = int(dp.num_tokens_across_dp_cpu.max())
+        current = stream = torch.cuda.current_stream()
+        # Big lookups stall persistent main-stream kernels anyway: run them inline.
+        _, inline_min_tokens = _engram_lookup_thresholds(hash_ids.device)
+        if inline_min_tokens is not None and num_tokens >= inline_min_tokens:
+            self.embed_tokens.lookup(hash_ids, rows)
+        else:
+            stream = self._prefetch_stream
+            assert stream is not None
+            stream.wait_stream(current)
+            # Keep temporary hash storage alive until lookup finishes reading it.
+            hash_ids.record_stream(stream)
+            with torch.cuda.stream(stream):
+                self.embed_tokens.lookup(hash_ids, rows, background=True)
+        assert self._prefetch_done is not None
+        self._prefetch_done.record(stream)
+
+    @eager_break_during_capture
+    def _finish_prefetch(self, event: torch.cuda.Event) -> None:
+        # Wait for this layer's lookup only, not for later layers on the stream.
+        torch.cuda.current_stream().wait_event(event)
 
     def _ready_rows(self, num_tokens: int) -> torch.Tensor:
+        if self._prefetch_done is not None:
+            self._finish_prefetch(self._prefetch_done)
+        if self.embed_tokens.dp_size > 1:
+            slot = engram_gathered_num_tokens()
+            staged = self.staged_rows[: slot * self.embed_tokens.dp_size]
+            return _gather_engram_rows(staged, num_tokens)
         return self.staged_rows[:num_tokens]
 
     def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
