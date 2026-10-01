@@ -6,6 +6,7 @@ use std::sync::Arc;
 use serde_json::Value as JsonValue;
 use thiserror_ext::AsReport as _;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
@@ -23,6 +24,7 @@ pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
 pub struct ControlServiceImpl {
     state: Arc<AppState>,
     rl_lock: Mutex<()>,
+    engine_shutdown: Option<CancellationToken>,
 }
 
 impl ControlServiceImpl {
@@ -30,7 +32,13 @@ impl ControlServiceImpl {
         Self {
             state,
             rl_lock: Mutex::new(()),
+            engine_shutdown: None,
         }
+    }
+
+    pub fn with_engine_shutdown(mut self, shutdown: Option<CancellationToken>) -> Self {
+        self.engine_shutdown = shutdown;
+        self
     }
 
     fn ready(&self) -> &EngineCoreReadyResponse {
@@ -179,6 +187,18 @@ fn list_loras_status(error: LoraDisabledError) -> Status {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for ControlServiceImpl {
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        let shutdown = self.engine_shutdown.as_ref().ok_or_else(|| {
+            Status::failed_precondition("this frontend does not manage the engine process")
+        })?;
+        tracing::info!("engine shutdown requested via gRPC");
+        shutdown.cancel();
+        Ok(Response::new(pb::ShutdownResponse {}))
+    }
+
     async fn get_server_info(
         &self,
         _request: Request<pb::GetServerInfoRequest>,
