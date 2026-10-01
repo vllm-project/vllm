@@ -4833,6 +4833,23 @@ class GPUModelRunner(
             self.input_batch.num_tokens_no_spec[i] = pos + 1
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
+    @contextmanager
+    def preserve_serving_state(self):
+        multi_block_table = self.input_batch.block_table
+        saved = [
+            (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
+            for bt in multi_block_table.block_tables
+        ]
+        multi_block_table.clear()
+        try:
+            yield
+        finally:
+            for bt, (saved_gpu, saved_cpu) in zip(
+                multi_block_table.block_tables, saved
+            ):
+                bt.block_table.gpu.copy_(saved_gpu)
+                bt.block_table.cpu.copy_(saved_cpu)
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
@@ -5718,6 +5735,9 @@ class GPUModelRunner(
          - during profile_run
          - during DP rank dummy run
         """
+        # The worker also resolves this flag and passes randomize_inputs, but
+        # V1 has internal dummy runs (e.g. CUDA graph capture) that don't go
+        # through the worker, so keep the check here too.
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         randomize_inputs = randomize_inputs or (
             envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
@@ -6403,7 +6423,7 @@ class GPUModelRunner(
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
-    def profile_run(self) -> None:
+    def profile_run(self, randomize_inputs: bool = False) -> None:
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
             mm_config = self.model_config.multimodal_config
@@ -6464,7 +6484,7 @@ class GPUModelRunner(
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
-            self.max_num_tokens, is_profile=True
+            self.max_num_tokens, is_profile=True, randomize_inputs=randomize_inputs
         )
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:

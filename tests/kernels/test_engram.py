@@ -9,13 +9,10 @@ import torch
 
 from vllm.models.deepseek_v41.common import engram as engram_ops
 from vllm.models.deepseek_v41.common.engram import (
-    Engram as CommonEngram,
-)
-from vllm.models.deepseek_v41.common.engram import (
+    Engram,
     NgramHashState,
+    ParallelEngramEmbedding,
 )
-from vllm.models.deepseek_v41.nvidia import engram as nvidia_engram_ops
-from vllm.models.deepseek_v41.nvidia.engram import Engram, ParallelEngramEmbedding
 from vllm.platforms import current_platform
 
 
@@ -111,7 +108,7 @@ def test_fused_engram_post_wkv_matches_reference(
     )
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: tp_rank)
 
-    module = CommonEngram.__new__(CommonEngram)
+    module = Engram.__new__(Engram)
     torch.nn.Module.__init__(module)
     module.dim = dim
     module.hc_mult = hc_mult
@@ -121,6 +118,7 @@ def test_fused_engram_post_wkv_matches_reference(
     module.embed_tokens = torch.nn.Identity()
     # `forward` reads rows staged by `prepare_embeddings`, so inject kv there.
     module.embed_tokens.tp_size = module.embed_tokens.n_hash_cols = 1
+    module.embed_tokens.dp_size = 1
     module.staged_rows = kv.unsqueeze(1)
     if use_sequence_parallel:
         padded = torch.nn.functional.pad(kv, (0, 0, 0, (-num_kv_tokens) % tp_size))
@@ -592,9 +590,8 @@ def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch
     monkeypatch.setattr(
         engram_ops, "get_tensor_model_parallel_world_size", lambda: tp_size
     )
-    monkeypatch.setattr(nvidia_engram_ops, "get_engram_dp_size", lambda: dp_size)
+    monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: dp_size)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(nvidia_engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
     with pytest.raises(AssertionError, match="ranks without hash heads"):
         ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads)
 
@@ -602,10 +599,19 @@ def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="CUDA or ROCm required"
 )
-@pytest.mark.parametrize("cpu_offload", [False, True])
+@pytest.mark.parametrize(
+    "cpu_offload,sort_rows", [(False, False), (True, False), (True, True)]
+)
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeypatch):
-    """Keep complete buckets and reconstruct head order, including TP padding."""
+def test_engram_head_shards_reconstruct_checkpoint(
+    cpu_offload, sort_rows, tp_size, monkeypatch
+):
+    """Keep complete buckets and reconstruct head order, including TP padding,
+    whether or not the host lookup sorts its rows by table offset."""
+    if sort_rows:
+        monkeypatch.setattr(
+            engram_ops, "_engram_lookup_thresholds", lambda _: (0, None)
+        )
     head_sizes = (17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73)
     num_rows, dim = sum(head_sizes), 64
     torch.manual_seed(0)
@@ -796,10 +802,8 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-@pytest.mark.parametrize(
-    "backend,cpu_offload", [("nvidia", None), ("nvidia", False), ("common", False)]
-)
-def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
+@pytest.mark.parametrize("cpu_offload", [None, False])
+def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
     """Default offload uses pinned storage and the given stream; False uses HBM."""
     from vllm.config import EngramConfig
 
@@ -817,23 +821,18 @@ def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
         else EngramConfig(cpu_offload=cpu_offload),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
     )
-    offloaded = backend == "nvidia" and vllm_config.engram_config.cpu_offload
-    if backend == "common":
-        vllm_config.engram_config = None
+    offloaded = vllm_config.engram_config.cpu_offload
     monkeypatch.setattr(engram_ops, "get_current_vllm_config", lambda: vllm_config)
-    monkeypatch.setattr(
-        nvidia_engram_ops, "get_current_vllm_config", lambda: vllm_config
-    )
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         engram_ops, "ColumnParallelLinear", lambda *a, **k: torch.nn.Identity()
     )
     stream = torch.cuda.Stream()
-    kwargs = {"prefetch_stream": stream} if backend == "nvidia" else {}
     with torch.device("cuda"):
-        cls = Engram if backend == "nvidia" else CommonEngram
-        module = cls(config, None, layout, 0, False, "engram", **kwargs)
+        module = Engram(
+            config, None, layout, 0, False, "engram", prefetch_stream=stream
+        )
     layer = module.embed_tokens
     if offloaded:
         assert layer.weight.device.type == "cpu" and layer.weight.is_pinned()
@@ -897,7 +896,8 @@ def test_engram_prefetch_detects_missing_dependency(monkeypatch, missing_depende
             "The allocator reuse negative control requires the native allocator"
         )
 
-    def start(self, hash_ids, rows, stream):
+    def start(self, hash_ids, rows):
+        stream = self._prefetch_stream
         if missing_dependency != "producer_wait":
             stream.wait_stream(torch.cuda.current_stream())
         if missing_dependency != "record_stream":
