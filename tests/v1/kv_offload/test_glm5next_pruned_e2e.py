@@ -12,6 +12,7 @@ SimpleCPUOffloadConnector).
 """
 
 import os
+from typing import Any
 
 import pytest
 import torch
@@ -39,6 +40,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def _connector_config(name: str) -> KVTransferConfig:
+    extra: dict[str, Any]
     if name == "SimpleCPUOffloadConnector":
         extra = {"cpu_bytes_to_use": 4 << 30}
     else:

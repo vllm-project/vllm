@@ -33,11 +33,13 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _prompt_ids(n: int, seed: int = 0) -> TokensPrompt:
+def _ids(n: int, seed: int = 0) -> list[int]:
     g = torch.Generator().manual_seed(seed)
-    return TokensPrompt(
-        prompt_token_ids=torch.randint(1000, 100000, (n,), generator=g).tolist()
-    )
+    return torch.randint(1000, 100000, (n,), generator=g).tolist()
+
+
+def _prompt_ids(n: int, seed: int = 0) -> TokensPrompt:
+    return TokensPrompt(prompt_token_ids=_ids(n, seed))
 
 
 def _make_llm(**kwargs) -> LLM:
@@ -113,6 +115,100 @@ def test_greedy_is_reproducible_across_block_boundary():
     assert all(len(t) == 16 for t in first)
 
 
+def _mamba_groups(scheduler) -> list[tuple[int, list[str]]]:
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    return [
+        (gid, list(group.layer_names))
+        for gid, group in enumerate(scheduler.kv_cache_config.kv_cache_groups)
+        if isinstance(group.kv_cache_spec, MambaSpec)
+    ]
+
+
+def _cached_block_ids(scheduler, group_id: int) -> list[int]:
+    from vllm.v1.core.kv_cache_utils import get_group_id
+
+    return sorted(
+        block.block_id
+        for block in scheduler.kv_cache_manager.block_pool.blocks
+        if block.block_hash is not None and get_group_id(block.block_hash) == group_id
+    )
+
+
+def _state_pages(worker, layer_name: str, block_id: int) -> list[torch.Tensor]:
+    """The (conv, recurrent) state pages of one Mamba layer at one block."""
+    forward_context = worker.model_runner.vllm_config.compilation_config
+    layer = forward_context.static_forward_context[layer_name]
+    return [state[block_id].cpu().clone() for state in layer.kv_cache]
+
+
+def test_prefill_checkpoint_lands_in_every_mamba_group(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A prefill that crosses a block boundary saves its internal checkpoint,
+    the Mamba state at that boundary, into every KDA group's own cached page,
+    and that page holds the same state as a cold prefill ending exactly there.
+
+    The KDA groups share one metadata build per step (#58762); a per-group
+    field left pointing at the first group's block table sends the other
+    groups' checkpoints to the wrong page (#59536), which a token-level repeat
+    on this model does not notice.
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    # Dense retention keeps the reference run's retired block; the default
+    # (0) retains only semantic checkpoints such as the long prompt's.
+    llm = _make_llm(prefix_cache_retention_interval=None)
+    scheduler = llm.llm_engine.engine_core.engine_core.scheduler
+    block = llm.llm_engine.vllm_config.cache_config.block_size
+    assert block < LONG_PROMPT_LEN < 2 * block
+    groups = _mamba_groups(scheduler)
+    assert len(groups) >= 2
+    prompt = _ids(LONG_PROMPT_LEN)
+    one_token = SamplingParams(temperature=0, max_tokens=1)
+
+    def cached_pages() -> dict[str, list[torch.Tensor]]:
+        pages = {}
+        for group_id, layer_names in groups:
+            # Exactly one cached Mamba block per group: the boundary state.
+            (block_id,) = _cached_block_ids(scheduler, group_id)
+            for name in layer_names:
+                pages[name] = llm.collective_rpc(_state_pages, args=(name, block_id))[0]
+        return pages
+
+    # Reference through the ordinary state path: prefill exactly one block,
+    # then one decode step crosses into the next block and retires the first
+    # block's page, which now holds the boundary state, into the cache.
+    two_tokens = SamplingParams(temperature=0, max_tokens=2)
+    llm.generate([TokensPrompt(prompt_token_ids=prompt[:block])], two_tokens)
+    reference = cached_pages()
+    assert llm.reset_prefix_cache()
+
+    # The long prompt crosses the boundary inside one prefill, so the only
+    # cached Mamba block is its internal checkpoint at that boundary.
+    llm.generate([TokensPrompt(prompt_token_ids=prompt)], one_token)
+    checkpoint = cached_pages()
+    # The two paths feed the KDA layers through different prefill batch
+    # shapes, so the pages differ by bf16 rounding (relative error <= 0.03
+    # observed); a page written by another group, or never written, is off by
+    # a relative error of 1 or more.
+    report = []
+    for name, ref_pages in reference.items():
+        for kind, ref, got in zip(("conv", "recurrent"), ref_pages, checkpoint[name]):
+            ref, got = ref.float(), got.float()
+            report.append((name, kind, ((got - ref).norm() / ref.norm()).item()))
+    summary = "\n".join(
+        f"{name} {kind}: relative error vs boundary state {rel:.3g}"
+        for name, kind, rel in report
+    )
+    print(summary)
+    assert all(rel <= 0.2 for _, _, rel in report), summary
+
+    # The checkpoint is what a request sharing the first block resumes from.
+    probe = TokensPrompt(prompt_token_ids=prompt[:block] + _ids(64, seed=4))
+    assert llm.generate([probe], one_token)[0].num_cached_tokens == block
+
+
 def test_mtp_speculative_decoding_runs():
     """MTP layer (renumbered layers.4) loads as the drafter and greedy output
     agrees with the target-only run on the leading tokens."""
@@ -125,14 +221,10 @@ def test_mtp_speculative_decoding_runs():
     assert list(out[:4]) == list(base[:4])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="fused_recurrent_kda_fwd launches grid.z = num_seqs * local KDA heads; "
-    "64 heads x 1024 seqs (the default max_num_seqs on >=70GiB GPUs) exceeds the "
-    "CUDA limit of 65535 -> 'Triton Error [CUDA]: invalid argument' "
-    "(vllm-project/vllm#56973, fixed by #56974; drop this marker once it lands)",
-)
 def test_default_max_num_seqs_tp1():
+    """Startup and a generation at the default max_num_seqs of large GPUs
+    (1024 sequences x 64 local KDA heads once hit CUDA's gridDim.z limit in
+    the recurrent kernel's warmup, vllm-project/vllm#56973)."""
     llm = _make_llm(max_num_seqs=1024)
     out = llm.generate([_prompt_ids(8, seed=3)], SamplingParams(max_tokens=2))
     assert len(out[0].outputs[0].token_ids) == 2

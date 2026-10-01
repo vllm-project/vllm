@@ -100,8 +100,11 @@ steps:
   source_file_dependencies:
   - vllm/models/glm5next/
   - vllm/transformers_utils/configs/glm5_next.py
-  - vllm/v1/core/kv_cache_utils.py
+  - vllm/model_executor/layers/mamba/
+  - vllm/v1/core/
+  - vllm/v1/attention/backends/gdn_attn.py
   - vllm/v1/attention/backends/mla/
+  - vllm/v1/worker/gpu/
   - tests/models/glm5next/test_pruned_e2e.py
   commands:
   # Layer-pruned real checkpoint (4 layers + MTP, full widths): hybrid KDA +
