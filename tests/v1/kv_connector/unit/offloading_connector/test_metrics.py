@@ -488,7 +488,7 @@ def test_reset():
 
 def test_prom_metrics_observes_manager_counter():
     prom_metrics = OffloadPromMetrics(
-        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        vllm_config=_FakeVllmConfig(),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -514,7 +514,7 @@ def test_prom_metrics_observes_manager_counter():
 
 def test_prom_metrics_observes_flat_transfer_metrics_and_legacy_metrics():
     prom_metrics = OffloadPromMetrics(
-        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        vllm_config=_FakeVllmConfig(),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -576,7 +576,7 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
         return_value=_spec_cls_with_metric_definitions(metric_definitions),
     ):
         prom_metrics = OffloadPromMetrics(
-            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            vllm_config=_FakeVllmConfig(store_threshold=0),
             metric_types={
                 Gauge: _FakeMetric,
                 Counter: _FakeMetric,
@@ -620,7 +620,7 @@ def test_prom_metrics_lazily_observes_labeled_metric():
         return_value=_spec_cls_with_metric_definitions(metric_definitions),
     ):
         prom_metrics = OffloadPromMetrics(
-            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            vllm_config=_FakeVllmConfig(store_threshold=0),
             metric_types={
                 Gauge: _FakeMetric,
                 Counter: _FakeMetric,
@@ -659,7 +659,7 @@ def test_prom_metrics_rejects_wrong_label_count():
         return_value=_spec_cls_with_metric_definitions(metric_definitions),
     ):
         prom_metrics = OffloadPromMetrics(
-            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            vllm_config=_FakeVllmConfig(store_threshold=0),
             metric_types={
                 Gauge: _FakeMetric,
                 Counter: _FakeMetric,
@@ -680,7 +680,7 @@ def test_prom_metrics_rejects_wrong_label_count():
 
 def test_prom_metrics_uses_configured_manager_metrics():
     prom_metrics = OffloadPromMetrics(
-        vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+        vllm_config=_FakeVllmConfig(store_threshold=0),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -701,7 +701,7 @@ def test_prom_metrics_registers_tiering_metrics_from_spec():
                 "spec_name": "TieringOffloadingSpec",
                 "secondary_tiers": [],
             },
-        ),  # type: ignore[arg-type]
+        ),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -749,7 +749,7 @@ def test_aggregate_into_empty_stats():
 def test_prom_metrics_multi_engine_routing():
     """Metrics are routed to the correct engine index."""
     prom_metrics = OffloadPromMetrics(
-        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        vllm_config=_FakeVllmConfig(),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -775,7 +775,7 @@ def test_prom_metrics_multi_engine_routing():
 def test_prom_metrics_rejects_undeclared_metric():
     """observe() asserts if a metric was never declared in metadata."""
     prom_metrics = OffloadPromMetrics(
-        vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+        vllm_config=_FakeVllmConfig(store_threshold=0),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,

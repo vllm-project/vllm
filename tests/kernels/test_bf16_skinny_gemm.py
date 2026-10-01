@@ -85,6 +85,12 @@ QWEN4_EXP_SM90_CASES = [
     for num_tokens, config in plans.items()
 ]
 
+QWEN4_EXP_SM100_CASES = [
+    (n, k, num_tokens, config)
+    for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS.items()
+    for num_tokens, config in plans.items()
+]
+
 EXPECTED_CUTE_CONFIGS = {
     (3072, 7168, 1): (224, 3, 4, 8),
     (3072, 7168, 2): (128, 3, 2, 8),
@@ -269,6 +275,9 @@ def test_kda_overlap_configs_match_measured_table() -> None:
     }
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="KDA CuTeDSL helper requires CUDA"
+)
 @pytest.mark.parametrize(
     "compute_capability,supported",
     [((9, 0), False), ((10, 0), True), ((10, 3), True), ((12, 0), True)],
@@ -714,6 +723,7 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
     "capability,expected_plans",
     [
         ((10, 3), qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS),
+        ((10, 0), qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS),
         ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
         ((8, 0), {}),
     ],
@@ -896,6 +906,29 @@ def test_qwen4_exp_sm90_selected_shapes(
     weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
 
     selected = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS[(n, k)][num_tokens]
+    assert selected == config
+    output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
+
+    reference = torch.nn.functional.linear(x, weight)
+    cosine = torch.nn.functional.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+    assert cosine > 0.999
+
+
+@pytest.mark.parametrize("n,k,num_tokens,config", QWEN4_EXP_SM100_CASES)
+def test_qwen4_exp_sm100_selected_shapes(
+    n: int,
+    k: int,
+    num_tokens: int,
+    config: SkinnyGemmConfig,
+) -> None:
+    _require_capability_and_cute((10, 0))
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+
+    selected = qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS[(n, k)][num_tokens]
     assert selected == config
     output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
 
