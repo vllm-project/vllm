@@ -5,7 +5,6 @@ import contextlib
 import json
 import multiprocessing
 import socket
-import sys
 import threading
 import time
 import weakref
@@ -184,6 +183,7 @@ class APIServerProcessManager:
         target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
         tensor_queue: Queue | None = None,
+        socket_factory: Callable[[], socket.socket] | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -196,13 +196,15 @@ class APIServerProcessManager:
         Args:
             target_server_fn: Override function to call for each API server process
             listen_address: Address to listen for client connections
-            sock: Socket for client connections
+            sock: Borrowed socket, passed to workers only without socket_factory.
             args: Command line arguments
             num_servers: Number of API server processes to start
             input_addresses: Input addresses for each API server
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
+            socket_factory: Optional factory returning a fresh socket per worker,
+                used instead of sock. Its parent handle closes after spawn.
 
         """
         self.listen_address = listen_address
@@ -222,65 +224,48 @@ class APIServerProcessManager:
                 SharedAdmissionStats.num_counters(num_servers),
             )
 
-        for i, in_addr, out_addr in zip(
-            range(num_servers), input_addresses, output_addresses
-        ):
-            client_config: dict[str, Any] = {
-                "input_address": in_addr,
-                "output_address": out_addr,
-                "client_count": num_servers,
-                "client_index": i,
-            }
-            if admission_counters is not None:
-                client_config["mp_admission_counters"] = admission_counters
-            if stats_update_address is not None:
-                client_config["stats_update_address"] = stats_update_address
-            if tensor_queue is not None:
-                client_config["tensor_queue"] = tensor_queue
-
-            parent_recv, child_send = spawn_context.Pipe(duplex=False)
-            self._address_pipes.append(parent_recv)
-            client_config["actual_address_pipe"] = child_send
-
-            worker_sock = sock
-            if (
-                num_servers > 1
-                and sys.platform == "linux"
-                and sock.family in (socket.AF_INET, socket.AF_INET6)
-                and sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT)
-                and not sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
-            ):
-                from vllm.entrypoints.launchers.launcher import create_server_socket
-
-                # REUSEPORT balances distinct listeners, not copies of one fd.
-                try:
-                    worker_sock = create_server_socket(
-                        sock.getsockname(), reuse_port=True
-                    )
-                except OSError:
-                    shutdown(self.processes)
-                    raise
-
-            proc = spawn_context.Process(
-                target=target_server_fn or run_api_server_worker_proc,
-                name=f"ApiServer_{i}",
-                args=(listen_address, worker_sock, args, client_config),
-            )
-            self.processes.append(proc)
-            try:
-                proc.start()
-            finally:
-                if worker_sock is not sock:
-                    worker_sock.close()
-
-            # Drop parent's write end so reader sees EOF on child death.
-            child_send.close()
-
-        logger.info("Started %d API server processes", len(self.processes))
-
         # Shutdown only the API server processes on garbage collection
         # The extra processes are managed by their owners
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        try:
+            for i, in_addr, out_addr in zip(
+                range(num_servers), input_addresses, output_addresses
+            ):
+                client_config: dict[str, Any] = {
+                    "input_address": in_addr,
+                    "output_address": out_addr,
+                    "client_count": num_servers,
+                    "client_index": i,
+                }
+                if admission_counters is not None:
+                    client_config["mp_admission_counters"] = admission_counters
+                if stats_update_address is not None:
+                    client_config["stats_update_address"] = stats_update_address
+                if tensor_queue is not None:
+                    client_config["tensor_queue"] = tensor_queue
+
+                parent_recv, child_send = spawn_context.Pipe(duplex=False)
+                self._address_pipes.append(parent_recv)
+                client_config["actual_address_pipe"] = child_send
+
+                with (
+                    child_send,
+                    socket_factory()
+                    if socket_factory is not None
+                    else contextlib.nullcontext(sock) as worker_sock,
+                ):
+                    proc = spawn_context.Process(
+                        target=target_server_fn or run_api_server_worker_proc,
+                        name=f"ApiServer_{i}",
+                        args=(listen_address, worker_sock, args, client_config),
+                    )
+                    self.processes.append(proc)
+                    proc.start()
+        except BaseException:
+            self.shutdown()
+            raise
+
+        logger.info("Started %d API server processes", len(self.processes))
 
     def gather_actual_addresses(
         self,
