@@ -2606,6 +2606,7 @@ class Scheduler(SchedulerInterface):
     def set_pause_state(self, pause_state: PauseState) -> None:
         logger.info("setting pause state to %s", pause_state.name)
         self._pause_state = pause_state
+        self._preserve_paused_kv = False
 
     def set_preserve_paused_kv(self, preserve: bool) -> None:
         self._preserve_paused_kv = preserve
@@ -2685,16 +2686,12 @@ class Scheduler(SchedulerInterface):
         # the engine would quiesce before the connector can drain completions.
         # TODO: replace with a more general mechanism for connectors to keep
         # the scheduler alive.
-        # Keep exported blocks allocated across a cache-preserving pause;
-        # a passive remote-reader lease is not active device work.
-        finished_work = (
-            bool(self.finished_req_ids)
-            if self._pause_state == PauseState.PAUSED_ALL and self._preserve_paused_kv
-            else self.has_finished_requests()
-        )
         return (
             self.has_unfinished_requests()
-            or finished_work
+            or bool(self.finished_req_ids)
+            # A cache-preserving pause keeps exported blocks allocated rather
+            # than waiting on passive remote-reader leases.
+            or (not self._preserve_paused_kv and self.has_finished_requests())
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
                 self.ec_connector is not None
