@@ -273,7 +273,6 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
     """Metadata builder for the SM100 TRT-LLM sparse MLA kernel."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-    hisparse_supports_multi_token_decode: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -502,10 +501,11 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             decode_lse: torch.Tensor | None = None
             if num_decode_tokens > 0:
                 physical_topk, valid_counts = (
-                    index_group.convert_decode_logical_to_physical_topk(
+                    index_group.convert_logical_to_physical_topk(
                         self.index_group_index,
                         topk_indices[:num_decode_tokens],
                         attn_metadata,
+                        block_stride_rows=None,
                         return_valid_counts=True,
                     )
                 )

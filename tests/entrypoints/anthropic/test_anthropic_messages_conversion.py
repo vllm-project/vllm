@@ -37,6 +37,8 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    FunctionCall,
+    ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
@@ -353,9 +355,11 @@ class TestToolResultContent:
             if m["role"] == "user" and isinstance(m.get("content"), list)
         ]
         assert len(follow_up) == 1
-        assert follow_up[0]["content"][0]["image_url"]["url"] == (
-            "data:image/jpeg;base64,QUFB"
-        )
+        content = follow_up[0]["content"]
+        assert isinstance(content, list)
+        image = content[0]
+        assert image["type"] == "image_url"
+        assert image["image_url"]["url"] == "data:image/jpeg;base64,QUFB"
 
     def test_tool_result_with_multiple_images(self):
         request = self._make_tool_result_request(
@@ -385,7 +389,12 @@ class TestToolResultContent:
             if m["role"] == "user" and isinstance(m.get("content"), list)
         ]
         assert len(follow_up) == 1
-        urls = [p["image_url"]["url"] for p in follow_up[0]["content"]]
+        content = follow_up[0]["content"]
+        assert isinstance(content, list)
+        urls = []
+        for part in content:
+            assert part["type"] == "image_url"
+            urls.append(part["image_url"]["url"])
         assert urls == [
             "data:image/png;base64,IMG1",
             "https://example.com/img2.jpg",
@@ -582,7 +591,8 @@ class TestThinkingBlockConversion:
         asst = asst_msgs[0]
 
         assert asst.get("reasoning") == "I need to call the calculator."
-        tool_calls = list(asst.get("tool_calls", []))
+        tool_calls = asst.get("tool_calls")
+        assert tool_calls is not None
         assert len(tool_calls) == 1
         assert tool_calls[0]["function"]["name"] == "calculator"
         # No text content alongside reasoning + tool_use.
@@ -999,11 +1009,6 @@ class TestInlineSystemMessageInMessagesArray:
 
 def _make_stream_converter():
     obj = MagicMock(spec=AnthropicServingMessages)
-    obj.stop_reason_map = {
-        "stop": "end_turn",
-        "length": "max_tokens",
-        "tool_calls": "tool_use",
-    }
     obj.message_stream_converter = (
         AnthropicServingMessages.message_stream_converter.__get__(obj)
     )
@@ -1669,6 +1674,78 @@ class TestStopSequenceReason:
         assert msg_deltas[0]["delta"]["stop_reason"] == "end_turn"
         assert "stop_sequence" in msg_deltas[0]["delta"]
         assert msg_deltas[0]["delta"]["stop_sequence"] is None
+
+
+class TestToolUseStopReason:
+    """A response carrying a tool_use block reports ``stop_reason="tool_use"``
+    even when the chat layer says ``finish_reason="stop"``, as it does for a
+    forced (named) tool. A call cut short by max_tokens or a stop string does not.
+    """
+
+    @pytest.mark.parametrize(
+        ("finish_reason", "stop_reason", "expected"),
+        [
+            ("stop", None, "tool_use"),
+            ("tool_calls", "</x>", "tool_use"),
+        ],
+    )
+    def test_non_streaming(self, finish_reason, stop_reason, expected):
+        tool_call = ToolCall(
+            function=FunctionCall(name="get_weather", arguments='{"city": "Paris"}')
+        )
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", tool_calls=[tool_call]),
+                    finish_reason=finish_reason,
+                    stop_reason=stop_reason,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = _make_full_converter().messages_full_converter(response)
+
+        assert result.content[0].type == "tool_use"
+        assert result.stop_reason == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("args", "finish_reason", "stop_reason", "expected"),
+        [
+            ('{"city": "Paris"}', "stop", None, "tool_use"),
+            ('{"city": "Pa', "length", None, "max_tokens"),
+            ('{"city": "Paris"}', "tool_calls", "</x>", "tool_use"),
+            ('{"city": "Pa', "tool_calls", "</x>", "stop_sequence"),
+        ],
+    )
+    async def test_streaming(self, args, finish_reason, stop_reason, expected):
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            yield _make_stream_chunk(
+                delta=DeltaMessage(
+                    tool_calls=[_tc(id="call_1", name="get_weather", args=args)]
+                )
+            )
+            yield _make_stream_chunk(
+                finish_reason=finish_reason, stop_reason=stop_reason
+            )
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        events = _parse_sse_events(
+            [e async for e in converter.message_stream_converter(sse_input())]
+        )
+
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert msg_deltas[0]["delta"]["stop_reason"] == expected
 
 
 # ======================================================================
