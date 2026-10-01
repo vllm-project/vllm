@@ -19,20 +19,11 @@ leaves the prefill kernels (which parallelize over the query dim) idle.
 
 import torch
 
-from vllm import envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
-
-# Keep the scalar kernel as the default until the tiled path has been measured
-# across more hardware and workloads. Values greater than one opt into tiling.
-_PREFILL_TILE_Q = envs.VLLM_MINIMAX_SPARSE_PREFILL_TILE_Q
-if _PREFILL_TILE_Q not in (0, 1, 2, 4, 8, 16, 32):
-    raise ValueError(
-        "VLLM_MINIMAX_SPARSE_PREFILL_TILE_Q must be 0, 1, 2, 4, 8, 16, or 32"
-    )
 
 _FP8_DTYPES = (
     torch.float8_e4m3fn,
@@ -550,12 +541,7 @@ def minimax_m3_sparse_attn(
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
 ) -> None:
-    """GQA block-sparse attention over the selected blocks.
-
-    The scalar kernel is the default. Set
-    ``VLLM_MINIMAX_SPARSE_PREFILL_TILE_Q`` to a value greater than one to
-    opt into query tiling.
-    """
+    """GQA block-sparse attention over the selected blocks. block_size_q == 1."""
     total_q, num_heads, head_dim = q.shape
     batch = cu_seqlens_q.shape[0] - 1
     topk = topk_idx.shape[-1]
@@ -582,98 +568,48 @@ def minimax_m3_sparse_attn(
             _KV_SCALE_NONE,
         )
     )
-    use_tiled = _PREFILL_TILE_Q > 1
-    if use_tiled:
-        tile_q = _PREFILL_TILE_Q
-        # Spread the larger Q/accumulator tiles over more threads to limit spilling.
-        launch_options = {
-            "num_warps": min(
-                16, max(4, tile_q * triton.next_power_of_2(gqa_group_size) // 16)
-            )
-        }
-        grid = (triton.cdiv(max_query_len, tile_q), num_kv_heads, batch)
-        _gqa_sparse_fwd_tiled_kernel[grid](
-            q,
-            kv_cache,
-            k_scale_arg,
-            v_scale_arg,
-            topk_idx,
-            output,
-            block_table,
-            cu_seqlens_q,
-            seq_lens,
-            prefix_lens,
-            gqa_group_size,
-            head_dim,
-            topk,
-            sm_scale,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            kv_cache.stride(0),
-            kv_cache.stride(1),
-            kv_cache.stride(2),
-            kv_cache.stride(3),
-            stride_ks_h,
-            stride_ks_t,
-            stride_vs_h,
-            stride_vs_t,
-            topk_idx.stride(0),
-            topk_idx.stride(1),
-            topk_idx.stride(2),
-            output.stride(0),
-            output.stride(1),
-            output.stride(2),
-            block_table.stride(0),
-            BLOCK_SIZE_Q=tile_q,
-            BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
-            USE_FP8=use_fp8,
-            KV_SCALE_MODE=kv_scale_mode,
-            **launch_options,
-        )
-    else:
-        grid = (max_query_len, num_kv_heads, batch)
-        _gqa_sparse_fwd_kernel[grid](
-            q,
-            kv_cache,
-            k_scale_arg,
-            v_scale_arg,
-            topk_idx,
-            output,
-            block_table,
-            cu_seqlens_q,
-            cu_seqlens_q,  # cu_seqblocks_q == cu_seqlens_q when block_size_q == 1
-            seq_lens,
-            prefix_lens,
-            num_kv_heads,
-            gqa_group_size,
-            head_dim,
-            topk,
-            1,  # num_q_loop
-            sm_scale,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            kv_cache.stride(0),
-            kv_cache.stride(1),
-            kv_cache.stride(2),
-            kv_cache.stride(3),
-            stride_ks_h,
-            stride_ks_t,
-            stride_vs_h,
-            stride_vs_t,
-            topk_idx.stride(0),
-            topk_idx.stride(1),
-            topk_idx.stride(2),
-            output.stride(0),
-            output.stride(1),
-            output.stride(2),
-            block_table.stride(0),
-            BLOCK_SIZE_Q=1,
-            BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
-            USE_FP8=use_fp8,
-            KV_SCALE_MODE=kv_scale_mode,
-        )
+    grid = (max_query_len, num_kv_heads, batch)
+    _gqa_sparse_fwd_kernel[grid](
+        q,
+        kv_cache,
+        k_scale_arg,
+        v_scale_arg,
+        topk_idx,
+        output,
+        block_table,
+        cu_seqlens_q,
+        cu_seqlens_q,  # cu_seqblocks_q == cu_seqlens_q when block_size_q == 1
+        seq_lens,
+        prefix_lens,
+        num_kv_heads,
+        gqa_group_size,
+        head_dim,
+        topk,
+        1,  # num_q_loop
+        sm_scale,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        kv_cache.stride(0),
+        kv_cache.stride(1),
+        kv_cache.stride(2),
+        kv_cache.stride(3),
+        stride_ks_h,
+        stride_ks_t,
+        stride_vs_h,
+        stride_vs_t,
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        block_table.stride(0),
+        BLOCK_SIZE_Q=1,
+        BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        USE_FP8=use_fp8,
+        KV_SCALE_MODE=kv_scale_mode,
+    )
 
 
 @torch.no_grad()

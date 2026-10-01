@@ -27,7 +27,7 @@ if source_override := os.getenv("MINIMAX_SPARSE_ATTN_SOURCE"):
 else:
     SOURCE = (
         Path(__file__).resolve().parents[3]
-        / "vllm/models/minimax_m3/common/ops/sparse_attn.py"
+        / "vllm/models/minimax_m3/nvidia/ops/sparse_prefill.py"
     )
 spec = importlib.util.spec_from_file_location("sparse_attn_under_test", SOURCE)
 assert spec is not None and spec.loader is not None
@@ -199,19 +199,11 @@ def _compare(args, tile, monkeypatch):
     torch.testing.assert_close(output, reference, rtol=0, atol=tol)
 
 
-@pytest.mark.parametrize("tile", [0, 1])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_scalar_fallback(tile, dtype, monkeypatch):
-    _compare(_case(2, 8, dtype, "overlap"), tile, monkeypatch)
-
-
 @pytest.mark.parametrize("tile", [16, 32])
 @pytest.mark.parametrize("group", [4, 8, 16])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("pattern", ["overlap", "varied"])
-def test_selected_keys_match_original_and_reference(
-    tile, group, dtype, pattern, monkeypatch
-):
+def test_selected_keys_match_reference(tile, group, dtype, pattern, monkeypatch):
     _compare(_case(tile, group, dtype, pattern), tile, monkeypatch)
 
 
