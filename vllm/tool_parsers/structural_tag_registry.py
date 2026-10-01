@@ -9,6 +9,7 @@ from openai.types.responses.response import ToolChoice as ResponsesToolChoice
 from openai.types.responses.tool import Tool as ResponsesTool
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from openai.types.responses.tool_choice_function import ToolChoiceFunction
+from pydantic import BaseModel
 from xgrammar import StructuralTag, normalize_tool_choice
 from xgrammar import get_model_structural_tag as get_xgrammar_model_structural_tag
 from xgrammar.openai_tool_call_schema import (
@@ -27,6 +28,7 @@ from xgrammar.structural_tag import (
     StarFormat,
     TagFormat,
     TagsWithSeparatorFormat,
+    TokenTriggeredTagsFormat,
     TriggeredTagsFormat,
 )
 
@@ -66,6 +68,7 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "deepseek_v3_1",
         "qwen_3_5",
         "qwen_3_coder",
+        "mimo",
         "qwen_3",
         "deepseek_v3_2",
         "glm_4_7",
@@ -194,6 +197,34 @@ def get_model_structural_tag(
         tool_choice=dumped_tool_choice,
         reasoning=reasoning,
     )
+
+
+_TOOL_CALL_LIST_FORMATS = (
+    TriggeredTagsFormat,
+    TokenTriggeredTagsFormat,
+    TagsWithSeparatorFormat,
+)
+
+
+def limit_to_single_tool_call(tag: StructuralTag) -> StructuralTag:
+    """Stop every tool-call list in ``tag`` after its first call, in place.
+
+    Enforces ``parallel_tool_calls=false`` in the grammar. In every registered
+    tag, ``_TOOL_CALL_LIST_FORMATS`` repeat tool calls, never arguments.
+    """
+
+    def visit(node: Any) -> None:
+        if isinstance(node, BaseModel):
+            if isinstance(node, _TOOL_CALL_LIST_FORMATS):
+                node.stop_after_first = True
+            for name in type(node).model_fields:
+                visit(getattr(node, name))
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                visit(item)
+
+    visit(tag.format)
+    return tag
 
 
 def _dump_tool_for_xgrammar(

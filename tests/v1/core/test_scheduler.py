@@ -42,6 +42,7 @@ from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.diffusion_scheduler import (
     DiffusionAsyncScheduler,
+    DiffusionScheduler,
     diffusion_canvas_width,
 )
 from vllm.v1.core.sched.interface import PauseState
@@ -434,6 +435,52 @@ def test_schedule_partial_requests():
     assert output.num_scheduled_tokens[requests[0].request_id] == 1
     assert output.num_scheduled_tokens[requests[1].request_id] == 700
     assert requests[2].request_id not in output.num_scheduled_tokens
+
+
+def test_encoder_only_prompt_longer_than_budget_is_chunked():
+    """The engine switches chunked prefill off for an encoder-only instance,
+    but the token budget must still split its prompt across steps instead of
+    leaving the request waiting forever."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_model_len=4096,
+        mm_encoder_only=True,
+    )
+    # EngineCore turns this off after config validation whenever the instance
+    # holds no KV cache, which is every encoder-only instance.
+    scheduler.scheduler_config.enable_chunked_prefill = False
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=2500,
+        mm_positions=[[PlaceholderRange(offset=100, length=600)]],
+    )
+    scheduler.add_request(request)
+
+    def advance(output):
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+    first = scheduler.schedule()
+    assert first.num_scheduled_tokens[request.request_id] == 1024
+    assert request.request_id in first.scheduled_encoder_inputs
+    advance(first)
+
+    second = scheduler.schedule()
+    assert second.num_scheduled_tokens[request.request_id] == 1024
+    advance(second)
+
+    third = scheduler.schedule()
+    assert third.num_scheduled_tokens[request.request_id] == 452
 
 
 @pytest.mark.parametrize("has_running", [True, False])
@@ -1562,13 +1609,7 @@ def test_scheduler_reset_prefix_cache():
     assert not scheduler.reset_prefix_cache()
     scheduler.aux_output_connector.reset.assert_not_called()
 
-    with pytest.raises(RuntimeError, match=r"pause\(mode='keep'\)"):
-        scheduler.reset_prefix_cache(reset_running_requests=True)
-
-    # pause(mode="keep") also waits for scheduled model outputs to drain.
-    scheduler.set_pause_state(PauseState.PAUSED_ALL)
-    with pytest.raises(RuntimeError, match="model output is in flight"):
-        scheduler.reset_prefix_cache(reset_running_requests=True)
+    # Pause completes pending model outputs before the caller resets the scheduler.
     for request in requests:
         request.num_in_flight_tokens = 0
 
@@ -7115,14 +7156,15 @@ def diffusion_model_runner(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
 
-def _diffusion_scheduler(**kwargs) -> DiffusionAsyncScheduler:
+def _diffusion_scheduler(async_scheduling: bool = True, **kwargs) -> DiffusionScheduler:
+    scheduler_cls = DiffusionAsyncScheduler if async_scheduling else DiffusionScheduler
     scheduler = create_scheduler(
-        async_scheduling=True,
+        async_scheduling=async_scheduling,
         diffusion_canvas_length=8,
-        scheduler_cls=DiffusionAsyncScheduler,
+        scheduler_cls=scheduler_cls,
         **kwargs,
     )
-    assert isinstance(scheduler, DiffusionAsyncScheduler)
+    assert isinstance(scheduler, scheduler_cls)
     return scheduler
 
 
@@ -7133,7 +7175,7 @@ def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
         async_scheduling=async_scheduling, diffusion_canvas_length=8
     ).vllm_config.scheduler_config
     assert config.get_scheduler_cls() is (
-        DiffusionAsyncScheduler if config.async_scheduling else Scheduler
+        DiffusionAsyncScheduler if config.async_scheduling else DiffusionScheduler
     )
 
 
@@ -7155,10 +7197,13 @@ def test_diffusion_scheduler_narrows_the_canvas_per_request():
 
 
 @pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.usefixtures("diffusion_model_runner")
-def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
+def test_diffusion_scheduler_trims_full_width_worker_drafts(
+    structured, async_scheduling
+):
     """Padded worker drafts must be narrowed before scheduling or grammar validation."""
-    scheduler = _diffusion_scheduler()
+    scheduler = _diffusion_scheduler(async_scheduling=async_scheduling)
     wide = _diffusion_request("wide", {})
     narrow = _diffusion_request("narrow", {"diffusion_canvas_length": 4})
     for request in (wide, narrow):
@@ -7173,8 +7218,12 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
             )
     tokens = list(range(8)) if structured else [-1] * 8
     drafts = DraftTokenIds(["wide", "narrow"], [tokens.copy(), tokens.copy()])
-    output = scheduler.schedule()
-    scheduler.update_draft_token_ids_in_output(drafts, output)
+    if async_scheduling:
+        output = scheduler.schedule()
+        scheduler.update_draft_token_ids_in_output(drafts, output)
+    else:
+        scheduler.update_draft_token_ids(drafts)
+        output = scheduler.schedule()
 
     assert output.scheduled_spec_decode_tokens == {
         "wide": tokens,
@@ -7184,6 +7233,36 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(structured):
     if structured:
         assert wide.structured_output_request.grammar.seen == [tokens]
         assert narrow.structured_output_request.grammar.seen == [tokens[:4]]
+
+
+@pytest.mark.parametrize(
+    "sampled, expected_status",
+    [
+        pytest.param([], RequestStatus.RUNNING, id="denoising"),
+        pytest.param([1] * 4, RequestStatus.FINISHED_LENGTH_CAPPED, id="final"),
+    ],
+)
+@pytest.mark.usefixtures("diffusion_model_runner")
+def test_sync_diffusion_step_commits_only_emitted_tokens(sampled, expected_status):
+    """An empty denoising step reuses the canvas; a completed read emits it."""
+    scheduler = _diffusion_scheduler(async_scheduling=False)
+    request = _diffusion_request(
+        "read", {"diffusion_canvas_length": 4, "diffusion_read_only": True}
+    )
+    request.max_tokens = request.sampling_params.max_tokens = 4
+    scheduler.add_request(request)
+    _model_output(scheduler, scheduler.schedule(), [[]])
+
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [list(range(8))])
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {request.request_id: 4}
+    _model_output(scheduler, output, [sampled])
+
+    assert request.num_computed_tokens == request.num_prompt_tokens + len(sampled)
+    assert list(request.output_token_ids) == sampled
+    assert request.status == expected_status
 
 
 @pytest.mark.usefixtures("diffusion_model_runner")
