@@ -333,6 +333,8 @@ __device__ __forceinline__ void storeIndexQElemsFp8(
 #else
   #define MINIMAX_M3_NVFP4_NATIVE_CVT 0
 #endif
+
+#ifndef USE_ROCM
 constexpr int kNvfp4DataBytes = kHeadDim / 2;            // 64
 constexpr int kNvfp4ScaleBytes = kHeadDim / 16;          // 8
 constexpr int kNvfp4LanesPerGroup = 16 / kElemsPerLane;  // 4
@@ -354,7 +356,6 @@ __device__ __forceinline__ uint32_t e2m1Code(float x) {
   return mag | ((__float_as_uint(x) >> 28) & 0x8u);
 }
 
-#ifndef USE_ROCM
 __device__ __forceinline__ float rcpApproxFtz(float a) {
   float b;
   asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(b) : "f"(a));
