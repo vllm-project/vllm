@@ -36,10 +36,6 @@ except json.JSONDecodeError:
 DEFAULT_ENV_VAR_PREFIXES: set[str] = {
     "VLLM_",
     "FLASH_ATTENTION_",
-    # TODO: Remove this env override and use config-based NVFP4 4/6
-    # configuration once https://github.com/flashinfer-ai/flashinfer/pull/5152
-    # is merged.
-    "FLASHINFER_",
     "LMCACHE_",
     "NCCL_",
     "UCX_",
@@ -49,6 +45,15 @@ DEFAULT_ENV_VAR_PREFIXES: set[str] = {
 
 DEFAULT_EXTRA_ENV_VARS: set[str] = {
     "PYTHONHASHSEED",
+    # Matches flashinfer.quantization.fp4_quantization.NVFP4_QUANT_ENV_VARS
+    # without importing FlashInfer in this platform-independent module.
+    # TODO: Replace NVFP4 4/6 env forwarding with config-based configuration
+    # once https://github.com/flashinfer-ai/flashinfer/pull/5152 is merged.
+    "FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH",
+    "FLASHINFER_NVFP4_4OVER6",
+    "FLASHINFER_NVFP4_4OVER6_ERR_MODE",
+    "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH",
+    "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256",
 }
 
 
