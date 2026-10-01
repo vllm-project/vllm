@@ -403,6 +403,16 @@ class DraftModelSpeculator(BaseSpeculator):
             "(communication: O(2*tp_size) vs O(vocab_size))."
         )
 
+    def compute_draft_logits(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.compute_logits(hidden_states)
+
+    def get_draft_top_tokens(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.get_top_tokens(hidden_states)
+
     def sample_draft(
         self,
         hidden_states: torch.Tensor,
@@ -412,9 +422,13 @@ class DraftModelSpeculator(BaseSpeculator):
         seeds: torch.Tensor,
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
+        spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        if draft_logits is None and self.use_local_argmax_reduction:
+            return self.get_draft_top_tokens(hidden_states, spec_step_idx)
+
+        logits = self.compute_draft_logits(hidden_states, spec_step_idx)
         if draft_logits is not None:
-            logits = self.model.compute_logits(hidden_states)
             sampler = (
                 gumbel_sample
                 if self.draft_watermarker is None
@@ -432,10 +446,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
-        elif self.use_local_argmax_reduction:
-            return self.model.get_top_tokens(hidden_states)
         else:
-            logits = self.model.compute_logits(hidden_states)
             sampled = logits.argmax(dim=-1)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
