@@ -2450,9 +2450,9 @@ class MoRIIOConnectorWorker:
                     base_addr_idx += 1
                 continue
             geometry = self._get_layer_transfer_geometry(layer_name)
-            # HMA / hybrid models (e.g. GLM-5.2 DSA) can advertise different
-            # per-layer block_size / block_len. Transfers already use per-layer
-            # geometry; do not hard-fail on a single page default.
+            # HMA / hybrid models (e.g. GLM-5.2 DSA, MiniMax) can advertise
+            # different per-layer block_size / block_len. Transfers already use
+            # per-layer geometry; do not hard-fail on a single page default.
             if geometry.block_size != self.block_size:
                 if geometry.block_len == self.block_len:
                     raise ValueError(
