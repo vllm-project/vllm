@@ -201,6 +201,23 @@ class OnlineQuantizationConfig(QuantizationConfig):
     def get_name(cls) -> QuantizationMethods:
         return "online"
 
+    def has_blocked_weights(self) -> bool:
+        """Block-FP8 linears quantize activations per 128-element group. The
+        config enables the CUDA QuantFP8 op (`+quant_fp8`) for blocked
+        weights: under torch.compile the native path emits float32 scales, but
+        DeepGEMM's UE8M0 kernels need the packed int32 scales the CUDA op
+        produces (they fail with a TMA/cuBLASLt error otherwise)."""
+        specs = [self.args.linear]
+        if self.args.targets is not None:
+            specs += [
+                _ONLINE_SHORTHANDS[shorthand].linear
+                for shorthand in self.args.targets.values()
+                if shorthand in _ONLINE_SHORTHANDS
+            ]
+        return any(
+            spec is not None and spec.weight == kFp8Static128BlockSym for spec in specs
+        )
+
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]

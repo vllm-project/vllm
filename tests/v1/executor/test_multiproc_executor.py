@@ -101,3 +101,28 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
             getattr(executor, method)()
     else:
         assert getattr(executor, method)() is result
+
+
+class _ReplyQueue:
+    def __init__(self, replies: list) -> None:
+        self.replies = deque(replies)
+
+    def dequeue(self, timeout=None):
+        return self.replies.popleft()
+
+
+def test_collective_rpc_drains_every_rank_on_failure():
+    """A failure on one rank used to raise before the other ranks' replies
+    were read, so the next call returned the previous call's replies."""
+    ok, failure = WorkerProc.ResponseStatus.SUCCESS, WorkerProc.ResponseStatus.FAILURE
+    executor = object.__new__(MultiprocExecutor)
+    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda msg: None)
+    executor.is_failed = False
+    executor.futures_queue = deque()
+    executor.response_mqs = [
+        _ReplyQueue([(failure, "rank 0 failed"), (ok, "second-0")]),
+        _ReplyQueue([(failure, "rank 1 failed"), (ok, "second-1")]),
+    ]
+    with pytest.raises(RuntimeError, match="rank 0 failed"):
+        executor.collective_rpc("first")
+    assert executor.collective_rpc("second") == ["second-0", "second-1"]

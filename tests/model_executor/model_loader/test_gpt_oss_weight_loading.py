@@ -150,3 +150,32 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
 
     assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
     assert torch.equal(experts.w13_weight[0], expected)
+
+
+def test_presliced_expert_goes_through_the_loader() -> None:
+    """The Quark and fused-BF16 paths copy through the param's loader (a direct
+    `param.data` copy would write a meta placeholder during a reload)."""
+    from vllm.model_executor.models.gpt_oss import _load_presliced_expert
+
+    experts = _TestExperts("w13_weight", (2, 4, 3))
+    calls = []
+    inner = experts.w13_weight.weight_loader
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs["shard_id"])
+        return inner(*args, **kwargs)
+
+    experts.w13_weight.weight_loader = spy
+    whole = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3)
+    _load_presliced_expert(experts.w13_weight, whole, "w13_weight", None)
+    assert torch.equal(experts.w13_weight, whole)
+    # one expert (index as is), partial rows (leading slices), and a scalar
+    part = -torch.ones(2, 3)
+    _load_presliced_expert(experts.w13_weight, part, "w13_weight", 1)
+    assert torch.equal(experts.w13_weight[1, :2], part)
+    assert torch.equal(experts.w13_weight[1, 2:], whole[1, 2:])
+    assert calls == ["gpt_oss_presliced"] * 2
+
+    scales = _TestExperts("w13_input_scale", (2,))
+    _load_presliced_expert(scales.w13_input_scale, torch.tensor(5.0), "s", 1)
+    assert scales.w13_input_scale.tolist() == [0.0, 5.0]

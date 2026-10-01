@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import importlib
 import importlib.machinery
 import inspect
 import sys
@@ -1255,3 +1256,85 @@ def test_online_quantize_reload(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+
+
+@requires_cuda
+def test_flashinfer_bmm_scales_refresh_in_place():
+    """FlashInfer's trtllm-gen decode reads bmm1/bmm2 scales from device
+    tensors allocated once and refilled by refresh(), so FULL CUDA graphs see
+    q/k/v scales changed by a reload. Values match the host-float path: the
+    launcher computes float(double(bmm1) * log2(e))."""
+    import math
+
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as fi
+
+    impl = object.__new__(fi.FlashInferImpl)
+    impl.scale = 0.125
+    impl.kv_cache_dtype = "fp8"
+    impl.bmm1_scale = impl.bmm2_scale = impl.o_sf_scale = None
+    impl._bmm_scale_tensors = None
+    impl._xqa_bmm1_tensors = None
+    impl.float_scales_in_decode = False
+    layer = SimpleNamespace(
+        _q_scale_float=1.0,
+        _k_scale_float=0.3,
+        _v_scale_float=0.7,
+        _o_scale_float=0.5,
+        _k_scale=torch.ones(1, device="cuda"),
+    )
+
+    impl.refresh(layer)
+    assert impl._bmm_scale_tensors is not None
+    bmm1_log2, bmm2 = impl._bmm_scale_tensors
+    ptrs = (bmm1_log2.data_ptr(), bmm2.data_ptr())
+    assert layer._o_scale_float is None  # re-read at the next eager forward
+    assert impl._trtllm_decode_bmm_scales(None) == (bmm1_log2, bmm2)
+    assert not impl.float_scales_in_decode
+
+    layer._k_scale_float, layer._v_scale_float = 0.9, 0.2
+    impl.refresh(layer)
+    assert (bmm1_log2.data_ptr(), bmm2.data_ptr()) == ptrs
+    assert impl.bmm1_scale == 0.125 * 0.9
+    expected_log2 = torch.tensor([0.125 * 0.9 * math.log2(math.e)], dtype=torch.float32)
+    assert torch.equal(bmm1_log2.cpu(), expected_log2)
+    assert torch.equal(bmm2.cpu(), torch.tensor([0.2], dtype=torch.float32))
+
+    # XQA (SM90) reads bmm1 per query dtype (q_scale only for an FP8 query)
+    xqa = impl._xqa_bmm1_tensors
+    assert xqa is not None
+    assert xqa[True].item() == pytest.approx(0.125 * 1.0 * 0.9)
+    assert xqa[False].item() == pytest.approx(0.125 * 0.9)
+
+    # output-quant fusion folds the o-scale into bmm2: host floats (flagged)
+    assert impl._trtllm_decode_bmm_scales(torch.ones(1)) == (None, impl.bmm2_scale)
+    assert impl.float_scales_in_decode
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_reload_attention_scales_use_model_dtype(monkeypatch, dtype):
+    """KV-cache scale params are 0-dim tensors of the default dtype, which is
+    the model dtype at model init. Reload recreates them under the same dtype,
+    so an fp32 checkpoint scale is rounded the same way as on a fresh load."""
+    from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+
+    layer = torch.nn.Module()
+    method = object.__new__(BaseKVCacheMethod)
+    layer.quant_method = method
+    info = SimpleNamespace(loaded_weights=[], restore_device=torch.device("cpu"))
+    seen = {}
+
+    def create_weights(layer):
+        BaseKVCacheMethod.create_weights(method, layer)
+        seen["dtype"] = layer.k_scale.dtype
+
+    method.create_weights = create_weights
+    method.process_weights_after_loading = lambda layer: None
+    monkeypatch.setattr(
+        reload_layerwise, "_copy_and_restore_kernel_tensors", lambda layer, info: None
+    )
+    reload_layerwise._reload_attention_scales(layer, info, SimpleNamespace(dtype=dtype))
+    assert seen["dtype"] == dtype
