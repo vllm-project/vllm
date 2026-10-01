@@ -21,10 +21,7 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMPostprocessMetadata,
 )
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
-from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
-    MambaHybridModelState,
-    compute_num_decode_draft_tokens,
-)
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 
 
@@ -150,38 +147,52 @@ def _mamba_hybrid_state(num_speculative_tokens: int) -> MambaHybridModelState:
     state._align_mode = False
     state.recoverssm = None
     # A request that accepted 3 drafts (plus the bonus token) on the previous
-    # step; the other has never had a draft accepted.
-    state.num_accepted_tokens_gpu = torch.tensor([4, 1], dtype=torch.int32)
+    # step; the others have never had a draft accepted.
+    state.num_accepted_tokens_gpu = torch.tensor([4, 1, 1], dtype=torch.int32)
     return state
 
 
-def _input_batch_with_no_scheduled_drafts() -> SimpleNamespace:
-    """A two-request decode batch where nobody proposed a draft this step
-    (`num_draft_tokens_per_req is None`), e.g. because ngram found no match
-    for anyone."""
+def _input_batch(
+    num_scheduled_tokens: list[int],
+    num_draft_tokens_per_req: list[int] | None,
+    is_prefilling: list[bool],
+    num_reqs_after_padding: int | None = None,
+) -> SimpleNamespace:
+    """`num_draft_tokens_per_req=None` is a batch where nobody proposed a
+    draft this step, e.g. because ngram found no match for anyone."""
+    num_reqs = len(num_scheduled_tokens)
+    query_start_loc = np.zeros(num_reqs + 1, dtype=np.int32)
+    query_start_loc[1:] = np.cumsum(num_scheduled_tokens)
+    num_tokens = int(query_start_loc[-1])
+    seq_lens = torch.full((num_reqs,), 10, dtype=torch.int32)
     return SimpleNamespace(
-        num_reqs=2,
-        num_reqs_after_padding=2,
-        num_tokens=2,
-        num_tokens_after_padding=2,
-        query_start_loc_np=np.array([0, 1, 2], dtype=np.int32),
-        num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
+        num_reqs=num_reqs,
+        num_reqs_after_padding=num_reqs_after_padding or num_reqs,
+        num_tokens=num_tokens,
+        num_tokens_after_padding=num_tokens,
+        query_start_loc_np=query_start_loc,
+        num_scheduled_tokens=np.array(num_scheduled_tokens, dtype=np.int32),
         max_query_len=None,
-        seq_lens_cpu_upper_bound=torch.tensor([10, 10], dtype=torch.int32),
-        is_prefilling_np=np.array([False, False]),
+        seq_lens_cpu_upper_bound=seq_lens,
+        is_prefilling_np=np.array(is_prefilling),
         prefill_runs_as_decode_np=None,
-        num_draft_tokens_per_req=None,
-        idx_mapping=torch.tensor([0, 1], dtype=torch.int64),
-        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
-        seq_lens=torch.tensor([10, 10], dtype=torch.int32),
+        num_draft_tokens_per_req=None
+        if num_draft_tokens_per_req is None
+        else np.array(num_draft_tokens_per_req, dtype=np.int32),
+        idx_mapping=torch.arange(num_reqs),
+        query_start_loc=torch.from_numpy(query_start_loc),
+        seq_lens=seq_lens,
         dcp_local_seq_lens=None,
-        positions=torch.tensor([9, 9], dtype=torch.int64),
+        positions=torch.zeros(num_tokens, dtype=torch.int64),
         prompt_lens=None,
     )
 
 
 def _prepare_attn_metadata(
-    state: MambaHybridModelState, monkeypatch
+    state: MambaHybridModelState,
+    monkeypatch,
+    input_batch: SimpleNamespace | None = None,
+    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
 ) -> SimpleNamespace:
     captured = {}
 
@@ -194,9 +205,11 @@ def _prepare_attn_metadata(
         fake_build_attn_metadata,
     )
 
+    if input_batch is None:
+        input_batch = _input_batch([1, 1], None, [False, False])
     state.prepare_attn(
-        input_batch=_input_batch_with_no_scheduled_drafts(),
-        cudagraph_mode=CUDAGraphMode.NONE,
+        input_batch=input_batch,
+        cudagraph_mode=cudagraph_mode,
         block_tables=(),
         slot_mappings={},
         attn_groups=[],
@@ -237,7 +250,7 @@ def test_prepare_attn_omits_the_offset_without_a_speculative_config(monkeypatch)
     assert metadata.num_decode_draft_tokens_cpu is None
 
 
-def test_zero_draft_decode_row_is_marked_as_a_speculative_row():
+def test_zero_draft_decode_row_is_marked_as_a_speculative_row(monkeypatch):
     """A decode row that got no drafts still has to reach the speculative path.
 
     The recurrent backends only apply a row's accepted-token offset on that
@@ -247,59 +260,55 @@ def test_zero_draft_decode_row_is_marked_as_a_speculative_row():
     -1 sentinel sends it to the plain decode path, which reads the state at
     column 0 and ignores the offset.
     """
-    num_decode_draft_tokens = compute_num_decode_draft_tokens(
-        num_padded_reqs=3,
-        num_scheduled_tokens=np.array([3, 1, 1], dtype=np.int32),
-        num_draft_tokens_per_req=np.array([2, 0, 0], dtype=np.int32),
-        is_prefilling=np.array([False, False, True]),
-    )
+    state = _mamba_hybrid_state(num_speculative_tokens=3)
+    input_batch = _input_batch([3, 1, 1], [2, 0, 0], [False, False, True])
 
-    assert num_decode_draft_tokens.tolist() == [
+    metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [
         2,  # decode row with drafts
         0,  # decode row with no drafts: speculative path, offset applied
         -1,  # one-token prefill tail: no offset to apply, stays a plain row
     ]
 
 
-def test_batch_without_any_drafts_still_marks_its_decode_rows():
+def test_batch_without_any_drafts_still_marks_its_decode_rows(monkeypatch):
     """`num_draft_tokens_per_req` is None whenever no row in the batch drafted
     anything. Those rows are ordinary decode rows carrying an offset from the
     previous step, so the absence of drafts in this step must not be read as
     speculative decoding being off."""
-    num_decode_draft_tokens = compute_num_decode_draft_tokens(
-        num_padded_reqs=2,
-        num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
-        num_draft_tokens_per_req=None,
-        is_prefilling=np.array([False, True]),
-    )
+    state = _mamba_hybrid_state(num_speculative_tokens=3)
+    input_batch = _input_batch([1, 1], None, [False, True])
 
-    assert num_decode_draft_tokens.tolist() == [0, -1]
+    metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [0, -1]
 
 
-def test_padded_rows_keep_the_sentinel():
+def test_padded_rows_keep_the_sentinel(monkeypatch):
     """Full CUDA-graph capture pads the batch; padded rows describe no request
     and must not be picked up as speculative rows."""
-    num_decode_draft_tokens = compute_num_decode_draft_tokens(
-        num_padded_reqs=4,
-        num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
-        num_draft_tokens_per_req=np.array([0, 0], dtype=np.int32),
-        is_prefilling=np.array([False, False]),
+    state = _mamba_hybrid_state(num_speculative_tokens=3)
+    input_batch = _input_batch([1, 1], [0, 0], [False, False], num_reqs_after_padding=4)
+
+    metadata = _prepare_attn_metadata(
+        state, monkeypatch, input_batch, cudagraph_mode=CUDAGraphMode.FULL
     )
 
-    assert num_decode_draft_tokens.tolist() == [0, 0, -1, -1]
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [0, 0, -1, -1]
 
 
-def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel():
+def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel(
+    monkeypatch,
+):
     """A prefill continuation is excluded by `is_prefilling`, not by its token
     count, so tails wider than one token are covered by the same rule."""
-    num_decode_draft_tokens = compute_num_decode_draft_tokens(
-        num_padded_reqs=2,
-        num_scheduled_tokens=np.array([2, 3], dtype=np.int32),
-        num_draft_tokens_per_req=np.array([0, 0], dtype=np.int32),
-        is_prefilling=np.array([True, True]),
-    )
+    state = _mamba_hybrid_state(num_speculative_tokens=3)
+    input_batch = _input_batch([2, 3], [0, 0], [True, True])
 
-    assert num_decode_draft_tokens.tolist() == [-1, -1]
+    metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [-1, -1]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
