@@ -22,7 +22,9 @@
 //
 //   2. The bf16 path uses a dedicated bit-trick that avoids the fp16-only
 //      "upper nibble * 16" trick, which would overflow the 7-bit bf16
-//      mantissa. See qdq_4_rdna3.cuh for details.
+//      mantissa. See qdq_4_rdna3.cuh for details. The fp16 path uses the
+//      exact factored dequant (also in qdq_4_rdna3.cuh): magic values in
+//      fp16, the (y, z) bias correction in fp32.
 //
 //   3. Wave32 geometry sized for high CU saturation: THREADS_X=256
 //      (8 waves per block) and BLOCK_KN_SIZE=256, with each thread
@@ -34,10 +36,10 @@
 //      with v_fma_f32. M_COUNT ∈ {1,2,4,8} is selected at launch
 //      based on size_m.
 //
-//   4. The bf16 dispatch with M >= 16 forwards to the WMMA kernel in
+//   4. The dispatch with M >= 12 forwards to the WMMA kernel in
 //      q_gemm_rdna3_wmma.cu (separate translation unit) where
-//      v_wmma_f32_16x16x16_bf16_w32 wins. The fp16 path always stays
-//      scalar (the bit-trick dequant beats WMMA below M=64).
+//      v_wmma_f32_16x16x16_bf16_w32 wins. Below that the scalar path wins
+//      and is the more accurate of the two.
 
 #include <cstdint>
 #include <cstdio>
@@ -98,29 +100,6 @@ __forceinline__ __device__ half tzero<half>() {
 template <>
 __forceinline__ __device__ bf16_t tzero<bf16_t>() {
   return __float2bfloat16(0.0f);
-}
-
-__forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
-  // RDNA3 has v_dot2_f32_f16 (`__builtin_amdgcn_fdot2`) which computes
-  // fp32 += a.x*b.x + a.y*b.y in a single instruction with the accumulator
-  // staying in fp32 throughout. hipcc 7.2 does NOT peephole the obvious
-  // `__hfma2 + cast + add` pattern into v_dot2 (verified by ISA
-  // disassembly: 0 v_dot2_f32_f16 vs 256 v_cvt_f32_f16 + 218 v_add_f32 in
-  // the M_COUNT=8 kernel before this change), so we issue the builtin
-  // explicitly. Saves the trailing 2× v_cvt_f32_f16 + v_add_f32 (3 ops)
-  // per dot22_8_f call vs the half2-accumulator form. With 128 calls per
-  // K=32 step that's ~384 ops/K-step less issue pressure on the VALU.
-  //
-  // Numerical bonus: accumulator stays fp32 throughout the dot. The old
-  // form accumulated 8 muladds in fp16 (10-bit mantissa) before casting,
-  // which could lose ~3 bits of precision on borderline magnitudes.
-  float result = 0.0f;
-  const half2* a2_ptr = (const half2*)a_ptr;
-  #pragma unroll
-  for (int i = 0; i < 4; i++) {
-    result = __builtin_amdgcn_fdot2(dq[i], *a2_ptr++, result, /*clamp=*/false);
-  }
-  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -286,12 +265,14 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
   int qk = offset_k / 8;
   const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
 
-  // Per-column dequant constants. We hold one set of (z, y) pairs per column.
-  // fp16 uses the exllama (z1z16, y1y16) double-pair to enable the upper-
-  // nibble-*16 trick. bf16 uses fp32 scalars (z, y) for the inline v_dot2
-  // bias correction.
-  half2 z1z16_h[4][2], y1y16_h[4][2];
+  // Per-column dequant constants, fp32 for both dtypes. fp16 needs two (y, z)
+  // pairs because the upper-nibble trick carries a factor of 16; bf16 needs one
+  // because its dequant produces fp32 directly — see prep_zero_scale_bf16_f32 /
+  // the FMA bypass for the missing v_pk_fma_bf16 on gfx11. Neither narrows the
+  // bias to the activation dtype: see the exact factored form in
+  // qdq_4_rdna3.cuh for why that matters.
   float z_b_f[4], y_b_f[4];
+  float yf_h[4][2], zf_h[4][2];
 
   auto refresh_group = [&](int g) {
     const uint32_t* qz_row = b_qzeros + g * (size_n / 8);
@@ -303,8 +284,8 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
     if constexpr (std::is_same<T, half>::value) {
   #pragma unroll
       for (int i = 0; i < 4; ++i) {
-        prep_zero_scale_fp16((uint32_t)(zeros[i] + zero_offset), scales[i],
-                             z1z16_h[i], y1y16_h[i]);
+        prep_zero_scale_fp16_f32((uint32_t)(zeros[i] + zero_offset), scales[i],
+                                 yf_h[i], zf_h[i]);
       }
     } else {
   #pragma unroll
@@ -354,24 +335,51 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
     }
     b_ptr += 4 * size_n;
 
+    // fp16 exact factored form: sum_a per row, split by nibble slot, summed
+    // across the whole 32-K round. It depends on neither the output column
+    // nor the weights, so the z correction is applied once after the j loop
+    // instead of four times inside it — see qdq_4_rdna3.cuh.
+    float sum_lo[M_COUNT] = {}, sum_hi[M_COUNT] = {};
+
   #pragma unroll
     for (int j = 0; j < 4; ++j) {
       const int a_off = (k - offset_k) + 8 * j;
 
       if constexpr (std::is_same<T, half>::value) {
-        half2 dq[4][4];
-        dequant_4bit_8_fp16((uint32_t)b_w[j].x, dq[0], z1z16_h[0], y1y16_h[0]);
-        dequant_4bit_8_fp16((uint32_t)b_w[j].y, dq[1], z1z16_h[1], y1y16_h[1]);
-        dequant_4bit_8_fp16((uint32_t)b_w[j].z, dq[2], z1z16_h[2], y1y16_h[2]);
-        dequant_4bit_8_fp16((uint32_t)b_w[j].w, dq[3], z1z16_h[3], y1y16_h[3]);
+        // Magic values with no bias folded in; the (y, z) correction is
+        // applied in fp32 — see the exact factored form in qdq_4_rdna3.cuh.
+        half2 qm[4][4];
+        magic_4bit_8_fp16((uint32_t)b_w[j].x, qm[0]);
+        magic_4bit_8_fp16((uint32_t)b_w[j].y, qm[1]);
+        magic_4bit_8_fp16((uint32_t)b_w[j].z, qm[2]);
+        magic_4bit_8_fp16((uint32_t)b_w[j].w, qm[3]);
+
+        constexpr uint32_t FP16_ONES = 0x3C003C00u;  // half2(1.0, 1.0)
+        const half2 ones = *reinterpret_cast<const half2*>(&FP16_ONES);
 
   #pragma unroll
         for (int m = 0; m < M_COUNT; ++m) {
-          const half* a_ptr = reinterpret_cast<const half*>(&block_a[m][a_off]);
-          block_c[m][0] += dot22_8_f(dq[0], a_ptr);
-          block_c[m][1] += dot22_8_f(dq[1], a_ptr);
-          block_c[m][2] += dot22_8_f(dq[2], a_ptr);
-          block_c[m][3] += dot22_8_f(dq[3], a_ptr);
+          const half2* a2 = reinterpret_cast<const half2*>(&block_a[m][a_off]);
+          // sum_a split by nibble slot (the high pairs carry a factor of 16).
+          // It does not depend on the output column, so one v_dot2 per pair is
+          // shared by the four columns this thread owns; and it does not depend
+          // on the weights, so it accumulates across the whole 32-K round and
+          // the z correction is applied once, after the j loop.
+          sum_lo[m] = __builtin_amdgcn_fdot2(a2[0], ones, sum_lo[m], false);
+          sum_hi[m] = __builtin_amdgcn_fdot2(a2[1], ones, sum_hi[m], false);
+          sum_lo[m] = __builtin_amdgcn_fdot2(a2[2], ones, sum_lo[m], false);
+          sum_hi[m] = __builtin_amdgcn_fdot2(a2[3], ones, sum_hi[m], false);
+  #pragma unroll
+          for (int c = 0; c < 4; ++c) {
+            float pl = 0.0f, ph = 0.0f;
+            pl = __builtin_amdgcn_fdot2(qm[c][0], a2[0], pl, /*clamp=*/false);
+            ph = __builtin_amdgcn_fdot2(qm[c][1], a2[1], ph, /*clamp=*/false);
+            pl = __builtin_amdgcn_fdot2(qm[c][2], a2[2], pl, /*clamp=*/false);
+            ph = __builtin_amdgcn_fdot2(qm[c][3], a2[3], ph, /*clamp=*/false);
+            // Only the y half here: y and z are both group constants, but z
+            // multiplies sum_a, which is still being accumulated.
+            block_c[m][c] += yf_h[c][0] * pl + yf_h[c][1] * ph;
+          }
         }
       } else if constexpr (M_COUNT == 1) {
         // bf16 decode (M=1), v_dot2_f32_bf16 path. Mirrors the data-flow of
@@ -536,6 +544,20 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
         }
       }
     }
+
+    if constexpr (std::is_same<T, half>::value) {
+      // z is a group constant and sum_a is complete for this round: one pair
+      // of FMAs per (row, column) per round instead of one pair per
+      // j-iteration. Per-round z applications sum exactly to the per-group
+      // correction because z does not change inside a group.
+  #pragma unroll
+      for (int m = 0; m < M_COUNT; ++m) {
+  #pragma unroll
+        for (int c = 0; c < 4; ++c) {
+          block_c[m][c] += zf_h[c][0] * sum_lo[m] + zf_h[c][1] * sum_hi[m];
+        }
+      }
+    }
     k += 32;  // 4 weight words * 8 nibbles = 32 K elements
   }
 
@@ -638,7 +660,7 @@ void launch_gemm_q4_for_mcount(const T* a, const uint32_t* b_q_weight,
 }
 
 // Dispatch to the largest M_COUNT template that doesn't waste more than
-// half a tile. Caps at 8: above that, the WMMA-prefill kernel (M >= 16) is
+// half a tile. Caps at 8: above that, the WMMA-prefill kernel (M >= 12) is
 // the right tool, not bigger M_COUNT in the scalar dot-product path.
 //
 // Tile-waste table:
@@ -668,9 +690,9 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
                                     size_m, size_n, size_k, groups, zero_offset,
                                     partials, stream);
   } else {
-    // M_COUNT=8 covers M up to 15 here; M >= 16 should ideally take the
-    // WMMA path, but if it falls through we still produce correct output —
-    // just leaving 3-5× of throughput on the table for prefill workloads.
+    // M_COUNT=8 covers the whole scalar domain (M <= 11 in practice: the
+    // public dispatch routes M >= 12 to WMMA); this branch is only reached
+    // when the caller falls through, and still produces correct output.
     launch_gemm_q4_for_mcount<T, 8>(a, b_q_weight, b_qzeros, b_scales, c,
                                     size_m, size_n, size_k, groups, zero_offset,
                                     partials, stream);
@@ -764,13 +786,39 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
                                    torch::Tensor b_scales, bool use_v2_format);
 
+// WMMA dispatch threshold, from the measured scalar/WMMA crossover on
+// gfx1100 (ratio = scalar_us / wmma_us, >1 means WMMA faster; median of
+// 300 CUDA-event timings per arm, identical inputs, both ops called
+// directly):
+//
+//   K / N (dtype)     M=1   M=4   M=8  M=11  M=12  M=16  M=24  M=32
+//   1536/5120 fp16   0.69  0.97  1.36  1.60  1.59  1.60  1.22  1.62
+//   4096/4096 fp16   0.46  0.69  1.01  1.30  1.30  1.32  1.05  1.40
+//   4352/5120 fp16   0.42  0.63  0.93  1.37  1.37  1.37  1.19  1.74
+//   5120/2048 fp16   0.44  0.62  0.87  1.00  1.00  1.01  1.15  1.34
+//   5120/8704 fp16   0.30  0.53  0.84  1.39  1.42  1.43  1.24  1.58
+//   1536/5120 bf16   1.07  1.23  1.50  1.71  1.69  1.00  1.00  1.00
+//   4096/4096 bf16   0.70  0.82  1.08  1.33  1.34  1.00  1.00  1.00
+//   4352/5120 bf16   0.62  0.74  0.98  1.40  1.40  1.00  1.00  1.00
+//   5120/2048 bf16   0.64  0.73  0.89  1.00  1.00  1.00  1.01  1.00
+//   5120/8704 bf16   0.45  0.65  0.92  1.46  1.49  1.00  1.00  1.00
+//
+// At M >= 12 WMMA wins or ties on every shape for both dtypes (the one
+// sub-1.0 sample, bf16 4096/4096 at M=24, is 0.996 — within noise); below
+// that the scalar path wins on most shapes (and is the more accurate of
+// the two since the exact fp16 factored dequant, so it keeps the band).
+// fp16 used to stay scalar until M=64 because the old baked-dequant
+// scalar kernel was faster there — that speed came with ~100x more
+// dequant error, and with the exact dequant the crossover moved down to
+// the same 12 as bf16. A shape-aware (N/K) dispatch would do better
+// still; that is tuning work beyond this fix.
+constexpr int64_t WMMA_MIN_M = 12;
+
 torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
                               bool use_v2_format) {
   if (a.dim() == 2 && b_q_weight.dim() == 2 && a.size(1) % 16 == 0 &&
-      b_q_weight.size(1) % 16 == 0 &&
-      ((a.scalar_type() == torch::kBFloat16 && a.size(0) >= 16) ||
-       (a.scalar_type() == torch::kHalf && a.size(0) >= 64))) {
+      b_q_weight.size(1) % 16 == 0 && a.size(0) >= WMMA_MIN_M) {
     return gptq_gemm_rdna3_wmma(a, b_q_weight, b_qzeros, b_scales,
                                 use_v2_format);
   }

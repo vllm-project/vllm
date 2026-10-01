@@ -37,13 +37,12 @@ pass (measured max errors on W7900/gfx1100 in parentheses):
 * scalar bf16  — dequant keeps FP32 precision end-to-end (magic-value
   v_dot2 path); the only rounding is the final cast, so
   max_abs <= 0.5 * ulp_bf16(max|ref|) * 1.5 + 1e-3   (measured ~0.06).
-* scalar fp16  — the classic exllama bit-trick rounds the per-(group,
-  column) offset constant scale*(-1024-zero) to fp16 (~0.008 abs at
-  scale≈0.02). That deterministic noise accumulates across the K/groups
-  axis (sigma ≈ 0.24 at K=4096, measured max ≈ 1.0). This is pre-existing
-  dequant behaviour shared with the exllama kernel — NOT epilogue error —
-  so the tolerance is loose (2.5) and the tight fp16 check lives on the
-  WMMA path below.
+* scalar fp16  — the dequant uses the exact factored form (magic values in
+  fp16, (y, z) correction in fp32; see qdq_4_rdna3.cuh), so the only fp16
+  roundings are the final output cast and the B-tile-free dot inputs:
+  max_abs <= 0.5 * ulp_fp16(max|ref|) * 1.5 + 1e-3   (measured ~0.015 at
+  |ref|~37; the pre-fix baked-constant form measured ~1.0-1.4 on the same
+  shapes — 94-200x worse).
 * WMMA bf16    — B is narrowed to bf16 per cell (one rounding,
   <= 0.5*ulp_bf16(|B|)), accumulated in FP32; measured max ≈ 0.09 at
   K=4096 — tolerance 0.25.
@@ -105,7 +104,7 @@ DTYPES = [torch.bfloat16, torch.float16]
 # Derivation in the module docstring; ~2-3x headroom over measured maxima.
 TOL = {
     ("scalar", torch.bfloat16): 0.10,
-    ("scalar", torch.float16): 2.50,
+    ("scalar", torch.float16): 0.025,
     ("wmma", torch.bfloat16): 0.25,
     ("wmma", torch.float16): 0.05,
 }
@@ -182,8 +181,9 @@ def _outputs_and_ref(M, K, N, seed, dtype, repeats=1):
 
 
 def _path_for(dtype, m):
-    """Public dispatch: bf16 reaches WMMA at M>=16, fp16 at M>=64."""
-    if (dtype == torch.bfloat16 and m >= 16) or (dtype == torch.float16 and m >= 64):
+    """Public dispatch: both dtypes reach WMMA at M>=12 (see the
+    WMMA_MIN_M crossover table in csrc/rocm/q_gemm_rdna3.cu)."""
+    if m >= 12:
         return "wmma"
     return "scalar"
 
@@ -251,12 +251,12 @@ def test_scalar_single_split_bit_repeatable(dist_init, dtype):
 @gfx1100_only
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_wmma_splitk_bit_repeatable(dist_init, dtype):
-    """WMMA path (bf16 M >= 16, fp16 M >= 64), split-K active.
+    """WMMA path (both dtypes M >= 12), split-K active.
 
     K=6656 gives K_SPLIT=4 under the upstream heuristic; the deterministic
     epilogue must be bit-repeatable regardless of the split count.
     """
-    m = 16 if dtype == torch.bfloat16 else 64
+    m = 12  # smallest M on the WMMA side of the dispatch boundary
     outs, _ = _outputs_and_ref(
         M=m, K=6656, N=4096, seed=1236, dtype=dtype, repeats=REPEATS
     )
@@ -288,6 +288,16 @@ def test_scalar_matches_fp32_reference(dist_init, dtype):
 
 
 @gfx1100_only
+@pytest.mark.parametrize("m", [4, 8])
+def test_scalar_fp16_multi_m_matches_fp32_reference(dist_init, m):
+    """The exact fp16 factored dequant across M_COUNT=4/8 instantiations:
+    the (y, z) correction and the nibble-slot activation sums must hold for
+    every tile width, not just the M=1 fast path."""
+    outs, ref = _outputs_and_ref(M=m, K=4096, N=512, seed=1247, dtype=torch.float16)
+    _assert_close_to_ref(outs[0], ref, "scalar", torch.float16)
+
+
+@gfx1100_only
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_scalar_single_split_matches_fp32_reference(dist_init, dtype):
     """Scalar z_count == 1 direct-store path vs the FP32 reference."""
@@ -299,8 +309,8 @@ def test_scalar_single_split_matches_fp32_reference(dist_init, dtype):
 @gfx1100_only
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_wmma_matches_fp32_reference(dist_init, dtype):
-    """WMMA split-K path (bf16 16x16_1w / fp16 64x64_4w) vs FP32 reference."""
-    m = 16 if dtype == torch.bfloat16 else 64
+    """WMMA split-K path (16x16_1w at the M=12 boundary) vs FP32 reference."""
+    m = 12  # smallest M on the WMMA side of the dispatch boundary
     outs, ref = _outputs_and_ref(M=m, K=4096, N=512, seed=1242, dtype=dtype)
     _assert_close_to_ref(outs[0], ref, _path_for(dtype, m), dtype)
 
@@ -310,7 +320,7 @@ def test_wmma_matches_fp32_reference(dist_init, dtype):
 def test_wmma_single_split_matches_fp32_reference(dist_init, dtype):
     """WMMA k_split == 1 direct-store path (K=256 -> compute_wmma_k_split
     returns 1 for every dispatch level) vs the FP32 reference."""
-    m = 16 if dtype == torch.bfloat16 else 64
+    m = 12  # smallest M on the WMMA side of the dispatch boundary
     outs, ref = _outputs_and_ref(M=m, K=256, N=512, seed=1243, dtype=dtype)
     _assert_close_to_ref(outs[0], ref, _path_for(dtype, m), dtype)
 
@@ -359,9 +369,7 @@ def _assert_v7v8_no_split_routing(dtype, m, n, k):
     """Assert the shape deterministically routes to the V7/V8 128x64
     kernel with k_split == 1: WMMA dispatch (bf16 M>=16 / fp16 M>=64),
     the M >= 128 branch, and the no-split threshold."""
-    assert (dtype == torch.bfloat16 and m >= 16) or (
-        dtype == torch.float16 and m >= 64
-    ), "not the WMMA path"
+    assert m >= 12, "not the WMMA path"
     assert m >= 128, "below the V7/V8 (128x64) branch"
     assert _compute_wmma_k_split_mn(m, n, k, 128, 64) == 1, (
         "shape does not route to the k_split == 1 no-split path"
@@ -387,3 +395,52 @@ def test_wmma_v7v8_no_split_matches_fp32_reference(dist_init, dtype):
     _assert_v7v8_no_split_routing(dtype, m, n, k)
     outs, ref = _outputs_and_ref(M=m, K=k, N=n, seed=1246, dtype=dtype)
     _assert_close_to_ref(outs[0], ref, _path_for(dtype, m), dtype)
+
+
+# ---------------------------------------------------------------------------
+# D. Dispatch boundary: M=11 must stay scalar, M=12 must route to WMMA
+#    (WMMA_MIN_M in csrc/rocm/q_gemm_rdna3.cu). Observed via the CUDA
+#    profiler: the scalar and WMMA kernels have disjoint names.
+# ---------------------------------------------------------------------------
+
+
+def _launched_kernel_names(fn) -> set:
+    from torch.profiler import ProfilerActivity, profile
+
+    fn()
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        fn()
+        torch.cuda.synchronize()
+    return {
+        e.name
+        for e in prof.events()
+        if "gemm_q4" in e.name or "reduce_partials" in e.name
+    }
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@gfx1100_only
+def test_dispatch_boundary(dist_init, dtype):
+    """The scalar/WMMA crossover sits between M=11 and M=12 for both
+    dtypes; the boundary must be exact (see the WMMA_MIN_M table)."""
+
+    def run(m):
+        outs, _ = _outputs_and_ref(M=m, K=4096, N=512, seed=1248, dtype=dtype)
+        return outs[0]
+
+    m11 = run(11)
+    names11 = _launched_kernel_names(lambda: run(11))
+    assert any("gemm_q4_kernel_rdna3" in n for n in names11), names11
+    assert not any("wmma" in n for n in names11), names11
+
+    m12 = run(12)
+    names12 = _launched_kernel_names(lambda: run(12))
+    assert any("wmma" in n for n in names12), names12
+    assert not any("gemm_q4_kernel_rdna3" in n for n in names12), names12
+
+    # Both sides of the boundary stay correct against the reference.
+    _, ref11 = _outputs_and_ref(M=11, K=4096, N=512, seed=1248, dtype=dtype)
+    _, ref12 = _outputs_and_ref(M=12, K=4096, N=512, seed=1248, dtype=dtype)
+    _assert_close_to_ref(m11, ref11, "scalar", dtype)
+    _assert_close_to_ref(m12, ref12, "wmma", dtype)
