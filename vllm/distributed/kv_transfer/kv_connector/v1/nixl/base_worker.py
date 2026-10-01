@@ -1132,6 +1132,18 @@ class NixlBaseConnectorWorker:
 
                 # Ensure engine id matches.
                 if metadata.engine_id != expected_engine_id:
+                    if metadata.engine_id == self.engine_id:
+                        raise RuntimeError(
+                            f"Remote NIXL agent engine ID mismatch: the "
+                            f"handshake reached this instance itself "
+                            f"(expected {expected_engine_id}, received our "
+                            f"own engine ID {self.engine_id}). The remote "
+                            f"instance most likely advertised an unreachable "
+                            f"NIXL side-channel address (the default "
+                            f"VLLM_NIXL_SIDE_CHANNEL_HOST is localhost). Set "
+                            f"VLLM_NIXL_SIDE_CHANNEL_HOST on the remote "
+                            f"instance to an address reachable from here."
+                        )
                     raise RuntimeError(
                         f"Remote NIXL agent engine ID mismatch. "
                         f"Expected {expected_engine_id},"
