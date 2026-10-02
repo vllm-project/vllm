@@ -1399,8 +1399,13 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("kv_cache_layout", ["LBHNC", "LBNHC"])
-def test_post_process_zeroes_untransferred_tail(kv_cache_layout):
+@pytest.mark.parametrize(
+    ("kv_cache_layout", "enable_permute_local_kv"),
+    [("LBHNC", False), ("LBNHC", False), ("LBNHC", True)],
+)
+def test_post_process_zeroes_untransferred_tail(
+    kv_cache_layout, enable_permute_local_kv
+):
     """Received remote sub-blocks are regrouped per head and the untransferred
     sub-blocks of the last local block are zeroed on receive, once per block
     although two attention groups alias the tensor."""
@@ -1417,24 +1422,28 @@ def test_post_process_zeroes_untransferred_tail(kv_cache_layout):
     worker = MagicMock(spec=NixlConnectorWorker)
     worker.transfer_topo = MagicMock()
     worker.device_type = "cpu"
-    worker.enable_permute_local_kv = False
+    worker.enable_permute_local_kv = enable_permute_local_kv
     worker.kv_cache_layout = kv_cache_layout
     # Attention caches are [B, H, N, C]; distinct values per head and token.
     expected = torch.arange(6 * num_kv_heads * block_tokens * 4).view(
         6, num_kv_heads, block_tokens, 4
     )
+    # Blocks [2, 3] as received: `ratio` head-major remote sub-blocks each.
+    received = (
+        expected[2:4]
+        .unflatten(2, (ratio, -1))
+        .transpose(1, 2)
+        .reshape(2, num_kv_heads, block_tokens, 4)
+    )
     if kv_cache_layout == "LBNHC":
-        # Token-major blocks receive the remote sub-blocks already in order.
         attn_cache = expected.transpose(1, 2).contiguous().transpose(1, 2)
+        if enable_permute_local_kv:
+            # The remote is LBHNC: its bytes land in token-major memory.
+            attn_cache.transpose(1, 2)[2:4] = received.view(2, block_tokens, -1, 4)
+        # Otherwise token-major blocks receive the sub-blocks in token order.
     else:
-        # Blocks [2, 3] as received: `ratio` head-major remote sub-blocks each.
         attn_cache = expected.clone()
-        attn_cache[2:4] = (
-            expected[2:4]
-            .unflatten(2, (ratio, -1))
-            .transpose(1, 2)
-            .reshape(2, num_kv_heads, block_tokens, 4)
-        )
+        attn_cache[2:4] = received
     worker.device_kv_caches = {"attn.0": attn_cache, "swa.0": attn_cache}
     fa_group = MagicMock(layer_names=["attn.0"])
     swa_group = MagicMock(layer_names=["swa.0"])

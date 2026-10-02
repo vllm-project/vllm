@@ -30,7 +30,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backends,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
-    kv_postprocess_layout_on_receive,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -2823,12 +2822,10 @@ class NixlBaseConnectorWorker:
 
             if convert:
                 for cache in attn_caches:
-                    if self.enable_permute_local_kv and block_size_ratio > 1:
+                    if self.enable_permute_local_kv:
                         kv_postprocess_blksize_and_layout_on_receive(
                             cache, indices, block_size_ratio
                         )
-                    elif self.enable_permute_local_kv:
-                        kv_postprocess_layout_on_receive(cache, indices)
                     elif KVCacheLayout[self.kv_cache_layout].is_block_contiguous:
                         # Token-major blocks get the sub-blocks in token order.
                         kv_postprocess_blksize_on_receive(
