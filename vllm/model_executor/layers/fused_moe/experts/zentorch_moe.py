@@ -151,6 +151,7 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if apply_router_weight_on_input:
             raise NotImplementedError(
