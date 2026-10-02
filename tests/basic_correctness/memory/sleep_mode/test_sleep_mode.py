@@ -211,6 +211,17 @@ def _cudagraph_tag_bytes(worker) -> int:
     return sum(d.handle[1] for d in data if d.tag == "cudagraph")
 
 
+def _release_and_recapture(worker) -> tuple[int, int]:
+    """Elastic EP's recapture: drop every graph, release the pool, capture."""
+    from vllm.compilation.cudagraph_pool import release_cudagraph_pool
+
+    worker.model_runner.cudagraph_manager.release_graphs()
+    release_cudagraph_pool(worker.vllm_config)
+    released = _cudagraph_tag_bytes(worker)
+    worker.model_runner.capture_model()
+    return released, _cudagraph_tag_bytes(worker)
+
+
 @pytest.mark.parametrize(
     ("mode", "breakable"),
     [("FULL", False), ("PIECEWISE", False), ("PIECEWISE", True)],
@@ -221,7 +232,9 @@ def _cudagraph_tag_bytes(worker) -> int:
 def test_sleep_cudagraph_pool_capture_sites(monkeypatch, mode, breakable):
     """Each Model Runner V2 capture site (FULL CudaGraphManager, compiled
     PIECEWISE CUDAGraphWrapper, BreakableCUDAGraphWrapper) captures into the
-    cuMem graph pool, which survives sleep."""
+    cuMem graph pool, which survives sleep. Releasing the graphs after a wake
+    and recapturing, as elastic EP does, frees the pool and refills it to the
+    same size."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1" if breakable else "0")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -237,6 +250,10 @@ def test_sleep_cudagraph_pool_capture_sites(monkeypatch, mode, breakable):
     expected = llm.generate(prompt, sampling_params)[0].outputs[0].text
     llm.sleep(level=1)
     llm.wake_up()
+    assert llm.generate(prompt, sampling_params)[0].outputs[0].text == expected
+    for _ in range(2):
+        (sizes,) = llm.collective_rpc(_release_and_recapture)
+        assert sizes == (0, graph_bytes)
     assert llm.generate(prompt, sampling_params)[0].outputs[0].text == expected
 
 

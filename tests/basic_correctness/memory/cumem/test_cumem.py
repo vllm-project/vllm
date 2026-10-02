@@ -516,3 +516,59 @@ def test_use_cudagraph_pool_routing(enabled, plain, routed):
         assert used == allocator.allocator_and_pools["cudagraph"][0][0].id
     else:
         assert used == pool
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
+def test_release_cudagraph_pool_bounds_recapture():
+    """Each capture runs on a new stream, as under graph_capture(), so a
+    recapture can't reuse the blocks its predecessor left in the pool; elastic
+    EP recaptures on every scale. Releasing the pool between captures returns
+    its segments through the free callback, also after a sleep/wake cycle, and
+    is refused while the pool is asleep or a graph still uses it."""
+    from types import SimpleNamespace
+
+    from vllm.compilation.cudagraph_pool import (
+        release_cudagraph_pool,
+        use_cudagraph_pool,
+    )
+    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+
+    allocator = get_mem_allocator_instance()
+    cfg = SimpleNamespace(use_cumem_cudagraph_pool=True)
+    x = torch.ones(1 << 20, device=DEVICE_TYPE)
+
+    def capture() -> torch.cuda.CUDAGraph:
+        graph = torch.cuda.CUDAGraph()
+        with (
+            use_cudagraph_pool(current_platform.graph_pool_handle(), cfg) as pool,
+            torch.cuda.graph(graph, pool=pool, stream=torch.cuda.Stream()),
+        ):
+            x.mul_(2).add_(torch.ones_like(x))
+        return graph
+
+    def graph_pool_bytes() -> int:
+        return sum(
+            data.handle[1]
+            for data in allocator.pointer_to_data.values()
+            if data.tag == "cudagraph"
+        )
+
+    graphs = [capture()]
+    captured = graph_pool_bytes()
+    assert captured > 0
+
+    backend = CuMemBackend()
+    backend.suspend(level=1)
+    with pytest.raises(AssertionError, match="asleep"):
+        release_cudagraph_pool(cfg)
+    backend.resume()
+    with pytest.raises(AssertionError, match="Live CUDA graphs"):
+        release_cudagraph_pool(cfg)
+
+    for _ in range(3):
+        graphs.clear()
+        release_cudagraph_pool(cfg)
+        assert graph_pool_bytes() == 0
+        graphs.append(capture())
+        assert graph_pool_bytes() == captured

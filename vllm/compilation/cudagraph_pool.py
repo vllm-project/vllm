@@ -43,3 +43,14 @@ def use_cudagraph_pool(
     with ctx as graph_pool:
         set_graph_pool_id(graph_pool or current_platform.graph_pool_handle())
         yield graph_pool
+
+
+def release_cudagraph_pool(vllm_config: VllmConfig) -> None:
+    """Return the cuMem graph pool's memory once all its graphs are destroyed,
+    so that a recapture starts from an empty pool. Call it wherever graphs are
+    released for recapture; without the cuMem pool, destroying the graphs is
+    enough."""
+    if vllm_config.use_cumem_cudagraph_pool:
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        CuMemAllocator.get_instance().release_cudagraph_pool()

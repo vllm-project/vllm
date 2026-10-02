@@ -447,6 +447,33 @@ class CuMemAllocator:
         finally:
             self.current_tag = old_tag
 
+    def release_cudagraph_pool(self) -> None:
+        """Retire the graph pool once every graph captured into it is gone.
+
+        Holding the pool keeps its freed blocks cached, and they are reused
+        only on the stream that freed them, while each capture runs on a new
+        stream: a recapture into the same pool would grow it. Dropping the pool
+        unmaps its segments through the free callback; the next capture starts
+        a fresh one.
+        """
+        entries = self.allocator_and_pools.get("cudagraph")
+        if not entries:
+            return
+        mem_pool, allocator = entries[0]
+        # Freeing an asleep allocation would unmap it a second time.
+        assert not any(
+            data.is_asleep
+            for data in self.pointer_to_data.values()
+            if data.tag == "cudagraph"
+        ), "Cannot release the CUDA graph pool while it is asleep"
+        # The pool counts our reference plus one per live graph.
+        assert mem_pool.use_count() == 1, "Live CUDA graphs still use the pool"
+        del self.allocator_and_pools["cudagraph"], entries
+        # ~MemPool frees the segments through the allocator, which must still
+        # be alive (pytorch/pytorch#145168): drop the pool first.
+        del mem_pool
+        del allocator
+
     def get_current_usage(self) -> int:
         """Get the total number of bytes allocated in the memory pool."""
         sum_bytes: int = 0

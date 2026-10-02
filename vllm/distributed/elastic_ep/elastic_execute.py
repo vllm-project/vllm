@@ -13,6 +13,7 @@ import torch.nn as nn
 from torch.distributed import P2POp
 
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.cudagraph_pool import release_cudagraph_pool
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed import (
@@ -458,6 +459,8 @@ class ElasticEPScalingExecutor:
                 reset_compile_wrapper(speculator.model)
 
         gc.collect()
+        # After gc.collect(): the pool is released only once no graph is alive.
+        release_cudagraph_pool(self.worker.vllm_config)
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
 
