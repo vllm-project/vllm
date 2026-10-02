@@ -439,3 +439,36 @@ def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
     assert runner.model_state._mamba_ctx is None
     assert runner.model_state._mamba_group_ids == []
     assert runner.model_state._mamba_spec is None
+
+
+def test_teardown_profiling_state_releases_recoverssm_step(monkeypatch):
+    """The recorded RecoverSSM step must not outlive the profiling KV cache.
+
+    PIECEWISE capture runs are prepared with ``for_capture=False``, so
+    ``RecoverSSMState`` records their step. Its metadata holds commit contexts
+    that reference the profiling KV cache; keeping it alive past teardown keeps
+    that cache allocated and the real KV cache allocation runs out of memory.
+    """
+    from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
+
+    recoverssm = RecoverSSMState()
+    recoverssm._step = (object(),)  # type: ignore[assignment]
+    runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=False, recoverssm=recoverssm
+    )
+    runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
+    runner.kv_caches = []
+    runner.attn_groups = []
+    runner.kv_cache_config = SimpleNamespace()
+    runner.cudagraph_manager = object()
+    runner.lora_config = None
+    runner.maybe_remove_all_loras = lambda _: None
+
+    monkeypatch.setattr(cgu.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(cgu.torch.accelerator, "empty_cache", lambda: None)
+
+    cgu._teardown_profiling_state(runner)
+
+    assert recoverssm._step is None
