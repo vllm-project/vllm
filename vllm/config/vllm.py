@@ -1276,19 +1276,17 @@ class VllmConfig:
         )
 
     def _verify_cumem_cudagraph_pool_env(self) -> None:
-        """Keep NCCL buffer registration off the offloaded cuMem graph pool: it
+        """Keep NCCL graph registration off the offloaded cuMem graph pool: it
         would pin the pool through sleep and keep stale registrations after
         wake remaps it, causing hangs or wrong results."""
         if not self.use_cumem_cudagraph_pool:
             return
         # Workers inherit it (Ray copies NCCL_*) before any communicator init.
-        graph_register = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
-        hook = os.environ.get("TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK") or "0"
-        if graph_register != "0" or hook.lower() not in ("0", "false"):
+        if os.environ.setdefault("NCCL_GRAPH_REGISTER", "0") != "0":
             raise ValueError(
                 "Sleep mode offloads Model Runner V2 CUDA graph pools, which "
-                "NCCL buffer registration would pin: unset NCCL_GRAPH_REGISTER "
-                "and TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK."
+                "NCCL graph registration would pin: set NCCL_GRAPH_REGISTER=0 "
+                "or leave it unset."
             )
 
     def _verify_sampling_replay_config(self) -> None:
