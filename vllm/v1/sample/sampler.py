@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import LogprobsMode
+from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
@@ -300,6 +301,8 @@ class Sampler(nn.Module):
 
     @staticmethod
     def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
+        if current_platform.is_cpu():
+            return torch.ops._C.greedy_argmax(logits)
         return logits.argmax(dim=-1).view(-1)
 
     def sample(
