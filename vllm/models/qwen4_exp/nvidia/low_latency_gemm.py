@@ -23,7 +23,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
-QWEN4_EXP_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
+QWEN4_EXP_SM103_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
     # GDN fused QKVZ projection, TP=4.
     (4096, 2560): {
         1: SkinnyGemmConfig(1, 64, 4, k_unroll=4),
@@ -264,7 +264,7 @@ QWEN4_EXP_SM121_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
 QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY: dict[
     tuple[int, int] | None, dict[tuple[int, int], dict[int, SkinnyGemmConfig]]
 ] = {
-    (10, 3): QWEN4_EXP_GEMM_PLANS,
+    (10, 3): QWEN4_EXP_SM103_GEMM_PLANS,
     (10, 0): QWEN4_EXP_SM100_GEMM_PLANS,
     (9, 0): QWEN4_EXP_SM90_GEMM_PLANS,
     (12, 1): QWEN4_EXP_SM121_GEMM_PLANS,
