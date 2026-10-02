@@ -117,6 +117,20 @@ class ServingDerender(BaseServing):
 
         return None
 
+    def _validate_prompt_token_ids(
+        self,
+        prompt_token_ids: list[list[int] | None],
+    ) -> ErrorResponse | None:
+        """Reject caller-supplied prompt_token_ids longer than max_model_len."""
+        max_model_len = self.model_config.max_model_len
+        for ids in prompt_token_ids:
+            if ids is not None and len(ids) > max_model_len:
+                return self.create_error_response(
+                    f"prompt_token_ids length ({len(ids)}) exceeds "
+                    f"max_model_len ({max_model_len})."
+                )
+        return None
+
     async def derender_chat_response(
         self,
         request: DerenderChatRequest,
@@ -138,6 +152,10 @@ class ServingDerender(BaseServing):
         if bounds_error is not None:
             return bounds_error
 
+        prompt_ids_error = self._validate_prompt_token_ids([request.prompt_token_ids])
+        if prompt_ids_error is not None:
+            return prompt_ids_error
+
         if self.online_derenderer.parser is not None and request.chat_request is None:
             return self.create_error_response(
                 "chat_request is required when a tool or reasoning parser is "
@@ -147,7 +165,9 @@ class ServingDerender(BaseServing):
 
         try:
             choices = await self.online_derenderer.derender_chat(
-                request.generate_response, request.chat_request
+                request.generate_response,
+                request.chat_request,
+                request.prompt_token_ids,
             )
         except ValueError as exc:
             return self.create_error_response(str(exc))
@@ -203,6 +223,11 @@ class ServingDerender(BaseServing):
         if bounds_error is not None:
             return bounds_error
 
+        if request.prompt_token_ids is not None:
+            prompt_ids_error = self._validate_prompt_token_ids(request.prompt_token_ids)
+            if prompt_ids_error is not None:
+                return prompt_ids_error
+
         (
             choices,
             total_prompt_tokens,
@@ -211,6 +236,7 @@ class ServingDerender(BaseServing):
             request.generate_responses,
             request.prompt_tokens,
             completion_request=request.completion_request,
+            prompt_token_ids=request.prompt_token_ids,
         )
 
         first = request.generate_responses[0]
@@ -367,6 +393,10 @@ class ServingDerender(BaseServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        prompt_ids_error = self._validate_prompt_token_ids([request.prompt_token_ids])
+        if prompt_ids_error is not None:
+            return prompt_ids_error
+
         model_name = request.model or self.models.model_name()
         try:
             (
@@ -378,6 +408,7 @@ class ServingDerender(BaseServing):
                 state=request.stream_state,
                 prompt_tokens=request.prompt_tokens,
                 completion_request=request.completion_request,
+                prompt_token_ids=request.prompt_token_ids,
             )
         except ValueError as exc:
             return self.create_error_response(str(exc))
