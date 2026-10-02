@@ -698,11 +698,16 @@ steps:
   - vllm/model_executor/layers/quantization/mxfp4.py
   - vllm/model_executor/layers/quantization/utils/b12x_moe.py
   - vllm/model_executor/warmup/b12x_warmup.py
+  - vllm/model_executor/warmup/kernel_warmup.py
+  - vllm/model_executor/models/qwen2_moe.py
   - vllm/utils/b12x.py
   - tests/kernels/moe/test_b12x.py
   - tests/kernels/quantization/nvfp4_utils.py
   - tests/model_executor/kernels/test_b12x_linear.py
   - tests/model_executor/test_b12x_warmup.py
+  - tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+  - tests/kernels/quantization/test_nvfp4_kernel_selection.py
+  - tests/model_executor/test_flashinfer_autotune_warmup.py
   - tests/kernels/quantization/test_block_fp8.py
   - tests/quantization/reference_mxfp4.py
   - tests/quantization/test_auto_round.py
@@ -713,6 +718,13 @@ steps:
       kernels/quantization/test_block_fp8.py
       kernels/moe/test_b12x.py
       quantization/test_auto_round.py -k b12x
+  # Native W4A16 is merged but not included in FlashInfer 0.7.0.
+  - BUILD_NVEP=0 uv pip install --system --no-deps
+      'flashinfer-python @ git+https://github.com/flashinfer-ai/flashinfer.git@2f3bc5acff26e239696b57fe27d86af1624a8f86'
+  - pytest -v -s kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+      -k dynamic_precision
+  - pytest -v -s kernels/quantization/test_nvfp4_kernel_selection.py
+      model_executor/test_flashinfer_autotune_warmup.py
 
 - label: ":nvidia: (H100) Helion Kernels Shard %N"
   key: kernels-helion-test
