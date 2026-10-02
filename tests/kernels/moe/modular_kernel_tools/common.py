@@ -86,6 +86,8 @@ class Config:
 
     torch_trace_dir_path: str | None = None
 
+    expert_capacity: int | None = None
+
     def __post_init__(self):
         if self.quant_config is None:
             self.quant_config = TestMoEQuantConfig(None, False, False, None)
@@ -102,6 +104,7 @@ class Config:
         s += f" K={self.K}\n"
         s += f" topk={self.topks}\n"
         s += f" dtype={self.dtype}\n"
+        s += f" expert_capacity={self.expert_capacity}\n"
         s += " Quant:\n"
         if self.quant_config is not None:
             s += f"     q_dtype={self.quant_dtype}\n"
@@ -648,6 +651,7 @@ def make_modular_kernel(
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
         max_num_tokens=next_power_of_2(config.M),
+        expert_capacity=config.expert_capacity,
         activation=MoEActivation.SILU,
         device=vllm_config.device_config.device,
         routing_method=RoutingMethodType.DeepSeekV3,

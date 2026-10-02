@@ -83,6 +83,15 @@ def make_config_arg_parser(description: str):
     )
     parser.add_argument("--topk", nargs="+", type=int, default=[4, 1], help="num topk")
 
+    parser.add_argument(
+        "--expert-capacity",
+        type=int,
+        help=(
+            "Cap assignments per expert (token dropping). Passing 0 drops "
+            "everything; omit to disable dropping."
+        ),
+    )
+
     # Quant args
     parser.add_argument(
         "--quant-dtype", type=to_quant_torch_dtype, help="Quant datatype"
@@ -155,4 +164,5 @@ def make_config(args: argparse.Namespace) -> Config:
         fused_experts_type=args.experts_type,
         world_size=args.world_size,
         torch_trace_dir_path=args.torch_trace_dir_path,
+        expert_capacity=args.expert_capacity,
     )

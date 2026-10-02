@@ -169,8 +169,11 @@ if __name__ == "__main__":
     parser = make_config_arg_parser(
         description=(
             "Run single prepare-finalize & fused-experts combination test"
-            "Example : python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel "  # noqa: E501
-            "--pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts"
+            "Example : python3 "
+            "-m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel "
+            "--pf-type DeepEPLLPrepareAndFinalize "
+            "--experts-type BatchedDeepGemmExperts "
+            "--expert-capacity 128"
         )
     )
     args = parser.parse_args()
