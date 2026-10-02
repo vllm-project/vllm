@@ -284,6 +284,7 @@ def bind_hisparse_kv_caches(
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()
             )
+            cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
             cache_handle.runtime.shared_host_region = host_pool.shared_region
             cache_handle.runtime.bind_source_cache(
                 source_cache,
