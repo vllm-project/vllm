@@ -91,9 +91,9 @@ QWEN4_EXP_SM100_CASES = [
     for num_tokens, config in plans.items()
 ]
 
-QWEN4_EXP_SM12X_CASES = [
+QWEN4_EXP_SM121_CASES = [
     (n, k, num_tokens, config)
-    for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM12X_GEMM_PLANS.items()
+    for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS.items()
     for num_tokens, config in plans.items()
 ]
 
@@ -725,8 +725,8 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
             assert config.static_k in (None, k)
 
 
-def test_qwen4_exp_sm12x_plans_are_valid() -> None:
-    plans = qwen4_exp_gemm.QWEN4_EXP_SM12X_GEMM_PLANS
+def test_qwen4_exp_sm121_plans_are_valid() -> None:
+    plans = qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS
 
     assert len(plans) == 10
     assert sum(map(len, plans.values())) == 32
@@ -749,7 +749,7 @@ def test_qwen4_exp_sm12x_plans_are_valid() -> None:
 @pytest.mark.parametrize(
     "capability,expected_plans",
     [
-        ((12, 1), qwen4_exp_gemm.QWEN4_EXP_SM12X_GEMM_PLANS),
+        ((12, 1), qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS),
         ((10, 3), qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS),
         ((10, 0), qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS),
         ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
@@ -973,8 +973,8 @@ def test_qwen4_exp_sm100_selected_shapes(
     assert cosine > 0.999
 
 
-@pytest.mark.parametrize("n,k,num_tokens,config", QWEN4_EXP_SM12X_CASES)
-def test_qwen4_exp_sm12x_selected_shapes(
+@pytest.mark.parametrize("n,k,num_tokens,config", QWEN4_EXP_SM121_CASES)
+def test_qwen4_exp_sm121_selected_shapes(
     n: int,
     k: int,
     num_tokens: int,
@@ -985,7 +985,7 @@ def test_qwen4_exp_sm12x_selected_shapes(
     x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
 
-    selected = qwen4_exp_gemm.QWEN4_EXP_SM12X_GEMM_PLANS[(n, k)][num_tokens]
+    selected = qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS[(n, k)][num_tokens]
     assert selected == config
     output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
 

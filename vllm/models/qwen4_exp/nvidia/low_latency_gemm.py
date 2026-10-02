@@ -211,7 +211,7 @@ QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
 # (DGX Spark).  Each config was chosen by exhaustive timing of every
 # valid SkinnyGemmConfig inside CUDA graphs, with weight copies
 # rotated past L2.  See https://github.com/vllm-project/vllm/issues/59605.
-QWEN4_EXP_SM12X_GEMM_PLANS: dict[
+QWEN4_EXP_SM121_GEMM_PLANS: dict[
     tuple[int, int], dict[int, SkinnyGemmConfig]
 ] = {
     # Shared-expert gate projection, replicated.
@@ -280,8 +280,8 @@ QWEN4_EXP_SM12X_GEMM_PLANS: dict[
 }
 
 
-def _is_sm12x() -> bool:
-    return current_platform.is_device_capability_family(120)
+def _is_sm121() -> bool:
+    return current_platform.is_device_capability((12, 1))
 
 
 def _is_sm100() -> bool:
@@ -297,8 +297,8 @@ def _is_sm90() -> bool:
 
 
 def _gemm_plans() -> dict[tuple[int, int], dict[int, SkinnyGemmConfig]]:
-    if _is_sm12x():
-        return QWEN4_EXP_SM12X_GEMM_PLANS
+    if _is_sm121():
+        return QWEN4_EXP_SM121_GEMM_PLANS
     if _is_sm103():
         return QWEN4_EXP_GEMM_PLANS
     if _is_sm100():
