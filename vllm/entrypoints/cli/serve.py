@@ -3,7 +3,6 @@
 
 import argparse
 import signal
-import sys
 import time
 from functools import partial
 
@@ -366,7 +365,7 @@ def run_multi_api_server(args: argparse.Namespace):
         else:
             # Start API server(s).
             socket_factory = None
-            if num_api_servers > 1 and sys.platform == "linux" and not args.uds:
+            if num_api_servers > 1 and not args.uds:
                 socket_factory = partial(
                     create_server_socket, sock.getsockname(), reuse_port=True
                 )

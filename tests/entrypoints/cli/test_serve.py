@@ -47,15 +47,14 @@ def test_headless_imports_reasoning_parser_plugin_before_engine_config():
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux REUSEPORT semantics")
 @pytest.mark.parametrize(
-    "platform,count,uds,independent",
+    "count,uds,independent",
     [
-        ("linux", 3, None, True),
-        ("linux", 1, None, False),
-        ("linux", 3, "/tmp/vllm.sock", False),
-        ("darwin", 3, None, False),
+        (3, None, True),
+        (1, None, False),
+        (3, "/tmp/vllm.sock", False),
     ],
 )
-def test_multi_server_selects_listener_policy(platform, count, uds, independent):
+def test_multi_server_selects_listener_policy(count, uds, independent):
     """HTTP startup selects listeners; the process manager receives that choice."""
     from vllm.entrypoints.launchers.launcher import create_server_socket
 
@@ -73,7 +72,6 @@ def test_multi_server_selects_listener_policy(platform, count, uds, independent)
     )
     with (
         create_server_socket(("127.0.0.1", 0), reuse_port=True) as sock,
-        patch("vllm.entrypoints.cli.serve.sys.platform", platform),
         patch("vllm.entrypoints.cli.serve.signal.signal"),
         patch("vllm.entrypoints.cli.serve.setup_multiprocess_prometheus"),
         patch("vllm.entrypoints.cli.serve.envs.VLLM_USE_RUST_FRONTEND", False),
