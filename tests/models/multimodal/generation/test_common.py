@@ -294,6 +294,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         # The checkpoint's stale `auto_map` points at remote code that no longer exists
+        vllm_runner_kwargs={"trust_remote_code": False},
         hf_processor=AutoProcessor.from_pretrained,
         single_image_prompts=IMAGE_ASSETS.prompts(
             {
