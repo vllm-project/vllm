@@ -53,6 +53,8 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 }
 ```
 
+With `stream=true`, each chunk carries the masks of the tokens it emits.
+
 ## Requirements
 
 | Requirement | Reason |
@@ -63,9 +65,12 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 | `top_k > 0` | Bounds mask size; pure top-p can produce vocab-sized masks |
 | Model Runner V2 | Required by the async D2H copy pipeline |
 
+Speculative decoding is supported; each emitted token gets the support of the
+target distribution at its position.
+
 The engine rejects unsupported combinations at startup or request time:
 
-- Speculative decoding
+- Speculative decoding with adaptive verification
 - Diffusion models
 - Custom logits processors (engine-level `--logits-processors`)
 
@@ -142,5 +147,3 @@ Each position then carries the sampled token's logprob and the top-128
 - **Engine-level flag:** `--return-sampling-mask` globally disables the
   FlashInfer fused sampler. All requests pay the cost of the PyTorch sampling
   path, even if they don't need the mask.
-- **No streaming support:** The mask is returned only in the final response,
-  not in intermediate streaming chunks.
