@@ -166,7 +166,7 @@ def test_rocm_mxfp8_linear_block32_matches_dequant_reference(name, n, k, num_tok
     device = "cuda"
     layer = _make_block32_layer(n, k, device)
     row_scale = layer.weight_scale.data.clone()
-    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(bmm_batch_size=None))
+    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
     kernel.process_weights_after_loading(layer)
     assert layer.weight.dtype == torch.float8_e4m3fn
     assert layer.weight_scale.shape == (n // 32, k // 32)
@@ -194,11 +194,12 @@ def test_rocm_mxfp8_linear_keeps_per_row_scales():
         RocmDotScaledMxfp8LinearKernel,
     )
 
-    layer = _make_block32_layer(64, 256, "cuda")
+    n, k = 64, 256
+    layer = _make_block32_layer(n, k, "cuda")
     layer.weight_scale.data[1, 0] += 1
-    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(bmm_batch_size=None))
+    kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
     kernel.process_weights_after_loading(layer)
-    assert layer.weight_scale.shape == (64, 256 // 32)
+    assert layer.weight_scale.shape == (n, k // 32)
 
 
 def _split_k_case(packed: bool):

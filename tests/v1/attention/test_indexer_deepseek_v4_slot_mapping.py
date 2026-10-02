@@ -7,6 +7,9 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonMetadataBuilder,
+)
 from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
@@ -21,6 +24,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV4IndexerBackend,
     DeepseekV32IndexerMetadataBuilder,
     DeepseekV41IndexerBackend,
+    get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     ConvertReqIndexToGlobalIndexKernel,
@@ -95,8 +99,11 @@ def test_fused_indexer_decode_metadata(query_lens, padding):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("query_lens", [[1], [0, 257, 1, 0, 3], [6] * 64, [2, 6, 4, 0]])
-def test_device_token_request_mapping(query_lens):
+@pytest.mark.parametrize(
+    "query_lens", [[1], [0, 257, 1, 0, 3], [6] * 64, [2, 6, 4, 0], [0, 0, 0]]
+)
+@pytest.mark.parametrize("use_sparse_mla_builder", [False, True])
+def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
     """Graph replay follows device boundaries even when CPU lengths are stale."""
     lengths = torch.tensor(query_lens, device="cuda", dtype=torch.int32)
     qsl = torch.cat(
@@ -117,7 +124,16 @@ def test_device_token_request_mapping(query_lens):
         ),
         slot_mapping=torch.full((n + 7,), -1, device="cuda", dtype=torch.int64),
     )
-    result = common.token_to_req_indices(output)
+
+    def build_mapping():
+        if use_sparse_mla_builder:
+            builder = SimpleNamespace(req_id_per_token_buffer=output)
+            return SparseMLACommonMetadataBuilder._build_req_id_per_token(
+                builder, common
+            )
+        return common.token_to_req_indices(output)
+
+    result = build_mapping()
     assert result.data_ptr() == output.data_ptr()
     expected = torch.repeat_interleave(
         torch.arange(len(query_lens), device="cuda", dtype=torch.int32), lengths
@@ -127,7 +143,7 @@ def test_device_token_request_mapping(query_lens):
     graph = torch.cuda.CUDAGraph()
     common._token_to_req_indices_cache = None
     with torch.cuda.graph(graph):
-        common.token_to_req_indices(output)
+        build_mapping()
     reversed_lens = lengths.flip(0)
     qsl[1:].copy_(reversed_lens.cumsum(0))
     graph.replay()
@@ -362,3 +378,43 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
         device=device,
     )
     torch.testing.assert_close(valid_slots, expected)
+
+
+@pytest.mark.parametrize("compress_ratio", [1, 4])
+def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
+    """The chunker budget is in compressed rows, like the K-gather workspace."""
+    max_model_len = 1024
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=compress_ratio,
+    )
+    vllm_config = create_vllm_config(max_model_len=max_model_len)
+    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
+    block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["dummy"],
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        block_table_width=block_table_width,
+    )
+
+    workspace_rows = get_max_prefill_buffer_size(vllm_config) // compress_ratio
+    assert builder.max_prefill_buffer_size == workspace_rows
+
+    # Overflows the workspace unless the chunker splits.
+    num_reqs = 3 * (workspace_rows // (max_model_len // compress_ratio)) + 1
+    compressed_seq_lens = torch.full((num_reqs,), max_model_len // compress_ratio)
+    query_lens = torch.ones(num_reqs, dtype=torch.int64)
+    chunks = builder._split_indexer_prefill_chunks(
+        compressed_seq_lens,
+        query_lens,
+        builder.max_prefill_buffer_size,
+        max_logits_bytes=10**15,
+    )
+    assert len(chunks) > 1
+    for req_slice, _ in chunks:
+        assert int(compressed_seq_lens[req_slice].sum()) <= workspace_rows

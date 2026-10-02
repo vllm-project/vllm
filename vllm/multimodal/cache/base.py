@@ -356,6 +356,14 @@ class BaseMultiModalProcessorCache(
         """Close the underlying cache, if needed."""
         pass
 
+    def validate_input_item(
+        self,
+        mm_item: MultiModalKwargsItem,
+        mm_hash: str,
+    ) -> None:
+        """Validate externally supplied cache metadata before engine handoff."""
+        return None
+
     @abstractmethod
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         """Update the cache eviction order for a multi-modal item.

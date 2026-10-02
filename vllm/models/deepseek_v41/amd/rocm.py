@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import torch
 
@@ -15,8 +16,14 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
+    RocmSparseAttnIndexer,
+    RocmSparseMQAIndexer,
+)
 from vllm.models.deepseek_v41.attention import (
     DeepseekV4Attention,
+    DeepseekV4Indexer,
+    DeepseekV4IndexerCache,
     _replace_layer_index,
 )
 from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
@@ -29,14 +36,17 @@ from vllm.models.deepseek_v41.sparse_mla import (
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
+    MultipleOf,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,
     DeepseekSparseSWAMetadata,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    build_prefill_topk_ragged_indices,
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
     rocm_inverse_rope_mxfp8_rows,
@@ -44,6 +54,9 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_mxfp8_wo_a_bmm,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
+)
+from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+    rocm_paged_mxfp4_cache_layout,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -61,6 +74,22 @@ def _trust_dsv4_extra_cache_nan_free(
         and not has_kv_transfer
         and has_extra_cache
     )
+
+
+def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_triton_sparse_mla_enabled():
+        return False
+    # The aiter kernel does not scrub NaNs, so like the trust check above it
+    # needs a cache only the canonical writer has touched.
+    if has_kv_transfer:
+        logger.warning_once(
+            "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with a KV "
+            "connector; DeepSeek V4 keeps the Triton sparse attention."
+        )
+        return False
+    return True
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -407,6 +436,9 @@ _TopkRagged = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
     decode_swa_ragged_indices: torch.Tensor | None = None
     decode_swa_ragged_indptr: torch.Tensor | None = None
+    # Built only for the aiter prefill, which reads the SWA cache in place.
+    prefill_swa_ragged_indices: torch.Tensor | None = None
+    prefill_swa_ragged_indptr: torch.Tensor | None = None
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataBuilder):
@@ -431,6 +463,9 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataBu
             dtype=torch.int32,
             device=self.device,
         )
+        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(
+            self.vllm_config.kv_transfer_config is not None
+        )
 
     def build(
         self,
@@ -445,6 +480,22 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataBu
             fast_build=fast_build,
             replay_start=replay_start,
         )
+
+        prefill_ragged_indices = None
+        prefill_ragged_indptr = None
+        if (
+            self._use_aiter_sparse_mla
+            and base.num_prefill_tokens > 0
+            and base.prefill_swa_indices is not None
+            and base.prefill_swa_lens is not None
+        ):
+            # Paged-coordinate rows, so every layer's prefill shares one build.
+            prefill_ragged_indices, prefill_ragged_indptr = (
+                build_ragged_indices_from_dense(
+                    base.prefill_swa_indices.reshape(base.num_prefill_tokens, -1),
+                    base.prefill_swa_lens,
+                )
+            )
 
         ragged_indices = None
         ragged_indptr = None
@@ -472,13 +523,145 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataBu
             **vars(base),
             decode_swa_ragged_indices=ragged_indices,
             decode_swa_ragged_indptr=ragged_indptr,
+            prefill_swa_ragged_indices=prefill_ragged_indices,
+            prefill_swa_ragged_indptr=prefill_ragged_indptr,
         )
+
+
+@functools.cache
+def _aiter_indexer_cache_ops() -> tuple[Callable[..., None], Callable[..., tuple]]:
+    """The aiter indexer key writer and query quantizer."""
+    from aiter.ops.triton.fusions.k_norm_rope_mxfp4_cache import (
+        k_norm_rope_mxfp4_cache,
+    )
+    from aiter.ops.triton.rope.q_rope_mxfp4_quant import q_rope_mxfp4_quant
+
+    return k_norm_rope_mxfp4_cache, q_rope_mxfp4_quant
+
+
+def rocm_mxfp4_indexer_k_store(
+    k_pre: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    k_cache: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    compress_ratio: int,
+    use_fp4_cache: bool,
+    *,
+    num_heads: int,
+) -> None:
+    """`indexer_k_norm_rope_store` for the ROCm MXFP4 cache: aiter's cache op
+    writes the key in the order its MQA-logits kernel reads with ``num_heads``
+    query heads."""
+    assert use_fp4_cache, "the ROCm indexer cache op writes MXFP4 only"
+    layout = rocm_paged_mxfp4_cache_layout(num_heads, k_pre.shape[1], k_cache.shape[1])
+    k_norm_rope_mxfp4_cache, _ = _aiter_indexer_cache_ops()
+    k_norm_rope_mxfp4_cache(
+        k_pre,
+        positions,
+        cos_sin_cache,
+        rms_norm_weight,
+        rms_norm_eps,
+        k_cache,
+        kv_slot_mapping,
+        compress_ratio,
+        shuffle=layout,
+    )
+
+
+def rocm_mxfp4_indexer_q_quant(
+    positions: torch.Tensor,
+    index_q: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    use_fp4: bool = True,
+    weights_out_dtype: torch.dtype = torch.float32,
+) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """`fused_indexer_q_rope_quant` for the ROCm MXFP4 indexer, on aiter's op:
+    ((packed [T, H, D // 2], e8m0 as one int32 per head [T, H]), fp32
+    weights)."""
+    assert use_fp4 and weights_out_dtype == torch.float32, (
+        "the ROCm indexer quantizes Q to MXFP4 and scores with fp32 weights"
+    )
+    _, q_rope_mxfp4_quant = _aiter_indexer_cache_ops()
+    q_packed, q_scale, weights_out = q_rope_mxfp4_quant(
+        index_q,
+        positions,
+        index_q_cos_sin_cache,
+        index_weights,
+        index_weights_softmax_scale * index_weights_head_scale,
+    )
+    return (q_packed, q_scale.view(torch.int32).squeeze(-1)), weights_out
+
+
+class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
+    """The indexer on aiter's paged MXFP4 cache: its K store and Q quant write
+    in the order aiter's MQA-logits kernel reads, and its layers score with it.
+    ``_produce_k`` and ``forward_q`` mirror ``DeepseekV4Indexer``'s except for
+    those two calls."""
+
+    mqa_cls = RocmSparseMQAIndexer
+    attn_cls = RocmSparseAttnIndexer
+
+    def _produce_k(
+        self,
+        latent: torch.Tensor | None,
+        positions: torch.Tensor,
+        rotary_emb: torch.nn.Module,
+    ) -> None:
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict) or latent is None:
+            return
+        assert self.owns_k
+        indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
+        k_pre, _ = self.wk(latent)
+        rocm_mxfp4_indexer_k_store(
+            k_pre,
+            positions,
+            rotary_emb.cos_sin_cache,
+            self.k_norm.weight,
+            self.k_norm.variance_epsilon,
+            self.k_cache.kv_cache,
+            indexer_metadata.slot_mapping,
+            self.compress_ratio,
+            self.use_fp4_kv,
+            num_heads=self.n_head,
+        )
+
+    def forward_q(
+        self,
+        qr: torch.Tensor | QuantizedActivation,
+        qr_scale: torch.Tensor | None,
+        indexer_weights: torch.Tensor,
+        positions: torch.Tensor,
+        rotary_emb: torch.nn.Module,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        q = self._wq_b_proj(qr, qr_scale).view(-1, self.n_head, self.head_dim)
+        (q, q_scale), weights = rocm_mxfp4_indexer_q_quant(
+            positions,
+            q,
+            rotary_emb.cos_sin_cache,
+            indexer_weights,
+            self.softmax_scale,
+            self.n_head**-0.5,
+            use_fp4=self.use_fp4_kv,
+            weights_out_dtype=self.indexer_weights_dtype,
+        )
+        return q, q_scale, weights
 
 
 class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_SPARSE_DSV4"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [64, 128]
 
     @staticmethod
     def get_builder_cls() -> type[DeepseekV4SparseMLAMetadataBuilder]:
@@ -496,6 +679,14 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
     swa_backend_cls = DeepseekV41ROCMAiterSparseSWABackend
+    _use_aiter_sparse_mla = False
+
+    def _indexer_cls(
+        self, k_cache: DeepseekV4IndexerCache | None
+    ) -> type[DeepseekV4Indexer]:
+        if k_cache is not None and k_cache.rocm_mxfp4:
+            return DeepseekV41RocmMxfp4Indexer
+        return super()._indexer_cls(k_cache)
 
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]
@@ -517,6 +708,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         # same thing. The source owns one cache per compress ratio, refreshed
         # when it runs; consumers below it read through.
         self._topk_ragged_cache: dict[int, _TopkRagged] = {}
+        self._prefill_topk_ragged_cache: dict[
+            str, tuple[torch.Tensor, torch.Tensor]
+        ] = {}
         self._index_source_prefix: str | None = None
         if self.compress_ratio > 0:
             assert self.index_source_layer_id is not None
@@ -529,6 +723,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "this rank; PP splits inside a v4.1 index-sharing group "
                     "are not supported."
                 )
+        self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        if self.compressor is None and self.indexer is None:
+            # Dense layers have nothing to overlap; keep the base serial path.
+            self.aux_stream_list = None
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -600,7 +798,177 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     def _run_parallel_input_projections(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        if self.indexer is not None and self.compressor is None:
+            # Serial: qr must sit on the default stream before the q-side
+            # fork below can consume it (ROCm).
+            aux_streams = self.aux_stream_list
+            self.aux_stream_list = None
+            try:
+                return super()._run_parallel_input_projections(hidden_states)
+            finally:
+                self.aux_stream_list = aux_streams
         return super()._run_parallel_input_projections(hidden_states)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if (
+            self.indexer is None
+            or self._prepare_and_attn_fn == self._prepare_and_attn_eager
+            or not current_platform.enable_multi_stream_overlap(
+                self.aux_stream_list, get_forward_context().attn_metadata
+            )
+        ):
+            # Sequential fallback: no forks outside the capture region, where
+            # HIP event sync is unreliable; MRV1 keeps the input prep in its
+            # wide eager region (#51430).
+            aux_streams = self.aux_stream_list
+            self.aux_stream_list = None
+            try:
+                return super().forward(positions, hidden_states, llama_4_scaling)
+            finally:
+                self.aux_stream_list = aux_streams
+
+        attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
+        if self.compressor is not None:
+            q, kv, index_q, index_q_scale, index_weights = self._forward_csa2_full(
+                hidden_states, positions
+            )
+        else:
+            q, kv, index_q, index_q_scale, index_weights = self._forward_csa2_reindex(
+                hidden_states, positions
+            )
+        self._sparse_indexer_and_attn(
+            hidden_states,
+            index_q,
+            index_q_scale,
+            index_weights,
+            q,
+            kv,
+            positions,
+            attn_out,
+        )
+        return self._o_proj(attn_out, positions)
+
+    def _forward_csa2_full(
+        self, hidden_states: torch.Tensor, positions: torch.Tensor
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """CSA layers: one fork replaces the base pipeline's three.
+
+        Each fork/join is a HIP event pair per side stream on ROCm, so the
+        base three-fork pipeline is expensive there; the compressor chain and
+        the indexer weights projection run fully in parallel with the default
+        chain. The indexer K write and q-side stay serial after the join:
+        ``wk`` consumes the aux-0 latent and the q-side's wq_b consumes the
+        default-stream qr.
+        """
+        attn_metadata = get_forward_context().attn_metadata
+        compressor = self.compressor
+        indexer = self.indexer
+        assert compressor is not None and indexer is not None
+        aux_streams = self.aux_stream_list
+        assert aux_streams is not None and len(aux_streams) >= 2
+
+        def default_chain():
+            qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+            qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
+            q = self._wq_b_proj(qr, qr_scale).view(
+                -1, self.n_local_heads, self.head_dim
+            )
+            return (
+                self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata),
+                qr,
+                qr_scale,
+                kv,
+            )
+
+        def compressor_chain():
+            kv_score = torch.mm(
+                hidden_states,
+                compressor.fused_wkv_wgate.weight.T,
+                out_dtype=torch.float32,
+            )
+            latent = compressor(kv_score, positions)
+            compressor.insert_cache(latent, positions, self.rotary_emb)
+            return latent
+
+        def indexer_weights_chain():
+            # ReplicatedLinear returns (output, bias); bias is None.
+            weights, _ = indexer.weights_proj(hidden_states)
+            return weights
+
+        (q, qr, qr_scale, kv), (latent, indexer_weights) = execute_in_parallel(
+            default_chain,
+            [compressor_chain, indexer_weights_chain],
+            self.ln_events[0],
+            self.ln_events[1:3],
+            aux_streams[:2],
+            enable=True,
+            default_first=True,
+        )
+
+        indexer._produce_k(latent, positions, self.indexer_rotary_emb)
+        index_q, index_q_scale, index_weights_out = indexer.forward_q(
+            qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
+        )
+        return q, kv, index_q, index_q_scale, index_weights_out
+
+    def _forward_csa2_reindex(
+        self, hidden_states: torch.Tensor, positions: torch.Tensor
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """Indexer-only layers: the q-side overlaps the SWA q path.
+
+        The input projections run serial first: the q-side consumes qr, so
+        it can only overlap the SWA q projection and KV insert.
+        """
+        indexer = self.indexer
+        assert indexer is not None
+        attn_metadata = get_forward_context().attn_metadata
+        # Serial on these layers via the _run_parallel_input_projections
+        # override: qr must sit on the default stream before the fork.
+        qr_kv, _, indexer_weights = self._run_parallel_input_projections(hidden_states)
+        assert indexer_weights is not None
+        qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
+
+        def swa_q_chain():
+            q = self._wq_b_proj(qr, qr_scale).view(
+                -1, self.n_local_heads, self.head_dim
+            )
+            return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+
+        def indexer_q_chain():
+            return indexer.forward_q(
+                qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
+            )
+
+        aux_streams = self.aux_stream_list
+        assert aux_streams is not None
+        q, aux_results = execute_in_parallel(
+            swa_q_chain,
+            [indexer_q_chain],
+            self.ln_events[0],
+            self.ln_events[1:2],
+            aux_streams[:1],
+            enable=True,
+            default_first=True,
+        )
+        index_q, index_q_scale, index_weights_out = aux_results[0]
+        return q, kv, index_q, index_q_scale, index_weights_out
 
     @functools.cached_property
     def _wq_b_uses_aiter_block_scaled(self) -> bool:
@@ -741,9 +1109,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         attn_metadata = forward_context.attn_metadata
 
         if attn_metadata is None:
-            # Warmup dummy run: no real metadata. Reserve the same bf16
-            # gather workspace _forward_prefill would; the dequantize / topk
-            # / sparse_fwd kernels are skipped this step.
+            # Warmup dummy run: no real metadata. Reserve the workspace
+            # _forward_prefill would; the dequantize / topk / sparse_fwd kernels
+            # are skipped this step. The aiter prefill reads the caches in place,
+            # so it asks only for the bf16 rows of the MXFP8 output.
             swa_only = self.compress_ratio == 0
             N = (
                 0
@@ -752,9 +1121,14 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 // self.compress_ratio
             )
             M = N + self.window_size + self.max_num_batched_tokens
-            current_workspace_manager().get_simultaneous(
-                *self._prefill_workspace_shapes(M, self.max_num_batched_tokens, q)
+            shapes = self._prefill_workspace_shapes(
+                M,
+                self.max_num_batched_tokens,
+                q,
+                gather=not self._use_aiter_sparse_mla,
             )
+            if shapes:
+                current_workspace_manager().get_simultaneous(*shapes)
             if mxfp8_out is None:
                 output.zero_()
             else:
@@ -913,6 +1287,38 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 num_decode_tokens=num_decode_tokens,
             )
 
+        if self._use_aiter_sparse_mla:
+            assert swa_metadata.decode_swa_ragged_indices is not None
+            assert swa_metadata.decode_swa_ragged_indptr is not None
+            out = output
+            if output_mxfp8 is not None:
+                # The aiter kernel has no MXFP8 epilogue: write bf16 rows, then
+                # rotate and quantize them as the decode reduce would have.
+                out = self._mxfp8_bf16_rows(q.shape[0], q)
+            assert out is not None
+            self._aiter_sparse_mla(
+                q,
+                out,
+                self.swa_cache_layer.kv_cache,
+                swa_metadata.decode_swa_ragged_indices,
+                swa_metadata.decode_swa_ragged_indptr,
+                kv_cache,
+                topk_ragged_indices,
+                topk_ragged_indptr,
+            )
+            if output_mxfp8 is not None:
+                rocm_inverse_rope_mxfp8_rows(
+                    out,
+                    positions,
+                    self.rotary_emb.cos_sin_cache,
+                    self.rope_head_dim,
+                    output_mxfp8[0],
+                    output_mxfp8[1],
+                )
+                return q.shape[0]
+            # The aiter kernel leaves the inverse RoPE to the caller.
+            return 0
+
         return rocm_sparse_attn_decode(
             q=q,
             kv_cache=kv_cache,
@@ -958,9 +1364,21 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         With ``mxfp8_out`` the rows go to a bf16 workspace first and are then
         inverse-RoPE'd and quantized into it in one pass.
         """
+        if self._use_aiter_sparse_mla:
+            self._forward_prefill_aiter(
+                q=q,
+                positions=positions,
+                compressed_k_cache=compressed_k_cache,
+                swa_k_cache=swa_k_cache,
+                output=output,
+                attn_metadata=attn_metadata,
+                swa_metadata=swa_metadata,
+                mxfp8_out=mxfp8_out,
+            )
+            return
+
         swa_only = attn_metadata is None
 
-        num_prefills = swa_metadata.num_prefills
         num_prefill_tokens = swa_metadata.num_prefill_tokens
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
@@ -989,21 +1407,23 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             N = 0
 
         M = N + self.window_size + self.max_num_batched_tokens
-        num_chunks = (num_prefills + self.PREFILL_CHUNK_SIZE - 1) // (
-            self.PREFILL_CHUNK_SIZE
+        chunk_plan = swa_metadata.get_prefill_chunk_plan(
+            compress_ratio=self.compress_ratio,
+            prefill_chunk_size=self.PREFILL_CHUNK_SIZE,
+            has_compressed=not swa_only,
         )
+        assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
 
         workspace = current_workspace_manager().get_simultaneous(
             *self._prefill_workspace_shapes(M, num_prefill_tokens, q)
         )
-        kv = workspace[0]
+        kv_rows = workspace[0].view(-1, q.shape[-1])
         if mxfp8_out is not None:
             output = workspace[1]
         assert output is not None
-        for chunk_idx in range(num_chunks):
-            chunk_start = chunk_idx * self.PREFILL_CHUNK_SIZE
-            chunk_end = min(chunk_start + self.PREFILL_CHUNK_SIZE, num_prefills)
+        for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
+            kv = kv_rows[: chunk_size * chunk_M].view(chunk_size, chunk_M, -1)
             if not swa_only:
                 assert attn_metadata is not None
                 assert compressed_k_cache is not None
@@ -1028,7 +1448,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 gather_lens=gather_lens[chunk_start:chunk_end],
                 block_table=swa_block_table[chunk_start:chunk_end],
                 block_size=swa_metadata.block_size,
-                offset=N,
+                offset=chunk_N,
                 use_fnuz=current_platform.is_fp8_fnuz(),
             )
 
@@ -1049,8 +1469,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 self.window_size,
                 self.compress_ratio,
                 top_k,
-                M,
-                N,
+                chunk_M,
+                chunk_N,
             )
             rocm_sparse_attn_prefill(
                 q=q[query_start:query_end],
@@ -1075,15 +1495,17 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             )
 
     def _prefill_workspace_shapes(
-        self, M: int, num_prefill_tokens: int, q: torch.Tensor
+        self, M: int, num_prefill_tokens: int, q: torch.Tensor, gather: bool = True
     ) -> list[tuple[tuple[int, ...], torch.dtype]]:
         """The prefill gather buffer, plus bf16 rows for the MXFP8 output.
 
         One ``get_simultaneous`` call: separate calls alias the same memory.
+        ``gather=False`` leaves out the gather buffer, which the aiter kernel,
+        reading the caches in place, never needs.
         """
-        shapes: list[tuple[tuple[int, ...], torch.dtype]] = [
-            ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16)
-        ]
+        shapes: list[tuple[tuple[int, ...], torch.dtype]] = []
+        if gather:
+            shapes.append(((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16))
         if _ON_GFX950:
             shapes.append(
                 (
@@ -1092,3 +1514,136 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 )
             )
         return shapes
+
+    def _prefill_topk_ragged(
+        self,
+        swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        attn_metadata: DeepseekV4FlashMLAMetadata,
+        compressed_k_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prefill counterpart of ``_decode_topk_ragged``: layers that share an
+        index source and a compressed cache reuse one build per step."""
+        assert swa_metadata.token_to_req_indices is not None
+        assert swa_metadata.query_start_loc is not None
+        assert swa_metadata.seq_lens is not None
+        assert swa_metadata.is_valid_token is not None
+        assert self.topk_indices_buffer is not None
+        assert self._index_source_prefix is not None
+        assert self.compressed_cache_prefix is not None
+
+        source = self._static_forward_context[self._index_source_prefix]
+        if source is self:
+            source._prefill_topk_ragged_cache = {}
+        cached = source._prefill_topk_ragged_cache.get(self.compressed_cache_prefix)
+        if cached is not None:
+            return cached
+
+        num_decode_tokens = swa_metadata.num_decode_tokens
+        num_prefill_tokens = swa_metadata.num_prefill_tokens
+        built = build_prefill_topk_ragged_indices(
+            self.topk_indices_buffer[
+                num_decode_tokens : num_decode_tokens + num_prefill_tokens
+            ],
+            swa_metadata.token_to_req_indices,
+            swa_metadata.query_start_loc,
+            swa_metadata.seq_lens,
+            swa_metadata.is_valid_token,
+            attn_metadata.block_table,
+            block_size=attn_metadata.block_size // self.compress_ratio,
+            compress_ratio=self.compress_ratio,
+            num_compressed=(self.max_model_len + self.compress_ratio - 1)
+            // self.compress_ratio,
+            token_offset=num_decode_tokens,
+            num_rows=compressed_k_cache.shape[0] * compressed_k_cache.shape[1],
+        )
+        source._prefill_topk_ragged_cache[self.compressed_cache_prefix] = built
+        return built
+
+    def _forward_prefill_aiter(
+        self,
+        q: torch.Tensor,
+        positions: torch.Tensor,
+        compressed_k_cache: torch.Tensor | None,
+        swa_k_cache: torch.Tensor,
+        output: torch.Tensor | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
+        swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> None:
+        """Prefill straight off the paged caches, with no bf16 gather.
+
+        With ``mxfp8_out`` the kernel writes bf16 rows to the workspace, which
+        are then inverse-RoPE'd and quantized into it as ``_forward_prefill``
+        does.
+        """
+        num_prefill_tokens = swa_metadata.num_prefill_tokens
+        assert swa_metadata.prefill_swa_ragged_indices is not None
+        assert swa_metadata.prefill_swa_ragged_indptr is not None
+
+        topk_indices = None
+        topk_indptr = None
+        if attn_metadata is None:
+            compressed_k_cache = None
+        else:
+            assert compressed_k_cache is not None
+            topk_indices, topk_indptr = self._prefill_topk_ragged(
+                swa_metadata, attn_metadata, compressed_k_cache
+            )
+
+        if mxfp8_out is not None:
+            output = self._mxfp8_bf16_rows(num_prefill_tokens, q)
+        assert output is not None
+        self._aiter_sparse_mla(
+            q[:num_prefill_tokens],
+            output[:num_prefill_tokens],
+            swa_k_cache,
+            swa_metadata.prefill_swa_ragged_indices,
+            swa_metadata.prefill_swa_ragged_indptr,
+            compressed_k_cache,
+            topk_indices,
+            topk_indptr,
+        )
+        if mxfp8_out is not None:
+            rocm_inverse_rope_mxfp8_rows(
+                output[:num_prefill_tokens],
+                positions[:num_prefill_tokens],
+                self.rotary_emb.cos_sin_cache,
+                self.rope_head_dim,
+                mxfp8_out[0][:num_prefill_tokens],
+                mxfp8_out[1][:num_prefill_tokens],
+            )
+
+    def _mxfp8_bf16_rows(self, num_tokens: int, q: torch.Tensor) -> torch.Tensor:
+        """bf16 attention rows for the aiter kernel to write when the layer's
+        output is MXFP8, taken from the workspace the warmup reserved."""
+        shapes = self._prefill_workspace_shapes(0, num_tokens, q, gather=False)
+        assert shapes, "an MXFP8 attention output is gfx950-only"
+        return current_workspace_manager().get_simultaneous(*shapes)[0]
+
+    def _aiter_sparse_mla(
+        self,
+        q: torch.Tensor,
+        output: torch.Tensor,
+        swa_k_cache: torch.Tensor,
+        swa_indices: torch.Tensor,
+        swa_indptr: torch.Tensor,
+        compressed_k_cache: torch.Tensor | None,
+        topk_indices: torch.Tensor | None,
+        topk_indptr: torch.Tensor | None,
+    ) -> None:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        # Both fp8 caches are read in place: the SWA window as the main segment,
+        # the top-k compressed tokens as the extra one.
+        rocm_aiter_ops.triton_sparse_mla_fwd(
+            q,
+            swa_k_cache,
+            output,
+            self.scale,
+            swa_indptr,
+            swa_indices,
+            attn_sink=self.attn_sink[: q.shape[1]],
+            extra_kv_buffer=compressed_k_cache,
+            extra_kv_indptr=topk_indptr,
+            extra_kv_indices=topk_indices,
+        )
