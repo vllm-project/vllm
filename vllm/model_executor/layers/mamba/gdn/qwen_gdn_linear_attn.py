@@ -529,7 +529,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         elif current_platform.is_xpu():
             self.gdn_decode_kernel = "XPU"
 
-        self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
+        self.enable_fused_gdn_decode = (
+            self.gdn_decode_kernel == "cuda" and self.speculative_config is not None
+        )
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
 
         compilation_config = get_current_vllm_config().compilation_config

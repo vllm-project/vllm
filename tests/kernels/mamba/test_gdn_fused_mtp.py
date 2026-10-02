@@ -182,6 +182,36 @@ def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "decode_kernel,num_spec,expected",
+    [
+        ("cuda", 0, False),
+        ("cuda", NUM_SPEC, True),
+        ("triton", 0, False),
+        ("triton", NUM_SPEC, False),
+    ],
+)
+def test_fused_decode_requires_speculative_config(
+    dist_init,
+    monkeypatch: pytest.MonkeyPatch,
+    decode_kernel: str,
+    num_spec: int,
+    expected: bool,
+) -> None:
+    monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", decode_kernel)
+    vllm_config = _make_vllm_config()
+    if num_spec == 0:
+        vllm_config.speculative_config = None
+    with set_current_vllm_config(vllm_config), torch.device("cuda"):
+        layer = QwenGatedDeltaNetAttention(
+            vllm_config.model_config.hf_text_config,
+            vllm_config,
+            prefix=PREFIX,
+        )
+    assert layer.gdn_decode_kernel == decode_kernel
+    assert layer.enable_fused_gdn_decode is expected
+
+
 @torch.inference_mode()
 def test_fused_forward_uses_packed_entrypoint() -> None:
     """Fused mode keeps projected QKVZ and BA packed through the model op."""
