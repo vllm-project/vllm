@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
+import itertools
 import time
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
+    ReqId,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -39,12 +41,18 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Requests to a re-registered engine, held back while reads to its
+        # previous registration are still in flight.
+        self._deferred_recvs: dict[ReqId, ReqMeta] = {}
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        for req_id, meta in metadata.reqs_to_recv.items():
+        deferred, self._deferred_recvs = self._deferred_recvs, {}
+        for req_id, meta in itertools.chain(
+            deferred.items(), metadata.reqs_to_recv.items()
+        ):
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block
             )
@@ -68,26 +76,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Aborted cleanup requests have already been removed from the scheduler.
             if meta.awaiting_kvs or any(meta.local_block_ids):
                 self._recving_metadata[req_id] = meta
-            if remote_engine_id not in self._remote_agents:
-                # Initiate handshake with remote engine to exchange metadata.
-                with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
-                        self._background_nixl_handshake(req_id, remote_engine_id, meta)
-                        continue
-
-            # Handshake already completed, start async read xfer.
-            self._read_blocks_for_req(req_id, meta)
+            self._start_recv(req_id, meta)
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
             req_id, meta = self._ready_requests.get_nowait()
-            assert meta.remote is not None
-            if meta.remote.engine_id not in self._remote_agents:
-                # The engine was released after its handshake completed, so
-                # handshake again. This fails if the engine is gone.
-                self._background_nixl_handshake(req_id, meta.remote.engine_id, meta)
-                continue
-            self._read_blocks_for_req(req_id, meta)
+            self._start_recv(req_id, meta)
 
         if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             # Replicated-KV PCP: only PCP rank 0 serves the KV, so this rank
@@ -132,6 +126,34 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Send heartbeats to P-side engines to keep KV blocks alive while
         # requests sit in the D scheduler WAITING queue.
         self._send_heartbeats(metadata)
+
+    def _start_recv(self, req_id: str, meta: ReqMeta) -> None:
+        """Read the request's blocks, or handshake first.
+
+        A handshake is redone when the engine was released since it completed,
+        or when the request names a newer registration of the engine; then the
+        engine is evicted first, once nothing is read through its old keys. A
+        request naming an older registration fails.
+        """
+        assert meta.remote is not None
+        engine_id = meta.remote.engine_id
+        delta = self._registration_epoch_delta(
+            engine_id, meta.remote.registration_epoch
+        )
+        if delta < 0:
+            # Prefilled before the remote slept: its blocks are gone.
+            self._log_failure("stale_remote_registration", req_id, meta=meta)
+            self._failed_recv_reqs.put(req_id)
+            return
+        if delta > 0:
+            if engine_id in self._engines_with_inflight_transfers():
+                self._deferred_recvs[req_id] = meta
+                return
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+        if engine_id not in self._remote_agents:
+            self._background_nixl_handshake(req_id, engine_id, meta)
+            return
+        self._read_blocks_for_req(req_id, meta)
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None

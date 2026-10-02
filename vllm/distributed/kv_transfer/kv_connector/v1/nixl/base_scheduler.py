@@ -108,6 +108,10 @@ class NixlBaseConnectorScheduler:
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
+        # Encoded handshake payload of each (pp_rank, tp_rank), served by it.
+        self._handshake_payloads: dict[tuple[int, int], bytes] = {}
+        # Registration epoch of the workers' KV caches, sent along to peers.
+        self._registration_epoch = 0
         self._stop_event = threading.Event()
 
         # Requests that need to start recv/send.
@@ -304,6 +308,7 @@ class NixlBaseConnectorScheduler:
                     "handshake metadata."
                 )
             encoded_data[(pp_rank, tp_rank)] = encoder.encode(rank_metadata)
+            self._registration_epoch = rank_metadata.registration_epoch
             logger.debug(
                 "PP rank %d, TP rank %d: encoded NixlHandshakePayload size: %s bytes",
                 pp_rank,
@@ -311,13 +316,16 @@ class NixlBaseConnectorScheduler:
                 str(len(encoded_data[(pp_rank, tp_rank)])),
             )
 
+        # Serve the current registrations: the KV caches register anew on wake-up.
+        self._handshake_payloads.update(encoded_data)
+
         # Only start the listener when we have metadata to serve.
         if self._nixl_handshake_listener_t is None:
             ready_event = threading.Event()
             self._nixl_handshake_listener_t = threading.Thread(
                 target=self._nixl_handshake_listener,
                 args=(
-                    encoded_data,
+                    self._handshake_payloads,
                     ready_event,
                     self._stop_event,
                     self.side_channel_host,

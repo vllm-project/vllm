@@ -281,6 +281,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             do_remote_decode=is_d_node,
             remote_block_ids=block_ids,
             remote_engine_id=self.engine_id,
+            remote_registration_epoch=self._registration_epoch,
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,

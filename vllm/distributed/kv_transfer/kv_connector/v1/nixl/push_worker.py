@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
@@ -104,6 +104,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # (``_pop_done_transfers``); guarded by
         # ``_sending_transfers_lock``.
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
+        self._sending_engines: dict[ReqId, EngineId] = {}
         self._send_failures: set[ReqId] = set()
         self._sending_transfers_lock = threading.RLock()
         # D-side: requests a producer reported it will not push (PUSH_FAIL).
@@ -146,13 +147,44 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 "NixlPushConnector does not support mixed-memory KV caches"
             )
         if self._push_writer_thread is None:
-            self._push_writer_thread = threading.Thread(
-                target=self._push_writer_loop,
-                daemon=True,
-                name="nixl-push-writer",
+            self._start_push_writer()
+
+    def _start_push_writer(self) -> None:
+        self._push_writer_thread = threading.Thread(
+            target=self._push_writer_loop,
+            daemon=True,
+            name="nixl-push-writer",
+        )
+        self._push_writer_thread.start()
+        logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
+
+    def _stop_push_writer(self) -> None:
+        self._push_writer_stop.set()
+        self._push_writer_wake.set()
+        if self._push_writer_thread is not None:
+            self._push_writer_thread.join()
+            self._push_writer_thread = None
+        self._push_writer_stop.clear()
+
+    def release_kv_caches(self) -> None:
+        # Only the writer posts WRITEs: with it stopped, the handle set is final.
+        self._stop_push_writer()
+        try:
+            super().release_kv_caches()
+        except Exception:
+            self._start_push_writer()
+            raise
+        # Their source blocks are released with the KV cache: never WRITE them.
+        while not self._deferred_push_inbox.empty():
+            self._deferred_push_inbox.get_nowait()
+
+    def _transfer_handles_processing(self) -> bool:
+        with self._sending_transfers_lock:
+            return super()._transfer_handles_processing() or any(
+                self.nixl_wrapper.check_xfer_state(handle) == "PROC"
+                for handles in self._sending_transfers.values()
+                for handle in handles
             )
-            self._push_writer_thread.start()
-            logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
 
     def shutdown(self) -> None:
         self._push_writer_stop.set()
@@ -247,7 +279,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     self._send_registration_to_p(rid, rd)
 
                 # 2. Deferred P→D pushes whose handshake just completed; do xfer now
-                while True:
+                for _ in range(self._deferred_push_inbox.qsize()):
                     try:
                         rid, blocks, rd = self._deferred_push_inbox.get_nowait()
                     except queue.Empty:
@@ -462,6 +494,26 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids = registration_data["local_block_ids"]
         decode_request_id = registration_data["request_id"]
 
+        delta = self._registration_epoch_delta(
+            decode_engine_id, registration_data.get("decode_registration_epoch")
+        )
+        if delta < 0:
+            # Registered before D slept: D aborted the request on its pause.
+            self._log_failure(
+                "stale_remote_registration",
+                request_id,
+                remote_engine_id=decode_engine_id,
+            )
+            return
+        if delta > 0:
+            if self._writing_to(decode_engine_id):
+                # Retried once the WRITEs through the old keys are reaped.
+                self._deferred_push_inbox.put(
+                    (request_id, local_block_ids, registration_data)
+                )
+                return
+            self._cleanup_remote_engine(decode_engine_id, log_eviction=False)
+
         # Runs on the background executor; defer the WRITE until it's ready.
         fut = self._ensure_handshake(
             decode_engine_id,
@@ -530,6 +582,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 "_do_start_push_kv for %s took %.1fms (slow NIXL submission)",
                 request_id,
                 elapsed_ms,
+            )
+
+    def _writing_to(self, engine_id: EngineId) -> bool:
+        with self._sending_transfers_lock:
+            return any(
+                self._sending_engines.get(req_id) == engine_id
+                for req_id, handles in self._sending_transfers.items()
+                if handles
             )
 
     @staticmethod
@@ -647,6 +707,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if handles:
             with self._sending_transfers_lock:
                 self._sending_transfers[req_id].extend(handles)
+                self._sending_engines[req_id] = engine_id
 
     def _xfer_blocks(
         self,
@@ -858,6 +919,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             done_pushing, failed_pushing = self._pop_done_transfers(
                 self._sending_transfers
             )
+            for req_id in done_pushing:
+                self._sending_engines.pop(req_id, None)
             # Remember failures until the final sibling WRITE completes.
             self._send_failures.update(failed_pushing)
             successful = {

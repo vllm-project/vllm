@@ -3,6 +3,7 @@
 """Base worker-side logic for the NIXL connector."""
 
 import contextlib
+import dataclasses
 import itertools
 import logging
 import math
@@ -566,6 +567,10 @@ class NixlBaseConnectorWorker:
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._lease_extension = kv_lease_duration * 2 // 3
         self._kv_lease_duration = kv_lease_duration
+        # A reader of our blocks starts at least this long before the lease ends.
+        self._lease_margin = min(5.0, kv_lease_duration / 4)
+        # A peer's read of blocks leased until before this time may still run.
+        self._lease_quarantine_until = 0.0
 
         self._bidirectional_kv_xfer_enabled: bool = (
             vllm_config.kv_transfer_config.get_from_extra_config(
@@ -677,6 +682,11 @@ class NixlBaseConnectorWorker:
                 else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
+        model_config = vllm_config.model_config
+        if model_config.enable_sleep_mode or model_config.enable_cumem_allocator:
+            # UCX's registration cache keeps a deregistered region pinned until it
+            # sees the memory freed, which the allocator's unmap does not signal.
+            os.environ.setdefault("UCX_RCACHE_ENABLE", "n")
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         # Map of engine_id -> {(pp_rank, tp_rank): agent_name, ...}.
         # non-PP remote uses pp_rank 0, i.e. (0, tp_rank).
@@ -685,6 +695,8 @@ class NixlBaseConnectorWorker:
         )
         # Map of engine_id -> clock offset.
         self._engine_clock_offset: dict[EngineId, float] = {}
+        # Map of engine_id -> registration epoch its cached keys belong to.
+        self._remote_registration_epochs: dict[EngineId, int] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -827,6 +839,8 @@ class NixlBaseConnectorWorker:
         self.dst_uses_region_group_mapping: dict[EngineId, bool] = {}
         self.dst_region_mem_types: dict[EngineId, list[str]] = {}
         self._registered_descs: list[Any] = []
+        # See NixlHandshakePayload.registration_epoch.
+        self._registration_epoch = 1
 
         # In progress transfers.
         # [req_id -> list[handle]]
@@ -1156,6 +1170,9 @@ class NixlBaseConnectorWorker:
                 )
                 remote_ranks = (remote_pp_rank, remote_rank)
                 remote_rank_to_agent_name[remote_ranks] = remote_agent_name
+                self._remote_registration_epochs[expected_engine_id] = (
+                    handshake_payload.registration_epoch
+                )
 
         assert best_offset is not None
         return remote_rank_to_agent_name, best_offset
@@ -1385,6 +1402,10 @@ class NixlBaseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+        if self.xfer_handshake_metadata is not None:
+            return  # Still registered (a retried wake-up).
+        if self._registered_descs:
+            self._release_registrations()  # Remains of a registration that failed.
         use_layer_name_routing = self._requires_layer_name_routing()
         route_packed_layers = self._has_packed_cache and use_layer_name_routing
         self.transfer_topo = TransferTopology(
@@ -1449,6 +1470,12 @@ class NixlBaseConnectorWorker:
         self._ssm_region_indices = []
         self._scratch_region_indices = []
         self._ple_region_index = None
+        self._region_is_mla = []
+        self.block_len_per_layer = []
+        self.block_stride_per_layer = []
+        self.region_group_ids = []
+        self.region_names = []
+        self.region_num_blocks = []
 
         packed_storage = _share_storage_and_block_stride(list(xfer_buffers.values()))
         # CSA-linear needs separate logical regions for attention and state
@@ -1885,6 +1912,76 @@ class NixlBaseConnectorWorker:
         self.xfer_handshake_metadata = NixlHandshakePayload(
             compatibility_hash=self.compat_hash,
             agent_metadata_bytes=encoder.encode(agent_metadata),
+            registration_epoch=self._registration_epoch,
+        )
+
+    def release_kv_caches(self) -> None:
+        """Release the NIXL registrations of the KV caches and everything
+        prepared on them, leaving the worker as before `register_kv_caches`.
+
+        First waits until no transfer this worker issued is in flight and no
+        peer can still read a block leased to it (see `_wait_until_unused`).
+        Peers learn of the next registration through its epoch. Idempotent.
+        """
+        if not self._registered_descs:
+            return
+        # Every rank counts every attempt, so that a rank whose release fails
+        # names the epoch the other ranks register anew in.
+        self._registration_epoch += 1
+        try:
+            self._wait_until_unused()
+        except TimeoutError:
+            if self.xfer_handshake_metadata is not None:
+                self.xfer_handshake_metadata = dataclasses.replace(
+                    self.xfer_handshake_metadata,
+                    registration_epoch=self._registration_epoch,
+                )
+            raise
+        self._release_registrations()
+
+    def _release_registrations(self) -> None:
+        # Queued handshakes prepare descriptors on the registered memory.
+        self._handshake_initiation_executor.submit(lambda: None).result()
+        for engine_id in list(self._remote_agents):
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+        for handle in itertools.chain(
+            self.src_xfer_handles_by_block_size.values(),
+            *self.src_xfer_handles_by_tp_ratio.values(),
+            self._dram_src_handles_by_block_size.values(),
+            *self._dram_src_handles_by_tp_ratio.values(),
+        ):
+            self.nixl_wrapper.release_dlist_handle(handle)
+        self.src_xfer_handles_by_block_size.clear()
+        self.src_xfer_handles_by_tp_ratio.clear()
+        self._dram_src_handles_by_block_size.clear()
+        self._dram_src_handles_by_tp_ratio.clear()
+        for descs in self._registered_descs:
+            self.nixl_wrapper.deregister_memory(descs)
+        self._registered_descs.clear()
+        self.host_xfer_buffers = {}
+        self.xfer_handshake_metadata = None
+
+    def _wait_until_unused(self) -> None:
+        """Wait until neither this worker nor a peer can access the KV cache
+        memory: no transfer handle is still processing, no block is leased to
+        a peer, and a peer's read of blocks whose lease ended has had the
+        safety margin to finish (it started at least that long before the
+        end). Raises TimeoutError after the lease duration."""
+        deadline = time.perf_counter() + self._kv_lease_duration + self._lease_margin
+        while (
+            (now := time.perf_counter()) < self._lease_quarantine_until
+            or any(expiry > now for expiry in self._reqs_to_send.values())
+            or self._transfer_handles_processing()
+        ):
+            if now >= deadline:
+                raise TimeoutError("KV cache transfers did not finish in time")
+            time.sleep(0.01)
+
+    def _transfer_handles_processing(self) -> bool:
+        return any(
+            self.nixl_wrapper.check_xfer_state(handle) == "PROC"
+            for handles in self._recving_transfers.values()
+            for handle in handles
         )
 
     def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
@@ -3073,6 +3170,9 @@ class NixlBaseConnectorWorker:
         expired = [
             req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
         ]
+        if expired:
+            # A read starts no later than the margin before the expiry.
+            self._lease_quarantine_until = now + self._lease_margin
         for req_id in expired:
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
             self.expected_consumer_notifications_by_req.pop(req_id, None)
@@ -3627,6 +3727,21 @@ class NixlBaseConnectorWorker:
             if now - last_active > self._engine_ttl and eid not in busy:
                 self._cleanup_remote_engine(eid)
 
+    def _registration_epoch_delta(
+        self, engine_id: EngineId, requested_epoch: int | None
+    ) -> int:
+        """Registration epoch a transfer names minus the one of the cached
+        handshake with `engine_id`: positive when the engine registered anew
+        since (its cached keys are dead), negative when the transfer predates
+        the cached registration (its blocks are gone), 0 when nothing is known.
+        """
+        if requested_epoch is None:
+            return 0
+        cached_epoch = self._remote_registration_epochs.get(engine_id)
+        if cached_epoch is None or engine_id not in self._remote_agents:
+            return 0
+        return requested_epoch - cached_epoch
+
     def _engines_with_inflight_transfers(self) -> set[EngineId]:
         """Remote engines a transfer is still reading from.
 
@@ -3715,6 +3830,7 @@ class NixlBaseConnectorWorker:
 
         # Drop the cached clock offset; it is re-measured on the next handshake.
         self._engine_clock_offset.pop(engine_id, None)
+        self._remote_registration_epochs.pop(engine_id, None)
         # A just-completed handshake may not have recorded activity yet, so
         # tolerate a missing entry.
         last_active = self._engine_last_active.pop(engine_id, None)

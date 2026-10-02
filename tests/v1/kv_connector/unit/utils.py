@@ -600,6 +600,7 @@ def make_nixl_push_scheduler(
     sched.decoder_kv_blocks_ttl = decoder_kv_blocks_ttl
     sched.use_host_buffer = False
     sched.engine_id = "decode-engine"
+    sched._registration_epoch = 0
     sched.transfer_tp_size = 1
     sched.side_channel_host = "127.0.0.1"
     sched.side_channel_port = 5600

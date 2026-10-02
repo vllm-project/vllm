@@ -154,6 +154,7 @@ class TestPushScheduler:
         """D scheduler stashes registration data + arms watchdog deadline."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
+        sched._registration_epoch = 3
 
         request = _make_request(request_id="req-d-1")
         blocks = _BlocksMock(block_ids=([10, 11, 12],))
@@ -165,6 +166,7 @@ class TestPushScheduler:
         # ``request_id`` is D's own vLLM request id; plus our own (D) coords.
         assert reg["request_id"] == request.request_id
         assert reg["decode_engine_id"] == sched.engine_id
+        assert reg["decode_registration_epoch"] == 3
         assert reg["decode_host"] == sched.side_channel_host
         assert reg["decode_port"] == sched.side_channel_port
         assert reg["local_block_ids"] == ([10, 11, 12],)
@@ -352,6 +354,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         )
 
         w._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
+        w._sending_engines = {}
         w._send_failures = set()
         w._sending_transfers_lock = threading.RLock()
         w._engine_clock_offset = {}
@@ -387,6 +390,9 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.pp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
+        w._remote_registration_epochs = {}
+        w._lease_extension = 20
+        w._lease_margin = 5.0
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w._uses_region_group_mapping = False
@@ -726,6 +732,44 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
     assert meta.remote.engine_id == "decode-engine"
     # RemoteMeta.request_id is D's request id from the registration.
     assert meta.remote.request_id == "req-hs"
+
+
+@pytest.mark.parametrize(
+    ("epoch", "writing_to", "evicted", "written"),
+    [
+        (2, None, True, True),
+        (2, "other-engine", True, True),
+        (2, "decode-engine", False, False),
+        (0, None, False, False),
+    ],
+    ids=["newer", "newer-while-writing-elsewhere", "newer-while-writing", "older"],
+)
+def test_do_start_push_kv_evicts_a_reregistered_decoder_first(
+    epoch, writing_to, evicted, written
+):
+    """A registration naming a newer epoch of the decoder evicts the cached
+    handshake before the WRITE; while a WRITE to that decoder is in flight it
+    waits on the deferred inbox. One naming an older epoch was aborted by D."""
+    w = _StubWriterWorker.fresh()
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    w._remote_agents["decode-engine"] = {(0, 0): "agent"}
+    w._remote_registration_epochs["decode-engine"] = 1
+    w._cleanup_remote_engine = MagicMock()
+    w._ensure_handshake = lambda *a, **k: None
+    xfer_calls: list[dict[str, Any]] = []
+    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+    if writing_to:
+        w._sending_transfers["other"] = [1]
+        w._sending_engines["other"] = writing_to
+    rd = _registration_data("req-new", decode_engine_id="decode-engine")
+    rd["decode_registration_epoch"] = epoch
+
+    _real_do_start_push_kv(w, "req-new", ([1, 2, 3],), rd)
+
+    assert w._cleanup_remote_engine.call_count == int(evicted)
+    assert [c["req_id"] for c in xfer_calls] == (["req-new"] if written else [])
+    deferred = writing_to == "decode-engine"
+    assert w._deferred_push_inbox.qsize() == int(deferred)
 
 
 def test_do_start_push_kv_drops_request_on_handshake_failure():

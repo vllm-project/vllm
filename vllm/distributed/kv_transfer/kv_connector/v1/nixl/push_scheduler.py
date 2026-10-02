@@ -177,6 +177,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self._push_pending_registrations[request.request_id] = {
             "request_id": request.request_id,
             "decode_engine_id": self.engine_id,
+            "decode_registration_epoch": self._registration_epoch,
             "decode_host": self.side_channel_host,
             "decode_port": self.side_channel_port,
             "decode_tp_size": (self.vllm_config.parallel_config.tensor_parallel_size),
@@ -283,6 +284,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             do_remote_decode=False,
             remote_block_ids=block_ids,
             remote_engine_id=self.engine_id,
+            remote_registration_epoch=self._registration_epoch,
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,

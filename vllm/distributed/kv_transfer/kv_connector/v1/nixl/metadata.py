@@ -51,8 +51,9 @@ PUSH_FAIL_NOTIF_PREFIX = b"PUSH_FAIL:"
 #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
+#  14: Add registration_epoch to the handshake payload and kv_transfer_params
 #
-NIXL_CONNECTOR_VERSION: int = 13
+NIXL_CONNECTOR_VERSION: int = 14
 
 
 @dataclass
@@ -96,6 +97,9 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 
     compatibility_hash: str
     agent_metadata_bytes: bytes  # NixlAgentMetadata encoded
+    # Number of KV cache release attempts plus one, equal on all ranks of the
+    # engine: a registration made in a later epoch has new keys.
+    registration_epoch: int = 0
 
 
 def _get_speculative_compatibility_factors(
@@ -236,6 +240,7 @@ class RemoteMeta:
     blocks_expiry_time: float | None = None
     blocks_lease_duration: float | None = None
     num_tokens: int | None = None
+    registration_epoch: int | None = None
 
 
 @dataclass
@@ -339,5 +344,6 @@ class NixlConnectorMetadata(KVConnectorMetadata):
                 "remote_blocks_lease_duration"
             ),
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
+            registration_epoch=kv_transfer_params.get("remote_registration_epoch"),
         )
         self.reqs_to_recv[request_id] = req

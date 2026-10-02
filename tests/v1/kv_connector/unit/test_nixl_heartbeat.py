@@ -30,6 +30,8 @@ def _worker_stub():
     w = object.__new__(NixlConnectorWorker)
     w._reqs_to_send = {}
     w._lease_extension = 20
+    w._lease_margin = 5.0
+    w._lease_quarantine_until = 0.0
     w._reqs_to_process = set()
     w.consumer_notification_counts_by_req = {}
     w.expected_consumer_notifications_by_req = {}
@@ -251,3 +253,17 @@ def test_reaper_reclaims_shorter_lease_behind_later_deadline(monkeypatch):
     assert done == {"Y"}
     assert list(w._reqs_to_send) == ["X"]
     assert w._reqs_to_process == {"X"}
+
+
+def test_reaper_quarantines_the_memory_of_reaped_leases(monkeypatch):
+    """A remote read starts no later than a margin before the lease ends, so
+    the memory stays registered for a margin after the reaping."""
+    w = _worker_stub()
+    monkeypatch.setattr(time, "perf_counter", lambda: 100.0)
+    w._reqs_to_send = {"live": 130.0}
+    w._reap_expired_send_leases(set())
+    assert w._lease_quarantine_until == 0.0
+    w._reqs_to_send["reaped"] = 100.0
+    w._reqs_to_process = {"reaped"}
+    w._reap_expired_send_leases(set())
+    assert w._lease_quarantine_until == 105.0
