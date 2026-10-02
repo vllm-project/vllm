@@ -642,7 +642,12 @@ roundtrip_tests! {
     seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
     step5 => [reasoning_and_content, tool_call_mix],
-    ernie45 => [reasoning_and_content, tool_call_mix],
+    // ERNIE's published `tokenizer.json` does not round-trip the fixture text
+    // (`2 + 2` decodes as `2  + 2`; the original `tokenizer.model` does), which
+    // the text-completion path rejects, and `<|im_end|>` is not an EOS token
+    // for the grammar replay.
+    ernie45 => #[ignore = "ERNIE tokenizer.json is not round-trip safe for the fixture text"]
+        [reasoning_and_content, tool_call_mix],
     nemotron_v3 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     gemma4_hf => [tool_call_mix],
