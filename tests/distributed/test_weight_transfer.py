@@ -7,12 +7,12 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
 import builtins
+import importlib.util
 import pickle
 import runpy
 import threading
 import time
 from contextlib import nullcontext
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -1497,10 +1497,12 @@ class TestDeferredProcessingContract:
     that caller ends up reaching through a getattr."""
 
     def _engines(self):
-        return {
-            name: loader()
-            for name, loader in WeightTransferEngineFactory._registry.items()
-        }
+        registry = dict(WeightTransferEngineFactory._registry)
+        # ModelExpress is an optional, separately installed package, but its
+        # backend is always registered. Skip it when the package is missing.
+        if importlib.util.find_spec("modelexpress") is None:
+            registry.pop("modelexpress")
+        return {name: loader() for name, loader in registry.items()}
 
     def test_every_engine_declares_whether_it_defers(self):
         for name, cls in self._engines().items():
@@ -2054,11 +2056,11 @@ def test_sparse_nccl_trainer_non_sender_skips_client():
 
 
 def _import_modelexpress_shim():
-    path = (
-        Path(__file__).parents[2]
-        / "vllm/distributed/weight_transfer/modelexpress_engine.py"
+    spec = importlib.util.find_spec(
+        "vllm.distributed.weight_transfer.modelexpress_engine"
     )
-    runpy.run_path(str(path), run_name="_test_modelexpress_shim")
+    assert spec is not None and spec.origin is not None
+    runpy.run_path(spec.origin, run_name="_test_modelexpress_shim")
 
 
 @pytest.mark.parametrize(
