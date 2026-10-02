@@ -390,6 +390,23 @@ def _selective_scan_update_kernel(
         D_ptrs = D_ptr + offs_m * stride_D_dim
     A_ptrs = A_ptr + offs_m[:, None] * stride_A_dim + offs_n[None, :] * stride_A_dstate
 
+    if USE_RS_ROUNDING:
+        tl.static_assert(state_ptr.dtype.element_ty == tl.float16, "state must be fp16")
+        rand_seed = tl.load(rand_seed_ptr)
+        if HAS_STATE_BATCH_INDICES:
+            rand_offsets = (
+                state_batch_idx * stride_state_batch + pid_h * stride_state_head
+            )
+        else:
+            rand_offsets = pid_b * stride_state_batch + pid_h * stride_state_head
+        rand_offsets += (
+            offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
+        )
+        if PHILOX_ROUNDS > 0:
+            rand = tl.randint(rand_seed, rand_offsets, PHILOX_ROUNDS)
+        else:
+            rand = tl.randint(rand_seed, rand_offsets)
+
     for i_t in range(seq_len):
         x_ptrs = x_ptr + offs_m * stride_x_dim
         dt_ptrs = dt_ptr + offs_m * stride_dt_dim
@@ -442,9 +459,11 @@ def _selective_scan_update_kernel(
                     + offs_m[:, None] * stride_state_dim
                     + offs_n[None, :] * stride_state_dstate
                 )
-                tl.store(
-                    token_dst_ptrs, state.to(token_dst_ptrs.dtype.element_ty), mask=mask
-                )
+                if USE_RS_ROUNDING:
+                    stored_state = convert_rs_fp16x2(state, rand)
+                else:
+                    stored_state = state.to(token_dst_ptrs.dtype.element_ty)
+                tl.store(token_dst_ptrs, stored_state, mask=mask)
 
         out = tl.sum(state * C[None, :], axis=1)
         if HAS_D:
@@ -463,31 +482,7 @@ def _selective_scan_update_kernel(
 
     if not IS_SPEC_DECODING:
         if USE_RS_ROUNDING:
-            # Load random seed
-            rand_seed = tl.load(rand_seed_ptr)
-            # Generate random offsets for each element in state
-            if HAS_STATE_BATCH_INDICES:
-                rand_offsets = (
-                    state_batch_idx * stride_state_batch + pid_h * stride_state_head
-                )
-            else:
-                rand_offsets = pid_b * stride_state_batch + pid_h * stride_state_head
-            rand_offsets += (
-                offs_m[:, None] * stride_state_dim
-                + offs_n[None, :] * stride_state_dstate
-            )
-            # Generate random 32-bits for each element in state
-            if PHILOX_ROUNDS > 0:
-                rand = tl.randint(rand_seed, rand_offsets, PHILOX_ROUNDS)
-            else:
-                rand = tl.randint(rand_seed, rand_offsets)
-            # Convert state to fp16 with RS rounding
             state = convert_rs_fp16x2(state, rand)
-            tl.static_assert(state.dtype == tl.float16, "state must be fp16")
-            tl.static_assert(
-                dst_state_ptrs.dtype.element_ty == tl.float16,
-                "dst_state_ptrs must be fp16",
-            )
         else:
             state = state.to(dst_state_ptrs.dtype.element_ty)
         tl.store(dst_state_ptrs, state, mask=mask)
