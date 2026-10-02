@@ -34,6 +34,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
@@ -2344,6 +2345,153 @@ def test_allocate_with_lookahead():
         num_lookahead_tokens=4,
     )
     assert len(blocks.get_block_ids()[0]) == 2
+
+
+def _make_full_attention_kv_manager(
+    block_size: int = 16,
+    num_blocks: int = 256,
+) -> KVCacheManager:
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer1"], new_kv_cache_spec(block_size=block_size)),
+        ],
+    )
+    return KVCacheManager(
+        kv_cache_config=config,
+        max_model_len=4096,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
+        enable_caching=False,
+    )
+
+
+def test_resident_kv_reallocation_matches_physical_length():
+    block_size = 16
+
+    for logical_phase in range(block_size):
+        for physical_phase in range(block_size):
+            logical_len = block_size * 20 + logical_phase
+            physical_len = block_size * 4 + physical_phase
+
+            manager = _make_full_attention_kv_manager(block_size)
+            request = make_request(
+                request_id="0",
+                prompt_token_ids=[1] * logical_len,
+                block_size=block_size,
+            )
+
+            manager.allocate_slots(request, num_new_tokens=logical_len)
+            request.num_computed_tokens = logical_len
+            manager.commit_resident_kv(request, physical_len)
+
+            resident_blocks = manager.coordinator.get_blocks(request.request_id)[0]
+            assert len(resident_blocks) == cdiv(physical_len, block_size)
+
+            previous_required = cdiv(physical_len, block_size)
+            for step in range(1, block_size * 2 + 1):
+                new_blocks = manager.allocate_slots(request, num_new_tokens=1)
+                assert new_blocks is not None
+
+                required = cdiv(physical_len + step, block_size)
+                expected_new_blocks = required - previous_required
+                assert len(new_blocks.get_block_ids()[0]) == expected_new_blocks
+                resident_blocks = manager.coordinator.get_blocks(request.request_id)[0]
+                assert len(resident_blocks) == required
+
+                request.num_computed_tokens += 1
+                previous_required = required
+
+
+def test_commit_resident_kv_reclaims_and_reuses_blocks():
+    block_size = 16
+    manager = _make_full_attention_kv_manager(block_size)
+    request = make_request(
+        request_id="main",
+        prompt_token_ids=[1] * 104,
+        block_size=block_size,
+    )
+
+    manager.allocate_slots(request, num_new_tokens=104)
+    request.num_computed_tokens = 104
+    before = manager.block_pool.get_num_free_blocks()
+
+    old_ids = {
+        block.block_id
+        for block in manager.coordinator.get_blocks(request.request_id)[0]
+    }
+    manager.commit_resident_kv(request, 32)
+
+    remaining = manager.coordinator.get_blocks(request.request_id)[0]
+    assert len(remaining) == 2
+    assert manager.block_pool.get_num_free_blocks() == before + 5
+
+    other = make_request(
+        request_id="other",
+        prompt_token_ids=[2] * (5 * block_size),
+        block_size=block_size,
+    )
+    manager.allocate_slots(other, num_new_tokens=5 * block_size)
+    other_ids = {
+        block.block_id for block in manager.coordinator.get_blocks(other.request_id)[0]
+    }
+    assert other_ids & (old_ids - {block.block_id for block in remaining})
+
+    # The compacted request allocates from 32 -> 33, independent of its
+    # logical position at 104.
+    new_blocks = manager.allocate_slots(request, num_new_tokens=1)
+    assert new_blocks is not None
+    assert len(new_blocks.get_block_ids()[0]) == 1
+
+    # Repeated compaction uses the updated resident frontier, not logical length.
+    manager.commit_resident_kv(request, 16)
+    assert len(manager.coordinator.get_blocks(request.request_id)[0]) == 1
+    new_blocks = manager.allocate_slots(request, num_new_tokens=1)
+    assert new_blocks is not None
+    assert len(new_blocks.get_block_ids()[0]) == 1
+
+
+def test_resident_kv_state_is_cleared_with_block_ownership():
+    block_size = 16
+    manager = _make_full_attention_kv_manager(block_size)
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=[1] * 104,
+        block_size=block_size,
+    )
+
+    manager.allocate_slots(request, num_new_tokens=104)
+    request.num_computed_tokens = 104
+    manager.commit_resident_kv(request, 32)
+
+    manager.free(request)
+    request.num_computed_tokens = 0
+
+    blocks = manager.allocate_slots(request, num_new_tokens=104)
+    assert blocks is not None
+    assert len(manager.coordinator.get_blocks(request.request_id)[0]) == 7
+
+
+def test_commit_resident_kv_rejects_growth():
+    block_size = 16
+    manager = _make_full_attention_kv_manager(block_size)
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=[1] * 65,
+        block_size=block_size,
+    )
+
+    manager.allocate_slots(request, num_new_tokens=65)
+    request.num_computed_tokens = 65
+
+    # The final allocated block has spare capacity, but resident length is 65.
+    with pytest.raises(ValueError, match="can only shrink"):
+        manager.commit_resident_kv(request, 66)
+
+    manager.commit_resident_kv(request, 32)
+    with pytest.raises(ValueError, match="can only shrink"):
+        manager.commit_resident_kv(request, 33)
 
 
 def test_get_kv_cache_config_one_worker():
