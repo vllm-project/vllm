@@ -14,7 +14,6 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
               (hash-based subdirectories to limit directory fan-out)
 """
 
-import errno
 import functools
 import json
 import os
@@ -299,7 +298,7 @@ class FileSystemTierManager(SecondaryTierManager):
                 # under the GIL once the finished queue hands back this job.
                 num_succeeded = getattr(exc, "num_succeeded", 0)
                 self._load_progress[job_id] = num_succeeded
-                if self._checksum_blocks and exc.errno == errno.EBADMSG:
+                if getattr(exc, "checksum_failed", False):
                     self._checksum_failed_jobs.add(job_id)
                 # Surfaces errno (e.g. EMFILE "Too many open files") for both
                 # the C and Python load paths.

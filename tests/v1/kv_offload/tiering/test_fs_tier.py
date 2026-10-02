@@ -883,19 +883,24 @@ def test_checksums_require_xattr_support(tmp_path, monkeypatch):
         )
 
 
-def test_checksum_failure_metric_is_defined_only_when_enabled(fs_tier, monkeypatch):
-    """Without checksums the metric is undefined, so EBADMSG must not be counted."""
-    import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
-
+def test_checksum_failure_metric_is_defined_only_when_enabled():
+    """Registered only when enabled, since only then can checksum_failed be set."""
     assert FileSystemTierManager.build_metric_definitions({}) == {}
     metrics = FileSystemTierManager.build_metric_definitions({"checksum_blocks": True})
     assert metrics[TieringOffloadingMetrics.CHECKSUM_FAILURES].labelnames == ("tier",)
+
+
+def test_ebadmsg_from_filesystem_is_not_a_checksum_failure(
+    fs_tier_with_checksums, monkeypatch
+):
+    """ext4/xfs report metadata checksum errors as EBADMSG too."""
+    import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
 
     def failing_load(*args, **kwargs):
         raise OSError(errno.EBADMSG, "Bad message")
 
     monkeypatch.setattr(mgr_mod, "batch_load_block", failing_load)
-    tier, _ = fs_tier
+    tier, _ = fs_tier_with_checksums
     tier.submit_load(make_job(1, [key(1)], [0], is_promotion=True))
     results = drain(tier)
     assert len(results) == 1
