@@ -991,16 +991,6 @@ class GlmAsrForConditionalGeneration(
         # only the last chunk of an audio can yield fewer.
         return self._get_num_tower_tokens_per_chunk() // self._get_audio_merge_ratio()
 
-    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
-        num_chunks = math.ceil(
-            num_audio_tokens / self._get_num_connector_tokens_per_chunk()
-        )
-        return num_chunks * self._get_num_tower_tokens_per_chunk()
-
-    def get_num_mm_connector_tokens(self, num_encoder_tokens: int) -> int:
-        num_chunks = num_encoder_tokens // self._get_num_tower_tokens_per_chunk()
-        return num_chunks * self._get_num_connector_tokens_per_chunk()
-
     def get_mm_lora_token_counts(
         self,
         *,
@@ -1012,10 +1002,14 @@ class GlmAsrForConditionalGeneration(
 
         input_features = mm_kwargs.get("input_features") if mm_kwargs else None
         if input_features is None or not isinstance(input_features.data, torch.Tensor):
-            num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
+            # Without the features (e.g. when sizing the punica wrappers at
+            # engine init), budget whole chunks for the given LM token count.
+            num_chunks = math.ceil(
+                num_mm_embeds / self._get_num_connector_tokens_per_chunk()
+            )
             return (
-                num_encoder_tokens,
-                self.get_num_mm_connector_tokens(num_encoder_tokens),
+                num_chunks * self._get_num_tower_tokens_per_chunk(),
+                num_chunks * self._get_num_connector_tokens_per_chunk(),
             )
 
         # `num_mm_embeds` is not invertible when the last chunk is nearly
