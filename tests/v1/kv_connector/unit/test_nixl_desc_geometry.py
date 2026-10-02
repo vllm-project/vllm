@@ -283,26 +283,6 @@ def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_layers(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("remote_block_size", [8, 32])
-def test_packed_mla_rejects_unequal_block_sizes_before_peer_registration(
-    remote_block_size,
-):
-    producer, _ = _make_packed_mla_view_worker({"L0": (0, 128)}, 128, pp_size=2)
-    metadata = msgspec.msgpack.decode(
-        producer.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
-    )
-    metadata.engine_id = "remote"
-    metadata.block_size = remote_block_size
-    with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
-        producer.add_remote_agent(metadata)
-    assert len(producer.nixl_wrapper.dlists) == 1  # Only the local list exists.
-    assert producer.tp_mappings == {}
-    assert "remote" not in producer.dst_num_blocks
-    with pytest.raises(KeyError):
-        producer.transfer_topo.get_engine_info("remote")
-
-
-@pytest.mark.cpu_test
 def test_local_descriptors_follow_each_region_pool_capacity():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,

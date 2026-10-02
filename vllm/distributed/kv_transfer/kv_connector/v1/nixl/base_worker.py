@@ -983,6 +983,14 @@ class NixlBaseConnectorWorker:
                 f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
                 f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
             )
+        if self._TRANSFER_MODE == "push" and (
+            agent_metadata.block_size != self.block_size
+            or agent_metadata.physical_blocks_per_logical_kv_block
+            != self._physical_blocks_per_logical_kv_block
+        ):
+            raise NotImplementedError(
+                "NixlPushConnector requires identical P/D block sizes."
+            )
 
     def _sync_block_size_with_kernel(self) -> None:
         backends = get_current_attn_backends(self.vllm_config)
@@ -2298,10 +2306,6 @@ class NixlBaseConnectorWorker:
         # Number of physical regions registered locally (one per layer/tensor).
         num_local_regions = len(self.block_len_per_layer)
         if self._transfer_layer_region_indices:
-            if self.block_size != nixl_agent_meta.block_size:
-                raise NotImplementedError(
-                    "Attention-HMA push requires identical P/D block sizes."
-                )
             if remote_tp_size > transfer_topo.tp_size and not self.use_mla:
                 raise NotImplementedError(
                     "Attention-HMA push does not support decode TP greater than "
