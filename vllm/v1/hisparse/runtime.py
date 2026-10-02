@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""NVIDIA HiSparse resident, host, and hot-cache data plane."""
+"""HiSparse resident, host, and hot-cache data plane."""
 
 from __future__ import annotations
 
@@ -87,9 +87,12 @@ class PagedCacheView:
         row_bytes = row_width * itemsize
         if block_stride % (block_size * row_bytes):
             return cls(cache, cache, block_size, block_size)
-        attention_cache = (
-            raw_tensor[byte_offset:].view(dtype).view(-1, block_size, row_width)
-        )
+        # The backing allocation may be padded past the last whole block (ROCm
+        # rounds it to a page); drop the tail so the reshape stays exact.
+        tail = raw_tensor[byte_offset:].view(dtype)
+        rows_per_block = block_size * row_width
+        tail = tail[: tail.numel() // rows_per_block * rows_per_block]
+        attention_cache = tail.view(-1, block_size, row_width)
         return cls(cache, attention_cache, block_size, block_stride // row_bytes)
 
 
@@ -168,14 +171,24 @@ def _check_residency_shared_memory(
     # (plus an empty slot), per-chunk offsets, five counters, done bits, and
     # the int16 compacted LRU.
     hot_size = config.device_buffer_size
-    num_chunks = cdiv(hot_size, 32)
-    required = 4 * (2 * (config.max_union_rows + 1) + 3 * num_chunks + 7) + 2 * hot_size
+    wave_size = 64 if current_platform.is_rocm() else 32
+    mask_bytes = wave_size // 8
+    num_chunks = cdiv(hot_size, wave_size)
+    required = (
+        4 * (2 * (config.max_union_rows + 1) + 2 * num_chunks + 7)
+        + mask_bytes * num_chunks
+        + mask_bytes
+        - 4
+        + 2 * hot_size
+    )
     device_index = (
         device.index
         if device.index is not None
         else torch.accelerator.current_device_index()
     )
     available = get_max_shared_memory_bytes(device_index)
+    if current_platform.is_rocm():
+        available = min(available, 64 * 1024)
     if required > available:
         raise ValueError(
             "HiSparse residency resolution needs "
@@ -426,7 +439,10 @@ def release_pinned_state(
                     err.value,
                     len(pinned_host_pools),
                 )
-                cudart.cudaGetLastError()
+                # Best-effort sticky-flag clear; absent from ROCm's cudart.
+                clear_error = getattr(cudart, "cudaGetLastError", None)
+                if clear_error is not None:
+                    clear_error()
                 break
             freed_bytes += tensor.nbytes
             pinned_host_pools.pop()

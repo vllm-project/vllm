@@ -410,12 +410,27 @@ steps:
       - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
       - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+      - vllm/config/vllm.py
+      - csrc/libtorch_stable/hisparse_kernels.cu
+      - csrc/cuda_compat.h
+      - vllm/v1/hisparse/
+      - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
+      - vllm/v1/attention/backends/mla/index_group.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+      - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
+      - vllm/models/deepseek_v32/amd/
+      - tests/kernels/attention/test_hisparse_kernels.py
+      - tests/v1/attention/test_sparse_mla_backends.py
+      - tests/v1/e2e/general/test_hisparse.py
       commands:
       - amd-smi
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/kernels/attention/test_hisparse_kernels.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/v1/attention/test_sparse_mla_backends.py -k "hisparse or rocm_compact or index_group"
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s tests/v1/e2e/general/test_hisparse.py
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test

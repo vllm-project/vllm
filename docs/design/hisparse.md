@@ -213,9 +213,28 @@ hot row? ──────── yes ──► existing hot physical row + upda
 choose GPU LRU victim ──► copy pinned host row ──► hot physical row
 ```
 
-ROCm is not currently supported because the fused HiSparse cache operations are
-implemented only by CUDA kernels. A future platform-specific worker may provide
-the same command, output, and cache-resolution boundaries.
+ROCm uses the HIP cache operations and the ROCm AITER sparse-MLA backend.
+The attention calculation uses the Triton ragged kernel because physical row
+offsets in the shared multi-layer KV allocation can exceed the signed 32-bit
+addressing range of the AITER assembly path. The packed `fp8_ds_mla` KV format
+is not supported on ROCm; use `auto`, `bfloat16`, or `fp8`.
+
+The residency resolver must fit within the device's per-block shared-memory
+budget. On CDNA, this is limited to 64 KiB. For `index_topk=2048`, the default
+hot buffer supports ordinary decode and one speculative token; larger defaults
+are rejected before serving. Small-top-k speculative tests do not establish
+support for larger full-model configurations.
+
+Local tensor-parallel workers share the host pool. ROCm orders host writes with
+a writer event synchronization and a TP barrier, rather than reusing imported
+HIP IPC events. This adds a per-step synchronization cost. Registered host
+memory is accessed through its HIP device alias, which can differ from its CPU
+address.
+
+When using a ROCm AITER version affected by the FP8 MoE scale overread reported
+in [ROCm/aiter#5764](https://github.com/ROCm/aiter/pull/5764), select
+`--kernel-config '{"moe_backend":"triton"}'`. This workaround is independent
+of the sparse cache operations.
 
 ## Main classes
 
