@@ -37,7 +37,11 @@ class XPressSpeculator(DFlashSpeculator):
         self.num_query_per_req = 1 + self.num_speculative_steps
 
         self.num_jacobi_passes = int(getattr(hf, "xpress_num_passes", 6))
-        logger.info("XPress: K=%d Jacobi passes", self.num_jacobi_passes)
+        logger.info(
+            "XPress: %d Jacobi passes, top-C=%s",
+            self.num_jacobi_passes,
+            getattr(hf, "xpress_topc", 512) or "off",
+        )
         # Query offset 0 of each request is the anchor. Its refined output is
         # discarded; its latent reaches the draft slots through mixer column 0.
         self._anchor_idx = (
