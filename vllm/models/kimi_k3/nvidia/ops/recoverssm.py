@@ -162,7 +162,6 @@ def _kda_recoverssm_verify_kernel(
             v_ptr + token * stride_v_token + pid_h * V + offs_v,
             mask=token_valid & mask_v,
             other=0.0,
-            eviction_policy="evict_first",
         ).to(tl.float32)
         raw_g = tl.load(
             raw_g_ptr + token * stride_g_token + pid_h * K + offs_k,
@@ -194,7 +193,6 @@ def _kda_recoverssm_verify_kernel(
             out_ptr + token * stride_out_token + pid_h * V + offs_v,
             out,
             mask=token_valid & mask_v,
-            eviction_policy="evict_first",
         )
 
         correction_ptr = (
