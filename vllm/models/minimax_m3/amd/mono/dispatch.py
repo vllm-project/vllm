@@ -27,11 +27,12 @@ cover every row.
 
 import torch
 
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.amd.mono.config import (
+    MAX_CONTEXT,
     MAX_INDEX_BLOCKS,
     MAX_TOKENS,
     MonoUnsupported,
@@ -43,6 +44,39 @@ from vllm.models.minimax_m3.amd.mono.runner import (
 )
 
 logger = init_logger(__name__)
+
+
+def _config_refusal() -> str | None:
+    """Why this deployment cannot use mono at all, or None.
+
+    Taken from the engine's config rather than the model, so a server mono cannot
+    serve says so while it is starting instead of at its first decode. What the
+    model itself has to satisfy is checked when the runner is built.
+    """
+    try:
+        cfg = get_current_vllm_config()
+    except Exception:
+        # No engine around the model: nothing to refuse on, and the runner still
+        # checks everything that decides whether its kernels can run.
+        return None
+    checks = (
+        # Each replica holds the whole model and reduces within its own TP group,
+        # so a second replica would route the MoE differently than K4 reduces.
+        (
+            cfg.parallel_config.data_parallel_size == 1,
+            f"DP {cfg.parallel_config.data_parallel_size}",
+        ),
+        # The score region is sized for MAX_CONTEXT, and a longer context would
+        # be scored past the end of it rather than merely more slowly.
+        (
+            cfg.model_config.max_model_len <= MAX_CONTEXT,
+            f"max_model_len {cfg.model_config.max_model_len} > {MAX_CONTEXT}",
+        ),
+    )
+    for ok, why in checks:
+        if not ok:
+            return why
+    return None
 
 
 class MonoDecode:
@@ -66,6 +100,10 @@ class MonoDecode:
         if len(layers) > N_DENSE:
             self.attn = getattr(layers[N_DENSE], "self_attn", None)
         self.layer_name = getattr(self.attn, "layer_name", None)
+        why = _config_refusal()
+        if why is not None:
+            self.off, self.off_reason = True, why
+            logger.info("[mono] off: %s", why)
         self._attach(layers)
 
     def _attach(self, layers) -> None:
@@ -96,7 +134,7 @@ class MonoDecode:
         in the message because what a rank decided is only meaningful against what
         the others decided, and a step the kernels serve has to be unanimous.
         """
-        logger.debug("[mono][rank %d] %s", self.rank, what)
+        logger.info("[mono][rank %d] %s", self.rank, what)
 
     def _declined(
         self, n: int, positions: torch.Tensor, residual: torch.Tensor | None
@@ -128,12 +166,18 @@ class MonoDecode:
         if why is not None:
             return why
         if self.runner is None:
-            # The runner freezes the caches' addresses into each layer's argument
-            # array, so it cannot be built before the caches exist. Memory
-            # profiling runs the model -- cudagraph memory included -- to decide
-            # how large they should be, which is exactly when they do not.
+            # The runner freezes each layer's index cache address into its
+            # argument array, so it cannot be built before the caches the engine
+            # will serve with exist.
             if self.attn is None or self.attn.kv_cache.numel() == 0:
                 return "KV caches not bound yet (memory profiling)"
+            # TODO: fix this correctly. 
+            blocks, want = self.attn.kv_cache.shape[0], md.decode.block_table.shape[1]
+            if blocks < want:
+                return (
+                    f"KV cache of {blocks} blocks is the cudagraph memory "
+                    f"profiler's, not the engine's {want} or more"
+                )
             # It also allocates, syncs and exchanges IPC handles over the TP CPU
             # group, none of which a capturing stream tolerates. vLLM warms each
             # capture size up with an uncaptured run first, so the build lands
