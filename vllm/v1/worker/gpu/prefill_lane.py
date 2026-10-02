@@ -14,6 +14,7 @@ lane reports it done, and its last token then goes through the normal path,
 which samples it.
 """
 
+import copy
 import ctypes
 import queue
 import threading
@@ -65,9 +66,16 @@ class PrefillLaneRunner(GPUModelRunner):
     never runs CUDA graphs.
     """
 
-    def __init__(self, main: GPUModelRunner):
+    def __init__(self, main: GPUModelRunner, chunk_tokens: int):
         self.main = main
-        super().__init__(main.vllm_config, main.device)
+        # Merging short first and last chunks takes a chunk past chunk_tokens,
+        # and past the scheduler's budget that sizes the runner's buffers.
+        vllm_config = copy.copy(main.vllm_config)
+        vllm_config.scheduler_config = copy.copy(main.vllm_config.scheduler_config)
+        vllm_config.scheduler_config.max_num_batched_tokens = max(
+            main.max_num_tokens, chunk_tokens + 2 * _MIN_CHUNK_TOKENS
+        )
+        super().__init__(vllm_config, main.device)
         self.load_model()
         self._init_kv_cache()
 
@@ -105,7 +113,10 @@ class PrefillLaneRunner(GPUModelRunner):
         self.block_tables = BlockTables(
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
-            **main.block_table_kwargs,
+            **{
+                **main.block_table_kwargs,
+                "max_num_batched_tokens": self.max_num_tokens,
+            },
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -155,7 +166,8 @@ class PrefillLaneRunner(GPUModelRunner):
 
 def split_chunks(start: int, end: int, chunk_tokens: int) -> list[tuple[int, int]]:
     """Chunk boundaries on multiples of chunk_tokens, like the scheduler's
-    Mamba-aligned split; a short last chunk is merged into the one before."""
+    Mamba-aligned split; a short first or last chunk is merged into its
+    neighbour."""
     bounds = [start]
     nxt = (start // chunk_tokens + 1) * chunk_tokens
     while nxt < end:
@@ -164,6 +176,8 @@ def split_chunks(start: int, end: int, chunk_tokens: int) -> list[tuple[int, int
     bounds.append(end)
     if len(bounds) > 2 and bounds[-1] - bounds[-2] <= _MIN_CHUNK_TOKENS:
         del bounds[-2]
+    if len(bounds) > 2 and bounds[1] - bounds[0] <= _MIN_CHUNK_TOKENS:
+        del bounds[1]
     return list(zip(bounds[:-1], bounds[1:]))
 
 
@@ -197,7 +211,7 @@ class PrefillLane:
         init_tp_lane_group()
         self.stream = _cu_masked_stream(self.device, num_units)
         with torch.cuda.stream(self.stream):
-            self.runner = PrefillLaneRunner(main)
+            self.runner = PrefillLaneRunner(main, chunk_tokens)
         self.jobs: queue.Queue[PrefillJob] = queue.Queue()
         self.num_pending = 0
         self.done: list[str] = []
