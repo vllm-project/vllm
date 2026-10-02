@@ -401,15 +401,13 @@ def get_json_schema_from_tools(
         for tool in tools:
             if not isinstance(tool, (FunctionTool, NamespaceTool)):
                 continue
-            # Short-name aliases exist so a forced function tool_choice can
-            # select one tool inside a NamespaceTool by its short name. A
-            # plain FunctionTool whose name happens to contain "__" must not
-            # register a phantom alias.
-            namespaced = isinstance(tool, NamespaceTool)
             for name, params in iter_response_function_tool_info(tool):
                 responses_tool_map[name] = params
-                if namespaced:
-                    responses_tool_map.setdefault(name.rsplit("__", 1)[1], params)
+                if isinstance(tool, NamespaceTool):
+                    short_name = name.removeprefix(
+                        f"{tool.name}{_NAMESPACE_TOOL_SEPARATOR}"
+                    )
+                    responses_tool_map.setdefault(short_name, params)
         if tool_name not in responses_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
         return _params_or_empty_object(responses_tool_map[tool_name])
