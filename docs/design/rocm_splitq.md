@@ -36,6 +36,10 @@ Models with full RoPE (Llama, Qwen3, Mistral, ...) or other head sizes are
 rejected at startup with an explicit error. Sliding window, ALiBi, attention
 sinks, soft-capping and encoder attention are not supported.
 
+The decode kernels cover GQA groups of 1, 2, 4, 6 or 8 query heads per KV
+head on each GPU. Under tensor parallelism the group is counted per GPU, so
+models with 32 query heads and 2 KV heads (Qwen3.5-122B-A10B) need TP ≥ 4.
+
 ## Format
 
 One slot per (token, KV head). V is always rotated as one 256-dim block

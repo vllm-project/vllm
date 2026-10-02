@@ -144,7 +144,13 @@ class RocmSplitQMetadataBuilder(AttentionMetadataBuilder[RocmSplitQMetadata]):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
         # Persistent so captured graphs keep reading the current contents.
-        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        # Sized for the larger of the scheduler's token budget and one KV
+        # block: block-aligned chunks can exceed the budget on hybrid models,
+        # where a block spans thousands of tokens.
+        max_tokens = max(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            kv_cache_spec.block_size,
+        )
         self._q_to_req = torch.empty(max_tokens, dtype=torch.int32, device=device)
         self._q_to_klen = torch.empty(max_tokens, dtype=torch.int32, device=device)
 
