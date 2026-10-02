@@ -457,8 +457,6 @@ class DeepseekOCRForCausalLM(
             return None
         assert isinstance(pixel_values, torch.Tensor)
         assert images_crop is None or isinstance(images_crop, torch.Tensor)
-        if torch.sum(pixel_values).item() == 0:
-            return None
 
         # Use actual tensor spatial dim instead of hardcoded
         # vision_config.image_size (1024). The vision encoders (SAM & CLIP)
