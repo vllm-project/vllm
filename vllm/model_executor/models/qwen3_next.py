@@ -279,6 +279,7 @@ class Qwen3NextAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
+        mrope_positions_bounded: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
@@ -330,6 +331,7 @@ class Qwen3NextAttention(nn.Module):
             max_position=config.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             dual_chunk_attention_config=self.dual_chunk_attention_config,
+            mrope_positions_bounded=mrope_positions_bounded,
         )
 
         # Late-interaction retrieval models (e.g. ColQwen3.5) run BIDIRECTIONAL
