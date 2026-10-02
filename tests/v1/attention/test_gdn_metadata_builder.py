@@ -17,6 +17,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
@@ -59,6 +60,17 @@ GDN_BUILD_TEST_CASES = {
         seq_lens=[50, 30],
         query_lens=[3, 3],
         num_decode_draft_tokens=[2, 2],
+        num_speculative_tokens=2,
+        expected_num_decodes=0,
+        expected_num_prefills=0,
+        expected_num_prefill_tokens=0,
+        expected_num_spec_decodes=2,
+    ),
+    # Padded (CUDA graph) sequences trail the spec decodes
+    "pure_spec_decode_with_padding": GDNBuildTestCase(
+        seq_lens=[50, 30, 16],
+        query_lens=[3, 3, 0],
+        num_decode_draft_tokens=[2, 2, -1],
         num_speculative_tokens=2,
         expected_num_decodes=0,
         expected_num_prefills=0,
@@ -143,8 +155,9 @@ def _create_gdn_builder(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
-    if full_cuda_graph:
-        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    vllm_config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
+    )
     if num_speculative_tokens > 0:
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
@@ -197,6 +210,8 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
     assert meta.num_prefills == test_case.expected_num_prefills
     assert meta.num_prefill_tokens == test_case.expected_num_prefill_tokens
     assert meta.num_spec_decodes == test_case.expected_num_spec_decodes
+    if meta.spec_state_indices_tensor is not None:
+        assert len(meta.spec_state_indices_tensor) == meta.num_spec_decodes
 
 
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
@@ -369,14 +384,9 @@ def test_cudagraph_capture_batch_stays_decode_only():
     torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
 
 
-@pytest.mark.parametrize("num_spec", [0, 3])
-@pytest.mark.parametrize("prefix_match_unit, expected_offset", [(16, 96), (8, 96)])
-def test_checkpoint_metadata_preserves_non_spec_order(
-    num_spec, prefix_match_unit, expected_offset
-):
-    """Only eligible non-spec rows get a checkpoint in their reserved page."""
-    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-
+def _create_checkpoint_builder_and_batch(
+    num_spec: int, prefix_match_unit: int = 16
+) -> tuple[GDNAttentionMetadataBuilder, CommonAttentionMetadata, dict]:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
@@ -417,7 +427,20 @@ def test_checkpoint_metadata_preserves_non_spec_order(
             num_decode_draft_tokens_cpu=torch.tensor([2, -1, -1], dtype=torch.int32),
             num_accepted_tokens=torch.ones(3, dtype=torch.int32),
         )
+    return builder, common, kwargs
 
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize("prefix_match_unit, expected_offset", [(16, 96), (8, 96)])
+def test_checkpoint_metadata_preserves_non_spec_order(
+    num_spec, prefix_match_unit, expected_offset
+):
+    """Only eligible non-spec rows get a checkpoint in their reserved page."""
+    from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+    builder, common, kwargs = _create_checkpoint_builder_and_batch(
+        num_spec, prefix_match_unit
+    )
     actual = builder.build(0, common, **kwargs)
     assert actual.checkpoint is not None
     offsets = [expected_offset, 0] if num_spec else [0, expected_offset, 0]
@@ -429,4 +452,35 @@ def test_checkpoint_metadata_preserves_non_spec_order(
     )
     torch.testing.assert_close(
         actual.checkpoint.state_indices, torch.tensor(slots, dtype=torch.int32)
+    )
+
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_update_block_table_regathers_checkpoint(num_spec):
+    """Checkpoint pages come from the target group's block table, not the
+    source group's (otherwise the target group's checkpoint page is never
+    written while the prefix cache treats it as valid)."""
+    src, common, kwargs = _create_checkpoint_builder_and_batch(num_spec)
+    dst, _, _ = _create_checkpoint_builder_and_batch(num_spec)
+    ref, _, _ = _create_checkpoint_builder_and_batch(num_spec)
+    other_table = common.block_table_tensor + 100
+    other = common.replace(block_table_tensor=other_table)
+    dst.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+        other_table, other.seq_lens, dst.kv_cache_spec, "align"
+    )
+
+    source = src.build(0, common, **kwargs)
+    expected = ref.build(0, other, **kwargs)
+    actual = dst.update_block_table(source, other_table, other.slot_mapping)
+
+    assert source.checkpoint is not None and expected.checkpoint is not None
+    assert actual.checkpoint is not None
+    torch.testing.assert_close(
+        actual.checkpoint.state_indices, expected.checkpoint.state_indices
+    )
+    torch.testing.assert_close(
+        actual.checkpoint.checkpoint_offsets, expected.checkpoint.checkpoint_offsets
+    )
+    assert not torch.equal(
+        actual.checkpoint.state_indices, source.checkpoint.state_indices
     )
