@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
@@ -1667,9 +1668,23 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # Round per-partition sizes up to each backend's requirement. Emulation is
         # handled inside the helper too (OCP MX block alignment), so no special-case.
         if self.mxfp4_backend is not None:
+            # TODO: remove once https://github.com/ROCm/aiter/pull/6086 is merged
+            # and AITER is bumped. Only SwiGLU-OAI is forwarded, to keep the
+            # existing SiLU/SiTU alignment.
+            activation = self.moe.activation
+            swiglu_oai_activation = (
+                activation
+                if activation
+                in (MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
+                else None
+            )
             hidden_size, intermediate_size_per_partition = (
                 mxfp4_round_up_hidden_size_and_intermediate_size(
-                    self.mxfp4_backend, hidden_size, intermediate_size_per_partition
+                    self.mxfp4_backend,
+                    hidden_size,
+                    intermediate_size_per_partition,
+                    activation=swiglu_oai_activation,
+                    has_bias=self.moe.has_bias,
                 )
             )
         return hidden_size, intermediate_size_per_partition

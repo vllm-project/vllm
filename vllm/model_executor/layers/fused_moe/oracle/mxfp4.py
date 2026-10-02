@@ -733,6 +733,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     hidden_size: int,
     intermediate_size: int,
     activation: MoEActivation | None = None,
+    has_bias: bool | None = None,
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
     if backend in B12X_BACKENDS:
@@ -790,6 +791,17 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
 
         intermediate_size = round_up(intermediate_size, alignment)
         hidden_size = round_up(hidden_size, alignment)
+
+        # TODO: remove once https://github.com/ROCm/aiter/pull/6086 is merged and
+        # AITER is bumped. AITER's bias-free SwiGLU path needs a hidden size that
+        # is a multiple of 512.
+        if (
+            backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+            and has_bias is False
+            and activation
+            in (MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
+        ):
+            hidden_size = round_up(hidden_size, 512)
     elif backend == Mxfp4MoeBackend.CPU:
         # CPU AMX kernel uses BLOCK_N=32, align to 32
         intermediate_size = round_up(intermediate_size, 32)
@@ -1622,16 +1634,23 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         # pick bf16 vs fp8 activations when gate_mode is INTERLEAVE. SiTUv2
         # a4w4 is separated and selects q_dtype_a independently, so the bound
         # is unused on that path.
-        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
+        # Temporary diagnostic: disable AITER's FP8 activation selection.
+        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "2147483647"
 
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
 
-        # DeepSeek V4.1 a4w4 uses ATOM's SEPARATED gate/up layout instead of
-        # the default INTERLEAVE shuffle (INTERLEAVE + fp4x2 has no tuned
-        # kernel and produces garbage output). Must match GateMode.SEPARATED
-        # in rocm_aiter_moe.py.
-        is_guinterleave = not use_separated_a4w4
+        # TODO: remove once https://github.com/ROCm/aiter/pull/6022 is merged and
+        # AITER is bumped. Bias-free SwiGLU uses AITER's separated gate/up path.
+        is_bias_free_swiglu = (
+            activation
+            in (
+                MoEActivation.SWIGLUOAI,
+                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            )
+            and w13_bias is None
+        )
+        is_guinterleave = not is_bias_free_swiglu and not use_separated_a4w4
 
         w13_weight = torch.nn.Parameter(
             _shuf_w(
