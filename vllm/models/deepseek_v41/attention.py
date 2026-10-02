@@ -119,14 +119,17 @@ def _fill_short_context_topk_indices(
     )
 
 
-# Which packed fp8_ds_mla record a V4.1 layer writes. FlashMLA decodes
-# DeepSeek's V4.1 record -- all 512 dims (RoPE included) as fp8 e4m3 with one
-# UE8M0 scale per 32 dims, 512 data bytes + 16 scale bytes per token, pages
-# rounded to the kernel's 512 B TMA stride -- only in its SM100 sparse-decode
-# kernels. Every other arch keeps the V4 record: 448 fp8 NoPE + 64 bf16 RoPE
-# plus 7 UE8M0 scales of 64 dims and a pad byte (584 B, 576 B pages).
+# Which packed fp8_ds_mla record a V4.1 layer writes. DeepSeek's V4.1 record
+# -- all 512 dims (RoPE included) as fp8 e4m3 with one UE8M0 scale per 32 dims,
+# 512 data bytes + 16 scale bytes per token, pages rounded to a 512 B TMA
+# stride -- is decoded by FlashMLA's SM100 sparse-decode kernels and by
+# FlashInfer's SM120 sparse MLA (its fp8_dsv41 cache format). Every other arch
+# keeps the V4 record: 448 fp8 NoPE + 64 bf16 RoPE plus 7 UE8M0 scales of 64
+# dims and a pad byte (584 B, 576 B pages).
 def _use_v41_mxfp8_kv_record() -> bool:
-    return current_platform.is_device_capability_family(100)
+    return current_platform.is_device_capability_family(
+        100
+    ) or current_platform.is_device_capability_family(120)
 
 
 def _resolve_dsv4_kv_cache_dtype(
