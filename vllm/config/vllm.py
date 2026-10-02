@@ -864,6 +864,27 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
         return enabled
 
+    def _maybe_configure_kvpp_communication(self) -> None:
+        """Avoid cross-GPU deadlocks between KVPP broadcasts and all-reduce.
+
+        KVPP broadcasts on a side stream while compute runs. Spin-waiting
+        all-reduce kernels and NCCL kernels from unordered communicators can
+        then wait on peers that cannot make progress.
+        """
+        if not self.cache_config.enable_kvpp:
+            return
+        for name, value in (
+            ("NCCL_LAUNCH_ORDER_IMPLICIT", "1"),
+            ("VLLM_ALLREDUCE_USE_FLASHINFER", "0"),
+            ("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"),
+        ):
+            if name not in os.environ:
+                os.environ[name] = value
+                logger.info_once("KVPP: setting %s=%s.", name, value)
+        if not self.parallel_config.disable_custom_all_reduce:
+            logger.info_once("KVPP: disabling custom all-reduce.")
+            self.parallel_config.disable_custom_all_reduce = True
+
     @property
     def needs_dp_coordinator(self) -> bool:
         """Determine if the DPCoordinator process is needed.
@@ -1739,6 +1760,7 @@ class VllmConfig:
             pass_config.fuse_gemm_comms = False
 
         breakable_cudagraph_enabled = self._maybe_enable_breakable_cudagraph()
+        self._maybe_configure_kvpp_communication()
 
         if not breakable_cudagraph_enabled and (
             self.compilation_config.backend == "eager"
