@@ -1385,7 +1385,8 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 # NoPE (GLM5Next): concat_mla_q requires rope_dim == 64,
                 # copy directly into the head-padded buffer instead.
                 q[:, : ql_nope.shape[1], : self.kv_lora_rank].copy_(ql_nope)
-                q[..., self.kv_lora_rank :].zero_()
+                if self.q_head_size > self.kv_lora_rank:
+                    q[..., self.kv_lora_rank :].zero_()
             else:
                 ops.concat_mla_q(ql_nope, q_pe, q)
         else:
