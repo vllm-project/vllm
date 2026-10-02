@@ -212,7 +212,7 @@ def test_mori_dispatch_aiter_combine_trim_regression():
         assert small_out.abs().sum() > 0, (
             "MoRI dispatch/combine returned all-zero output for real "
             "tokens after buffer reuse -- the dispatch-output trim in "
-            "MoriPrepareAndFinalize.prepare() appears to be missing"
+            "MoriPrepareAndFinalize.prepare() may be missing"
         )
 
     dist.barrier()
