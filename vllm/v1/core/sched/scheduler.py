@@ -353,9 +353,6 @@ class Scheduler(SchedulerInterface):
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
-        # Blocks that KV loads will overwrite this step, skipped from
-        # zeroing since the zeroing could race the out-of-band write.
-        self._skip_zero_block_ids: set[int] = set()
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
@@ -1230,9 +1227,17 @@ class Scheduler(SchedulerInterface):
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
+                    # Hybrid sync loads also write whole pages out of band.
                     skip_zeroing_group_ids=(
                         self.connector.get_loaded_kv_cache_group_ids(request)
-                        if load_kv_async and self.connector is not None
+                        if self.connector is not None
+                        and (
+                            load_kv_async
+                            or (
+                                self.has_mamba_layers
+                                and num_external_computed_tokens > 0
+                            )
+                        )
                         else ()
                     ),
                     num_encoder_tokens=num_encoder_tokens,
@@ -1305,11 +1310,6 @@ class Scheduler(SchedulerInterface):
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
-                    if self.needs_kv_cache_zeroing:
-                        assert self.connector is not None
-                        self._skip_zero_block_ids.update(
-                            self.connector.get_sync_load_block_ids(request)
-                        )
                 if self.log_stats:
                     request.record_event(
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
