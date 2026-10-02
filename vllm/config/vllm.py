@@ -21,6 +21,7 @@ import torch
 from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
+from vllm.device_allocator import cumem_cudagraph_pool_enabled
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
@@ -1259,6 +1260,22 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
+    def _verify_cumem_cudagraph_pool_env(self) -> None:
+        """Keep NCCL buffer registration off the offloaded cuMem graph pool: it
+        would pin the pool through sleep and keep stale registrations after
+        wake remaps it, causing hangs or wrong results."""
+        if not cumem_cudagraph_pool_enabled(self):
+            return
+        # Workers inherit it (Ray copies NCCL_*) before any communicator init.
+        graph_register = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
+        hook = os.environ.get("TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK") or "0"
+        if graph_register != "0" or hook.lower() not in ("0", "false"):
+            raise ValueError(
+                "Sleep mode offloads Model Runner V2 CUDA graph pools, which "
+                "NCCL buffer registration would pin: unset NCCL_GRAPH_REGISTER "
+                "and TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK."
+            )
+
     def _verify_sampling_replay_config(self) -> None:
         model_config = self.model_config
         if model_config is None or not model_config.return_sampling_mask:
@@ -2321,6 +2338,7 @@ class VllmConfig:
                 custom_ops.append("+quant_fp8")
 
         self._verify_kv_transfer_compat()
+        self._verify_cumem_cudagraph_pool_env()
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
 
