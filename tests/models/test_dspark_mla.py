@@ -28,6 +28,50 @@ def test_kv_cache_layer_defaults_to_the_attention_module():
     assert NestedCacheOwner.kv_cache_layer(SimpleNamespace(), attn) is attn.mla_attn
 
 
+def test_wrapper_uses_mla_attn_cls():
+    from vllm.model_executor.layers.mla import (
+        MLAModules,
+        MultiHeadLatentAttentionWrapper,
+    )
+
+    class DummyAttn(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            self.prefix = kwargs["prefix"]
+
+    class Sub(MultiHeadLatentAttentionWrapper):
+        mla_attn_cls = DummyAttn
+
+    modules = MLAModules(
+        kv_a_layernorm=nn.Identity(),
+        kv_b_proj=nn.Identity(),
+        rotary_emb=None,
+        o_proj=nn.Identity(),
+        fused_qkv_a_proj=None,
+        kv_a_proj_with_mqa=nn.Identity(),
+        q_a_layernorm=None,
+        q_b_proj=None,
+        q_proj=nn.Identity(),
+        indexer=None,
+        is_sparse=False,
+        topk_indices_buffer=None,
+    )
+    wrapper = Sub(
+        hidden_size=8,
+        num_heads=2,
+        scale=1.0,
+        qk_nope_head_dim=4,
+        qk_rope_head_dim=2,
+        v_head_dim=4,
+        q_lora_rank=None,
+        kv_lora_rank=4,
+        mla_modules=modules,
+        prefix="model.layers.0.self_attn",
+    )
+    assert isinstance(wrapper.mla_attn, DummyAttn)
+    assert wrapper.mla_attn.prefix == "model.layers.0.self_attn.attn"
+
+
 def test_dspark_mla_uses_compile_free_model_entrypoint():
     assert ModelRegistry._try_load_model_cls("K3DSparkModel") is K3DSparkForCausalLM
     assert not issubclass(K3DSparkModel, TorchCompileWithNoGuardsWrapper)
