@@ -480,6 +480,269 @@ steps:
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404" release-images'
 
+      # ---- AWS EFA variants (build the vllm-openai-efa stage) ----
+      - label: "Build release image - x86_64 - CUDA 13.0 - EFA"
+        depends_on: ~
+        id: build-release-image-x86-efa
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh efa) \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=13.0.2 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359 \
+              --target vllm-openai-efa \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-efa"
+          # re-tag to default image tag and push, just in case arm64 build fails
+          - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-efa"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-efa" release-images'
+
+      - label: "Build release image - aarch64 - CUDA 13.0 - EFA"
+        depends_on: ~
+        id: build-release-image-arm64-efa
+        agents:
+          queue: arm64_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh efa) \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=13.0.2 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0-b8b5f17a7d9ccfc25bbc5cf17b3fcea12964a042 \
+              --target vllm-openai-efa \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-efa" release-images'
+
+      - label: "Build release image - x86_64 - CUDA 12.9 - EFA"
+        depends_on: ~
+        id: build-release-image-x86-cuda-12-9-efa
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu129-efa) \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=12.9.1 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9-78e737ad29420ffc4800e677c51e2a852caf8359 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86_CU129}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --target vllm-openai-efa \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-efa"
+          # re-tag to default image tag and push, just in case arm64 build fails
+          - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-efa"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-efa" release-images'
+
+      - label: "Build release image - aarch64 - CUDA 12.9 - EFA"
+        depends_on: ~
+        id: build-release-image-arm64-cuda-12-9-efa
+        agents:
+          queue: arm64_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu129-efa) \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=12.9.1 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9-78e737ad29420ffc4800e677c51e2a852caf8359 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64_CU129}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --target vllm-openai-efa \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-efa" release-images'
+
+      - label: "Build release image - x86_64 - Rubin CUDA 13.4 - EFA"
+        depends_on: ~
+        id: build-release-image-x86-rubin-cuda-13-4-efa
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker buildx build --load \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu134-efa) \
+              --platform linux/amd64 \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=13.4 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg INSTALL_RUBIN_PRERELEASE=true \
+              --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
+              --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
+              --build-arg RUN_WHEEL_CHECK=false \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.4 \
+              --build-arg FINAL_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04 \
+              --target vllm-openai-efa \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134-efa" release-images'
+
+      - label: "Build release image - aarch64 - Rubin CUDA 13.4 - EFA"
+        depends_on: ~
+        id: build-release-image-arm64-rubin-cuda-13-4-efa
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: arm64_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker buildx build --load \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu134-efa) \
+              --platform linux/arm64 \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=13.4 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg INSTALL_RUBIN_PRERELEASE=true \
+              --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
+              --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
+              --build-arg RUN_WHEEL_CHECK=false \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.4 \
+              --build-arg FINAL_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04 \
+              --target vllm-openai-efa \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu134-efa" release-images'
+
+      - label: "Build release image - x86_64 - CUDA 13.0 - Ubuntu 24.04 - EFA"
+        depends_on: ~
+        id: build-release-image-x86-ubuntu2404-efa
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh ubuntu2404-efa) \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=13.0.2 \
+              --build-arg UBUNTU_VERSION=24.04 \
+              --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359 \
+              --target vllm-openai-efa \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404-efa"
+          - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-ubuntu2404-efa"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-ubuntu2404-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404-efa" release-images'
+
+      - label: "Build release image - aarch64 - CUDA 13.0 - Ubuntu 24.04 - EFA"
+        depends_on: ~
+        id: build-release-image-arm64-ubuntu2404-efa
+        agents:
+          queue: arm64_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh ubuntu2404-efa) \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=13.0.2 \
+              --build-arg UBUNTU_VERSION=24.04 \
+              --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0-b8b5f17a7d9ccfc25bbc5cf17b3fcea12964a042 \
+              --target vllm-openai-efa \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-ubuntu2404-efa" release-images'
+
+      - label: "Build release image - x86_64 - CUDA 12.9 - Ubuntu 24.04 - EFA"
+        depends_on: ~
+        id: build-release-image-x86-cuda-12-9-ubuntu2404-efa
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu129-ubuntu2404-efa) \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=12.9.1 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda12.9-78e737ad29420ffc4800e677c51e2a852caf8359 \
+              --build-arg UBUNTU_VERSION=24.04 \
+              --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_X86_CU129}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --target vllm-openai-efa \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404-efa"
+          - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404-efa"
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404-efa" release-images'
+
+      - label: "Build release image - aarch64 - CUDA 12.9 - Ubuntu 24.04 - EFA"
+        depends_on: ~
+        id: build-release-image-arm64-cuda-12-9-ubuntu2404-efa
+        agents:
+          queue: arm64_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu129-ubuntu2404-efa) \
+              --build-arg max_jobs=16 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg CUDA_VERSION=12.9.1 \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda12.9-78e737ad29420ffc4800e677c51e2a852caf8359 \
+              --build-arg UBUNTU_VERSION=24.04 \
+              --build-arg GDRCOPY_OS_VERSION=Ubuntu24_04 \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64_CU129}" \
+              --build-arg INSTALL_KV_CONNECTORS=true \
+              --target vllm-openai-efa \
+              --progress plain \
+              -f docker/Dockerfile .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-cu129-ubuntu2404-efa" release-images'
+
       - label: ":docker: Build release image - x86_64 - XPU"
         depends_on: ~
         id: build-xpu-release-image
@@ -612,6 +875,74 @@ steps:
           - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu129-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu129-ubuntu2404 --amend"
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 12.9 Ubuntu 24.04" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404" release-manifests'
+
+
+      # ---- AWS EFA variant manifests ----
+      - label: "Create multi-arch manifest - CUDA 13.0 - EFA"
+        depends_on:
+          - build-release-image-x86-efa
+          - build-release-image-arm64-efa
+        id: create-multi-arch-manifest-efa
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-efa --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 13.0 - EFA" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-efa" release-manifests'
+
+      - label: "Create multi-arch manifest - CUDA 12.9 - EFA"
+        depends_on:
+          - build-release-image-x86-cuda-12-9-efa
+          - build-release-image-arm64-cuda-12-9-efa
+        id: create-multi-arch-manifest-cuda-12-9-efa
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu129-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu129-efa --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 12.9 - EFA" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-efa" release-manifests'
+
+      - label: "Create multi-arch manifest - Rubin CUDA 13.4 - EFA"
+        depends_on:
+          - build-release-image-x86-rubin-cuda-13-4-efa
+          - build-release-image-arm64-rubin-cuda-13-4-efa
+        id: create-multi-arch-manifest-rubin-cuda-13-4-efa
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu134-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu134-efa --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: Rubin CUDA 13.4 - EFA" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu134-efa" release-manifests'
+
+      - label: "Create multi-arch manifest - CUDA 13.0 - Ubuntu 24.04 - EFA"
+        depends_on:
+          - build-release-image-x86-ubuntu2404-efa
+          - build-release-image-arm64-ubuntu2404-efa
+        id: create-multi-arch-manifest-ubuntu2404-efa
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-ubuntu2404-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-ubuntu2404-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-ubuntu2404-efa --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-ubuntu2404-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 13.0 Ubuntu 24.04 - EFA" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-ubuntu2404-efa" release-manifests'
+
+      - label: "Create multi-arch manifest - CUDA 12.9 - Ubuntu 24.04 - EFA"
+        depends_on:
+          - build-release-image-x86-cuda-12-9-ubuntu2404-efa
+          - build-release-image-arm64-cuda-12-9-ubuntu2404-efa
+        id: create-multi-arch-manifest-cuda-12-9-ubuntu2404-efa
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu129-ubuntu2404-efa public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu129-ubuntu2404-efa --amend"
+          - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404-efa"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 12.9 Ubuntu 24.04 - EFA" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404-efa" release-manifests'
 
       - label: "Create manifest - XPU"
         depends_on:
@@ -1249,6 +1580,11 @@ steps:
       - "cuda-12-9"
       - "cuda-13-0-ubuntu-24-04"
       - "cuda-12-9-ubuntu-24-04"
+      # AWS EFA variants; no-ops when the opt-in EFA image was not built.
+      - "cuda-13-0-efa"
+      - "cuda-12-9-efa"
+      - "cuda-13-0-ubuntu-24-04-efa"
+      - "cuda-12-9-ubuntu-24-04-efa"
       - "rocm"
       - "xpu"
       - "cpu"
