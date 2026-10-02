@@ -657,7 +657,7 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
 
     moe = DeepseekV4MoE.__new__(DeepseekV4MoE)
     torch.nn.Module.__init__(moe)
-    moe.use_mega_moe = True
+    moe.use_native_mega_moe = True
     moe.gate = FakeGate()
     moe.experts = FakeExperts()
     moe.shared_experts = FakeSharedExperts()

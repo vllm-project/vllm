@@ -241,7 +241,7 @@ def test_v41_dspark_loads_linear_scales(
         linear_scale_name=scale_name,
         pad_shared_expert=False,
         model=SimpleNamespace(
-            layers=[SimpleNamespace(ffn=SimpleNamespace(use_mega_moe=False))],
+            layers=[SimpleNamespace(ffn=SimpleNamespace(use_native_mega_moe=False))],
             confidence_head=None,
         ),
         named_parameters=lambda: [(runtime_name, param)],

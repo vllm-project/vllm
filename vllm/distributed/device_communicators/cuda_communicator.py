@@ -255,6 +255,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import FlashInferNVLinkOneSidedManager
 
                 self.all2all_manager = FlashInferNVLinkOneSidedManager(self.cpu_group)
+            elif self.all2all_backend == "passthrough":
+                from .all2all import PassThroughAll2AllManager
+
+                self.all2all_manager = PassThroughAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             else:
                 raise ValueError(f"Unknown all2all backend: {self.all2all_backend}")
 

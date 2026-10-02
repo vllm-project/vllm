@@ -25,6 +25,11 @@ INT4_DTYPE = scalar_types.uint4b8
 INT8_DTYPE = scalar_types.uint8b128
 
 
+def require_finite_positive_scales(name: str, value: torch.Tensor) -> None:
+    if not torch.isfinite(value).all() or not (value > 0).all():
+        raise ValueError(f"{name} must contain finite positive scales")
+
+
 def _dtype_abbr(dtype: torch.dtype | ScalarType) -> str:
     """Return a stable short name for torch and ScalarType dtypes."""
     if isinstance(dtype, ScalarType):
