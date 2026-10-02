@@ -6,10 +6,14 @@ Unit tests for engine classes (parsing, validation, registry).
 Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
+import builtins
 import pickle
+import runpy
 import threading
 import time
 from contextlib import nullcontext
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pybase64 as base64
@@ -64,6 +68,7 @@ from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseWeightPatch,
 )
 from vllm.platforms import current_platform
+from vllm.utils.nccl import _nccl_has_no_cache
 from vllm.utils.network_utils import get_open_port
 
 
@@ -297,6 +302,36 @@ class TestEngineRegistry:
         )
         assert isinstance(engine, SparseNCCLWeightTransferEngine)
 
+    def test_modelexpress_registration_is_native_and_lazy(self, monkeypatch):
+        from vllm.distributed.weight_transfer import factory
+
+        imported = []
+        module = MagicMock()
+        module.ModelExpressWeightTransferEngine.__name__ = (
+            "ModelExpressWeightTransferEngine"
+        )
+
+        def import_module(name):
+            imported.append(name)
+            return module
+
+        monkeypatch.setattr(factory.importlib, "import_module", import_module)
+        config = WeightTransferConfig(backend="modelexpress")
+        vllm_config = create_mock_vllm_config()
+        device = torch.device("cpu")
+        model = MagicMock(spec=torch.nn.Module)
+
+        assert imported == []
+        engine = WeightTransferEngineFactory.create_engine(
+            config, vllm_config, device, model
+        )
+
+        assert imported == ["vllm.distributed.weight_transfer.modelexpress_engine"]
+        module.ModelExpressWeightTransferEngine.assert_called_once_with(
+            config, vllm_config, device, model
+        )
+        assert engine is module.ModelExpressWeightTransferEngine.return_value
+
     def test_create_engine_invalid_backend(self):
         config = WeightTransferConfig(backend="invalid")
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):
@@ -399,13 +434,15 @@ def trainer_broadcast_tensor(
     return True
 
 
-@ray.remote(num_gpus=1)
+# max_calls=1: a batch-invariant run leaves NCCL pins in the worker process.
+@ray.remote(num_gpus=1, max_calls=1)
 def inference_receive_tensor(
     master_address: str,
     master_port: int,
     world_size: int,
     tensor_shape: list[int],
     tensor_dtype: str,
+    batch_invariant: bool = False,
 ) -> dict:
     """Inference task that receives tensor via NCCLWeightTransferEngine."""
     import contextlib
@@ -414,6 +451,21 @@ def inference_receive_tensor(
     import torch
 
     _set_ray_assigned_device()
+    if batch_invariant:
+        from vllm.model_executor.determinism.batch_invariant import (
+            override_envs_for_invariance,
+        )
+
+        override_envs_for_invariance()
+        # Like vLLM's own groups, a pinned communicator makes NCCL read the
+        # pins before the transfer group exists.
+        torch.distributed.init_process_group(
+            "nccl",
+            init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            rank=0,
+            world_size=1,
+        )
+        torch.distributed.all_reduce(torch.ones(1, device="cuda"))
 
     from vllm.config.parallel import ParallelConfig
     from vllm.config.weight_transfer import WeightTransferConfig
@@ -500,11 +552,25 @@ def inference_receive_tensor(
     torch.accelerator.device_count() < 2,
     reason="Need at least 2 GPUs to run NCCL weight transfer test.",
 )
-def test_nccl_weight_transfer_between_processes():
+@pytest.mark.parametrize(
+    "batch_invariant",
+    [
+        pytest.param(False, id="default"),
+        pytest.param(
+            True,
+            id="batch-invariant-worker",
+            marks=pytest.mark.skipif(
+                not _nccl_has_no_cache(), reason="Needs CUDA NCCL >= 2.29.7."
+            ),
+        ),
+    ],
+)
+def test_nccl_weight_transfer_between_processes(batch_invariant):
     """Test NCCL weight transfer from trainer to inference process using Ray.
 
     This test verifies that the NCCLWeightTransferEngine can receive
-    tensors broadcast by a trainer process via NCCL.
+    tensors broadcast by a trainer process via NCCL, including when the
+    worker runs with batch-invariance NCCL pins the trainer does not have.
     """
     _init_ray_for_weight_transfer()
 
@@ -516,13 +582,19 @@ def test_nccl_weight_transfer_between_processes():
     tensor_dtype = "float32"
 
     inference_future = inference_receive_tensor.remote(
-        master_address, master_port, world_size, tensor_shape, tensor_dtype
+        master_address,
+        master_port,
+        world_size,
+        tensor_shape,
+        tensor_dtype,
+        batch_invariant,
     )
     trainer_future = trainer_broadcast_tensor.remote(
         master_address, master_port, world_size, tensor_shape, tensor_dtype
     )
 
-    trainer_result, result = ray.get([trainer_future, inference_future])
+    # A mismatched NCCL config deadlocks instead of failing.
+    trainer_result, result = ray.get([trainer_future, inference_future], timeout=300)
 
     assert trainer_result, "Trainer should complete successfully"
     assert result["success"], (
@@ -1976,3 +2048,322 @@ def test_sparse_nccl_trainer_non_sender_skips_client():
     engine.send_weights([_sparse_patch()])
     engine.send_weight_chunk([_sparse_patch()])
     assert client.order == []
+
+
+# --- Optional ModelExpress Client Lifecycle ---
+
+
+def _import_modelexpress_shim():
+    path = (
+        Path(__file__).parents[2]
+        / "vllm/distributed/weight_transfer/modelexpress_engine.py"
+    )
+    runpy.run_path(str(path), run_name="_test_modelexpress_shim")
+
+
+@pytest.mark.parametrize(
+    "missing_module",
+    [
+        "modelexpress",
+        "modelexpress_rl",
+        "modelexpress_rl.inference",
+        "modelexpress_rl.inference.engines",
+        "modelexpress_rl.inference.engines.vllm",
+        "modelexpress_rl.inference.engines.vllm.weight_transfer_engine",
+    ],
+)
+def test_modelexpress_missing_backend_explains_source_install(
+    monkeypatch, missing_module
+):
+    original_import = builtins.__import__
+    error = ModuleNotFoundError(name=missing_module)
+
+    def import_without_backend(name, *args, **kwargs):
+        if name == "modelexpress":
+            raise error
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_backend)
+    with pytest.raises(ImportError, match="modelexpress_client/python") as exc_info:
+        _import_modelexpress_shim()
+    assert exc_info.value.__cause__ is error
+    assert "uv pip install" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("missing_module", ["grpc", "modelexpress.internal_dependency"])
+def test_modelexpress_preserves_transitive_import_errors(monkeypatch, missing_module):
+    original_import = builtins.__import__
+    error = ModuleNotFoundError(name=missing_module)
+
+    def import_without_dependency(name, *args, **kwargs):
+        if name == "modelexpress":
+            raise error
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_dependency)
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        _import_modelexpress_shim()
+    assert exc_info.value is error
+
+
+@pytest.fixture
+def mx_client(monkeypatch):
+    client_module = pytest.importorskip("modelexpress_rl.inference.client")
+    client = MagicMock()
+    monkeypatch.setattr(
+        client_module.ModelExpressGeneratorClient,
+        "initialize",
+        MagicMock(return_value=client),
+    )
+    monkeypatch.setattr(torch.accelerator, "synchronize", MagicMock())
+    return client
+
+
+def _make_modelexpress_engine():
+    return WeightTransferEngineFactory.create_engine(
+        WeightTransferConfig(backend="modelexpress"),
+        SimpleNamespace(
+            parallel_config=SimpleNamespace(),
+            model_config=SimpleNamespace(model="test/model"),
+        ),
+        torch.device("cpu"),
+        torch.nn.Linear(2, 2),
+    )
+
+
+@pytest.fixture
+def mx_worker(mx_client, monkeypatch):
+    from vllm.v1.worker import gpu_worker
+
+    monkeypatch.setattr(gpu_worker, "set_current_vllm_config", lambda _: nullcontext())
+    worker = object.__new__(gpu_worker.Worker)
+    worker.weight_transfer_engine = _make_modelexpress_engine()
+    worker.vllm_config = worker.weight_transfer_engine.vllm_config
+    worker._weight_update_active = False
+    worker._weight_update_is_draft = False
+    worker.model_runner = MagicMock()
+    return worker
+
+
+def test_modelexpress_worker_rejects_updates_before_initialization(
+    mx_worker, mx_client
+):
+    with pytest.raises(RuntimeError, match="not initialized"):
+        mx_worker.start_weight_update()
+    with pytest.raises(RuntimeError, match="start_weight_update must be called"):
+        mx_worker.update_weights({"version_id": "version-a"})
+    with pytest.raises(RuntimeError, match="without a matching"):
+        mx_worker.finish_weight_update()
+    mx_client.stage_weight.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "second_update, error_type",
+    [
+        ({"version_id": "version-a"}, RuntimeError),
+        ({"version_id": "version-b"}, RuntimeError),
+        ({"version_id": ""}, ValueError),
+        ({"version_id": None}, ValueError),
+        ({}, ValueError),
+    ],
+)
+def test_modelexpress_worker_recovers_after_rejected_update(
+    mx_worker, mx_client, second_update, error_type
+):
+    """A rejected payload must release A so a fresh session can actually install B."""
+    mx_worker.weight_transfer_engine.init_transfer_engine(
+        mx_worker.weight_transfer_engine.parse_init_info({})
+    )
+    staged_a = SimpleNamespace(version_id="version-a", metrics={}, release=MagicMock())
+    staged_b = SimpleNamespace(version_id="version-b", metrics={}, release=MagicMock())
+    mx_client.stage_weight.side_effect = [staged_a, staged_b]
+    mx_client.apply_weight.return_value = {}
+    mx_worker.start_weight_update()
+    mx_worker.update_weights({"version_id": "version-a"})
+
+    with pytest.raises(error_type):
+        mx_worker.update_weights(second_update)
+    staged_a.release.assert_called_once_with()
+    mx_client.apply_weight.assert_called_once_with(staged_a)
+
+    mx_worker.start_weight_update()
+    mx_worker.update_weights({"version_id": "version-b"})
+    mx_worker.finish_weight_update()
+
+    assert [
+        call.kwargs["version"].version_id
+        for call in mx_client.stage_weight.call_args_list
+    ] == ["version-a", "version-b"]
+    mx_client.apply_weight.assert_called_with(staged_b)
+    staged_b.release.assert_called_once_with()
+
+
+def test_modelexpress_worker_can_retry_failed_finish(mx_worker, mx_client):
+    mx_worker.weight_transfer_engine.init_transfer_engine(
+        mx_worker.weight_transfer_engine.parse_init_info({})
+    )
+    staged = mx_client.stage_weight.return_value
+    staged.release.side_effect = [RuntimeError("release failed"), None]
+    mx_worker.start_weight_update()
+    mx_worker.update_weights({"version_id": "version-a"})
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        mx_worker.finish_weight_update()
+    mx_worker.finish_weight_update()
+
+    assert staged.release.call_count == 2
+    assert not mx_worker._weight_update_active
+    mx_worker.start_weight_update()
+
+
+def test_native_engine_applies_and_releases_exact_versions(mx_client):
+    from modelexpress_rl.inference.engines.vllm import (
+        weight_transfer_engine as mx_engine,
+    )
+
+    from vllm.distributed.weight_transfer import modelexpress_engine
+
+    engine = _make_modelexpress_engine()
+    assert type(engine) is mx_engine.ModelExpressWeightTransferEngine
+    assert (
+        modelexpress_engine.ModelExpressWeightTransferInitInfo
+        is mx_engine.ModelExpressWeightTransferInitInfo
+    )
+    assert (
+        modelexpress_engine.ModelExpressWeightTransferUpdateInfo
+        is mx_engine.ModelExpressWeightTransferUpdateInfo
+    )
+    assert not engine.supports_draft_weight_update
+    engine.init_transfer_engine(engine.parse_init_info({}))
+
+    for version_id in ("version-a", "version-b"):
+        staged = SimpleNamespace(version_id=version_id, metrics={}, release=MagicMock())
+        mx_client.stage_weight.return_value = staged
+        mx_client.apply_weight.return_value = {}
+        engine.start_weight_update()
+        engine.update_weights({"version_id": version_id})
+
+        assert (
+            mx_client.stage_weight.call_args.kwargs["version"].version_id == version_id
+        )
+        mx_client.apply_weight.assert_called_with(staged)
+        torch.accelerator.synchronize.assert_called()
+        staged.release.assert_not_called()
+        engine.finish_weight_update()
+        staged.release.assert_called_once_with()
+
+    engine.shutdown()
+    engine.shutdown()
+    mx_client.close.assert_called_once_with()
+
+
+def test_vime_init_config_reaches_mx_client(mx_client):
+    from modelexpress_rl.inference.client import ModelExpressGeneratorClient
+
+    engine = _make_modelexpress_engine()
+    ModelExpressGeneratorClient.initialize.assert_not_called()
+    engine.init_transfer_engine(
+        engine.parse_init_info(
+            {
+                "model_name": "policy",
+                "server_url": "mx:8001",
+                "initial_serving_version_id": "serving-a",
+                "object_storage_type": "S3",
+                "initial_base_version_id": "base-a",
+                "seed_checkpoint_path": "/models/launch",
+                "refit_checkpoint_dir": "/mxdelta/receiver",
+                "refit_checkpoint_max_size_gb": 200,
+                "object_storage_endpoint_url": "http://minio:9000",
+                "object_storage_region_name": "us-west-2",
+                "registration_ttl_seconds": 90,
+                "lease_ttl_seconds": 60,
+                "max_transfer_attempts": 4,
+                "max_replay_chain_length": 17,
+                "rpc_timeout_seconds": 12.5,
+            }
+        )
+    )
+    config = ModelExpressGeneratorClient.initialize.call_args.args[0]
+    assert config.engine_context.model is engine.model
+    assert config.engine_context.vllm_config is engine.vllm_config
+    assert config.model_name == "policy"
+    assert config.server_url == "mx:8001"
+    assert config.initial_serving_version_id == "serving-a"
+    assert config.registration_ttl_seconds == 90
+    assert config.lease_ttl_seconds == 60
+    assert config.max_transfer_attempts == 4
+    assert config.max_replay_chain_length == 17
+    assert config.rpc_timeout_seconds == 12.5
+    storage = config.object_storage
+    assert storage.storage_type.value == "S3"
+    assert storage.initial_base_version_id == "base-a"
+    assert storage.seed_checkpoint_path == "/models/launch"
+    assert storage.refit_checkpoint_dir == "/mxdelta/receiver"
+    assert storage.refit_checkpoint_max_size_gb == 200
+    assert storage.endpoint_url == "http://minio:9000"
+    assert storage.region_name == "us-west-2"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "object_storage_type",
+        "initial_base_version_id",
+        "seed_checkpoint_path",
+        "refit_checkpoint_dir",
+        "object_storage_endpoint_url",
+        "object_storage_region_name",
+    ],
+)
+def test_incomplete_storage_config_rejected_before_init(mx_client, key):
+    from modelexpress_rl.inference.client import ModelExpressGeneratorClient
+
+    engine = _make_modelexpress_engine()
+    with pytest.raises(ValueError, match="object storage requires"):
+        engine.init_transfer_engine(engine.parse_init_info({key: "value"}))
+    ModelExpressGeneratorClient.initialize.assert_not_called()
+
+
+@pytest.mark.parametrize("version_id", ["", "   ", None, 1])
+def test_invalid_version_rejected_before_staging(mx_client, version_id):
+    engine = _make_modelexpress_engine()
+    engine.init_transfer_engine(engine.parse_init_info({}))
+    engine.start_weight_update()
+    with pytest.raises(ValueError, match="version_id is required"):
+        engine.update_weights({"version_id": version_id})
+    mx_client.stage_weight.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["stage", "apply", "release"])
+def test_update_failure_preserves_error_and_releases_handle(mx_client, failure):
+    engine = _make_modelexpress_engine()
+    engine.init_transfer_engine(engine.parse_init_info({}))
+    staged = SimpleNamespace(version_id="version-a", metrics={}, release=MagicMock())
+    mx_client.stage_weight.return_value = staged
+    if failure == "stage":
+        mx_client.stage_weight.side_effect = RuntimeError("stage failed")
+    else:
+        mx_client.apply_weight.side_effect = RuntimeError("apply failed")
+        if failure == "release":
+            staged.release.side_effect = RuntimeError("release failed")
+    engine.start_weight_update()
+    with pytest.raises(RuntimeError, match="stage failed|apply failed"):
+        engine.update_weights({"version_id": "version-a"})
+    assert staged.release.call_count == (0 if failure == "stage" else 1)
+    torch.accelerator.synchronize.assert_not_called()
+    engine.shutdown()
+    mx_client.close.assert_called_once_with()
+
+
+def test_plugin_does_not_replace_native_backend(mx_client):
+    from modelexpress.engines.vllm.registration import (
+        register_plugin_weight_transfer_engine,
+    )
+    from modelexpress_rl.inference.engines.vllm.weight_transfer_engine import (
+        ModelExpressWeightTransferEngine,
+    )
+
+    native_loader = WeightTransferEngineFactory._registry["modelexpress"]
+    register_plugin_weight_transfer_engine()
+    assert WeightTransferEngineFactory._registry["modelexpress"] is native_loader
+    assert type(_make_modelexpress_engine()) is ModelExpressWeightTransferEngine
