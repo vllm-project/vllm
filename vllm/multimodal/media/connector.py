@@ -5,9 +5,12 @@ import asyncio
 import atexit
 import contextlib
 import hashlib
+import ipaddress
 import os
+import socket
 import tempfile
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeVar
@@ -125,6 +128,76 @@ def _wrap_media_fetch_error(
     return exc
 
 
+# Extra networks blocked beyond what `ipaddress.is_private` covers on older
+# Python versions: RFC 6598 shared address space (CGNAT) and the IPv6
+# transition mechanisms that embed an IPv4 destination (6to4, NAT64) —
+# pinned explicitly so the block does not depend on the Python version.
+_BLOCKED_EXTRA_NETWORKS = [
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("2002::/16"),
+    ipaddress.ip_network("64:ff9b::/96"),
+]
+
+
+def _ip_is_blocked(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Whether an address must not be a media fetch destination.
+
+    Covers loopback, RFC 1918, link-local (including the cloud metadata
+    range 169.254.0.0/16), IPv6 ::1 / fe80::/10 / fc00::/7, plus reserved,
+    multicast, unspecified and RFC 6598 ranges.
+    """
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+        or any(addr in net for net in _BLOCKED_EXTRA_NETWORKS)
+    )
+
+
+def _assert_ip_not_private(ip_str: str) -> None:
+    addr = ipaddress.ip_address(ip_str)
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        # ::ffff:169.254.169.254 must be judged as 169.254.169.254
+        addr = addr.ipv4_mapped
+    if _ip_is_blocked(addr):
+        logger.warning(
+            "Blocked media URL fetch: resolved address %s is a private, "
+            "loopback or link-local address",
+            ip_str,
+        )
+        raise ValueError(
+            f"Media URL host resolves to a blocked address: {ip_str}. "
+            "Private, loopback, link-local and multicast destinations are "
+            "not allowed (set VLLM_MEDIA_EGRESS_BLOCK_PRIVATE=0 to disable)."
+        )
+
+
+def _assert_url_not_private(url_spec: Url) -> None:
+    """Resolve the URL host and reject private/loopback/link-local targets.
+
+    Resolving before connecting also normalizes non-canonical literal hosts
+    (decimal/hex IP forms) to the address that would actually be dialed.
+    """
+    hostname = url_spec.hostname
+    if not hostname:
+        raise ValueError(f"Media URL has no host: {url_spec.url!r}")
+    try:
+        addrinfos = socket.getaddrinfo(hostname, url_spec.port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        # Mirror the ConnectionError the HTTP clients raise for
+        # unresolvable hosts so transient DNS failures stay retryable.
+        raise ConnectionError(f"Cannot resolve media URL host {hostname!r}: {e}") from e
+    if not addrinfos:
+        raise ConnectionError(f"Cannot resolve media URL host {hostname!r}")
+    for family, _type, _proto, _canonname, sockaddr in addrinfos:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            continue
+        _assert_ip_not_private(sockaddr[0])
+
+
 def merge_media_io_kwargs(
     defaults: dict[str, dict[str, Any]] | None,
     overrides: dict[str, dict[str, Any]] | None,
@@ -172,6 +245,7 @@ class MediaConnector:
         allowed_local_media_path: A local directory to load media files from.
         allowed_media_domains: If set, only media URLs that belong to this
                                domain can be used for multi-modal inputs.
+                               Applies to every redirect hop as well.
 
         """
         super().__init__()
@@ -364,6 +438,38 @@ class MediaConnector:
                 f"{url_spec.hostname}"
             )
 
+    def _assert_media_url_safe(self, url: str) -> None:
+        """Validate one URL hop before it is requested (SSRF guard).
+
+        Applied to the input URL and to every redirect target, so a
+        redirect can never escape the configured domain whitelist or
+        reach private/loopback/link-local addresses.
+        """
+        url_spec = parse_url(url)
+        if not url_spec.scheme or not url_spec.scheme.startswith("http"):
+            raise ValueError(f"The media URL must remain HTTP(S): {url[:32]!r}")
+        self._assert_url_in_allowed_media_domains(url_spec)
+        if envs.VLLM_MEDIA_EGRESS_BLOCK_PRIVATE:
+            _assert_url_not_private(url_spec)
+
+    async def _assert_media_url_safe_async(self, url: str) -> None:
+        # DNS resolution is blocking; keep it off the event loop.
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(global_thread_pool, self._assert_media_url_safe, url)
+
+    def _media_url_validator(
+        self, *, is_async: bool = False
+    ) -> Callable[[str], Any] | None:
+        """Per-hop URL validator for guarded fetches, or None to keep the
+        unguarded (client-driven) fetch path."""
+        if envs.VLLM_MEDIA_EGRESS_BLOCK_PRIVATE or self.allowed_media_domains:
+            return (
+                self._assert_media_url_safe_async
+                if is_async
+                else self._assert_media_url_safe
+            )
+        return None
+
     def load_from_url(
         self,
         url: str,
@@ -391,6 +497,7 @@ class MediaConnector:
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
                     max_bytes=max_bytes,
+                    validate_url=self._media_url_validator(),
                 )
             except Exception as e:
                 wrapped = _wrap_media_fetch_error(url, e)
@@ -444,6 +551,7 @@ class MediaConnector:
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
                     max_bytes=max_bytes,
+                    validate_url=self._media_url_validator(is_async=True),
                 )
             except Exception as e:
                 wrapped = _wrap_media_fetch_error(url, e)
