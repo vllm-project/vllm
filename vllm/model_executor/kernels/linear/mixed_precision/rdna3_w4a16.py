@@ -69,6 +69,15 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
                 "RDNA3 W4A16 kernel does not support channelwise quantization",
             )
 
+        # The scalar decode kernel advances K 32 at a time and only switches
+        # groups between steps.
+        if c.group_size % 32 != 0:
+            return (
+                False,
+                f"Group size ({c.group_size}) must be a multiple of 32 for the "
+                "RDNA3 W4A16 kernel",
+            )
+
         if c.full_weight_shape[0] % c.group_size != 0:
             return (
                 False,
