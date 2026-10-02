@@ -109,11 +109,6 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: KVCacheSpec,
     ) -> int | None:
-        # The spec path reads per-request offsets and accepted counts off device
-        # within a fixed num_spec + 1 window (spec_state_indices_tensor, conv
-        # max_query_len), so a graph captured at that width replays any 1..k+1
-        # mix. Keep UNIFORM_BATCH rather than claiming ALWAYS: FULL capture here
-        # is decode-only (build_for_cudagraph_capture asserts it).
         if not _adaptive_verification_enabled(vllm_config):
             return None
         if (
@@ -142,10 +137,6 @@ class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
             metadata.uniform_spec_sequence_length is not None
             and _adaptive_verification_enabled(self.vllm_config)
         ):
-            # Adaptive verification trims drafts on device after the CPU split
-            # was made, so equal CPU lengths do not mean equal device lengths.
-            # The fixed-length recurrent kernel places sequence i at i * L and
-            # never reads cu_seqlens; force the cu_seqlens-driven kernel.
             metadata = replace(metadata, uniform_spec_sequence_length=None)
         return metadata
 
@@ -173,8 +164,4 @@ class KimiK3ROCmKDABackend(GDNAttentionBackend):
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # Pure spec-decode batches take their plan from DEVICE offsets
-        # (spec_query_start_loc, num_accepted_tokens) once the builder drops the
-        # CPU-derived uniform length under adaptive verification. Mixed batches
-        # only need the CPU totals, which adaptive verification preserves.
         return True

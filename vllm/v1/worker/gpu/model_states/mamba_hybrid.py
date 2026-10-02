@@ -84,9 +84,6 @@ def compute_num_decode_draft_tokens(
     num_decode_draft_tokens = np.full(num_padded_reqs, -1, dtype=np.int32)
     if num_draft_tokens_per_req is None:
         num_draft_tokens_per_req = np.zeros(num_reqs, dtype=np.int32)
-    # A spec row's state indices hold one slot per verified position, so a
-    # row wider than a verify block (e.g. a dummy run's prefill-shaped rows,
-    # which carry no prefill flag) must take the prefill path instead.
     is_decode = (
         (~is_prefilling)
         & (num_scheduled_tokens > 0)

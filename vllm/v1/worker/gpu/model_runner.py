@@ -610,8 +610,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
         dcp_sharded = []
-        # Token-indexed caches get fabricated context blocks; recurrent-state
-        # groups get one state slot per request (set_dummy_context).
         self._dummy_context_groups = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
