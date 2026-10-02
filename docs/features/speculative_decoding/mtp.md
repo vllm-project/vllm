@@ -88,15 +88,9 @@ vllm serve <mtp-model> \
   (`draft_sample_method: "probabilistic"`), the proposal is a distribution over
   the full vocabulary with zero mass outside the list, so rejection sampling
   stays exact.
-- The file can be SGLang's `--speculative-token-map` format (a `.pt` list of
-  ids), a JSON list, or whitespace/comma separated text. As in SGLang, a path
-  that does not exist locally is read as `<hf_repo_id>/<filename>`. EOS ids are
-  always added.
-- An unquantized head is sliced. A quantized head is materialized for the
-  listed rows in the model dtype through its own quantization method, so the
-  reduced head costs `len(list) * hidden_size` elements in that dtype. The
-  saving is largest for BF16 heads; a BF16 slice of an NVFP4 head must cover
-  well under a quarter of the vocabulary to read fewer bytes than the full head.
+- The file is SGLang's `--speculative-token-map` format (a `.pt` list of ids)
+  or a JSON list. EOS ids are always added.
+- The shared lm_head must be unquantized.
 - Acceptance drops when the list misses tokens your traffic uses, so build it
   from representative text, ideally the model's own outputs, and include all
   special tokens. [`build_draft_token_map.py`](../../../examples/features/speculative_decoding/build_draft_token_map.py)

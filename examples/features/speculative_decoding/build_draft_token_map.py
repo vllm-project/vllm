@@ -20,8 +20,8 @@ Example:
         '{"method": "mtp", "num_speculative_tokens": 3,
           "draft_token_map": "draft_vocab.pt"}'
 
-The `.pt` output uses SGLang's `--speculative-token-map` format; `.json` and
-`.txt` outputs are also accepted by vLLM.
+The `.pt` output uses SGLang's `--speculative-token-map` format; a `.json`
+output is also accepted by vLLM.
 
 """
 
@@ -46,10 +46,7 @@ def _row_text(row: dict, tokenizer) -> str:
                 for t in turns
             ]
             if tokenizer.chat_template:
-                try:
-                    return tokenizer.apply_chat_template(messages, tokenize=False)
-                except Exception:
-                    pass
+                return tokenizer.apply_chat_template(messages, tokenize=False)
             return "\n".join(m["content"] for m in messages)
     return "\n".join(str(v) for v in row.values() if isinstance(v, str))
 
@@ -99,7 +96,7 @@ def main() -> None:
         "frequency ordered).",
     )
     parser.add_argument("--holdout", type=float, default=0.05)
-    parser.add_argument("--output", required=True, help=".pt, .json or .txt")
+    parser.add_argument("--output", required=True, help=".pt or .json")
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
@@ -123,14 +120,11 @@ def main() -> None:
         keep.add(token_id)
     ids = sorted(keep)
 
-    if args.output.endswith((".pt", ".pth")):
-        torch.save(ids, args.output)
-    elif args.output.endswith(".json"):
+    if args.output.endswith(".json"):
         with open(args.output, "w") as f:
             json.dump(ids, f)
     else:
-        with open(args.output, "w") as f:
-            f.write("\n".join(map(str, ids)) + "\n")
+        torch.save(ids, args.output)
 
     print(
         f"Wrote {len(ids)} ids ({len(counts)} distinct ids seen in "

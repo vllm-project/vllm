@@ -472,10 +472,9 @@ class SpeculativeConfig:
     (FR-Spec). The drafter's shared lm_head is restricted to these rows, which
     cuts its cost per draft token; the target still verifies with the full
     vocabulary, so outputs follow the usual speculative decoding guarantees.
-    Accepts SGLang's `--speculative-token-map` file (`.pt`), a JSON list, or
-    whitespace/comma separated text. EOS ids are always included. Requires a
-    drafter that shares the target lm_head (MTP, or EAGLE without its own
-    head) and Model Runner V2."""
+    Accepts SGLang's `--speculative-token-map` file (`.pt`) or a JSON list.
+    EOS ids are always included. Requires an MTP drafter that shares the
+    target's unquantized lm_head, and Model Runner V2."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -1867,15 +1866,9 @@ class SpeculativeConfig:
                 "omit it."
             )
 
-        if self.draft_token_map is not None and (
-            self.method not in ("mtp", "eagle", "eagle3")
-            or self.use_gemma4_mtp()
-            or self.use_step3p5_mtp()
-        ):
+        if self.draft_token_map is not None and self.method != "mtp":
             raise ValueError(
-                "draft_token_map requires a drafter that shares the target "
-                "model's lm_head (method 'mtp', 'eagle' or 'eagle3', except "
-                f"Gemma 4 and Step-3.5 MTP), got method={self.method!r}."
+                f"draft_token_map requires method 'mtp', got {self.method!r}."
             )
 
         if not self.use_heterogeneous_vocab:
