@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-import functools
 from collections.abc import Callable
 from typing import Any
 
@@ -311,10 +310,7 @@ class DFlashSpeculator(DraftModelSpeculator):
     def _draft_sampler(self) -> Callable[..., torch.Tensor]:
         if self.draft_watermarker is None:
             return super()._draft_sampler()
-        return functools.partial(
-            self.draft_watermarker.sample_parallel,
-            num_steps=self.num_speculative_steps,
-        )
+        return self.draft_watermarker.sample_parallel
 
     def _num_graph_context_tokens(self, num_reqs: int) -> int:
         # Context rows a captured draft step stores: one full verify per request.

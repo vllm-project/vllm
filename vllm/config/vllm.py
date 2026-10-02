@@ -1337,15 +1337,11 @@ class VllmConfig:
                 raise ValueError(
                     "Parallel speculative drafting is not supported with watermarking."
                 )
-            if speculative_config.method not in (
-                "dflash",
-                "dspark",
-                "eagle",
-                "eagle3",
-                "mtp",
-            ):
+            spec_methods = ("dflash", "dspark", "eagle", "eagle3", "mtp")
+            if speculative_config.method not in spec_methods:
                 raise ValueError(
-                    "Watermarking supports only model-based speculative decoding."
+                    "Watermarking supports speculative decoding only with methods "
+                    f"{', '.join(spec_methods)}; got {speculative_config.method!r}."
                 )
             if (
                 watermark_config.supports_speculative_decoding
@@ -1353,7 +1349,9 @@ class VllmConfig:
             ):
                 raise ValueError(
                     "DFlash2 and LiLiCorr candidate drafters do not support draft "
-                    "watermarking."
+                    "watermarking. Use algorithm='gumbel' with "
+                    "allow_target_only_watermarking=true to leave drafts "
+                    "unwatermarked."
                 )
             if (
                 not watermark_config.allow_target_only_watermarking
