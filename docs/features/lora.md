@@ -231,6 +231,33 @@ curl -X POST http://localhost:8000/v1/load_lora_adapter \
 }'
 ```
 
+### Updating LoRA Weights from Tensors
+
+The LoRA manager of each worker can also replace an adapter's weights from tensors, without writing a checkpoint, or expose the GPU slot that holds them. These calls run inside the worker, typically from a worker extension (the `worker_extension_cls` engine argument) that obtains the tensors itself, e.g. generates them from a seed or receives them through a weight-transfer channel; `collective_rpc` then only carries small arguments:
+
+```python
+import torch
+
+
+class LoRAWriter:  # in an importable module, passed as worker_extension_cls
+    def set_down_proj(self, lora_id: int, layer: int, seed: int) -> None:
+        g = torch.Generator().manual_seed(seed)
+        lora_a = torch.randn(8, 3072, generator=g)  # (rank, in_features)
+        lora_b = torch.zeros(1024, 8)  # (out_features, rank), scaling folded in
+        self.model_runner.lora_manager.update_adapter_weights(
+            lora_id, {f"model.layers.{layer}.mlp.down_proj": (lora_a, lora_b)}
+        )
+
+
+llm = LLM(model, enable_lora=True, worker_extension_cls="my_module.LoRAWriter")
+llm.collective_rpc("set_down_proj", args=(lora_id, 0, 1234))
+```
+
+- `update_adapter_weights(lora_id, weights)` takes a mapping from module name to `(lora_a, lora_b)`, with one entry per slice for packed modules such as `qkv_proj` (`None` keeps a slice). Modules held by another pipeline-parallel rank are skipped, so every worker can receive the same mapping. The cached copy of the adapter is updated too, so the weights survive GPU-slot eviction for as long as the adapter stays registered; an adapter removed from the CPU cache is reloaded from its `lora_path`. Passing `update_cpu_cache=False` writes only the GPU slot, avoiding a device-to-host copy for frequent updates, and requires the adapter to be pinned (`pin_lora`).
+- `get_adapter_slot(lora_id)` returns the slot index, and `get_adapter_slot_weights(lora_id)` returns per-module views of the slot's A and B buffers (local to the rank, padded to `max_lora_rank`) for reading or in-place updates under `torch.inference_mode()`.
+
+Prefix-cache entries computed with an adapter's previous weights are not invalidated by these calls. Call `llm.reset_prefix_cache()` after an update if requests for that adapter may share cached prefixes.
+
 ## New format for `--lora-modules`
 
 In the previous version, users would provide LoRA modules via the following format, either as a key-value pair or in JSON format. For example:
