@@ -1208,14 +1208,14 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 swa_only=swa_only,
                 output=output[:num_decode_tokens],
             )
-        # Only the decode reduce rotates its own rows, and only the leading
-        # `rotated` of them; prefill rows and any decode path that did not
-        # fuse still owe the standalone pass. Settle that here rather than in
-        # _o_proj: the split is batch-dependent and _o_proj runs compiled,
-        # where such a value freezes at its trace-time value.
+        # Rows [rotated, end) were not rotated in a kernel's store and owe the
+        # standalone pass. Settle that here rather than in _o_proj: the split
+        # is batch-dependent and _o_proj runs compiled, where such a value
+        # freezes at its trace-time value.
+        end = num_decode_tokens if self._use_aiter_sparse_mla else output.shape[0]
         rocm_inverse_rope_rows_(
-            output[rotated:, : self.n_local_heads, :],
-            positions[rotated:],
+            output[rotated:end, : self.n_local_heads, :],
+            positions[rotated:end],
             self.rotary_emb.cos_sin_cache,
             self.rope_head_dim,
         )
@@ -1555,8 +1555,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> None:
         """Prefill straight off the paged caches, with no bf16 gather.
 
-        With ``mxfp8_out`` the kernel's store inverse-RoPEs and quantizes the
-        rows into it; bf16 rows are left to the caller's inverse RoPE.
+        The store applies the inverse RoPE, and quantizes into ``mxfp8_out``.
         """
         num_prefill_tokens = swa_metadata.num_prefill_tokens
         assert swa_metadata.prefill_swa_ragged_indices is not None
@@ -1582,7 +1581,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             compressed_k_cache,
             topk_indices,
             topk_indptr,
-            positions=None if mxfp8_out is None else positions[:num_prefill_tokens],
+            positions=positions[:num_prefill_tokens],
             output_mxfp8=(
                 None
                 if mxfp8_out is None
