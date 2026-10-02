@@ -18,7 +18,7 @@ class FaultToleranceConfig:
     """
 
     enable_nan_fault_tolerance: bool = False
-    """When enabled, requests producing NaN logits are immediately aborted and
-    KV cache blocks are zeroed on reuse to prevent corruption from propagating
-    into prefix cache, CPU/disk offloading tiers, or disaggregated decode
-    instances. Implies --enable-detect-nans-in-logits."""
+    """Abort requests producing NaN logits, zero newly allocated KV blocks, and
+    delay GPU prefix-cache insertion until each result is checked. This adds
+    GPU memory writes and logit checks, and concurrent cold-prefix requests may
+    repeat prefill work. Implies --enable-detect-nans-in-logits."""
