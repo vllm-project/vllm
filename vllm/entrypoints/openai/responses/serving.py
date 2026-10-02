@@ -15,7 +15,6 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseStatus,
-    response_text_delta_event,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from pydantic import TypeAdapter
@@ -73,6 +72,9 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -139,6 +141,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            tokenizer=self.renderer.tokenizer,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -332,6 +335,16 @@ class OpenAIServingResponses(GenerateBaseServing):
         if maybe_validation_error is not None:
             return maybe_validation_error
 
+        maybe_template_error = self.online_renderer.validate_chat_template(
+            request_chat_template=None,
+            chat_template_kwargs=request.chat_template_kwargs,
+            trust_request_chat_template=(
+                self.online_renderer.trust_request_chat_template
+            ),
+        )
+        if maybe_template_error is not None:
+            return maybe_template_error
+
         self._preflight()
 
         if request.store and not self.enable_store:
@@ -434,6 +447,12 @@ class OpenAIServingResponses(GenerateBaseServing):
             response_parser = self._make_response_parser(
                 request, tokenizer, chat_template_kwargs
             )
+            if response_parser is not None:
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_input
+                ).token_ids
+                if prompt_token_ids is not None:
+                    response_parser.set_prompt_token_ids(prompt_token_ids)
 
             context: ConversationContext
             function_tool_names = extract_function_tool_names(request.tools)
@@ -443,6 +462,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     available_tools,
                     function_tool_names,
                     response_parser=response_parser,
+                    request=request,
                 )
             else:
                 if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
@@ -678,14 +698,24 @@ class OpenAIServingResponses(GenerateBaseServing):
                     tok_params=tok_params,
                 )
 
-                sampling_params.max_tokens = max_model_len - self._extract_prompt_len(
-                    engine_input
+                sampling_params.max_tokens = get_max_tokens(
+                    max_model_len,
+                    context.request.max_output_tokens if context.request else None,
+                    self._extract_prompt_len(engine_input),
+                    self.default_sampling_params,
+                    self.override_max_tokens,
                 )
             elif isinstance(context, ParsableContext):
                 (engine_input,) = await self._render_next_turn(
                     context.request,
                     context.response_messages,
                 )
+                if context.response_parser is not None:
+                    prompt_token_ids = self._extract_prompt_components(
+                        engine_input
+                    ).token_ids
+                    if prompt_token_ids is not None:
+                        context.response_parser.set_prompt_token_ids(prompt_token_ids)
 
                 sampling_params.max_tokens = get_max_tokens(
                     max_model_len,
@@ -805,14 +835,19 @@ class OpenAIServingResponses(GenerateBaseServing):
             if final_output.finish_reason == "length":
                 status = "incomplete"
 
-            # TODO: Build final response items from the accumulated streaming
-            # parser results instead of reparsing the complete output.
-            output = self._make_response_output_items(
-                request,
-                final_output,
-                tokenizer,
-                parser=context.response_parser,
+            streamed_items = context.streamed_output_items
+            self._log_final_output(
+                request, final_output, is_streaming=streamed_items is not None
             )
+            if streamed_items is not None:
+                output = streamed_items
+            else:
+                output = self._make_response_output_items(
+                    request,
+                    final_output,
+                    tokenizer,
+                    parser=context.response_parser,
+                )
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -827,18 +862,12 @@ class OpenAIServingResponses(GenerateBaseServing):
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
         num_reasoning_tokens = context.num_reasoning_tokens
-        # For text-based reasoning parsers (e.g., <think>...</think>),
-        # HarmonyContext already counts reasoning tokens via channels.
-        # For Simple/Parsable contexts, derive reasoning_tokens from
-        # accumulated output token IDs using the parser if not already set.
-        if (
-            num_reasoning_tokens == 0
-            and isinstance(context, (SimpleContext, ParsableContext))
-            and context.response_parser is not None
-        ):
-            accumulated = getattr(context, "_accumulated_token_ids", []) or []
+        # HarmonyContext and ParsableContext count reasoning tokens as each
+        # round is appended. SimpleContext is single-round but accumulates
+        # streaming deltas, so count its full output once here.
+        if isinstance(context, SimpleContext) and context.response_parser is not None:
             num_reasoning_tokens = context.response_parser.count_reasoning_tokens(
-                accumulated
+                context._accumulated_token_ids
             )
 
         usage = ResponseUsage(
@@ -960,32 +989,21 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
         return out
 
-    def _create_stream_response_logprobs(
+    def _log_final_output(
         self,
-        token_ids: Sequence[int],
-        logprobs: SampleLogprobs | None,
-        tokenizer: TokenizerLike,
-        top_logprobs: int | None = None,
-    ) -> list[response_text_delta_event.Logprob]:
-        lgs = self._create_response_logprobs(
-            token_ids=token_ids,
-            logprobs=logprobs,
-            tokenizer=tokenizer,
-            top_logprobs=top_logprobs,
-        )
-        return [
-            response_text_delta_event.Logprob(
-                token=lg.token,
-                logprob=lg.logprob,
-                top_logprobs=[
-                    response_text_delta_event.LogprobTopLogprob(
-                        token=tl.token, logprob=tl.logprob
-                    )
-                    for tl in lg.top_logprobs
-                ],
+        request: ResponsesRequest,
+        final_output: CompletionOutput,
+        is_streaming: bool,
+    ) -> None:
+        if self.enable_log_outputs and self.request_logger:
+            self.request_logger.log_outputs(
+                request_id=request.request_id,
+                outputs=final_output.text,
+                output_token_ids=final_output.token_ids,
+                finish_reason=final_output.finish_reason,
+                is_streaming=is_streaming,
+                delta=False,
             )
-            for lg in lgs
-        ]
 
     def _make_response_output_items(
         self,
@@ -994,17 +1012,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         tokenizer: TokenizerLike,
         parser: Parser | None = None,
     ) -> list[ResponseOutputItem]:
-        # Log complete response if output logging is enabled
-        if self.enable_log_outputs and self.request_logger:
-            self.request_logger.log_outputs(
-                request_id=request.request_id,
-                outputs=final_output.text,
-                output_token_ids=final_output.token_ids,
-                finish_reason=final_output.finish_reason,
-                is_streaming=False,
-                delta=False,
-            )
-
         # Compute logprobs if requested
         logprobs = None
         if request.is_include_output_logprobs() and final_output.logprobs:
@@ -1029,7 +1036,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
-                tool_calls=tool_calls,
+                tool_calls=maybe_filter_parallel_tool_calls(tool_calls or [], request),
                 logprobs=logprobs,
                 tools=request.tools,
             )
@@ -1193,16 +1200,16 @@ class OpenAIServingResponses(GenerateBaseServing):
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor(tools=request.tools)
 
-        hide_stream_metadata = not request.include_reasoning and self.parser is not None
+        hide_stream_metadata = (
+            not request.include_reasoning and context.response_parser is not None
+        )
 
-        def _get_logprobs(
-            output: CompletionOutput,
-        ) -> list[response_text_delta_event.Logprob]:
+        def _get_logprobs(output: CompletionOutput) -> list[Logprob]:
             if not request.is_include_output_logprobs():
                 return []
             if hide_stream_metadata:
                 return []
-            return self._create_stream_response_logprobs(
+            return self._create_response_logprobs(
                 token_ids=output.token_ids,
                 logprobs=output.logprobs,
                 tokenizer=tokenizer,
@@ -1232,6 +1239,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             if not delta_message:
                 continue
+            delta_message = maybe_filter_parallel_tool_calls(delta_message, request)
 
             for dm in split_delta(delta_message):
                 target_state, tool_call = processor.resolve_target_state(dm)
@@ -1249,6 +1257,9 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         for event in processor.close_current():
             yield _increment_sequence_number_and_return(event)
+
+        assert isinstance(context, SimpleContext)
+        context.streamed_output_items = processor.output_items
 
     async def _process_harmony_streaming_events(
         self,

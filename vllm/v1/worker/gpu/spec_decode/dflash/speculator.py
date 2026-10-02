@@ -37,12 +37,18 @@ class DFlashSpeculator(DraftModelSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size > 1:
-            vllm_config = copy.copy(vllm_config)
-            vllm_config.parallel_config = replace(
-                parallel_config,
-                prefill_context_parallel_size=1,
-            )
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        vllm_config = copy.copy(vllm_config)
+        vllm_config.parallel_config = replace(
+            parallel_config,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=(
+                parallel_config.decode_context_parallel_size
+                if speculative_config.draft_model_config.use_mla
+                else 1
+            ),
+        )
         super().__init__(vllm_config, device)
 
         self.hidden_states = torch.zeros(
@@ -322,6 +328,11 @@ class DFlashSpeculator(DraftModelSpeculator):
             context_slots,
         )
 
+    def prepare_context_anchor(
+        self, input_batch: InputBatch, num_rejected: torch.Tensor
+    ) -> None:
+        """Publish context features required by a draft's candidate head."""
+
     @torch.inference_mode()
     def propose(
         self,
@@ -369,6 +380,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         else:
             hidden_states = last_hidden_states
         self.hidden_states[:num_target_tokens].copy_(hidden_states[:num_target_tokens])
+        self.prepare_context_anchor(input_batch, num_rejected)
 
         if dummy_run and skip_attn_for_dummy_run:
             # Memory profiling path: block_tables / kv_cache_config are not initialized.
@@ -421,7 +433,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.block_tables.input_block_tables[gid],
                 self.block_tables.kernel_block_sizes[gid],
                 self.block_tables.cp_rank,
-                self.block_tables.cp_size,
+                self.dcp_size,
                 self.block_tables.cp_interleave,
                 self.parallel_drafting_token_id,
                 self.num_query_per_req,

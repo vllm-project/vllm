@@ -9,7 +9,7 @@ import importlib.metadata
 import sys
 from importlib.util import find_spec
 
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_from_args, init_logger
 
 logger = init_logger(__name__)
 
@@ -110,7 +110,9 @@ def main():
             cmds[cmd.name] = cmd
     args = parser.parse_args()
     if args.subparser in cmds:
-        cmds[args.subparser].validate(args)
+        cmd = cmds[args.subparser]
+        configure_logging_from_args(args)
+        cmd.validate(args)
 
     if hasattr(args, "dispatch_function"):
         args.dispatch_function(args)

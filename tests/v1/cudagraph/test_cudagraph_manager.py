@@ -38,7 +38,7 @@ def _reset_graph_pool_id():
 
 def _create_vllm_config() -> MagicMock:
     compilation_config = CompilationConfig(
-        cudagraph_mode="FULL",
+        cudagraph_mode=CUDAGraphMode.FULL,
         cudagraph_capture_sizes=[4],
     )
     compilation_config.max_cudagraph_capture_size = 4
@@ -132,6 +132,7 @@ def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
         pcp_world_size=pcp_world_size,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=False,
         max_num_reqs=num_reqs,
         max_num_tokens=num_tokens,
         block_tables=pcp_block_tables,
@@ -224,7 +225,9 @@ def test_speculator_capture_preserves_decode_query_bounds(
     )
     manager = SpeculatorCudaGraphManager.__new__(SpeculatorCudaGraphManager)
     manager.max_num_reqs = num_reqs
-    manager.dp_size = 1
+    manager.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_size=1)
+    )
     buffers = InputBuffers(num_reqs, num_tokens, torch.device("cpu"))
     block_tables = MagicMock()
     block_tables.cp_size = 1
@@ -262,7 +265,7 @@ def _create_decode_vllm_config(
     use_kda_recoverssm: bool = False,
 ) -> MagicMock:
     compilation_config = CompilationConfig(
-        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         cudagraph_capture_sizes=capture_sizes,
     )
     compilation_config.max_cudagraph_capture_size = capture_sizes[-1]
@@ -294,6 +297,7 @@ def _make_spec_decode_manager(
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
+    varlen_decode: bool = False,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -316,6 +320,7 @@ def _make_spec_decode_manager(
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         decode_query_len=decode_query_len,
+        varlen_decode=varlen_decode,
     )
     manager._graphs_captured = True
     return manager
@@ -371,6 +376,28 @@ def test_mixed_batch_never_selects_a_uniform_decode_graph(monkeypatch):
     assert desc.cg_mode == CUDAGraphMode.PIECEWISE
     assert desc.uniform_token_count is None
     assert desc.num_tokens == 16
+
+
+def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
+    """A varlen decode graph replays any decode batch within its query-length
+    bound. The runner passes no bound for a batch with a prefill, which must not
+    replay one however short the prefill is."""
+    manager = _make_spec_decode_manager(monkeypatch, varlen_decode=True)
+
+    def dispatch(max_query_len):
+        return manager.dispatch(
+            num_reqs=3,
+            num_tokens=6,
+            uniform_token_count=None,
+            num_active_loras=0,
+            max_query_len=max_query_len,
+        )
+
+    desc = dispatch(_DECODE_QUERY_LEN)
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.max_query_len == _DECODE_QUERY_LEN
+    assert dispatch(None).cg_mode == CUDAGraphMode.PIECEWISE
+    assert dispatch(_DECODE_QUERY_LEN + 1).cg_mode == CUDAGraphMode.PIECEWISE
 
 
 def test_mixed_batch_at_decode_only_token_count_still_gets_a_graph(monkeypatch):
@@ -447,6 +474,7 @@ def test_dynamic_spec_decode_shared_token_count_stays_reachable(monkeypatch):
     assert any(len(descs) > 1 for descs in by_num_tokens.values())
 
     for desc in full_descs:
+        assert desc.num_reqs is not None
         assert desc in manager._candidates[(desc.num_tokens, 0)], desc
         assert (
             manager.dispatch(

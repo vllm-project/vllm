@@ -631,6 +631,8 @@ class SpeculativeConfig:
             "dspark",
         )
         factors.append(uses_aux_hidden_states)
+        if self.method == "dspark":
+            factors.append(self.enable_adaptive_verification)
 
         if self.draft_model_config is not None:
             factors.append(self.draft_model_config.compute_hash())
@@ -1057,7 +1059,7 @@ class SpeculativeConfig:
             )
         if hf_config.model_type == "glm5_next":
             hf_config.model_type = "glm5_next_mtp"
-            n_predict = hf_config.num_nextn_predict_layers
+            n_predict = hf_config.get_text_config().num_nextn_predict_layers
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Glm5NextMTPModel"]}
             )

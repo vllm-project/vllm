@@ -3,6 +3,7 @@
 
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +16,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.cache import CacheDType
 from vllm.model_executor.models.config import (
     DiffusionGemmaModelForBlockDiffusionConfig,
     Gemma4Config,
@@ -31,7 +33,7 @@ else:
 if current_platform.is_rocm():
     from vllm.platforms.rocm import RocmPlatform
 else:
-    RocmPlatform = None
+    RocmPlatform = None  # type: ignore[misc]  # Unavailable platform import.
 
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
@@ -588,7 +590,7 @@ def test_cuda_auto_selects_flashinfer_for_gemma4_without_fa4(
     reason="Attention backend FA3 is not supported on ROCm. This test can't succeed.",
 )
 def test_per_head_quant_scales_backend_selection(
-    backend_name: str, flash_attn_version: int | None, should_succeed: bool
+    backend_name: str, flash_attn_version: Literal[2, 3, 4] | None, should_succeed: bool
 ):
     """Test backend selection when use_per_head_quant_scales=True."""
     # Clear cache to ensure fresh backend selection
@@ -741,7 +743,7 @@ def test_non_causal_autoselect_backend():
         "int8_per_token_head",
     ],
 )
-def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: str):
+def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: CacheDType):
     """FlashAttentionBackend must not claim support for kv_cache dtypes
     that it cannot handle."""
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -751,7 +753,7 @@ def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: str):
 
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
 def test_flash_attn_accepts_handled_fp8_variants(
-    kv_cache_dtype: str, monkeypatch: pytest.MonkeyPatch
+    kv_cache_dtype: CacheDType, monkeypatch: pytest.MonkeyPatch
 ):
     """FlashAttentionBackend must accept the two fp8 dtypes it can actually
     handle: 'fp8' (alias for fp8_e4m3fn) and 'fp8_e4m3'."""
@@ -1058,7 +1060,9 @@ def test_rswa_selection_does_not_reuse_causal_result(blackwell_selection):
     config = EngineArgs(
         model="google/gemma-4-31B-it",
         dtype="bfloat16",
-        attention_config={"backend": "TRITON_FLASHINFER"},
+        attention_config=AttentionConfig(
+            backend=AttentionBackendEnum.TRITON_FLASHINFER
+        ),
     ).create_engine_config()
     with set_current_vllm_config(config):
         assert (
