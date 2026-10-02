@@ -288,26 +288,6 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
     return chunkk, fits
 
 
-def use_aiter_decode_gemm(n, m, k, dtype, bias):
-    """Return True if aiter has a tuned decode-GEMM row for this exact shape.
-
-    Only asked under CUDA-graph capture: aiter's dispatch costs more CPU per
-    call than the skinny kernels, which eager decode cannot afford. The tuned
-    config is keyed by gfx and cu_num, so no architecture check is needed.
-    """
-    if not rocm_aiter_ops.is_linear_enabled():
-        return False
-    if dtype not in [torch.float16, torch.bfloat16]:
-        return False
-    try:
-        from aiter.tuned_gemm import get_GEMM_A16W16_config, is_flydsl_decode_config
-
-        cfg = get_GEMM_A16W16_config(n, m, k, bias is not None, str(dtype), str(dtype))
-    except ImportError:  # aiter absent, or too old to have decode rows
-        return False
-    return is_flydsl_decode_config(cfg)
-
-
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -356,7 +336,7 @@ def rocm_unquantized_gemm_impl(
     if (
         torch.cuda.is_current_stream_capturing()
         and skinny_operands_compatible
-        and use_aiter_decode_gemm(n, m, k, x.dtype, bias)
+        and rocm_aiter_ops.has_tuned_decode_gemm(n, m, k, x.dtype, bias is not None)
     ):
         from aiter.tuned_gemm import tgemm
 

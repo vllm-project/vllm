@@ -46,11 +46,11 @@ class AiterBranchOff:
     """Disable only the aiter decode branch; the rest of the ladder is unchanged."""
 
     def __enter__(self):
-        self._orig = U.use_aiter_decode_gemm
-        U.use_aiter_decode_gemm = lambda *args, **kwargs: False
+        self._orig = U.rocm_aiter_ops.has_tuned_decode_gemm
+        U.rocm_aiter_ops.has_tuned_decode_gemm = lambda *args, **kwargs: False
 
     def __exit__(self, *exc):
-        U.use_aiter_decode_gemm = self._orig
+        U.rocm_aiter_ops.has_tuned_decode_gemm = self._orig
 
 
 def kernel_that_ran(fn) -> str:
