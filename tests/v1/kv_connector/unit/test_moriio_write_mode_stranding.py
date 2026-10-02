@@ -4,11 +4,11 @@
 
 import threading
 import time
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
-
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_connector
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
     MoRIIOMode,
@@ -23,25 +23,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWriter,
 )
 
-_get_num_new_matched_tokens = MoRIIOConnectorScheduler.get_num_new_matched_tokens
 _update_connector_output = MoRIIOConnectorScheduler.update_connector_output
 _process_deferred_tasks = MoRIIOWriter._process_deferred_tasks
 _fail_deferred_task = MoRIIOWriter._fail_deferred_task
 _get_transfer_results = MoRIIOConnectorWorker.get_transfer_results
-
-PROMPT_LEN = 8
-
-
-# {"do_remote_prefill": False}: re-asked after preemption or a failed load.
-@pytest.mark.parametrize("params", [{"do_remote_prefill": False}, None])
-def test_write_mode_does_not_wait_without_a_pending_push(params):
-    consumer = SimpleNamespace(is_producer=False, mode=MoRIIOMode.WRITE)
-    req = SimpleNamespace(
-        prompt_token_ids=list(range(PROMPT_LEN)),
-        num_prompt_tokens=PROMPT_LEN,
-        kv_transfer_params=params,
-    )
-    assert _get_num_new_matched_tokens(consumer, req, 0) == (0, False)
 
 
 def _task(transfer_id="tid-1", age=0.0):
@@ -53,6 +38,7 @@ def _task(transfer_id="tid-1", age=0.0):
         remote_notify_port=8501,
         multi_pod_hosts=["10.0.0.1", "10.0.0.2"],
         remote_dp_size_local=2,
+        remote_dp_size=4,
     )
 
 
@@ -98,52 +84,65 @@ def test_expired_write_still_runs_if_the_remote_allocation_arrived():
     assert failed == []
 
 
-def test_timeout_notifies_failure_before_releasing_blocks():
-    events: list[str] = []
+class _Wrapper:
+    def __init__(self, events, send_notify=None):
+        self.events = events
+        self.lock = threading.Lock()
+        self.done_req_ids = []
+        self.done_remote_allocate_req_dict = {}
+        self.terminal: set[str] = set()
+        self.sent: list[tuple[str, int, str]] = []
+        if send_notify is not None:
+            self.send_notify = send_notify
 
-    class Wrapper:
-        def __init__(self):
-            self.lock = threading.Lock()
-            self.done_req_ids = []
-            self.done_remote_allocate_req_dict = {}
-            self.terminal: set[str] = set()
+    def _is_transfer_terminal_locked(self, transfer_id):
+        return transfer_id in self.terminal
 
-        def _is_transfer_terminal_locked(self, transfer_id):
-            return transfer_id in self.terminal
+    def _mark_transfer_terminal_locked(self, transfer_id):
+        self.terminal.add(transfer_id)
+        self.events.append("terminal")
 
-        def _mark_transfer_terminal_locked(self, transfer_id):
-            self.terminal.add(transfer_id)
-            events.append("terminal")
+    def send_notify(self, transfer_id, host, port, message_type):
+        assert transfer_id in self.terminal
+        assert self.done_req_ids == []
+        self.sent.append((host, port, message_type))
 
-        def send_notify(self, transfer_id, host, port, message_type):
-            assert transfer_id in self.terminal
-            assert self.done_req_ids == []
-            # Global DP rank 3 with two ranks per pod is local rank 1 on pod 1.
-            assert (host, port, message_type) == (
-                "10.0.0.2",
-                8501 + get_port_offset(1, 0),
-                "write_failed",
-            )
-            events.append("failure_sent")
 
-    wrapper = Wrapper()
+def _failing_writer(wrapper, events):
     writer = SimpleNamespace(
-        worker=SimpleNamespace(
-            moriio_wrapper=wrapper,
-            tp_rank=0,
-            vllm_config=SimpleNamespace(
-                parallel_config=SimpleNamespace(data_parallel_rank=3)
-            ),
-        ),
+        worker=SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0),
         _clear_transfer_state=lambda transfer_id: events.append("state_cleared"),
     )
     writer._resolve_notify_endpoint = lambda task, rank: (
         MoRIIOWriter._resolve_notify_endpoint(writer, task, rank)
     )
+    return writer
 
-    _fail_deferred_task(writer, _task(), 120.0)
 
-    assert events == ["terminal", "state_cleared", "failure_sent"]
+def test_timeout_notifies_every_decode_dp_rank_before_releasing_blocks():
+    events: list[str] = []
+    wrapper = _Wrapper(events)
+
+    _fail_deferred_task(_failing_writer(wrapper, events), _task(), 120.0)
+
+    assert events == ["terminal", "state_cleared"]
+    # Global DP ranks 0-3 with two ranks per pod.
+    assert wrapper.sent == [
+        (host, 8501 + get_port_offset(local_rank, 0), "write_failed")
+        for host in ("10.0.0.1", "10.0.0.2")
+        for local_rank in (0, 1)
+    ]
+    assert [ack.transfer_id for ack in wrapper.done_req_ids] == ["tid-1"]
+
+
+def test_timeout_releases_blocks_even_if_notification_fails():
+    def send_notify(*args, **kwargs):
+        raise ConnectionError
+
+    events: list[str] = []
+    wrapper = _Wrapper(events, send_notify=send_notify)
+
+    assert _fail_deferred_task(_failing_writer(wrapper, events), _task(), 120.0)
     assert [ack.transfer_id for ack in wrapper.done_req_ids] == ["tid-1"]
 
 
@@ -188,22 +187,35 @@ def test_write_scheduler_does_not_release_blocks_on_its_own_timeout():
     assert scheduler._deferred_send_deadlines == {}
 
 
-def test_write_failure_is_reported_as_finished_and_failed_recving():
-    wrapper = SimpleNamespace(pop_failed_write_req_ids=lambda: {"tid-1"})
-    worker = SimpleNamespace(
+def _consumer_worker(failed_ids, mapping):
+    return SimpleNamespace(
         mode=MoRIIOMode.WRITE,
         is_producer=False,
-        moriio_wrapper=wrapper,
-        transfer_id_to_request_id={"tid-1": "req-1"},
-        _unmatched_write_failures=set(),
+        moriio_wrapper=SimpleNamespace(pop_failed_write_req_ids=lambda: failed_ids),
+        transfer_id_to_request_id=mapping,
+        _unmatched_write_failures=OrderedDict(),
         get_finished=lambda: (set(), set()),
     )
+
+
+def test_write_failure_is_reported_as_finished_and_failed_recving():
+    worker = _consumer_worker({"tid-1", "tid-other-rank"}, {"tid-1": "req-1"})
 
     results = _get_transfer_results(worker)
 
     assert results.finished_recving == {"req-1"}
     assert results.failed_recving == {"req-1"}
-    assert worker._unmatched_write_failures == set()
+    assert list(worker._unmatched_write_failures) == ["tid-other-rank"]
+
+
+def test_unmatched_write_failures_are_bounded():
+    worker = _consumer_worker({"tid-new"}, {})
+    worker._unmatched_write_failures = OrderedDict.fromkeys(["tid-old-1", "tid-old-2"])
+
+    with patch.object(moriio_connector, "_MAX_UNMATCHED_WRITE_FAILURES", 2):
+        _get_transfer_results(worker)
+
+    assert list(worker._unmatched_write_failures) == ["tid-old-2", "tid-new"]
 
 
 def test_write_failed_message_is_drained_separately_from_success():

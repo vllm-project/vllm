@@ -259,32 +259,32 @@ class MoRIIOWriter:
             wrapper._mark_transfer_terminal_locked(task.transfer_id)
         self._clear_transfer_state(task.transfer_id)
 
-        # No remote allocation arrived, so there is no decode_dp_rank to read.
-        # WRITE routing pins both legs to the same global DP rank.
-        decode_dp_rank = self.worker.vllm_config.parallel_config.data_parallel_rank
-        remote_ip, remote_port = self._resolve_notify_endpoint(task, decode_dp_rank)
         logger.error(
             "Deferred write task for request %s timed out after %.1fs waiting "
             "for remote blocks",
             task.request_id,
             age,
         )
-        try:
-            wrapper.send_notify(
-                task.transfer_id,
-                remote_ip,
-                remote_port,
-                message_type="write_failed",
-            )
-        except Exception:
-            logger.exception(
-                "Failed to notify consumer that transfer %s timed out",
-                task.transfer_id,
-            )
-            return True
+        # No remote allocation arrived, so the decode DP rank that owns the
+        # request is unknown. Tell every rank; the others drop it.
+        for decode_dp_rank in range(max(task.remote_dp_size, 1)):
+            remote_ip, remote_port = self._resolve_notify_endpoint(task, decode_dp_rank)
+            try:
+                wrapper.send_notify(
+                    task.transfer_id,
+                    remote_ip,
+                    remote_port,
+                    message_type="write_failed",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to notify decode DP rank %d that transfer %s timed out",
+                    decode_dp_rank,
+                    task.transfer_id,
+                )
 
-        # Release the producer blocks only after the transfer is terminal and
-        # the consumer failure has been sent.
+        # The transfer is terminal, so no write can target these blocks anymore
+        # and they are safe to release even if a notification failed.
         with wrapper.lock:
             wrapper.done_req_ids.append(MoRIIOTransferAck(task.transfer_id))
         return True

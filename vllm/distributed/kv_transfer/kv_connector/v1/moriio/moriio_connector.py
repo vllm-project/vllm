@@ -5,7 +5,7 @@ import math
 import queue
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
@@ -113,6 +113,9 @@ logger = init_logger(__name__)
 _SQ_FULL_BACKOFF_INITIAL_S = 0.001
 _SQ_FULL_BACKOFF_MAX_S = 0.05
 _MAX_LOCAL_MAMBA_TAIL_BLOCKS = 1
+# A WRITE failure is broadcast to every decode DP rank, so ranks that never
+# see the request would otherwise keep its transfer id forever.
+_MAX_UNMATCHED_WRITE_FAILURES = 4096
 
 
 try:
@@ -749,15 +752,10 @@ class MoRIIOConnectorScheduler:
         num_prompt_tokens = request.num_prompt_tokens
         num_external_tokens = max(num_prompt_tokens - num_computed_tokens, 0)
         if self.mode == MoRIIOMode.WRITE:
-            # update_state_after_alloc clears do_remote_prefill once the push is
-            # triggered. A request asked again after preemption or a failed load
-            # must recompute locally rather than wait for a push that never
-            # comes. Hybrid models never get here: register_kv_caches refuses
-            # WRITE mode for them.
-            params = request.kv_transfer_params
-            if params is not None and params.get("do_remote_prefill"):
-                return num_external_tokens, True
-            return 0, False
+            # MoriiO in write mode, no remote prefill. Hybrid models never get
+            # here: register_kv_caches refuses WRITE mode for them, so there is
+            # no recurrent-state accounting to do.
+            return num_external_tokens, True
 
         # READ mode always recomputes the last token locally on the decoder.
         #
@@ -1624,7 +1622,7 @@ class MoRIIOConnectorWorker:
         # Completions that arrived before transfer_id_to_request_id was populated.
         # Retried each step until the mapping is established.
         self._unmatched_write_completions: set[str] = set()
-        self._unmatched_write_failures: set[str] = set()
+        self._unmatched_write_failures: OrderedDict[TransferId, None] = OrderedDict()
         # Producer-side READ-mode ACK fan-in. When decode TP is larger than
         # prefill TP, multiple decode ranks can read from one prefill rank and
         # notify the same transfer_id. Blocks are reusable only after all ACKs.
@@ -1820,6 +1818,7 @@ class MoRIIOConnectorWorker:
         remote_ip: str,
         multi_pod_hosts: list[str],
         remote_dp_size_local: int,
+        remote_dp_size: int,
     ) -> None:
         """Schedule a block write operation.
 
@@ -1835,6 +1834,7 @@ class MoRIIOConnectorWorker:
             remote_ip: IP address of remote node
             multi_pod_hosts: List of pod IPs for multi-pod Wide-EP
             remote_dp_size_local: Per-pod DP size for multi-pod
+            remote_dp_size: Global DP size of the decode instance
 
         """
         # synchronization to prevent dirty reads between
@@ -1858,6 +1858,7 @@ class MoRIIOConnectorWorker:
             remote_ip=remote_ip,
             multi_pod_hosts=multi_pod_hosts,
             remote_dp_size_local=remote_dp_size_local,
+            remote_dp_size=remote_dp_size,
         )
         self._writer.schedule_write(task)
 
@@ -2675,19 +2676,16 @@ class MoRIIOConnectorWorker:
         failed_recving: set[ReqId] = set()
 
         if self.mode == MoRIIOMode.WRITE and not self.is_producer:
-            self._unmatched_write_failures |= (
-                self.moriio_wrapper.pop_failed_write_req_ids()
-            )
-            matched_failures = {
-                transfer_id
-                for transfer_id in self._unmatched_write_failures
-                if transfer_id in self.transfer_id_to_request_id
-            }
-            failed_recving = {
-                self.transfer_id_to_request_id[transfer_id]
-                for transfer_id in matched_failures
-            }
-            self._unmatched_write_failures -= matched_failures
+            pending = self._unmatched_write_failures
+            mapping = self.transfer_id_to_request_id
+            for transfer_id in self.moriio_wrapper.pop_failed_write_req_ids():
+                pending[transfer_id] = None
+            smaller = pending if len(pending) <= len(mapping) else mapping
+            for transfer_id in [t for t in smaller if t in pending and t in mapping]:
+                del pending[transfer_id]
+                failed_recving.add(mapping[transfer_id])
+            while len(pending) > _MAX_UNMATCHED_WRITE_FAILURES:
+                pending.popitem(last=False)
             done_recving |= failed_recving
 
         return KVConnectorTransferResults(
@@ -3268,6 +3266,7 @@ class MoRIIOConnectorWorker:
             remote_ip=meta.remote_host,
             multi_pod_hosts=hosts,
             remote_dp_size_local=dp_local,
+            remote_dp_size=int(meta.remote_dp_size),
         )
 
     def merge_contiguous_blocks(

@@ -71,6 +71,7 @@ class WriteTask:
     remote_ip: str
     multi_pod_hosts: list[str] = field(default_factory=list)
     remote_dp_size_local: int = 0
+    remote_dp_size: int = 1
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
 
