@@ -2829,7 +2829,8 @@ class NixlBaseConnectorWorker:
                         )
                     elif self.enable_permute_local_kv:
                         kv_postprocess_layout_on_receive(cache, indices)
-                    else:
+                    elif KVCacheLayout[self.kv_cache_layout].is_block_contiguous:
+                        # Token-major blocks get the sub-blocks in token order.
                         kv_postprocess_blksize_on_receive(
                             cache, indices, block_size_ratio
                         )
