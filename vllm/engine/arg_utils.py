@@ -80,6 +80,7 @@ from vllm.config.cache import (
 )
 from vllm.config.device import Device
 from vllm.config.kernel import (
+    PASSTHROUGH_ALL2ALL_BACKEND,
     IrOpPriorityConfig,
     LinearBackend,
     MoEBackend,
@@ -723,6 +724,9 @@ class EngineArgs:
     kv_cache_metrics_sample: float = get_field(
         ObservabilityConfig, "kv_cache_metrics_sample"
     )
+    custom_histogram_buckets: dict[str, list[float]] | None = (
+        ObservabilityConfig.custom_histogram_buckets
+    )
     cudagraph_metrics: bool = ObservabilityConfig.cudagraph_metrics
     enable_layerwise_nvtx_tracing: bool = (
         ObservabilityConfig.enable_layerwise_nvtx_tracing
@@ -1101,6 +1105,10 @@ class EngineArgs:
 
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
+        # Bound from --moe-backend in KernelConfig.set_platform_defaults().
+        parallel_kwargs["all2all_backend"]["choices"].remove(
+            PASSTHROUGH_ALL2ALL_BACKEND
+        )
         parallel_group = parser.add_argument_group(
             title="ParallelConfig",
             description=ParallelConfig.__doc__,
@@ -1634,6 +1642,10 @@ class EngineArgs:
             **observability_kwargs["kv_cache_metrics_sample"],
         )
         observability_group.add_argument(
+            "--custom-histogram-buckets",
+            **observability_kwargs["custom_histogram_buckets"],
+        )
+        observability_group.add_argument(
             "--cudagraph-metrics",
             **observability_kwargs["cudagraph_metrics"],
         )
@@ -2126,6 +2138,7 @@ class EngineArgs:
             per_request_spec_decode_metrics=self.per_request_spec_decode_metrics,
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
+            custom_histogram_buckets=self.custom_histogram_buckets,
             cudagraph_metrics=self.cudagraph_metrics,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
             enable_mfu_metrics=self.enable_mfu_metrics,
