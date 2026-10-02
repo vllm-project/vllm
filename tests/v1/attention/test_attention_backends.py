@@ -1531,120 +1531,68 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
-def test_flashinfer_sm120_nvfp4_xqa_uses_model_dtype_for_decode(monkeypatch):
-    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
-
-    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
-    builder.cache_dtype = "nvfp4"
-    builder.model_config = SimpleNamespace(dtype=torch.bfloat16)
-    builder.vllm_config = SimpleNamespace(
-        attention_config=SimpleNamespace(disable_flashinfer_q_quantization=False)
-    )
-    monkeypatch.setattr(
-        flashinfer_backend.current_platform,
-        "is_device_capability",
-        lambda capability: False,
-    )
-    monkeypatch.setattr(
-        flashinfer_backend.current_platform,
-        "is_device_capability_family",
-        lambda capability: capability == 120,
-    )
-    monkeypatch.setattr(flashinfer_backend, "force_use_trtllm_attention", lambda: None)
-
-    assert builder.get_q_data_type(is_prefill=False) == torch.bfloat16
-    assert builder.get_q_data_type(is_prefill=True) == flashinfer_backend.FP8_DTYPE
-
-
-@pytest.mark.skipif(
-    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
-    reason="FlashInfer is not available.",
-)
-def test_flashinfer_xqa_isolated_stream_fork_and_join(monkeypatch):
-    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
-
-    events: list[tuple[str, ...]] = []
-
-    class FakeStream:
-        def __init__(self, name):
-            self.name = name
-
-        def wait_stream(self, stream):
-            events.append((self.name, "wait", stream.name))
-
-    class FakeStreamContext:
-        def __enter__(self):
-            events.append(("side", "enter"))
-
-        def __exit__(self, *_):
-            events.append(("side", "exit"))
-
-    current = FakeStream("current")
-    side = FakeStream("side")
-    monkeypatch.setattr(
-        flashinfer_backend.envs,
-        "VLLM_FLASHINFER_XQA_USE_ISOLATED_STREAM",
-        True,
-    )
-    monkeypatch.setattr(
-        flashinfer_backend.torch.cuda, "current_stream", lambda: current
-    )
-    monkeypatch.setattr(
-        flashinfer_backend.torch.cuda, "stream", lambda stream: FakeStreamContext()
-    )
-    monkeypatch.setattr(flashinfer_backend, "_get_xqa_isolated_stream", lambda: side)
-
-    with flashinfer_backend._xqa_isolated_stream_scope(enabled=True):
-        events.append(("body",))
-
-    assert events == [
-        ("side", "wait", "current"),
-        ("side", "enter"),
-        ("body",),
-        ("side", "exit"),
-        ("current", "wait", "side"),
-    ]
-
-
-@pytest.mark.skipif(
-    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
-    reason="FlashInfer is not available.",
-)
-@pytest.mark.parametrize(("configured", "enabled"), [(False, True), (True, False)])
-def test_flashinfer_xqa_isolated_stream_disabled_is_noop(
-    monkeypatch, configured, enabled
+@pytest.mark.parametrize("head_size,dcp_size", [(256, 1), (512, 1), (256, 2)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_flashinfer_nvfp4_decode_dtype_after_fallback(
+    monkeypatch, head_size, dcp_size, dtype
 ):
-    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
-
-    monkeypatch.setattr(
-        flashinfer_backend.envs,
-        "VLLM_FLASHINFER_XQA_USE_ISOLATED_STREAM",
-        configured,
+    """Only a resolved XQA route uses model-dtype NVFP4 queries."""
+    from vllm.config import (
+        AttentionConfig,
+        CacheConfig,
+        CompilationConfig,
+        CUDAGraphMode,
     )
-    monkeypatch.setattr(
-        flashinfer_backend,
-        "_get_xqa_isolated_stream",
-        lambda: pytest.fail("isolated stream must not be created"),
+    from vllm.v1.attention.backends import flashinfer as fi
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+    from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=dtype, max_model_len=64, get_num_attention_heads=lambda _: 24
+        ),
+        cache_config=CacheConfig(cache_dtype="nvfp4"),
+        attention_config=AttentionConfig(),
+        compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=2),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp_size,
+            cp_kv_cache_interleave_size=1,
+            dcp_comm_backend="ag_rs",
+        ),
+        speculative_config=None,
+        num_speculative_tokens=0,
+        use_v2_model_runner=False,
     )
-
-    with flashinfer_backend._xqa_isolated_stream_scope(enabled):
-        pass
-
-
-@pytest.mark.skipif(
-    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
-    reason="FlashInfer is not available.",
-)
-def test_flashinfer_xqa_isolated_stream_requires_eager_warmup(monkeypatch):
-    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
-
-    monkeypatch.setattr(flashinfer_backend, "_xqa_isolated_stream", None)
-    monkeypatch.setattr(
-        flashinfer_backend.torch.cuda, "is_current_stream_capturing", lambda: True
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=head_size,
+        dtype=dtype,
+        kv_quant_mode=get_kv_quant_mode("nvfp4"),
     )
-
-    with pytest.raises(RuntimeError, match="eager XQA warmup"):
-        flashinfer_backend._get_xqa_isolated_stream()
+    monkeypatch.setattr(fi, "force_use_trtllm_attention", lambda: None)
+    monkeypatch.setattr(fi, "get_num_attention_heads_from_layers", lambda *_: 24)
+    monkeypatch.setattr(fi.current_platform, "is_device_capability", lambda _: False)
+    monkeypatch.setattr(
+        fi.current_platform, "is_device_capability_family", lambda cap: cap == 120
+    )
+    # Exercise route/dtype selection independently of the native NVFP4
+    # prefill capability gate, which is a prerequisite for SM12x serving.
+    monkeypatch.setattr(fi, "supports_trtllm_attention", lambda **_: True)
+    monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda *_, **__: True)
+    monkeypatch.setattr(fi, "get_dcp_world_size_and_rank", lambda _: (dcp_size, 0))
+    monkeypatch.setattr(
+        fi,
+        "get_per_layer_parameters",
+        lambda *_: {"layer": PerLayerParameters(-1, 0.0, head_size**-0.5)},
+    )
+    builder = fi.FlashInferMetadataBuilder(spec, ["layer"], config, torch.device("cpu"))
+    use_xqa = head_size <= 256 and dcp_size == 1
+    assert builder.use_xqa == use_xqa
+    assert builder.use_trtllm_decode_attention == use_xqa
+    assert builder.q_data_type_decode == (dtype if use_xqa else fi.FP8_DTYPE)
+    assert builder.q_data_type_prefill == fi.FP8_DTYPE
 
 
 @pytest.mark.skipif(
