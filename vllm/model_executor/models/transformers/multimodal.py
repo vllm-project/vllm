@@ -18,7 +18,7 @@
 
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
@@ -69,12 +69,14 @@ _MODALITY_SIZE_KEYS = {
     "image": "num_image_patches",
     "video": "num_video_patches",
 }
-# NOTE: Profiling cap as in lava_onevision._MAX_FRAMES_PER_VIDEO
+# NOTE: Profiling cap as in llava_onevision._MAX_FRAMES_PER_VIDEO
 # past which a pixel budget only shrinks the frames, so Qwen3-VL's most is
 # 12168 tokens at 16 frames and 9600 at its `max_frames` of 768
 _MAX_FRAMES_PER_VIDEO = 16
-# Tiny frames trip processors' channel-axis inference
-_MIN_DUMMY_FRAME_SIDE = 224
+# Arbitrary large size, bounded only by the processor's own resizing
+_MAX_DUMMY_SIDE = 10_000
+# Tiny inputs trip processors' channel-axis inference
+_MIN_DUMMY_SIDE = 224
 
 
 def _get_embed_token_id(replacement_ids: torch.Tensor) -> int:
@@ -110,14 +112,12 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def _is_video_model(self) -> bool:
         if not hasattr(self.get_hf_processor(), "video_processor"):
             return False
-        width, height = self.get_image_size_with_most_features()
         num_frames = self._get_min_video_frames()
+        side = _MIN_DUMMY_SIDE
         # TODO: Drop the except branch once every video processor can count, see
         # https://github.com/huggingface/transformers/issues/43329
         try:
-            mm_tokens = self._get_num_mm_tokens(
-                video_sizes=([num_frames, height, width],)
-            )
+            mm_tokens = self._get_num_mm_tokens(video_sizes=([num_frames, side, side],))
         except AttributeError:
             logger.info_once(
                 "%s cannot count video tokens yet, so the Transformers modeling "
@@ -180,8 +180,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         if "image" in modalities:
             max_tokens["image"] = self.get_max_image_tokens()
         if "video" in modalities:
-            num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
-            max_tokens["video"] = self.get_num_video_tokens(num_frames)
+            max_tokens["video"] = self.get_max_video_tokens(seq_len, mm_counts)
         return max_tokens
 
     def get_max_audio_tokens(self) -> int:
@@ -207,27 +206,35 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         size = self.get_image_size_with_most_features()
         return self._get_num_image_tokens(size)
 
+    def get_max_video_tokens(self, seq_len: int, mm_counts: Mapping[str, int]) -> int:
+        num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+        return self._get_max_video_tokens_for_frames(num_frames)
+
+    def _get_max_video_tokens_for_frames(self, num_frames: int) -> int:
+        size = self.get_video_size_with_most_features(num_frames)
+        return self._get_num_video_tokens(num_frames, size)
+
     def _get_num_image_tokens(self, size: ImageSize) -> int:
         mm_tokens = self._get_num_mm_tokens(image_sizes=([size.height, size.width],))
         return mm_tokens["num_image_tokens"][0]
+
+    def _get_num_video_tokens(self, num_frames: int, size: ImageSize) -> int:
+        video_sizes = ([num_frames, size.height, size.width],)
+        mm_tokens = self._get_num_mm_tokens(video_sizes=video_sizes)
+        return mm_tokens["num_video_tokens"][0]
 
     def _get_size_candidates(
         self, sub_processor: Any, divisors: tuple[int, ...]
     ) -> list[ImageSize]:
         """Candidate sizes read off a sub-processor's `size`.
 
-        `size` bounds the resized output, not the token count, because a tiling
-        processor applies it per tile and emits more tiles for a larger input.
-        The caller picks between the candidates by token count rather than
-        trusting any one of them.
-
         The keys are one of `VALID_SIZE_DICT_KEYS`, so the bound is either exact
-        or an area budget, which `divisors` splits over its items.
+        or an area budget, which `divisors` splits over its items. `shortest_edge`
+        bounds only the small side, so it yields no candidate.
 
-        `shortest_edge` bounds only the small side, so it is no candidate at all.
-        `longest_edge` is read as the area budget Qwen and GLM use it for, so a
-        processor using it as an edge length (SmolVLM) yields a candidate far too
-        small to win, leaving the caller on its own large fallback size.
+        `longest_edge` is read as the area budget Qwen and GLM use it for. A
+        processor using it as an edge length (SmolVLM) yields a tiny candidate,
+        which is only chosen if it ties on tokens, so it is still correct.
         """
         size = getattr(sub_processor, "size", None) or {}
         height = size.get("height", size.get("max_height"))
@@ -241,40 +248,50 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             ]
         return []
 
-    def _get_num_video_tokens(self, num_frames: int, size: ImageSize) -> int:
-        mm_tokens = self._get_num_mm_tokens(
-            video_sizes=([num_frames, size.height, size.width],)
-        )
-        return mm_tokens["num_video_tokens"][0]
+    def _get_size_with_most_tokens(
+        self, candidates: list[ImageSize], count: Callable[[ImageSize], int]
+    ) -> ImageSize:
+        """Smallest size found that yields the most tokens.
 
-    def get_num_video_tokens(self, num_frames: int) -> int:
-        size = self.get_video_size_with_most_features(num_frames)
-        return self._get_num_video_tokens(num_frames, size)
+        `size` bounds the resized output, not the token count, so the candidates
+        are compared by token count against an arbitrary large fallback, which
+        tiling processors need. The fallback goes last so a candidate wins a tie.
+        Resize rounding can give a large input fewer tokens (Qwen2.5-VL), so the
+        candidates matter for the count, not only for memory.
+
+        The winner is then halved while the count holds, so processors with no
+        usable bound aren't profiled on huge dummy inputs.
+        """
+        sizes = [*candidates, ImageSize(width=_MAX_DUMMY_SIDE, height=_MAX_DUMMY_SIDE)]
+        num_tokens = [count(size) for size in sizes]
+        most_tokens = max(num_tokens)
+        size = sizes[num_tokens.index(most_tokens)]
+
+        while min(size.width, size.height) // 2 >= _MIN_DUMMY_SIDE:
+            smaller = ImageSize(width=size.width // 2, height=size.height // 2)
+            if count(smaller) < most_tokens:
+                break
+            size = smaller
+        return size
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        return self._get_size_with_most_tokens(
+            self._get_size_candidates(self.get_hf_processor().image_processor, (1,)),
+            self._get_num_image_tokens,
+        )
 
     def get_video_size_with_most_features(self, num_frames: int) -> ImageSize:
         """Per-frame size that yields the most video tokens.
 
-        It is bound by the video processor's `size`, whose budget can
-        contain the temporal compression factor, so the frames are also
-        tried against the temporal patches they group into.
+        The video processor's `size` budget may cover one frame, every frame or
+        every temporal patch, so all three splits are tried.
         """
         video_processor = self.get_hf_processor().video_processor
         grid_t = max(num_frames // self._get_min_video_frames(), 1)
-        sizes = self._get_size_candidates(video_processor, (num_frames, grid_t, 1))
-        sizes.append(self.get_image_size_with_most_features())
-
-        num_tokens = [self._get_num_video_tokens(num_frames, size) for size in sizes]
-        most_tokens = max(num_tokens)
-        size = sizes[num_tokens.index(most_tokens)]
-
-        # Shrink while the count holds, so a processor whose `size` names no
-        # bound (e.g. only `shortest_edge`) isn't profiled on huge dummy frames
-        while min(size.width, size.height) // 2 >= _MIN_DUMMY_FRAME_SIDE:
-            smaller = ImageSize(width=size.width // 2, height=size.height // 2)
-            if self._get_num_video_tokens(num_frames, smaller) < most_tokens:
-                break
-            size = smaller
-        return size
+        return self._get_size_with_most_tokens(
+            self._get_size_candidates(video_processor, (num_frames, grid_t, 1)),
+            lambda size: self._get_num_video_tokens(num_frames, size),
+        )
 
     def get_num_frames_with_most_features(
         self, seq_len: int, mm_counts: Mapping[str, int]
@@ -284,25 +301,11 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         num_frames = step
         while (
             num_frames + step <= _MAX_FRAMES_PER_VIDEO
-            and self.get_num_video_tokens(num_frames + step) * max_videos <= seq_len
+            and self._get_max_video_tokens_for_frames(num_frames + step) * max_videos
+            <= seq_len
         ):
             num_frames += step
         return num_frames
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        """Image size that yields the most image tokens.
-
-        It is bound by the image processor's `size`, but processors which
-        tile images or skip resizing produce more than `size` says, so the
-        size is picked by the token count instead.
-        """
-        image_processor = getattr(self.get_hf_processor(), "image_processor", None)
-        sizes = self._get_size_candidates(image_processor, (1,))
-        # Arbitrary large fallback, last so a processor candidate wins any tie
-        sizes.append(ImageSize(width=10_000, height=10_000))
-
-        num_tokens = [self._get_num_image_tokens(size) for size in sizes]
-        return sizes[num_tokens.index(max(num_tokens))]
 
 
 class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingInfo]):
