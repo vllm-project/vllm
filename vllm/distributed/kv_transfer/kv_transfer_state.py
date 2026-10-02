@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from vllm.device_allocator import register_tag_hooks
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -14,6 +16,8 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 _KV_CONNECTOR_AGENT: KVConnectorBaseType | None = None
+# Unsubscribes the worker connector from the KV cache mapping.
+_unregister_kv_cache_hooks: Callable[[], None] | None = None
 
 
 def get_kv_transfer_group() -> KVConnectorBaseType:
@@ -74,7 +78,7 @@ def ensure_kv_transfer_initialized(
     vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"
 ) -> None:
     """Initialize KV cache transfer parallel group."""
-    global _KV_CONNECTOR_AGENT
+    global _KV_CONNECTOR_AGENT, _unregister_kv_cache_hooks
 
     if _KV_CONNECTOR_AGENT is not None:
         return
@@ -90,10 +94,19 @@ def ensure_kv_transfer_initialized(
             role=KVConnectorRole.WORKER,
             kv_cache_config=kv_cache_config,
         )
+        if _KV_CONNECTOR_AGENT.supports_sleep_mode:
+            _unregister_kv_cache_hooks = register_tag_hooks(
+                "kv_cache",
+                _KV_CONNECTOR_AGENT.release_kv_caches,
+                _KV_CONNECTOR_AGENT.restore_kv_caches,
+            )
 
 
 def ensure_kv_transfer_shutdown() -> None:
-    global _KV_CONNECTOR_AGENT
+    global _KV_CONNECTOR_AGENT, _unregister_kv_cache_hooks
+    if _unregister_kv_cache_hooks is not None:
+        _unregister_kv_cache_hooks()
+        _unregister_kv_cache_hooks = None
     if _KV_CONNECTOR_AGENT is not None:
         _KV_CONNECTOR_AGENT.shutdown()
         _KV_CONNECTOR_AGENT = None

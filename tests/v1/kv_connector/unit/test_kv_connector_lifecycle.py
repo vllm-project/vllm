@@ -3,7 +3,16 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from vllm import device_allocator
+from vllm.device_allocator import (
+    AllocationData,
+    run_after_map_hooks,
+    run_before_unmap_hooks,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa: E501
+    ExampleConnector,
     ExampleConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
@@ -34,7 +43,7 @@ def _make_empty_scheduler_output():
     )
 
 
-def test_kv_connector_mixin_clears_metadata():
+def _init_worker_connector():
     vllm_config = create_vllm_config(
         kv_connector="TestExampleConnector",
         kv_role="kv_both",
@@ -55,7 +64,11 @@ def test_kv_connector_mixin_clears_metadata():
         return_value=mock_tp_group,
     ):
         ensure_kv_transfer_initialized(vllm_config, kv_cache_config)
+    return vllm_config
 
+
+def test_kv_connector_mixin_clears_metadata():
+    vllm_config = _init_worker_connector()
     try:
         # Minimal scheduler output with empty metadata; mixin should still
         # bind/clear metadata even if no loads happen
@@ -76,3 +89,37 @@ def test_kv_connector_mixin_clears_metadata():
     finally:
         # Ensure we clean up the global connector between tests
         ensure_kv_transfer_shutdown()
+
+
+@pytest.mark.parametrize("supported", [False, True], ids=["unsupported", "supported"])
+def test_worker_connector_follows_the_kv_cache_mapping_iff_it_supports_sleep_mode(
+    monkeypatch, supported
+):
+    """While it is alive, a connector that declares sleep-mode support is
+    released right before the allocator unmaps the KV cache and restored once
+    it is mapped again; no other connector is ever called."""
+    monkeypatch.setattr(device_allocator, "_tag_hooks", {})
+    monkeypatch.setattr(ExampleConnector, "supports_sleep_mode", supported)
+    monkeypatch.setattr(ExampleConnector, "release_kv_caches", lambda self: None)
+    monkeypatch.setattr(ExampleConnector, "restore_kv_caches", lambda self: None)
+    kv_cache = AllocationData(handle=(0, 0, 0, 0), tag="kv_cache")
+
+    def unmap_and_map() -> None:
+        run_before_unmap_hooks([kv_cache])
+        kv_cache.is_asleep = True
+        run_after_map_hooks([kv_cache])  # still unmapped
+        kv_cache.is_asleep = False
+        run_after_map_hooks([kv_cache])
+
+    _init_worker_connector()
+    connector = get_kv_transfer_group()
+    try:
+        unmap_and_map()
+    finally:
+        ensure_kv_transfer_shutdown()
+    unmap_and_map()  # a shut down connector is not called
+
+    calls = connector.call_record
+    assert (calls["release_kv_caches"], calls["restore_kv_caches"]) == (
+        (1, 1) if supported else (0, 0)
+    )

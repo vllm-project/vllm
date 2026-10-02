@@ -724,6 +724,68 @@ def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_ba
     core.model_executor.discard.assert_not_called()
 
 
+@pytest.mark.parametrize("supported", [False, True], ids=["unsupported", "supported"])
+@pytest.mark.parametrize(
+    ("call", "unmaps"),
+    [
+        (lambda core: EngineCore.sleep(core, level=1), "sleep"),
+        (lambda core: EngineCore.sleep(core, level=2), "sleep"),
+        (EngineCore.release_kv_cache_memory, "discard"),
+        (lambda core: EngineCore.sleep(core, level=0), None),
+    ],
+    ids=["sleep-1", "sleep-2", "release-kv-cache-memory", "pause-only"],
+)
+def test_unmapping_the_kv_cache_refuses_unsupported_kv_connector(
+    call, unmaps, supported
+):
+    """Without sleep mode (the cumem allocator alone) an unsupported connector
+    passes startup, so unmapping the KV cache refuses it before anything is
+    paused or unmapped; a pause alone is never refused."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.PAUSED_ALL
+    core.model_executor.is_sleeping = False
+    core.pause_scheduler = MagicMock(return_value=None)
+    core._reset_caches = MagicMock()
+    core.scheduler.get_kv_connector.return_value.supports_sleep_mode = supported
+
+    if unmaps and not supported:
+        with pytest.raises(ValueError, match="does not support sleep mode"):
+            call(core)
+        core.pause_scheduler.assert_not_called()
+        core._reset_caches.assert_not_called()
+        assert core.model_executor.method_calls == []
+    else:
+        call(core)
+        if unmaps:
+            getattr(core.model_executor, unmaps).assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("tags", "published"),
+    [(None, True), (["kv_cache"], True), (["scheduling"], False)],
+    ids=["all", "kv_cache", "scheduling-only"],
+)
+def test_wake_up_republishes_kv_connector_handshake_metadata(tags, published):
+    """A wake-up that maps the KV cache back registers it anew, so the
+    scheduler's connector then serves the workers' new handshake metadata."""
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = False
+    core.model_executor.get_kv_connector_handshake_metadata.return_value = [
+        {(0, 0): "metadata"},
+        None,
+    ]
+    kv_connector = core.scheduler.get_kv_connector.return_value
+
+    assert EngineCore.wake_up(core, tags)
+
+    if published:
+        kv_connector.set_xfer_handshake_metadata_pp_aware.assert_called_once_with(
+            {(0, 0): "metadata"}
+        )
+    else:
+        kv_connector.set_xfer_handshake_metadata_pp_aware.assert_not_called()
+
+
 @pytest.mark.parametrize("deferred", [False, True])
 def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     """A resolved pause promises an idle device: the barrier must run before
@@ -744,3 +806,28 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
+
+
+@create_new_process_for_each_test()
+def test_sleep_mode_refuses_unsupported_kv_connector_at_startup():
+    """Whether a connector supports sleep mode is a property of its class, so
+    an engine with sleep mode enabled refuses an unsupported one at startup."""
+    engine_args = EngineArgs(
+        model=MODEL_NAME,
+        enable_sleep_mode=True,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="ExampleConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"shared_storage_path": "local_storage"},
+        ),
+    )
+    vllm_config = engine_args.create_engine_config()
+    with (
+        set_default_torch_num_threads(1),
+        pytest.raises(ValueError, match="ExampleConnector does not support sleep"),
+    ):
+        EngineCore(
+            vllm_config=vllm_config,
+            executor_class=Executor.get_class(vllm_config),
+            log_stats=True,
+        )

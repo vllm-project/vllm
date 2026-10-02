@@ -232,6 +232,26 @@ def test_multi_connector_rejects_multiple_mem_pool_contexts(mc: MultiConnector):
         mc.get_mem_pool_context()
 
 
+@pytest.mark.parametrize(
+    ("children", "supported"),
+    [((True, True), True), ((True, False), False), ((False, True), False)],
+)
+def test_multi_connector_follows_the_kv_cache_mapping_through_every_connector(
+    mc: MultiConnector, children, supported
+):
+    for connector, child_supported in zip(mc._connectors, children):
+        connector.supports_sleep_mode = child_supported
+        connector.release_kv_caches = MagicMock()
+        connector.restore_kv_caches = MagicMock()
+    assert mc.supports_sleep_mode is supported
+
+    mc.release_kv_caches()
+    mc.restore_kv_caches()
+    for connector in mc._connectors:
+        connector.release_kv_caches.assert_called_once_with()
+        connector.restore_kv_caches.assert_called_once_with()
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""

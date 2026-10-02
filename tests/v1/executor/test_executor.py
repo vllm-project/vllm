@@ -205,3 +205,26 @@ def test_custom_executor_async(distributed_executor_backend, tmp_path):
         assert os.path.exists(".marker")
     finally:
         os.chdir(cwd)
+
+
+def test_failed_sleep_is_recovered_by_wake_up():
+    """A sleep that fails on some rank may have unmapped the others, so the
+    executor counts as asleep and a wake-up recovers every rank (mapping and
+    restoring do nothing where nothing was unmapped)."""
+    executor = object.__new__(UniProcExecutor)
+    executor.sleeping_tags = set()
+    rpcs: list[str] = []
+
+    def collective_rpc(method, timeout=None, args=(), kwargs=None, non_block=False):
+        rpcs.append(method)
+        if method == "sleep":
+            raise RuntimeError("failed")
+
+    executor.collective_rpc = collective_rpc
+    with pytest.raises(RuntimeError, match="failed"):
+        executor.sleep()
+    assert executor.is_sleeping
+
+    executor.wake_up()
+    assert rpcs == ["sleep", "wake_up"]
+    assert not executor.is_sleeping

@@ -7,6 +7,8 @@ touch CUDA - the ``cumem`` suspend/resume path is exercised end-to-end on GPU
 in ``tests/basic_correctness/memory/``.
 """
 
+from contextlib import nullcontext
+
 import pytest
 
 from vllm.device_allocator.sleep_mode_backend import (
@@ -38,9 +40,14 @@ def test_new_backend_starts_in_running_state():
     assert CuMemBackend().state() == "RUNNING"
 
 
+@pytest.mark.parametrize("backend_fails", [False, True], ids=["ok", "backend-fails"])
 @pytest.mark.parametrize("enable_nccl_comm_suspend", [True, False])
-def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_suspend):
-    """Comm walkers run around sleep/wake only when explicitly enabled."""
+def test_worker_drives_communicator_suspension(
+    monkeypatch, enable_nccl_comm_suspend, backend_fails
+):
+    """Comm walkers run around sleep/wake only when explicitly enabled. They are
+    collective, so a rank whose backend step raised (for example a KV connector
+    release) still runs them, or its peers would hang in theirs."""
     from types import SimpleNamespace
 
     from vllm.v1.worker.gpu_worker import Worker
@@ -50,9 +57,13 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
     class Backend:
         def suspend(self, level: int = 1) -> None:
             calls.append(("backend.suspend", level))
+            if backend_fails:
+                raise RuntimeError("suspend failed")
 
         def resume(self, tags: list[str] | None = None) -> None:
             calls.append(("backend.resume", tuple(tags) if tags else None))
+            if backend_fails:
+                raise RuntimeError("resume failed")
 
     worker = object.__new__(Worker)
     worker._sleep_mode_backend = Backend()
@@ -74,8 +85,13 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
         lambda: calls.append(("comms.resume", None)),
     )
 
-    worker.sleep(level=1)
-    worker.wake_up(tags=["weights"])
+    def failure():
+        return pytest.raises(RuntimeError) if backend_fails else nullcontext()
+
+    with failure():
+        worker.sleep(level=1)
+    with failure():
+        worker.wake_up(tags=["weights"])
 
     expected = [
         ("backend.suspend", 1),

@@ -290,9 +290,12 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
-        self.sleep_mode_backend.suspend(level)
-        if self.vllm_config.model_config.enable_nccl_comm_suspend:
-            suspend_device_comms()
+        try:
+            self.sleep_mode_backend.suspend(level)
+        finally:
+            # Collective: the peers suspend even if this rank's suspend raised.
+            if self.vllm_config.model_config.enable_nccl_comm_suspend:
+                suspend_device_comms()
 
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
@@ -312,9 +315,12 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        self.sleep_mode_backend.resume(tags)
-        if self.vllm_config.model_config.enable_nccl_comm_suspend:
-            resume_device_comms()
+        try:
+            self.sleep_mode_backend.resume(tags)
+        finally:
+            # Collective: the peers resume even if this rank's resume raised.
+            if self.vllm_config.model_config.enable_nccl_comm_suspend:
+                resume_device_comms()
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags

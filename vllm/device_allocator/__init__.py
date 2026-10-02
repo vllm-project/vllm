@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+from collections.abc import Callable, Collection, Iterable
 from contextlib import AbstractContextManager
 from typing import Protocol, TypeAlias
 
@@ -23,6 +24,47 @@ class AllocationData:
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
     is_asleep: bool = False
+
+
+# Tag -> (before_unmap, after_map) of every subscriber, see register_tag_hooks.
+_tag_hooks: dict[str, list[tuple[Callable[[], None], Callable[[], None]]]] = {}
+
+
+def register_tag_hooks(
+    tag: str, before_unmap: Callable[[], None], after_map: Callable[[], None]
+) -> Callable[[], None]:
+    """Have the sleep-mode allocator call `before_unmap` right before it unmaps
+    allocations of `tag` (sleep, discard), and the idempotent `after_map` after
+    every wake-up that leaves all of them mapped. For state on that memory that
+    must live exactly as long as its mapping, such as transport registrations
+    of the KV cache. Returns the function that unregisters them."""
+    hooks = (before_unmap, after_map)
+    _tag_hooks.setdefault(tag, []).append(hooks)
+    return lambda: _tag_hooks[tag].remove(hooks)
+
+
+def run_before_unmap_hooks(
+    allocations: Iterable[AllocationData], tags: Collection[str] | None = None
+) -> None:
+    """Run the `before_unmap` hooks of each tag in `tags` (every tag if None)
+    that still has mapped allocations."""
+    mapped = {
+        d.tag
+        for d in allocations
+        if not d.is_asleep and (tags is None or d.tag in tags)
+    }
+    for tag in mapped & _tag_hooks.keys():
+        for before_unmap, _ in _tag_hooks[tag]:
+            before_unmap()
+
+
+def run_after_map_hooks(allocations: Iterable[AllocationData]) -> None:
+    """Run the `after_map` hooks of every fully mapped tag. Being idempotent,
+    they also retry one that failed on an earlier wake-up."""
+    asleep = {d.tag for d in allocations if d.is_asleep}
+    for tag in _tag_hooks.keys() - asleep:
+        for _, after_map in _tag_hooks[tag]:
+            after_map()
 
 
 class MemAllocator(Protocol):
