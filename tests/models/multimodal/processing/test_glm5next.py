@@ -13,14 +13,17 @@ The checks below are arithmetic: no weights, no GPU.
 """
 
 import pytest
-
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.transformers_utils.processors.glm5next import (
+import torch
+from PIL import Image
+from transformers.models.glm5_next.video_processing_glm5_next import (
     Glm5NextVideoProcessor,
-    _pixel_budget,
-    glm_sample_frame_indices,
     smart_resize,
 )
+from transformers.video_utils import VideoMetadata
+
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 
 from ...utils import build_model_context
 
@@ -44,27 +47,16 @@ def _pixel_path_grid(
     width: int,
 ) -> tuple[int, int, int]:
     """The ``video_grid_thw`` ``Glm5NextVideoProcessor._preprocess`` builds."""
-    min_pixels, max_pixels = _pixel_budget(
-        video_processor.min_image_tokens,
-        video_processor.max_image_tokens,
-        video_processor.patch_size,
-        video_processor.merge_size,
-        video_processor.temporal_patch_size,
-    )
-    factor = (
-        video_processor.patch_size
-        * video_processor.merge_size
-        * video_processor.patch_expand_factor
-    )
     resized_height, resized_width = smart_resize(
-        t=num_frames,
-        h=height,
-        w=width,
-        t_factor=video_processor.temporal_patch_size,
-        h_factor=factor,
-        w_factor=factor,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
+        num_frames=num_frames,
+        height=height,
+        width=width,
+        temporal_factor=video_processor.temporal_patch_size,
+        factor=video_processor.patch_size
+        * video_processor.merge_size
+        * video_processor.patch_expand_factor,
+        min_pixels=video_processor.min_image_tokens,
+        max_pixels=video_processor.max_image_tokens,
     )
     padded_frames = num_frames + (-num_frames % video_processor.temporal_patch_size)
     return (
@@ -100,13 +92,8 @@ def test_video_placeholders_match_encoder_rows(
     info = processor.info
     video_processor = info.get_video_processor()
 
-    frame_indices = glm_sample_frame_indices(
-        total_num_frames,
-        fps,
-        duration,
-        target_fps=video_processor.fps_interval,
-        max_frame_count=video_processor.max_frame_count_dynamic,
-        temporal_patch_size=video_processor.temporal_patch_size,
+    frame_indices = video_processor.sample_frames(
+        VideoMetadata(total_num_frames=total_num_frames, fps=fps, duration=duration)
     )
     grid_t, grid_h, grid_w = _pixel_path_grid(
         video_processor, len(frame_indices), height, width
@@ -168,3 +155,87 @@ def test_video_shorter_than_one_sampling_interval_is_rejected(processor):
             },
             2,
         )
+
+
+@pytest.mark.usefixtures("default_vllm_config")
+def test_mm_device_do_normalize():
+    device = current_platform.device_type
+    ctx = build_model_context(
+        "zai-org/GLM-5.3-Flash",
+        limit_mm_per_prompt={"image": 2},
+    )
+    assert ctx.model_config.multimodal_config.mm_device_do_normalize
+
+    ctx.model_config.multimodal_config.mm_device_do_normalize = False
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    images = [
+        Image.new("RGB", (310, 470), color=(17, 89, 231)),
+        Image.new("RGB", (480, 320), color=(201, 13, 127)),
+    ]
+    prompt = "<|begin_of_image|><|image|><|end_of_image|>" * len(images)
+    mm_items = processor.info.parse_mm_data({"image": images})
+
+    normalized_inputs = processor(prompt, mm_items=mm_items)
+    normalized_values = normalized_inputs["mm_kwargs"].get_data()["pixel_values"]
+
+    ctx.model_config.multimodal_config.mm_device_do_normalize = True
+    raw_inputs = processor(prompt, mm_items=mm_items)
+    raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert raw_values.dtype == torch.uint8
+
+    input_norm = build_mm_input_norm(ctx.model_config).to(device)
+    output = input_norm(raw_values.to(device), normalized_values.dtype)
+    torch.testing.assert_close(
+        output, normalized_values.to(device), rtol=1e-5, atol=1e-6
+    )
+
+
+def _image_info(**kwargs):
+    ctx = build_model_context(
+        "zai-org/GLM-5.3-Flash",
+        limit_mm_per_prompt={"image": 1},
+        **kwargs,
+    )
+    return MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    ).info
+
+
+def test_image_encoder_cache_covers_full_token_budget():
+    """The most-features probe must reach the processor's token ceiling.
+
+    The inherited square probe refits to 89x89 = 7921 tokens under the
+    max_image_tokens=8000 budget, so the encoder cache came up short and
+    ordinary non-square images in 7922-8000 tokens were refused with
+    HTTP 400 (#59539).
+    """
+    info = _image_info()
+    assert info.get_max_image_tokens() == 8000
+
+    # The shapes from the issue, with the token counts the processor
+    # actually produces; every one must fit the cache.
+    for width, height, expected_tokens in [
+        (4032, 3024, 7931),  # phone photo, 4:3
+        (3840, 2160, 7973),  # 4K frame, 16:9
+        (3508, 2480, 7950),  # A4 at 300 dpi
+        (2600, 2400, 7998),  # 13:12
+        (3000, 3000, 7921),  # square worst case before the fix
+    ]:
+        num_tokens = info.get_num_image_tokens(image_width=width, image_height=height)
+        assert num_tokens == expected_tokens
+        assert num_tokens <= info.get_max_image_tokens()
+
+    # The profiling dummy covers the real worst case, not the square one.
+    size = info.get_image_size_with_most_features()
+    assert size.width * size.height == 2240 * 2800
+
+
+def test_image_encoder_cache_follows_max_pixels_override():
+    info = _image_info(mm_processor_kwargs={"max_pixels": 1568 * 100})
+    assert info.get_max_image_tokens() == 100
+    size = info.get_image_size_with_most_features()
+    assert (
+        info.get_num_image_tokens(image_width=size.width, image_height=size.height)
+        == 100
+    )

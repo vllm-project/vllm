@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import torch
 
 from vllm.logger import init_logger
@@ -472,6 +473,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
 
@@ -736,6 +738,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_bias=w2_bias,
                 _cache_permute_indices=self._cache_permute_indices,
                 activation=self.moe.activation,
+                use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
             )
         )
 
@@ -781,7 +784,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
-    def process_weights_after_loading(self, layer):
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
             return
 
@@ -899,4 +902,5 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )

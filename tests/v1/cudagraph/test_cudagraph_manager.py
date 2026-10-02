@@ -132,9 +132,10 @@ def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
         pcp_world_size=pcp_world_size,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=False,
         max_num_reqs=num_reqs,
         max_num_tokens=num_tokens,
-        block_tables=pcp_block_tables,  # type: ignore[arg-type]
+        block_tables=pcp_block_tables,
     )
 
     block_tables = MagicMock()
@@ -224,7 +225,7 @@ def test_speculator_capture_preserves_decode_query_bounds(
     )
     manager = SpeculatorCudaGraphManager.__new__(SpeculatorCudaGraphManager)
     manager.max_num_reqs = num_reqs
-    manager.vllm_config = SimpleNamespace(  # type: ignore[assignment]
+    manager.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(data_parallel_size=1)
     )
     buffers = InputBuffers(num_reqs, num_tokens, torch.device("cpu"))
