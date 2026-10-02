@@ -101,6 +101,20 @@ llama3_8b_fp4 = ModelFusionInfo(
     ),
 )
 
+# ModelOpt MIXED_PRECISION: FP8 attention projections, NVFP4 MLPs. It resolves to
+# modelopt_mixed, not modelopt_fp4, and its MLP has no manual act+quant fusion, so
+# every MLP boundary is left to ActivationQuantFusionPass.
+qwen3_8_27b_mixed_fp4 = ModelFusionInfo(
+    model_name="nvidia/Qwen3.8-27B-NVFP4",
+    hf_overrides=lambda n_layers: {
+        "text_config": {
+            "num_hidden_layers": n_layers,
+            "layer_types": ["linear_attention"] * (n_layers - 1) + ["full_attention"],
+        }
+    },
+    matches=lambda n_layers: Matches(act_quant_fusion=n_layers),
+)
+
 # MoEs cannot do act+quant fusion because those ops are hidden from torch.compile.
 # MoEs also only expose 1 rms+quant fusion because the quant for up_proj is hidden.
 # TODO(luka): https://github.com/vllm-project/vllm/issues/31985
