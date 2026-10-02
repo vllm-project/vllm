@@ -30,13 +30,12 @@ padding and HIP-graph token-padding are separate mechanisms, covered in
 See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
 """
 
-import importlib.util
-
 import pytest
 import torch
 import torch.nn.functional as F
 
 import vllm.envs as envs
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -54,8 +53,9 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
-aiter_available = importlib.util.find_spec("aiter") is not None
+aiter_available = is_aiter_found_and_supported()
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(),
@@ -139,15 +139,13 @@ def _make_routed_experts(hidden_size: int, intermediate_size: int) -> RoutedExpe
 
 
 def _expert_weight_iterator(seed: int, hidden_size: int, intermediate_size: int):
-    generator = torch.Generator(device=DEVICE)
-    generator.manual_seed(seed)
+    set_random_seed(seed)
     for expert_id in range(NUM_EXPERTS):
         yield (
             f"{expert_id}.gate_proj.weight",
             torch.randn(
                 intermediate_size,
                 hidden_size,
-                generator=generator,
                 device=DEVICE,
                 dtype=DTYPE,
             ),
@@ -157,7 +155,6 @@ def _expert_weight_iterator(seed: int, hidden_size: int, intermediate_size: int)
             torch.randn(
                 intermediate_size,
                 hidden_size,
-                generator=generator,
                 device=DEVICE,
                 dtype=DTYPE,
             ),
@@ -167,7 +164,6 @@ def _expert_weight_iterator(seed: int, hidden_size: int, intermediate_size: int)
             torch.randn(
                 hidden_size,
                 intermediate_size,
-                generator=generator,
                 device=DEVICE,
                 dtype=DTYPE,
             ),
@@ -190,12 +186,10 @@ def _load_and_process_weights(
 def _make_static_inputs(
     hidden_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    generator = torch.Generator(device=DEVICE)
-    generator.manual_seed(2026)
+    set_random_seed(2026)
     x = torch.randn(
         NUM_TOKENS,
         hidden_size,
-        generator=generator,
         device=DEVICE,
         dtype=DTYPE,
     )
@@ -414,7 +408,9 @@ def test_aiter_moe_padding_numerically_transparent(
         topk_weights=topk_weights,
         topk_ids=topk_ids,
     )
-    torch.testing.assert_close(outputs[True], outputs[False], rtol=2e-2, atol=2e-2)
+    # Same AITER kernel, byte-identical weights and inputs either way (only
+    # a transient weight-loading buffer differs): bitwise-identical results.
+    torch.testing.assert_close(outputs[True], outputs[False], atol=0, rtol=0)
 
     # Cosine similarity, not elementwise assert_close, for the reference
     # comparison: two independently computed bf16 GEMM chains can have
