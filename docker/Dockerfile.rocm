@@ -497,17 +497,9 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
         /app/lmcache/requirements/common.txt)" -eq 2 \
     && test "$(grep -Fxc 'numpy<=2.2.6' \
         /app/lmcache/requirements/common.txt)" -eq 1 \
-    && test "$(grep -Fxc 'opentelemetry-api >= 1.20.0, <= 1.40.0' \
-        /app/lmcache/requirements/common.txt)" -eq 1 \
-    && test "$(grep -Fxc 'opentelemetry-sdk >= 1.20.0' \
-        /app/lmcache/requirements/common.txt)" -eq 1 \
-    && test "$(grep -Fxc 'opentelemetry-exporter-otlp >= 1.20.0' \
-        /app/lmcache/requirements/common.txt)" -eq 1 \
     && sed -i -E \
         -e '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
         -e 's/^numpy<=2\.2\.6$/numpy<=2.3.5/' \
-        -e 's/^opentelemetry-sdk >= 1\.20\.0$/opentelemetry-sdk >= 1.20.0, <= 1.40.0/' \
-        -e 's/^opentelemetry-exporter-otlp >= 1\.20\.0$/opentelemetry-exporter-otlp >= 1.20.0, <= 1.40.0/' \
         /app/lmcache/requirements/common.txt \
     && rm -rf /app/lmcache/.git
 
@@ -928,6 +920,7 @@ COPY --from=test_smoke /vllm-smoke-ok /
 # -----------------------
 # Final vLLM image
 FROM mori_base AS final_common
+ENV UV_COMPILE_BYTECODE=1
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
@@ -956,12 +949,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
+# Keep OpenTelemetry within LMCache's cap.
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system -r requirements/rocm.txt \
+    && echo "opentelemetry-api<=1.40.0" > /tmp/otel-constraints.txt \
+    && uv pip install --system -c /tmp/otel-constraints.txt -r requirements/rocm.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
+    && uv pip install --system -c /tmp/otel-constraints.txt *.whl \
+    && rm /tmp/otel-constraints.txt
 
 # Install NIXL ROCm wheel
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
