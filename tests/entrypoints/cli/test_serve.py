@@ -73,7 +73,10 @@ def test_multi_server_selects_listener_policy(
     )
     addresses = SimpleNamespace(inputs=["in"] * count, outputs=["out"] * count)
     engine_launch = SimpleNamespace(
-        engine_manager=None, coordinator=None, addresses=addresses, tensor_queue=None
+        engine_manager=MagicMock(),
+        coordinator=MagicMock(),
+        addresses=addresses,
+        tensor_queue=None,
     )
     with (
         create_server_socket(("127.0.0.1", 0), reuse_port=True) as sock,
@@ -124,6 +127,8 @@ def test_multi_server_selects_listener_policy(
         else:
             run_multi_api_server(args)
         instance.shutdown.assert_called_once()
+        engine_launch.engine_manager.shutdown.assert_called_once()
+        engine_launch.coordinator.shutdown.assert_called_once()
         assert sock.fileno() == -1
 
 

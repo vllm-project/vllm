@@ -5,7 +5,6 @@ import argparse
 import signal
 import sys
 import time
-from contextlib import ExitStack
 from functools import partial
 
 import uvloop
@@ -298,7 +297,7 @@ def run_multi_api_server(args: argparse.Namespace):
 
     listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
 
-    with sock, ExitStack() as startup:
+    with sock:
         engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
         engine_args._api_process_count = num_api_servers
         engine_args._api_process_rank = -1
@@ -337,71 +336,70 @@ def run_multi_api_server(args: argparse.Namespace):
             defer_api_server_ports=not (rust_frontend_path or is_ray_dp),
         )
 
-        with launch_core_engines(
-            vllm_config, executor_class, log_stats, addresses
-        ) as engine_launch:
-            local_engine_manager = engine_launch.engine_manager
-            coordinator = engine_launch.coordinator
-            addresses = engine_launch.addresses
-            stats_update_address = (
-                coordinator.get_stats_publish_address() if coordinator else None
-            )
-
-            if rust_frontend_path:
-                if parallel_config.local_engines_only:
-                    expected_engine_start_index = parallel_config.data_parallel_rank
-                    expected_engine_count = parallel_config.data_parallel_size_local
-                else:
-                    expected_engine_start_index = 0
-                    expected_engine_count = parallel_config.data_parallel_size
-                # Start rust front-end process.
-                api_server_manager = RustFrontendProcessManager(
-                    binary_path=rust_frontend_path,
-                    sock=sock,
-                    args=args,
-                    input_address=addresses.inputs[0],
-                    output_address=addresses.outputs[0],
-                    engine_start_index=expected_engine_start_index,
-                    engine_count=expected_engine_count,
-                    data_parallel_size=parallel_config.data_parallel_size,
-                    stats_update_address=stats_update_address,
-                )
-                startup.callback(api_server_manager.shutdown)
-            else:
-                # Start API server(s).
-                socket_factory = None
-                if num_api_servers > 1 and sys.platform == "linux" and not args.uds:
-                    socket_factory = partial(
-                        create_server_socket, sock.getsockname(), reuse_port=True
-                    )
-                api_server_manager = APIServerProcessManager(
-                    listen_address=listen_address,
-                    sock=sock,
-                    args=args,
-                    num_servers=num_api_servers,
-                    input_addresses=addresses.inputs,
-                    output_addresses=addresses.outputs,
-                    stats_update_address=stats_update_address,
-                    tensor_queue=engine_launch.tensor_queue,
-                    socket_factory=socket_factory,
-                )
-
-                startup.callback(api_server_manager.shutdown)
-                if not is_ray_dp:
-                    # Forward bound endpoints to the engine handshake on with exit.
-                    # Ray DP pre-allocates addresses held by the actors already.
-                    actual_inputs, actual_outputs = (
-                        api_server_manager.gather_actual_addresses()
-                    )
-                    addresses.inputs = actual_inputs
-                    addresses.outputs = actual_outputs
-
-            # Set frontend processes to watch during engine startup.
-            # Abort engine startup if a frontend exits before the engines are up.
-            engine_launch.watched_frontend_processes = api_server_manager.processes
-
-        # Wait for API servers.
+        local_engine_manager = coordinator = None
         try:
+            with launch_core_engines(
+                vllm_config, executor_class, log_stats, addresses
+            ) as engine_launch:
+                local_engine_manager = engine_launch.engine_manager
+                coordinator = engine_launch.coordinator
+                addresses = engine_launch.addresses
+                stats_update_address = (
+                    coordinator.get_stats_publish_address() if coordinator else None
+                )
+
+                if rust_frontend_path:
+                    if parallel_config.local_engines_only:
+                        expected_engine_start_index = parallel_config.data_parallel_rank
+                        expected_engine_count = parallel_config.data_parallel_size_local
+                    else:
+                        expected_engine_start_index = 0
+                        expected_engine_count = parallel_config.data_parallel_size
+                    # Start rust front-end process.
+                    api_server_manager = RustFrontendProcessManager(
+                        binary_path=rust_frontend_path,
+                        sock=sock,
+                        args=args,
+                        input_address=addresses.inputs[0],
+                        output_address=addresses.outputs[0],
+                        engine_start_index=expected_engine_start_index,
+                        engine_count=expected_engine_count,
+                        data_parallel_size=parallel_config.data_parallel_size,
+                        stats_update_address=stats_update_address,
+                    )
+                else:
+                    # Start API server(s).
+                    socket_factory = None
+                    if num_api_servers > 1 and sys.platform == "linux" and not args.uds:
+                        socket_factory = partial(
+                            create_server_socket, sock.getsockname(), reuse_port=True
+                        )
+                    api_server_manager = APIServerProcessManager(
+                        listen_address=listen_address,
+                        sock=sock,
+                        args=args,
+                        num_servers=num_api_servers,
+                        input_addresses=addresses.inputs,
+                        output_addresses=addresses.outputs,
+                        stats_update_address=stats_update_address,
+                        tensor_queue=engine_launch.tensor_queue,
+                        socket_factory=socket_factory,
+                    )
+
+                    if not is_ray_dp:
+                        # Forward bound endpoints to the engine handshake on with exit.
+                        # Ray DP pre-allocates addresses held by the actors already.
+                        actual_inputs, actual_outputs = (
+                            api_server_manager.gather_actual_addresses()
+                        )
+                        addresses.inputs = actual_inputs
+                        addresses.outputs = actual_outputs
+
+                # Set frontend processes to watch during engine startup.
+                # Abort engine startup if a frontend exits before the engines are up.
+                engine_launch.watched_frontend_processes = api_server_manager.processes
+
+            # Wait for API servers.
             wait_for_completion_or_failure(
                 api_server_manager=api_server_manager,
                 engine_manager=local_engine_manager,
@@ -421,8 +419,8 @@ def run_multi_api_server(args: argparse.Namespace):
                     else max(deadline - time.monotonic(), 0.0)
                 )
 
-            startup.pop_all()
-            api_server_manager.shutdown(timeout=timeout)
+            if api_server_manager is not None:
+                api_server_manager.shutdown(timeout=timeout)
             if local_engine_manager:
                 local_engine_manager.shutdown(timeout=to_timeout(shutdown_by))
             if coordinator:
