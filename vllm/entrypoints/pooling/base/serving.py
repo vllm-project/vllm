@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
 from vllm.tracing import (
@@ -206,6 +207,10 @@ class PoolingBaseServing(ABC, BaseServing):
         final_res_batch = [None] * num_inputs
 
         async for i, res in ctx.result_generator:
+            if res.error is not None:
+                if res.error.retryable:
+                    raise RetryableRequestError(res.error.message)
+                raise GenerationError(res.error.message)
             final_res_batch[i] = res
 
         if None in final_res_batch:

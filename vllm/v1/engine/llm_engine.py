@@ -323,6 +323,14 @@ class LLMEngine:
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
             )
+
+            mm_processor_cache = self.renderer.mm_processor_cache
+            if mm_processor_cache is not None:
+                for engine_core_output in outputs.outputs:
+                    if engine_core_output.mm_cache_miss_hashes:
+                        for mm_hash in engine_core_output.mm_cache_miss_hashes:
+                            mm_processor_cache.invalidate(mm_hash)
+
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
