@@ -5,7 +5,12 @@ from copy import deepcopy
 
 import pytest
 import regex as re
-from openai.types.responses import FunctionTool, ToolChoiceFunction, WebSearchTool
+from openai.types.responses import (
+    FunctionTool,
+    NamespaceTool,
+    ToolChoiceFunction,
+    WebSearchTool,
+)
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -480,3 +485,37 @@ class TestForcedNamedToolChoiceEmptyParams:
         choice = ToolChoiceFunction(type="function", name="ping")
         schema = get_json_schema_from_tools(choice, [tool])
         assert schema == {"type": "object", "properties": {}}
+
+
+class TestForcedFunctionShortNameAlias:
+    """The short-name alias in the Responses forced-function path exists so a
+    forced function tool_choice can select one tool inside a NamespaceTool by
+    its short name. A plain FunctionTool whose name happens to contain "__"
+    must not register a phantom alias for the same purpose."""
+
+    PARAMS = {"type": "object", "properties": {"x": {"type": "integer"}}}
+
+    def test_namespaced_tool_short_name_resolves(self):
+        tool = NamespaceTool.model_validate(
+            {
+                "type": "namespace",
+                "name": "math",
+                "description": "math tools",
+                "tools": [
+                    {"type": "function", "name": "add", "parameters": self.PARAMS}
+                ],
+            }
+        )
+        choice = ToolChoiceFunction(type="function", name="add")
+        assert get_json_schema_from_tools(choice, [tool]) == self.PARAMS
+
+    def test_plain_function_double_underscore_name_has_no_phantom_alias(self):
+        tool = FunctionTool(type="function", name="math__add", parameters=self.PARAMS)
+        choice = ToolChoiceFunction(type="function", name="add")
+        with pytest.raises(ValueError, match="has not been passed in `tools`"):
+            get_json_schema_from_tools(choice, [tool])
+
+    def test_plain_function_full_name_still_resolves(self):
+        tool = FunctionTool(type="function", name="math__add", parameters=self.PARAMS)
+        choice = ToolChoiceFunction(type="function", name="math__add")
+        assert get_json_schema_from_tools(choice, [tool]) == self.PARAMS
