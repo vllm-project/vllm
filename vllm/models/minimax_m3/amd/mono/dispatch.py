@@ -171,7 +171,7 @@ class MonoDecode:
             # will serve with exist.
             if self.attn is None or self.attn.kv_cache.numel() == 0:
                 return "KV caches not bound yet (memory profiling)"
-            # TODO: fix this correctly. 
+            # TODO: fix this correctly.
             blocks, want = self.attn.kv_cache.shape[0], md.decode.block_table.shape[1]
             if blocks < want:
                 return (
