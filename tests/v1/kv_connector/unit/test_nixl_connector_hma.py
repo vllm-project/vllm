@@ -1401,21 +1401,19 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 @pytest.mark.cpu_test
 def test_post_process_zeroes_untransferred_tail():
     """Received remote sub-blocks are regrouped per head and the untransferred
-    sub-blocks of the last local block are zeroed on receive; mamba state
-    caches are untouched by the attention permute."""
+    sub-blocks of the last local block are zeroed on receive, once per block
+    although two attention groups alias the tensor."""
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     ratio = 4
     block_tokens = 8  # 2 tokens per remote sub-block
     num_kv_heads = 2  # fewer than ratio
 
     worker = MagicMock(spec=NixlConnectorWorker)
-    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
     worker.transfer_topo = MagicMock()
     worker.device_type = "cpu"
     worker.enable_permute_local_kv = False
@@ -1431,27 +1429,21 @@ def test_post_process_zeroes_untransferred_tail():
         .transpose(1, 2)
         .reshape(2, num_kv_heads, block_tokens, 4)
     )
-    mamba_cache = torch.ones(6, 16)
-    worker.device_kv_caches = {"attn.0": attn_cache, "mamba.0": mamba_cache}
+    worker.device_kv_caches = {"attn.0": attn_cache, "swa.0": attn_cache}
     fa_group = MagicMock(layer_names=["attn.0"])
-    ssm_group = MagicMock(layer_names=["mamba.0"])
-    worker.kv_cache_config = MagicMock(transfer_groups=[fa_group, ssm_group])
-    # The cached property filters mamba layers out of the permuted caches.
-    attn_caches = NixlConnectorWorker._attention_kv_caches.func(worker)
-    assert len(attn_caches) == 1 and attn_caches[0] is attn_cache
-    worker._attention_kv_caches = attn_caches
+    swa_group = MagicMock(layer_names=["swa.0"])
+    worker.kv_cache_config = MagicMock(transfer_groups=[fa_group, swa_group])
     _bind_worker_method(worker, "post_process_device_kv_on_receive")
 
-    # Request occupies blocks [2, 3]; only 6 of 8 sub-blocks were received.
-    worker.post_process_device_kv_on_receive(ratio, [([2, 3], 6)])
+    # Group 0 request in blocks [2, 3]; only 6 of 8 sub-blocks were received.
+    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], 6)])
 
     # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
     assert torch.equal(attn_cache[2], expected[2])
     assert torch.equal(attn_cache[3, :, :4], expected[3, :, :4])
     assert torch.all(attn_cache[3, :, 4:] == 0)
-    # Untouched blocks and the mamba cache keep their content.
+    # Untouched blocks keep their content.
     assert torch.equal(attn_cache[4], expected[4])
-    assert torch.all(mamba_cache == 1)
 
 
 @pytest.mark.cpu_test
