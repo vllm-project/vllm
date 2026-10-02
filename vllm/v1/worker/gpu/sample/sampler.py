@@ -53,13 +53,16 @@ class Sampler:
         enable_trace_replay: bool = False,
         return_sampling_mask: bool = False,
         custom_logits_processors: Sequence[LogitsProcessor] = (),
+        default_seed: Sequence[int] | None = None,
     ):
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
         self.use_fp64_gumbel = use_fp64_gumbel
 
         self.req_states = req_states
-        self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
+        self.sampling_states = SamplingStates(
+            max_num_reqs, vocab_size, np.random.default_rng(default_seed)
+        )
 
         lp_req_state = LogitsProcRequestState.from_request_state(req_states)
         self.penalties_state = PenaltiesState(vllm_config, lp_req_state)

@@ -15,8 +15,16 @@ _NP_INT64_MAX = np.iinfo(np.int64).max
 
 
 class SamplingStates:
-    def __init__(self, max_num_reqs: int, vocab_size: int):
+    def __init__(
+        self,
+        max_num_reqs: int,
+        vocab_size: int,
+        seed_rng: np.random.Generator | None = None,
+    ):
         self.max_num_reqs = max_num_reqs
+        # Source of seeds for requests without one. Data-parallel engines must
+        # not share it, or their n-th unseeded requests sample identically.
+        self.seed_rng = seed_rng if seed_rng is not None else np.random.default_rng()
         self.vocab_size = vocab_size
 
         self.temperature = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
@@ -54,7 +62,7 @@ class SamplingStates:
         seed = sampling_params.seed
         self.seeds_set[req_idx] = seed is not None
         if seed is None:
-            seed = np.random.randint(_NP_INT64_MIN, _NP_INT64_MAX)
+            seed = int(self.seed_rng.integers(_NP_INT64_MIN, _NP_INT64_MAX))
         self.seeds.np[req_idx] = seed
 
         num_logprobs = sampling_params.logprobs
