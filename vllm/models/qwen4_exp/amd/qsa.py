@@ -8,6 +8,7 @@ from typing import ClassVar, cast
 
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -23,9 +24,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 from vllm.platforms import current_platform
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -75,7 +73,7 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
         return "QWEN4_EXP_QSA_TRITON"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # QSA consumes manager pages directly and does not use FA4 paged attention.
         return [MultipleOf(16)]
 
@@ -430,7 +428,6 @@ def qwen4_exp_qsa_with_output(
     layer_name: LayerNameType,
 ) -> None:
     """Run the complete QSA state/update/attend transaction."""
-
     layer_name = _resolve_layer_name(layer_name)
     layer = get_forward_context().no_compile_layers[layer_name]
     if not isinstance(layer, Qwen4ExpQSAAttention):

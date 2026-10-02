@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Whenever you add an architecture to this page, please also update
+"""Whenever you add an architecture to this page, please also update
 `tests/models/registry.py` with example HuggingFace models for it.
 """
 
@@ -73,7 +72,6 @@ _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
-    "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
     "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
     "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
@@ -85,7 +83,6 @@ _TEXT_GENERATION_MODELS = {
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2MoeForCausalLM": ("cohere2_moe", "Cohere2MoeForCausalLM"),
-    "CwmForCausalLM": ("llama", "LlamaForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek_v2", "DeepseekForCausalLM"),
@@ -115,7 +112,6 @@ _TEXT_GENERATION_MODELS = {
         "vllm.models.qwen4_exp",
         "Qwen4ExpForCausalLM",
     ),
-    "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
     "Glm4MoeForCausalLM": ("glm4_moe", "Glm4MoeForCausalLM"),
     "Glm4MoeLiteForCausalLM": ("glm4_moe_lite", "Glm4MoeLiteForCausalLM"),
@@ -161,7 +157,6 @@ _TEXT_GENERATION_MODELS = {
     ),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
-    "MellumForCausalLM": ("mellum", "MellumForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
     "MiniMaxM2ForCausalLM": ("minimax_m2", "MiniMaxM2ForCausalLM"),
@@ -227,7 +222,6 @@ _EMBEDDING_MODELS = {
     "DeepseekV3BidirectionalModel": ("deepseek_v2", "DeepseekV3ForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3TextModel": ("gemma3", "Gemma3Model"),
-    "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
     "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
@@ -634,6 +628,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
+    "LiLiCorrDraftModel": ("lilicorr", "LiLiCorrForCausalLM"),
     "DFlash2DraftModel": ("qwen3_dflash2", "DFlash2Qwen3ForCausalLM"),
     # Muse Glimmer's DFlash draft head, reusing the generic qwen3_dflash
     # implementation. EAGLEConfig rewrites a dflash draft's architecture to
@@ -709,10 +704,15 @@ _SPECULATIVE_DECODING_MODELS = {
 
 _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
+    "ArceeForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "CwmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "FlexOlmoForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "GlmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "GPTBigCodeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "MellumForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "NanbeigeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Olmo3ForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -927,9 +927,7 @@ class _BaseRegisteredModel(ABC):
 
 @dataclass(frozen=True)
 class _RegisteredModel(_BaseRegisteredModel):
-    """
-    Represents a model that has already been imported in the main process.
-    """
+    """Represents a model that has already been imported in the main process."""
 
     interfaces: _ModelInfo
     model_cls: type[nn.Module]
@@ -950,9 +948,7 @@ class _RegisteredModel(_BaseRegisteredModel):
 
 @dataclass(frozen=True)
 class _LazyRegisteredModel(_BaseRegisteredModel):
-    """
-    Represents a model that has not been imported in the main process.
-    """
+    """Represents a model that has not been imported in the main process."""
 
     module_name: str
     class_name: str
@@ -1017,7 +1013,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
             return None
 
     def _save_modelinfo_to_cache(self, mi: _ModelInfo, module_hash: str) -> None:
-        """save dictionary json file to cache"""
+        """Save dictionary json file to cache."""
         from vllm.model_executor.model_loader.weight_utils import atomic_writer
 
         try:
@@ -1127,8 +1123,7 @@ class _ModelRegistry:
         model_arch: str,
         model_cls: type[nn.Module] | str,
     ) -> None:
-        """
-        Register an external model to be used in vLLM.
+        """Register an external model to be used in vLLM.
 
         `model_cls` can be either:
 

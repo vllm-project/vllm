@@ -18,11 +18,11 @@ from vllm.distributed import (
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     RoutedExperts,
 )
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -62,12 +62,10 @@ class DbrxRouter(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_total_experts = config.ffn_config.moe_num_experts
         self.d_model = config.d_model
-        self.layer = ReplicatedLinear(
+        self.layer = GateLinear(
             self.d_model,
             self.num_total_experts,
-            bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
