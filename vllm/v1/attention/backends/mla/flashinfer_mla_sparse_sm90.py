@@ -443,10 +443,16 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         assert topk_indices_buffer is not None
         hf_config = vllm_config.model_config.hf_text_config
         assert hf_config.index_topk is not None
+        # fp8 KV cache is stored as uint8; plan() needs the logical dtype.
+        kv_plan_dtype = (
+            torch.float8_e4m3fn
+            if kv_cache_spec.dtype == torch.uint8
+            else kv_cache_spec.dtype
+        )
         self.state = _SM90State(
             device,
             impl.num_heads,
-            kv_cache_spec.dtype,
+            kv_plan_dtype,
             vllm_config.scheduler_config.max_num_batched_tokens,
             topk_indices_buffer.shape[1],
             kv_lora_rank=impl.kv_lora_rank,

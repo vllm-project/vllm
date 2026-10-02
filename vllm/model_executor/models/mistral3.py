@@ -14,6 +14,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -225,7 +226,7 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
         image_size = size["longest_edge"]
         return Mistral3HFEncoderInfo(self.get_hf_config(), image_size)
 
-    def get_hf_processor(self, **kwargs: object):
+    def get_hf_processor(self, **kwargs: object) -> PixtralProcessor:
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -277,9 +278,6 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder):
 
 
 class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
-    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.dummy_inputs.get_dummy_text(mm_counts)
-
     def _postprocess_hf_mm_data(
         self,
         mm_data: Mapping[str, object],
@@ -378,6 +376,7 @@ def init_vision_tower_for_mistral3(
     hf_config: Mistral3Config,
     quant_config: QuantizationConfig | None,
     *,
+    input_norm: nn.Module | None = None,
     require_post_norm: bool | None = None,
     prefix: str = "",
 ) -> PixtralHFVisionModel:
@@ -391,6 +390,7 @@ def init_vision_tower_for_mistral3(
     return PixtralHFVisionModel(
         vision_config,
         quant_config=quant_config,
+        input_norm=input_norm,
         num_hidden_layers_override=num_hidden_layers,
         require_post_norm=require_post_norm,
         prefix=prefix,
@@ -410,6 +410,8 @@ class Mistral3ForConditionalGeneration(
     SupportsEagle,
     SupportsEagle3,
 ):
+    supports_mm_device_do_normalize = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -464,6 +466,7 @@ class Mistral3ForConditionalGeneration(
             self.vision_tower = init_vision_tower_for_mistral3(
                 config,
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )

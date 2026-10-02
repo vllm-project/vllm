@@ -167,7 +167,10 @@ def test_sparse_mla_sink_matches_ragged_reference(
     impl.sinks = sinks
 
     output, lse = impl._forward_mla(
-        SimpleNamespace(_q_scale=q_scale, _k_scale=kv_scale), q, kv, metadata
+        SimpleNamespace(_q_scale=q_scale, _k_scale=kv_scale),
+        q,
+        kv,
+        metadata,
     )
     kv_flat = kv_ref[:, 0]
     references = []

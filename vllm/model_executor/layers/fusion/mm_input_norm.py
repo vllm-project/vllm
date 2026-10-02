@@ -147,6 +147,11 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
     rescale_factor)`` from the processor config."""
     config = get_processor_config(model_config.model, revision=model_config.revision)
     config = config.get("image_processor", config)
+    if not any(
+        key in config
+        for key in ("do_normalize", "do_rescale", "image_mean", "image_std")
+    ):
+        config = model_config.hf_image_processor_config
 
     has_norm_params = "image_mean" in config and "image_std" in config
     do_normalize = bool(config.get("do_normalize", has_norm_params))
@@ -240,6 +245,10 @@ class FusedMMInputNorm(CustomOp):
         device = torch.get_default_device()
         self.register_buffer("weight", (rescale_factor / std).to(device))
         self.register_buffer("bias", (-mean / std).to(device))
+
+    @classmethod
+    def enabled(cls) -> bool:
+        return True
 
     @property
     def input_dtype(self) -> torch.dtype | None:
