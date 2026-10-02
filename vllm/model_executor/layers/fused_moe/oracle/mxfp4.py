@@ -1266,31 +1266,6 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
-    elif mxfp4_backend == Mxfp4MoeBackend.CPU:
-        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-            prepare_mxfp4_moe_layer_for_cpu,
-        )
-
-        packed_w13, packed_w2, packed_w13_scale, packed_w2_scale = (
-            prepare_mxfp4_moe_layer_for_cpu(
-                w13_weight.data,
-                w2_weight.data,
-                w13_weight_scale.data,
-                w2_weight_scale.data,
-            )
-        )
-        if w13_bias is not None:
-            w13_bias = w13_bias.data.to(torch.float32)
-        if w2_bias is not None:
-            w2_bias = w2_bias.data.to(torch.float32)
-        return (
-            packed_w13,
-            packed_w2,
-            packed_w13_scale,
-            packed_w2_scale,
-            w13_bias,
-            w2_bias,
-        )
     elif mxfp4_backend in (
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.EMULATION,
@@ -1419,7 +1394,31 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_mxfp4_moe_layer_for_cpu,
+        )
 
+        packed_w13, packed_w2, packed_w13_scale, packed_w2_scale = (
+            prepare_mxfp4_moe_layer_for_cpu(
+                w13_weight.data,
+                w2_weight.data,
+                w13_weight_scale.data,
+                w2_weight_scale.data,
+            )
+        )
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
+        return (
+            packed_w13,
+            packed_w2,
+            packed_w13_scale,
+            packed_w2_scale,
+            w13_bias,
+            w2_bias,
+        )
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend for Mxfp4MoEMethod: {mxfp4_backend}. "
