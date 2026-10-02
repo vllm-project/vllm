@@ -34,6 +34,7 @@ from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
     resolve_block_hashes,
     resolve_dcp_kv_block_size,
+    to_event_extra_keys,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -1147,9 +1148,7 @@ class SimpleCPUOffloadScheduler:
                             lora_id=meta.lora_id if meta else None,
                             medium=self.kv_event_medium,
                             lora_name=meta.lora_name if meta else None,
-                            extra_keys=(
-                                [extra_keys] if extra_keys is not None else None
-                            ),
+                            extra_keys=to_event_extra_keys(extra_keys and [extra_keys]),
                             group_idx=group_idx,
                             kv_cache_spec_kind=get_kv_cache_spec_kind(spec).value,
                             kv_cache_spec_sliding_window=(

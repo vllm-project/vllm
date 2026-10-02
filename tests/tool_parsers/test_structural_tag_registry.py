@@ -47,6 +47,7 @@ from vllm.tool_parsers.mimo_tool_parser import MiMoToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
 from vllm.tool_parsers.plamo3_engine_tool_parser import Plamo3EngineToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+from vllm.tool_parsers.step3p5_tool_parser import Step3p5ToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
@@ -669,12 +670,54 @@ def test_get_model_structural_tag_supports_named_tool_choice(
         (Llama3JsonToolParser, "llama"),
         (MinimaxM2ToolParser, "minimax"),
         (Qwen3EngineToolParser, "qwen_3_coder"),
+        (Step3p5ToolParser, "qwen_3_coder"),
         (MiMoToolParser, "mimo"),
     ],
 )
 def test_tool_parsers_declare_matching_xgrammar_builtin_model(parser_cls, model):
     assert parser_cls.structural_tag_model == model
     assert not parser_cls.supports_required_and_named
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", {"type": "function", "function": {"name": "get_weather"}}],
+)
+def test_step3p5_forced_tool_choice_round_trips_native_xml(
+    sample_tools: list[ChatCompletionToolsParam], tool_choice
+):
+    """Forced Step calls must be constrained to, and parsed from, Step XML."""
+
+    class StepParser(DelegatingParser):
+        tool_parser_cls = Step3p5ToolParser
+
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        # Named tool choice validation reads tools in their JSON form.
+        tools=[tool.model_dump(exclude_none=True) for tool in sample_tools],
+        tool_choice=tool_choice,
+    )
+    parser = StepParser(MagicMock(), tools=sample_tools)
+    request = parser.adjust_request(request)
+
+    assert request.structured_outputs.json is None
+    grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
+    # Rendered exactly as the Step-3.5/3.7 chat templates render tool calls.
+    output = (
+        "<tool_call>\n<function=get_weather>\n"
+        "<parameter=city>\nDallas\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    assert _is_grammar_accept_string(grammar, output)
+    assert not _is_grammar_accept_string(grammar, "It is sunny in Dallas.")
+
+    _, content, tool_calls = parser.parse(output, request, enable_auto_tools=True)
+
+    assert not content
+    assert [(call.name, json.loads(call.arguments)) for call in tool_calls] == [
+        ("get_weather", {"city": "Dallas"})
+    ]
 
 
 def test_tool_parsers_without_structural_tag_support_required_and_named():
