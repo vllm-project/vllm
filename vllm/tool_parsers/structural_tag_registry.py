@@ -949,9 +949,33 @@ def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
     return JSONSchemaFormat(json_schema={"type": prop_type})
 
 
+def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Return ``properties`` when the schema is a plain object schema."""
+    properties = params.get("properties")
+    if (
+        not isinstance(properties, dict)
+        or not properties
+        or params.get("additionalProperties") is True
+        or any(
+            key in params
+            for key in ("$ref", "allOf", "anyOf", "oneOf", "patternProperties")
+        )
+    ):
+        return None
+    return properties
+
+
 def _glm_4_7_tool_tag(tool: FunctionToolParam) -> TagFormat:
     """Shallow tag for a non-strict tool: keys and basic value types pinned."""
-    properties = (tool.function.parameters or {}).get("properties", {})
+    properties = _glm_4_7_plain_properties(tool.function.parameters or {})
+    if properties is None:
+        return TagFormat(
+            begin=f"<tool_call>{tool.function.name}",
+            content=JSONSchemaFormat(
+                json_schema=True, style="glm_xml", any_order=False
+            ),
+            end="</tool_call>",
+        )
     pairs: list[Any] = [
         SequenceFormat(
             elements=[

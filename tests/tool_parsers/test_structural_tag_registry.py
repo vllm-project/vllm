@@ -1470,6 +1470,67 @@ def test_glm47_non_strict_reasoning_gates_on_think_close():
     assert not _is_grammar_accept_string(grammar, call)
 
 
+@pytest.mark.parametrize(
+    ("parameters", "key"),
+    [
+        (
+            {
+                "$ref": "#/$defs/args",
+                "$defs": {
+                    "args": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }
+                },
+            },
+            "city",
+        ),
+        (
+            {
+                "anyOf": [
+                    {"type": "object", "properties": {"city": {"type": "string"}}},
+                    {"type": "null"},
+                ]
+            },
+            "city",
+        ),
+        (
+            {"allOf": [{"type": "object", "properties": {"city": {"type": "string"}}}]},
+            "city",
+        ),
+        ({"type": "object", "patternProperties": {"^arg": {"type": "string"}}}, "city"),
+        ({"type": "object"}, "city"),
+        ({}, "city"),
+        (
+            {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "additionalProperties": True,
+            },
+            "undeclared_key",
+        ),
+    ],
+)
+def test_glm47_non_plain_object_schemas_keep_free_arguments(parameters, key):
+    # Schemas that are not a plain object with declared properties fall back
+    # to the builtin's non-strict envelope content, which accepts any key.
+    tools = [
+        ChatCompletionToolsParam(
+            type="function", function={"name": "f", "parameters": parameters}
+        )
+    ]
+    tag = get_model_structural_tag(
+        model="glm_4_7",
+        tools=tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+    assert isinstance(tag, StructuralTag)
+    grammar = Grammar.from_structural_tag(tag)
+    call = _glm47_call("f", _glm47_arg(key, "Paris"))
+    assert _is_grammar_accept_string(grammar, call)
+
+
 def _glm47_strict_tools() -> list[ChatCompletionToolsParam]:
     return [
         ChatCompletionToolsParam(
