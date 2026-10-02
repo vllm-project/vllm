@@ -5,7 +5,7 @@
 set -ex
 
 # Skip the new torch installation during build since we are using the specified version for arm64 in the Dockerfile
-python3 use_existing_torch.py
+python3 tools/use_existing_torch.py
 
 # Try building the docker image
 DOCKER_BUILDKIT=1 docker build . \

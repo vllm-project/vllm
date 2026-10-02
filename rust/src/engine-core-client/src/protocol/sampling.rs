@@ -20,6 +20,10 @@ fn default_temperature() -> f32 {
     1.0
 }
 
+fn default_watermarking() -> bool {
+    true
+}
+
 fn default_max_tokens() -> u32 {
     16
 }
@@ -68,6 +72,9 @@ pub struct EngineCoreSamplingParams {
     /// greedy sampling.
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    /// Whether to apply the engine's configured watermark to this request.
+    #[serde(default = "default_watermarking")]
+    pub watermarking: bool,
     /// Cumulative probability threshold for nucleus sampling.
     #[serde(default = "default_top_p")]
     pub top_p: f32,
@@ -94,6 +101,11 @@ pub struct EngineCoreSamplingParams {
     ///
     /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
     pub prompt_logprobs: Option<i32>,
+    /// Candidate token IDs scored at every scored causal prompt row, where row
+    /// `i` scores them as predictions of prompt token `i + 1`.
+    pub prompt_logprob_token_ids: Option<Vec<u32>>,
+    /// First causal prompt row to score; `None` scores from the first row.
+    pub prompt_logprob_start: Option<u32>,
     /// Minimum probability threshold for token sampling.
     pub min_p: f32,
     /// Frequency penalty applied by the sampler.
@@ -155,6 +167,7 @@ impl EngineCoreSamplingParams {
     pub fn for_test() -> Self {
         Self {
             temperature: 1.0,
+            watermarking: true,
             top_p: 1.0,
             top_k: 0,
             seed: None,
@@ -163,6 +176,8 @@ impl EngineCoreSamplingParams {
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: 0.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -229,6 +244,7 @@ mod tests {
 
         // Omitted fields -> Python defaults.
         assert_eq!(sampling.temperature, 1.0);
+        assert!(sampling.watermarking);
         assert_eq!(sampling.top_p, 1.0);
         assert_eq!(sampling.top_k, 0);
         assert_eq!(sampling.seed, None);
