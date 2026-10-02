@@ -382,6 +382,15 @@ class HFConfigParser(ConfigParserBase):
         if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
             _patch_hf_transformers_allowed_layer_types(extra_layer_types)
 
+        if model_type == "vlm":
+            # HyperCLOVAX remote code registers this alias in a bare
+            # `try/except` that fails silently since transformers 5.18
+            from transformers import CONFIG_MAPPING, Qwen2_5_VLVisionConfig
+
+            CONFIG_MAPPING.register(
+                "qwen2_5_vl_visual", Qwen2_5_VLVisionConfig, exist_ok=True
+            )
+
         rope_parameters = config_dict.get("rope_parameters") or {}
         if model_type == "gemma4_text" and "full_attention" in rope_parameters:
             from transformers import Gemma4TextConfig
