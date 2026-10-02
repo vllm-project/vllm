@@ -1,0 +1,3 @@
+Qwen3-30B-A3B-BF16-fi-trtllm-deepep-v2.yaml
+Qwen3-30B-A3B-Fp8-AutoFp8-fi-trtllm-deepep-v2.yaml
+Qwen3-30B-A3B-MXFP4A16-deepgemm-deepep-v2.yaml

@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# DeepEP v2 (PaddedStandard) + TrtLlmMxfp4Mxfp8ExpertsModular.
+# DP+EP counterpart of gpt-oss-20b-sm100-fi-mxfp4-mxfp8-trtllm.yaml.
+model_name: "openai/gpt-oss-20b"
+metric_threshold: 0.568
+reasoning_effort: "low"
+startup_max_wait_seconds: 1800
+server_args: >-
+  --max-model-len 8192
+  --data-parallel-size 8
+  --enable-expert-parallel
+  --all2all-backend deepep_v2
+  --moe-backend=flashinfer_trtllm
+  --quantization-config.moe.activation mxfp8
