@@ -766,6 +766,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
         self.kvpp_runtime = create_kvpp_runtime(self.kv_cache_config, kv_caches_dict)
+        if self.kvpp_runtime is not None:
+            self.block_tables.enable_cpu_block_ids()
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -1948,7 +1950,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
                 maybe_prepare_kvpp(
-                    self.kvpp_runtime, self.req_states, batch_req_state, input_batch
+                    self.kvpp_runtime,
+                    self.req_states,
+                    batch_req_state,
+                    input_batch,
+                    self.block_tables if self.kvpp_runtime is not None else None,
                 )
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None

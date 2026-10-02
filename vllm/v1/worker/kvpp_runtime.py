@@ -4,6 +4,7 @@
 
 from typing import Any
 
+import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -41,6 +42,24 @@ class KVPPRuntime:
         )
         self.regions = [r for r in plan.regions if r.bundle.owner is not None]
         self.buffers = [backing.narrow(0, r.offset, r.size) for r in self.regions]
+        # Per-component [num_blocks, page_bytes] views, used to pack only the
+        # blocks a batch reads instead of broadcasting whole bundles.
+        tensors = {t.layers[0]: t for t in config.kv_cache_tensors}
+        self.component_views: list[list[torch.Tensor]] = []
+        for region in self.regions:
+            views = []
+            for name in region.bundle.layers:
+                t = tensors[name]
+                nbytes = t.block_stride * config.num_blocks
+                assert region.offset <= t.offset <= region.offset + region.size - nbytes
+                views.append(
+                    backing.narrow(0, t.offset, nbytes).view(
+                        config.num_blocks, t.block_stride
+                    )
+                )
+            self.component_views.append(views)
+        self.rank = plan.placement.rank
+        self.block_ids: torch.Tensor | None = None
         self.layer_indices = {
             name: index
             for index, region in enumerate(self.regions)
@@ -55,7 +74,7 @@ class KVPPRuntime:
         logger.info(
             "KVPP rank %d/%d (%s): %d logical blocks, %d/%d owned target bundles, "
             "%d persistent bytes, %d total allocation bytes, "
-            "%d broadcast payload bytes per forward with history",
+            "%d max broadcast bytes per forward",
             plan.placement.rank,
             plan.placement.world_size,
             "bcast",
@@ -67,13 +86,22 @@ class KVPPRuntime:
             sum(r.size for r in self.regions),
         )
 
-    def prepare_forward(self, has_history: bool) -> None:
+    def prepare_forward(
+        self, has_history: bool, block_ids: np.ndarray | None = None
+    ) -> None:
         assert (
             self.next_index == len(self.regions)
             and self.active_index is None
             and self.pending is None
         ), "Previous KVPP forward is incomplete."
         self.has_history = has_history
+        # Without block IDs (dummy runs), whole bundles are broadcast.
+        self.block_ids = None
+        if has_history and block_ids is not None:
+            self.block_ids = torch.from_numpy(block_ids).to(
+                self.transfer_stream.device, non_blocking=True
+            )
+            self.block_ids.record_stream(self.transfer_stream)
         self.next_index = 0
         self.ready = torch.cuda.Event()
         self.ready.record(torch.cuda.current_stream())
@@ -88,16 +116,44 @@ class KVPPRuntime:
                 and region.scratch_slot in self.slot_last_use
             ):
                 self.transfer_stream.wait_event(self.slot_last_use[region.scratch_slot])
-            work = dist.broadcast(
-                self.buffers[index],
-                src=self.ranks[region.bundle.owner],
-                group=self.group,
-                async_op=True,
-            )
-            work.wait()
+            if self.block_ids is None:
+                work = dist.broadcast(
+                    self.buffers[index],
+                    src=self.ranks[region.bundle.owner],
+                    group=self.group,
+                    async_op=True,
+                )
+                work.wait()
+            else:
+                work = self._broadcast_blocks(index, self.block_ids)
             done = torch.cuda.Event()
             done.record(self.transfer_stream)
         self.pending = (index, work, done)
+
+    def _broadcast_blocks(self, index: int, block_ids: torch.Tensor) -> Any:
+        """Gather, broadcast, and scatter selected blocks of one bundle."""
+        owner = self.regions[index].bundle.owner
+        assert owner is not None
+        views = self.component_views[index]
+        n = block_ids.numel()
+        packed = torch.empty(
+            n * sum(v.shape[1] for v in views),
+            dtype=torch.int8,
+            device=block_ids.device,
+        )
+        chunks = packed.split([n * v.shape[1] for v in views])
+        chunks = [c.view(n, v.shape[1]) for c, v in zip(chunks, views)]
+        if owner == self.rank:
+            for view, chunk in zip(views, chunks):
+                torch.index_select(view, 0, block_ids, out=chunk)
+        work = dist.broadcast(
+            packed, src=self.ranks[owner], group=self.group, async_op=True
+        )
+        work.wait()
+        if owner != self.rank:
+            for view, chunk in zip(views, chunks):
+                view.index_copy_(0, block_ids, chunk)
+        return work
 
     def acquire(self, layer_name: str) -> None:
         index = self.layer_indices.get(layer_name)

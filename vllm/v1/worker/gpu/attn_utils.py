@@ -59,21 +59,26 @@ def maybe_prepare_kvpp(
     req_states: "RequestState",
     batch_req_state: "BatchReqState | None",
     input_batch: "InputBatch",
+    block_tables: "BlockTables | None" = None,
 ) -> None:
     """Prepare KVPP history tracking without batch processing when disabled."""
     if runtime is None:
         return
+    block_ids = None
     if batch_req_state is not None:
         # PCP-local query offsets include the current prefill. Read shared
         # request history, selecting only this batch to exclude stale slots.
-        num_computed_tokens = req_states.num_computed_tokens_np[
-            batch_req_state.idx_mapping_np
-        ]
+        req_indices = batch_req_state.idx_mapping_np
+        num_computed_tokens = req_states.num_computed_tokens_np[req_indices]
+        if block_tables is not None and block_tables.cpu_block_ids is not None:
+            block_ids = block_tables.get_history_block_ids(
+                req_indices, num_computed_tokens
+            )
     else:
         # Dummy runs have no request-state mapping; use their synthetic context
         # lengths and exclude padded entries.
         num_computed_tokens = input_batch.num_computed_tokens_np[: input_batch.num_reqs]
-    runtime.prepare_forward(bool(np.any(num_computed_tokens > 0)))
+    runtime.prepare_forward(bool(np.any(num_computed_tokens > 0)), block_ids)
 
 
 @dataclass(frozen=True)
