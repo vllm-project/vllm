@@ -261,32 +261,14 @@ QWEN4_EXP_SM121_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
 }
 
 
-def _is_sm121() -> bool:
-    return current_platform.is_device_capability((12, 1))
-
-
-def _is_sm100() -> bool:
-    return current_platform.is_device_capability((10, 0))
-
-
-def _is_sm103() -> bool:
-    return current_platform.is_device_capability((10, 3))
-
-
-def _is_sm90() -> bool:
-    return current_platform.is_device_capability((9, 0))
-
-
-def _gemm_plans() -> dict[tuple[int, int], dict[int, SkinnyGemmConfig]]:
-    if _is_sm103():
-        return QWEN4_EXP_GEMM_PLANS
-    if _is_sm100():
-        return QWEN4_EXP_SM100_GEMM_PLANS
-    if _is_sm90():
-        return QWEN4_EXP_SM90_GEMM_PLANS
-    if _is_sm121():
-        return QWEN4_EXP_SM121_GEMM_PLANS
-    return {}
+QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY: dict[
+    tuple[int, int] | None, dict[tuple[int, int], dict[int, SkinnyGemmConfig]]
+] = {
+    (10, 3): QWEN4_EXP_GEMM_PLANS,
+    (10, 0): QWEN4_EXP_SM100_GEMM_PLANS,
+    (9, 0): QWEN4_EXP_SM90_GEMM_PLANS,
+    (12, 1): QWEN4_EXP_SM121_GEMM_PLANS,
+}
 
 
 def _is_packed_row_major(tensor: torch.Tensor) -> bool:
@@ -330,7 +312,10 @@ class Qwen4ExpLowLatencyEmbeddingMethod(
 
 
 def _qwen4_exp_low_latency_gemm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    plan = _gemm_plans().get((weight.shape[0], weight.shape[1]))
+    plans = QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY.get(
+        current_platform.get_device_capability(), {}
+    )
+    plan = plans.get((weight.shape[0], weight.shape[1]))
     config = None if plan is None else plan.get(x.shape[0])
     if (
         config is not None
@@ -358,7 +343,9 @@ def enable_qwen4_exp_low_latency_gemm(
     module: nn.Module,
     dtype: torch.dtype,
 ) -> None:
-    plans = _gemm_plans()
+    plans = QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY.get(
+        current_platform.get_device_capability(), {}
+    )
     if dtype != torch.bfloat16 or not plans:
         return
     if not shape_dynamic_skinny_gemm.is_available():

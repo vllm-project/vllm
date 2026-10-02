@@ -742,11 +742,16 @@ def test_qwen4_exp_gemm_capability_routing(
 ) -> None:
     monkeypatch.setattr(
         qwen4_exp_gemm.current_platform,
-        "is_device_capability",
-        lambda target: capability == target,
+        "get_device_capability",
+        lambda: capability,
     )
 
-    assert qwen4_exp_gemm._gemm_plans() == expected_plans
+    assert (
+        qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY.get(
+            qwen4_exp_gemm.current_platform.get_device_capability(), {}
+        )
+        == expected_plans
+    )
 
 
 def test_installation_is_shape_specific_and_unquantized(
