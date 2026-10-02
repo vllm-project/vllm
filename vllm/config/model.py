@@ -503,6 +503,10 @@ class ModelConfig:
         # here early.
         if self.multimodal_config:
             factors["language_model_only"] = self.multimodal_config.language_model_only
+            # Sizes Qwen3.5's M-RoPE cache.
+            factors["video_pruning"] = (
+                self.multimodal_config.is_multimodal_pruning_enabled()
+            )
         return hash_factors(factors)
 
     def _update_nested(
