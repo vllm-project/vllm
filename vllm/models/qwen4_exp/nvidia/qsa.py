@@ -25,10 +25,8 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     Qwen4ExpQSAQKVIndexerLinear,
     RowParallelLinear,
-    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
@@ -419,19 +417,13 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.use_fused_qsa_prepare = (
             self.use_fused_qk_norm_rope_gate and self.indexer.use_fused_pre_indexer
         )
-        projection_method = type(self.qkv_proj.quant_method)
-        self.fuse_indexer_projection = (
-            vllm_config.lora_config is None
-            and projection_method in (UnquantizedLinearMethod, Fp8LinearMethod)
-            and projection_method is type(self.indexer.index_qk_proj.quant_method)
-        )
+        self.fuse_indexer_projection = vllm_config.lora_config is None
         if self.fuse_indexer_projection:
-            projection_quant_config = model.without_modelopt_fp4(quant_config)
-            if type(self.qkv_proj.quant_method) is UnquantizedLinearMethod:
-                projection_quant_config = None
             self.index_qk_size = self.indexer.index_qk_proj.output_size
             self.qkv_proj = Qwen4ExpQSAQKVIndexerLinear(
-                self.qkv_proj, self.index_qk_size, projection_quant_config
+                self.qkv_proj,
+                self.index_qk_size,
+                model.without_modelopt_fp4(quant_config),
             )
             del self.indexer.index_qk_proj
 
