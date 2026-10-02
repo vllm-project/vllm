@@ -35,7 +35,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
-    select_deepseek_v4_mxfp4_moe_backend,
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -388,6 +387,7 @@ def test_b12x_moe_config_support(
     [
         (kMxfp8Dynamic, False, Mxfp4MoeBackend.B12X_MXFP4_MXFP8),
         (None, False, Mxfp4MoeBackend.B12X_MXFP4_MXFP8),
+        (None, True, Mxfp4MoeBackend.B12X_MXFP4_BF16),
     ],
 )
 def test_explicit_b12x_mxfp4_selection(
@@ -437,33 +437,6 @@ def test_explicit_b12x_mxfp4_force_a16_uses_a16_contract(
     assert experts_cls is B12xExperts
 
 
-@pytest.mark.parametrize(
-    "force_a16,expected_backend",
-    [
-        (False, Mxfp4MoeBackend.B12X_MXFP4_MXFP8),
-        (True, Mxfp4MoeBackend.B12X_MXFP4_BF16),
-    ],
-)
-def test_deepseek_v4_b12x_activation_selection(
-    monkeypatch: pytest.MonkeyPatch,
-    force_a16: bool,
-    expected_backend: Mxfp4MoeBackend,
-) -> None:
-    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
-    monkeypatch.setattr(
-        mxfp4_oracle.envs,
-        "VLLM_B12X_MOE_FP4_FORCE_A16",
-        force_a16,
-    )
-    config = make_dummy_moe_config(hidden_dim=256, intermediate_size=64)
-    config.moe_backend = "b12x"
-
-    backend, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
-
-    assert backend == expected_backend
-    assert experts_cls is B12xExperts
-
-
 def test_deepseek_v4_flashinfer_cutlass_falls_through_to_w4a8(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -487,7 +460,7 @@ def test_deepseek_v4_flashinfer_cutlass_falls_through_to_w4a8(
     config = make_dummy_moe_config(hidden_dim=256, intermediate_size=64)
     config.moe_backend = "flashinfer_cutlass"
 
-    backend, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    backend, experts_cls = select_mxfp4_moe_backend(config)
 
     assert backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8
     assert experts_cls is FlashInferExperts

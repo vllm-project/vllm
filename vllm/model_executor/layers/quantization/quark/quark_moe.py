@@ -50,7 +50,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
     backend_to_kernel_cls,
-    convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
@@ -1604,19 +1604,31 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         self.static_input_scales = activation_quant_key == kFp8StaticTensorSym
 
+        self.model_type = getattr(
+            get_current_vllm_config().model_config.hf_config, "model_type", None
+        )
+
+        is_gpt_oss = self.model_type == "gpt_oss"
+
         # Select backend based on OCP MX scheme
         if self.ocp_mx_scheme == "w_mxfp4":
             # W4A16: weight-only MXFP4
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, use_gpt_oss_priority=is_gpt_oss
+            )
         elif self.ocp_mx_scheme == "w_mxfp4_a_fp8" and self.static_input_scales:
             # W4A8: MXFP4 weights + static FP8 activations
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kFp8StaticTensorSym
+                moe,
+                activation_key=kFp8StaticTensorSym,
+                use_gpt_oss_priority=is_gpt_oss,
             )
         elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp4":
             # W4A4: MXFP4 weights + MXFP4 activations
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kMxfp4Dynamic
+                moe,
+                activation_key=kMxfp4Dynamic,
+                use_gpt_oss_priority=is_gpt_oss,
             )
 
         # Validation for unsupported schemes
@@ -1636,10 +1648,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 f"not implemented for OCP MX scheme {self.ocp_mx_scheme}. "
                 "Please open an issue."
             )
-
-        self.model_type = getattr(
-            get_current_vllm_config().model_config.hf_config, "model_type", None
-        )
 
         # If no native backend available, use emulation.
         if self.mxfp4_backend is Mxfp4MoeBackend.NONE:
@@ -1800,13 +1808,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         self._setup_kernel(layer)
 
     def _setup_kernel(self, layer: RoutedExperts):
-        """Setup kernel using oracle functions for MXFP4 schemes (W4A16, W4A8)."""
+        """Setup kernel using oracle functions for MXFP4 schemes (W4A16, W4A8, W4A4)."""
         w13_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
         # Convert weights to kernel format (handles all backend-specific logic)
         w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+            convert_weight_to_mxfp4_moe_kernel_format(
                 mxfp4_backend=self.mxfp4_backend,
                 layer=layer,
                 w13_weight=layer.w13_weight,
@@ -1815,8 +1823,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w2_weight_scale=layer.w2_weight_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
-                w13_input_scale=layer.w13_input_scale,
-                w2_input_scale=layer.w2_input_scale,
+                # GPT-OSS checkpoints store w13 with gate/up interleaved.
+                is_w13_interleaved=self.model_type == "gpt_oss",
             )
         )
 
