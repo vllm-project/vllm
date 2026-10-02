@@ -277,8 +277,13 @@ class DPCoordinatorProc:
                     min_timeout = 0
 
                 events = poller.poll(timeout=max(min_timeout, wait_for - elapsed))
-                if not events:
-                    # Poller timeout - publish current stats to front-ends.
+                snapshot_ready = (
+                    not self.enable_wave_coordination or last_step_counts is not None
+                )
+                if not events or (elapsed >= wait_for and snapshot_ready):
+                    # Publish due snapshots even while input stays readable. For
+                    # lockstep engines, keep the quiet-poll fallback when there
+                    # is no previous-step snapshot yet.
                     if last_step_counts is not None:
                         engine_req_counts_list = last_step_counts
                         last_step_counts = None

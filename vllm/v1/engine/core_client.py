@@ -1520,17 +1520,21 @@ class DPAsyncMPClient(AsyncMPClient):
                         await socket.send(msg)
 
                     buf = None
+                    counts = None
                     while True:
-                        # Drain all stats events (we only care about latest).
+                        # Keep the latest counts even if a later message only
+                        # updates the wave state.
                         future: asyncio.Future[bytes] = socket.recv(flags=zmq.NOBLOCK)
                         if isinstance(future.exception(), zmq.Again):
                             break
                         buf = future.result()
+                        new_counts, wave, running = msgspec.msgpack.decode(buf)
+                        if new_counts is not None:
+                            counts = new_counts
                     if buf is None:
                         continue
 
                     # Update local load-balancing state.
-                    counts, wave, running = msgspec.msgpack.decode(buf)
                     self.current_wave = wave
                     self.engines_running = running
                     if counts is not None:

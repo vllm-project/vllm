@@ -299,6 +299,72 @@ def test_dplb_burst_round_robins_despite_snapshot_rebinds():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("loaded_engine_index", "running"), [(0, False), (1, True)])
+async def test_dplb_wave_updates_preserve_latest_load_snapshot(
+    loaded_engine_index: int, running: bool
+):
+    """State-only updates must not discard queued counts used for routing."""
+    import msgspec
+    import zmq.asyncio
+
+    client = _make_dplb_client(num_engines=2, client_count=2)
+    client.engine_ranks_managed = [0, 1]
+    client.engines_running = True
+    client.current_wave = 0
+    client.lb_engines[1 - loaded_engine_index][1] = 50
+    client.resources = SimpleNamespace(stats_update_task=None)
+    client.stats_update_address = "inproc://wave-update-stats"
+    client.first_req_sock_addr = "inproc://wave-update-first-request"
+    first_counts = [[0, 0, 0.0], [0, 0, 0.0]]
+    first_counts[1 - loaded_engine_index][1] = 30
+    latest_counts = [[0, 0, 0.0], [0, 0, 0.0]]
+    latest_counts[loaded_engine_index][1] = 10
+
+    async def wait_for_wave(wave: int):
+        while client.current_wave != wave:
+            await asyncio.sleep(0)
+
+    with (
+        zmq.asyncio.Context() as ctx,
+        ctx.socket(zmq.XPUB) as coordinator,
+        ctx.socket(zmq.PAIR) as first_req_socket,
+    ):
+        client.ctx = ctx
+        coordinator.bind(client.stats_update_address)
+        first_req_socket.bind(client.first_req_sock_addr)
+        client._ensure_stats_update_task()
+        try:
+            await asyncio.wait_for(coordinator.recv(), timeout=5)
+            # Queue the entire burst before yielding to the receiving task.
+            for message in (
+                (first_counts, 1, True),
+                (None, 2, False),
+                (latest_counts, 2, False),
+                (None, 3, running),
+            ):
+                coordinator.send(msgspec.msgpack.encode(message)).result()
+
+            await asyncio.wait_for(wait_for_wave(3), timeout=5)
+            assert client.engines_running is running
+            assert client.lb_engines == latest_counts
+            chosen = client.get_core_engine_for_request(
+                _make_pooling_request("after-wave-update")
+            )
+            assert chosen == client.core_engines[1 - loaded_engine_index]
+
+            # A later state-only update must also preserve the current counts.
+            retained_counts = [counts.copy() for counts in client.lb_engines]
+            await coordinator.send(msgspec.msgpack.encode((None, 4, not running)))
+            await asyncio.wait_for(wait_for_wave(4), timeout=5)
+            assert client.engines_running is not running
+            assert client.lb_engines == retained_counts
+        finally:
+            task = client.resources.stats_update_task
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
     """A coordinator snapshot during scale-down must only route to survivors."""
     import msgspec
