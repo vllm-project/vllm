@@ -334,3 +334,79 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     runner.capture_model(profile_only=True)
 
     assert lock_calls == []
+
+
+@pytest.mark.parametrize("replace_new_table", [False, True])
+def test_hisparse_new_request_block_table_replacement(replace_new_table):
+    """A prefix restore stages one authoritative table per new request.
+
+    Initial and restored tables must never race in the fused GPU writer.
+    Check staging deterministically, then validate the actual device contents.
+    """
+    import numpy as np
+
+    from vllm.platforms import current_platform
+
+    if not (current_platform.is_cuda() or current_platform.is_rocm()):
+        pytest.skip("requires CUDA or ROCm")
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner._remove_request = lambda req_id: None
+    runner.req_states = SimpleNamespace(
+        add_request=lambda **kwargs: None,
+        req_id_to_index={"new": 0, "cached": 1},
+        apply_staged_writes=lambda: None,
+        num_computed_tokens_np=np.zeros(2, dtype=np.int32),
+        prefill_len=SimpleNamespace(np=np.full(2, 64, dtype=np.int32)),
+        num_computed_prefill_tokens=np.zeros(2, dtype=np.int32),
+    )
+    runner.adaptive_verification = None
+    runner.pooling_runner = None
+    runner.encoder_cache = None
+    runner.is_last_pp_rank = False
+    runner.sampler = None
+    runner.model_state = Mock()
+    runner.lora_state = Mock()
+    runner.block_tables = BlockTables(
+        block_sizes=[16, 16],
+        max_num_reqs=2,
+        max_num_batched_tokens=32,
+        max_num_blocks_per_group=[8, 8],
+        device=torch.device("cuda"),
+        kernel_block_sizes=[16, 16],
+    )
+    initial = ([1, 2, 3, 4], [0, 0, 0, 8])
+    restored = ([1, 2, 3, 4], [5, 6, 7, 8])
+    cached = ([9, 10], [11, 12])
+    updates = {"cached": cached}
+    if replace_new_table:
+        updates["new"] = restored
+    output = SimpleNamespace(
+        scheduled_new_reqs=[
+            SimpleNamespace(
+                req_id="new",
+                prefill_token_ids=[1] * 64,
+                prompt_len=64,
+                sampling_params=None,
+                num_computed_tokens=48,
+                block_ids=initial,
+                lora_request=None,
+            )
+        ],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["cached"],
+            num_computed_tokens=[16],
+            new_block_ids=[([99], [99])],
+        ),
+        block_table_updates=updates,
+        new_block_ids_to_zero=[],
+        kv_cache_block_copies=[],
+    )
+    runner.add_requests(output)
+    runner.update_requests(output)
+    for table in runner.block_tables.block_tables:
+        assert sorted(table._staged_write_indices) == [0, 1]
+    runner.block_tables.apply_staged_writes()
+    expected = restored if replace_new_table else initial
+    for group, table in enumerate(runner.block_tables.block_tables):
+        assert table.gpu[0, :4].tolist() == expected[group]
+        assert table.gpu[1, :2].tolist() == cached[group]

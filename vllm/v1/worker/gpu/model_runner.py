@@ -1190,9 +1190,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
 
             self.model_state.add_request(req_index, new_req_data)
-            self.block_tables.append_block_ids(
-                req_index, new_req_data.block_ids, overwrite=True
-            )
+            # A restored HiSparse prefix can replace a new request's initial
+            # table in the same scheduler step. update_requests stages that
+            # replacement; staging both creates overlapping unordered GPU writes.
+            if req_id not in (scheduler_output.block_table_updates or {}):
+                self.block_tables.append_block_ids(
+                    req_index, new_req_data.block_ids, overwrite=True
+                )
             self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
 
             if self.is_last_pp_rank and new_req_data.sampling_params is not None:
