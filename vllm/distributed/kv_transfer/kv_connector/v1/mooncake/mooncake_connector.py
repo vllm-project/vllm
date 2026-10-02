@@ -630,12 +630,6 @@ class MooncakeXferMetadata(
     layout_id: int = 0
 
 
-def _metadata_includes_layout(meta: MooncakeXferMetadata) -> bool:
-    return bool(
-        meta.kv_caches_base_addr or meta.registered_layer_names or meta.block_lens
-    )
-
-
 class MooncakeXferResponseStatus(IntEnum):
     # Transfer finished
     FINISH = 0
@@ -1253,7 +1247,6 @@ class MooncakeConnectorWorker:
         self._kv_layout_id = 0
         # Decode side: worker addresses that echoed the current layout_id.
         self._acked_layout_peers: set[str] = set()
-        self._logged_xfer_sizes: set[tuple[str, bool]] = set()
 
         assert (parallel_config := vllm_config.parallel_config)
         dp_rank = parallel_config.data_parallel_index
@@ -1540,7 +1533,7 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        if meta.layout_id and not _metadata_includes_layout(meta):
+        if meta.layout_id and not meta.kv_caches_base_addr:
             stored = self._lookup_peer_layout(meta)
             if stored is None:
                 response = MooncakeXferResponse(
@@ -2016,7 +2009,6 @@ class MooncakeConnectorWorker:
         self._prepared_transfer_regions.clear()
         self._layout_by_peer.clear()
         self._acked_layout_peers.clear()
-        self._logged_xfer_sizes.clear()
         # Odd, so never 0 (the "layout on every pull" marker).
         self._kv_layout_id = secrets.randbits(63) | 1
 
@@ -2349,7 +2341,12 @@ class MooncakeConnectorWorker:
                 pull_metas, include_layout=include_layout
             )
             encoded_data = self._encoder.encode(metadata)
-            self._log_xfer_metadata_size(worker_addr, encoded_data, include_layout)
+            logger.debug(
+                "MooncakeXferMetadata to %s is %d bytes (%s).",
+                worker_addr,
+                len(encoded_data),
+                "layout" if include_layout else "blocks",
+            )
             logger.debug(
                 "Sending kv transfer request for %s on path: %s", req_ids, worker_addr
             )
@@ -2810,20 +2807,6 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
-        )
-
-    def _log_xfer_metadata_size(
-        self, worker_addr: str, encoded: bytes, include_layout: bool
-    ) -> None:
-        key = (worker_addr, include_layout)
-        if key in self._logged_xfer_sizes:
-            return
-        self._logged_xfer_sizes.add(key)
-        logger.info(
-            "MooncakeXferMetadata to %s is %d bytes (%s).",
-            worker_addr,
-            len(encoded),
-            "layout" if include_layout else "blocks",
         )
 
     def _validate_head_resharding_layout(

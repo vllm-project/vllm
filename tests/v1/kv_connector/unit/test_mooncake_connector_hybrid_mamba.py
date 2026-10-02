@@ -247,7 +247,6 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     worker._prepared_transfer_regions = {}
     worker._layout_by_peer = OrderedDict()
     worker._acked_layout_peers = set()
-    worker._logged_xfer_sizes = set()
     worker.use_mla = False
     worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
     worker.is_kv_consumer = True
