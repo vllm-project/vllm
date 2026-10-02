@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
+import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -965,19 +966,30 @@ def _can_use_min_latency_fused_qkv_a_gemm(weight: torch.Tensor) -> bool:
     inside the ``min_latency_fused_qkv_a_proj`` custom op so torch.compile /
     CUDA-graph capture freezes the eager branch into the graph (a Python-level
     quant_method dispatch would silently no-op, see the GLM-5.2 P-3 incident).
+
+    The GLM-5.2 shape is gated by the ``VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM``
+    env var so that the feature-toggle A/B comparison captures the full benefit
+    of this path.  The DeepSeek-V3 shape is always-on.
     """
-    return (
-        weight.dtype == torch.bfloat16
-        and (
-            (weight.shape[0] == 2112 and weight.shape[1] == 7168)
-            or (weight.shape[0] == 2624 and weight.shape[1] == 6144)
-        )
-        and current_platform.is_cuda()
-        and (
-            current_platform.is_device_capability(90)
-            or current_platform.is_device_capability_family(100)
-        )
-    )
+    if weight.dtype != torch.bfloat16 or not current_platform.is_cuda():
+        return False
+    if not (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(100)
+    ):
+        return False
+
+    # DeepSeek-V3 fused-QKV-A: always-on (no feature toggle).
+    if weight.shape[0] == 2112 and weight.shape[1] == 7168:
+        return True
+
+    # GLM-5.2 fused-QKV-A: gated by the GLM-5.2 kill switch so the toggle
+    # A/B comparison measures the full optimisation, not just the secondary
+    # CuTe-DSL projections.
+    if weight.shape[0] == 2624 and weight.shape[1] == 6144:
+        return os.getenv("VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM", "0") != "1"
+
+    return False
 
 
 class DeepSeekV2FusedQkvAProjLinear(MergedColumnParallelLinear):
