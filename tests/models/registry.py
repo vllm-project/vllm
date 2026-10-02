@@ -1396,18 +1396,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen3ASRForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-ASR-0.6B",
         max_model_len=4096,
-        min_transformers_version="4.57",
+        min_transformers_version="5.13",
     ),
     "Qwen3ASRRealtimeGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-ASR-0.6B",
         max_model_len=4096,
-        min_transformers_version="4.57",
+        min_transformers_version="5.13",
         hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
     ),
     "Qwen3ASRForcedAlignerForTokenClassification": _HfExamplesInfo(
         "Qwen/Qwen3-ForcedAligner-0.6B",
         max_model_len=4096,
-        min_transformers_version="4.57",
+        min_transformers_version="5.13",
         hf_overrides={"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]},
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
