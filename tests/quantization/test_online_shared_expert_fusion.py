@@ -304,10 +304,11 @@ def test_online_quantization(
     logged_messages: list[str] = []
     logged_warnings: list[str] = []
 
-    def record_info(message: str, *args: object) -> None:
-        logged_messages.append(message % args)
+    def record_info(message: str, *args: object, **_kwargs: object) -> None:
+        if "Quantized " in message and "of types" in message:
+            logged_messages.append(message % args)
 
-    def record_warning(message: str, *args: object) -> None:
+    def record_warning(message: str, *args: object, **_kwargs: object) -> None:
         logged_warnings.append(message % args)
 
     monkeypatch.setattr(
