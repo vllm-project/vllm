@@ -49,6 +49,7 @@ never stores.
 | `capacity_bytes` | 64 GiB | Pool size per worker. |
 | `total_capacity_bytes` | | Pool size per engine, split evenly across its workers. Exclusive with `capacity_bytes`. |
 | `load_async` | `true` | Load in the background while the request waits. |
+| `lookup_async` | `false` | Look up the pool off the scheduler thread; the request waits until the lookup completes. |
 | `enable_lookup` | `true` | Restore from the pool. With `false` the connector only stores. |
 | `save_decode_cache` | `false` | Also store blocks produced by decoding. |
 | `num_workers`, `timeout_ms` | `4`, `30000` | Transfer threads per worker, and how long a worker waits for a transfer it must finish before failing the step rather than reusing its blocks. |

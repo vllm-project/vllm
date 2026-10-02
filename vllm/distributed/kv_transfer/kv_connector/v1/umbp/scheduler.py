@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -60,6 +61,22 @@ class _StoreEvent:
     result: StoreEventResult = field(default_factory=StoreEventResult)
 
 
+@dataclass(frozen=True)
+class _LookupContext:
+    request: Request
+    local_tokens: int
+    num_tokens: int
+    hashes: tuple[bytes, ...]
+    objects: dict[int, list[tuple[bytes, tuple[str, ...]]]]
+    keys: list[str]
+
+
+@dataclass(frozen=True)
+class _PendingLookup:
+    context: _LookupContext
+    future: Future[Sequence[bool]]
+
+
 class UMBPStoreConnectorScheduler:
     """Own vLLM prefix matching while the runtime owns lookup transport."""
 
@@ -88,6 +105,7 @@ class UMBPStoreConnectorScheduler:
         extra = transfer_config.kv_connector_extra_config
         self.load_async = bool(extra.get("load_async", True))
         self.enable_lookup = bool(extra.get("enable_lookup", True))
+        self.lookup_async = bool(extra.get("lookup_async", False))
         self.save_decode_cache = bool(extra.get("save_decode_cache", False))
         # A kv_consumer only restores from the pool, as with other store
         # connectors; it never offloads its own KV.
@@ -104,6 +122,11 @@ class UMBPStoreConnectorScheduler:
             group_id: self.group_block_sizes[group_id]
             for group_id in kv_cache_config.prefix_cacheable_group_ids
         }
+        self._pending_lookups: dict[str, _PendingLookup] = {}
+        self._lookup_executor = ThreadPoolExecutor(
+            max_workers=int(extra.get("lookup_workers", 2)),
+            thread_name_prefix="umbp-lookup",
+        )
         self._requests: dict[str, Request] = {}
         self._request_trackers: dict[str, RequestTracker] = {}
         self._gpu_block_pool: BlockPool | None = None
@@ -119,7 +142,19 @@ class UMBPStoreConnectorScheduler:
     ) -> tuple[int | None, bool]:
         if not self.enable_lookup:
             return 0, False
-        hashes = request.block_hashes
+        hashes = tuple(request.block_hashes)
+        pending = self._pending_lookups.get(request.request_id)
+        if pending is not None:
+            context = pending.context
+            if (
+                context.request is not request
+                or context.local_tokens != num_computed_tokens
+                or context.num_tokens != request.num_tokens
+                or context.hashes != hashes
+            ):
+                self._pending_lookups.pop(request.request_id)
+                pending.future.cancel()
+                pending = None
         if not hashes or request.num_tokens < self.block_size:
             return 0, False
         if num_computed_tokens % self.block_size != 0:
@@ -131,14 +166,29 @@ class UMBPStoreConnectorScheduler:
         if max_external_token <= num_computed_tokens:
             self._load_specs.pop(request.request_id, None)
             return 0, False
-        logical_objects_by_group, keys = self._lookup_objects(
-            request, num_computed_tokens, hashes
-        )
+        if pending is not None and not pending.future.done():
+            return None, False
+        if pending is None:
+            context = self._build_lookup_context(request, num_computed_tokens, hashes)
+            if self.lookup_async:
+                self._pending_lookups[request.request_id] = _PendingLookup(
+                    context,
+                    self._lookup_executor.submit(self.runtime.lookup, context.keys),
+                )
+                return None, False
+        else:
+            context = self._pending_lookups.pop(request.request_id).context
         try:
-            hits = list(self.runtime.lookup(keys))
+            hits = list(
+                pending.future.result()
+                if pending is not None
+                else self.runtime.lookup(context.keys)
+            )
         except Exception as exc:
             logger.debug("UMBP lookup failed request=%s: %s", request.request_id, exc)
             return 0, False
+        keys = context.keys
+        logical_objects_by_group = context.objects
         if len(hits) != len(keys):
             logger.debug(
                 "UMBP lookup returned an invalid result length request=%s",
@@ -187,9 +237,9 @@ class UMBPStoreConnectorScheduler:
         )
         return need_to_load, self.load_async
 
-    def _lookup_objects(
-        self, request: Request, local_tokens: int, hashes: Sequence[bytes]
-    ) -> tuple[dict[int, list[tuple[bytes, tuple[str, ...]]]], list[str]]:
+    def _build_lookup_context(
+        self, request: Request, local_tokens: int, hashes: tuple[bytes, ...]
+    ) -> _LookupContext:
         objects: dict[int, list[tuple[bytes, tuple[str, ...]]]] = {}
         keys: list[str] = []
         for group_id, unit in self._lookup_units.items():
@@ -200,7 +250,9 @@ class UMBPStoreConnectorScheduler:
                 group_objects.append((block_hash, rank_keys))
                 keys.extend(rank_keys)
             objects[group_id] = group_objects
-        return objects, keys
+        return _LookupContext(
+            request, local_tokens, request.num_tokens, hashes, objects, keys
+        )
 
     def update_state_after_alloc(
         self,
@@ -248,6 +300,9 @@ class UMBPStoreConnectorScheduler:
             self._load_specs.pop(request_id, None)
             self._request_trackers.pop(request_id, None)
             self._requests.pop(request_id, None)
+            pending = self._pending_lookups.pop(request_id, None)
+            if pending is not None:
+                pending.future.cancel()
         for request in scheduler_output.scheduled_new_reqs:
             load_plans = self._pending_loads.pop(request.req_id, [])
             self._load_specs.pop(request.req_id, None)
@@ -558,6 +613,9 @@ class UMBPStoreConnectorScheduler:
         self._pending_loads.pop(request.request_id, None)
         self._load_specs.pop(request.request_id, None)
         self._requests.pop(request.request_id, None)
+        pending = self._pending_lookups.pop(request.request_id, None)
+        if pending is not None:
+            pending.future.cancel()
         return False, None
 
     def update_connector_output(self, output: KVConnectorOutput) -> None:
@@ -585,9 +643,14 @@ class UMBPStoreConnectorScheduler:
     def reset_store(self) -> bool:
         if self._store_events:
             return False
+        for pending in self._pending_lookups.values():
+            pending.future.cancel()
+        self._pending_lookups.clear()
         self._load_specs.clear()
         self._pending_loads.clear()
         return self.runtime.clear()
 
     def close(self) -> None:
+        self._lookup_executor.shutdown(wait=True, cancel_futures=True)
+        self._pending_lookups.clear()
         self.runtime.close()
