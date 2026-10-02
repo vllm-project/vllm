@@ -24,13 +24,23 @@ with `--enforce-eager`, or compiled PIECEWISE:
 | Device and runner | NVIDIA CUDA, NCCL, Model Runner V2 |
 | Replica group | PCP × TP ≥ 2, DCP=1; at least one target bundle per rank |
 | Cache layout | Replicated full-attention MLA, common block size, layer-compact storage |
-| Execution | Eager or compiled PIECEWISE with Dynamo splitting of attention and KV updates |
+| Execution | Eager, compiled PIECEWISE with Dynamo splitting of attention and KV updates, or PIECEWISE breakable CUDA graphs |
 | Offload | `SimpleCPUOffloadConnector`, using persistent owner views |
 
 Keep the default `splitting_ops` so cache acquisition, prefetch, and release run
-on every replay. GPU MRV1, FULL/FULL_AND_PIECEWISE graphs, breakable graphs,
-Inductor graph partitioning, DBO, HiSparse, and cross-layer KV sharing are
-unsupported. Other connectors must implement the layer-sharded storage contract.
+on every replay. Models that default to breakable CUDA graphs (for example
+GLM-5.x and DeepSeek-V3.2 sparse attention) run acquisition and release in eager
+breaks. KVPP overrides FULL and FULL_AND_PIECEWISE to PIECEWISE because FULL
+replay bypasses the forward context. GPU MRV1, Inductor graph partitioning, DBO,
+HiSparse, and cross-layer KV sharing are unsupported. Other connectors must
+implement the layer-sharded storage contract.
+
+KVPP broadcasts on a side stream while compute continues, so it must not run
+next to all-reduce kernels that spin on peers. `--enable-kvpp` therefore sets
+`NCCL_LAUNCH_ORDER_IMPLICIT=1`, `VLLM_ALLREDUCE_USE_FLASHINFER=0`, and
+`VLLM_ALLREDUCE_USE_SYMM_MEM=0` unless they are already set, and disables custom
+all-reduce. Without both the launch ordering and NCCL-only all-reduce, GLM-5.3 on
+4×GB300 deadlocks at the first broadcast with history.
 
 For TP2 × PCP2, set `--tensor-parallel-size 2` and
 `--prefill-context-parallel-size 2`. PCP retains its MRV2 capability limits,
@@ -72,8 +82,12 @@ requirements from cache specs; block-count overrides must fit the worker budget.
 `maybe_prepare_kvpp` prepares the runtime after connector pre-forward setup.
 It determines history from scheduled request state before PCP partitioning,
 where global context lengths distinguish previous KV from current-prefill
-queries. A batch with history broadcasts each complete allocated bundle,
-including inactive blocks; a batch without history uses its cache views directly.
+queries. A batch with history broadcasts only the unique blocks that hold its
+requests' computed tokens: the owner gathers them from each bundle component,
+broadcasts one packed buffer, and receivers scatter it into their scratch views.
+`BlockTables` keeps a host mirror of logical block IDs for this when KVPP is
+enabled. Dummy runs, which have no request state, broadcast complete bundles. A
+batch without history uses its cache views directly.
 
 For a batch with history, the first component access to bundle `i` calls
 `acquire`, which:
@@ -149,3 +163,25 @@ Current-revision throughput and long-output decode gains remain unmeasured.
 Device and workload matter: the H100 cropped-DSv3.2 CPU-offload experiment showed
 a throughput regression with attention-before broadcast. Source provenance and
 validation commands are recorded in [PR #59059](https://github.com/vllm-project/vllm/pull/59059).
+
+### GLM-5.3 prefill pooling on 4×GB300
+
+GLM-5.3 FP8 (DSA sparse attention), MRV2, default breakable CUDA graphs
+(PIECEWISE under KVPP; TP2 × PCP2 runs with `-cc.cudagraph_mode=NONE`), prefix
+caching, `--max-num-batched-tokens 16384`, 0.9 GPU memory utilization, one
+output token per request. Agent workloads use 32 (64K) or 16 (120K) shared
+prefixes with a 10% unique suffix, about 1.8M tokens of prefixes, shuffled.
+
+| Configuration | KV capacity (tokens) | GSM8K | Cold 64K tok/s | Agent 64K tok/s (hit) | Agent 120K tok/s (hit) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| TP4 | 778,688 | 0.940 | 16,619 | 24,344 (32.7%) | 20,887 (27.1%) |
+| TP4 + KVPP | 2,713,216 | 0.935 | 16,573 | 71,157 (78.7%) | 66,741 (78.7%) |
+| TP2 × PCP2 | 698,624 | 0.920 | 22,810 | 32,425 (29.8%) | 28,278 (23.4%) |
+| TP2 × PCP2 + KVPP | 2,443,712 | 0.910 | 22,552 | 95,896 (77.6%) | 91,118 (78.0%) |
+
+KVPP keeps the whole prefix working set resident, which replicated KV cannot,
+and its broadcast cost is under 1% on cold prefill. PCP speeds up the
+remaining computation, so the two compose. Larger
+`--max-num-batched-tokens` values gain at most 4% on cold prefill but reserve
+more activation memory and shrink KV capacity. Decode was not measured; it
+broadcasts every step and gives up the FlashInfer all-reduce.
