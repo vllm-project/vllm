@@ -171,6 +171,23 @@ def get_random_id_to_index(
     return slots
 
 
+def _assert_slot_weights_round_trip(
+    layer: BaseLayerWithLoRA, slot_idx: int, lora: LoRALayerWeights
+) -> None:
+    """`slot_weights` reads back what `set_lora` wrote, in its orientation."""
+    views_a, views_b = layer.slot_weights(slot_idx)
+    as_list = lambda t: t if isinstance(t, list) else [t]  # noqa: E731
+    for view_a, view_b, lora_a, lora_b in zip(
+        views_a, views_b, as_list(lora.lora_a), as_list(lora.lora_b), strict=True
+    ):
+        if lora_a is None:
+            continue
+        rows_a, cols_a = lora_a.shape
+        rows_b, cols_b = lora_b.shape
+        torch.testing.assert_close(view_a[:rows_a, :cols_a], lora_a.to(view_a))
+        torch.testing.assert_close(view_b[:rows_b, :cols_b], lora_b.to(view_b))
+
+
 def populate_loras(
     id_to_index: list[int | None],
     layer: BaseLayerWithLoRA,
@@ -221,6 +238,8 @@ def populate_loras(
                 lora_a=lora.lora_a,
                 lora_b=lora.lora_b,
             )
+            if getattr(layer, "tp_size", 1) == 1:
+                _assert_slot_weights_round_trip(layer, slot_idx, lora)
 
             lora_dict[lora_id] = lora
             sublora_dict[lora_id] = subloras

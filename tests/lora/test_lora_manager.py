@@ -28,6 +28,7 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -1103,3 +1104,221 @@ def test_target_modules_match_packed_runtime_modules(
         ],
         vllm_config=default_vllm_config,
     )
+
+
+def _slot_manager(model, vllm_config, device, max_loras=2):
+    return LRUCacheLoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=16,
+            max_cpu_loras=4,
+            max_loras=max_loras,
+            lora_dtype=DEFAULT_DTYPE,
+        ),
+        device=device,
+        vllm_config=vllm_config,
+    )
+
+
+def _assert_slot_holds(manager, adapter_id, module_name, lora_a, lora_b):
+    """The slot equals (lora_a, lora_b), zero-padded to max_lora_rank."""
+    (view_a,), (view_b,) = manager.get_adapter_slot_weights(adapter_id, [module_name])[
+        module_name
+    ]
+    rank = lora_a.shape[0]
+    torch.testing.assert_close(view_a[:rank], lora_a.to(view_a))
+    torch.testing.assert_close(view_b[:, :rank], lora_b.to(view_b))
+    assert not view_a[rank:].any() and not view_b[:, rank:].any()
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_adapter_slot_views_alias_the_forward_buffers(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    manager = _slot_manager(dummy_model, default_vllm_config, device)
+    lora = create_lora(1, manager.model, ["dense1", "dense2", "lm_head"], device)
+    expected = lora.clone(1)
+    assert manager.get_adapter_slot(1) is None
+    manager.add_adapter(lora)
+    manager.activate_adapter(1)
+    slot = manager.get_adapter_slot(1)
+    assert slot == manager.lora_index_to_id.index(1)
+
+    for name in ("dense1", "dense2", "lm_head"):
+        weights = expected.get_lora(name)
+        _assert_slot_holds(manager, 1, name, weights.lora_a, weights.lora_b)
+
+    # A write through the view lands in the buffer the forward reads.
+    (view_a,), _ = manager.get_adapter_slot_weights(1, ["dense1"])["dense1"]
+    view_a.fill_(3.0)
+    assert (manager.modules["dense1"].lora_a_stacked[0][slot, 0] == 3.0).all()
+
+    with pytest.raises(ValueError, match="not active"):
+        manager.get_adapter_slot_weights(2)
+    with pytest.raises(KeyError, match="not a LoRA module"):
+        manager.get_adapter_slot_weights(1, ["dense3"])
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_updated_adapter_weights_survive_eviction(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    manager = _slot_manager(dummy_model, default_vllm_config, device, max_loras=1)
+    lora1 = create_lora(1, manager.model, ["dense1", "dense2"], device)
+    lora2 = create_lora(2, manager.model, ["dense1", "dense2"], device)
+    manager.add_adapter(lora1)
+    manager.add_adapter(lora2)
+    manager.activate_adapter(1)
+
+    new_a = torch.rand_like(lora1.get_lora("dense1").lora_a)
+    new_b = torch.rand_like(lora1.get_lora("dense1").lora_b)
+    untouched = lora1.clone(1).get_lora("dense2")
+    manager.update_adapter_weights(1, {"dense1": (new_a, new_b)})
+    _assert_slot_holds(manager, 1, "dense1", new_a, new_b)
+
+    # The only slot goes to adapter 2, then adapter 1 is reloaded from cache.
+    manager.activate_adapter(2)
+    assert manager.get_adapter_slot(1) is None
+    manager.activate_adapter(1)
+    _assert_slot_holds(manager, 1, "dense1", new_a, new_b)
+    _assert_slot_holds(manager, 1, "dense2", untouched.lora_a, untouched.lora_b)
+
+    # An inactive adapter is updated in the cache and picks it up on activation.
+    newer_a = torch.rand_like(new_a)
+    manager.update_adapter_weights(2, {"dense1": (newer_a, new_b)})
+    torch.testing.assert_close(lora2.get_lora("dense1").lora_a, newer_a)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_gpu_only_update_requires_a_pinned_adapter(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    manager = _slot_manager(dummy_model, default_vllm_config, device)
+    lora = create_lora(1, manager.model, ["dense1"], device)
+    cached = lora.clone(1).get_lora("dense1")
+    manager.add_adapter(lora)
+    manager.activate_adapter(1)
+    new_a = torch.rand_like(cached.lora_a)
+    new_b = torch.rand_like(cached.lora_b)
+
+    with pytest.raises(ValueError, match="pinned"):
+        manager.update_adapter_weights(
+            1, {"dense1": (new_a, new_b)}, update_cpu_cache=False
+        )
+    manager.pin_adapter(1)
+    manager.update_adapter_weights(
+        1, {"dense1": (new_a, new_b)}, update_cpu_cache=False
+    )
+    _assert_slot_holds(manager, 1, "dense1", new_a, new_b)
+    # The cached copy is left as it was.
+    torch.testing.assert_close(lora.get_lora("dense1").lora_a, cached.lora_a)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_update_adapter_weights_validates_before_writing(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    manager = _slot_manager(dummy_model, default_vllm_config, device)
+    lora = create_lora(1, manager.model, ["dense1", "dense2"], device)
+    before = lora.clone(1)
+    manager.add_adapter(lora)
+    manager.activate_adapter(1)
+    good = before.get_lora("dense1")
+    bad = before.get_lora("dense2")
+    with pytest.raises(ValueError, match="dense2 slice 0 A"):
+        manager.update_adapter_weights(
+            1,
+            {
+                "dense1": (torch.rand_like(good.lora_a), torch.rand_like(good.lora_b)),
+                "dense2": (bad.lora_a[:4], bad.lora_b),
+            },
+        )
+    # dense1 came first in the mapping and must not have been written.
+    _assert_slot_holds(manager, 1, "dense1", good.lora_a, good.lora_b)
+    torch.testing.assert_close(lora.get_lora("dense1").lora_a, good.lora_a)
+
+    with pytest.raises(ValueError, match="not registered"):
+        manager.update_adapter_weights(7, {})
+    with pytest.raises(ValueError, match="no weights for output"):
+        manager.update_adapter_weights(1, {"output": (good.lora_a, good.lora_b)})
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_update_one_slice_of_a_packed_module(
+    default_vllm_config, dist_init, dummy_model_gate_up, device
+):
+    manager = _slot_manager(dummy_model_gate_up, default_vllm_config, device)
+    lora = create_packed_lora(
+        1,
+        manager.model,
+        module_name="gate_up_proj",
+        replaced_module_names=["gate_proj", "up_proj"],
+        device=device,
+    )
+    manager.add_adapter(lora)
+    manager.activate_adapter(1)
+    packed = lora.get_lora("gate_up_proj")
+    gate_a, gate_b = packed.lora_a[0].clone(), packed.lora_b[0].clone()
+    up_a, up_b = torch.rand_like(packed.lora_a[1]), torch.rand_like(packed.lora_b[1])
+
+    manager.update_adapter_weights(1, {"gate_up_proj": ([None, up_a], [None, up_b])})
+    views_a, views_b = manager.get_adapter_slot_weights(1, ["gate_up_proj"])[
+        "gate_up_proj"
+    ]
+    # The merged packed weights are cached on CPU, as in serving.
+    for view, expected in (
+        (views_a[0][:8], gate_a),
+        (views_b[0][:, :8], gate_b),
+        (views_a[1][:8], up_a),
+        (views_b[1][:, :8], up_b),
+    ):
+        torch.testing.assert_close(view, expected.to(view))
+
+    with pytest.raises(ValueError, match="2 LoRA slices"):
+        manager.update_adapter_weights(1, {"gate_up_proj": (up_a, up_b)})
+    manager.pin_adapter(1)
+    with pytest.raises(ValueError, match="needs every slice"):
+        manager.update_adapter_weights(
+            1, {"gate_up_proj": ([None, up_a], [None, up_b])}, update_cpu_cache=False
+        )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_update_skips_modules_of_other_pipeline_ranks(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    # This rank does not hold layer1, as on a later pipeline-parallel stage.
+    dummy_model.layer1 = PPMissingLayer()
+    manager = _slot_manager(dummy_model, default_vllm_config, device)
+    lora = create_lora(1, manager.model, ["dense1"], device)
+    manager.add_adapter(lora)
+    manager.activate_adapter(1)
+    new_a = torch.rand_like(lora.get_lora("dense1").lora_a)
+    new_b = torch.rand_like(lora.get_lora("dense1").lora_b)
+    elsewhere = (torch.rand(8, 100), torch.rand(10, 8))
+
+    manager.update_adapter_weights(
+        1, {"dense1": (new_a, new_b), "layer1.dense1": elsewhere}
+    )
+    _assert_slot_holds(manager, 1, "dense1", new_a, new_b)
+    with pytest.raises(KeyError, match="not a LoRA module"):
+        manager.update_adapter_weights(1, {"layer2.dense1": elsewhere})
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_update_adapter_loaded_under_inference_mode(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    """The model runner loads adapters in inference mode; RPCs run outside it."""
+    with torch.inference_mode():
+        manager = _slot_manager(dummy_model, default_vllm_config, device)
+        lora = create_lora(1, manager.model, ["dense1"], device)
+        manager.add_adapter(lora)
+        manager.activate_adapter(1)
+    new_a = torch.rand_like(lora.get_lora("dense1").lora_a)
+    new_b = torch.rand_like(lora.get_lora("dense1").lora_b)
+    manager.update_adapter_weights(1, {"dense1": (new_a, new_b)})
+    _assert_slot_holds(manager, 1, "dense1", new_a, new_b)
