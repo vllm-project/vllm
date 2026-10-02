@@ -83,9 +83,12 @@ def find_nccl_library_paths() -> list[str] | None:
     return paths or None
 
 
-def query_nccl_gin_type(group: torch.distributed.ProcessGroup) -> int | None:
-    """Return the GIN type for an initialized group, or ``None`` on failure."""
+def query_nccl_gin_type(
+    group: torch.distributed.ProcessGroup, *, railed: bool = False
+) -> int | None:
+    """Return the full or railed GIN type, or ``None`` on query failure."""
     from vllm.distributed.device_communicators.pynccl_wrapper import (
+        NCCL_COMM_PROPERTIES_LAYOUT_VERSION,
         NCCLLibrary,
         ncclCommProperties,
     )
@@ -114,7 +117,9 @@ def query_nccl_gin_type(group: torch.distributed.ProcessGroup) -> int | None:
         ctypes.memset(ctypes.addressof(props), 0, ctypes.sizeof(props))
         props.size = ctypes.sizeof(props)
         props.magic = 0xCAFEBEEF
-        props.version = nccl.ncclGetRawVersion()
+        props.version = min(
+            nccl.ncclGetRawVersion(), NCCL_COMM_PROPERTIES_LAYOUT_VERSION
+        )
         result = query_fn(ctypes.c_void_p(comm_ptr), ctypes.byref(props))
     except Exception:
         logger.warning("Failed to query NCCL communicator properties", exc_info=True)
@@ -123,4 +128,4 @@ def query_nccl_gin_type(group: torch.distributed.ProcessGroup) -> int | None:
     if result != 0:
         logger.warning("ncclCommQueryProperties returned error %d", result)
         return None
-    return props.ginType
+    return props.railedGinType if railed else props.ginType

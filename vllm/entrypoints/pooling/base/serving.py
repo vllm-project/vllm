@@ -16,7 +16,7 @@ from vllm import PoolingRequestOutput, envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
@@ -30,6 +30,7 @@ from vllm.tracing import (
 )
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
+from ...serve.engine.protocol import ErrorResponse
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
 
@@ -60,6 +61,7 @@ class PoolingBaseServing(ABC, BaseServing):
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.log_error_stack = log_error_stack
         self.chat_template_config = chat_template_config
+        self.trust_request_mm_kwargs = chat_template_config.trust_request_mm_kwargs
 
         # Shared thread pool executor for preprocessing and postprocessing.
         self._executor: Executor = self.renderer._executor
@@ -108,12 +110,20 @@ class PoolingBaseServing(ABC, BaseServing):
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ):
-        model_name = self.models.model_name()
-        request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
+        validate_request_mm_kwargs(
+            mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            media_io_kwargs=getattr(request, "media_io_kwargs", None),
+            trust_request_mm_kwargs=self.trust_request_mm_kwargs,
+        )
+        base_request_id = self._base_request_id(
+            raw_request, getattr(request, "request_id", None)
+        )
+        request_id = f"{self.request_id_prefix}-{base_request_id}"
         await self._check_model(request)
 
         pooling_params = io_processor.create_pooling_params(request)
         lora_request = self._maybe_get_adapters(request)
+        model_name = self.models.model_name(lora_request)
         priorities = getattr(request, "priority", 0)
         prompt_extras = {
             k: v

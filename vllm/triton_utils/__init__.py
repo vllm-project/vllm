@@ -12,10 +12,16 @@ if TYPE_CHECKING or HAS_TRITON:
     import triton
     import triton.language as tl
     import triton.language.extra.libdevice as tldevice
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+    from triton.language.core import _aggregate as aggregate  # noqa: E501
 else:
     triton = TritonPlaceholder()
     tl = TritonLanguagePlaceholder()
     tldevice = TritonLanguagePlaceholder()
+    gluon = TritonLanguagePlaceholder()
+    gl = TritonLanguagePlaceholder()
+    aggregate = TritonLanguagePlaceholder()
 
 from vllm.triton_utils.tensor_descriptor import use_tensor_descriptor
 
@@ -29,5 +35,8 @@ __all__ = [
     "tldevice",
     "LOG2E",
     "LOGE2",
+    "gluon",
+    "gl",
+    "aggregate",
     "use_tensor_descriptor",
 ]

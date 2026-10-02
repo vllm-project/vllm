@@ -4,9 +4,6 @@
 // Router GEMM: activation(T) x weight(fp32) -> fp32, M<=32, for the
 // supported (E, H) pairs listed at the bottom of this file.
 // Supports bf16 or fp32 activation; weight is always fp32.
-// Adapted from dsv3_router_gemm_float_out.cu.
-// (E=256, H=6144) bf16 uses a B300-tuned wide-block geometry; see
-// invokeFp32RouterGemm.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -215,34 +212,10 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
                           float const* mat_b, cudaStream_t stream) {
   // Geometry tuned on B300 per supported shape, bf16 activation, under a
   // production-fidelity harness (CUDA-graph replay, per-layer cold weights).
-  // GLM-5.2 (E=256, H=6144):
-  //   M <= 4        : BS=768, EPB=1 (2.7us vs cast+cuBLAS 8.1us at M=1)
-  //   M in [5, 15]
-  //   or odd        : BS=384, EPB=2 (crossover vs BS=768 measured in (4, 8))
-  //   M >= 16, even : BS=192, EPB=2, 2 token groups (M=16 4.79us vs 5.04,
-  //                   M=24 5.71 vs 6.38, M=32 6.79 vs 7.72; M=12 loses at
-  //                   0.97x, so the boundary is 16).
   // Only enabled on the Blackwell family where it was validated; Hopper and
   // other shapes / fp32 activation keep the legacy geometry.
-  if constexpr (std::is_same_v<InputT, __nv_bfloat16> && kNumExperts == 256 &&
+  if constexpr (std::is_same_v<InputT, __nv_bfloat16> && kNumExperts == 128 &&
                 kHiddenDim == 6144) {
-    if (!isBlackwellFamily()) {
-      launchFp32RouterGemm<InputT, 128, 1, kNumTokens, kNumExperts, kHiddenDim>(
-          output, mat_a, mat_b, stream);
-      return;
-    }
-    if constexpr (kNumTokens <= 4) {
-      launchFp32RouterGemm<InputT, 768, 1, kNumTokens, kNumExperts, kHiddenDim>(
-          output, mat_a, mat_b, stream);
-    } else if constexpr (kNumTokens >= 16 && kNumTokens % 2 == 0) {
-      launchFp32RouterGemm<InputT, 192, 2, kNumTokens, kNumExperts, kHiddenDim,
-                           2>(output, mat_a, mat_b, stream);
-    } else {
-      launchFp32RouterGemm<InputT, 384, 2, kNumTokens, kNumExperts, kHiddenDim>(
-          output, mat_a, mat_b, stream);
-    }
-  } else if constexpr (std::is_same_v<InputT, __nv_bfloat16> &&
-                       kNumExperts == 128 && kHiddenDim == 6144) {
     // MiniMax-M3. Legacy 128/1 only fills 128 blocks and pays the same
     // accumulator register cliffs; B300 sweep:
     //   even M in [6, 10] : BS=384, EPB=1, 2 token groups (1.26-1.43x)
@@ -296,8 +269,7 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
 
 // ---------------------------------------------------------------------------
 // Explicit instantiations: M=1..32, for both input types, for the supported
-// (E, H) pairs:  (256, 3072) [MiniMax-M2/M2.5],  (128, 6144) [MiniMax-M3]
-// and  (256, 6144) [GLM-5.2].
+// (E, H) pairs:  (256, 3072) [MiniMax-M2/M2.5]  and  (128, 6144) [MiniMax-M3].
 // ---------------------------------------------------------------------------
 
 #define INSTANTIATE(T, M, E, H)                                    \
@@ -342,8 +314,6 @@ INSTANTIATE_ALL(float, 256, 3072)
 INSTANTIATE_ALL(__nv_bfloat16, 256, 3072)
 INSTANTIATE_ALL(float, 128, 6144)
 INSTANTIATE_ALL(__nv_bfloat16, 128, 6144)
-INSTANTIATE_ALL(float, 256, 6144)
-INSTANTIATE_ALL(__nv_bfloat16, 256, 6144)
 
 #undef INSTANTIATE_ALL
 #undef INSTANTIATE

@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -49,6 +49,7 @@ from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
+    BeforeValidator,
     Field,
     ValidationError,
     field_serializer,
@@ -60,7 +61,12 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    StopParam,
+    validate_cache_salt,
+)
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -79,6 +85,7 @@ _INT64_MAX = 2**63 - 1
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
+    cache_write_tokens: int
     input_tokens_per_turn: list[int] = Field(default_factory=list)
     cached_tokens_per_turn: list[int] = Field(default_factory=list)
 
@@ -99,9 +106,7 @@ class ResponseUsage(OpenAIBaseModel):
 
 
 def serialize_message(msg):
-    """
-    Serializes a single message
-    """
+    """Serializes a single message."""
     if isinstance(msg, dict):
         return msg
     elif hasattr(msg, "to_dict"):
@@ -112,9 +117,7 @@ def serialize_message(msg):
 
 
 def serialize_messages(msgs):
-    """
-    Serializes multiple messages
-    """
+    """Serializes multiple messages."""
     return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
@@ -131,6 +134,31 @@ ResponseInputOutputMessage: TypeAlias = (
     list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
 )
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
+
+
+def _default_input_image_details(value: Any) -> Any:
+    """Set the API default for input images before SDK type validation."""
+    if not isinstance(value, dict):
+        return value
+
+    content = value.get("content")
+    if not isinstance(content, list):
+        return value
+
+    new_content = []
+    changed = False
+    for part in content:
+        new_part = part
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "input_image"
+            and "detail" not in part
+        ):
+            new_part = {**part, "detail": "auto"}
+            changed = True
+        new_content.append(new_part)
+
+    return {**value, "content": new_content} if changed else value
 
 
 class ResponsesRequest(OpenAIBaseModel):
@@ -150,7 +178,15 @@ class ResponsesRequest(OpenAIBaseModel):
         ]
         | None
     ) = None
-    input: str | list[ResponseInputOutputItem]
+    input: (
+        str
+        | list[
+            Annotated[
+                ResponseInputOutputItem,
+                BeforeValidator(_default_input_image_details),
+            ]
+        ]
+    )
     instructions: str | None = None
     max_output_tokens: int | None = None
     max_tool_calls: int | None = None
@@ -212,12 +248,21 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     # --8<-- [start:responses-extra-params]
+    watermarking: bool = True
     request_id: str = Field(
         default_factory=lambda: f"resp_{random_uuid()}",
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."
+        ),
+    )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable session identity shared by related requests. Unlike "
+            "request_id, this value is expected to remain stable across "
+            "multiple requests in the same conversation or agent session."
         ),
     )
     media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
@@ -243,6 +288,8 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -272,7 +319,7 @@ class ResponsesRequest(OpenAIBaseModel):
 
     repetition_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = []
+    stop: StopParam = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
@@ -337,6 +384,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
+            tool_choice=self.tool_choice if self.tools else None,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -424,6 +472,7 @@ class ResponsesRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             temperature=temperature,
+            watermarking=self.watermarking,
             top_p=top_p,
             top_k=top_k,
             max_tokens=max_tokens,
@@ -456,7 +505,17 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        validate_cache_salt(data.get("cache_salt"))
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def validate_background(cls, data):
+        if not isinstance(data, dict):
+            return data
         if not data.get("background"):
             return data
         if not data.get("store", True):
@@ -469,21 +528,11 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("prompt") is not None:
             raise VLLMValidationError(
                 "prompt template is not supported", parameter="prompt"
-            )
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None and (
-            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
-        ):
-            raise VLLMValidationError(
-                "Parameter 'cache_salt' must be a non-empty string if provided.",
-                parameter="cache_salt",
             )
         return data
 
@@ -501,6 +550,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
         Invalid structures are left for Pydantic to reject.
         """
+        if not isinstance(data, dict):
+            return data
         input_data = data.get("input")
 
         # Early return for None, strings, or bytes
@@ -618,8 +669,15 @@ class ResponsesRequest(OpenAIBaseModel):
                 if isinstance(tool, dict):
                     if tool.get("type") == "namespace":
                         namespace = tool.get("name")
-                        for namespaced_tool in tool.get("tools", []):
-                            namespaced_name = namespaced_tool.get("name")
+                        namespaced_tools = tool.get("tools")
+                        if not isinstance(namespaced_tools, list):
+                            return data
+                        for namespaced_tool in namespaced_tools:
+                            namespaced_name = (
+                                namespaced_tool.get("name")
+                                if isinstance(namespaced_tool, dict)
+                                else getattr(namespaced_tool, "name", None)
+                            )
                             tool_names.add(namespaced_name)
                             tool_names.add(f"{namespace}__{namespaced_name}")
                     else:
@@ -663,6 +721,11 @@ class ResponsesResponse(OpenAIBaseModel):
     truncation: Literal["auto", "disabled"]
     usage: ResponseUsage | None = None
     user: str | None = None
+
+    # vLLM-specific per-request metrics. Omitted unless enabled server-side.
+    metrics: PerRequestMetrics | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     presence_penalty: float | None = Field(
         default=None,
@@ -732,6 +795,7 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: ResponseUsage | None = None,
+        metrics: PerRequestMetrics | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
@@ -775,6 +839,7 @@ class ResponsesResponse(OpenAIBaseModel):
             truncation=request.truncation,
             user=request.user,
             usage=usage,
+            metrics=metrics,
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
         )

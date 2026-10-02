@@ -7,6 +7,7 @@ from enum import Enum
 import pytest
 
 from vllm.config.cache import CacheConfig
+from vllm.config.scheduler import SchedulerConfig
 from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
 
 # Helpers
@@ -39,7 +40,7 @@ class DummyLogprobsMode(Enum):
 
 
 def test_hash_factors_deterministic():
-    """Test that hash_factors produces consistent SHA-256 hashes"""
+    """Test that hash_factors produces consistent SHA-256 hashes."""
     factors = {"a": 1, "b": "test"}
     hash1 = hash_factors(factors)
     hash2 = hash_factors(factors)
@@ -167,6 +168,28 @@ def test_classes_are_types():
     assert endswith_fqname(LocalDummy, ".LocalDummy")
 
 
+def test_ir_config_hash_initializes_provider_and_tracks_implementation(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.ir.op import IrOp
+    from vllm.platforms import current_platform
+
+    op = IrOp.registry["rms_norm"]
+    implementation = SimpleNamespace(uuid=lambda: "first-implementation")
+
+    def import_ir_kernels():
+        monkeypatch.setitem(op.impls, "test_lazy_provider", implementation)
+
+    monkeypatch.setattr(current_platform, "import_ir_kernels", import_ir_kernels)
+    config = IrOpPriorityConfig(rms_norm=["test_lazy_provider"])
+    first_hash = config.compute_hash()
+    assert config.compute_hash() == first_hash
+
+    implementation.uuid = lambda: "changed-implementation"
+    assert config.compute_hash() != first_hash
+
+
 def test_envs_compile_factors_stable():
     """Test that envs.compile_factors() hash is stable across fresh initializations.
 
@@ -214,6 +237,32 @@ def test_cache_config_hash_ignores_kv_cache_sizing_knobs():
     base_hash = CacheConfig().compute_hash()
     assert CacheConfig(kv_cache_memory_bytes=1 << 30).compute_hash() == base_hash
     assert CacheConfig(gpu_memory_utilization=0.5).compute_hash() == base_hash
+    config = CacheConfig()
+    config.effective_attention_block_size = 64
+    assert config.compute_hash() == base_hash
+
+
+def test_scheduler_config_hash_includes_max_num_seqs():
+    """Per-request workspace sizes must invalidate compiled graphs."""
+    base_hash = SchedulerConfig(
+        max_model_len=8192,
+        is_encoder_decoder=False,
+        max_num_batched_tokens=8192,
+        max_num_seqs=128,
+    ).compute_hash()
+    larger_batch_hash = SchedulerConfig(
+        max_model_len=8192,
+        is_encoder_decoder=False,
+        max_num_batched_tokens=8192,
+        max_num_seqs=1024,
+    ).compute_hash()
+
+    assert larger_batch_hash != base_hash
+
+
+def test_cache_config_hash_ignores_prefix_cache_retention_interval():
+    base_hash = CacheConfig().compute_hash()
+    assert CacheConfig(prefix_cache_retention_interval=64).compute_hash() == base_hash
 
 
 def test_envs_compile_factors_relocation_invariant(tmp_path):

@@ -84,6 +84,7 @@ impl ManagedEngineArgs {
     pub fn into_config(
         self,
         model: String,
+        revision: Option<String>,
         max_logprobs: Option<i32>,
         profiler_config: Option<String>,
         reasoning_parser: Option<&str>,
@@ -91,9 +92,15 @@ impl ManagedEngineArgs {
         disable_log_stats: bool,
         shutdown_timeout: u64,
         handshake_port: u16,
+        limit_mm_per_prompt: Option<String>,
+        hf_overrides: Option<String>,
     ) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
         // Manually forward some args to the Python engine.
+        if let Some(revision) = revision {
+            python_args.push("--revision".to_string());
+            python_args.push(revision);
+        }
         if let Some(max_model_len) = self.max_model_len {
             python_args.push("--max-model-len".to_string());
             python_args.push(max_model_len);
@@ -125,6 +132,14 @@ impl ManagedEngineArgs {
         if let Some(data_parallel_size_local) = self.data_parallel_size_local {
             python_args.push("--data-parallel-size-local".to_string());
             python_args.push(data_parallel_size_local.to_string());
+        }
+        if let Some(limit_mm_per_prompt) = limit_mm_per_prompt {
+            python_args.push("--limit-mm-per-prompt".to_string());
+            python_args.push(limit_mm_per_prompt);
+        }
+        if let Some(hf_overrides) = hf_overrides {
+            python_args.push("--hf-overrides".to_string());
+            python_args.push(hf_overrides);
         }
 
         ManagedEngineConfig {

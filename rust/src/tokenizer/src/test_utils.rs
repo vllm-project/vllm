@@ -69,6 +69,7 @@ struct TestToken {
 pub struct TestTokenizer {
     token_to_id: BTreeMap<String, u32>,
     id_to_token: BTreeMap<u32, TestToken>,
+    added_vocab: Vec<(String, u32)>,
     unknown_decode: UnknownDecode,
     vocab_size: Option<usize>,
     bos_token_id: Option<u32>,
@@ -86,6 +87,7 @@ impl TestTokenizer {
         Self {
             token_to_id: BTreeMap::new(),
             id_to_token: BTreeMap::new(),
+            added_vocab: Vec::new(),
             unknown_decode: UnknownDecode::Error,
             vocab_size: None,
             bos_token_id: None,
@@ -154,9 +156,21 @@ impl TestTokenizer {
         if self.token_to_id.insert(token.clone(), id).is_some() {
             panic!("configured test token text {token:?} was registered more than once");
         }
-        if self.id_to_token.insert(id, TestToken { text: token, kind }).is_some() {
+        if self
+            .id_to_token
+            .insert(
+                id,
+                TestToken {
+                    text: token.clone(),
+                    kind,
+                },
+            )
+            .is_some()
+        {
             panic!("configured test token id {id} was registered more than once");
         }
+        self.added_vocab.push((token, id));
+        self.added_vocab.sort_unstable_by_key(|(_, id)| *id);
     }
 
     fn byte_to_token(id: u32) -> Option<String> {
@@ -208,6 +222,10 @@ impl Tokenizer for TestTokenizer {
         Ok(ids)
     }
 
+    fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>> {
+        Ok(text.as_bytes().iter().copied().map(u32::from).collect())
+    }
+
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         let mut output = String::new();
         let mut pending_bytes = Vec::new();
@@ -248,6 +266,10 @@ impl Tokenizer for TestTokenizer {
             .get(&id)
             .map(|token| token.text.clone())
             .or_else(|| Self::byte_to_token(id))
+    }
+
+    fn added_vocab(&self) -> &[(String, u32)] {
+        &self.added_vocab
     }
 
     fn vocab_size(&self) -> usize {
@@ -372,6 +394,32 @@ mod tests {
         );
         assert!(tokenizer.is_special_id(0xF001));
         assert!(!tokenizer.is_special_id(0xF002));
+    }
+
+    #[test]
+    fn ordinary_encoding_bypasses_all_configured_tokens() {
+        let tokenizer = TestTokenizer::new()
+            .with_bos_token("<bos>", 256)
+            .with_special_token("<control>", 257)
+            .with_regular_token("<visible>", 258);
+        let ordinary_text = "user <control> and <visible>";
+
+        assert_eq!(tokenizer.encode("<control>", false).unwrap(), vec![257]);
+        assert_eq!(tokenizer.encode("<visible>", false).unwrap(), vec![258]);
+        assert_eq!(
+            tokenizer.encode_ordinary(ordinary_text).unwrap(),
+            ordinary_text.as_bytes().iter().copied().map(u32::from).collect::<Vec<_>>()
+        );
+
+        let mut segmented = tokenizer.encode("<control>", false).unwrap();
+        segmented.extend(tokenizer.encode_ordinary(ordinary_text).unwrap());
+        segmented.extend(tokenizer.encode("<visible>", false).unwrap());
+        assert_eq!(segmented.first(), Some(&257));
+        assert_eq!(segmented.last(), Some(&258));
+        assert_eq!(
+            tokenizer.decode(&segmented, false).unwrap(),
+            format!("<control>{ordinary_text}<visible>")
+        );
     }
 
     #[test]

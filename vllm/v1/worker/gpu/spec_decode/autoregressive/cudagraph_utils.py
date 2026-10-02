@@ -56,10 +56,8 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                skip_attn=(
-                    desc.cg_mode == CUDAGraphMode.PIECEWISE
-                    and not self.use_breakable_cg
-                ),
+                full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
+                max_query_len=desc.max_query_len or desc.uniform_token_count,
             )
 
             return lambda cg_mode: forward_fn(
