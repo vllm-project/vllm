@@ -423,6 +423,32 @@ steps:
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2"
+  mirror:
+    amd:
+      label: ":amd: (MI355) Spec Decode AL DFlash2 Nightly"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/spec_decode.yaml
+      - tests/v1/e2e/spec_decode/
+      - tests/evals/gsm8k/
+      - tests/utils.py
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/worker/gpu/sample/
+      - vllm/v1/worker/gpu/model_runner.py
+      - vllm/v1/attention/
+      - vllm/model_executor/models/qwen3_dflash.py
+      - vllm/model_executor/models/qwen3_dflash2.py
+      - vllm/model_executor/models/qwen3_5.py
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/quantization/
+      - vllm/model_executor/kernels/linear/
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DSpark Nightly"
   key: spec-decode-dspark-nightly
