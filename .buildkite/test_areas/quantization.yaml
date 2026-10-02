@@ -38,6 +38,7 @@ steps:
       - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
       - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
       - tests/rocm/test_moe_weight_replay.py
+      - tests/rocm/test_moe_padding.py
       commands:
       # Use the ROCm default instead of the NVIDIA runner override.
       - unset VLLM_USE_V2_MODEL_RUNNER
@@ -45,6 +46,7 @@ steps:
       - uv pip install --system conch-triton-kernels
       - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
       - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s rocm/test_moe_padding.py; fi
 
 - label: ":nvidia: (H200 MIG 35GB) Quantized Fusions"
   device: h200_35gb
