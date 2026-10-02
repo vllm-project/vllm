@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from vllm.config.speculative import SpeculativeConfig
 from vllm.model_executor.models.config import (
@@ -16,10 +17,6 @@ from vllm.model_executor.models.config import (
 from vllm.models.qwen4_exp.common.qsa_cache import (
     QSA_RING_MAX_WIDENING,
     qsa_ring_capacity,
-)
-from vllm.models.qwen4_exp.config import (
-    Qwen4ExpConfig,
-    Qwen4ExpTextConfig,
 )
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
 from vllm.utils.math_utils import cdiv
@@ -42,7 +39,10 @@ def _text_config(**kwargs) -> Qwen4ExpTextConfig:
         "linear_num_value_heads": 2,
         "linear_key_head_dim": 8,
         "linear_value_head_dim": 8,
-        "num_experts": 0,
+        "num_experts": 4,
+        "num_experts_per_tok": 2,
+        # `Qwen4ExpTextConfig` requires an EOS token whenever PLE is enabled.
+        "eos_token_id": 1,
         "hc_count": 2,
         "hc_lowrank": 4,
         "ple_layer_ids": [1],

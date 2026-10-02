@@ -8,6 +8,7 @@ from typing import cast
 
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
@@ -15,9 +16,6 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
@@ -33,7 +31,6 @@ def apply_qsa_rope(
     tensor: torch.Tensor,
 ) -> torch.Tensor:
     """Apply the main attention's exact 1D/MRoPE composition to QSA heads."""
-
     num_tokens, _, head_dim = tensor.shape
     rotary_dim = rotary_emb.rotary_dim
     cache = rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
@@ -67,7 +64,6 @@ def apply_qsa_rmsnorm(
     tensor: torch.Tensor,
 ) -> torch.Tensor:
     """Use vLLM's portable RMSNorm implementation on ROCm."""
-
     return cast(torch.Tensor, norm(tensor))
 
 
@@ -153,7 +149,6 @@ class QSAIndexer(nn.Module):
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Project replicated Q/K, normalize+rotate Q, and preserve raw K."""
-
         qk, _ = self.index_qk_proj(hidden_states)
         q_raw, token_k = qk.split(
             (
@@ -176,7 +171,6 @@ class QSAIndexer(nn.Module):
         first_rope_positions: torch.Tensor,
     ) -> torch.Tensor:
         """Normalize pooled K and apply the first token's exact group position."""
-
         keys = compressed_keys.reshape(-1, self.index_head_dim)
         keys = apply_qsa_rmsnorm(self.k_layernorm, keys).reshape(
             -1, 1, self.index_head_dim
@@ -284,7 +278,6 @@ class QSAIndexer(nn.Module):
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return fixed-width request-relative token indices padded with ``-1``."""
-
         metadata = self._metadata()
         if metadata is None:
             # Preserve step-0 indices when later MTP steps reuse the buffer.
