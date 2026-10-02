@@ -2401,11 +2401,13 @@ def test_hisparse_swap_in_preserves_rows_across_eviction():
         torch.testing.assert_close(gathered, expected)
 
     runtime.index_group.swap_stats.zero_()
-    runtime.swap_in(
+    runtime.begin_forward()
+    cache.swap_in(
         req_id_per_token=req_ids,
         block_table=block_table,
-        topk_indices=topk.clone(),
+        logical_topk_indices=topk.clone(),
         block_size=block_size,
+        num_valid_rows=_valid_rows(req_ids.numel()),
     )
     torch.accelerator.synchronize()
     expected_stats = torch.tensor(

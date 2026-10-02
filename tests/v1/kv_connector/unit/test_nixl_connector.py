@@ -2200,6 +2200,7 @@ def _read_hisparse_blocks(worker):
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import ReadSpec
 
     worker._remote_agents = {"remote": {(0, 0): "prefill"}}
+    worker._engine_by_address = {("localhost", 1234): "remote"}
     worker._hisparse_destination = MagicMock()
     worker._hisparse_destination.prepare_reads.return_value = [
         (10, np.array([0]), np.array([5])),
