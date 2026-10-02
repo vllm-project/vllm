@@ -2571,8 +2571,9 @@ def finalize_extensible_kv_cache(
     ``commit_granule`` (set when a KV connector is configured) the count is
     also granule-aligned, see `granule_aligned_kv_cache_blocks`.
     """
-    # No measurements: the elastic-EP scale-up path skips warmup. It forces the
-    # V1 runner today, so this branch is not reached; it keeps the capacity.
+    # No measurements: the elastic-EP scale-up path skips warmup. Elastic EP
+    # leaves the extensible KV cache off, so this branch is not reached; it
+    # keeps the capacity.
     num_blocks = min(
         (
             times.num_kv_blocks

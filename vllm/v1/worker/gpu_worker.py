@@ -524,11 +524,11 @@ class Worker(WorkerBase):
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             # Weights from external model loader process
-            external_weight_memory = get_model_loader(
+            self.external_weight_memory = get_model_loader(
                 self.load_config
             ).get_external_weight_memory(self.vllm_config)
             self.requested_memory = request_memory(
-                init_snapshot, self.cache_config, external_weight_memory
+                init_snapshot, self.cache_config, self.external_weight_memory
             )
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
@@ -913,7 +913,9 @@ class Worker(WorkerBase):
 
     def disable_extensible_kv_cache(self) -> None:
         self.cache_config.enable_extensible_kv_cache = False
-        self.requested_memory = request_memory(self.init_snapshot, self.cache_config)
+        self.requested_memory = request_memory(
+            self.init_snapshot, self.cache_config, self.external_weight_memory
+        )
 
     def _v2_model_runner(self) -> "GPUModelRunnerV2":
         assert self.use_v2_model_runner

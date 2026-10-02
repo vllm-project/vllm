@@ -3125,6 +3125,11 @@ class VllmConfig:
             unsupported = "it requires the V2 model runner"
         elif self.attention_config.hisparse_config is not None:
             unsupported = "HiSparse allocates its KV cache itself"
+        elif self.parallel_config.enable_elastic_ep:
+            unsupported = (
+                "elastic EP scale-up skips warmup and reuses the profiled KV "
+                "cache size, so no measurement would size the cache"
+            )
         elif (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.uses_custom_mem_pool()
