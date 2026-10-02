@@ -368,6 +368,50 @@ class TestTritonTopkTopp:
         p = torch.tensor([0.1, 0.5, 0.9, 1.0] * 4, dtype=torch.float32)
         self._compare_results(logits.clone(), k=None, p=p)
 
+    def test_topp_keeps_whole_row_when_p_exceeds_reachable_mass(self):
+        """Regression for #59785: when reaching p requires every token, the
+        kernel must not drop the min-prob one.
+
+        Rows repeat the reporter's logits, and the batch exceeds the split
+        pipeline's limit so the monolithic kernel handles them on CUDA too.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        row = [
+            -0.9507,
+            -0.7643,
+            -0.9077,
+            -1.0789,
+            -0.0125,
+            -0.5607,
+            -1.1629,
+            -0.3498,
+        ]
+        logits = torch.tensor([row] * 128, dtype=torch.float32)
+        p = torch.full((128,), 0.95, dtype=torch.float32)
+
+        ref = apply_top_k_top_p_pytorch(logits.clone(), k=None, p=p)
+        out = apply_top_k_top_p_triton(logits.clone(), k=None, p=p)
+
+        assert torch.equal(out != float("-inf"), ref != float("-inf"))
+
+    def test_topk_topp_keeps_all_k_when_p_exceeds_topk_mass(self):
+        """Regression for #59785: with top-k+top-p, if reaching p needs the
+        k-th token, the kernel must keep the whole top-k set."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.full((1, 32), -30.0, dtype=torch.float32)
+        logits[0, :5] = torch.log(
+            torch.tensor([0.4, 0.3, 0.15, 0.1, 0.05], dtype=torch.float32)
+        )
+        k = torch.tensor([5], dtype=torch.int32)
+        p = torch.tensor([0.97], dtype=torch.float32)
+
+        ref = apply_top_k_top_p_pytorch(logits.clone(), k=k, p=p)
+        out = apply_top_k_top_p_triton(logits.clone(), k=k, p=p)
+
+        assert torch.equal(out != float("-inf"), ref != float("-inf"))
+
     def test_large_batch(self):
         """Test with a large batch size."""
         batch_size, vocab_size = 512, 32000

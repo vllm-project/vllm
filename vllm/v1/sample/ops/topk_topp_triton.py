@@ -534,6 +534,10 @@ def _topk_topp_kernel(
                         min_larger_prob = 1.0
                         num_min_larger = tl.zeros((), dtype=tl.uint32)
                         p_pivots_sum = 0.0
+                        best_pivot = 0.0
+                        best_mass = 0.0
+                        best_min_larger = 1.0
+                        best_num_min = tl.zeros((), dtype=tl.uint32)
 
                         # Fifth passes: Search for p_pivot
                         found_pivot = 0
@@ -579,6 +583,14 @@ def _topk_topp_kernel(
                                 p_pivots_sum = p_pivots_sum_0
                                 found_pivot = 1
 
+                            # Track the tightest pivot that still reaches p,
+                            # so a failed search falls back to the safe side.
+                            if p_pivots_sum_0 >= p and p_pivot_0 > best_pivot:
+                                best_pivot = p_pivot_0
+                                best_mass = p_pivots_sum_0
+                                best_min_larger = min_larger_0
+                                best_num_min = num_min_larger_0
+
                             # Update range
                             if p_pivots_sum_0 > p:
                                 min_range = p_pivot_0
@@ -587,23 +599,31 @@ def _topk_topp_kernel(
 
                             num_iters += 1
                             if (max_range - min_range) < 1e-9 or num_iters >= 18:
-                                p_pivot = (max_range + min_range) / 2.0
-                                min_larger_prob = min_larger_0
-                                num_min_larger = num_min_larger_0
-                                p_pivots_sum = p_pivots_sum_0
+                                if best_pivot > 0.0:
+                                    p_pivot = best_pivot
+                                    min_larger_prob = best_min_larger
+                                    num_min_larger = best_num_min
+                                    p_pivots_sum = best_mass
+                                else:
+                                    # No pivot reached p even with every
+                                    # candidate kept; signal no-masking.
+                                    p_pivot = 0.0
                                 found_pivot = 1
 
-                        duplicate_logit = (
-                            tl.log(min_larger_prob * sum_exp_logits) + max_logit
-                        )
-                        num_duplicate_logit = num_min_larger
-                        num_keep = num_duplicate_logit - tl.cast(
-                            (p_pivots_sum - p) / min_larger_prob, tl.uint32
-                        )
-                        num_kept = tl.zeros((), dtype=tl.uint32)
+                        if p_pivot > 0.0:
+                            duplicate_logit = (
+                                tl.log(min_larger_prob * sum_exp_logits) + max_logit
+                            )
+                            num_duplicate_logit = num_min_larger
+                            num_keep = num_duplicate_logit - tl.cast(
+                                (p_pivots_sum - p) / min_larger_prob, tl.uint32
+                            )
+                            num_kept = tl.zeros((), dtype=tl.uint32)
 
-                        # Top-k + Top-p path
-                        final_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
+                            # Top-k + Top-p path
+                            final_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
+                        # else: no pivot reached p even with every top-k
+                        # survivor kept; keep the top-k boundary as-is.
 
         if TOPP_ENABLED and final_pivot == -float("inf"):
             #### STANDALONE TOP-P SAMPLING ####
@@ -703,6 +723,10 @@ def _topk_topp_kernel(
                 min_larger_prob = 1.0
                 num_min_larger = tl.zeros((), dtype=tl.uint32)
                 p_pivots_sum = 0.0
+                best_pivot = 0.0
+                best_mass = 0.0
+                best_min_larger = 1.0
+                best_num_min = tl.zeros((), dtype=tl.uint32)
 
                 # Third pass: Search for p_pivot
                 if sum_outlier_probs > p:
@@ -755,6 +779,14 @@ def _topk_topp_kernel(
                             p_pivots_sum = p_pivots_sum_0
                             found_pivot = 1
 
+                        # Track the tightest pivot that still reaches p, so a
+                        # failed search can fall back to the safe side.
+                        if p_pivots_sum_0 >= p and p_pivot_0 > best_pivot:
+                            best_pivot = p_pivot_0
+                            best_mass = p_pivots_sum_0
+                            best_min_larger = min_larger_0
+                            best_num_min = num_min_larger_0
+
                         # Update range
                         if p_pivots_sum_0 > p:
                             min_range = p_pivot_0
@@ -763,10 +795,15 @@ def _topk_topp_kernel(
 
                         num_iters += 1
                         if (max_range - min_range) < 1e-9 or num_iters >= 18:
-                            p_pivot = (max_range + min_range) / 2.0
-                            min_larger_prob = min_larger_0
-                            num_min_larger = num_min_larger_0
-                            p_pivots_sum = p_pivots_sum_0
+                            if best_pivot > 0.0:
+                                p_pivot = best_pivot
+                                min_larger_prob = best_min_larger
+                                num_min_larger = best_num_min
+                                p_pivots_sum = best_mass
+                            else:
+                                # No pivot reached p even with every
+                                # candidate kept; signal no-masking.
+                                p_pivot = 0.0
                             found_pivot = 1
                 else:
                     # Re-populate the buffer with full softmax probabilities
@@ -821,6 +858,14 @@ def _topk_topp_kernel(
                             p_pivots_sum = p_pivots_sum_0
                             found_pivot = 1
 
+                        # Track the tightest pivot that still reaches p, so a
+                        # failed search can fall back to the safe side.
+                        if p_pivots_sum_0 >= p and p_pivot_0 > best_pivot:
+                            best_pivot = p_pivot_0
+                            best_mass = p_pivots_sum_0
+                            best_min_larger = min_larger_0
+                            best_num_min = num_min_larger_0
+
                         # Update range
                         if p_pivots_sum_0 > p:
                             min_range = p_pivot_0
@@ -829,21 +874,33 @@ def _topk_topp_kernel(
 
                         num_iters += 1
                         if (max_range - min_range) < 1e-9 or num_iters >= 18:
-                            p_pivot = (max_range + min_range) / 2.0
-                            min_larger_prob = min_larger_0
-                            num_min_larger = num_min_larger_0
-                            p_pivots_sum = p_pivots_sum_0
+                            if best_pivot > 0.0:
+                                p_pivot = best_pivot
+                                min_larger_prob = best_min_larger
+                                num_min_larger = best_num_min
+                                p_pivots_sum = best_mass
+                            else:
+                                # No pivot reached p even with every
+                                # candidate kept; signal no-masking.
+                                p_pivot = 0.0
                             found_pivot = 1
 
-                duplicate_logit = tl.log(min_larger_prob * sum_exp_logits) + max_sample
-                num_duplicate_logit = num_min_larger
-                num_keep = num_duplicate_logit - tl.cast(
-                    (p_pivots_sum - p) / min_larger_prob, tl.uint32
-                )
-                num_kept = tl.zeros((), dtype=tl.uint32)
+                if p_pivot > 0.0:
+                    duplicate_logit = (
+                        tl.log(min_larger_prob * sum_exp_logits) + max_sample
+                    )
+                    num_duplicate_logit = num_min_larger
+                    num_keep = num_duplicate_logit - tl.cast(
+                        (p_pivots_sum - p) / min_larger_prob, tl.uint32
+                    )
+                    num_kept = tl.zeros((), dtype=tl.uint32)
 
-                # Top-p only path
-                final_pivot = tl.log(p_pivot * sum_exp_logits) + max_sample
+                    # Top-p only path
+                    final_pivot = tl.log(p_pivot * sum_exp_logits) + max_sample
+                else:
+                    # No pivot accumulated p even with the whole row kept;
+                    # top-p needs every token, so keep everything.
+                    final_pivot = -float("inf")
 
         # Sixth pass: Apply mask and store final output.
         # If the pivot >= max logit (or is NaN), no token would
