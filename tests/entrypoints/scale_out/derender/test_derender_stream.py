@@ -50,8 +50,6 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderCompletionRequest,
     DerenderCompletionStreamRequest,
     DerenderStreamState,
-    GenerateResponse,
-    GenerateResponseChoice,
     GenerateStreamResponse,
     GenerateTokensChoice,
     GenerateTokensResponse,
@@ -329,11 +327,11 @@ def test_non_streaming_derender_initializes_parser_prefix(
     )
     monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
     generated_ids = tokenizer.encode("answer", add_special_tokens=False)
-    response = GenerateResponse(
+    response = GenerateTokensResponse(
         request_id="test",
         prompt_token_ids=[11, 12],
         choices=[
-            GenerateResponseChoice(
+            GenerateTokensChoice(
                 index=0,
                 token_ids=generated_ids,
                 finish_reason="length",
@@ -586,10 +584,10 @@ class TestPromptSeededLeadingSpace:
     ):
         prompt_ids, output_ids, expected = leading_space_ids
         choices = await derenderer.derender_chat(
-            GenerateResponse(
+            GenerateTokensResponse(
                 request_id="t",
                 choices=[
-                    GenerateResponseChoice(
+                    GenerateTokensChoice(
                         index=0, token_ids=output_ids, finish_reason="stop"
                     )
                 ],
@@ -604,10 +602,10 @@ class TestPromptSeededLeadingSpace:
     ):
         prompt_ids, output_ids, expected = leading_space_ids
         choices = await derenderer.derender_chat(
-            GenerateResponse(
+            GenerateTokensResponse(
                 request_id="t",
                 choices=[
-                    GenerateResponseChoice(
+                    GenerateTokensChoice(
                         index=0, token_ids=output_ids, finish_reason="stop"
                     )
                 ],
@@ -623,10 +621,10 @@ class TestPromptSeededLeadingSpace:
         prompt_ids, output_ids, expected = leading_space_ids
         wrong_ids = tokenizer.encode("a different prompt", add_special_tokens=False)
         choices = await derenderer.derender_chat(
-            GenerateResponse(
+            GenerateTokensResponse(
                 request_id="t",
                 choices=[
-                    GenerateResponseChoice(
+                    GenerateTokensChoice(
                         index=0, token_ids=output_ids, finish_reason="stop"
                     )
                 ],
@@ -642,10 +640,10 @@ class TestPromptSeededLeadingSpace:
     ):
         _, output_ids, _ = leading_space_ids
         choices = await derenderer.derender_chat(
-            GenerateResponse(
+            GenerateTokensResponse(
                 request_id="t",
                 choices=[
-                    GenerateResponseChoice(
+                    GenerateTokensChoice(
                         index=0, token_ids=output_ids, finish_reason="stop"
                     )
                 ],
@@ -658,10 +656,10 @@ class TestPromptSeededLeadingSpace:
         prompt_ids, output_ids, expected = leading_space_ids
         choices, _, _ = await derenderer.derender_completion(
             [
-                GenerateResponse(
+                GenerateTokensResponse(
                     request_id="t",
                     choices=[
-                        GenerateResponseChoice(
+                        GenerateTokensChoice(
                             index=0, token_ids=output_ids, finish_reason="stop"
                         )
                     ],
