@@ -536,3 +536,56 @@ def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_p
         sock.close()
 
     assert '"model_tag": "org/model"' in caplog.text
+
+
+def test_rust_frontend_inherits_grpc_listener(monkeypatch):
+    """The Python-bound gRPC socket is passed to Rust like the HTTP one."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model", "--grpc-port", "50051"]
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append((cmd, kwargs))
+        return _FakeProc()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    grpc_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_address="ipc:///tmp/in",
+            output_address="ipc:///tmp/out",
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+            grpc_sock=grpc_sock,
+        )
+        [(cmd, kwargs)] = popen_calls
+        grpc_fd = grpc_sock.fileno()
+        flag_index = cmd.index("--grpc-listen-fd")
+        assert cmd[flag_index + 1] == str(grpc_fd)
+        assert list(kwargs["pass_fds"]) == [sock.fileno(), grpc_fd]
+    finally:
+        sock.close()
+        grpc_sock.close()

@@ -174,6 +174,7 @@ fn serve_args_forward_python_flags_with_separator() {
                     host: "127.0.0.1",
                     port: 8000,
                     uds: None,
+                    grpc_port: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         revision: None,
@@ -188,7 +189,6 @@ fn serve_args_forward_python_flags_with_separator() {
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
-                        grpc_port: None,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -1007,6 +1007,7 @@ fn frontend_args_accept_json() {
             command: Frontend(
                 FrontendArgs {
                     listen_fd: 3,
+                    grpc_listen_fd: None,
                     input_address: "ipc:///tmp/input.sock",
                     output_address: "ipc:///tmp/output.sock",
                     coordinator_address: Some(
@@ -1029,7 +1030,6 @@ fn frontend_args_accept_json() {
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
-                        grpc_port: None,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -1687,6 +1687,7 @@ fn serve_args_accept_handshake_aliases() {
                     host: "127.0.0.1",
                     port: 8000,
                     uds: None,
+                    grpc_port: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         revision: None,
@@ -1701,7 +1702,6 @@ fn serve_args_accept_handshake_aliases() {
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
-                        grpc_port: None,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -1854,6 +1854,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 host: "127.0.0.1",
                 port: 8000,
             },
+            grpc_listener_mode: None,
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             tool_strict_level: Auto,
@@ -1887,7 +1888,6 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             tls: None,
             api_keys: [],
             disable_log_stats: false,
-            grpc_port: None,
             shutdown_timeout: 0ns,
             manages_engine: true,
             keep_alive_timeout: 5s,
@@ -1949,6 +1949,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 host: "127.0.0.1",
                 port: 8000,
             },
+            grpc_listener_mode: None,
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             tool_strict_level: Auto,
@@ -1982,7 +1983,6 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             tls: None,
             api_keys: [],
             disable_log_stats: false,
-            grpc_port: None,
             shutdown_timeout: 0ns,
             manages_engine: true,
             keep_alive_timeout: 5s,
@@ -2088,6 +2088,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             listener_mode: InheritedFd {
                 fd: 3,
             },
+            grpc_listener_mode: None,
             tool_call_parser: None,
             reasoning_parser: None,
             tool_strict_level: Auto,
@@ -2121,7 +2122,6 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             tls: None,
             api_keys: [],
             disable_log_stats: false,
-            grpc_port: None,
             shutdown_timeout: 0ns,
             manages_engine: false,
             keep_alive_timeout: 5s,
@@ -2139,6 +2139,8 @@ fn serve_frontend_config_uses_unix_listener_when_uds_is_present() {
         "Qwen/Qwen3-0.6B",
         "--uds",
         "/tmp/vllm.sock",
+        "--grpc-port",
+        "50051",
     ])
     .unwrap();
 
@@ -2152,6 +2154,69 @@ fn serve_frontend_config_uses_unix_listener_when_uds_is_present() {
         HttpListenerMode::BindUnix {
             path: "/tmp/vllm.sock".to_string(),
         }
+    );
+    assert_eq!(
+        config.grpc_listener_mode,
+        Some(HttpListenerMode::BindTcp {
+            host: "127.0.0.1".to_string(),
+            port: 50051,
+        })
+    );
+}
+
+#[test]
+fn serve_frontend_config_binds_grpc_on_http_host() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--host",
+        "0.0.0.0",
+        "--grpc-port",
+        "50051",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
+
+    assert_eq!(
+        config.grpc_listener_mode,
+        Some(HttpListenerMode::BindTcp {
+            host: "0.0.0.0".to_string(),
+            port: 50051,
+        })
+    );
+}
+
+#[test]
+fn frontend_config_adopts_inherited_grpc_listener() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--grpc-listen-fd",
+        "4",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","grpc_port":50051}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(
+        config.grpc_listener_mode,
+        Some(HttpListenerMode::InheritedFd { fd: 4 })
     );
 }
 
