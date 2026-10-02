@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from vllm.config.speculative import SpeculativeConfig
 from vllm.model_executor.models.config import (
@@ -17,10 +18,6 @@ from vllm.model_executor.models.config import (
     Qwen4ExpForConditionalGenerationConfig,
 )
 from vllm.models.qwen4_exp.common.mtp import make_mtp_hidden_buffer
-from vllm.models.qwen4_exp.config import (
-    Qwen4ExpConfig,
-    Qwen4ExpTextConfig,
-)
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
@@ -41,7 +38,10 @@ def _text_config(**kwargs) -> Qwen4ExpTextConfig:
         "linear_num_value_heads": 2,
         "linear_key_head_dim": 8,
         "linear_value_head_dim": 8,
-        "num_experts": 0,
+        "num_experts": 4,
+        "num_experts_per_tok": 2,
+        # `Qwen4ExpTextConfig` requires an EOS token whenever PLE is enabled.
+        "eos_token_id": 1,
         "hc_count": 2,
         "hc_lowrank": 4,
         "ple_layer_ids": [1],
@@ -250,20 +250,6 @@ def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:
     )
     assert second["query_start_loc"].data_ptr() == query_start_loc_ptr
     assert second["ngram_context"].data_ptr() == ngram_context_ptr
-
-
-def test_text_config_normalizes_transformers_sparse_attention_spelling():
-    """Checkpoints re-exported through transformers' Qwen4Exp config class
-    serialize "qwen_sparse_attention"; vLLM keys QSA off "full_attention"."""
-    from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
-
-    config = Qwen4ExpTextConfig(
-        hc_count=4,
-        layer_types=["linear_attention", "qwen_sparse_attention"],
-        num_hidden_layers=2,
-    )
-
-    assert config.layer_types == ["linear_attention", "full_attention"]
 
 
 @contextmanager

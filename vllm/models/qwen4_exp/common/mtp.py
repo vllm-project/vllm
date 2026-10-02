@@ -3,9 +3,9 @@
 """Shared MTP drafter state for Qwen4Exp."""
 
 import torch
+from transformers import Qwen4ExpTextConfig
 
 from vllm.config import VllmConfig
-from vllm.transformers_utils.configs.qwen4_exp import Qwen4ExpTextConfig
 
 
 def make_mtp_hidden_buffer(
