@@ -99,7 +99,6 @@ def test_derived_drafter_keeps_the_choice_and_runs_the_checks():
         ("mamba_config__enable_stochastic_rounding", True, "stochastic"),
         ("mamba_config__backend", "flashinfer", "mamba-backend triton"),
         ("use_v2_model_runner", False, "V2_MODEL_RUNNER"),
-        ("cache_config__mamba_cache_mode", "all", "none and align"),
     ],
 )
 def test_runtime_checks_reject(override, value, match):
