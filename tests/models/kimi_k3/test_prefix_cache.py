@@ -93,14 +93,21 @@ MODES = [Mode(unit, spec) for spec in (False, True) for unit in (None, 128)]
 @dataclass(frozen=True)
 class Instance:
     tp: int = 1
+    dp: int = 1
     dcp: int = 1
     kv_config: dict | None = None
     prefix_caching: bool = True
+
+    @property
+    def num_gpus(self) -> int:
+        return self.tp * self.dp
 
     def args(self, mode: Mode) -> list[str]:
         args = BASE_ARGS + ["--tensor-parallel-size", str(self.tp)]
         if mode.spec:
             args += ["--speculative-config", json.dumps(SPEC_CONFIG)]
+        if self.dp > 1:
+            args += ["--data-parallel-size", str(self.dp), "--enable-expert-parallel"]
         if self.dcp > 1:
             args += ["--decode-context-parallel-size", str(self.dcp)]
         if self.kv_config is not None:
@@ -126,7 +133,7 @@ class Deployment:
 
     @property
     def num_gpus(self) -> int:
-        return sum(i.tp for i in self.instances)
+        return sum(i.num_gpus for i in self.instances)
 
 
 DEPLOYMENTS = {
@@ -136,9 +143,9 @@ DEPLOYMENTS = {
     "dcp2-offload": Deployment(Instance(tp=2, dcp=2, kv_config=OFFLOAD), offload=True),
     "pd": Deployment(Instance(kv_config=NIXL), prefill=Instance(kv_config=NIXL)),
     # NIXL rejects prefix caching on a hybrid decoder with a different TP.
-    "pd-tp1-tp2": Deployment(
-        Instance(tp=2, kv_config=NIXL, prefix_caching=False),
-        prefill=Instance(kv_config=NIXL),
+    "pd-tp2-dep2": Deployment(
+        Instance(dp=2, kv_config=NIXL, prefix_caching=False),
+        prefill=Instance(tp=2, kv_config=NIXL),
     ),
     "pd-offload": Deployment(
         Instance(kv_config=NIXL_OFFLOAD),
@@ -288,8 +295,8 @@ def _serve(deployment: Deployment, mode: Mode) -> Iterator[list[RemoteOpenAIServ
                 # Enables /reset_prefix_cache.
                 env["VLLM_SERVER_DEV_MODE"] = "1"
             if deployment.prefill is not None:
-                gpus = range(next_gpu, next_gpu + instance.tp)
-                next_gpu += instance.tp
+                gpus = range(next_gpu, next_gpu + instance.num_gpus)
+                next_gpu += instance.num_gpus
                 env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
                 env["VLLM_SSM_CONV_STATE_LAYOUT"] = "DS"
                 env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(get_open_port())
