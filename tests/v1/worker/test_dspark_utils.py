@@ -47,10 +47,22 @@ class _FakeParallelConfig:
             raise ValueError("elastic EP requires EPLB")
 
 
-def test_dspark_parallel_config_preserves_eplb_for_dsv4():
+@pytest.mark.parametrize(
+    ("model_type", "enable_eplb", "num_redundant_experts", "shares_eplb_config"),
+    [
+        ("deepseek_v4", True, 32, True),
+        ("deepseek_v41", False, 0, False),
+    ],
+)
+def test_dspark_parallel_config_eplb_by_model_type(
+    model_type: str,
+    enable_eplb: bool,
+    num_redundant_experts: int,
+    shares_eplb_config: bool,
+):
     target_config = _FakeParallelConfig()
     draft_model_config = _FakeModelConfig(
-        hf_config=_FakeHFConfig(model_type="deepseek_v4")
+        hf_config=_FakeHFConfig(model_type=model_type)
     )
 
     draft_config = _get_dspark_parallel_config(
@@ -68,27 +80,13 @@ def test_dspark_parallel_config_preserves_eplb_for_dsv4():
     assert draft_config is not target_config
     assert draft_config.pipeline_parallel_size == 1
     assert draft_config.tensor_parallel_size == 4
-    assert draft_config.enable_eplb
-    assert draft_config.eplb_config.num_redundant_experts == 32
+    assert draft_config.enable_eplb is enable_eplb
+    assert draft_config.eplb_config.num_redundant_experts == num_redundant_experts
     assert not draft_config.enable_elastic_ep
-    assert draft_config.eplb_config is target_config.eplb_config
-
-
-def test_dspark_parallel_config_disables_eplb_for_dsv41():
-    target_config = _FakeParallelConfig()
-    draft_model_config = _FakeModelConfig(
-        hf_config=_FakeHFConfig(model_type="deepseek_v41")
-    )
-
-    draft_config = _get_dspark_parallel_config(
-        target_config,
-        tensor_parallel_size=4,
-        draft_model_config=draft_model_config,
-    )
-
-    assert draft_config.enable_eplb is False
-    assert draft_config.eplb_config.num_redundant_experts == 0
-    assert draft_config.eplb_config is not target_config.eplb_config
+    if shares_eplb_config:
+        assert draft_config.eplb_config is target_config.eplb_config
+    else:
+        assert draft_config.eplb_config is not target_config.eplb_config
 
 
 @pytest.mark.parametrize("pcp_size", [1, 4])

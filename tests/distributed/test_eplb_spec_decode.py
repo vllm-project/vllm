@@ -16,7 +16,6 @@ from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.worker.gpu.eplb_utils import (
     EPLBController,
     draft_model_supports_eplb,
-    eplb_draft_model_name,
 )
 
 
@@ -169,39 +168,25 @@ def test_eplb_state_rejects_mismatched_dsv4_draft_redundant_experts():
         EplbState.assert_confs_equal(draft, target)
 
 
-def test_dspark_draft_supports_eplb_only_for_dsv4(dspark_vllm_config):
-    assert dspark_draft_supports_eplb(
-        dspark_vllm_config.speculative_config.draft_model_config
-    )
-    dspark_vllm_config.speculative_config.draft_model_config.hf_config.model_type = (
-        "deepseek_v41"
-    )
-    assert not dspark_draft_supports_eplb(
-        dspark_vllm_config.speculative_config.draft_model_config
-    )
-
-
-def test_eplb_draft_model_name_adds_suffix(dspark_vllm_config):
+@pytest.mark.parametrize(
+    ("model_type", "expected"),
+    [
+        ("deepseek_v4", True),
+        ("deepseek_v41", False),
+    ],
+)
+def test_dspark_draft_supports_eplb(
+    dspark_vllm_config, model_type: str, expected: bool
+):
     draft_model_config = dspark_vllm_config.speculative_config.draft_model_config
-    assert eplb_draft_model_name(draft_model_config) == "dspark (draft)"
+    draft_model_config.hf_config.model_type = model_type
+    assert dspark_draft_supports_eplb(draft_model_config) is expected
 
 
-def test_draft_model_supports_eplb_for_dsv4_dspark(dspark_vllm_config):
-    draft = SimpleNamespace()
-    assert draft_model_supports_eplb(
-        dspark_vllm_config.speculative_config,
-        draft,
-    )
-
-
-def test_draft_model_supports_eplb_rejects_dsv41_dspark(dspark_vllm_config):
-    dspark_vllm_config.speculative_config.draft_model_config.hf_config.model_type = (
-        "deepseek_v41"
-    )
-    draft = SimpleNamespace()
+def test_draft_model_supports_eplb_requires_draft_moe(dspark_vllm_config):
     assert not draft_model_supports_eplb(
         dspark_vllm_config.speculative_config,
-        draft,
+        None,
     )
 
 
