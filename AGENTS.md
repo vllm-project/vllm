@@ -31,6 +31,7 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
     - Test commands run and results.
     - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
+- Use vLLM's [`/pr-checklist`](.agents/skills/pr-checklist/SKILL.md) skill before submitting a PR to ensure quality and adherence to the contribution guidelines.
 
 ### Fail-closed behavior
 
@@ -60,12 +61,13 @@ pre-commit install
 ### Installing dependencies
 
 ```bash
-# If you are only making Python changes:
+# Start with precompiled artifacts for an editable install:
 VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
-
-# If you are also making C/C++ changes:
-uv pip install -e . --torch-backend=auto
 ```
+
+For C/C++ or CUDA changes, follow the
+[incremental compilation workflow](docs/contributing/incremental_build.md) to
+configure and perform incremental builds.
 
 ### Tests
 

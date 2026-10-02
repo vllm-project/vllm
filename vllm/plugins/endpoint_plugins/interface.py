@@ -20,7 +20,7 @@ for the loading/gating rules and `docs/usage/security.md` for the security
 posture of exposing plugin defined routes.
 
 The CPU only render server (see `build_and_serve_renderer` in
-`vllm/entrypoints/openai/api_server.py`) has no `EngineClient`. A plugin
+`vllm/entrypoints/launchers/render`) has no `EngineClient`. A plugin
 eligible for the `render` task (`required_tasks` is `None` or includes
 `"render"`) still gets `attach_router` called but `init_state` receives
 `engine_client=None`. Plugins that cannot function without an engine should
@@ -34,8 +34,9 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from fastapi import FastAPI
 from starlette.datastructures import State
 
+from vllm.engine.protocol import EngineClient
+
 if TYPE_CHECKING:
-    from vllm.engine.protocol import EngineClient
     from vllm.tasks import SupportedTask
 
 
@@ -85,3 +86,38 @@ class EndpointPlugin(Protocol):
         cannot function without an engine.
         """
         ...
+
+
+def attach_endpoint_plugins(
+    app: FastAPI, supported_tasks: tuple["SupportedTask", ...]
+) -> None:
+    """Phase A of endpoint plugin wiring: discover, gate and attach routes.
+
+    Attached last after all core routers. This is so endpoint plugin routes can
+    shadow core routes with the same path (see `EndpointPlugin.attach_router`
+    docstring). No-ops when no plugins are discovered/allowlisted.
+    """
+    from vllm.plugins import load_endpoint_plugins
+
+    endpoint_plugins = load_endpoint_plugins(supported_tasks)
+    for plugin in endpoint_plugins:
+        plugin.attach_router(app)
+    app.state.endpoint_plugins = endpoint_plugins
+
+
+async def init_endpoint_plugins_state(
+    engine_client: EngineClient | None, state: State, args: Namespace
+) -> None:
+    """Phase B of endpoint plugin wiring: initialize per app plugin state.
+
+    `state.endpoint_plugins` is set by `_attach_endpoint_plugins` (Phase A)
+    in `build_app`. Some `init_app_state` callers (e.g. `run_batch.py`)
+    build their own bare `State` without going through `build_app`. As a result
+    `endpoint_plugins` may be absent and are treated that the same as "none attached".
+
+    `engine_client` is `None` for the CPU only render server which has no
+    engine (see `init_render_app_state`). Plugins must handle a `None`
+    `engine_client` themselves (see `EndpointPlugin.init_state`).
+    """
+    for plugin in getattr(state, "endpoint_plugins", []):
+        await plugin.init_state(engine_client, state, args)

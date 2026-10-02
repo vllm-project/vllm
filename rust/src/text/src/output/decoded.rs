@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_llm::{FinishReason, GenerateOutput, TokenUsage};
-use vllm_tokenizer::{DynTokenizer, IncrementalDecoder};
+use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
 use super::logprobs::{
     DecodedLogprobs, DecodedPromptLogprobs, decode_logprobs, decode_prompt_logprobs,
@@ -50,6 +51,21 @@ pub struct Finished {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Sampling support sets aligned with all generated token positions.
+    pub sampling_mask: Option<SamplingMask>,
+}
+
+/// Sample metadata emitted by one engine output update.
+///
+/// Token IDs and logprobs share the engine-update clock and align by generated
+/// token position. They may arrive before the corresponding decoded text is
+/// visible or alongside decoded text attributed to earlier updates.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SampledDelta {
+    /// Token IDs produced by this engine update, after stop-string truncation.
+    pub token_ids: Vec<u32>,
+    /// Per-position logprobs aligned with `token_ids`, when requested.
+    pub logprobs: Option<DecodedLogprobs>,
 }
 
 /// Internal decoded-text event emitted before higher-level assistant
@@ -68,25 +84,25 @@ pub enum DecodedTextEvent {
         /// remaining prompt positions.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
-    /// A delta of text has been decoded, optionally alongside token-position
-    /// logprobs.
+    /// Decoded text and sampled metadata observed during one output update.
     ///
-    /// `delta` is the newly visible decoded text fragment for this update.
+    /// `decoded` follows the decoder clock. It may be empty while tokens remain
+    /// undecodable, and may later contain token attributions from earlier
+    /// engine updates. Tokens suppressed before decoding are absent.
     ///
-    /// `logprobs` covers the newly generated token positions from the same
-    /// update, but is not guaranteed to align with `delta` by character
-    /// span. One update may carry token logprobs but no newly visible text
-    /// yet, and one visible text fragment may reflect multiple token
-    /// positions becoming decodable together.
+    /// `sampled` follows the engine-update clock. Its token IDs and logprobs
+    /// align with each other. `decoded.attributions` has an independent decoder
+    /// clock and positional sequence.
     ///
-    /// Upper-level may further parse `delta` as reasoning or tool calls.
+    /// Upper-level may further parse `decoded.text` as reasoning or tool calls.
     ///
     /// When `finished` is `Some`, this is the terminal event for the request.
     TextDelta {
-        delta: String,
-        token_ids: Vec<u32>,
-        logprobs: Option<DecodedLogprobs>,
-        finished: Option<Finished>,
+        decoded: DecodedText,
+        sampled: SampledDelta,
+        /// Heap-backed because terminal metadata is large and appears once per
+        /// request, while every streaming event carries this enum variant.
+        finished: Option<Box<Finished>>,
     },
 }
 
@@ -104,9 +120,10 @@ pub async fn decoded_text_event_stream(
     let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
     let mut prompt_token_count = 0_usize;
     let mut cached_token_count = 0_usize;
-    let mut token_ids = Vec::new();
+    let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
-    let mut logprobs: Option<DecodedLogprobs> = None;
+    let mut sampled_logprobs: Option<DecodedLogprobs> = None;
+    let mut sampling_mask: Option<SamplingMask> = None;
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
@@ -168,7 +185,7 @@ pub async fn decoded_text_event_stream(
             &output.token_ids
         };
 
-        let mut delta: Option<String> = None;
+        let mut decoded = DecodedText::default();
         let mut truncate_output_to = None;
         let mut truncate_tokens_to = None;
         for (tok_idx, &token_id) in decodable_token_ids.iter().enumerate() {
@@ -188,18 +205,19 @@ pub async fn decoded_text_event_stream(
 
                 break;
             }
+        }
 
-            if intermediate && let Some(chunk) = decoder.next_chunk() {
-                if let Some(delta_str) = delta.as_mut() {
-                    delta_str.push_str(&chunk);
-                } else {
-                    delta = Some(chunk);
-                }
-            }
+        // Coalesce output per nonterminal engine update; terminal updates flush below.
+        if intermediate
+            && finish_reason.is_none()
+            && let Some(chunk) = decoder.next_chunk()
+        {
+            decoded.append(chunk);
         }
 
         let mut new_token_ids = output.token_ids;
         let mut new_logprobs = output.logprobs;
+        let mut new_sampling_mask = output.sampling_mask;
 
         // Trim tokens and logprobs if we matched stop string.
         if let Some(num_tokens) = truncate_tokens_to {
@@ -207,9 +225,15 @@ pub async fn decoded_text_event_stream(
             if let Some(logprobs) = &mut new_logprobs {
                 logprobs.positions.truncate(num_tokens);
             }
+            if let Some(mask) = &mut new_sampling_mask {
+                mask.rows.truncate(num_tokens);
+            }
         }
 
         output_token_count += new_token_ids.len();
+        if let Some(mut mask) = new_sampling_mask {
+            sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
+        }
 
         let decoded_logprobs = new_logprobs
             .as_ref()
@@ -223,9 +247,9 @@ pub async fn decoded_text_event_stream(
             .transpose()?;
 
         if !intermediate {
-            token_ids.extend(&new_token_ids);
+            sampled_token_ids.extend(&new_token_ids);
             if let Some(dlp) = decoded_logprobs.as_ref() {
-                logprobs
+                sampled_logprobs
                     .get_or_insert_with(|| DecodedLogprobs { positions: vec![] })
                     .positions
                     .extend_from_slice(&dlp.positions);
@@ -233,23 +257,30 @@ pub async fn decoded_text_event_stream(
         }
 
         if let Some(reason) = finish_reason {
-            // Flush any remaining buffered text.
-            let (last_chunk, mut text) = decoder.flush(truncate_output_to)?;
-            let text_len = text.len();
-            let full_text = tracing::enabled!(Level::TRACE).then(|| text.clone());
-
-            if intermediate {
-                if let Some(chunk) = last_chunk {
-                    if let Some(delta_str) = delta.as_mut() {
-                        delta_str.push_str(&chunk);
-                    } else {
-                        delta = Some(chunk);
-                    }
+            if let Some(mask) = sampling_mask.as_ref()
+                && mask.rows.len() != output_token_count
+            {
+                return Err(vllm_llm::Error::SamplingMaskTokenCountMismatch {
+                    request_id,
+                    token_count: output_token_count,
+                    row_count: mask.rows.len(),
                 }
-                token_ids = new_token_ids;
-                logprobs = decoded_logprobs;
-                text = delta.unwrap_or_default();
+                .into());
             }
+            // Flush any remaining buffered text.
+            let (last_chunk, full_decoded) = decoder.flush(truncate_output_to)?;
+            let text_len = full_decoded.text.len();
+            let full_text = tracing::enabled!(Level::TRACE).then(|| full_decoded.text.clone());
+            let decoded = if intermediate {
+                if let Some(chunk) = last_chunk {
+                    decoded.append(chunk);
+                }
+                sampled_token_ids = new_token_ids;
+                sampled_logprobs = decoded_logprobs;
+                decoded
+            } else {
+                full_decoded
+            };
 
             debug!(
                 finish_reason = ?reason,
@@ -269,10 +300,12 @@ pub async fn decoded_text_event_stream(
             }
 
             y.yield_ok(DecodedTextEvent::TextDelta {
-                delta: text,
-                token_ids,
-                logprobs,
-                finished: Some(Finished {
+                decoded,
+                sampled: SampledDelta {
+                    token_ids: sampled_token_ids,
+                    logprobs: sampled_logprobs,
+                },
+                finished: Some(Box::new(Finished {
                     usage: TokenUsage {
                         prompt_token_count,
                         output_token_count,
@@ -281,7 +314,8 @@ pub async fn decoded_text_event_stream(
                     finish_reason: reason,
                     kv_transfer_params,
                     ec_transfer_params,
-                }),
+                    sampling_mask,
+                })),
             })
             .await;
             return Ok(());
@@ -289,9 +323,11 @@ pub async fn decoded_text_event_stream(
 
         if intermediate {
             y.yield_ok(DecodedTextEvent::TextDelta {
-                delta: delta.unwrap_or_default(),
-                token_ids: new_token_ids,
-                logprobs: decoded_logprobs,
+                decoded,
+                sampled: SampledDelta {
+                    token_ids: new_token_ids,
+                    logprobs: decoded_logprobs,
+                },
                 finished: None,
             })
             .await;
@@ -338,10 +374,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
 
-    use futures::{Stream, stream};
+    use futures::{Stream, StreamExt as _, stream};
     use vllm_engine_core_client::AbortCause;
+    use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
     use vllm_llm::GenerateOutput;
-    use vllm_tokenizer::test_utils::TestTokenizer;
+    use vllm_tokenizer::{TokenAnchor, TokenAttribution, test_utils::TestTokenizer};
 
     use super::*;
     use crate::output::TextOutputStreamExt as _;
@@ -370,11 +407,203 @@ mod tests {
         s.bytes().map(u32::from).collect()
     }
 
+    #[tokio::test]
+    async fn sampling_masks_survive_text_decode_and_collection() {
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let mut first = GenerateOutput::for_test(Some(prompt), vec![b'a' as u32], None);
+        first.sampling_mask = Some(SamplingMask {
+            rows: vec![vec![1, b'a' as u32]],
+        });
+        let mut terminal =
+            GenerateOutput::for_test(None, vec![b'b' as u32], Some(FinishReason::Length));
+        terminal.sampling_mask = Some(SamplingMask {
+            rows: vec![vec![2, b'b' as u32]],
+        });
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+
+        let collected = decoded_text_event_stream(
+            "test-mask".into(),
+            tokenizer,
+            stream::iter([Ok(first), Ok(terminal)]),
+            TextDecodeOptions::default(),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(
+            collected.sampling_mask,
+            Some(SamplingMask {
+                rows: vec![vec![1, b'a' as u32], vec![2, b'b' as u32]],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn sampling_mask_mismatch_reuses_llm_error() {
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let mut terminal = GenerateOutput::for_test(
+            Some(prompt),
+            vec![b'a' as u32, b'b' as u32],
+            Some(FinishReason::Length),
+        );
+        terminal.sampling_mask = Some(SamplingMask {
+            rows: vec![vec![1, b'a' as u32]],
+        });
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+
+        let error = decoded_text_event_stream(
+            "test-mask-mismatch".into(),
+            tokenizer,
+            stream::iter([Ok(terminal)]),
+            TextDecodeOptions::default(),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::Error::Llm(vllm_llm::Error::SamplingMaskTokenCountMismatch {
+                token_count: 2,
+                row_count: 1,
+                ..
+            })
+        ));
+    }
+
     fn opts(stop: &[&str], min_tokens: u32) -> TextDecodeOptions {
         TextDecodeOptions {
             stop_strings: Some(stop.iter().map(|s| s.to_string()).collect()),
             min_tokens,
             ..Default::default()
+        }
+    }
+
+    fn visible(token_id: u32, byte_offset: u32) -> TokenAttribution {
+        TokenAttribution {
+            token_id,
+            anchor: TokenAnchor::Visible { byte_offset },
+        }
+    }
+
+    fn text_delta(
+        text: impl Into<String>,
+        attributions: impl IntoIterator<Item = TokenAttribution>,
+        sampled_token_ids: Vec<u32>,
+        finished: Option<Finished>,
+    ) -> DecodedTextEvent {
+        DecodedTextEvent::TextDelta {
+            decoded: DecodedText {
+                text: text.into(),
+                attributions: attributions.into_iter().collect(),
+            },
+            sampled: SampledDelta {
+                token_ids: sampled_token_ids,
+                logprobs: None,
+            },
+            finished: finished.map(Box::new),
+        }
+    }
+
+    async fn run_intermediate(
+        outputs: Vec<GenerateOutput>,
+        decode_options: TextDecodeOptions,
+    ) -> Vec<DecodedTextEvent> {
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+        decoded_text_event_stream(
+            "test".into(),
+            tokenizer,
+            stream::iter(outputs.into_iter().map(Ok)),
+            decode_options,
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<crate::Result<Vec<_>>>()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn decoded_and_sampled_clocks_are_independent() {
+        struct Case {
+            name: &'static str,
+            outputs: Vec<GenerateOutput>,
+            expected: Vec<DecodedTextEvent>,
+        }
+
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let cases = [
+            Case {
+                name: "utf8 byte fallback resolves across engine updates",
+                outputs: vec![
+                    GenerateOutput::for_test(Some(Arc::clone(&prompt)), vec![0xe4], None),
+                    GenerateOutput::for_test(None, vec![0xbd, 0xa0], Some(FinishReason::Length)),
+                ],
+                expected: vec![
+                    DecodedTextEvent::Start {
+                        prompt_token_ids: Arc::clone(&prompt),
+                        prompt_logprobs: None,
+                    },
+                    text_delta("", [], vec![0xe4], None),
+                    text_delta(
+                        "你",
+                        [visible(0xe4, 0), visible(0xbd, 0), visible(0xa0, 0)],
+                        vec![0xbd, 0xa0],
+                        Some(Finished {
+                            usage: TokenUsage {
+                                prompt_token_count: 0,
+                                output_token_count: 3,
+                                cached_token_count: 0,
+                            },
+                            finish_reason: FinishReason::Length,
+                            kv_transfer_params: None,
+                            ec_transfer_params: None,
+                            sampling_mask: None,
+                        }),
+                    ),
+                ],
+            },
+            Case {
+                name: "terminal stop token remains sampled and bypasses decoder",
+                outputs: vec![GenerateOutput::for_test(
+                    Some(Arc::clone(&prompt)),
+                    ascii_tokens("a!"),
+                    Some(FinishReason::Stop(Some(StopReason::TokenId(b'!' as u32)))),
+                )],
+                expected: vec![
+                    DecodedTextEvent::Start {
+                        prompt_token_ids: Arc::clone(&prompt),
+                        prompt_logprobs: None,
+                    },
+                    text_delta(
+                        "a",
+                        [visible(b'a' as u32, 0)],
+                        ascii_tokens("a!"),
+                        Some(Finished {
+                            usage: TokenUsage {
+                                prompt_token_count: 0,
+                                output_token_count: 2,
+                                cached_token_count: 0,
+                            },
+                            finish_reason: FinishReason::Stop(Some(StopReason::TokenId(
+                                b'!' as u32,
+                            ))),
+                            kv_transfer_params: None,
+                            ec_transfer_params: None,
+                            sampling_mask: None,
+                        }),
+                    ),
+                ],
+            },
+        ];
+
+        for case in cases {
+            let actual = run_intermediate(case.outputs, TextDecodeOptions::default()).await;
+            assert_eq!(actual, case.expected, "{}", case.name);
         }
     }
 
@@ -437,6 +666,60 @@ mod tests {
         let output = run_to_completion(ascii_tokens("hello"), opts(&["e"], 0)).await;
         assert_eq!(output.text, "h");
         assert!(output.finish_reason.is_stop());
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_mid_chunk_keeps_token_logprob_mask_alignment() {
+        let token_ids = ascii_tokens("abcxyz");
+        let mut raw = GenerateOutput::for_test(
+            Some(Arc::from([])),
+            token_ids.clone(),
+            Some(FinishReason::Length),
+        );
+        raw.logprobs = Some(Logprobs {
+            positions: token_ids
+                .iter()
+                .map(|&token_id| PositionLogprobs {
+                    entries: vec![TokenLogprob {
+                        token_id,
+                        logprob: -0.25,
+                        rank: 1,
+                    }],
+                })
+                .collect(),
+        });
+        raw.sampling_mask = Some(SamplingMask {
+            rows: token_ids.iter().map(|&token_id| vec![token_id, token_id + 100]).collect(),
+        });
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+
+        let output = decoded_text_event_stream(
+            "test-mid-chunk-stop".into(),
+            tokenizer,
+            stream::iter([Ok(raw)]),
+            opts(&["cx"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(output.text, "ab");
+        assert!(output.finish_reason.is_stop());
+        assert_eq!(output.token_ids, ascii_tokens("abcx"));
+        assert_eq!(output.logprobs.as_ref().unwrap().positions.len(), 4);
+        assert_eq!(
+            output.sampling_mask,
+            Some(SamplingMask {
+                rows: vec![
+                    vec![b'a' as u32, b'a' as u32 + 100],
+                    vec![b'b' as u32, b'b' as u32 + 100],
+                    vec![b'c' as u32, b'c' as u32 + 100],
+                    vec![b'x' as u32, b'x' as u32 + 100],
+                ],
+            })
+        );
+        assert_eq!(output.usage.output_token_count, 4);
     }
 
     #[tokio::test]

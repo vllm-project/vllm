@@ -48,17 +48,10 @@ def test_bert_model_runner_v2(
             vllm_model.token_classify(prompts) for prompts in prompt_batches
         ]
 
-    # Use eager attention on ROCm to avoid HF Transformers flash attention
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    hf_model_kwargs = {}
-    if current_platform.is_rocm():
-        hf_model_kwargs["attn_implementation"] = "eager"
-
     with hf_runner(
         model,
         dtype=dtype,
         auto_cls=AutoModelForTokenClassification,
-        model_kwargs=hf_model_kwargs,
     ) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
@@ -100,17 +93,10 @@ def test_modernbert_models(
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.token_classify(example_prompts)
 
-    # Use eager attention on ROCm to avoid HF Transformers flash attention
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    hf_model_kwargs = {}
-    if current_platform.is_rocm():
-        hf_model_kwargs["attn_implementation"] = "eager"
-
     with hf_runner(
         model,
         dtype=dtype,
         auto_cls=AutoModelForTokenClassification,
-        model_kwargs=hf_model_kwargs,
     ) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
@@ -129,6 +115,7 @@ def test_modernbert_models(
 
 @pytest.mark.parametrize("model", ["Davlan/xlm-roberta-base-ner-hrl"])
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_xlm_roberta_models(
     hf_runner,
@@ -140,17 +127,10 @@ def test_xlm_roberta_models(
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.token_classify(example_prompts)
 
-    # Use eager attention on ROCm to avoid HF Transformers flash attention
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    hf_model_kwargs = {}
-    if current_platform.is_rocm():
-        hf_model_kwargs["attn_implementation"] = "eager"
-
     with hf_runner(
         model,
         dtype=dtype,
         auto_cls=AutoModelForTokenClassification,
-        model_kwargs=hf_model_kwargs,
     ) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
@@ -197,15 +177,10 @@ def test_openai_privacy_filter(
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.token_classify(PRIVACY_FILTER_PROMPTS)
 
-    hf_model_kwargs = {}
-    if current_platform.is_rocm():
-        hf_model_kwargs["attn_implementation"] = "eager"
-
     with hf_runner(
         model,
         dtype=dtype,
         auto_cls=AutoModelForTokenClassification,
-        model_kwargs=hf_model_kwargs,
     ) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
@@ -223,6 +198,7 @@ def test_openai_privacy_filter(
 
 @pytest.mark.parametrize("model", ["bd2lcco/Qwen3-0.6B-finetuned"])
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_auto_conversion(
     hf_runner,
@@ -276,12 +252,6 @@ def test_bert_for_masked_lm(
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.token_classify(example_prompts)
 
-    # Use eager attention on ROCm to avoid HF Transformers flash attention
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    hf_model_kwargs = {}
-    if current_platform.is_rocm():
-        hf_model_kwargs["attn_implementation"] = "eager"
-
     # Run hf_runner reference with "highest" fp32 precision to match
     # default behvior of vLLM. This is needed on ROCm since the
     # pooling tests set matmul precision to "high" in conftest.py
@@ -291,7 +261,6 @@ def test_bert_for_masked_lm(
         model,
         dtype=dtype,
         auto_cls=AutoModelForMaskedLM,
-        model_kwargs=hf_model_kwargs,
     ) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []

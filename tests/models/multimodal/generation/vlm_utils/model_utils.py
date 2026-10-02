@@ -5,10 +5,7 @@ for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.
 """
 
-import logging
 import types
-import warnings
-from pathlib import PosixPath
 
 import numpy as np
 import numpy.typing as npt
@@ -31,10 +28,8 @@ from vllm.logprobs import SampleLogprobs
 from vllm.platforms import current_platform
 from vllm.utils.collection_utils import is_list_of
 
-from .....conftest import HfRunner, ImageAsset, ImageTestAssets
+from .....conftest import HfRunner, ImageTestAssets
 from .types import RunnerOutput
-
-logger = logging.getLogger(__name__)
 
 
 ####### vLLM output processors functions
@@ -50,17 +45,6 @@ def blip2_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutp
     hf_output_ids = hf_output_ids[1:]
 
     return hf_output_ids, hf_output_str, out_logprobs
-
-
-def qwen_vllm_to_hf_output(
-    vllm_output: RunnerOutput, model: str
-) -> tuple[list[int], str, SampleLogprobs | None]:
-    """Sanitize vllm output [qwen models] to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
-
-    hf_output_str = output_str + "<|endoftext|>"
-
-    return output_ids, hf_output_str, out_logprobs
 
 
 def qwen2_vllm_to_hf_output(
@@ -243,36 +227,6 @@ def get_llava_embeddings(image_assets: ImageTestAssets):
     return [asset.image_embeds for asset in image_assets]
 
 
-####### Prompt path encoders for models that need models on disk
-def qwen_prompt_path_encoder(
-    tmp_path: PosixPath, prompt: str, assets: list[ImageAsset] | ImageTestAssets
-) -> str:
-    """Given a temporary dir path, export one or more image assets into the
-    tempdir & replace its contents with the local path to the string so that
-    the HF version of Qwen-VL can resolve the path and load the image in its
-    forward() call.
-
-    Args:
-        tmp_path: Tempdir for test under consideration.
-        prompt: Prompt with image placeholders.
-        assets: list of image assets whose len equals the num placeholders.
-    """
-    # Ensure that the number of placeholders matches the number of assets;
-    # If this is not true, the test is probably written incorrectly.
-    assert prompt.count("<img></img>") == len(assets)
-
-    # Replace the placeholders with local paths to the exported assets
-    for asset in assets:
-        image_tmp_path = tmp_path / f"{asset.name}.jpg"
-        asset.pil_image.save(image_tmp_path)
-        prompt = prompt.replace(
-            "<img></img>",
-            f"<img>{image_tmp_path}</img>",
-            1,
-        )
-    return prompt
-
-
 ####### Model-specific HuggingFace runner patchers
 def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4."""
@@ -310,16 +264,6 @@ def gemma3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         return hf_processor(*args, do_pan_and_scan=True, **kwargs)
 
     hf_model.processor = processor
-
-    orig_generate = hf_model.model.generate
-
-    def _generate(self, *args, **kwargs):
-        # FIXME: https://github.com/huggingface/transformers/issues/38333
-        kwargs["disable_compile"] = True
-
-        return orig_generate(*args, **kwargs)
-
-    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
 
     return hf_model
 
@@ -511,15 +455,12 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     2) Ensure IsaacModel.forward returns hidden_states
     for compatibility with hidden_states_to_seq_logprobs()
     """
-
     from perceptron.tensorstream import TextType
     from perceptron.tensorstream.ops import compute_mrope_pos_tensor, modality_mask
     from transformers.modeling_outputs import BaseModelOutputWithPast
 
     def compute_position_ids_input_ids(input_ids: torch.Tensor) -> torch.Tensor:
-        """
-        Create 3D positional indices for token input.
-        """
+        """Create 3D positional indices for token input."""
         batch_size, seq_length = input_ids.shape
         position_ids = torch.arange(seq_length, device=input_ids.device)
         position_ids = position_ids.view(1, -1).expand(batch_size, -1)
@@ -559,32 +500,6 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     # ----------------------------
     isaac_model = hf_model.model.model
 
-    # [ROCm] Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
-    # ----------------------------
-    from ...conftest import patch_hf_vision_attn_for_rocm
-
-    try:
-        patch_hf_vision_attn_for_rocm(hf_model.model)
-    except AttributeError as e:
-        if "vision_config" in str(e):
-            warnings.warn(
-                f"Skipping ROCm vision attention patch for Isaac model: {e}. "
-                "This is expected for models without vision_config in "
-                "attention layers (e.g., Siglip2VariableLengthAttention).",
-                stacklevel=2,
-            )
-        else:
-            logger.error(
-                "Unexpected AttributeError during ROCm vision attention patch: %s. "
-                "Model type: %s. Inner model type: %s.",
-                e,
-                type(hf_model.model).__name__,
-                type(getattr(hf_model.model, "model", None)).__name__,
-            )
-            raise
-
     def patched_forward(
         self,
         input_ids=None,
@@ -600,8 +515,7 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         cache_position=None,
         **kwargs,
     ):
-        """
-        Forward pass with MRoPE position embeddings.
+        """Forward pass with MRoPE position embeddings.
         Computes position embeddings once and passes them through all layers.
         """
         output_hidden_states = (
@@ -922,6 +836,22 @@ def _internvl_generate(
     return outputs
 
 
+def _restore_resampler_pos_cache(hf_model: HfRunner) -> None:
+    """Recompute the resampler's 2D sin/cos position cache after loading.
+
+    `from_pretrained` materializes non-persistent buffers as uninitialized
+    memory, leaving `pos_embed` as zeros or NaN instead of the values computed
+    in `__init__`.
+    """
+    restored = 0
+    for module in hf_model.model.modules():
+        if not hasattr(module, "_set_2d_pos_cache"):
+            continue
+        module._set_2d_pos_cache(module.max_size, module.pos_embed.device)
+        restored += 1
+    assert restored, "no resampler pos cache found to restore"
+
+
 def minicpmv_25_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     orig_generate = hf_model.model.generate
 
@@ -965,6 +895,8 @@ def minicpmo_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 
 def minicpmv_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    _restore_resampler_pos_cache(hf_model)
+
     orig_generate = hf_model.model.generate
 
     def _generate(self, *args, image_sizes=None, **kwargs):
@@ -1196,7 +1128,6 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
     HfRunner.generate calls batch_decode on the full sequence (prompt +
     generated).
     """
-
     import io
 
     import pybase64 as base64
@@ -1262,7 +1193,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
                 output.sequences = output.sequences[:, prompt_len:]
         return output
 
-    hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign, assignment]
+    hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign]
     hf_model.model.generate = patched_generate  # type: ignore[method-assign]
     return hf_model
 
