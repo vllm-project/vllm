@@ -69,7 +69,7 @@ _MODALITY_SIZE_KEYS = {
     "image": "num_image_patches",
     "video": "num_video_patches",
 }
-# NOTE: Profiling cap as in https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llava_onevision.py#L52
+# NOTE: Profiling cap as in lava_onevision._MAX_FRAMES_PER_VIDEO
 # past which a pixel budget only shrinks the frames, so Qwen3-VL's most is
 # 12168 tokens at 16 frames and 9600 at its `max_frames` of 768
 _MAX_FRAMES_PER_VIDEO = 16
@@ -98,9 +98,11 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             self.get_hf_processor(), ("audio_processor", "feature_extractor")
         )
 
+    @cached_property
     def _is_audio_model(self) -> bool:
         return self._get_audio_processor() is not None
 
+    @cached_property
     def _is_image_model(self) -> bool:
         return hasattr(self.get_hf_processor(), "image_processor")
 
@@ -138,9 +140,9 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
     def _get_supported_modalities(self) -> list[str]:
         modalities = []
-        if self._is_audio_model():
+        if self._is_audio_model:
             modalities.append("audio")
-        if self._is_image_model():
+        if self._is_image_model:
             modalities.append("image")
         if self._is_video_model:
             modalities.append("video")
@@ -159,7 +161,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return 16000.0
 
     def get_data_parser(self) -> MultiModalDataParser:
-        target_sr = self._get_audio_sampling_rate() if self._is_audio_model() else None
+        target_sr = self._get_audio_sampling_rate() if self._is_audio_model else None
         return MultiModalDataParser(
             target_sr=target_sr,
             video_needs_metadata=self._video_needs_metadata,
@@ -306,12 +308,12 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         text = ""
-        if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
+        if self.info._is_audio_model and (num_audios := mm_counts.get("audio", 0)):
             processor = self.info.get_hf_processor()
             audio_token = getattr(processor, "audio_token", "")
             # Separated so that adjacent placeholders stay distinguishable
             text += " ".join([audio_token] * num_audios)
-        if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
+        if self.info._is_image_model and (num_images := mm_counts.get("image", 0)):
             processor = self.info.get_hf_processor()
             if "gemma3" in processor.__class__.__name__.lower():
                 image_token = processor.boi_token
@@ -336,7 +338,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         mm_options: "MultiModalDummyOptions",
     ) -> MultiModalDataDict:
         data = MultiModalDataBuiltins()
-        if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
+        if self.info._is_audio_model and (num_audios := mm_counts.get("audio", 0)):
             sampling_rate = self.info._get_audio_sampling_rate()
             sub = self.info._get_audio_processor()
             chunk_length = getattr(sub, "chunk_length", None) if sub else None
@@ -347,7 +349,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 num_audios=num_audios,
                 overrides=mm_options.get("audio"),
             )
-        if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
+        if self.info._is_image_model and (num_images := mm_counts.get("image", 0)):
             width, height = self.info.get_image_size_with_most_features()
             data["image"] = self._get_dummy_images(
                 width=width,
