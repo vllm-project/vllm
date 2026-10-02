@@ -14,7 +14,7 @@ import torch
 from torch import nn
 
 import vllm.config as vllm_config_module
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -924,6 +924,50 @@ def test_models_fse_init(
 
     importlib.reload(envs)
     rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "reason"),
+    [
+        ("tensor_parallel_size", 4, None),
+        ("tensor_parallel_size", 8, None),
+        ("tensor_parallel_size", 2, "tensor_parallel_size is 2"),
+        ("data_parallel_size", 2, "data_parallel_size is 2"),
+        ("prefill_context_parallel_size", 2, "prefill_context_parallel_size is 2"),
+        ("enable_expert_parallel", True, "expert parallelism is enabled"),
+        ("on_gfx950", False, "the GPU is not gfx950"),
+    ],
+)
+def test_glm5_next_fuses_shared_experts_only_in_tuned_setups(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    value: object,
+    reason: str | None,
+) -> None:
+    from vllm.models.glm5next.common import model as glm5_next_model
+
+    parallel_config = SimpleNamespace(
+        tensor_parallel_size=4,
+        data_parallel_size=1,
+        prefill_context_parallel_size=1,
+        enable_expert_parallel=False,
+    )
+    on_gfx950 = value if setting == "on_gfx950" else True
+    if setting != "on_gfx950":
+        setattr(parallel_config, setting, value)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: on_gfx950)
+
+    with patch.object(glm5_next_model.logger, "warning_once") as warning:
+        tuned = glm5_next_model._fused_shared_experts_tuned(
+            cast(ParallelConfig, parallel_config)
+        )
+
+    assert tuned is (reason is None)
+    if reason is None:
+        warning.assert_not_called()
+    else:
+        warning.assert_called_once()
+        assert warning.call_args.args[1] == reason
 
 
 @pytest.mark.parametrize(

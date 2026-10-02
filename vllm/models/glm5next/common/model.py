@@ -264,10 +264,9 @@ class Glm5NextMoE(nn.Module):
         swiglu_limit = config.swiglu_limit
         self.is_fused_shared_expert_enabled = False
         if config.n_shared_experts is not None:
-            self.is_fused_shared_expert_enabled = (
-                resolve_layer_fused_shared_expert(quant_config, prefix)
-                and _fused_shared_experts_tuned_on_device()
-            )
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+                quant_config, prefix
+            ) and _fused_shared_experts_tuned(parallel_config)
         if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
         else:
@@ -1249,18 +1248,39 @@ def get_spec_layer_idx_from_weight_name(
     return None
 
 
-def _fused_shared_experts_tuned_on_device() -> bool:
+def _fused_shared_experts_tuned(parallel_config: ParallelConfig) -> bool:
     """AITER has fused-MoE configs tuned for the fused shared-expert shape
     (one more expert and one more top-k slot than the routed MoE) only on
-    gfx950; other GPUs would run that shape on untuned fallback kernels."""
+    gfx950, with every expert on each rank and its weights split by TP4 or
+    TP8. Data, prefill context and expert parallelism change that split, so
+    any other GPU or parallel layout would run untuned fallback kernels."""
     from vllm.platforms.rocm import on_gfx950
 
-    if on_gfx950():
+    reasons: list[str] = []
+    if not on_gfx950():
+        reasons.append("the GPU is not gfx950")
+    if parallel_config.tensor_parallel_size not in (4, 8):
+        reasons.append(
+            f"tensor_parallel_size is {parallel_config.tensor_parallel_size}"
+        )
+    if parallel_config.data_parallel_size != 1:
+        reasons.append(f"data_parallel_size is {parallel_config.data_parallel_size}")
+    if parallel_config.prefill_context_parallel_size != 1:
+        reasons.append(
+            "prefill_context_parallel_size is "
+            f"{parallel_config.prefill_context_parallel_size}"
+        )
+    if parallel_config.enable_expert_parallel:
+        reasons.append("expert parallelism is enabled")
+
+    if not reasons:
         return True
     logger.warning_once(
-        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is ignored for GLM-5.3-Flash "
-        "on this GPU: AITER has tuned configs for its fused shared-expert MoE "
-        "only on gfx950. Running the shared experts as a separate MLP."
+        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is ignored for GLM-5.3-Flash: "
+        "%s. AITER has tuned configs for its fused shared-expert MoE only on "
+        "gfx950 at TP4 and TP8, without data, prefill context or expert "
+        "parallelism. Running the shared experts as a separate MLP.",
+        "; ".join(reasons),
     )
     return False
 
