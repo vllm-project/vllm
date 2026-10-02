@@ -691,10 +691,8 @@ class Base(
         # vLLM does not support encoder-decoder models, so if any encoder layer is
         # found in a text only model, we assume the whole model is an encoder model
         if has_encoder(self.model) and not is_multimodal(self.config):
-            self.check_version("5.0.0", "encoder models support")
             return EncoderOnlyAttention
         if self.model_config.use_mla:
-            self.check_version("5.15.0.dev0", "optimized MLA support")
             if any(
                 isinstance(fuser, MLAFuser)
                 for fusers in self.fusers.values()
@@ -820,7 +818,6 @@ class Base(
             )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.check_version("5.2.0", "Eagle3 support")
         from transformers.utils.output_capturing import (
             OutputRecorder,
             maybe_install_capturing_hooks,
