@@ -4,7 +4,6 @@ import argparse
 import contextlib
 import json
 import multiprocessing
-import socket
 import threading
 import time
 import weakref
@@ -183,7 +182,7 @@ class APIServerProcessManager:
         target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
         tensor_queue: Queue | None = None,
-        socket_factory: Callable[[], socket.socket] | None = None,
+        socket_factory: Callable[[], Any] | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -203,8 +202,7 @@ class APIServerProcessManager:
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
-            socket_factory: Optional factory returning a fresh socket per worker,
-                used instead of sock. Its parent handle closes after spawn.
+            socket_factory: Fresh socket per worker, closed in parent after spawn.
 
         """
         self.listen_address = listen_address
