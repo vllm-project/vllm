@@ -472,9 +472,11 @@ class HiSparseResidentSpec(KVCacheSpec):
         return cdiv(num_tokens, self.block_size)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        return cdiv(vllm_config.model_config.max_model_len, self.block_size) * (
-            self.page_size
+        max_blocks = self.max_admission_blocks_per_request(
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_model_len=vllm_config.model_config.max_model_len,
         )
+        return max_blocks * self.page_size
 
     @property
     def has_layer_views(self) -> bool:

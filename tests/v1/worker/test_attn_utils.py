@@ -86,6 +86,9 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
             get_attn_backend=lambda backend=backend: backend,
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    monkeypatch.setattr(
+        attn_utils_module, "get_hisparse_kv_cache_groups", lambda *_: []
+    )
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
     )
