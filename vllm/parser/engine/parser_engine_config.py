@@ -109,6 +109,11 @@ class ParserEngineConfig:
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
+    # In REASONING, defer TOOL_START until THINK_END or end of stream. This
+    # lets formats preserve quoted tool markup when reasoning has an explicit
+    # end while retaining implicit-reasoning-end tool calls at stream finish.
+    defer_reasoning_tool_start: bool = False
+
     def terminal_literal(self, name: str) -> str | None:
         """Canonical spelling of terminal *name*, or ``None`` if undeclared."""
         value = self.terminals.get(name)
