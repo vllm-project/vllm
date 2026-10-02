@@ -32,6 +32,7 @@ class VLLMValidationError(VLLMClientError):
         message: The error message describing the validation failure.
         parameter: Optional parameter name that failed validation.
         value: Optional value that was rejected during validation.
+
     """
 
     def __init__(
@@ -56,7 +57,7 @@ class VLLMValidationError(VLLMClientError):
 
 
 class VLLMNotFoundError(VLLMClientError):
-    """vLLM-specific NotFoundError"""
+    """vLLM-specific NotFoundError."""
 
     pass
 
@@ -69,6 +70,7 @@ class LoRAAdapterNotFoundError(VLLMNotFoundError):
 
     Attributes:
         message: The error message string describing the exception
+
     """
 
     message: str
@@ -96,6 +98,7 @@ class VLLMUnprocessableEntityError(VLLMClientError):
         message: The error message describing the unprocessable entity.
         parameter: Optional parameter name that failed validation.
         value: Optional value that was rejected during validation.
+
     """
 
     def __init__(
@@ -125,6 +128,14 @@ class GenerationError(VLLMServerError):
     def __init__(self, message: str = "Internal server error"):
         super().__init__(message)
         self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+class RetryableRequestError(GenerationError):
+    """A transient request-level failure that is safe for clients to retry."""
+
+    def __init__(self, message: str = "Request failed; please retry"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.SERVICE_UNAVAILABLE
 
 
 class GracefulHTTPError(VLLMError):

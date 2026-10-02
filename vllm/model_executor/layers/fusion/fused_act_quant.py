@@ -1,25 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Producer side of the QuantizedActivation contract for activation layers.
+"""Producer side of the QuantizedActivation contract for activation layers.
 
 Given an activation module and the downstream linear it feeds, fuse the
 activation with that linear's input quantization into a single kernel when the
-linear advertises a consumable input_quant_key (see quant_activation.py).
+linear advertises a consumable input quantization key (see quant_activation.py).
 Falls back to the plain activation when nothing matches, so a model forward can
 always call maybe_fused_act_quant unconditionally.
 
 This is the manual-fusion counterpart to ActivationQuantFusionPass: when fusion
-fires here the silu_and_mul pattern is already consumed, so the compiler pass
-finds nothing to rewrite and the two never double-fuse.
+fires here, the activation and quantization are already consumed, so a compiler
+pass cannot fuse the same boundary again.
 """
 
 from collections.abc import Callable
 
 import torch
 
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
+from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
+    relu_squared_static_fp8_quant,
+)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -28,6 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -105,19 +111,29 @@ def _silu_and_mul_nvfp4_dynamic(
     # NVFP4 packs 2 values into 1 byte
     result = torch.empty((num_tokens, d // 2), dtype=FP4_DTYPE, device=x.device)
 
-    # Block scale output shape: swizzled layout for tensor cores
-    # Each group of 16 elements shares one FP8 scale
-    num_k_tiles = (d + 63) // 64
+    # Block scale output: swizzled tensor-core layout
+    # [num_m_tiles, num_k_tiles, 32, 4, 4] of int32-packed FP8 scales, so the
+    # row/col extents must be padded to the 128x4 tile like
+    # scaled_fp4_quant's allocator (create_fp4_scale_tensor). Each group of 16
+    # elements shares one FP8 scale.
+    rounded_m = round_up(num_tokens, 128)
+    rounded_n = round_up(d // 16, 4)
     block_scale = torch.empty(
-        (num_tokens, num_k_tiles * 4), dtype=FP8_DTYPE, device=x.device
+        (rounded_m, rounded_n // 4), dtype=torch.int32, device=x.device
+    ).view(FP8_DTYPE)
+
+    # The kernel folds the global scale into the block scales, and the
+    # consumer GEMM's alpha (= input_global_scale * weight_global_scale)
+    # divides it back out, so quantize with the reciprocal like the unfused
+    # scaled_fp4_quant path does.
+    input_global_scale_inv = getattr(linear, "input_global_scale_inv", None)
+    assert input_global_scale_inv is not None, (
+        "input_global_scale_inv is required for NVFP4 quantization"
     )
 
-    input_global_scale = getattr(linear, "input_global_scale", None)
-    assert input_global_scale is not None, (
-        "input_global_scale is required for NVFP4 quantization"
+    torch.ops._C.silu_and_mul_nvfp4_quant(
+        result, block_scale, x, input_global_scale_inv
     )
-
-    torch.ops._C.silu_and_mul_nvfp4_quant(result, block_scale, x, input_global_scale)
 
     return QuantizedActivation(
         data=result.view(out_shape[:-1] + (d // 2,)),
@@ -128,11 +144,45 @@ def _silu_and_mul_nvfp4_dynamic(
     )
 
 
-# (activation module type, consumer input_quant_key) -> fused producer.
-# Mirrors ActivationQuantFusionPass.FUSED_OPS; add a row to migrate a scheme.
+# (activation module type, consumer input quantization key) -> fused producer.
+# Add a row for each supported manual producer.
 _FUSED_ACT_QUANT: dict[tuple[type, QuantKey], Callable] = {
     (SiluAndMul, kFp8StaticTensorSym): _silu_and_mul_fp8_static,
 }
+
+
+def _relu_squared_static_fp8_quant_supported(
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+) -> bool:
+    """Return whether the ReLU2 static-FP8 producer can consume this input."""
+    scale = getattr(linear, "input_scale", None)
+    return (
+        isinstance(act_fn, ReLUSquaredActivation)
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.is_contiguous()
+        and isinstance(scale, torch.Tensor)
+        and scale.dtype == torch.float32
+        and scale.device == x.device
+        and scale.numel() == 1
+    )
+
+
+# Optional per-entry predicates preserve the unconditional fallback contract
+# for producers whose supported inputs are narrower than their registry key.
+_FUSED_ACT_QUANT_SUPPORT: dict[
+    tuple[type, QuantKey], Callable[[torch.nn.Module, torch.Tensor, LinearBase], bool]
+] = {}
+
+# This path is validated on SM90 and newer CUDA devices.
+if current_platform.is_cuda() and current_platform.has_device_capability(90):
+    _RELU2_STATIC_FP8_KEY = (ReLUSquaredActivation, kFp8StaticTensorSym)
+    _FUSED_ACT_QUANT[_RELU2_STATIC_FP8_KEY] = relu_squared_static_fp8_quant
+    _FUSED_ACT_QUANT_SUPPORT[_RELU2_STATIC_FP8_KEY] = (
+        _relu_squared_static_fp8_quant_supported
+    )
 
 # Add CUDA-specific entries for dynamic block quantization
 if current_platform.is_cuda_alike():
@@ -150,12 +200,14 @@ def maybe_fused_act_quant(
 ) -> "torch.Tensor | QuantizedActivation":
     """Apply act_fn, fusing the downstream linear's input quant when possible.
 
-    Returns a QuantizedActivation when a fused kernel matches
-    (act_fn, linear.input_quant_key), else the plain activated tensor.
+    Returns a QuantizedActivation when a fused kernel matches the activation and
+    the consumer's effective input quantization key, else the plain activation.
     """
-    key = getattr(linear, "input_quant_key", None)
+    key = get_input_quant_key(linear)
     if key is not None:
-        producer = _FUSED_ACT_QUANT.get((type(act_fn), key))
-        if producer is not None:
+        registry_key = (type(act_fn), key)
+        producer = _FUSED_ACT_QUANT.get(registry_key)
+        support = _FUSED_ACT_QUANT_SUPPORT.get(registry_key)
+        if producer is not None and (support is None or support(act_fn, x, linear)):
             return producer(x, linear)
     return act_fn(x)

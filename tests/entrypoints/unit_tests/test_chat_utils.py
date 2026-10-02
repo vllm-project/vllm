@@ -17,10 +17,14 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     MEDIA_CONNECTOR_REGISTRY,
     AsyncMultiModalItemTracker,
+    ChatCompletionMessageParam,
     ConversationMessage,
+    _load_embeds_dict,
+    _parse_metadata_array,
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
+    validate_chat_template,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
@@ -36,6 +40,45 @@ PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
 MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+
+@pytest.mark.parametrize("values", [[1, 32, 48], [0.0, 0.12345678912345678]])
+def test_json_metadata_preserves_numeric_precision(values):
+    tensor = _parse_metadata_array("grid", values, {"grid"})
+    assert tensor.tolist() == values
+    assert tensor.dtype == (
+        torch.float64 if isinstance(values[0], float) else torch.int64
+    )
+
+
+@pytest.mark.parametrize(
+    "key,values",
+    [
+        ("image_embeds", [1, 2]),
+        ("grid", [True]),
+        ("grid", [float("nan")]),
+        ("grid", [float("inf")]),
+        ("grid", [[1, 2]]),
+        ("grid", [2**64]),
+    ],
+)
+def test_json_arrays_are_only_valid_numeric_metadata(key, values):
+    with pytest.raises(VLLMValidationError):
+        _parse_metadata_array(key, values, {"grid"})
+
+
+@pytest.mark.asyncio
+async def test_json_metadata_bypasses_tensor_deserialization():
+    from unittest.mock import AsyncMock
+
+    tensor = torch.ones(2, 3)
+    fetch = AsyncMock(return_value=tensor)
+    result = await _load_embeds_dict(
+        {"image_embeds": "legacy-base64", "image_grid_thw": [1, 2, 2]}, fetch
+    )
+    fetch.assert_awaited_once_with("legacy-base64")
+    assert result["image_embeds"] is tensor
+    assert result["image_grid_thw"] == [1, 2, 2]
 
 
 @pytest.fixture(scope="function")
@@ -727,7 +770,9 @@ async def test_text_only_chat_does_not_initialize_media_connector(
 ):
     load_connector = MagicMock()
     monkeypatch.setattr(MEDIA_CONNECTOR_REGISTRY, "load", load_connector)
-    messages = [{"role": "user", "content": "Who are you?"}]
+    messages: list[ChatCompletionMessageParam] = [
+        {"role": "user", "content": "Who are you?"}
+    ]
 
     parse_chat_messages(
         messages,
@@ -898,7 +943,6 @@ def test_parse_chat_messages_audio_embeds_with_string(
     audio_embeds_model_config,
 ):
     """Test audio_embeds with base64 string embedding data."""
-
     import torch
 
     # Create a sample audio embedding tensor
@@ -941,7 +985,6 @@ async def test_parse_chat_messages_audio_embeds_async(
     audio_embeds_model_config,
 ):
     """Test audio_embeds with async futures."""
-
     import torch
 
     # Create a sample audio embedding tensor
@@ -1354,8 +1397,10 @@ def test_parse_chat_messages_empty_dict_image_embeds(
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
 
 
+@pytest.mark.parametrize("json_metadata", [False, True])
 def test_parse_chat_messages_multiple_dict_image_embeds(
     qwen25omni_model_config_image_embeds,
+    json_metadata,
 ):
     """Test that multiple dictionaries for image_embeds is handled without errors."""
     # Create two sample image embedding tensors
@@ -1373,7 +1418,9 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
                         "type": "image_embeds",
                         "image_embeds": {
                             "image_embeds": tensor2base64(embeds),
-                            "image_grid_thw": tensor2base64(grid_thw),
+                            "image_grid_thw": grid_thw.tolist()
+                            if json_metadata
+                            else tensor2base64(grid_thw),
                         },
                     }
                     for embeds, grid_thw in zip(
@@ -2338,8 +2385,10 @@ def test_parse_chat_messages_include_thinking_chunk(mistral_model_config):
     assert conversation_with_thinking == expected_conversation
 
 
+@pytest.mark.parametrize("input_audio", [None, {}, {"data": "", "format": "wav"}])
 def test_parse_chat_messages_single_empty_audio_with_uuid(
     qwen2_audio_model_config,
+    input_audio,
 ):
     audio_uuid = "abcd"
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -2349,7 +2398,7 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
                 "content": [
                     {
                         "type": "input_audio",
-                        "input_audio": {},
+                        "input_audio": input_audio,
                         "uuid": audio_uuid,
                     },
                     {"type": "text", "text": "What does the audio say?"},
@@ -2372,8 +2421,10 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("input_audio", [None, {}, {"data": "", "format": "wav"}])
 async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     qwen2_audio_model_config,
+    input_audio,
 ):
     audio_uuid = "abcd"
     conversation, mm_data, mm_uuids = await parse_chat_messages_async(
@@ -2383,7 +2434,7 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
                 "content": [
                     {
                         "type": "input_audio",
-                        "input_audio": {},
+                        "input_audio": input_audio,
                         "uuid": audio_uuid,
                     },
                     {"type": "text", "text": "What does the audio say?"},
@@ -2409,7 +2460,7 @@ def test_parse_chat_messages_image_vision_chunk(
     kimi_k2_5_model_config,
     image_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2445,7 +2496,7 @@ def test_parse_chat_messages_video_vision_chunk(
     kimi_k2_5_model_config,
     video_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2482,7 +2533,7 @@ def test_parse_chat_messages_image_vision_chunk_with_uuid(
     image_url,
 ):
     image_uuid = "image_123"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2520,7 +2571,7 @@ def test_parse_chat_messages_video_vision_chunk_with_uuid(
     video_url,
 ):
     video_uuid = "video_456"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2558,7 +2609,7 @@ def test_parse_chat_messages_mixed_vision_chunk(
     image_url,
     video_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2607,7 +2658,7 @@ def test_parse_chat_messages_mixed_vision_chunk_with_uuid(
 ):
     image_uuid = "image_123"
     video_uuid = "video_456"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2659,7 +2710,7 @@ async def test_parse_chat_messages_mixed_vision_chunk_async(
     image_url,
     video_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2709,7 +2760,7 @@ async def test_parse_chat_messages_mixed_vision_chunk_with_uuid_async(
 ):
     image_uuid = "image_123"
     video_uuid = "video_456"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2760,7 +2811,7 @@ async def test_parse_chat_messages_image_vision_chunk_async(
     kimi_k2_5_model_config,
     image_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2797,7 +2848,7 @@ async def test_parse_chat_messages_video_vision_chunk_async(
     kimi_k2_5_model_config,
     video_url,
 ):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2835,7 +2886,7 @@ async def test_parse_chat_messages_image_vision_chunk_with_uuid_async(
     image_url,
 ):
     image_uuid = "image_123"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2874,7 +2925,7 @@ async def test_parse_chat_messages_video_vision_chunk_with_uuid_async(
     video_url,
 ):
     video_uuid = "video_456"
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": [
@@ -2936,7 +2987,6 @@ def test_postprocess_messages_null_arguments_string():
 @pytest.mark.asyncio
 async def test_resolve_items_runs_modalities_concurrently_and_preserves_order():
     """Media fetches overlap while modality and item order are preserved."""
-
     active_fetches = 0
     max_active_fetches = 0
 
@@ -2950,8 +3000,7 @@ async def test_resolve_items_runs_modalities_concurrently_and_preserves_order():
         finally:
             active_fetches -= 1
 
-    tracker = AsyncMultiModalItemTracker(MagicMock())
-    tracker._model_config.is_multimodal_model = True
+    tracker = AsyncMultiModalItemTracker(MagicMock(is_multimodal_model=True))
     tracker.__dict__["mm_processor"] = MagicMock()
     tracker._items_by_modality["video"] = [
         lambda: _fetch("video-0", 0.02),
@@ -3138,3 +3187,12 @@ def test_tool_call_arguments_multiple_independent(caplog):
 
     assert len(caplog.records) == 1
     assert "bad" in caplog.records[0].message
+
+
+def test_validate_chat_template_rejects_invalid_type():
+    """A non-str/Path chat_template is invalid user input."""
+    with pytest.raises(
+        VLLMValidationError, match="not a valid chat template type"
+    ) as exc_info:
+        validate_chat_template(123)
+    assert exc_info.value.parameter == "chat_template"

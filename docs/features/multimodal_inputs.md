@@ -1228,6 +1228,9 @@ vllm serve mistralai/Voxtral-Mini-3B-2507 \
     decodes each stream in a single call that releases the GIL for its whole
     duration, which is why `auto` prefers it when many requests decode audio
     concurrently, such as when audio tracks are extracted from video.
+    vLLM normalizes codec padding on this path (e.g. it trims trailing Vorbis
+    padding that older system FFmpeg versions (< 5.0) fail to trim), so the
+    decoded waveform matches the soundfile reference length.
 
 !!! note
     `torchcodec` ships as a requirement on CUDA, CPU and XPU builds. On other

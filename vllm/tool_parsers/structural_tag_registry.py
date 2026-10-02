@@ -9,6 +9,7 @@ from openai.types.responses.response import ToolChoice as ResponsesToolChoice
 from openai.types.responses.tool import Tool as ResponsesTool
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from openai.types.responses.tool_choice_function import ToolChoiceFunction
+from pydantic import BaseModel
 from xgrammar import StructuralTag, normalize_tool_choice
 from xgrammar import get_model_structural_tag as get_xgrammar_model_structural_tag
 from xgrammar.openai_tool_call_schema import (
@@ -27,6 +28,7 @@ from xgrammar.structural_tag import (
     StarFormat,
     TagFormat,
     TagsWithSeparatorFormat,
+    TokenTriggeredTagsFormat,
     TriggeredTagsFormat,
 )
 
@@ -34,6 +36,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -65,13 +68,15 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "deepseek_v3_1",
         "qwen_3_5",
         "qwen_3_coder",
+        "mimo",
         "qwen_3",
         "deepseek_v3_2",
         "glm_4_7",
         "deepseek_v4",
+        "deepseek_v4_1",
     }
 )
-VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "hy_v4", "kimi_k3"})
+VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "hy_v4", "kimi_k3", "plamo3"})
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 )
@@ -91,15 +96,57 @@ def register_vllm_structural_tag(
     return decorator
 
 
+def _tool_is_strict(tool: ChatCompletionToolsParam | ResponsesTool) -> bool:
+    if isinstance(tool, FunctionTool):
+        return tool.strict is True
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.function.strict is True
+    return False
+
+
 def _any_tool_strict(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
 ) -> bool:
-    for tool in tools:
-        if isinstance(tool, FunctionTool) and tool.strict is True:
-            return True
-        if isinstance(tool, ChatCompletionToolsParam) and tool.function.strict is True:
-            return True
-    return False
+    return any(_tool_is_strict(tool) for tool in tools)
+
+
+def _with_tool_strict(
+    tool: ChatCompletionToolsParam | ResponsesTool,
+    strict: bool,
+) -> ChatCompletionToolsParam | ResponsesTool:
+    """Return a copy of ``tool`` with ``strict`` set, leaving the request's alone."""
+    if isinstance(tool, FunctionTool):
+        return tool.model_copy(update={"strict": strict})
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.model_copy(
+            update={"function": tool.function.model_copy(update={"strict": strict})}
+        )
+    return tool
+
+
+def resolve_tool_strictness(
+    tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
+    tool_choice: ToolChoice,
+    strict_level: ToolStrictLevel,
+) -> Sequence[ChatCompletionToolsParam | ResponsesTool] | None:
+    """Decide whether a structural tag applies and pin each tool's ``strict``.
+
+    A tool without an explicit ``strict`` is treated as non-strict: its call
+    envelope is still constrained, but its arguments stay free unless the
+    server level is PARAMETER. ``None`` means no structural tag.
+    """
+    if (
+        tool_choice == "auto"
+        and strict_level == ToolStrictLevel.AUTO
+        and not _any_tool_strict(tools)
+    ):
+        return None
+    return [
+        _with_tool_strict(
+            tool, strict_level >= ToolStrictLevel.PARAMETER or _tool_is_strict(tool)
+        )
+        for tool in tools
+    ]
 
 
 def get_model_structural_tag(
@@ -108,13 +155,14 @@ def get_model_structural_tag(
     tool_choice: ToolChoice,
     reasoning: bool,
     token_suffix: str = "",
+    strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
-
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools):
+    tools = resolve_tool_strictness(tools, tool_choice, strict_level)
+    if tools is None:
         return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
@@ -151,11 +199,38 @@ def get_model_structural_tag(
     )
 
 
+_TOOL_CALL_LIST_FORMATS = (
+    TriggeredTagsFormat,
+    TokenTriggeredTagsFormat,
+    TagsWithSeparatorFormat,
+)
+
+
+def limit_to_single_tool_call(tag: StructuralTag) -> StructuralTag:
+    """Stop every tool-call list in ``tag`` after its first call, in place.
+
+    Enforces ``parallel_tool_calls=false`` in the grammar. In every registered
+    tag, ``_TOOL_CALL_LIST_FORMATS`` repeat tool calls, never arguments.
+    """
+
+    def visit(node: Any) -> None:
+        if isinstance(node, BaseModel):
+            if isinstance(node, _TOOL_CALL_LIST_FORMATS):
+                node.stop_after_first = True
+            for name in type(node).model_fields:
+                visit(getattr(node, name))
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                visit(item)
+
+    visit(tag.format)
+    return tag
+
+
 def _dump_tool_for_xgrammar(
     tool: ChatCompletionToolsParam | ResponsesTool,
 ) -> dict[str, Any]:
     """Convert tool objects to xgrammar's Chat Completions tool protocol."""
-
     if isinstance(tool, FunctionTool):
         function: dict[str, Any] = {"name": tool.name}
         if tool.description is not None:
@@ -175,7 +250,6 @@ def _dump_tool_choice_for_xgrammar(
     tool_choice: ToolChoice,
 ) -> dict[str, Any] | str | None:
     """Convert tool_choice objects to xgrammar's expected protocol."""
-
     if tool_choice is None:
         return None
 
@@ -362,6 +436,70 @@ def get_minimax_structural_tag(
         )
 
     return StructuralTag(format=suffix_tag)
+
+
+_PLAMO3_BEGIN_TOOL_REQUESTS = "<|plamo:begin_tool_requests:plamo|>"
+_PLAMO3_END_TOOL_REQUESTS = "<|plamo:end_tool_requests:plamo|>"
+_PLAMO3_BEGIN_TOOL_REQUEST = "<|plamo:begin_tool_request:plamo|>"
+_PLAMO3_END_TOOL_REQUEST = "<|plamo:end_tool_request:plamo|>"
+_PLAMO3_BEGIN_TOOL_NAME = "<|plamo:begin_tool_name:plamo|>"
+_PLAMO3_END_TOOL_NAME = "<|plamo:end_tool_name:plamo|>"
+_PLAMO3_BEGIN_TOOL_ARGUMENTS = (
+    "<|plamo:begin_tool_arguments:plamo|><|plamo:constrain|>json<|plamo:msg|>"
+)
+_PLAMO3_END_TOOL_ARGUMENTS = "<|plamo:end_tool_arguments:plamo|>"
+_PLAMO3_EOT = "<|plamo:tag|>"
+
+
+@register_vllm_structural_tag("plamo3")
+def get_plamo3_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    """Build PLaMo3's explicit tool-request structural tag."""
+    del builtin_tools, reasoning, token_suffix
+
+    request_tags = [
+        TagFormat(
+            begin=(
+                _PLAMO3_BEGIN_TOOL_REQUEST
+                + _PLAMO3_BEGIN_TOOL_NAME
+                + tool.function.name
+                + _PLAMO3_END_TOOL_NAME
+                + _PLAMO3_BEGIN_TOOL_ARGUMENTS
+            ),
+            content=JSONSchemaFormat(
+                json_schema=get_function_parameters(tool.function)
+            ),
+            end=_PLAMO3_END_TOOL_ARGUMENTS + _PLAMO3_END_TOOL_REQUEST,
+        )
+        for tool in tools
+    ]
+    requests_tag = TagFormat(
+        begin=_PLAMO3_BEGIN_TOOL_REQUESTS,
+        content=TagsWithSeparatorFormat(
+            tags=request_tags,
+            separator="",
+            at_least_one=True,
+            stop_after_first=tool_choice == "forced",
+        ),
+        end=[
+            _PLAMO3_END_TOOL_REQUESTS,
+            _PLAMO3_END_TOOL_REQUESTS + _PLAMO3_EOT,
+        ],
+    )
+
+    if tool_choice == "auto":
+        return StructuralTag(
+            format=TriggeredTagsFormat(
+                triggers=[_PLAMO3_BEGIN_TOOL_REQUESTS],
+                tags=[requests_tag],
+            )
+        )
+    return StructuralTag(format=requests_tag)
 
 
 # ---------------------------------------------------------------------------
@@ -676,6 +814,7 @@ def get_hy_v4_structural_tag(
             leading colon (e.g. ``":6124c78e"``), or ``""`` when the checkpoint
             uses unsuffixed tokens. The HYV4 tool parser reads it off the
             tokenizer vocab and passes it to ``get_model_structural_tag``.
+
     """
     del builtin_tools
 
