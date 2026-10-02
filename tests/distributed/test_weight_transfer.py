@@ -7,12 +7,12 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
 import builtins
+import importlib.util
 import pickle
 import runpy
 import threading
 import time
 from contextlib import nullcontext
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -68,6 +68,7 @@ from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseWeightPatch,
 )
 from vllm.platforms import current_platform
+from vllm.utils.nccl import _nccl_has_no_cache
 from vllm.utils.network_utils import get_open_port
 
 
@@ -433,13 +434,15 @@ def trainer_broadcast_tensor(
     return True
 
 
-@ray.remote(num_gpus=1)
+# max_calls=1: a batch-invariant run leaves NCCL pins in the worker process.
+@ray.remote(num_gpus=1, max_calls=1)
 def inference_receive_tensor(
     master_address: str,
     master_port: int,
     world_size: int,
     tensor_shape: list[int],
     tensor_dtype: str,
+    batch_invariant: bool = False,
 ) -> dict:
     """Inference task that receives tensor via NCCLWeightTransferEngine."""
     import contextlib
@@ -448,6 +451,21 @@ def inference_receive_tensor(
     import torch
 
     _set_ray_assigned_device()
+    if batch_invariant:
+        from vllm.model_executor.determinism.batch_invariant import (
+            override_envs_for_invariance,
+        )
+
+        override_envs_for_invariance()
+        # Like vLLM's own groups, a pinned communicator makes NCCL read the
+        # pins before the transfer group exists.
+        torch.distributed.init_process_group(
+            "nccl",
+            init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            rank=0,
+            world_size=1,
+        )
+        torch.distributed.all_reduce(torch.ones(1, device="cuda"))
 
     from vllm.config.parallel import ParallelConfig
     from vllm.config.weight_transfer import WeightTransferConfig
@@ -534,11 +552,25 @@ def inference_receive_tensor(
     torch.accelerator.device_count() < 2,
     reason="Need at least 2 GPUs to run NCCL weight transfer test.",
 )
-def test_nccl_weight_transfer_between_processes():
+@pytest.mark.parametrize(
+    "batch_invariant",
+    [
+        pytest.param(False, id="default"),
+        pytest.param(
+            True,
+            id="batch-invariant-worker",
+            marks=pytest.mark.skipif(
+                not _nccl_has_no_cache(), reason="Needs CUDA NCCL >= 2.29.7."
+            ),
+        ),
+    ],
+)
+def test_nccl_weight_transfer_between_processes(batch_invariant):
     """Test NCCL weight transfer from trainer to inference process using Ray.
 
     This test verifies that the NCCLWeightTransferEngine can receive
-    tensors broadcast by a trainer process via NCCL.
+    tensors broadcast by a trainer process via NCCL, including when the
+    worker runs with batch-invariance NCCL pins the trainer does not have.
     """
     _init_ray_for_weight_transfer()
 
@@ -550,13 +582,19 @@ def test_nccl_weight_transfer_between_processes():
     tensor_dtype = "float32"
 
     inference_future = inference_receive_tensor.remote(
-        master_address, master_port, world_size, tensor_shape, tensor_dtype
+        master_address,
+        master_port,
+        world_size,
+        tensor_shape,
+        tensor_dtype,
+        batch_invariant,
     )
     trainer_future = trainer_broadcast_tensor.remote(
         master_address, master_port, world_size, tensor_shape, tensor_dtype
     )
 
-    trainer_result, result = ray.get([trainer_future, inference_future])
+    # A mismatched NCCL config deadlocks instead of failing.
+    trainer_result, result = ray.get([trainer_future, inference_future], timeout=300)
 
     assert trainer_result, "Trainer should complete successfully"
     assert result["success"], (
@@ -1459,10 +1497,12 @@ class TestDeferredProcessingContract:
     that caller ends up reaching through a getattr."""
 
     def _engines(self):
-        return {
-            name: loader()
-            for name, loader in WeightTransferEngineFactory._registry.items()
-        }
+        registry = dict(WeightTransferEngineFactory._registry)
+        # ModelExpress is an optional, separately installed package, but its
+        # backend is always registered. Skip it when the package is missing.
+        if importlib.util.find_spec("modelexpress") is None:
+            registry.pop("modelexpress")
+        return {name: loader() for name, loader in registry.items()}
 
     def test_every_engine_declares_whether_it_defers(self):
         for name, cls in self._engines().items():
@@ -2016,11 +2056,11 @@ def test_sparse_nccl_trainer_non_sender_skips_client():
 
 
 def _import_modelexpress_shim():
-    path = (
-        Path(__file__).parents[2]
-        / "vllm/distributed/weight_transfer/modelexpress_engine.py"
+    spec = importlib.util.find_spec(
+        "vllm.distributed.weight_transfer.modelexpress_engine"
     )
-    runpy.run_path(str(path), run_name="_test_modelexpress_shim")
+    assert spec is not None and spec.origin is not None
+    runpy.run_path(spec.origin, run_name="_test_modelexpress_shim")
 
 
 @pytest.mark.parametrize(
