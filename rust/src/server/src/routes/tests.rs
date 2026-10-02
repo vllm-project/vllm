@@ -7802,20 +7802,64 @@ where
     )
 }
 
+/// An empty body starts profiling without overrides, with or without a JSON
+/// content type.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn start_profile_route_sends_expected_utility_call() {
+    for content_type in [None, Some("application/json")] {
+        let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+            boxed_test_future(async move {
+                let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+                let call_id = recv_profile_call(dealer, start).await;
+                send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            })
+        })
+        .await;
+
+        let mut request = Request::builder().method("POST").uri("/start_profile");
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        let response = app
+            .clone()
+            .call(request.body(Body::empty()).expect("build request"))
+            .await
+            .expect("call app");
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{content_type:?}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(body.is_empty());
+        engine_task.await.expect("mock engine task");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_route_forwards_session_overrides() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let utility = recv_engine_message(dealer).await;
-            assert_eq!(utility[0].as_ref(), &[0x03]);
-
             let payload = decode_value(&utility[1]).expect("decode utility payload");
             let array = payload.as_array().expect("utility payload array");
             let call_id = array[1].as_u64().expect("call id");
 
             assert_eq!(array[2], Value::from("profile"));
-            assert_eq!(array[3], Value::Array(vec![Value::from(true), Value::Nil]));
+            assert_eq!(
+                array[3],
+                Value::Array(vec![
+                    Value::from(true),
+                    Value::from("sharegpt_run-1"),
+                    Value::from(5000),
+                    Value::from(20),
+                ])
+            );
 
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
@@ -7828,16 +7872,247 @@ async fn start_profile_route_sends_expected_utility_call() {
             Request::builder()
                 .method("POST")
                 .uri("/start_profile")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "profile_prefix": "sharegpt_run-1",
+                        "delay_iterations": 5000,
+                        "max_iterations": 20,
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_route_ignores_completion_payload() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(
+                array[3],
+                Value::Array(vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil,])
+            );
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen3-0.6B",
+                        "prompt": "profile this request",
+                        "max_tokens": 16,
+                        "stream": false,
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn duplicate_start_profile_returns_conflict() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let first = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    let second = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
                 .body(Body::empty())
                 .expect("build request"),
         )
         .await
         .expect("call app");
 
-    let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_succeeds_again_after_stop() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let expected_args = [
+                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                vec![Value::from(false), Value::Nil],
+                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                vec![Value::from(false), Value::Nil],
+            ];
+            for expected in expected_args {
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]).expect("decode utility payload");
+                let array = payload.as_array().expect("utility payload array");
+                let call_id = array[1].as_u64().expect("call id");
+
+                assert_eq!(array[2], Value::from("profile"));
+                assert_eq!(array[3], Value::Array(expected));
+
+                send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            }
+        })
+    })
+    .await;
+
+    for uri in [
+        "/start_profile",
+        "/stop_profile",
+        "/start_profile",
+        "/stop_profile",
+    ] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+    engine_task.await.expect("mock engine task");
+}
+
+/// Receive a `profile` utility call with the expected args and return its call id.
+async fn recv_profile_call(dealer: &mut DealerSocket, expected_args: Vec<Value>) -> u64 {
+    let utility = recv_engine_message(dealer).await;
+    assert_eq!(utility[0].as_ref(), &[0x03]);
+    let payload = decode_value(&utility[1]).expect("decode utility payload");
+    let array = payload.as_array().expect("utility payload array");
+    assert_eq!(array[2], Value::from("profile"));
+    assert_eq!(array[3], Value::Array(expected_args));
+    array[1].as_u64().expect("call id")
+}
+
+/// A start issued while a stop is in flight waits for that stop instead of
+/// racing it, so a stale stop reply cannot clear the new session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_waits_for_inflight_stop() {
+    let (stop_received_tx, stop_received_rx) = tokio::sync::oneshot::channel();
+    let (release_stop_tx, release_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (app, engine_task) = test_profiling_app_with_engine_script(move |dealer, push| {
+        boxed_test_future(async move {
+            let start = || vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+
+            let call_id = recv_profile_call(dealer, start()).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+
+            let call_id = recv_profile_call(dealer, vec![Value::from(false), Value::Nil]).await;
+            stop_received_tx.send(()).expect("notify stop received");
+            release_stop_rx.await.expect("release stop");
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+
+            let call_id = recv_profile_call(dealer, start()).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let post = |uri: &'static str| {
+        let mut app = app.clone();
+        async move {
+            app.call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app")
+            .status()
+        }
+    };
+
+    assert_eq!(post("/start_profile").await, StatusCode::OK);
+    let stop = tokio::spawn(post("/stop_profile"));
+    stop_received_rx.await.expect("stop received");
+    let restart = tokio::spawn(post("/start_profile"));
+    // No hook observes the restart reaching the profile lock; give it time so
+    // an unserialized client would reject it against the stale session.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    release_stop_tx.send(()).expect("release stop");
+    assert_eq!(stop.await.expect("stop task"), StatusCode::OK);
+    assert_eq!(restart.await.expect("restart task"), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_route_rejects_invalid_prefix() {
+    let (app, engine_task) =
+        test_profiling_app_with_engine_script(|_, _| boxed_test_future(async move {})).await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"profile_prefix": "../trace"}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     engine_task.await.expect("mock engine task");
 }
 
