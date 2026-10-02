@@ -229,11 +229,7 @@ def set_dummy_context(
     input_block_tables: Sequence[torch.Tensor] | None = None,
     context_groups: Sequence[bool] | None = None,
 ) -> None:
-    """Give each dummy request context_len of context, used when profiling step cost.
-
-    context_groups marks the KV cache groups indexed by context tokens; the
-    others hold one recurrent-state slot per request. Defaults to every group.
-    """
+    """Give each dummy request context_len of context, used when profiling step cost."""
     if input_block_tables is None:
         input_block_tables = block_tables.input_block_tables
     if not input_block_tables:
@@ -259,11 +255,6 @@ def set_dummy_context(
     seq_len = context_len + query_len
     if context_groups is None:
         context_groups = [True] * len(input_block_tables)
-    # Hybrid models back every KV cache group with the same tensors, so block b
-    # is the same bytes in each group. Keep the groups' fabricated ids apart:
-    # context blocks count up from the first block past the null block, and
-    # recurrent-state slots count down from the top of the pool. Neither may be
-    # the null block: dummy runs write recurrent state there.
     for block_table, block_size, bpk, is_context in zip(
         input_block_tables,
         block_tables.kernel_block_sizes,
@@ -273,9 +264,6 @@ def set_dummy_context(
     ):
         num_usable = max(num_kv_blocks - 1, 1) * bpk
         if not is_context:
-            # One state slot per request, in column 0. The spec columns stay on
-            # the null block: a dummy spec row has accepted one token, so it
-            # reads column 0, and the recurrent kernels skip null-block writes.
             state_slots = (
                 num_kv_blocks * bpk
                 - 1

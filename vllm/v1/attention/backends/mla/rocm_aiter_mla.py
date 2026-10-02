@@ -346,15 +346,6 @@ def _aiter_mla_small_head_mode() -> str:
 
 
 def _adaptive_varlen_verify_enabled(vllm_config: VllmConfig) -> bool:
-    """Whether causal verify batches may carry 1..k+1 tokens per request.
-
-    Adaptive verification trims each verify request on device after the CPU
-    split was made. Only the plain route is supported: DCP routes plan per-row
-    windows from host lengths. A group's spec is not consulted for causality:
-    Kimi-K3 DSpark draft layers share the target's MLA group, whose merged spec
-    then reports non_causal_multi_token_decode. Non-causal draft batches are
-    never trimmed and keep the uniform path (see _build_decode).
-    """
     speculative_config = vllm_config.speculative_config
     return (
         speculative_config is not None
@@ -365,7 +356,6 @@ def _adaptive_varlen_verify_enabled(vllm_config: VllmConfig) -> bool:
 
 
 def _gather_rows(x: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
-    # index_select has no fp8 kernel on every torch build; move the bytes.
     if x.dtype.itemsize == 1 and x.dtype.is_floating_point:
         return x.view(torch.uint8).index_select(0, index).view(x.dtype)
     return x.index_select(0, index)
@@ -534,11 +524,6 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     use_gluon_verify: bool = False
     # Whether persistent MLA metadata was computed
     has_persistent_metadata: bool = False
-    # Adaptive verification only. The kernel runs every request as a uniform
-    # max_qo_len block with its real tokens left-aligned and the KV length
-    # extended by the pad, so the causal window of each real token is
-    # unchanged. varlen_q_rows[i] is the packed query row feeding kernel row i;
-    # varlen_o_rows[t] is the kernel row holding packed token t's output.
     varlen_q_rows: torch.Tensor | None = None
     varlen_o_rows: torch.Tensor | None = None
 
@@ -633,9 +618,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: KVCacheSpec,
     ) -> int | None:
-        # Under adaptive verification every decode batch is padded to the
-        # captured k+1 width (see _fill_varlen_rows), so one graph replays any
-        # 1..k+1 mix. Mixed batches still take the UNIFORM_BATCH rules.
         if not _adaptive_varlen_verify_enabled(vllm_config):
             return None
         if (
@@ -719,10 +701,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # persistent gate below and makes aiter raise a KeyError mid-run.
         self._mtp_decode_qlen = self.reorder_batch_threshold or 1
 
-        # Adaptive verification: 0 when off, else the uniform width (k+1) every
-        # decode batch is padded to. The kernel variant a FULL graph replays is
-        # fixed by this width at capture, so it must not follow per-step
-        # lengths.
         self._varlen_decode_qlen = 0
         if _adaptive_varlen_verify_enabled(vllm_config):
             assert self._mtp_decode_qlen == max_decode_query_len(vllm_config), (
@@ -730,8 +708,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 max_decode_query_len(vllm_config),
             )
             self._varlen_decode_qlen = self._mtp_decode_qlen
-            # The CPU split hands trailing verify requests one draft fewer, so
-            # decode lengths already differ on the host.
             self.query_len_support = QueryLenSupport.VARLEN
             max_rows = vllm_config.scheduler_config.max_num_seqs * (
                 self._varlen_decode_qlen
@@ -741,7 +717,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._varlen_row_pos = row_ids % self._varlen_decode_qlen
             self._varlen_row_ids = row_ids
             self._varlen_q_rows = torch.zeros_like(row_ids)
-            # One spare slot absorbs the scatter from left-padding rows.
             self._varlen_o_rows = torch.zeros(
                 max_rows + 1, dtype=torch.int64, device=device
             )
@@ -761,7 +736,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         max_num_pages = max_num_reqs * max_num_pages_per_req
         speculative_config = vllm_config.speculative_config
         if _adaptive_varlen_verify_enabled(vllm_config):
-            # Varlen verify pads each request's page list by up to k pages.
             assert speculative_config is not None
             max_num_pages += max_num_reqs * (
                 speculative_config.num_speculative_tokens or 0
@@ -1336,9 +1310,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         qo_len = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         varlen_decode = self._varlen_decode_qlen > 0 and causal
         if varlen_decode:
-            # Host lengths are an even split of the draft budget, not the
-            # device lengths. Run a uniform k+1 block per request instead;
-            # _fill_varlen_rows maps the real tokens in and out.
             max_qo_len = self._varlen_decode_qlen
             pad_uniform_mtp = True
         else:
@@ -1384,10 +1355,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         varlen_q_rows = varlen_o_rows = None
         if varlen_decode:
-            # Real tokens are left-aligned in their k+1 block (see
-            # _fill_varlen_rows). Extending the KV length by the pad keeps each
-            # real token's causal window exact and every row's window >= 1.
-            # Graph padding requests (qlen 0, seq_len 0) get k+1.
             seq_lens_for_kernel = seq_lens_device + (max_qo_len - qo_lens_device)
             varlen_q_rows, varlen_o_rows = self._fill_varlen_rows(
                 query_start_loc_device, qo_lens_device, num_reqs
@@ -1453,7 +1420,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # num_tokens mask out entirely.
             max_tokens_per_req = block_table_tensor.shape[1] * self.kernel_block_size
             if varlen_decode:
-                # CLAMP_TAIL pads each page list by up to max_qo_len - 1 pages.
                 max_tokens_per_req += max_qo_len - 1
             num_chunks = max(1, cdiv(max_tokens_per_req, 1024))
             _expand_page_indices_kernel[(num_reqs, num_chunks)](
@@ -1672,14 +1638,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         qo_lens_device: torch.Tensor,
         num_reqs: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Map packed verify tokens onto left-aligned uniform blocks, on device.
-
-        Request r's t-th real token sits in kernel row r * L + t. With the
-        kernel KV length set to seq_len_r + (L - qlen_r), the uniform causal
-        bound for that row is seq_len_r - (qlen_r - 1 - t): exactly the real
-        token's window. Trailing pad rows see the appended pages, never a
-        window of zero; they read packed row 0 and are never gathered back.
-        """
         width = self._varlen_decode_qlen
         num_rows = num_reqs * width
         row_req = self._varlen_row_req[:num_rows]
@@ -1690,8 +1648,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         packed_row = row_start + row_pos
         q_rows = self._varlen_q_rows[:num_rows]
         q_rows.copy_(torch.where(is_real, packed_row, 0))
-        # Tokens past the real total (graph padding) keep row 0; their output
-        # is discarded, so only the address has to be valid.
         o_rows = self._varlen_o_rows
         o_rows.zero_()
         dump_slot = o_rows.size(0) - 1
@@ -2402,8 +2358,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         if decode is None or decode.varlen_q_rows is None:
             return self._forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
         assert decode.varlen_o_rows is not None
-        # Adaptive verification: run right-aligned uniform blocks, then pick
-        # each packed token's row back out (see _fill_varlen_rows).
         q_rows = decode.varlen_q_rows
         if type(q) is tuple:
             num_tokens = q[0].shape[0]
