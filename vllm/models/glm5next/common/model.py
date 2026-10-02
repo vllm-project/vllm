@@ -213,8 +213,9 @@ class Glm5NextMoE(nn.Module):
         swiglu_limit = config.swiglu_limit
         self.is_fused_shared_expert_enabled = False
         if config.n_shared_experts is not None:
-            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
-                quant_config, prefix
+            self.is_fused_shared_expert_enabled = (
+                resolve_layer_fused_shared_expert(quant_config, prefix)
+                and _fused_shared_experts_tuned_on_device()
             )
         if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
@@ -1198,6 +1199,22 @@ def get_spec_layer_idx_from_weight_name(
             ) or weight_name.startswith(f"layers.{layer_idx + i}."):
                 return layer_idx + i
     return None
+
+
+def _fused_shared_experts_tuned_on_device() -> bool:
+    """AITER has fused-MoE configs tuned for the fused shared-expert shape
+    (one more expert and one more top-k slot than the routed MoE) only on
+    gfx950; other GPUs would run that shape on untuned fallback kernels."""
+    from vllm.platforms.rocm import on_gfx950
+
+    if on_gfx950():
+        return True
+    logger.warning_once(
+        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is ignored for GLM-5.3-Flash "
+        "on this GPU: AITER has tuned configs for its fused shared-expert MoE "
+        "only on gfx950. Running the shared experts as a separate MLP."
+    )
+    return False
 
 
 def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> int:
