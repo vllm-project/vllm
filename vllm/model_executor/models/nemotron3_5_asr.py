@@ -237,7 +237,7 @@ class Nemotron3_5AsrMultiModalProcessor(
         hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_processor_mm_kwargs)
         if hf_processor_mm_kwargs.get("is_streaming"):
             raise ValueError(
-                "Nemotron 3.5 ASR does not support streaming audio chunks yet."
+                "Nemotron 3.5 ASR requires a complete audio clip per request."
             )
         feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
 

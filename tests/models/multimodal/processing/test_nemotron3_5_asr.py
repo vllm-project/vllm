@@ -138,7 +138,7 @@ def test_nemotron_dummy_audio_is_bounded(
     [
         (159, {}, "audio samples"),
         (4000, {}, "audio samples"),
-        (1600, {"is_streaming": True}, "streaming audio chunks"),
+        (1600, {"is_streaming": True}, "complete audio clip"),
         (
             1600,
             {"audio_kwargs": {"padding": "max_length", "max_length": 4800}},

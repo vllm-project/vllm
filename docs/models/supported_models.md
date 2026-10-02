@@ -737,23 +737,12 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
 
 !!! note
-    `Nemotron3_5AsrForRNNT` supports greedy transcription of one complete audio
-    clip per request. Audio length is bounded by the checkpoint's encoder position
-    capacity and `--max-model-len`, measured in encoder frames. Profiling uses this
-    bound; reduce `--max-model-len` to lower the maximum audio size and memory use.
-    Use Model Runner V2, `--enforce-eager`,
-    and TP=1 / PP=1. Quantization, beam search, alternative-token logprobs,
-    and cache-aware streaming are not supported. Its renderer and logprobs
-    limit are configured automatically. Generic beam search requests alternative
-    token scores and is rejected by the existing logprobs-limit validation.
-    Decoding uses greedy RNNT decisions; temperature and top-k/top-p do not
-    change them. The adapter's output scores are not RNNT probabilities.
-    Token-masking controls, such as allowed-token lists, bad words, and structured
-    outputs, are unsupported: masking the chosen token can leave no valid
-    sampler choice.
-    `max_logprobs=0` limits alternative-token scores; it does not disable the
-    chosen-token score requested with `logprobs=0`. That score currently reflects
-    the forced token choice, not model confidence.
+    `Nemotron3_5AsrForRNNT` uses greedy transcription with one complete audio clip
+    per request. It requires Model Runner V2, `--enforce-eager`, TP=1 and PP=1.
+    Audio length is bounded by encoder capacity and `--max-model-len`.
+    Quantization, speculative decoding, beam search and token-masking constraints
+    are unsupported. Alternative-token logprobs are unavailable; chosen-token
+    scores are synthetic and must not be used as model confidence.
 
 #### Realtime Transcription
 
