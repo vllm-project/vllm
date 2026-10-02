@@ -15,16 +15,15 @@ The checks below are arithmetic: no weights, no GPU.
 import pytest
 import torch
 from PIL import Image
+from transformers.models.glm5_next.video_processing_glm5_next import (
+    Glm5NextVideoProcessor,
+    smart_resize,
+)
+from transformers.video_utils import VideoMetadata
 
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
-from vllm.transformers_utils.processors.glm5next import (
-    Glm5NextVideoProcessor,
-    _pixel_budget,
-    glm_sample_frame_indices,
-    smart_resize,
-)
 
 from ...utils import build_model_context
 
@@ -48,27 +47,16 @@ def _pixel_path_grid(
     width: int,
 ) -> tuple[int, int, int]:
     """The ``video_grid_thw`` ``Glm5NextVideoProcessor._preprocess`` builds."""
-    min_pixels, max_pixels = _pixel_budget(
-        video_processor.min_image_tokens,
-        video_processor.max_image_tokens,
-        video_processor.patch_size,
-        video_processor.merge_size,
-        video_processor.temporal_patch_size,
-    )
-    factor = (
-        video_processor.patch_size
-        * video_processor.merge_size
-        * video_processor.patch_expand_factor
-    )
     resized_height, resized_width = smart_resize(
-        t=num_frames,
-        h=height,
-        w=width,
-        t_factor=video_processor.temporal_patch_size,
-        h_factor=factor,
-        w_factor=factor,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
+        num_frames=num_frames,
+        height=height,
+        width=width,
+        temporal_factor=video_processor.temporal_patch_size,
+        factor=video_processor.patch_size
+        * video_processor.merge_size
+        * video_processor.patch_expand_factor,
+        min_pixels=video_processor.min_image_tokens,
+        max_pixels=video_processor.max_image_tokens,
     )
     padded_frames = num_frames + (-num_frames % video_processor.temporal_patch_size)
     return (
@@ -104,13 +92,8 @@ def test_video_placeholders_match_encoder_rows(
     info = processor.info
     video_processor = info.get_video_processor()
 
-    frame_indices = glm_sample_frame_indices(
-        total_num_frames,
-        fps,
-        duration,
-        target_fps=video_processor.fps_interval,
-        max_frame_count=video_processor.max_frame_count_dynamic,
-        temporal_patch_size=video_processor.temporal_patch_size,
+    frame_indices = video_processor.sample_frames(
+        VideoMetadata(total_num_frames=total_num_frames, fps=fps, duration=duration)
     )
     grid_t, grid_h, grid_w = _pixel_path_grid(
         video_processor, len(frame_indices), height, width
