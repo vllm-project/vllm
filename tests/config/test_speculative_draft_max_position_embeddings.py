@@ -17,11 +17,13 @@ import logging
 from typing import Literal
 
 import pytest
+import torch
 from transformers import PreTrainedConfig
 
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 
 # All repos are public; only config/tokenizer-config files are fetched.
 EAGLE3_DRAFT = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"  # max_position_embeddings=2048
@@ -114,3 +116,22 @@ def test_independent_draft_model_keeps_its_own_limit(
     draft_hf_config = speculative_config.draft_model_config.hf_config
     assert draft_hf_config.max_position_embeddings == 2048
     assert not _override_logged(vllm_caplog)
+
+
+@pytest.mark.cpu_test
+def test_yarn_draft_rope_covers_target_max_model_len(default_vllm_config):
+    """YaRN sizes its cache from original_max_position_embeddings * factor, not
+    from the draft max_position_embeddings that #49343 raises; it must still
+    cover max_position."""
+    rope_parameters = {
+        "rope_type": "yarn",
+        "rope_theta": 10000.0,
+        "factor": 2.0,
+        "original_max_position_embeddings": 8192,
+    }
+    rope = get_rope(128, max_position=65536, rope_parameters=rope_parameters)
+    assert rope.cos_sin_cache.shape[0] == 65536
+    # Extending the cache must not change the positions it already covered.
+    unextended = get_rope(128, max_position=16384, rope_parameters=rope_parameters)
+    assert unextended.cos_sin_cache.shape[0] == 16384
+    torch.testing.assert_close(rope.cos_sin_cache[:16384], unextended.cos_sin_cache)
