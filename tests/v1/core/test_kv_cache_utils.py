@@ -59,7 +59,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.hisparse.layout import (
     create_hisparse_layout,
-    get_hisparse_gpu_memory_usage,
+    get_hisparse_kv_cache_groups,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -118,9 +118,6 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             cache_role=SparseCacheRole.INDEXER,
         ),
     }
-    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert group_spec is not None
-    group = KVCacheGroupSpec(list(specs), group_spec)
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
@@ -142,14 +139,9 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
         ),
     )
-    indexer_spec = specs["model.layers.0.self_attn.indexer"]
-    assert get_hisparse_gpu_memory_usage(config, [group]) == (
-        indexer_spec.max_memory_usage_bytes(config)
-    )
-
     monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
     cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        config, [group], available_memory=2**30
+        config, get_hisparse_kv_cache_groups(config, specs), available_memory=2**30
     )
     assert cache_config.num_blocks == 7
     assert cache_config.hisparse_host_num_blocks is not None
@@ -228,8 +220,6 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
             cache_role=SparseCacheRole.INDEXER,
         ),
     }
-    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert group_spec is not None
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
@@ -240,14 +230,123 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
     )
     host_page = specs["model.layers.0.self_attn"].page_size_bytes
     host_budget = (4 + extra_blocks) * host_page
-    group = KVCacheGroupSpec(list(specs), group_spec)
+    groups = get_hisparse_kv_cache_groups(config, specs)
 
     if ok:
-        layout = create_hisparse_layout(config, [group], host_budget=host_budget)
+        layout = create_hisparse_layout(config, groups, host_budget=host_budget)
         assert layout.host_num_blocks == 4 + extra_blocks
     else:
         with pytest.raises(ValueError, match="increase host_pool_gib"):
-            create_hisparse_layout(config, [group], host_budget=host_budget)
+            create_hisparse_layout(config, groups, host_budget=host_budget)
+
+
+@pytest.mark.parametrize(
+    "max_model_len,num_gpu_blocks,ok",
+    [
+        (8192, 160, False),
+        (8192, 1000, True),
+        (32768, 656, False),
+        (32768, 657, True),
+        (-1, 657, True),
+    ],
+)
+def test_hisparse_pool_must_fit_max_model_len(
+    monkeypatch, max_model_len, num_gpu_blocks, ok
+):
+    """Each resident group takes its own blocks from HiSparse's shared GPU pool,
+    so a pool that fits only the indexer pages must be rejected at startup.
+    Resident pages are capped at the in-flight window: at 32768 tokens with 2048
+    in flight, one request needs 512 indexer + 4 x 32 resident + 16 hot blocks,
+    plus the null block. Auto-fit (-1) must pick a length that passes the same
+    check."""
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
+    specs: dict[str, KVCacheSpec] = {}
+    for i in range(4):
+        specs[f"model.layers.{i}.self_attn"] = MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        )
+        specs[f"model.layers.{i}.self_attn.indexer"] = MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        )
+    config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    config.scheduler_config.max_num_batched_tokens = 2048
+    # Async scheduling doubles the in-flight window, and with it the bound.
+    config.scheduler_config.async_scheduling = False
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_config.index_topk = 128
+    config.cache_config.num_gpu_blocks_override = num_gpu_blocks
+    config.cache_config.kv_cache_layout = "BLHNC"
+    # Workers report the resident/hot caches HiSparse derives.
+    specs |= {
+        name: group.kv_cache_spec
+        for group in get_hisparse_kv_cache_groups(config, specs) or []
+        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        for name in group.layer_names
+    }
+
+    if ok:
+        kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
+    else:
+        with pytest.raises(ValueError, match="max seq len"):
+            kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
+
+
+def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
+    """Workers report HiSparse's resident/hot caches, which lay out their own raw
+    backing; KV cache layout resolution must skip them."""
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    specs: dict[str, KVCacheSpec] = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+    }
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_config.index_topk = 128
+    reported = specs | {
+        name: group.kv_cache_spec
+        for group in get_hisparse_kv_cache_groups(config, specs) or []
+        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        for name in group.layer_names
+    }
+    assert len(reported) > len(specs)
+
+    layouts = []
+    for worker_specs in (specs, reported):
+        config.cache_config.kv_cache_layout = None
+        layouts.append(
+            resolve_kv_cache_layout(
+                config, [["BLHNC", "LBNHC"]], list(worker_specs.values())
+            )
+        )
+    assert layouts[0] == layouts[1]
 
 
 def test_hisparse_rejects_deepseek_v4():
@@ -260,9 +359,6 @@ def test_hisparse_rejects_deepseek_v4():
             model_version="deepseek_v4",
         )
     }
-    full_uniform = UniformTypeKVCacheSpecs.from_specs(full_specs)
-    assert full_uniform is not None
-    group = KVCacheGroupSpec(list(full_specs), full_uniform)
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
@@ -270,11 +366,7 @@ def test_hisparse_rejects_deepseek_v4():
     )
 
     with pytest.raises(ValueError, match="does not support DeepSeek V4"):
-        create_hisparse_layout(
-            config,
-            [group],
-            host_budget=2**30,
-        )
+        get_hisparse_kv_cache_groups(config, full_specs)
 
 
 @pytest.fixture(autouse=True)
@@ -1022,7 +1114,7 @@ def test_generate_block_hash_extra_keys_lora():
     )
 
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
-    assert extra_keys == (("lora", "test_lora_adapter"),)
+    assert extra_keys == (("lora", "test_lora_adapter", "/path/to/lora"),)
 
     request.lora_request = None
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
@@ -1048,6 +1140,28 @@ def test_lora_name_and_cache_salt_block_hashes_do_not_collide(hash_fn):
     assert lora_req.block_hashes[0] != salted_req.block_hashes[0]
 
 
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_lora_path_change_changes_block_hashes(hash_fn):
+    """Re-pointing a LoRA name at another adapter must not reuse its blocks."""
+
+    def make_lora_request(lora_path: str) -> Request:
+        return Request(
+            request_id=lora_path,
+            prompt_token_ids=[0, 1, 2],
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            lora_request=LoRARequest(
+                lora_name="foo", lora_int_id=1, lora_path=lora_path
+            ),
+            block_hasher=get_request_block_hasher(3, hash_fn),
+        )
+
+    first = make_lora_request("/path/to/lora_a")
+    second = make_lora_request("/path/to/lora_b")
+
+    assert first.block_hashes[0] != second.block_hashes[0]
+
+
 def test_to_event_extra_keys_keeps_untagged_event_format():
     """KV events keep publishing the extra-key shapes consumers already parse."""
     request = make_request(
@@ -1064,7 +1178,7 @@ def test_to_event_extra_keys_keeps_untagged_event_format():
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
 
     assert extra_keys == (
-        ("lora", "adapter"),
+        ("lora", "adapter", "/path/to/lora"),
         ("mm", "hash1", 2),
         ("cache_salt", "salt"),
     )
