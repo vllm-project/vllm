@@ -109,8 +109,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "K2HorizonReasoningParser",
     ),
     "mimo": (
-        "qwen3_engine_reasoning_parser",
-        "Qwen3ParserReasoningAdapter",
+        "mimo_engine_reasoning_parser",
+        "MiMoParserReasoningAdapter",
     ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
@@ -136,6 +136,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "olmo3_reasoning_parser",
         "Olmo3ReasoningParser",
     ),
+    "plamo3": (
+        "plamo3_engine_reasoning_parser",
+        "Plamo3ParserReasoningAdapter",
+    ),
     "muse_glimmer": (
         "muse_glimmer_reasoning_parser",
         "MuseGlimmerReasoningParser",
@@ -153,8 +157,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Step3ReasoningParser",
     ),
     "step3p5": (
-        "step3p5_reasoning_parser",
-        "Step3p5ReasoningParser",
+        "step3p5_engine_reasoning_parser",
+        "Step3p5ParserReasoningAdapter",
     ),
     "inkling": (
         "inkling_reasoning_parser",
