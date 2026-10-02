@@ -310,7 +310,9 @@ def _make_vllm_config(
     kv_cache_layout: KVCacheLayout = KVCacheLayout.LBHNC,
     disable_hybrid_kv_cache_manager: bool = True,
 ) -> SimpleNamespace:
-    cache_config = SimpleNamespace(block_size=16, num_gpu_blocks=10)
+    cache_config = SimpleNamespace(
+        block_size=16, num_gpu_blocks=10, prefix_match_unit=None
+    )
     cache_config.get_resolved_kv_cache_layout = lambda: kv_cache_layout
     return SimpleNamespace(
         model_config=_FakeModelConfig(),
@@ -1541,7 +1543,7 @@ def test_store_sending_thread_reports_job_when_the_preamble_raises():
     # every dequeue leaves through the same exit.
     thread = _make_store_sending_thread(MagicMock())
     req = _make_store_req("req-a", [b"a0", b"a1"])
-    req.token_len_chunk = None  # type: ignore[assignment]
+    req.token_len_chunk = None
 
     with contextlib.suppress(TypeError):
         _run_store_req(thread, req)
