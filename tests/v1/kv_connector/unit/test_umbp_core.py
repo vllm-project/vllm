@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.umbp_test_utils import (
+    _CancellableWorkerHandle,
     _DelayedLoadWorkerHandle,
     _DelayedStoreWorkerHandle,
     _EmbeddedRuntime,
@@ -1050,7 +1051,7 @@ def test_async_stores_keep_independent_events_across_steps(fail_first):
     assert not handle.waited
 
 
-def test_preemption_waits_for_pending_stores_from_previous_steps():
+def test_preemption_cancels_pending_stores_from_previous_steps():
     handle = _DelayedStoreWorkerHandle()
     worker = UMBPStoreConnectorWorker(handle)
     for event_id, request_id in enumerate(("first", "other", "first")):
@@ -1064,12 +1065,14 @@ def test_preemption_waits_for_pending_stores_from_previous_steps():
         )
         worker.wait_for_save()
     worker.handle_preemptions(UMBPConnectorMetadata(preempted_request_ids={"first"}))
-    assert handle.waited == [handle.jobs[0], handle.jobs[2]]
     worker.get_finished(set())
+    assert handle.cancelled == [handle.jobs[0], handle.jobs[2]]
     assert worker.build_connector_worker_meta().store_events == {
         0: StoreEventResult(1),
         2: StoreEventResult(1),
     }
+    assert not handle.publications
+    assert not handle.waited
     handle.jobs[1].complete()
     worker.get_finished(set())
     assert worker.build_connector_worker_meta().store_events == {1: StoreEventResult(1)}
@@ -1088,25 +1091,61 @@ def test_async_store_drains_before_buffers_can_be_reused():
     assert worker.build_connector_worker_meta().store_events == {4: StoreEventResult(1)}
 
 
-def test_preemption_waits_only_for_the_preempted_requests_loads():
-    handle = _WaitRecordingDelayedLoadHandle()
+def test_worker_preemption_cancels_only_matching_request():
+    handle = _CancellableWorkerHandle()
     worker = UMBPStoreConnectorWorker(handle)
+    first = BlockTransferPlan("first", 1, request_id="first")
+    second = BlockTransferPlan("second", 2, request_id="second")
+    worker.enqueue_stores(
+        UMBPConnectorMetadata(
+            store_event=21,
+            store_plans=[first, second],
+            store_requests={"first": [first], "second": [second]},
+        )
+    )
+
+    worker.handle_preemptions(UMBPConnectorMetadata(preempted_request_ids={"first"}))
+
+    assert len(handle.cancelled) == 1
+    assert handle.cancelled[0].plans == (first,)
+    assert worker.build_connector_worker_meta().store_events == {}
+    worker.wait_for_save()
+    assert handle.published.plans == (second,)
+    assert worker.build_connector_worker_meta().store_events == {
+        21: StoreEventResult(1)
+    }
+
+
+@pytest.mark.parametrize("async_load", [False, True])
+def test_load_cancellation_preserves_other_requests(async_load):
+    handle = _CancellableWorkerHandle()
+    worker = UMBPStoreConnectorWorker(handle)
+    plans = {
+        name: [
+            BlockTransferPlan(
+                name,
+                block_id,
+                request_id=name,
+                ranges=(KVRange("layer1", 0, block_id, 1000, 16, 16, 0),),
+            )
+        ]
+        for name, block_id in (("first", 1), ("second", 2))
+    }
     worker.start_load_kv(
         None,
         UMBPConnectorMetadata(
-            async_load=True,
-            load_requests={
-                name: [BlockTransferPlan(name, block_id, request_id=name)]
-                for name, block_id in (("first", 1), ("second", 2))
-            },
+            async_load=async_load,
+            load_requests=plans,
         ),
     )
     worker.handle_preemptions(UMBPConnectorMetadata(preempted_request_ids={"first"}))
+    worker.wait_for_layer_load("")
+    # Asynchronous loads settle through get_finished, not the forward pass.
+    finished = worker.get_finished(set())
 
-    assert [job.plans[0].request_id for job in handle.waited] == ["first"]
-    assert worker.get_finished(set()) == (None, None)
-    handle.load_job.complete()
-    assert worker.get_finished(set()) == (None, {"second"})
+    assert len(handle.cancelled) == 1
+    assert handle.cancelled[0].plans[0].request_id == "first"
+    assert finished == (None, {"second"} if async_load else None)
 
 
 def test_worker_reports_load_completion_and_store_event_without_deferring_request():

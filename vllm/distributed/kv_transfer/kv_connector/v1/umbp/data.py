@@ -575,6 +575,7 @@ class TransferJobStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -606,6 +607,10 @@ class TransferJobState:
         self.failed_keys.update(keys)
         self.error = error
         self._finish_if_done()
+
+    def cancel(self, error: str = "cancelled") -> None:
+        self.error = error
+        self.status = TransferJobStatus.CANCELLED
 
     @property
     def failed_block_ids(self) -> set[int]:

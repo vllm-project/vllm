@@ -51,6 +51,7 @@ def test_mori_external_kv_preserves_generated_tokens(tmp_path):
                 "capacity_bytes": 2 << 30,
                 "lookup_dir": str(tmp_path),
                 "num_workers": 2,
+                "timeout_ms": 60000,
                 "load_async": False,
             },
         ),

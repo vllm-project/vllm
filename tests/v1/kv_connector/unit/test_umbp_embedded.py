@@ -3,6 +3,8 @@
 
 import sys
 import threading
+import time
+from concurrent.futures import Future
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -28,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     KVRange,
     KVRegion,
     RankTopology,
+    TransferJobState,
     TransferJobStatus,
     UMBPConnectorMetadata,
     UMBPNamespace,
@@ -143,6 +146,7 @@ def bulk_worker(monkeypatch, tmp_path):
         RankTopology(),
         str(tmp_path),
         1,
+        5,
         planner.describe(RankTopology()),
     )
     worker = UMBPStoreConnectorWorker(handle, planner)
@@ -697,8 +701,12 @@ def test_embedded_scheduler_clear_removes_published_objects():
     scheduler.close()
 
 
+@pytest.mark.parametrize("operation", ["wait", "cancel"])
+@pytest.mark.parametrize("timeout_first", [False, True])
 @pytest.mark.parametrize("blocked_stage", ["copy", "flush", "load"])
-def test_mori_transfer_keeps_buffers_owned_until_completion(tmp_path, blocked_stage):
+def test_mori_transfer_keeps_buffers_owned_until_completion(
+    tmp_path, operation, timeout_first, blocked_stage
+):
     class _Client:
         def __init__(self):
             self.started = threading.Event()
@@ -742,20 +750,21 @@ def test_mori_transfer_keeps_buffers_owned_until_completion(tmp_path, blocked_st
     source = torch.zeros((1, 1024), dtype=torch.uint8)
     handle = _MoriWorkerHandle(
         client,
-        "owned-buffer",
+        "cancel-reuse",
         RankTopology(),
         str(tmp_path),
         1,
+        5,
         KVLayoutDescriptor((KVRegion("layer0", 0, 1024, 1024, 0),), RankTopology()),
     )
     handle.register_buffers({"layer0": source})
     job = (
-        handle.load_blocks([BlockTransferPlan("owned-buffer-key", 0, group_id=0)])
+        handle.load_blocks([BlockTransferPlan("cancel-reuse-key", 0, group_id=0)])
         if blocked_stage == "load"
         else handle.store(
             [
                 BlockTransferPlan(
-                    "owned-buffer-key",
+                    "cancel-reuse-key",
                     0,
                     ranges=(
                         KVRange(
@@ -775,10 +784,19 @@ def test_mori_transfer_keeps_buffers_owned_until_completion(tmp_path, blocked_st
     assert job is not None
     assert client.started.wait(5)
     assert handle.poll(job) is None
-    assert handle.batch_exists(["owned-buffer-key"]) == [False]
+    assert handle.batch_exists(["cancel-reuse-key"]) == [False]
     result = []
-    waiter = threading.Thread(target=lambda: result.append(handle.wait(job)))
+    waiter = threading.Thread(
+        target=lambda: result.append(getattr(handle, operation)(job))
+    )
     try:
+        if timeout_first:
+            handle._timeout_s = 0.001
+            with pytest.raises(TimeoutError, match="buffers still in use"):
+                getattr(handle, operation)(job)
+            assert job.status is TransferJobStatus.RUNNING
+            assert handle.poll(job) is None
+        handle._timeout_s = 5
         waiter.start()
         waiter.join(0.1)
         assert waiter.is_alive()
@@ -806,7 +824,7 @@ def test_mori_publication_does_not_flush_on_the_worker_thread(tmp_path, flush_su
         flush=flush,
         close=lambda: None,
     )
-    handle = _MoriWorkerHandle(client, "flush", RankTopology(), str(tmp_path), 1)
+    handle = _MoriWorkerHandle(client, "flush", RankTopology(), str(tmp_path), 1, 5)
     try:
         job = handle.wait(handle.store([BlockTransferPlan("key", 0)]))
         assert len(flush_threads) == 1
@@ -820,3 +838,66 @@ def test_mori_publication_does_not_flush_on_the_worker_thread(tmp_path, flush_su
         assert len(flush_threads) == 1
     finally:
         handle.close()
+
+
+def test_store_timeout_does_not_count_time_waiting_for_a_worker(tmp_path):
+    release = threading.Event()
+
+    def put(keys, *args):
+        release.wait(5)
+        return [True] * len(keys)
+
+    client = SimpleNamespace(
+        batch_put_ranges_from_ptr=put,
+        batch_exists=lambda keys: [True] * len(keys),
+        flush=lambda: True,
+        close=lambda: None,
+    )
+    handle = _MoriWorkerHandle(client, "queued", RankTopology(), str(tmp_path), 1, 5)
+    try:
+        running = handle.store([BlockTransferPlan("running", 0)])
+        handle._timeout_s = 0.05
+        queued = handle.store([BlockTransferPlan("queued", 0)])
+        time.sleep(0.2)
+        # Still behind the running store on the only transfer thread.
+        assert handle.poll(queued) is None
+        handle._timeout_s = 5
+        release.set()
+        assert handle.wait(running).status is TransferJobStatus.COMPLETED
+        assert handle.wait(queued).status is TransferJobStatus.COMPLETED
+    finally:
+        release.set()
+        handle.close()
+
+
+def test_async_store_timeout_does_not_release_buffers():
+    handle = _MoriWorkerHandle(
+        SimpleNamespace(close=lambda: None), "timeout", RankTopology(), "/tmp", 1, 1
+    )
+    job = TransferJobState((BlockTransferPlan("pending", 0),))
+    job.start()
+    future: Future[TransferJobState] = Future()
+    handle._futures[id(job)] = future
+    handle._store_deadlines[id(job)] = 0
+    with pytest.raises(TimeoutError, match="buffers still in use"):
+        handle.poll(job)
+    assert job.status is TransferJobStatus.RUNNING
+    assert handle._futures[id(job)] is future
+    job.complete()
+    future.set_result(job)
+    assert handle.poll(job) is job
+    handle.close()
+
+
+def test_mori_completed_transfer_timeout_is_a_safe_failure():
+    handle = _MoriWorkerHandle(
+        SimpleNamespace(close=lambda: None), "timeout", RankTopology(), "/tmp", 1, 1
+    )
+    job = TransferJobState((BlockTransferPlan("failed", 0),))
+    job.start()
+    future: Future[TransferJobState] = Future()
+    future.set_exception(TimeoutError("backend already stopped"))
+    handle._futures[id(job)] = future
+    assert handle.wait(job).status is TransferJobStatus.FAILED
+    assert handle.poll(job) is job
+    handle.close()

@@ -178,6 +178,7 @@ class _MemoryWorkerHandle(UMBPWorkerHandle):
         if job.status in (
             TransferJobStatus.COMPLETED,
             TransferJobStatus.FAILED,
+            TransferJobStatus.CANCELLED,
         ):
             return job
         return None
@@ -186,6 +187,11 @@ class _MemoryWorkerHandle(UMBPWorkerHandle):
         if job.status.value != "completed":
             raise RuntimeError("cannot publish an incomplete embedded job")
         self._store.publish(id(job))
+
+    def cancel(self, job: TransferJobState) -> TransferJobState:
+        if job.status.value not in ("completed", "failed"):
+            job.cancel("preempted")
+        return job
 
     def close(self) -> None:
         return
@@ -315,6 +321,7 @@ class _WorkerHandle:
         if job.status in (
             TransferJobStatus.COMPLETED,
             TransferJobStatus.FAILED,
+            TransferJobStatus.CANCELLED,
         ):
             return job
         return None
@@ -378,8 +385,19 @@ class _WaitRecordingDelayedLoadHandle(_DelayedLoadWorkerHandle):
         return job
 
 
-class _DelayedStoreWorkerHandle(_WorkerHandle):
+class _CancellableWorkerHandle(_WorkerHandle):
     def __init__(self):
+        self.cancelled = []
+
+    def cancel(self, job):
+        self.cancelled.append(job)
+        job.cancel("preempted")
+        return job
+
+
+class _DelayedStoreWorkerHandle(_CancellableWorkerHandle):
+    def __init__(self):
+        super().__init__()
         self.jobs = []
         self.waited = []
         self.publications = []

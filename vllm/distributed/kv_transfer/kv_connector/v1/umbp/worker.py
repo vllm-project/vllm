@@ -175,7 +175,7 @@ class UMBPStoreConnectorWorker:
                 result = self.runtime.wait(job) if wait else self.runtime.poll(job)
                 if result is None:
                     continue
-                # A partly failed job is not published, including its stored keys.
+                # A partly failed job is not published.
                 self._finish_job(request_id, result, is_load=False)
                 del batch.jobs[request_id]
             if not batch.jobs:
@@ -216,19 +216,25 @@ class UMBPStoreConnectorWorker:
             self._submit_store_plans(plans, request_id)
 
     def handle_preemptions(self, metadata: UMBPConnectorMetadata) -> None:
-        """Finish request-local jobs before vLLM reuses their GPU blocks."""
+        """Cancel request-local jobs before vLLM reuses their GPU blocks."""
         preempted = metadata.preempted_request_ids
         if not preempted:
             return
         for request_id in preempted:
             for job in self._load_jobs.pop(request_id, {}).values():
-                self.runtime.wait(job)
+                self._cancel_job(job)
         for jobs in [self._store_jobs, *(batch.jobs for batch in self._pending_stores)]:
             for request_id, job in jobs.items():
                 if request_id in preempted or any(
                     plan.request_id in preempted for plan in job.plans
                 ):
-                    jobs[request_id] = self.runtime.wait(job)
+                    jobs[request_id] = self._cancel_job(job)
+
+    def _cancel_job(self, job: TransferJobState) -> TransferJobState:
+        cancel = getattr(self.runtime, "cancel", None)
+        if callable(cancel):
+            return cancel(job)
+        return self.runtime.wait(job)
 
     def get_finished(
         self, finished_req_ids: set[str]

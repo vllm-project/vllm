@@ -51,13 +51,16 @@ class UMBPWorkerHandle(Protocol):
         return None
 
     def wait(self, job: TransferJobState) -> TransferJobState:
-        """Block until the job is final and its buffers are safe to reuse."""
+        """Return a final state only when buffers are safe to reuse; otherwise raise."""
 
     def poll(self, job: TransferJobState) -> TransferJobState | None:
         """Return a finished job without blocking, or None if still pending."""
 
     def publish(self, job: TransferJobState) -> None:
         """Accept a completed store; a runtime may defer visibility until then."""
+
+    def cancel(self, job: TransferJobState) -> TransferJobState:
+        """Cancel if possible, otherwise wait until buffers are safe to reuse."""
 
     def close(self) -> None:
         """Release worker-side resources."""

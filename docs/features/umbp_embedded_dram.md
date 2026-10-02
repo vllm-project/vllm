@@ -51,7 +51,7 @@ never stores.
 | `load_async` | `true` | Load in the background while the request waits. |
 | `enable_lookup` | `true` | Restore from the pool. With `false` the connector only stores. |
 | `save_decode_cache` | `false` | Also store blocks produced by decoding. |
-| `num_workers` | `4` | Transfer threads per worker. |
+| `num_workers`, `timeout_ms` | `4`, `30000` | Transfer threads per worker, and how long a worker waits for a transfer it must finish before failing the step rather than reusing its blocks. |
 | `lookup_instance` | | Distinguishes independent engines serving the same model on one host. Data-parallel ranks are already distinguished. |
 | `lookup_dir` | `/tmp` | Directory of the per-worker lookup sockets. |
 | `key_namespace` | derived | Overrides the namespace derived from the model, revision, KV layout, cache groups, parallel topology and draft model. |

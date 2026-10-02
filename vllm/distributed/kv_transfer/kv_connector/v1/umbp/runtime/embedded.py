@@ -11,7 +11,7 @@ import socket
 import threading
 import time
 from collections.abc import Iterable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
@@ -38,6 +38,11 @@ logger = init_logger(__name__)
 
 # Bounds one scheduler-to-worker lookup round trip on the local socket.
 _LOOKUP_TIMEOUT_S = 1.0
+
+# MORI evicts asynchronously once the pool crosses its high watermark, so a
+# put into a full pool can fail until eviction catches up.
+_STORE_RETRIES = 2
+_STORE_RETRY_BACKOFF_S = 0.01
 
 _RANK_KEY_PATTERN = re.compile(r":tp(\d+):pcp(\d+):dcp(\d+):pp(\d+):g\d+:")
 
@@ -307,6 +312,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         topology: RankTopology,
         lookup_dir: str,
         max_workers: int,
+        timeout_s: float,
         layout: KVLayoutDescriptor | None = None,
         lookup_instance: str = "",
     ) -> None:
@@ -323,6 +329,8 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             thread_name_prefix="umbp-embedded-transfer",
         )
         self._futures: dict[int, Future[TransferJobState]] = {}
+        self._store_deadlines: dict[int, float] = {}
+        self._timeout_s = timeout_s
         self._layout = layout
         self._load_layouts: dict[int, _BlockLoadLayout] = {}
 
@@ -582,6 +590,8 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         ready_events: list[torch.Event],
         range_args: _StoreArgs | None = None,
     ) -> TransferJobState:
+        # Timed from here: a store queued behind others has not stalled.
+        self._store_deadlines[id(job)] = time.monotonic() + self._timeout_s
         for event in ready_events:
             event.synchronize()
         if not plans:
@@ -593,6 +603,30 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         results = self.client.batch_put_ranges_from_ptr(
             keys, object_sizes, pointers, sizes, offsets
         )
+        failed_indices = [index for index, ok in enumerate(results) if not ok]
+        for attempt in range(_STORE_RETRIES):
+            if not failed_indices:
+                break
+            self.client.flush()
+            time.sleep(_STORE_RETRY_BACKOFF_S * (attempt + 1))
+            for index in failed_indices.copy():
+                retry = self.client.batch_put_ranges_from_ptr(
+                    [keys[index]],
+                    [object_sizes[index]],
+                    [pointers[index]],
+                    [sizes[index]],
+                    [offsets[index]],
+                )
+                if retry and retry[0]:
+                    results[index] = True
+                    failed_indices.remove(index)
+            if failed_indices:
+                logger.warning(
+                    "MORI UMBP store retry %d left %d/%d objects pending",
+                    attempt + 1,
+                    len(failed_indices),
+                    len(plans),
+                )
         if not self.client.flush():
             job.fail([plan.key for plan in plans], "MORI UMBP flush failed")
             return job
@@ -609,22 +643,43 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         if future is None:
             return job
         try:
-            return future.result()
+            return future.result(timeout=self._timeout_s)
+        except TimeoutError as exc:
+            if not future.done():
+                # The transfer still owns GPU pointers. Abort this engine step
+                # rather than reporting completion and allowing block reuse.
+                raise TimeoutError(
+                    "MORI UMBP transfer timed out with buffers still in use"
+                ) from exc
+            job.fail([plan.key for plan in job.plans], str(exc))
+            return job
         except Exception as exc:
             job.fail([plan.key for plan in job.plans], str(exc))
             return job
         finally:
-            self._futures.pop(id(job), None)
+            if future.done():
+                self._futures.pop(id(job), None)
+                self._store_deadlines.pop(id(job), None)
 
     def poll(self, job: TransferJobState) -> TransferJobState | None:
         future = self._futures.get(id(job))
         if future is None:
-            if job.status in (TransferJobStatus.COMPLETED, TransferJobStatus.FAILED):
+            if job.status in (
+                TransferJobStatus.COMPLETED,
+                TransferJobStatus.FAILED,
+                TransferJobStatus.CANCELLED,
+            ):
                 return job
             return None
         if not future.done():
+            deadline = self._store_deadlines.get(id(job))
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "MORI UMBP transfer timed out with buffers still in use"
+                )
             return None
         self._futures.pop(id(job), None)
+        self._store_deadlines.pop(id(job), None)
         try:
             return future.result()
         except Exception as exc:
@@ -634,6 +689,17 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
     def publish(self, job: TransferJobState) -> None:
         if job.status.value != "completed":
             raise RuntimeError("cannot publish an incomplete MORI UMBP job")
+
+    def cancel(self, job: TransferJobState) -> TransferJobState:
+        future = self._futures.get(id(job))
+        if future is None:
+            return job
+        if future.cancel():
+            self._futures.pop(id(job), None)
+            self._store_deadlines.pop(id(job), None)
+            job.cancel("preempted")
+            return job
+        return self.wait(job)
 
     def close(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=True)
@@ -773,6 +839,7 @@ class EmbeddedRuntime(IUMBPRuntime):
             topology,
             self.lookup_dir,
             int(self.options.get("num_workers", 4)),
+            float(self.options.get("timeout_ms", 30000)) / 1000,
             layout,
             lookup_instance=self.lookup_instance,
         )

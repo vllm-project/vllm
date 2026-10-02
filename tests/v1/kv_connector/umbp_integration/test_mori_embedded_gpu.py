@@ -155,6 +155,7 @@ def test_mori_store_overlaps_gpu_compute(tmp_path):
                 "capacity_bytes": 256 << 20,
                 "lookup_dir": str(tmp_path),
                 "num_workers": 2,
+                "timeout_ms": 60000,
             },
         )
     )
@@ -227,6 +228,7 @@ def test_mori_embedded_dram_eviction_and_restore(tmp_path, bulk_load):
                 "dram_high_watermark": 0.75,
                 "dram_low_watermark": 0.5,
                 "lookup_dir": str(tmp_path),
+                "timeout_ms": 60000,
             },
         )
     )
