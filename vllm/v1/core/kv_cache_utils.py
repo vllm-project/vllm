@@ -2776,16 +2776,23 @@ def get_kv_cache_configs(
         for worker_spec in kv_cache_specs
     ]
 
+    kvpp_staging_size = 0
     if vllm_config.cache_config.enable_kvpp:
-        from vllm.v1.kv_cache_placement import get_layer_sharded_capacity
+        from vllm.v1.kv_cache_placement import (
+            get_layer_sharded_capacity,
+            get_transfer_staging_size,
+        )
 
         assert placements is not None, "KVPP requires worker placement metadata."
         assert (
             len(placements) == len(available_memory) == len(projected_groups_per_worker)
         ), "KVPP placement, budget, and worker counts must match."
         layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+        kvpp_staging_size = get_transfer_staging_size(available_memory)
         capacities = [
-            get_layer_sharded_capacity(groups, placement, layout, available)
+            get_layer_sharded_capacity(
+                groups, placement, layout, available - kvpp_staging_size
+            )
             for groups, placement, available in zip(
                 projected_groups_per_worker, placements, available_memory
             )
@@ -2882,7 +2889,7 @@ def get_kv_cache_configs(
 
         assert placements is not None
         kv_cache_configs = [
-            build_kv_cache_storage(config, placement, layout)
+            build_kv_cache_storage(config, placement, layout, kvpp_staging_size)
             for config, placement in zip(kv_cache_configs, placements)
         ]
         set_layer_sharded_offload_block_size(kv_cache_configs)

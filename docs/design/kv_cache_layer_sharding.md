@@ -83,11 +83,13 @@ requirements from cache specs; block-count overrides must fit the worker budget.
 It determines history from scheduled request state before PCP partitioning,
 where global context lengths distinguish previous KV from current-prefill
 queries. A batch with history broadcasts only the unique blocks that hold its
-requests' computed tokens: the owner gathers them from each bundle component,
-broadcasts one packed buffer, and receivers scatter it into their scratch views.
-`BlockTables` keeps a host mirror of logical block IDs for this when KVPP is
-enabled. Dummy runs, which have no request state, broadcast complete bundles. A
-batch without history uses its cache views directly.
+requests' computed tokens: the owner gathers them from each bundle component
+into a staging buffer, broadcasts it, and receivers scatter it into their
+scratch views, in chunks the staging buffer can hold. All ranks share one
+staging size, at most 256 MiB, taken from the KV budget. `BlockTables` keeps a
+host mirror of logical block IDs for this when KVPP is enabled. Dummy runs have
+no real blocks and move only the null block. A batch without history uses its
+cache views directly.
 
 For a batch with history, the first component access to bundle `i` calls
 `acquire`, which:
@@ -113,56 +115,10 @@ and events.
 
 ## Validation
 
-### Accuracy and execution
-
-DeepSeek-V2-Lite-Chat on 4×H100, TP2 × PCP2, MRV2, compiled PIECEWISE:
-
-| Check | Replicated baseline | KVPP |
-| --- | ---: | ---: |
-| GSM8K, 200 questions / 5-shot | 64.0% | 63.0% |
-| Invalid answers | 0 | 0 |
-| Short/long and repeated-prefix smoke | Reference | 8/8 token-for-token matches |
-
-Both scores pass the existing 0.65 ± 0.08 threshold (max output 256, concurrency
-8). The evaluation used `08cccd2edf` with its eager-only guard removed.
-Commit `74a2ceb3a9` passed a fresh startup/capture, the eight-request comparison,
-and nine configuration tests. Observers confirmed graph replay with KVPP
-prefetch executing outside capture.
-
-Module coverage includes placement agreement, capacity, scratch aliases,
-persistent offload views, distributed lifetimes, and group reinitialization.
-The full distributed suite and helper tests were not rerun at `74a2ceb3a9`.
-`tests/evals/gsm8k/configs/DeepSeek-V2-Lite-Chat-KVPP.yaml` provides the model
-accuracy guard. Extend validation across prefill, decode, prefix reuse, and pool
-reload as execution support expands.
-
-### Capacity-constrained prefix pooling
-
-The best observed attention-before result used DeepSeek-V2-Lite-Chat on
-4×RTX 5090, TP4, MRV2 eager, with 512 MiB KV per rank. Four families each supplied
-4,096 shared prefix tokens and a 1,024-token unique suffix. Each of two measured
-rounds ran 256 requests at concurrency 4, generating one token per request after
-warmup.
-
-| Metric | Replicated baseline | KVPP |
-| --- | ---: | ---: |
-| Logical KV capacity (tokens) | 17,248 | 51,776 |
-| Prefix-cache hit rate, rounds 1 / 2 | 37.8% / 38.3% | 80.0% / 80.0% |
-| Input tokens/s, rounds 1 / 2 | 67,988 / 68,586 | 124,651 / 124,638 |
-| Mean input tokens/s | 68,287 | 124,645 (+82.5%) |
-
-This GPU-resident prefix pool used no CPU offload. Input throughput includes
-cached tokens, so the gain combines cache residency and broadcast scheduling.
-Both services used `NCCL_P2P_DISABLE=1` and disabled FlashInfer autotune. Maximum
-model length was 8,192 for baseline and 16,384 for KVPP; both served the same
-5,120-token requests.
-
-The performance data predates the current refactor and PIECEWISE support; its
-scope is the earlier eager implementation and this one-token-output workload.
-Current-revision throughput and long-output decode gains remain unmeasured.
-Device and workload matter: the H100 cropped-DSv3.2 CPU-offload experiment showed
-a throughput regression with attention-before broadcast. Source provenance and
-validation commands are recorded in [PR #59059](https://github.com/vllm-project/vllm/pull/59059).
+DeepSeek-V2-Lite-Chat on 4×H100 (TP2 × PCP2, compiled PIECEWISE) scores 63.0%
+on GSM8K (200 questions, 5-shot) against 64.0% for replicated KV, within the
+0.65 ± 0.08 threshold of
+`tests/evals/gsm8k/configs/DeepSeek-V2-Lite-Chat-KVPP.yaml`.
 
 ### GLM-5.3 prefill pooling on 4×GB300
 
@@ -181,7 +137,8 @@ prefixes with a 10% unique suffix, about 1.8M tokens of prefixes, shuffled.
 
 KVPP keeps the whole prefix working set resident, which replicated KV cannot,
 and its broadcast cost is under 1% on cold prefill. PCP speeds up the
-remaining computation, so the two compose. Larger
-`--max-num-batched-tokens` values gain at most 4% on cold prefill but reserve
-more activation memory and shrink KV capacity. Decode was not measured; it
-broadcasts every step and gives up the FlashInfer all-reduce.
+remaining computation, so the two compose. With `--max-num-batched-tokens
+65536`, TP4 + KVPP reaches 93,021 tok/s on the 64K agent workload, close to
+TP2 × PCP2 + KVPP at 16K; larger steps also reserve more activation memory,
+which shrinks KV capacity. Decode was not measured; it broadcasts every step
+and gives up the FlashInfer all-reduce.

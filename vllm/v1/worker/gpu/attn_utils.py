@@ -61,24 +61,31 @@ def maybe_prepare_kvpp(
     input_batch: "InputBatch",
     block_tables: "BlockTables | None" = None,
 ) -> None:
-    """Prepare KVPP history tracking without batch processing when disabled."""
+    """Pass KVPP the blocks of earlier KV this batch reads, if any.
+
+    Skips batch processing when KVPP is disabled.
+    """
     if runtime is None:
         return
-    block_ids = None
     if batch_req_state is not None:
         # PCP-local query offsets include the current prefill. Read shared
         # request history, selecting only this batch to exclude stale slots.
         req_indices = batch_req_state.idx_mapping_np
         num_computed_tokens = req_states.num_computed_tokens_np[req_indices]
-        if block_tables is not None and block_tables.cpu_block_ids is not None:
-            block_ids = block_tables.get_history_block_ids(
-                req_indices, num_computed_tokens
-            )
-    else:
-        # Dummy runs have no request-state mapping; use their synthetic context
-        # lengths and exclude padded entries.
-        num_computed_tokens = input_batch.num_computed_tokens_np[: input_batch.num_reqs]
-    runtime.prepare_forward(bool(np.any(num_computed_tokens > 0)), block_ids)
+        if not np.any(num_computed_tokens > 0):
+            runtime.prepare_forward(None)
+            return
+        assert block_tables is not None
+        runtime.prepare_forward(
+            block_tables.get_history_block_ids(req_indices, num_computed_tokens)
+        )
+        return
+    # Dummy runs have no request-state mapping or real blocks. Use their
+    # synthetic context lengths, excluding padding, and move only the null block
+    # so every rank still issues the same collectives.
+    num_computed_tokens = input_batch.num_computed_tokens_np[: input_batch.num_reqs]
+    has_history = bool(np.any(num_computed_tokens > 0))
+    runtime.prepare_forward(np.zeros(1, dtype=np.int64) if has_history else None)
 
 
 @dataclass(frozen=True)

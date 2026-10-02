@@ -55,12 +55,11 @@ def test_disabled_kvpp_does_not_access_batch_state():
     [([0], 4, False), ([1], 0, True), (None, 0, False), (None, 4, True)],
 )
 def test_kvpp_uses_scheduled_history_or_dummy_context(indices, local_history, expected):
-    prepared: list[bool] = []
-
-    def prepare_forward(has_history: bool, block_ids: Any = None) -> None:
-        prepared.append(has_history)
-
-    runtime = SimpleNamespace(prepare_forward=prepare_forward)
+    prepared: list[np.ndarray | None] = []
+    runtime = SimpleNamespace(prepare_forward=prepared.append)
+    block_tables = SimpleNamespace(
+        get_history_block_ids=lambda indices, computed: np.array([3])
+    )
     req_states = SimpleNamespace(num_computed_tokens_np=np.array([0, 7]))
     if indices is not None:
         batch_req_state = SimpleNamespace(idx_mapping_np=np.array(indices))
@@ -69,8 +68,11 @@ def test_kvpp_uses_scheduled_history_or_dummy_context(indices, local_history, ex
     input_batch = SimpleNamespace(
         num_reqs=1, num_computed_tokens_np=np.array([local_history, 9])
     )
-    attn_utils.maybe_prepare_kvpp(runtime, req_states, batch_req_state, input_batch)
-    assert prepared == [expected]
+    attn_utils.maybe_prepare_kvpp(
+        runtime, req_states, batch_req_state, input_batch, block_tables
+    )
+    [block_ids] = prepared
+    assert (block_ids is not None) == expected
 
 
 @pytest.mark.parametrize(

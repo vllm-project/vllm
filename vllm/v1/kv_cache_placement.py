@@ -15,6 +15,9 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+# Upper bound on the packed buffer used to broadcast a batch's blocks.
+MAX_TRANSFER_STAGING_BYTES = 256 << 20
+
 
 @dataclass(frozen=True)
 class KVCacheBundle:
@@ -65,6 +68,9 @@ class KVCacheStoragePlan:
     placement: KVCachePlacement
     regions: tuple[KVCacheBundleRegion, ...]
     backing_size: int
+    # Packed buffer for broadcasting a batch's blocks, outside the backing
+    # arena. Ranks agree on its size so transfers chunk identically.
+    staging_size: int = 0
 
     @property
     def persistent_layers(self) -> tuple[str, ...]:
@@ -114,10 +120,16 @@ def validate_kv_cache_placements(
                 raise ValueError("KV replica ranks have different logical cache specs.")
 
 
+def get_transfer_staging_size(available_memory: list[int]) -> int:
+    """Common staging budget for packed transfers, taken from the KV budget."""
+    return min(MAX_TRANSFER_STAGING_BYTES, min(available_memory) // 16)
+
+
 def build_kv_cache_storage(
     config: KVCacheConfig,
     placement: KVCachePlacement,
     layout: KVCacheLayout,
+    staging_size: int = 0,
 ) -> KVCacheConfig:
     """Materialize stable owner and alternating scratch views for final blocks.
 
@@ -190,7 +202,9 @@ def build_kv_cache_storage(
             )
     for tensor in tensors:
         tensor.size = cursor
-    plan = KVCacheStoragePlan(placement, tuple(regions), cursor)
+    # Staging must hold at least one block of the largest target bundle.
+    staging_size = max(staging_size, scratch_size // config.num_blocks)
+    plan = KVCacheStoragePlan(placement, tuple(regions), cursor, staging_size)
     return replace(config, kv_cache_tensors=tensors, storage_plan=plan)
 
 
