@@ -563,7 +563,7 @@ def test_release_cudagraph_pool_bounds_recapture():
     with pytest.raises(AssertionError, match="asleep"):
         release_cudagraph_pool(cfg)
     backend.resume()
-    with pytest.raises(AssertionError, match="Live CUDA graphs"):
+    with pytest.raises(AssertionError, match="still has 1 other reference"):
         release_cudagraph_pool(cfg)
 
     for _ in range(3):

@@ -466,8 +466,14 @@ class CuMemAllocator:
             for data in self.pointer_to_data.values()
             if data.tag == "cudagraph"
         ), "Cannot release the CUDA graph pool while it is asleep"
-        # The pool counts our reference plus one per live graph.
-        assert mem_pool.use_count() == 1, "Live CUDA graphs still use the pool"
+        # The pool counts our reference plus one per live graph, and one per
+        # pool reference taken without a release while capturing.
+        others = mem_pool.use_count() - 1
+        assert others == 0, (
+            f"The CUDA graph pool still has {others} other reference(s): live "
+            "CUDA graphs, or references taken by resuming graph-pool allocation "
+            "during capture without a release (NCCL symmetric memory did this)"
+        )
         del self.allocator_and_pools["cudagraph"], entries
         # ~MemPool frees the segments through the allocator, which must still
         # be alive (pytorch/pytorch#145168): drop the pool first.
