@@ -233,7 +233,9 @@ def _verify_checksum(fd: int, path: str, data: memoryview) -> None:
         os.remove(path)
     except OSError as cleanup_exc:
         logger.warning("Failed to remove corrupt file %s: %s", path, cleanup_exc)
-    raise OSError(errno.EBADMSG, "Block checksum mismatch", path)
+    mismatch = OSError(errno.EBADMSG, "Block checksum mismatch", path)
+    mismatch.checksum_failed = True  # type: ignore[attr-defined]
+    raise mismatch
 
 
 def batch_store_block(
@@ -277,7 +279,8 @@ def batch_load_block(
     Raises on first error (see _load_block for the delete-on-short-read policy).
     On failure the raised OSError carries ``num_succeeded`` = the number of
     blocks loaded before the failing one, so the tier can keep them.
-    With *checksum*, a block failing verification raises with errno ``EBADMSG``.
+    With *checksum*, a block failing verification raises ``EBADMSG`` with
+    ``checksum_failed`` set.
     """
     _validate_offsets(view, offsets, block_size)
 

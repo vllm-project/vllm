@@ -37,6 +37,9 @@ constexpr int kXattrAbsentErrno = ENOATTR;
 constexpr int kXattrAbsentErrno = ENODATA;
 #endif
 
+// Returned by verify_checksum for a mismatch; distinct from any errno.
+constexpr int kChecksumMismatch = -1;
+
 extern "C" {
 
 namespace {
@@ -108,7 +111,7 @@ inline int set_checksum_xattr(int fd, uint32_t crc) {
 }
 
 // Returns 0 if `data` matches the CRC32C recorded on `fd` or none is recorded,
-// EBADMSG on a mismatch, or the errno of a failed lookup.
+// kChecksumMismatch on a mismatch, or the errno of a failed lookup.
 inline int verify_checksum(int fd, const char* data, size_t size) {
   unsigned char value[kChecksumSize];
 #if defined(__APPLE__)
@@ -121,16 +124,16 @@ inline int verify_checksum(int fd, const char* data, size_t size) {
       return 0;
     }
     // ERANGE: the record is larger than a checksum.
-    return errno == ERANGE ? EBADMSG : errno;
+    return errno == ERANGE ? kChecksumMismatch : errno;
   }
   if (len != static_cast<ssize_t>(kChecksumSize)) {
-    return EBADMSG;
+    return kChecksumMismatch;
   }
   const uint32_t expected = (static_cast<uint32_t>(value[0]) << 24) |
                             (static_cast<uint32_t>(value[1]) << 16) |
                             (static_cast<uint32_t>(value[2]) << 8) |
                             static_cast<uint32_t>(value[3]);
-  return crc32c(data, size) == expected ? 0 : EBADMSG;
+  return crc32c(data, size) == expected ? 0 : kChecksumMismatch;
 }
 
 // Returns 0 on success, or the std::error_code's POSIX-compatible value on
@@ -205,7 +208,8 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
 // corruption. Open failures and read errors (bytes_read < 0) are
 // transient/ambiguous and leave the file untouched; a close failure after a
 // full read is harmless and does not fail the load.
-// With `checksum`, a CRC32C mismatch also removes the file and returns EBADMSG.
+// With `checksum`, a CRC32C mismatch also removes the file and returns
+// kChecksumMismatch.
 inline int _load_block(const char* source_path, char* dst, size_t size,
                        bool use_o_direct, bool checksum) {
   const int o_direct_flag = use_o_direct ? kODirectFlag : 0;
@@ -232,7 +236,7 @@ inline int _load_block(const char* source_path, char* dst, size_t size,
     const int err = verify_checksum(fd, dst, size);
     if (err != 0) {
       close(fd);
-      if (err == EBADMSG) {
+      if (err == kChecksumMismatch) {
         unlink(source_path);
       }
       return err;
@@ -405,7 +409,8 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
 ///                     (default True). Ignored where O_DIRECT is unsupported
 ///                     by the platform.
 /// @param checksum     bool – check each block against its recorded CRC32C
-///                     (default False). A mismatch raises EBADMSG.
+///                     (default False). A mismatch raises EBADMSG with
+///                     `checksum_failed` set.
 /// @note Releases the GIL for the entire batch. Raises on first error.
 static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
   PyObject* source_paths_obj = nullptr;
@@ -454,8 +459,9 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
   release_buffer_list(buffers);
 
   if (failed_index >= 0) {
+    const bool checksum_failed = failure_errno == kChecksumMismatch;
     // PyErr_SetFromErrnoWithFilename() reads the errno to format exception.
-    errno = failure_errno;
+    errno = checksum_failed ? EBADMSG : failure_errno;
     PyErr_SetFromErrnoWithFilename(PyExc_OSError, source_paths[failed_index]);
     // Attach the number of blocks that loaded before the failure so the tier
     // can keep them (partial success). failed_index == count of blocks read OK.
@@ -467,6 +473,9 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
       if (num != nullptr) {
         PyObject_SetAttrString(evalue, "num_succeeded", num);
         Py_DECREF(num);
+      }
+      if (checksum_failed) {
+        PyObject_SetAttrString(evalue, "checksum_failed", Py_True);
       }
     }
     PyErr_Restore(etype, evalue, etb);
