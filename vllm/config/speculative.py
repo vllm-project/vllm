@@ -467,6 +467,16 @@ class SpeculativeConfig:
     draft logits to shared tokens only (TLI algorithm). Requires
     method='draft_model'."""
 
+    draft_token_map: str | None = None
+    """Path to a list of target token ids that the drafter may propose
+    (FR-Spec). The drafter's shared lm_head is restricted to these rows, which
+    cuts its cost per draft token; the target still verifies with the full
+    vocabulary, so outputs follow the usual speculative decoding guarantees.
+    Accepts SGLang's `--speculative-token-map` file (`.pt`), a JSON list, or
+    whitespace/comma separated text. EOS ids are always included. Requires a
+    drafter that shares the target lm_head (MTP, or EAGLE without its own
+    head) and Model Runner V2."""
+
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
     """Maximum size of ngram token window when using Ngram proposer, required
@@ -1855,6 +1865,17 @@ class SpeculativeConfig:
                 "use_heterogeneous_vocab currently only supports greedy draft "
                 "sampling. Set draft_sample_method='greedy' (the default) or "
                 "omit it."
+            )
+
+        if self.draft_token_map is not None and (
+            self.method not in ("mtp", "eagle", "eagle3")
+            or self.use_gemma4_mtp()
+            or self.use_step3p5_mtp()
+        ):
+            raise ValueError(
+                "draft_token_map requires a drafter that shares the target "
+                "model's lm_head (method 'mtp', 'eagle' or 'eagle3', except "
+                f"Gemma 4 and Step-3.5 MTP), got method={self.method!r}."
             )
 
         if not self.use_heterogeneous_vocab:

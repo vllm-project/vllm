@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.spec_decode.draft_vocab import DraftVocab, make_draft_vocab
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
@@ -102,6 +103,10 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
+    # Whether draft tokens are sampled only through sample_draft(), which is
+    # what draft_token_map hooks into.
+    supports_draft_token_map: bool = False
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device
@@ -207,6 +212,9 @@ class DraftModelSpeculator(BaseSpeculator):
         self.supports_mm_inputs = False
         self.pcp_manager: PCPManager | None = None
 
+        self.draft_vocab: DraftVocab | None = None
+        self.draft_vocab_logits: torch.Tensor | None = None
+
     @abstractmethod
     def load_draft_model(
         self, target_model: nn.Module, target_attn_layer_names: set[str]
@@ -222,6 +230,7 @@ class DraftModelSpeculator(BaseSpeculator):
         )
 
         self.model = self.load_draft_model(target_model, target_attn_layer_names)
+        self._maybe_init_draft_vocab(target_model)
         self._validate_local_argmax_reduction()
 
         all_attn_layers = get_layers_from_vllm_config(
@@ -384,6 +393,35 @@ class DraftModelSpeculator(BaseSpeculator):
         """
         return vllm_config.model_config.head_dtype, 0.0
 
+    def _maybe_init_draft_vocab(self, target_model: nn.Module) -> None:
+        token_map = self.speculative_config.draft_token_map
+        if token_map is None:
+            return
+        if not self.supports_draft_token_map:
+            raise ValueError(
+                f"draft_token_map is not supported by {type(self).__name__}."
+            )
+        from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
+
+        target_language_model = (
+            target_model.get_language_model()
+            if hasattr(target_model, "get_language_model")
+            else target_model
+        )
+        target_lm_head = get_target_lm_head(target_model, target_language_model)
+        if target_lm_head is None:
+            raise ValueError("draft_token_map requires the target lm_head.")
+        self.draft_vocab = make_draft_vocab(
+            token_map, self.vllm_config.model_config, self.model, target_lm_head
+        )
+        if self.draft_logits is not None:
+            self.draft_vocab_logits = torch.full(
+                (self.max_num_reqs, self.vocab_size),
+                float("-inf"),
+                dtype=self.draft_logits.dtype,
+                device=self.device,
+            )
+
     def _validate_local_argmax_reduction(self) -> None:
         if not self.use_local_argmax_reduction:
             return
@@ -424,10 +462,18 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_logits: torch.Tensor | None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        draft_vocab = self.draft_vocab
         if draft_logits is None and self.use_local_argmax_reduction:
-            return self.get_draft_top_tokens(hidden_states, spec_step_idx)
+            top = self.get_draft_top_tokens(hidden_states, spec_step_idx)
+            return top if draft_vocab is None else draft_vocab.col_to_target[top]
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
+        if draft_vocab is not None:
+            logits = draft_vocab.restrict(logits)
+            if draft_logits is not None:
+                # Rejection sampling reads the proposal over the full vocab.
+                assert self.draft_vocab_logits is not None
+                logits = draft_vocab.scatter(logits, self.draft_vocab_logits)
         if draft_logits is not None:
             sampler = (
                 gumbel_sample
@@ -448,6 +494,8 @@ class DraftModelSpeculator(BaseSpeculator):
             )
         else:
             sampled = logits.argmax(dim=-1)
+            if draft_vocab is not None:
+                sampled = draft_vocab.target_ids[sampled]
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
 
