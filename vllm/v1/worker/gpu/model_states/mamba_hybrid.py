@@ -75,6 +75,7 @@ def compute_num_decode_draft_tokens(
     num_scheduled_tokens: np.ndarray,
     num_draft_tokens_per_req: np.ndarray | None,
     is_prefilling: np.ndarray,
+    max_decode_query_len: int,
 ) -> np.ndarray:
     """Preserve the speculative state layout for decode rows without drafts."""
     num_reqs = num_scheduled_tokens.shape[0]
@@ -83,7 +84,11 @@ def compute_num_decode_draft_tokens(
     num_decode_draft_tokens = np.full(num_padded_reqs, -1, dtype=np.int32)
     if num_draft_tokens_per_req is None:
         num_draft_tokens_per_req = np.zeros(num_reqs, dtype=np.int32)
-    is_decode = (~is_prefilling) & (num_scheduled_tokens > 0)
+    is_decode = (
+        (~is_prefilling)
+        & (num_scheduled_tokens > 0)
+        & (num_scheduled_tokens <= max_decode_query_len)
+    )
     num_decode_draft_tokens[:num_reqs] = np.where(
         is_decode, num_draft_tokens_per_req, -1
     )
@@ -303,6 +308,7 @@ class MambaHybridModelState(DefaultModelState):
                     input_batch.num_scheduled_tokens,
                     num_draft_tokens_per_req,
                     is_prefilling_np,
+                    max_decode_query_len=self.vllm_config.num_speculative_tokens + 1,
                 )
             )
 

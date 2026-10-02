@@ -44,6 +44,9 @@ from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import (  # noqa: E402
+    compute_num_decode_draft_tokens,
+)
 
 NUM_SPEC = 3
 SPEC_TOKENS = NUM_SPEC + 1
@@ -251,6 +254,11 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
         ),
         pytest.param([96], [64], [-1], 0, id="pure-prefill"),
         pytest.param([128], [1], [-1], 0, id="pure-decode"),
+        pytest.param([64, 64], [12, 12], None, 0, id="oversized-dummy-batch"),
+        pytest.param([128, 64], [1, 12], None, 0, id="zero-draft-with-dummy"),
+        pytest.param(
+            [128, 64], [SPEC_TOKENS, 12], None, 0, id="verify-boundary-with-dummy"
+        ),
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
@@ -258,7 +266,7 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
 def test_fused_model_path_matches_reference(
     seq_lens: list[int],
     query_lens: list[int],
-    draft_tokens: list[int],
+    draft_tokens: list[int] | None,
     expected_fused_calls: int,
     output_gate_activation: str,
 ) -> None:
@@ -282,6 +290,17 @@ def test_fused_model_path_matches_reference(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     )
     common.block_table_tensor.add_(1)
+    if draft_tokens is None:
+        draft_tokens = compute_num_decode_draft_tokens(
+            num_padded_reqs=batch.batch_size,
+            num_scheduled_tokens=torch.tensor(query_lens, dtype=torch.int32).numpy(),
+            num_draft_tokens_per_req=None,
+            is_prefilling=torch.zeros(batch.batch_size, dtype=torch.bool).numpy(),
+            max_decode_query_len=SPEC_TOKENS,
+        ).tolist()
+        assert draft_tokens == [
+            0 if length <= SPEC_TOKENS else -1 for length in query_lens
+        ]
     with set_current_vllm_config(vllm_config):
         metadata = builder.build(
             common_prefix_len=0,

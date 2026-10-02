@@ -178,6 +178,7 @@ def test_zero_draft_decode_row_is_marked_as_a_speculative_row():
         num_scheduled_tokens=np.array([3, 1, 1], dtype=np.int32),
         num_draft_tokens_per_req=np.array([2, 0, 0], dtype=np.int32),
         is_prefilling=np.array([False, False, True]),
+        max_decode_query_len=3,
     )
 
     assert num_decode_draft_tokens.tolist() == [
@@ -197,6 +198,7 @@ def test_batch_without_any_drafts_still_marks_its_decode_rows():
         num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
         num_draft_tokens_per_req=None,
         is_prefilling=np.array([False, True]),
+        max_decode_query_len=4,
     )
 
     assert num_decode_draft_tokens.tolist() == [0, -1]
@@ -210,9 +212,32 @@ def test_padded_rows_keep_the_sentinel():
         num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
         num_draft_tokens_per_req=np.array([0, 0], dtype=np.int32),
         is_prefilling=np.array([False, False]),
+        max_decode_query_len=4,
     )
 
     assert num_decode_draft_tokens.tolist() == [0, 0, -1, -1]
+
+
+@pytest.mark.parametrize("max_decode_query_len", [1, 4, 8])
+@pytest.mark.parametrize("has_drafts", [False, True])
+def test_decode_rows_must_fit_in_the_speculative_state_window(
+    max_decode_query_len: int, has_drafts: bool
+) -> None:
+    """Profiling rows without prefill flags must not overrun the state window."""
+    query_lens = np.array(
+        [0, 1, max_decode_query_len, max_decode_query_len + 1, 12, 1],
+        dtype=np.int32,
+    )
+    draft_tokens = np.zeros(len(query_lens), dtype=np.int32) if has_drafts else None
+    result = compute_num_decode_draft_tokens(
+        num_padded_reqs=8,
+        num_scheduled_tokens=query_lens,
+        num_draft_tokens_per_req=draft_tokens,
+        is_prefilling=np.array([False, False, False, False, False, True]),
+        max_decode_query_len=max_decode_query_len,
+    )
+
+    assert result.tolist() == [-1, 0, 0, -1, -1, -1, -1, -1]
 
 
 def test_adaptive_verification_keeps_decode_rows_speculative():
@@ -221,6 +246,7 @@ def test_adaptive_verification_keeps_decode_rows_speculative():
         num_scheduled_tokens=np.array([2, 1, 0], dtype=np.int32),
         num_draft_tokens_per_req=np.array([5, 0, 0], dtype=np.int32),
         is_prefilling=np.array([False, False, False]),
+        max_decode_query_len=6,
     )
 
     assert num_decode_draft_tokens.tolist() == [5, 0, -1]
@@ -234,9 +260,58 @@ def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel():
         num_scheduled_tokens=np.array([2, 3], dtype=np.int32),
         num_draft_tokens_per_req=np.array([0, 0], dtype=np.int32),
         is_prefilling=np.array([True, True]),
+        max_decode_query_len=4,
     )
 
     assert num_decode_draft_tokens.tolist() == [-1, -1]
+
+
+@pytest.mark.parametrize("query_lens", [[12, 12], [1, 12], [8, 12]])
+def test_prepare_attn_excludes_oversized_dummy_rows_from_spec_decode(
+    monkeypatch: pytest.MonkeyPatch, query_lens: list[int]
+) -> None:
+    """Unflagged profiling rows must use prefill metadata, not bounded state slots."""
+    state = _mamba_hybrid_state(num_speculative_tokens=7)
+    batch = _input_batch_with_no_scheduled_drafts()
+    batch.num_tokens = batch.num_tokens_after_padding = sum(query_lens)
+    batch.num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
+    batch.query_start_loc_np = np.array([0, query_lens[0], sum(query_lens)], np.int32)
+    batch.query_start_loc = torch.from_numpy(batch.query_start_loc_np)
+    batch.seq_lens = batch.seq_lens_cpu_upper_bound = torch.tensor([128, 128])
+    batch.positions = torch.arange(batch.num_tokens)
+    build_attn_metadata = Mock(return_value={})
+    monkeypatch.setattr(mamba_hybrid, "build_attn_metadata", build_attn_metadata)
+    state.prepare_attn(
+        input_batch=batch,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        block_tables=(),
+        slot_mappings={},
+        attn_groups=[],
+        kv_cache_config=Mock(),
+    )
+    metadata = build_attn_metadata.call_args.kwargs["model_specific_attn_metadata"]
+    builder = _create_gdn_builder(num_speculative_tokens=7)
+    builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[128, 128], query_lens=query_lens), BLOCK_SIZE, DEVICE
+    ).replace(**metadata.get_extra_common_attn_kwargs(0, 2))
+    result = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=metadata.num_accepted_tokens,
+        num_decode_draft_tokens_cpu=metadata.num_decode_draft_tokens_cpu,
+    )
+
+    expected_spec_decodes = int(query_lens[0] <= 8)
+    assert result.num_spec_decodes == expected_spec_decodes
+    assert result.num_prefills == 2 - expected_spec_decodes
+    assert result.num_prefill_tokens == sum(query_lens[expected_spec_decodes:])
+    if expected_spec_decodes:
+        assert result.num_accepted_tokens.tolist() == [4]
+        assert result.spec_state_indices_tensor.shape[1] == 8
+        assert torch.diff(result.spec_query_start_loc).tolist() == [query_lens[0]]
+    else:
+        assert result.spec_state_indices_tensor is None
 
 
 def test_padded_prompt_tail_builds_as_spec_decode(
