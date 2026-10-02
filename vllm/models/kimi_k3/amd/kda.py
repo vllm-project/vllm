@@ -52,7 +52,6 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda,
     fused_recurrent_kda_packed_decode,
 )
-from vllm.platforms.rocm import on_gfx950, on_gfx1250
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
@@ -216,11 +215,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             "The ROCm Kimi-K3 KDA prefill backend must be one of "
             f"'auto', 'triton' or 'fused', got {backend!r}."
         )
-        gluon_ok = (
-            (on_gfx950() or on_gfx1250())
-            and rocm_aiter_ops.is_enabled()
-            and self.use_safe_gate
-        )
+        gluon_ok = rocm_aiter_ops.is_enabled() and self.use_safe_gate
         if backend in ("auto", "fused") and gluon_ok:
             backend = "gluon"
         elif backend == "auto":

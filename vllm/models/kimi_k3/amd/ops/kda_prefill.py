@@ -72,8 +72,8 @@ def chunk_kda_prefill(
         use_fused_chunk: request the two-kernel ROCm path. It is used only when
             every one of its preconditions holds; otherwise the Triton path
             runs unchanged.
-        use_gluon_chunk: run aiter's Gluon chunk KDA kernel instead of the
-            fused or Triton path.
+        use_gluon_chunk: run aiter's chunk_kda instead of the fused or Triton
+            path.
         out: buffer the result must land in. Honoured by both backends, so the
             caller can hand in a slice of its own output and skip a copy.
         checkpoint_state: destination for mid-prefill recurrent state
