@@ -233,6 +233,7 @@ async def init_generate_state(
     strategy_cls = (
         select_read_strategy(engine_client.model_config)
         if "generate" in supported_tasks
+        and getattr(args, "enable_structured_decisions", False)
         else None
     )
     state.serving_structured_decisions = (

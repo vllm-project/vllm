@@ -181,9 +181,13 @@ class RenderedDecision:
             return str(self.answer_macro(question_vars(question), label))
 
     def slot(self, tokenizer: TokenizerLike, question: Question) -> AnswerSlot:
+        labels = list(question.labels)
+        if len(labels) == 1:
+            # label_position needs us to tokenize with a throwaway label
+            labels.append(next(c for c in LABEL_CANDIDATES if c != labels[0]))
         variants = [
             tokenizer.encode(self.answer(question, label), add_special_tokens=False)
-            for label in question.labels
+            for label in labels
         ]
         pos, label_ids = label_position(question, variants)
         if pos == 0:
@@ -191,7 +195,9 @@ class RenderedDecision:
                 f"question {question.id!r}: the answer must have text before the "
                 "label, such as the question id"
             )
-        return AnswerSlot(prefix_ids=variants[0][:pos], label_ids=label_ids)
+        return AnswerSlot(
+            prefix_ids=variants[0][:pos], label_ids=label_ids[: len(question.labels)]
+        )
 
 
 def label_position(

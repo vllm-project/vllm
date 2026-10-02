@@ -3,16 +3,30 @@
 from types import SimpleNamespace
 from typing import Any
 
+from fastapi import FastAPI
+
+from vllm.entrypoints.generate.structured_decisions.api_router import (
+    register_structured_decisions_api_router,
+)
 from vllm.entrypoints.generate.structured_decisions.strategies import (
     NextTokenStrategy,
     select_read_strategy,
 )
 
 
-def model(is_diffusion: bool) -> Any:
-    return SimpleNamespace(is_diffusion=is_diffusion)
+def model(architecture: str) -> Any:
+    return SimpleNamespace(architecture=architecture)
 
 
 def test_strategy_selection():
-    assert select_read_strategy(model(False)) is NextTokenStrategy
-    assert select_read_strategy(model(True)) is None
+    assert select_read_strategy(model("Qwen3ForCausalLM")) is NextTokenStrategy
+    assert select_read_strategy(model("LlamaForCausalLM")) is None
+
+
+def test_route_needs_the_flag():
+    for enabled in (False, True):
+        app = FastAPI()
+        app.state.args = SimpleNamespace(enable_structured_decisions=enabled)
+        register_structured_decisions_api_router(app)
+        paths = {getattr(route, "path", None) for route in app.routes}
+        assert ("/v1/systemone" in paths) == enabled

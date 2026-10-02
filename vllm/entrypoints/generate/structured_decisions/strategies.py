@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Read strategies: how a model is asked for label probabilities.
 
-Diffusion models have no read strategy yet, so the decision route returns 501
-for them.
+Only models in NEXT_TOKEN_ARCHITECTURES are currently supported.
 """
 
 import math
@@ -156,5 +155,12 @@ class NextTokenStrategy(ReadStrategy):
         return reads
 
 
+NEXT_TOKEN_ARCHITECTURES = frozenset(
+    {"Qwen3ForCausalLM", "Qwen3_5MoeForConditionalGeneration"}
+)
+
+
 def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy] | None:
-    return None if model_config.is_diffusion else NextTokenStrategy
+    if model_config.architecture in NEXT_TOKEN_ARCHITECTURES:
+        return NextTokenStrategy
+    return None

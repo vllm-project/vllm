@@ -90,6 +90,17 @@ def test_slot_on_default_answer():
         )
 
 
+def test_slot_for_one_option():
+    tokenizer = get_tokenizer(MODEL_NAME)
+    q = choice("q", "", {"only": None}, ("K",))
+    slot = (
+        DecisionTemplate(DEFAULT_DECISION_TEMPLATE).render(None, [q]).slot(tokenizer, q)
+    )
+    assert tokenizer.encode("q: K", add_special_tokens=False) == (
+        slot.prefix_ids + slot.label_ids
+    )
+
+
 def test_slot_with_text_after_the_label():
     tokenizer = get_tokenizer(MODEL_NAME)
     template = DecisionTemplate(

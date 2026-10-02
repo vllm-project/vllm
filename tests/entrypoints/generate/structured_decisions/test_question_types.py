@@ -75,13 +75,18 @@ def test_choice_answer_shape():
         ("", "choice", {"x": None, "y": None}, "non-empty"),
         ("q", "nope", {"x": None, "y": None}, "unknown question type"),
         ("q", "choice", ["x", "y"], "must map option names"),
-        ("q", "choice", {"x": None}, "at least 2"),
         ("q", "choice", {str(i): None for i in range(27)}, "at most 26"),
     ],
 )
 def test_build_question_rejects(qid, type_name, criteria, match):
     with pytest.raises(StructuredDecisionError, match=match):
         build_question(qid, type_name, "", criteria, LETTERS, 128)
+
+
+def test_one_option_choice():
+    q = build_question("q", "choice", "", {"only": None}, LETTERS, 128)
+    assert len(q.labels) == 1
+    assert q.type.answer(q, [1.0], 0.4)["confidence"] == 0.4
 
 
 def test_option_limit_is_the_smaller_cap():

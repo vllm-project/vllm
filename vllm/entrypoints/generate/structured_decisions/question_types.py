@@ -93,10 +93,8 @@ def build_question(
         )
     qtype = get_question_type(type_name)
     options = qtype.parse_options(qid, criteria)
-    if len(options) < 2:
-        raise StructuredDecisionError(
-            f"question {qid!r}: needs at least 2 options, got {len(options)}"
-        )
+    if not options:
+        raise StructuredDecisionError(f"question {qid!r}: needs at least one option")
     names = [o.name for o in options]
     if len(set(names)) != len(names):
         raise StructuredDecisionError(f"question {qid!r}: duplicate option names")

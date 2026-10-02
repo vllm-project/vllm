@@ -3,8 +3,9 @@
 The `/v1/systemone` endpoint answers a set of typed questions about a state and
 returns a probability for every allowed answer.
 
-The endpoint serves generative models (task `"generate"`) that have a chat
-template.
+The endpoint is off unless the server starts with
+`--enable-structured-decisions`. The endpoint only serves models that support
+structured decisions, and other models will return 501.
 
 ## How it works
 
@@ -31,7 +32,7 @@ the fourth.
 | --- | --- | --- |
 | `choice` | map of option name to a description or `null` | `choice`, `probabilities` by option name, `confidence` |
 
-A choice has at least 2 options. A question id is a non-empty string made of any
+A choice has at least one option. A question id is a non-empty string made of any
 characters except `:` and newline.
 
 ## Example
