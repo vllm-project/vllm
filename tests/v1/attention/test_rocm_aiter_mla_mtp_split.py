@@ -1313,28 +1313,16 @@ def _adaptive_config(
     )
 
 
-@pytest.mark.parametrize(
-    ("config", "spec", "bound"),
-    [
-        (_adaptive_config(), SimpleNamespace(), 8),
-        (_adaptive_config(adaptive=False), SimpleNamespace(), None),
-        # DCP routes plan per-row windows from host lengths.
-        (_adaptive_config(dcp=2), SimpleNamespace(), None),
-        # Kimi-K3 DSpark draft layers share the target's group; causality is
-        # decided per batch, so the merged non-causal spec keeps the bound.
-        (
-            _adaptive_config(),
-            SimpleNamespace(non_causal_multi_token_decode=True),
-            8,
-        ),
-    ],
-    ids=["adaptive", "fixed", "dcp", "shared_draft_group"],
-)
-def test_varlen_cudagraph_bound_follows_adaptive_verification(config, spec, bound):
-    assert (
-        AiterMLAMetadataBuilder.get_varlen_cudagraph_max_query_len(config, spec)
-        == bound
-    )
+def test_varlen_cudagraph_bound_follows_adaptive_verification():
+    bound = AiterMLAMetadataBuilder.get_varlen_cudagraph_max_query_len
+    assert bound(_adaptive_config(), SimpleNamespace()) == 8
+    assert bound(_adaptive_config(adaptive=False), SimpleNamespace()) is None
+    # DCP routes plan per-row windows from host lengths.
+    assert bound(_adaptive_config(dcp=2), SimpleNamespace()) is None
+    # Kimi-K3 DSpark draft layers share the target's group; causality is
+    # decided per batch, so the merged non-causal spec keeps the bound.
+    shared_draft_group = SimpleNamespace(non_causal_multi_token_decode=True)
+    assert bound(_adaptive_config(), shared_draft_group) == 8
 
 
 def test_varlen_rows_left_align_each_request_in_its_block():

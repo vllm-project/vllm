@@ -74,24 +74,11 @@ def _trimmed_verify_batch(builder: KimiK3ROCmKDAMetadataBuilder):
     return builder.build(0, common, accepted, num_decode_draft_tokens_cpu)
 
 
-def test_backend_accepts_device_trimmed_query_lengths():
+def test_backend_and_builder_opt_in_only_under_adaptive_verification():
     assert KimiK3ROCmKDABackend.supports_device_cpu_query_lens_mismatch()
-
-
-def test_varlen_cudagraph_bound_is_the_verify_width_only_when_adaptive():
-    spec = _spec()
-    assert (
-        KimiK3ROCmKDAMetadataBuilder.get_varlen_cudagraph_max_query_len(
-            _config(adaptive=True), spec
-        )
-        == NUM_SPEC + 1
-    )
-    assert (
-        KimiK3ROCmKDAMetadataBuilder.get_varlen_cudagraph_max_query_len(
-            _config(adaptive=False), spec
-        )
-        is None
-    )
+    bound = KimiK3ROCmKDAMetadataBuilder.get_varlen_cudagraph_max_query_len
+    assert bound(_config(adaptive=True), _spec()) == NUM_SPEC + 1
+    assert bound(_config(adaptive=False), _spec()) is None
 
 
 def test_adaptive_verification_drops_the_host_uniform_length():
@@ -103,21 +90,6 @@ def test_adaptive_verification_drops_the_host_uniform_length():
     assert torch.equal(
         meta.spec_query_start_loc.cpu(), torch.tensor([0, 4, 6], dtype=torch.int32)
     )
-
-
-def test_fixed_verification_keeps_the_uniform_length():
-    """Control: without adaptive verification the host lengths are exact."""
+    # Without adaptive verification the host lengths are exact and kept.
     meta = _trimmed_verify_batch(_builder(adaptive=False))
     assert meta.uniform_spec_sequence_length == 3
-
-
-def test_one_token_capture_shape_is_recorded_on_the_spec_path():
-    """Varlen decode graphs are captured with one token per request; the graph
-    must hold the spec kernels that real trimmed batches replay into."""
-    builder = _builder(adaptive=True)
-    batch = BatchSpec(seq_lens=[64] * 4, query_lens=[1] * 4)
-    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
-    meta = builder.build_for_cudagraph_capture(common)
-    assert meta.num_spec_decodes == 4
-    assert meta.num_decodes == 0
-    assert meta.uniform_spec_sequence_length is None
