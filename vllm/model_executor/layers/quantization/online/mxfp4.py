@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     )
 
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
@@ -168,21 +167,11 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        # TODO: remove once https://github.com/ROCm/aiter/pull/6086 is merged
-        # and AITER is bumped. Only SwiGLU-OAI is forwarded, to keep the
-        # existing SiLU/SiTU alignment.
-        activation = self.moe.activation
-        swiglu_oai_activation = (
-            activation
-            if activation
-            in (MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
-            else None
-        )
         return mxfp4_round_up_hidden_size_and_intermediate_size(
             self.mxfp4_backend,
             hidden_size,
             intermediate_size_per_partition,
-            activation=swiglu_oai_activation,
+            activation=self.moe.activation,
             has_bias=self.moe.has_bias,
         )
 

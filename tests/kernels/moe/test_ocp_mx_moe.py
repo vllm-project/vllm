@@ -1549,6 +1549,18 @@ ROCM_BACKEND_CONFIGS = {
         "requires_aiter": True,
         "requires_gfx950": True,
     },
+    "AITER_MXFP4_BF16_SILU": {
+        "backend": "AITER_MXFP4_BF16",
+        "activation": "SILU",
+        # TODO: tighten rtol/percent/sign_percent to the AITER_MXFP4_BF16 values
+        # once AITER_BF16_FP8_MOE_BOUND is removed from the mxfp4 oracle (it
+        # forces FP8 activations on this path).
+        "rtol": 0.5,
+        "percent": 0.9,
+        "sign_percent": 0.98,
+        "requires_aiter": True,
+        "requires_gfx950": True,
+    },
     "AITER_TRITON_MXFP4_BF16": {
         "activation": "SILU",
         "rtol": 0.3,
@@ -1578,16 +1590,10 @@ ROCM_BACKEND_CONFIGS = {
 @pytest.mark.parametrize("backend_name", list(ROCM_BACKEND_CONFIGS.keys()))
 @pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("topk", [4])
-@pytest.mark.parametrize(
-    "num_experts,num_tokens,hidden_size,intermediate_size",
-    [
-        (128, 16, 6144, 768),
-        (8, 16, 256, 256),
-        (8, 16, 512, 256),
-        (8, 16, 768, 256),
-        (8, 16, 1024, 256),
-    ],
-)
+@pytest.mark.parametrize("num_experts", [8])
+@pytest.mark.parametrize("num_tokens", [16])
+@pytest.mark.parametrize("hidden_size", [256, 384, 512, 768, 1024, 6144])
+@pytest.mark.parametrize("intermediate_size", [256, 768])
 @pytest.mark.skipif(
     not ROCM_AVAILABLE,
     reason="ROCm is required for this test",
@@ -1621,12 +1627,15 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Backend {backend_name} requires AITER")
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
-    # TODO: ungate the other backends on the small hidden-size sweep shapes.
-    if (num_experts, num_tokens, hidden_size, intermediate_size) in (
-        (8, 16, 512, 256),
-        (8, 16, 768, 256),
-        (8, 16, 1024, 256),
-    ) and backend_name not in ("EMULATION", "AITER_MXFP4_BF16"):
+    # TODO: ungate the other backends on the hidden/intermediate size sweep.
+    if (hidden_size, intermediate_size) not in (
+        (256, 256),
+        (6144, 768),
+    ) and backend_name not in (
+        "EMULATION",
+        "AITER_MXFP4_BF16",
+        "AITER_MXFP4_BF16_SILU",
+    ):
         pytest.skip(f"Shape not yet validated for backend {backend_name}")
     # TODO: ungate
     if not has_bias and backend_name in (
@@ -1638,6 +1647,8 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Bias-free weights not yet validated for {backend_name}")
     if backend_name == "AITER_MXFP4_FP8" and hidden_size == 6144:
         pytest.skip(f"Shape not yet validated for backend {backend_name}")
+    if has_bias and backend_name == "AITER_MXFP4_BF16_SILU":
+        pytest.skip(f"Weights with bias not yet validated for {backend_name}")
 
     import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config
@@ -1661,9 +1672,14 @@ def test_rocm_mxfp4_moe_oracle(
 
     # AITER must be enabled or aiter_mxfp4_w4a8_moe asserts before dispatch.
     monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    # Weight conversion sets this process-wide; restore AITER's default after
+    # each case so it does not leak into later cases.
+    # TODO: remove this patch once AITER_BF16_FP8_MOE_BOUND is removed from the
+    # mxfp4 oracle.
+    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
 
     # Map string to enum
-    backend = Mxfp4MoeBackend[backend_name]
+    backend = Mxfp4MoeBackend[config.get("backend", backend_name)]
 
     # Get experts class from oracle
     experts_cls_list = backend_to_kernel_cls(backend)

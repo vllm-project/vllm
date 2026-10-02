@@ -776,7 +776,8 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
         # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128
         # rather than the generic ROCm 256 round-up, which would inflate
-        # weights and OOM.
+        # weights and OOM. AITER's FlyDSL stage 1 always uses tile_k=256 over
+        # the hidden size, so the hidden size stays 256-aligned.
         aiter_uses_128 = backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
 
         # matmul_ogs uses block_k=128 for MXFP4 on pre-CDNA4 GPUs.
@@ -785,12 +786,13 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
             backend == Mxfp4MoeBackend.TRITON_UNFUSED and get_cdna_version() != 4
         )
 
-        alignment = (
+        intermediate_alignment = (
             128 if is_situ_or_silu and (aiter_uses_128 or triton_uses_128) else 256
         )
+        hidden_alignment = 128 if is_situ_or_silu and triton_uses_128 else 256
 
-        intermediate_size = round_up(intermediate_size, alignment)
-        hidden_size = round_up(hidden_size, alignment)
+        intermediate_size = round_up(intermediate_size, intermediate_alignment)
+        hidden_size = round_up(hidden_size, hidden_alignment)
 
         # TODO: remove once https://github.com/ROCm/aiter/pull/6086 is merged and
         # AITER is bumped. AITER's bias-free SwiGLU path needs a hidden size that
@@ -1634,8 +1636,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         # pick bf16 vs fp8 activations when gate_mode is INTERLEAVE. SiTUv2
         # a4w4 is separated and selects q_dtype_a independently, so the bound
         # is unused on that path.
-        # Temporary diagnostic: disable AITER's FP8 activation selection.
-        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "2147483647"
+        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
 
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
@@ -1650,6 +1651,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             )
             and w13_bias is None
         )
+        # DeepSeek V4.1 a4w4 uses ATOM's SEPARATED gate/up layout instead of
+        # the default INTERLEAVE shuffle (INTERLEAVE + fp4x2 has no tuned
+        # kernel and produces garbage output). Must match GateMode.SEPARATED
+        # in rocm_aiter_moe.py.
         is_guinterleave = not is_bias_free_swiglu and not use_separated_a4w4
 
         w13_weight = torch.nn.Parameter(
