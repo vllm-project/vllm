@@ -59,7 +59,7 @@ from .ops.hc import (
 logger = init_logger(__name__)
 
 _USE_TWO_STAGE = os.getenv("VLLM_ROCM_HC_FLYDSL_TWO_STAGE", "0") == "1"
-_TWO_STAGE_MAX_M = int(os.getenv("VLLM_ROCM_HC_FLYDSL_MAX_M", "4"))
+_TWO_STAGE_MAX_M = int(os.getenv("VLLM_ROCM_HC_FLYDSL_MAX_M", "8"))
 
 _two_stage_folded: dict[tuple[int, int], torch.Tensor] = {}
 
