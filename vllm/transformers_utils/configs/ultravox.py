@@ -7,14 +7,14 @@ from typing import Any
 import transformers
 
 
-class UltravoxConfig(transformers.PreTrainedConfig):
+class UltravoxConfig(transformers.PretrainedConfig):
     r"""This is the configuration class to store the configuration of a
     [`UltravoxForConditionalGeneration`]. It is used to instantiate an
     Ultravox model according to the specified arguments, defining the model
     architecture.
 
-    Configuration objects inherit from [`PreTrainedConfig`] and can be used to
-    control the model outputs. Read the documentation from [`PreTrainedConfig`]
+    Configuration objects inherit from [`PretrainedConfig`] and can be used to
+    control the model outputs. Read the documentation from [`PretrainedConfig`]
     for more information.
 
     Args:
@@ -74,7 +74,7 @@ class UltravoxConfig(transformers.PreTrainedConfig):
         self.num_projector_layers = num_projector_layers
 
         # N.B. May set the wrapped_model_config below.
-        self.wrapped_model_config: transformers.PreTrainedConfig
+        self.wrapped_model_config: transformers.PretrainedConfig
         self.text_model_id = text_model_id
         if text_model_id is None:
             text_config = text_config or {}
@@ -113,7 +113,7 @@ class UltravoxConfig(transformers.PreTrainedConfig):
         return super().__setattr__(key, value)
 
     @property
-    def text_config(self) -> transformers.PreTrainedConfig:
+    def text_config(self) -> transformers.PretrainedConfig:
         # When Ultravox wraps a multi-modal model (e.g. Gemma), we instantiate
         # the full model, but the text config is the text config of the inner
         # model.

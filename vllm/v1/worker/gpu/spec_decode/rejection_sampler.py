@@ -18,7 +18,7 @@ from vllm.v1.worker.gpu.input_batch import (
 )
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
-from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
@@ -72,76 +72,6 @@ def _flatten_sampled_kernel(
     for i in range(num_sampled):
         token_id = tl.load(sampled_ptr + req_idx * sampled_stride + i)
         tl.store(flat_sampled_ptr + start_idx + i, token_id)
-
-
-@triton.jit
-def _gather_draft_sampled_kernel(
-    # [num_logits]
-    draft_sampled_ptr,
-    # [num_logits]
-    pos_ptr,
-    # [num_tokens]
-    input_ids_ptr,
-    # [num_tokens]
-    positions_ptr,
-    # [num_logits]
-    logits_indices_ptr,
-    # [num_logits]
-    expanded_idx_mapping_ptr,
-    # [num_logits]
-    expanded_local_pos_ptr,
-    # [max_num_reqs]
-    prefill_len_ptr,
-    num_logits,
-    BLOCK_SIZE: tl.constexpr,
-):
-    block = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < num_logits
-    token_idx = tl.load(logits_indices_ptr + block, mask=mask)
-    token_id = tl.load(input_ids_ptr + token_idx, mask=mask)
-    pos = tl.load(positions_ptr + token_idx, mask=mask)
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + block, mask=mask)
-    local_pos = tl.load(expanded_local_pos_ptr + block, mask=mask)
-    prefill_len = tl.load(prefill_len_ptr + req_state_idx, mask=mask)
-    # Drafts are only proposed after sampling past the prefill, so any draft
-    # slots in a step starting within the prefill are placeholders (e.g. the
-    # padded first step after a P/D remote KV load).
-    is_placeholder = (local_pos > 0) & (pos - local_pos < prefill_len)
-    token_id = tl.where(is_placeholder, -1, token_id)
-    tl.store(draft_sampled_ptr + block, token_id, mask=mask)
-    tl.store(pos_ptr + block, pos, mask=mask)
-
-
-def gather_draft_sampled(
-    input_ids: torch.Tensor,
-    positions: torch.Tensor,
-    logits_indices: torch.Tensor,
-    expanded_idx_mapping: torch.Tensor,
-    expanded_local_pos: torch.Tensor,
-    prefill_len: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Gather the input token and position of each logits row.
-
-    Draft rows of requests that have not yet sampled past their prefill are
-    set to -1 so that the rejection kernels reject them.
-    """
-    num_logits = logits_indices.shape[0]
-    draft_sampled = input_ids.new_empty(num_logits)
-    pos = positions.new_empty(num_logits)
-    BLOCK_SIZE = 1024
-    _gather_draft_sampled_kernel[(triton.cdiv(num_logits, BLOCK_SIZE),)](
-        draft_sampled,
-        pos,
-        input_ids,
-        positions,
-        logits_indices,
-        expanded_idx_mapping,
-        expanded_local_pos,
-        prefill_len,
-        num_logits,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
-    return draft_sampled, pos
 
 
 class RejectionSampler:
@@ -204,7 +134,8 @@ class RejectionSampler:
         if expanded_logits:
             if self.enable_adaptive_verification:
                 # Adaptive verification keeps the true per-request boundaries
-                # on device only; cu_num_logits_np holds the pre-compacted layout.
+                # on device only; cu_num_logits_np holds the pre-compacted
+                # layout.
                 cu_num_generated_tokens = cu_num_logits.clone()
             else:
                 cu_num_generated_tokens = cu_num_logits_np.tolist()
@@ -226,18 +157,11 @@ class RejectionSampler:
         if self.watermark_key is None:
             return {}
         assert isinstance(self.sampler, GPUWatermarkSampler)
-        contexts = self.sampler._get_contexts(
-            expanded_idx_mapping, expanded_local_pos, draft_sampled
-        )
-        watermarking_skip_mask = None
-        if self.sampler.deduplicate_contexts != "none":
-            watermarking_skip_mask = self.sampler._get_repeated_contexts(
-                expanded_idx_mapping, contexts, expanded_local_pos
-            )
         return {
-            "contexts": contexts,
+            "contexts": self.sampler._get_contexts(
+                expanded_idx_mapping, expanded_local_pos, draft_sampled
+            ),
             "watermarking": self.sampler.watermarking.gpu,
-            "watermarking_skip_mask": watermarking_skip_mask,
             "watermark_key": self.watermark_key,
         }
 
@@ -252,8 +176,6 @@ class RejectionSampler:
         idx_mapping_np: np.ndarray,
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
-        seq_lens_upper_bound_np: np.ndarray,
-        verify_draft_sampled: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
@@ -263,12 +185,11 @@ class RejectionSampler:
             pos,
             draft_sampled,
             expanded_local_pos,
-            seq_lens_upper_bound_np,
         )
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
-            verify_draft_sampled,
+            draft_sampled,
             cu_num_logits,
             pos,
             idx_mapping,
@@ -295,15 +216,7 @@ class RejectionSampler:
         pos: torch.Tensor,
         max_chunk_logits: int,
         max_num_logprobs: int,
-        verify_draft_sampled: torch.Tensor | None = None,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        LogprobsTensors | None,
-        SamplingMaskTensors | None,
-    ]:
-        if verify_draft_sampled is None:
-            verify_draft_sampled = draft_sampled
+    ) -> tuple[torch.Tensor, torch.Tensor, LogprobsTensors | None]:
         cu_num_logits_np = input_batch.cu_num_logits_np
         use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
         num_reqs = input_batch.num_reqs
@@ -321,14 +234,6 @@ class RejectionSampler:
         sampled_chunks: list[torch.Tensor] = []
         num_sampled_chunks: list[torch.Tensor] = []
         logprobs_chunks: list[LogprobsTensors] = []
-        sampling_mask_chunks: list[SamplingMaskTensors] = []
-        max_num_kept = None
-        if self.sampler.return_sampling_mask:
-            max_num_kept = int(
-                np.max(
-                    self.sampler.sampling_states.top_k.np[input_batch.idx_mapping_np]
-                )
-            )
 
         for start, end in request_chunks:
             lo = int(cu_num_logits_np[start])
@@ -346,8 +251,6 @@ class RejectionSampler:
                 input_batch.idx_mapping_np[start:end],
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
-                input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
-                verify_draft_sampled[lo:hi],
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
@@ -359,31 +262,13 @@ class RejectionSampler:
             )
             if chunk_logprobs is not None:
                 logprobs_chunks.append(chunk_logprobs)
-            if max_num_kept is not None:
-                sampling_mask_chunks.append(
-                    SamplingMaskTensors.from_logits(
-                        processed_logits,
-                        chunk_cu_num_logits,
-                        num_sampled,
-                        max_num_kept,
-                        self.num_speculative_steps + 1,
-                    )
-                )
             del processed_logits
             sampled_chunks.append(sampled)
             num_sampled_chunks.append(num_sampled)
 
         if len(sampled_chunks) == 1:
             logprobs_tensors = logprobs_chunks[0] if logprobs_chunks else None
-            sampling_mask_tensors = (
-                sampling_mask_chunks[0] if sampling_mask_chunks else None
-            )
-            return (
-                sampled_chunks[0],
-                num_sampled_chunks[0],
-                logprobs_tensors,
-                sampling_mask_tensors,
-            )
+            return sampled_chunks[0], num_sampled_chunks[0], logprobs_tensors
 
         logprobs_tensors = None
         if logprobs_chunks:
@@ -397,51 +282,26 @@ class RejectionSampler:
 
         sampled = torch.cat(sampled_chunks)
         num_sampled = torch.cat(num_sampled_chunks)
-        sampling_mask_tensors = (
-            SamplingMaskTensors.cat(sampling_mask_chunks)
-            if sampling_mask_chunks
-            else None
-        )
-        return sampled, num_sampled, logprobs_tensors, sampling_mask_tensors
+        return sampled, num_sampled, logprobs_tensors
 
     def __call__(
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
-        invalid_drafts: torch.Tensor | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
-        draft_sampled, pos = gather_draft_sampled(
-            input_batch.input_ids,
-            input_batch.positions,
-            input_batch.logits_indices,
-            input_batch.expanded_idx_mapping,
-            input_batch.expanded_local_pos,
-            self.sampler.req_states.prefill_len.gpu,
-        )
-
-        # Marking a draft invalid (`is_valid_draft = draft_sampled >= 0`) pins the
-        # accepted length before it reaches a permissive bitmask row. Only
-        # verification sees the copy: `apply_sampling_params` and watermarking
-        # keep the real draft ids.
-        verify_draft_sampled = draft_sampled
-        if invalid_drafts is not None:
-            verify_draft_sampled = draft_sampled.masked_fill(invalid_drafts, -1)
+        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        pos = input_batch.positions[input_batch.logits_indices]
 
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
             input_batch.idx_mapping_np
         )
         chunk_logit_limit = get_max_chunk_logits(logits.shape[1])
-        (
-            sampled,
-            num_sampled,
-            logprobs_tensors,
-            sampling_mask_tensors,
-        ) = self._verify_in_chunks(
+        sampled, num_sampled, logprobs_tensors = self._verify_in_chunks(
             logits,
             input_batch,
             draft_logits,
@@ -449,7 +309,6 @@ class RejectionSampler:
             pos,
             chunk_logit_limit,
             max_num_logprobs,
-            verify_draft_sampled,
         )
 
         num_sampled, num_rejected = get_num_sampled_and_rejected(
@@ -466,5 +325,4 @@ class RejectionSampler:
             num_nans=num_nans,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
-            sampling_mask_tensors=sampling_mask_tensors,
         )

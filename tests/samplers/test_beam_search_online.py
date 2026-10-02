@@ -5,7 +5,6 @@ import pytest
 
 from vllm import CompletionOutput, RequestOutput
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
-from vllm.inputs import TokensInput
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.sampling_params import BeamSearchParams
 
@@ -63,7 +62,7 @@ class _Serving(BeamSearchOnlineMixin):
 
 @pytest.mark.asyncio
 async def test_beam_search_handles_extra_logprob_candidates() -> None:
-    prompt: TokensInput = {
+    prompt = {
         "type": "token",
         "prompt": "prompt",
         "prompt_token_ids": [1],
@@ -91,7 +90,7 @@ async def test_beam_search_handles_extra_logprob_candidates() -> None:
 async def test_beam_search_respects_skip_special_tokens(
     skip_special_tokens: bool, expected_text: str
 ) -> None:
-    prompt: TokensInput = {
+    prompt = {
         "type": "token",
         "prompt": "prompt",
         "prompt_token_ids": [1],
@@ -141,11 +140,7 @@ async def test_beam_search_abort_returns_partial_outputs(
 
     serving = _Serving()
     monkeypatch.setattr(serving.engine_client, "generate", generate)
-    prompt: TokensInput = {
-        "type": "token",
-        "prompt": "prompt",
-        "prompt_token_ids": [prompt_token],
-    }
+    prompt = {"type": "token", "prompt": "prompt", "prompt_token_ids": [prompt_token]}
     outputs = [
         output
         async for output in serving.beam_search(

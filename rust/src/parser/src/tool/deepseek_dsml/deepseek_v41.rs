@@ -4,6 +4,8 @@
 use super::{DeepSeekDsmlToolParser, DsmlTokens};
 use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
+mod structural_tag;
+
 /// Tool parser for DeepSeek V4.1's spaced DSML tags.
 ///
 /// Arguments are emitted only after a full `invoke` block is parsed.
@@ -25,7 +27,7 @@ impl ToolParser for DeepSeekV41ToolParser {
     }
 
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
-        Some(xgrammar_structural_tag::Model::DeepSeekV41.builder())
+        Some(&structural_tag::DeepSeekV41StructuralTagBuilder)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {

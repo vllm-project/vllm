@@ -14,7 +14,6 @@ ST_PROJECTOR_MODELS = [
         "TencentBAC/Conan-embedding-v1",
         architecture="BertModel",
         mteb_score=0.688611955,
-        mteb_tol=2e-3,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -25,7 +24,6 @@ ST_PROJECTOR_MODELS = [
         "google/embeddinggemma-300m",
         architecture="Gemma3TextModel",
         mteb_score=0.7473819294684156,
-        mteb_tol=2e-3,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -35,7 +33,6 @@ ST_PROJECTOR_MODELS = [
 ]
 
 
-@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", ST_PROJECTOR_MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)

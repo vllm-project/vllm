@@ -45,7 +45,11 @@ from transformers import BatchFeature
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import (
+    BaseDummyOptions,
+    ImageDummyOptions,
+    VideoDummyOptions,
+)
 from vllm.distributed import (
     divide,
     get_pp_group,
@@ -230,7 +234,7 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         processor = self.info.get_hf_processor()
         video_processor = processor.video_processor
@@ -241,12 +245,16 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
             * int(video_processor.downsample_factor)
             * video_grid
         )
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
+        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
+        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
         return {
             "image": self._get_dummy_images(
                 width=image_width,
                 height=image_height,
                 num_images=mm_counts.get("image", 0),
-                overrides=mm_options.get("image"),
+                overrides=image_overrides,
             ),
             "video": self._get_dummy_videos(
                 width=video_size,
@@ -255,7 +263,7 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
                     seq_len, mm_counts
                 ),
                 num_videos=mm_counts.get("video", 0),
-                overrides=mm_options.get("video"),
+                overrides=video_overrides,
             ),
         }
 

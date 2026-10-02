@@ -165,6 +165,7 @@ T = TypeVar("T", bound=SparseMLACommonMetadata)
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     metadata_cls: type[T]
     require_uniform_decodes: ClassVar[bool] = False
+    hisparse_supports_multi_token_decode: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -258,6 +259,8 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     ) -> None:
         if self.vllm_config.attention_config.hisparse_config is not None:
             reorder_batch_threshold = 1
+            if not self.hisparse_supports_multi_token_decode:
+                supports_spec_as_decode = False
         super()._init_reorder_batch_threshold(
             reorder_batch_threshold,
             supports_spec_as_decode,
@@ -288,7 +291,17 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self,
         common_attn_metadata: "CommonAttentionMetadata",
     ) -> torch.Tensor:
-        return common_attn_metadata.token_to_req_indices(self.req_id_per_token_buffer)
+        num_tokens = common_attn_metadata.num_actual_tokens
+        starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
+        seg_lengths = np.diff(starts)
+        req_id_per_token = np.repeat(
+            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
+        )
+        self.req_id_per_token_buffer.fill_(0)
+        self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
+            np_to_pinned_tensor(req_id_per_token), non_blocking=True
+        )
+        return self.req_id_per_token_buffer[:num_tokens]
 
     def _build_chunked_context_fields(
         self,

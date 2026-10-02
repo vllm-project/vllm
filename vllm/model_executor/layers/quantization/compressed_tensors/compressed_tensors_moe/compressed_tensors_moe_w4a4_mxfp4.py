@@ -24,7 +24,6 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
 from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
     XPUExpertsMxFp4,
 )
-from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     B12X_BACKENDS,
     Mxfp4MoeBackend,
@@ -228,7 +227,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | UnfinalizedMoEOutput:
+    ) -> torch.Tensor:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,

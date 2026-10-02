@@ -6,7 +6,7 @@ from typing import Any
 import transformers
 
 
-class Granite4VisionConfig(transformers.PreTrainedConfig):
+class Granite4VisionConfig(transformers.PretrainedConfig):
     """Configuration for Granite 4 Vision model.
 
     This config is needed because the granite4_vision model type is not yet
@@ -81,7 +81,7 @@ class Granite4VisionConfig(transformers.PreTrainedConfig):
                 **vision_config
             )
         else:
-            self.vision_config = transformers.PreTrainedConfig(**vision_config)
+            self.vision_config = transformers.PretrainedConfig(**vision_config)
 
         text_model_type = text_config.get("model_type", "granite")
         if text_model_type in transformers.CONFIG_MAPPING:
@@ -89,6 +89,6 @@ class Granite4VisionConfig(transformers.PreTrainedConfig):
                 **text_config
             )
         else:
-            self.text_config = transformers.PreTrainedConfig(**text_config)
+            self.text_config = transformers.PretrainedConfig(**text_config)
 
         super().__init__(**kwargs)

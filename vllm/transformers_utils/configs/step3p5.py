@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers.configuration_utils import PreTrainedConfig
+from transformers.configuration_utils import PretrainedConfig
 
 
-class Step3p5Config(PreTrainedConfig):
+class Step3p5Config(PretrainedConfig):
     model_type = "step3p5"
 
     def __init__(

@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 
 import pytest
+from packaging.version import Version
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 import vllm
 from tests.conftest import VllmRunner
@@ -27,12 +29,20 @@ class TestConfig:
 
     def __post_init__(self):
         if self.mm_processor_kwargs is None:
-            self.mm_processor_kwargs = {
-                "size": {
-                    "shortest_edge": 28 * 28,
-                    "longest_edge": 1280 * 28 * 28,
+            # There is a bug in transformers v4 where size is ignored by
+            # `Qwen2VLProcessor.__call__`
+            if Version(TRANSFORMERS_VERSION) < Version("5.2.0"):
+                self.mm_processor_kwargs = {
+                    "min_pixels": 28 * 28,
+                    "max_pixels": 1280 * 28 * 28,
                 }
-            }
+            else:
+                self.mm_processor_kwargs = {
+                    "size": {
+                        "shortest_edge": 28 * 28,
+                        "longest_edge": 1280 * 28 * 28,
+                    }
+                }
 
 
 class Qwen2VLTester:

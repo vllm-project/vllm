@@ -19,7 +19,6 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesResponse,
     AnthropicOutputConfig,
     AnthropicStreamEvent,
-    AnthropicThinkingConfig,
     AnthropicUsage,
 )
 
@@ -36,7 +35,6 @@ SERVING_PROTOCOL_EXPORTS = (
     AnthropicMessagesResponse,
     AnthropicOutputConfig,
     AnthropicStreamEvent,
-    AnthropicThinkingConfig,
     AnthropicUsage,
 )
 

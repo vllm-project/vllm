@@ -30,7 +30,6 @@ from ..vllm_inductor_pass import (
     VllmPatternReplacement,
     _fx_view_to_reshape,
     fold_consecutive_reshapes,
-    remove_noop_reshapes,
 )
 from .matcher_utils import (
     MatcherQuantFP8,
@@ -453,9 +452,9 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
     """Matches decomposed RMSNormGated + reshape + group FP8 quant and replaces
     with rocm_aiter_fused_rms_gated_fp8_group_quant.
 
-    The norm operates per-head, on either (N*H, D) or (N, H, D). The compiler
-    folds the reshape chain so after norm the result goes through
-    reshape->merge->quant. The pattern reshapes to (N, H*D) before calling
+    The norm operates per-head on (N*H, D) tensors. The compiler folds the
+    reshape chain so after norm the result goes through reshape->merge->quant.
+    The pattern reshapes from (N*H, D) to (N, H*D) before calling
     MatcherQuantFP8 so that _quantize_group_native sees the full hidden dim
     and computes the correct num_groups.
     """
@@ -483,16 +482,6 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         self.head_dim = head_dim
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        self._register_layout(pm_pass, flatten_heads=True)
-        # Both layouts reach the norm. With an opaque quant op they trace to
-        # the same pattern; with a native quant they differ, because its group
-        # reshape back to (N, H, D) is a no-op the compiler already dropped.
-        if not self.quant_matcher.enabled:
-            self._register_layout(pm_pass, flatten_heads=False)
-
-    def _register_layout(
-        self, pm_pass: PatternMatcherPass, *, flatten_heads: bool
-    ) -> None:
         num_heads = self.num_heads
         head_dim = self.head_dim
         hidden_dim = num_heads * head_dim
@@ -513,11 +502,6 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             z: torch.Tensor,
             weight: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            # The pattern matches on op structure rather than rank, so either
-            # per-head layout can land here. The fused op takes (M, D), and
-            # both operands are contiguous, so collapsing the heads is a view.
-            x = x.reshape(-1, head_dim)
-            z = z.reshape(-1, head_dim)
             fused = self.FUSED_OP(
                 x=x,
                 weight=weight,
@@ -535,21 +519,14 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             return fp8_reshaped, scales_reshaped
 
         n_tokens = 2
-        shape = (
-            (n_tokens * num_heads, head_dim)
-            if flatten_heads
-            else (n_tokens, num_heads, head_dim)
-        )
-        x = self.empty(*shape)
-        z = self.empty(*shape)
+        x = self.empty(n_tokens * num_heads, head_dim)
+        z = self.empty(n_tokens * num_heads, head_dim)
         w = self.empty(head_dim)
 
         def trace_fn(*args, **kwargs):
             gm = pm.fwd_only(*args, **kwargs)
             _fx_view_to_reshape(gm)
             fold_consecutive_reshapes(gm)
-            if not flatten_heads:
-                remove_noop_reshapes(gm)
             return gm
 
         pm.register_replacement(
@@ -598,7 +575,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
             gated_norm_shapes.add((num_v_heads // layer.tp_size, head_v_dim))
 
-        # RDNA4 uses native quant ops and supports only Triton replacements.
+        # RDNA uses native quant ops and supports only Triton replacements.
         match_aiter_quant_op = not rocm_aiter_ops.is_rdna_aiter_enabled()
 
         # Make sure fused add patterns are before simple rms norm,
@@ -661,7 +638,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             # an aiter version that includes the GDN triton kernel renames.
             if gated_norm_shapes and (
                 rocm_aiter_ops.are_gdn_triton_kernels_available()
-                or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+                or rocm_aiter_ops.are_rdna_gdn_triton_kernels_available()
             ):
                 for num_heads, head_dim in gated_norm_shapes:
                     if head_dim != 128:

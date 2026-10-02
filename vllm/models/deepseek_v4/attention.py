@@ -43,7 +43,6 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
@@ -172,20 +171,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        output: "torch.Tensor | QuantizedActivation",
+        output: torch.Tensor,
     ) -> None:
         """Platform-specific sparse MLA forward; writes attention into ``output``."""
         raise NotImplementedError
 
     @abstractmethod
-    def _o_proj(
-        self, o: "torch.Tensor | QuantizedActivation", positions: torch.Tensor
-    ) -> torch.Tensor:
-        """Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
-
-        ``o`` is the live heads of the bf16 attention output, or the
-        QuantizedActivation of a layer whose ``_alloc_attn_out`` returns one.
-        """
+    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """Inverse-RoPE + wo_a + wo_b output projection (platform-specific)."""
         raise NotImplementedError
 
     def _uses_fp8_ds_mla_layout(self) -> bool:
@@ -474,9 +467,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # The eager attention region writes into a caller-owned buffer
-        # (breakable_cudagraph needs in-place outputs).
-        attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
+        # Pre-allocate attention output with FlashMLA-padded head count.
+        # The op writes into `o_padded`; we slice to n_local_heads after.
+        num_tokens = hidden_states.shape[0]
+        o_padded = torch.empty(
+            (num_tokens, self.padded_heads, self.head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
 
         # Keep the attention input preparation in the captured graph. Only the
         # sparse indexer and MLA attention run in the eager break below.
@@ -494,27 +492,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             indexer_kv_score,
             indexer_weights,
             positions,
-            attn_out,
+            o_padded,
         )
-        if isinstance(attn_out, torch.Tensor):
-            attn_out = attn_out[:, : self.n_local_heads, :]
-        return self._o_proj(attn_out, positions)
+        o = o_padded[:, : self.n_local_heads, :]
 
-    def _alloc_attn_out(
-        self, num_tokens: int, hidden_states: torch.Tensor
-    ) -> "torch.Tensor | QuantizedActivation":
-        """The buffer ``forward_mqa`` fills.
-
-        A bf16 ``[num_tokens, padded_heads, head_dim]`` buffer by default, whose
-        padding heads are sliced off before ``_o_proj``. A layer whose kernel
-        also does the inverse RoPE and the FP8 cast returns a
-        QuantizedActivation instead and gets it back in ``_o_proj`` whole.
-        """
-        return torch.empty(
-            (num_tokens, self.padded_heads, self.head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
+        return self._o_proj(o, positions)
 
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
@@ -546,7 +529,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         indexer_kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
-        o_padded: "torch.Tensor | QuantizedActivation",
+        o_padded: torch.Tensor,
     ) -> None:
         """Wide eager region: the whole of ``_prepare_and_attn`` runs eagerly.
 
@@ -575,7 +558,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         indexer_kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
-        o_padded: "torch.Tensor | QuantizedActivation",
+        o_padded: torch.Tensor,
     ) -> None:
         """Attention input preparation followed by the sparse indexer and MLA.
 
@@ -740,7 +723,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        out: "torch.Tensor | QuantizedActivation",
+        out: torch.Tensor,
     ) -> None:
         if self.indexer is not None and index_q is not None:
             assert index_weights is not None
@@ -753,7 +736,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
 
         # MLA attention writes into the pre-allocated `out` buffer
-        # (see _alloc_attn_out).
+        # ([num_tokens, padded_heads, head_dim]).
         self.forward_mqa(q, kv, positions, out)
 
     def _fused_qnorm_rope_kv_insert(
@@ -865,7 +848,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
-            max_tp_shards=1,
             head_size=self.head_dim,
             dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
             tokens_per_state=self.compress_ratio,
@@ -911,7 +893,6 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
-            max_tp_shards=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
@@ -992,14 +973,24 @@ class DeepseekV4Indexer(nn.Module):
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
 
+        self.uncompressed_max_model_len = vllm_config.model_config.max_model_len
         self.max_model_len = (
-            vllm_config.model_config.max_model_len // self.compress_ratio
+            self.uncompressed_max_model_len // self.compress_ratio
         )
         self.prefix = prefix
 
         self.max_total_seq_len = (
             get_max_prefill_buffer_size(vllm_config) // self.compress_ratio
         )
+        if self.compress_ratio > 1:
+            logger.info_once(
+                "DeepseekV4Indexer paged-MQA semantics: "
+                "uncompressed_max_model_len=%d compress_ratio=%d "
+                "compressed_max_model_len=%d",
+                self.uncompressed_max_model_len,
+                self.compress_ratio,
+                self.max_model_len,
+            )
 
         assert cache_config is not None, "Deepseek V4 indexer requires cache_config"
         if self.use_fp4_kv:
@@ -1042,6 +1033,8 @@ class DeepseekV4Indexer(nn.Module):
             skip_k_cache_insert=True,
             use_fp4_cache=self.use_fp4_kv,
             compress_ratio=self.compress_ratio,
+            semantic_uncompressed_max_model_len=self.uncompressed_max_model_len,
+            semantic_compress_ratio=self.compress_ratio,
         )
 
         # None on ROCm — maybe_execute_in_parallel falls back to sequential.

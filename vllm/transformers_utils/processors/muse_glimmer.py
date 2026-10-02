@@ -437,7 +437,7 @@ class MuseGlimmerProcessor(ProcessorMixin):
     attributes = ["image_processor", "video_processor", "tokenizer"]
     image_processor_class = "AutoImageProcessor"
     video_processor_class = "AutoVideoProcessor"
-    tokenizer_class = "TokenizersBackend"
+    tokenizer_class = "PreTrainedTokenizerFast"
 
     def __init__(
         self,

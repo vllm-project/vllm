@@ -29,18 +29,16 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers.configuration_utils import PreTrainedConfig
+from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEFactory,
-    GateLinear,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -62,7 +60,7 @@ from .utils import (
 )
 
 
-class PhiMoEConfig(PreTrainedConfig):
+class PhiMoEConfig(PretrainedConfig):
     model_type = "phimoe"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -264,10 +262,12 @@ class PhiMoE(nn.Module):
         self.hidden_size = hidden_size
 
         # Gate always runs at half / full precision for now.
-        self.gate = GateLinear(
+        self.gate = ReplicatedLinear(
             hidden_size,
             num_experts,
+            bias=False,
             params_dtype=params_dtype,
+            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 

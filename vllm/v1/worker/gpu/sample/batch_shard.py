@@ -200,9 +200,6 @@ class BatchSharder:
             num_logits_per_req_np[local_req_indices_np], out=local_cu_num_logits_np[1:]
         )
         max_num_logits_per_req = int(num_logits_per_req_np.max()) if num_reqs else 1
-        local_seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound[
-            torch.from_numpy(local_req_indices_np)
-        ]
 
         # Shard the input batch GPU tensors.
         sorted_logits_indices = torch.empty(
@@ -272,7 +269,6 @@ class BatchSharder:
             expanded_idx_mapping=local_expanded_idx_mapping,
             expanded_local_pos=local_expanded_local_pos,
             seq_lens=local_seq_lens,
-            seq_lens_cpu_upper_bound=local_seq_lens_cpu_upper_bound,
             logits_indices=local_logits_indices,
             cu_num_logits=local_cu_num_logits,
             cu_num_logits_np=local_cu_num_logits_np,
@@ -339,16 +335,9 @@ def _shard_grammar_output(
         cursor += num_req_logits
     if not local_ids:
         return None
-    # num_acceptable_drafts is ordered with structured_output_request_ids.
-    num_acceptable = grammar_output.num_acceptable_drafts
-    if num_acceptable is not None:
-        owned = set(local_ids)
-        ids = grammar_output.structured_output_request_ids
-        num_acceptable = [n for i, n in zip(ids, num_acceptable) if i in owned]
     return GrammarOutput(
         structured_output_request_ids=local_ids,
         grammar_bitmask=grammar_output.grammar_bitmask[keep_indices],
-        num_acceptable_drafts=num_acceptable,
     )
 
 
@@ -624,6 +613,8 @@ def gather_sampler_output(
         device=device,
     )
     if local_output is not None:
+        assert local_output.num_sampled is not None
+        assert local_output.num_rejected is not None
         assert not gather_num_nans or local_output.num_nans is not None
         num_src_cols = min(
             local_output.sampled_token_ids.shape[1], max_num_logits_per_req

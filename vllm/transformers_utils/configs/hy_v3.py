@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers.configuration_utils import PreTrainedConfig
+from transformers.configuration_utils import PretrainedConfig
 
 
-class HYV3Config(PreTrainedConfig):
+class HYV3Config(PretrainedConfig):
     r"""This is the configuration class to store the configuration of a [`HYV3Model`].
     It is used to instantiate a HYV3 model (HY V3 MoE language model) according to
     the specified arguments.
 
-    Configuration objects inherit from [`PreTrainedConfig`] and can be used to
-    control the model outputs. Read the documentation from [`PreTrainedConfig`]
+    Configuration objects inherit from [`PretrainedConfig`] and can be used to
+    control the model outputs. Read the documentation from [`PretrainedConfig`]
     for more information.
 
     Args:

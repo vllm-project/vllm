@@ -29,7 +29,7 @@ from vllm.entrypoints.cohere.cohere_chat_message import (
 class TestCitationSource:
     def test_invalid_type_rejected(self):
         with pytest.raises(ValidationError):
-            CitationSource(type="other")
+            CitationSource(type="other")  # type: ignore[arg-type]
 
     def test_none_fields_excluded_from_dump(self):
         s = CitationSource(type="document", id="d1")
@@ -65,7 +65,7 @@ class TestCitationSource:
 class TestCitation:
     def test_invalid_type_rejected(self):
         with pytest.raises(ValidationError):
-            Citation(type="OTHER")
+            Citation(type="OTHER")  # type: ignore[arg-type]
 
     def test_dump_excludes_none_fields(self):
         c = Citation(start=0, end=5, text="hello")

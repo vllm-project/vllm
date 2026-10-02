@@ -35,39 +35,6 @@ def scheduler():
     return create_scheduler(vllm_config)
 
 
-@pytest.mark.parametrize("policy", ["fail", "recompute"])
-def test_failed_receive_completion_honors_failure_policy(policy):
-    """Failed receives still need completion to free blocks or resume computation."""
-    scheduler = create_scheduler(create_vllm_config(kv_load_failure_policy=policy))
-    request = create_request(num_tokens=3 * scheduler.block_size)
-    scheduler.add_request(request)
-    scheduler.connector = Mock()
-    scheduler.connector.get_num_new_matched_tokens.side_effect = [
-        (2 * scheduler.block_size, True),
-        (0, False),
-    ]
-    scheduler.connector.request_finished.return_value = (False, None)
-    scheduler.connector.take_events.return_value = ()
-    block_pool = scheduler.kv_cache_manager.block_pool
-    free_blocks_before = block_pool.get_num_free_blocks()
-    scheduler_output = scheduler.schedule()
-    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-
-    output = create_model_runner_output([], finished_recving={request.request_id})
-    assert output.kv_connector_output is not None
-    output.kv_connector_output.failed_recving = {request.request_id}
-    scheduler.update_from_output(scheduler_output, output)
-
-    if policy == "fail":
-        assert request.status == RequestStatus.FINISHED_ERROR
-        assert request.request_id not in scheduler.requests
-        assert block_pool.get_num_free_blocks() == free_blocks_before
-    else:
-        assert request.num_computed_tokens == 0
-        next_output = scheduler.schedule()
-        assert request.request_id in next_output.num_scheduled_tokens
-
-
 @pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
     [
@@ -111,8 +78,8 @@ def test_async_load_failure(
     scheduler_output = scheduler.schedule()
 
     assert len(scheduler.waiting) == 0
-    assert len(scheduler.kv_holding_waiting) == 3
-    for request in scheduler.kv_holding_waiting:
+    assert len(scheduler.skipped_waiting) == 3
+    for request in scheduler.skipped_waiting:
         assert request.num_computed_tokens == num_external_computed_tokens
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
@@ -132,8 +99,8 @@ def test_async_load_failure(
     min_invalid_block_idx = min(invalid_block_idxs)
 
     assert len(scheduler.waiting) == 0
-    assert len(scheduler.kv_holding_waiting) == 3
-    for request in scheduler.kv_holding_waiting:
+    assert len(scheduler.skipped_waiting) == 3
+    for request in scheduler.skipped_waiting:
         if request.request_id == request2.request_id:
             assert request.num_computed_tokens == (
                 min_invalid_block_idx * scheduler.block_size
@@ -340,9 +307,8 @@ def test_async_progressive_load_failure(
     scheduler_output = scheduler.schedule()
 
     assert len(scheduler.waiting) == 0
-    assert len(scheduler.kv_holding_waiting) == 1
-    peeked = scheduler.kv_holding_waiting.peek_request()
-    assert peeked.request_id == request.request_id
+    assert len(scheduler.skipped_waiting) == 1
+    assert scheduler.skipped_waiting.peek_request().request_id == request.request_id
     assert request.num_computed_tokens == num_external_computed_tokens
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 1
@@ -364,9 +330,8 @@ def test_async_progressive_load_failure(
         min_invalid_block_idx = min(min_invalid_block_idx, invalid_block_idx)
 
         assert len(scheduler.waiting) == 0
-        assert len(scheduler.kv_holding_waiting) == 1
-        peeked = scheduler.kv_holding_waiting.peek_request()
-        assert peeked.request_id == request.request_id
+        assert len(scheduler.skipped_waiting) == 1
+        assert scheduler.skipped_waiting.peek_request().request_id == request.request_id
         assert request.num_computed_tokens == (
             min_invalid_block_idx * scheduler.block_size
         )

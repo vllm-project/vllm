@@ -109,17 +109,15 @@ def test_gsm8k_correctness(config_filename):
             "Its W2A16 (uint2b2) scheme has no kernel outside CUDA."
         )
 
+    # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
     if current_platform.is_rocm() and (
         "deepseek-ai/DeepSeek-V3.2" in eval_config["model_name"]
         or "deepseek-ai/DeepSeek-R1" in eval_config["model_name"]
     ):
-        from vllm.platforms.rocm import get_cdna_version
-
-        if get_cdna_version() < 4:
-            pytest.skip(
-                "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms below "
-                "CDNA 4 due to agent pool disk space issues and pod evictions."
-            )
+        pytest.skip(
+            "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
+            "due to agent pool disk space issues and pod evictions."
+        )
     if current_platform.is_rocm() and (
         "Qwen3.5-35B-A3B-MXFP4-AITER-TP2" in config_filename.name
     ):
@@ -130,12 +128,6 @@ def test_gsm8k_correctness(config_filename):
                 "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
                 "The quantization scheme is not supported on non-GFX950 platforms."
             )
-    if "--all2all-backend=moonep" in eval_config.get("server_args", ""):
-        from vllm.utils.import_utils import has_moonep
-
-        if not has_moonep():
-            pytest.skip("Skipping MoonEP config: the moonep package is not installed.")
-
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
     server_args = shlex.split(server_args_str) if server_args_str else []

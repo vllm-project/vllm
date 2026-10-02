@@ -170,7 +170,6 @@ mod tests {
     };
 
     use super::HyStructuralTagBuilder;
-    use crate::output_grammar::test_utils::outline;
     use crate::tool::{HyDialect, HyToolMarkers};
 
     fn tool(name: &str, parameters: Value) -> ToolParam {
@@ -220,33 +219,7 @@ mod tests {
             ToolChoice::required(),
         );
 
-        expect![[r#"
-            sequence
-              `<tool_calls:opensource>\n`
-              tags_with_separator `\n` at_least_one
-                tag `<tool_call:opensource>get_weather<tool_sep:opensource>\n` .. `</tool_call:opensource>`
-                  sequence
-                    sequence
-                      `<arg_key:opensource>`
-                      `city`
-                      `</arg_key:opensource>`
-                      `\n`
-                      `<arg_value:opensource>`
-                      text excluding [`<tool_calls:opensource>`, `</tool_calls:opensource>`, `<tool_call:opensource>`, `</tool_call:opensource>`, `<tool_sep:opensource>`, `<arg_key:opensource>`, `</arg_key:opensource>`, `<arg_value:opensource>`, `</arg_value:opensource>`]
-                      `</arg_value:opensource>`
-                      `\n`
-                    star
-                      sequence
-                        `<arg_key:opensource>`
-                        `days`
-                        `</arg_key:opensource>`
-                        `\n`
-                        `<arg_value:opensource>`
-                        text excluding [`<tool_calls:opensource>`, `</tool_calls:opensource>`, `<tool_call:opensource>`, `</tool_call:opensource>`, `<tool_sep:opensource>`, `<arg_key:opensource>`, `</arg_key:opensource>`, `<arg_value:opensource>`, `</arg_value:opensource>`]
-                        `</arg_value:opensource>`
-                        `\n`
-              `\n</tool_calls:opensource>`
-        "#]].assert_eq(&outline(&tag.format));
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"const_string","value":"<tool_calls:opensource>\n"},{"type":"tags_with_separator","tags":[{"begin":"<tool_call:opensource>get_weather<tool_sep:opensource>\n","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<arg_key:opensource>"},{"type":"const_string","value":"city"},{"type":"const_string","value":"</arg_key:opensource>"},{"type":"const_string","value":"\n"},{"type":"const_string","value":"<arg_value:opensource>"},{"type":"any_text","excludes":["<tool_calls:opensource>","</tool_calls:opensource>","<tool_call:opensource>","</tool_call:opensource>","<tool_sep:opensource>","<arg_key:opensource>","</arg_key:opensource>","<arg_value:opensource>","</arg_value:opensource>"]},{"type":"const_string","value":"</arg_value:opensource>"},{"type":"const_string","value":"\n"}]},{"type":"star","content":{"type":"sequence","elements":[{"type":"const_string","value":"<arg_key:opensource>"},{"type":"const_string","value":"days"},{"type":"const_string","value":"</arg_key:opensource>"},{"type":"const_string","value":"\n"},{"type":"const_string","value":"<arg_value:opensource>"},{"type":"any_text","excludes":["<tool_calls:opensource>","</tool_calls:opensource>","<tool_call:opensource>","</tool_call:opensource>","<tool_sep:opensource>","<arg_key:opensource>","</arg_key:opensource>","<arg_value:opensource>","</arg_value:opensource>"]},{"type":"const_string","value":"</arg_value:opensource>"},{"type":"const_string","value":"\n"}]}}]},"end":"</tool_call:opensource>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"\n</tool_calls:opensource>"}]}}"#]].assert_eq(&tag.to_json_string().unwrap());
     }
 
     #[test]
@@ -265,21 +238,7 @@ mod tests {
             ToolChoice::required(),
         );
 
-        expect![[r#"
-            sequence
-              `<tool_calls:opensource>`
-              tags_with_separator `` at_least_one
-                tag `<tool_call:opensource>get_weather` .. `</tool_call:opensource>`
-                  sequence
-                    sequence
-                      `<arg_key:opensource>`
-                      `city`
-                      `</arg_key:opensource>`
-                      `<arg_value:opensource>`
-                      text excluding [`<tool_calls:opensource>`, `</tool_calls:opensource>`, `<tool_call:opensource>`, `</tool_call:opensource>`, `<arg_key:opensource>`, `</arg_key:opensource>`, `<arg_value:opensource>`, `</arg_value:opensource>`]
-                      `</arg_value:opensource>`
-              `</tool_calls:opensource>`
-        "#]].assert_eq(&outline(&tag.format));
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"const_string","value":"<tool_calls:opensource>"},{"type":"tags_with_separator","tags":[{"begin":"<tool_call:opensource>get_weather","content":{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<arg_key:opensource>"},{"type":"const_string","value":"city"},{"type":"const_string","value":"</arg_key:opensource>"},{"type":"const_string","value":"<arg_value:opensource>"},{"type":"any_text","excludes":["<tool_calls:opensource>","</tool_calls:opensource>","<tool_call:opensource>","</tool_call:opensource>","<arg_key:opensource>","</arg_key:opensource>","<arg_value:opensource>","</arg_value:opensource>"]},{"type":"const_string","value":"</arg_value:opensource>"}]}]},"end":"</tool_call:opensource>"}],"separator":"","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"</tool_calls:opensource>"}]}}"#]].assert_eq(&tag.to_json_string().unwrap());
     }
 
     #[test]
@@ -298,34 +257,14 @@ mod tests {
             )],
             ToolChoice::required(),
         );
-        expect![[r#"
-            sequence
-              `<tool_calls>\n`
-              tags_with_separator `\n` at_least_one
-                tag `<tool_call>lookup<tool_sep>\n` .. `</tool_call>`
-                  sequence
-                    star
-                      or
-                        sequence
-                          `<arg_key>`
-                          `query`
-                          `</arg_key>`
-                          `\n`
-                          `<arg_value>`
-                          text excluding [`<tool_calls>`, `</tool_calls>`, `<tool_call>`, `</tool_call>`, `<tool_sep>`, `<arg_key>`, `</arg_key>`, `<arg_value>`, `</arg_value>`]
-                          `</arg_value>`
-                          `\n`
-                        sequence
-                          `<arg_key>`
-                          `limit`
-                          `</arg_key>`
-                          `\n`
-                          `<arg_value>`
-                          text excluding [`<tool_calls>`, `</tool_calls>`, `<tool_call>`, `</tool_call>`, `<tool_sep>`, `<arg_key>`, `</arg_key>`, `<arg_value>`, `</arg_value>`]
-                          `</arg_value>`
-                          `\n`
-              `\n</tool_calls>`
-        "#]].assert_eq(&outline(&tag.format));
+        let value = serde_json::to_value(tag).unwrap();
+
+        expect![[r#"{"type":"sequence","elements":[{"type":"star","content":{"type":"or","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<arg_key>"},{"type":"const_string","value":"query"},{"type":"const_string","value":"</arg_key>"},{"type":"const_string","value":"\n"},{"type":"const_string","value":"<arg_value>"},{"type":"any_text","excludes":["<tool_calls>","</tool_calls>","<tool_call>","</tool_call>","<tool_sep>","<arg_key>","</arg_key>","<arg_value>","</arg_value>"]},{"type":"const_string","value":"</arg_value>"},{"type":"const_string","value":"\n"}]},{"type":"sequence","elements":[{"type":"const_string","value":"<arg_key>"},{"type":"const_string","value":"limit"},{"type":"const_string","value":"</arg_key>"},{"type":"const_string","value":"\n"},{"type":"const_string","value":"<arg_value>"},{"type":"any_text","excludes":["<tool_calls>","</tool_calls>","<tool_call>","</tool_call>","<tool_sep>","<arg_key>","</arg_key>","<arg_value>","</arg_value>"]},{"type":"const_string","value":"</arg_value>"},{"type":"const_string","value":"\n"}]}]}}]}"#]].assert_eq(
+            &serde_json::to_string(
+                &value["format"]["elements"][1]["tags"][0]["content"],
+            )
+            .unwrap(),
+        );
     }
 
     #[test]
@@ -334,24 +273,11 @@ mod tests {
             tool("search", json!({ "type": "object" })),
             tool("lookup", json!({ "type": "object" })),
         ];
-        let auto = build("", &tools, ToolChoice::auto());
-        let forced = build("", &tools, ToolChoice::function("lookup"));
+        let auto = build("", &tools, ToolChoice::auto()).to_json_string().unwrap();
+        let forced = build("", &tools, ToolChoice::function("lookup")).to_json_string().unwrap();
 
-        expect![[r#"
-            triggered_tags [`<tool_calls>`]
-              tag `<tool_calls>\n` .. `\n</tool_calls>`
-                tags_with_separator `\n` at_least_one
-                  tag `<tool_call>search<tool_sep>\n` text `</tool_call>`
-                  tag `<tool_call>lookup<tool_sep>\n` text `</tool_call>`
-        "#]]
-        .assert_eq(&outline(&auto.format));
-        expect![[r#"
-            sequence
-              `<tool_calls>\n`
-              tag `<tool_call>lookup<tool_sep>\n` text `</tool_call>`
-              `\n</tool_calls>`
-        "#]]
-        .assert_eq(&outline(&forced.format));
+        expect![[r#"{"type":"structural_tag","format":{"type":"triggered_tags","triggers":["<tool_calls>"],"tags":[{"begin":"<tool_calls>\n","content":{"type":"tags_with_separator","tags":[{"begin":"<tool_call>search<tool_sep>\n","content":{"type":"any_text","excludes":[]},"end":"</tool_call>"},{"begin":"<tool_call>lookup<tool_sep>\n","content":{"type":"any_text","excludes":[]},"end":"</tool_call>"}],"separator":"\n","at_least_one":true,"stop_after_first":false},"end":"\n</tool_calls>"}],"at_least_one":false,"stop_after_first":false,"excludes":[]}}"#]].assert_eq(&auto);
+        expect![[r#"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"const_string","value":"<tool_calls>\n"},{"type":"tag","begin":"<tool_call>lookup<tool_sep>\n","content":{"type":"any_text","excludes":[]},"end":"</tool_call>"},{"type":"const_string","value":"\n</tool_calls>"}]}}"#]].assert_eq(&forced);
     }
 
     #[test]
@@ -365,13 +291,11 @@ mod tests {
             )],
             ToolChoice::function("get_current_date"),
         );
-        expect![[r#"
-            sequence
-              `<tool_calls>`
-              tag `<tool_call>get_current_date` `` `</tool_call>`
-              `</tool_calls>`
-        "#]]
-        .assert_eq(&outline(&tag.format));
+        let value = serde_json::to_value(tag).unwrap();
+
+        expect![[r#"{"type":"tag","begin":"<tool_call>get_current_date","content":{"type":"const_string","value":""},"end":"</tool_call>"}"#]].assert_eq(
+            &serde_json::to_string(&value["format"]["elements"][1]).unwrap(),
+        );
     }
 
     #[test]
@@ -388,31 +312,13 @@ mod tests {
             )],
             ToolChoice::required(),
         );
-        expect![[r#"
-            sequence
-              `<tool_calls>\n`
-              tags_with_separator `\n` at_least_one
-                tag `<tool_call>search<tool_sep>\n` .. `</tool_call>`
-                  sequence
-                    sequence
-                      `<arg_key>`
-                      `query`
-                      `</arg_key>`
-                      `\n`
-                      `<arg_value>`
-                      text excluding [`<tool_calls>`, `</tool_calls>`, `<tool_call>`, `</tool_call>`, `<tool_sep>`, `<arg_key>`, `</arg_key>`, `<arg_value>`, `</arg_value>`]
-                      `</arg_value>`
-                      `\n`
-                    sequence
-                      `<arg_key>`
-                      `tenant`
-                      `</arg_key>`
-                      `\n`
-                      `<arg_value>`
-                      text excluding [`<tool_calls>`, `</tool_calls>`, `<tool_call>`, `</tool_call>`, `<tool_sep>`, `<arg_key>`, `</arg_key>`, `<arg_value>`, `</arg_value>`]
-                      `</arg_value>`
-                      `\n`
-              `\n</tool_calls>`
-        "#]].assert_eq(&outline(&tag.format));
+        let value = serde_json::to_value(tag).unwrap();
+
+        expect![[r#"{"type":"sequence","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"<arg_key>"},{"type":"const_string","value":"query"},{"type":"const_string","value":"</arg_key>"},{"type":"const_string","value":"\n"},{"type":"const_string","value":"<arg_value>"},{"type":"any_text","excludes":["<tool_calls>","</tool_calls>","<tool_call>","</tool_call>","<tool_sep>","<arg_key>","</arg_key>","<arg_value>","</arg_value>"]},{"type":"const_string","value":"</arg_value>"},{"type":"const_string","value":"\n"}]},{"type":"sequence","elements":[{"type":"const_string","value":"<arg_key>"},{"type":"const_string","value":"tenant"},{"type":"const_string","value":"</arg_key>"},{"type":"const_string","value":"\n"},{"type":"const_string","value":"<arg_value>"},{"type":"any_text","excludes":["<tool_calls>","</tool_calls>","<tool_call>","</tool_call>","<tool_sep>","<arg_key>","</arg_key>","<arg_value>","</arg_value>"]},{"type":"const_string","value":"</arg_value>"},{"type":"const_string","value":"\n"}]}]}"#]].assert_eq(
+            &serde_json::to_string(
+                &value["format"]["elements"][1]["tags"][0]["content"],
+            )
+            .unwrap(),
+        );
     }
 }

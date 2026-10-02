@@ -11,7 +11,6 @@ import pytest
 import torch
 
 from tests.utils import RemoteOpenAIServer
-from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep
 
 # Detect Blackwell / B200 (compute capability 10.x)
@@ -31,10 +30,7 @@ DP_SIZE = 2
 # GSM8K eval configuration
 NUM_QUESTIONS = 256  # Fast eval for CI; but must be large enough to hit dbo thresholds
 NUM_SHOTS = 5  # Few-shot examples
-
-# Expected 0.64 with 2% buffer (based on vLLM test data)
-# On ROCm, widened to 0.61 after observing 0.617 amd-ci nightly flake twice.
-MIN_ACCURACY = 0.61 if current_platform.is_rocm() else 0.62
+MIN_ACCURACY = 0.62  # Expected 0.64 with 2% buffer (based on vLLM test data)
 
 # Increase max_num_seqs to trigger DBO for decode batches
 # With 64 seqs, decode batches should exceed the 32 token threshold

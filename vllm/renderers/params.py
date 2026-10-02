@@ -27,9 +27,13 @@ _S = TypeVar("_S", list[int], "torch.Tensor")
 # Prompt keys whose entry i describes token i of the prompt, so they must be
 # reduced with the same slice as the prompt tokens themselves. Anything added
 # here is truncated by `TokenizeParams.apply_post_tokenization`.
+# `_assistant_tokens_mask` is renderer-internal: `HfRenderer.render_messages`
+# stashes it on the prompt so `_process_tokens` can move it onto the engine
+# input.
 _PARALLEL_TO_PROMPT_TOKENS = (
     "prompt_token_offsets",
     "prompt_is_token_ids",
+    "_assistant_tokens_mask",
 )
 
 
@@ -95,6 +99,9 @@ class ChatParams:
     mm_processor_kwargs: dict[str, Any] | None = None
     """The kwargs to pass to the multi-modal processor."""
 
+    return_assistant_tokens_mask: bool = False
+    """Request a per-token assistant mask from apply_chat_template."""
+
     tool_choice: Any | None = None
     """Request-level tool choice for renderers that need API metadata."""
 
@@ -129,6 +136,7 @@ class ChatParams:
                 default_mm_processor_kwargs,
                 self.mm_processor_kwargs,
             ),
+            return_assistant_tokens_mask=self.return_assistant_tokens_mask,
             tool_choice=self.tool_choice,
             response_format=self.response_format,
         )
@@ -234,7 +242,7 @@ class TokenizeParams:
             raise VLLMValidationError(
                 f"{self.max_output_tokens_param}={max_output_tokens} "
                 f"cannot be greater than "
-                f"{self.max_total_tokens_param}={max_total_tokens}. "
+                f"{self.max_total_tokens_param}={max_total_tokens=}. "
                 f"Please request fewer output tokens.",
                 parameter=self.max_output_tokens_param,
                 value=max_output_tokens,

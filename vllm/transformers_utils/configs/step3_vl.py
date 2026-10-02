@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers.configuration_utils import PreTrainedConfig
+from transformers.configuration_utils import PretrainedConfig
 
 
-class Step3VisionEncoderConfig(PreTrainedConfig):
+class Step3VisionEncoderConfig(PretrainedConfig):
     model_type = "step3_vision_encoder"
 
     def __init__(
@@ -35,7 +35,7 @@ class Step3VisionEncoderConfig(PreTrainedConfig):
         super().__init__(**kwargs)
 
 
-class Step3TextConfig(PreTrainedConfig):
+class Step3TextConfig(PretrainedConfig):
     model_type = "step3_text"
     architectures = ["Step3TextForCausalLM"]
 
@@ -146,7 +146,7 @@ class Step3TextConfig(PreTrainedConfig):
         super().__init__(**kwargs)
 
 
-class Step3VLConfig(PreTrainedConfig):
+class Step3VLConfig(PretrainedConfig):
     model_type = "step3_vl"
 
     def __init__(

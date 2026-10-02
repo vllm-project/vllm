@@ -227,9 +227,6 @@ pub(super) fn render_request_with_media_order(
                     );
                 }
             }
-            ChatMessage::Custom { role, .. } => {
-                return Err(Error::UnsupportedChatRole { role: role.clone() });
-            }
         }
 
         if is_user_like_entry(message, current_render_index as usize, dialect)
@@ -289,8 +286,8 @@ pub(super) fn resolve_reasoning(
         DsDialect::V41 => {
             let budget = match effort {
                 EffortValue::String(effort) => match effort.as_str() {
-                    "low" => 50,
-                    "high" => 75,
+                    "low" => 25,
+                    "high" => 50,
                     "xhigh" => 75,
                     "max" => 100,
                     _ => return Err(invalid_v41_reasoning_effort()),

@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 
-class MLPSpeculatorConfig(PreTrainedConfig):
+class MLPSpeculatorConfig(PretrainedConfig):
     model_type = "mlp_speculator"
 
     attribute_map = {

@@ -61,7 +61,6 @@ if TYPE_CHECKING:
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
-    from vllm.tokenizers import TokenizerLike
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
@@ -90,13 +89,6 @@ MambaStateShapes: TypeAlias = (
         tuple[int, int],
         tuple[int, int, int],
         tuple[int, int, int],
-        tuple[int, int, int],
-    ]
-    | tuple[
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int],
         tuple[int, int, int],
     ]
 )
@@ -1263,7 +1255,7 @@ class SupportsRealtime(Protocol):
     Override in subclasses based on the model's expected output length."""
 
     @classmethod
-    def buffer_realtime_audio(
+    async def buffer_realtime_audio(
         cls,
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
@@ -1450,7 +1442,7 @@ class SupportsTranscription(Protocol):
     def parse_language_detection_output(
         cls,
         token_ids: list[int],
-        tokenizer: "TokenizerLike",
+        tokenizer: object,
     ) -> str:
         """Parse the detected language from model output token IDs.
 
@@ -1462,7 +1454,7 @@ class SupportsTranscription(Protocol):
     @classmethod
     def get_language_token_ids(
         cls,
-        tokenizer: "TokenizerLike",
+        tokenizer: object,
     ) -> list[int] | None:
         """Return token IDs that represent valid language tokens.
 

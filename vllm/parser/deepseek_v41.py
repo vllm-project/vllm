@@ -5,10 +5,11 @@
 import functools
 from dataclasses import replace
 
+import regex as re
+
 from vllm.parser.deepseek_v4 import (
     DeepSeekV4Parser,
     _dsml_arg_converter,
-    _param_patterns,
     deepseek_v4_config,
 )
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig
@@ -20,7 +21,17 @@ DSML_INVOKE_END = "</｜DSML｜ invoke>"
 DSML_PARAM_START = "<｜DSML｜ parameter"
 DSML_PARAM_CLOSE = "</｜DSML｜ parameter>"
 
-_PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START, DSML_PARAM_CLOSE)
+_PARAM_RE = re.compile(
+    r'<｜DSML｜ parameter\s+name="([^"]+)"\s+string="(true|false)">'
+    r"(.*?)"
+    r"(?:</｜DSML｜ parameter>|(?=<｜DSML｜ parameter\s+name=))",
+    re.DOTALL,
+)
+_PARTIAL_PARAM_RE = re.compile(
+    r'<｜DSML｜ parameter\s+name="([^"]+)"\s+string="(true|false)">'
+    r"(.*)$",
+    re.DOTALL,
+)
 
 
 @functools.cache

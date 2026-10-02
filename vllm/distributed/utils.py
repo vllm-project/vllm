@@ -530,7 +530,8 @@ def get_cpu_distributed_timeout_or_none() -> timedelta | None:
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
         return None
-    return vllm_config.parallel_config.cpu_distributed_timeout
+    timeout_seconds = vllm_config.parallel_config.cpu_distributed_timeout_seconds
+    return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
 
 
 def get_distributed_timeout_or_none() -> timedelta | None:
@@ -581,7 +582,6 @@ def stateless_init_torch_distributed_process_group(
     group_name: str | None = None,
     return_store: bool = False,
     listen_socket: socket.socket | None = None,
-    timeout: timedelta | None = None,
 ) -> ProcessGroup | tuple[ProcessGroup, Store]:
     """A replacement for `torch.distributed.init_process_group` that does not
     pollute the global state. The created ProcessGroup object can be used for
@@ -617,13 +617,18 @@ def stateless_init_torch_distributed_process_group(
     is skipped and a ``TCPStore`` server is created directly using the
     pre-bound socket.  This is useful for eliminating TOCTOU races
     between port allocation and binding.
-
-    If *timeout* is None, use PyTorch's default for the backend.
     """
     init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
-    if timeout is None:
-        timeout = _get_default_timeout(backend)
+    timeout = _get_default_timeout(backend)
+    if backend == "gloo":
+        gloo_timeout = get_cpu_distributed_timeout_or_none()
+        if gloo_timeout is not None:
+            timeout = gloo_timeout
+    else:
+        device_timeout = get_distributed_timeout_or_none()
+        if device_timeout is not None:
+            timeout = device_timeout
 
     if listen_socket is not None:
         store = create_tcp_store(

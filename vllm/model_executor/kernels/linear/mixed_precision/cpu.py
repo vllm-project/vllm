@@ -213,10 +213,5 @@ def _get_isa_hint(dtype: torch.dtype) -> str:
         return "amx"
     elif current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
         return "rvv"
-    elif (
-        dtype == torch.bfloat16
-        and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
-    ):
-        return "vsx"
     else:
         return "vec"

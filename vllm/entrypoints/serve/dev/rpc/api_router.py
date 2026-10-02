@@ -29,11 +29,6 @@ async def collective_rpc(raw_request: Request):
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail=f"JSON decode error: {e}",
         ) from e
-    if not isinstance(body, dict):
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="Request body must be a JSON object",
-        )
     method = body.get("method")
     if method is None:
         raise HTTPException(

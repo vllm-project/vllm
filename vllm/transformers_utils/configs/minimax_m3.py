@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 
-class MiniMaxM3TextConfig(PreTrainedConfig):
+class MiniMaxM3TextConfig(PretrainedConfig):
     """Config for the MiniMax M3 text backbone (MiniMaxM3SparseForCausalLM).
 
     Defaults mirror the ``text_config`` of the MiniMax-M3-preview checkpoint.
@@ -120,7 +120,7 @@ class MiniMaxM3MTPConfig(MiniMaxM3TextConfig):
         super().__init__(num_hidden_layers=num_hidden_layers, **kwargs)
 
 
-class MiniMaxM3Config(PreTrainedConfig):
+class MiniMaxM3Config(PretrainedConfig):
     """Top-level MiniMax M3 (VL) config.
 
     Holds the text backbone as ``text_config`` so that

@@ -85,8 +85,6 @@ def forward(
 
 For reference, check out our [Llama implementation](../../../vllm/model_executor/models/llama.py). vLLM already supports a large number of models. It is recommended to find a model similar to yours and adapt it to your model's architecture. Check out [vllm/model_executor/models](../../../vllm/model_executor/models) for more examples.
 
-Adapting model-specific structure or boilerplate can keep architectures independent. Reuse shared layer implementations, such as Attention and MoE, where their contracts fit the model.
-
 ## 3. (Optional) Implement tensor parallelism and quantization support
 
 If your model is too large to fit into a single GPU, you can use tensor parallelism to manage it.

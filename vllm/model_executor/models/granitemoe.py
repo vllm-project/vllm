@@ -29,7 +29,7 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers.configuration_utils import PreTrainedConfig
+from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -39,13 +39,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEFactory,
-    GateLinear,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -96,10 +94,12 @@ class GraniteMoeMoE(nn.Module):
         self.is_sequence_parallel = is_sequence_parallel
 
         # Gate always runs at half / full precision for now.
-        self.gate = GateLinear(
+        self.gate = ReplicatedLinear(
             hidden_size,
             num_experts,
+            bias=False,
             params_dtype=params_dtype,
+            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -141,7 +141,7 @@ class GraniteMoeMoE(nn.Module):
 class GraniteMoeAttention(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,

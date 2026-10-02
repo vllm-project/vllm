@@ -5,7 +5,13 @@
 import pytest
 import torch
 
+from tests.utils import ensure_current_vllm_config
+from vllm.distributed.parallel_state import (
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
 EMBED_DIM = 256
 NUM_HEADS = 4
@@ -15,11 +21,20 @@ WINDOW = 8
 SEQ_LENS = [5, 37]
 
 
-@pytest.fixture
-def vision_attn_env(dist_init):
+@pytest.fixture(scope="module")
+def vision_attn_env():
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        local_rank=0,
+        distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+        backend="nccl",
+    )
     default_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
-    yield
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=1)
+        yield
     torch.set_default_dtype(default_dtype)
 
 

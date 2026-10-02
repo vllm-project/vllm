@@ -11,7 +11,9 @@ from transformers import BatchFeature
 from transformers.video_utils import VideoMetadata
 
 from vllm.config.multimodal import (
-    MultiModalDummyOptions,
+    BaseDummyOptions,
+    ImageDummyOptions,
+    VideoDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import (
@@ -281,7 +283,7 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         size = self.info.get_image_size_with_most_features()
         video_size = self.info.get_video_size_with_most_features()
@@ -291,14 +293,14 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
                 width=size.width,
                 height=size.height,
                 num_images=mm_counts.get("image", 0),
-                overrides=mm_options.get("image"),
+                overrides=cast(ImageDummyOptions | None, mm_options.get("image")),
             ),
             "video": self._get_dummy_videos(
                 width=video_size.width,
                 height=video_size.height,
                 num_frames=num_frames,
                 num_videos=mm_counts.get("video", 0),
-                overrides=mm_options.get("video"),
+                overrides=cast(VideoDummyOptions | None, mm_options.get("video")),
             ),
         }
 

@@ -52,19 +52,6 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
-class KvHintAction(msgspec.Struct, frozen=True):
-    action_id: str
-    action_type: str
-    action_version: str
-    payload: dict[str, object]
-
-
-class KvHintsEnvelope(msgspec.Struct, frozen=True):
-    protocol_version: str
-    message_id: str
-    actions: list[KvHintAction]
-
-
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,
@@ -91,7 +78,6 @@ class EngineCoreRequest(
     reasoning_parser_kwargs: dict[str, object] | None = None
     abort_immediately: bool = False
     session_id: str | None = None
-    kv_hints: KvHintsEnvelope | None = None
 
 
 class EngineCoreOutput(
@@ -116,7 +102,6 @@ class EngineCoreOutput(
     mm_cache_miss_hashes: list[str] | None = None
     new_sampling_mask: object | None = None
     spec_decode_metrics: object | None = None
-    prompt_token_id_logprobs: object | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -168,18 +153,6 @@ request = EngineCoreRequest(
     arrival_time=42.5,
     client_index=0,
     session_id="session-1",
-    kv_hints=KvHintsEnvelope(
-        protocol_version="0.1",
-        message_id="msg-1",
-        actions=[
-            KvHintAction(
-                action_id="action-1",
-                action_type="example.action",
-                action_version="1.0",
-                payload={"key": "value"},
-            )
-        ],
-    ),
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.
@@ -261,9 +234,13 @@ sampling_mask_wire = [
     [
         "<i4",
         [5],
-        msgspec.msgpack.Ext(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
+        msgpack.ExtType(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
     ],
-    None,
+    [
+        "<i8",
+        [2],
+        msgpack.ExtType(3, np.array([0, 5], dtype=np.int64).tobytes()),
+    ],
     None,
 ]
 outputs_with_sampling_mask = EngineCoreOutputs(

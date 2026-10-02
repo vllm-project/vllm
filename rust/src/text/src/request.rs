@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
@@ -97,11 +96,6 @@ pub struct SamplingParams {
     ///
     /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
     pub prompt_logprobs: Option<i32>,
-    /// Candidate token IDs scored at every scored causal prompt row, where row
-    /// `i` scores them as predictions of prompt token `i + 1`.
-    pub prompt_logprob_token_ids: Option<Vec<u32>>,
-    /// First causal prompt row to score; `None` scores from the first row.
-    pub prompt_logprob_start: Option<u32>,
     /// Minimum probability threshold for token sampling. `None` means no
     /// explicit user override.
     pub min_p: Option<f32>,
@@ -161,8 +155,6 @@ impl Default for SamplingParams {
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
-            prompt_logprob_token_ids: None,
-            prompt_logprob_start: None,
             min_p: None,
             frequency_penalty: None,
             presence_penalty: None,
@@ -219,22 +211,10 @@ pub struct TextRequest {
     /// Stable session identity shared by related requests.
     #[serde(default)]
     pub session_id: Option<String>,
-    /// Optional orchestrator-originated KV hints.
+    /// Optional reasoning-parser kwargs forwarded to engine-side structured
+    /// output logic.
     #[serde(default)]
-    pub kv_hints: Option<KvHintsEnvelope>,
-    /// Reasoning-parser kwargs forwarded to engine-side structured output
-    /// logic. The engine consults them only when it owns grammar activation;
-    /// see [`Self::reasoning_ended`].
-    #[serde(default)]
-    pub reasoning_parser_kwargs: ReasoningParserKwargs,
-    /// Optional engine reasoning-gate override selected by a higher-level frontend.
-    ///
-    /// `Some(true)` means the structured output grammar covers reasoning from
-    /// the first generated token, so the engine masks and advances immediately
-    /// instead of waiting for its reasoning parser. Unset for final-output-only
-    /// grammars and for requests without a grammar.
-    #[serde(default)]
-    pub reasoning_ended: Option<bool>,
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
@@ -262,9 +242,7 @@ impl TextRequest {
             add_special_tokens: false,
             data_parallel_rank: None,
             session_id: None,
-            kv_hints: None,
-            reasoning_parser_kwargs: Default::default(),
-            reasoning_ended: None,
+            reasoning_parser_kwargs: None,
             lora_request: None,
             arrival_time: None,
         }

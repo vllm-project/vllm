@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from transformers.configuration_utils import PreTrainedConfig
+from transformers.configuration_utils import PretrainedConfig
 
 
-class AfmoeConfig(PreTrainedConfig):
+class AfmoeConfig(PretrainedConfig):
     model_type = "afmoe"
 
     def __init__(

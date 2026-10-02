@@ -148,7 +148,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: "SharedExperts | None",
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | UnfinalizedMoEOutput:
+    ) -> torch.Tensor:
         """Apply the MoE operation using modular kernels.
 
         Args:
@@ -160,7 +160,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             shared_experts: The shared experts module, if any
 
         Returns:
-            Finalized routed states or a deferred-finalize output.
+            Output tensor from routed experts.
 
         """
         raise NotImplementedError

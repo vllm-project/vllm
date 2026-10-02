@@ -4,7 +4,6 @@
 
 import torch
 
-from tests.v1.sample.utils import create_mock_reasoning_config
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
@@ -13,9 +12,14 @@ from vllm.v1.sample.logits_processor.interface import (
 from vllm.v1.sample.thinking_budget_state import ThinkingBudgetStateHolder
 
 
+class _MockReasoningConfig:
+    reasoning_start_token_ids = [151667]
+    reasoning_end_token_ids = [151668]
+
+
 def _make_holder() -> ThinkingBudgetStateHolder:
     return ThinkingBudgetStateHolder(
-        create_mock_reasoning_config([151667], [151668]),
+        _MockReasoningConfig(),
         8,
         0,
         torch.device("cpu"),

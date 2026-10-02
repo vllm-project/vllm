@@ -25,6 +25,7 @@ from vllm.model_executor.layers.pooler import (
     Pooler,
     PoolingParamsUpdate,
 )
+from vllm.model_executor.layers.pooler.activations import LambdaPoolerActivation
 from vllm.model_executor.layers.pooler.seqwise import (
     EmbeddingPoolerHead,
     SequencePooler,
@@ -115,11 +116,11 @@ class BertPooler(SequencePooler):
         )
         self.act_fn = nn.Tanh()
 
-        # Keep the model's head layers even when output activation is disabled.
         # Use lambdas so that weights are not registered under `self.head`
         self.head = EmbeddingPoolerHead(
             head_dtype=head_dtype,
-            projector=lambda x: self.act_fn(self.dense(x)),
+            projector=lambda x: self.dense(x),
+            activation=LambdaPoolerActivation(self.act_fn),
         )
 
 
@@ -461,7 +462,6 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     """
 
     is_pooling_model = True
-    embedding_class: type[nn.Module] = BertEmbedding
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -505,7 +505,7 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
     def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:
         return BertModel(
-            vllm_config=vllm_config, prefix=prefix, embedding_class=self.embedding_class
+            vllm_config=vllm_config, prefix=prefix, embedding_class=BertEmbedding
         )
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
@@ -782,7 +782,6 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
     """
 
     is_pooling_model = True
-    embedding_class: type[nn.Module] = BertEmbedding
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -792,7 +791,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
         self.bert = BertPoolingModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "bert"),
-            embedding_class=self.embedding_class,
+            embedding_class=BertEmbedding,
         )
         self.classifier = nn.Linear(
             config.hidden_size,
@@ -842,7 +841,6 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
 @default_pooling_type(tok_pooling_type="ALL")
 class BertForTokenClassification(nn.Module):
     is_pooling_model = True
-    embedding_class: type[nn.Module] = BertEmbedding
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -852,7 +850,7 @@ class BertForTokenClassification(nn.Module):
         self.bert = BertModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "bert"),
-            embedding_class=self.embedding_class,
+            embedding_class=BertEmbedding,
         )
         self.classifier = nn.Linear(
             config.hidden_size, config.num_labels, dtype=self.head_dtype
@@ -930,15 +928,13 @@ class BertForMaskedLM(nn.Module):
         }
     )
 
-    embedding_class: type[nn.Module] = BertEmbedding
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.bert = BertModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "bert"),
-            embedding_class=self.embedding_class,
+            embedding_class=BertEmbedding,
         )
         self.mlm_head = BertMLMHead(
             hidden_size=config.hidden_size,

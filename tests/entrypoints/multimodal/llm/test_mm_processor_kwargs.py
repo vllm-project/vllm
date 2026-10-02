@@ -7,9 +7,6 @@ from unittest.mock import Mock
 import pytest
 
 from vllm import LLM, SamplingParams
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.inputs import TextPrompt
-from vllm.outputs import RequestOutput
 
 
 def _make_mock_llm() -> LLM:
@@ -20,13 +17,12 @@ def _make_mock_llm() -> LLM:
     return llm
 
 
-def test_generate_forwards_mm_processor_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generate_forwards_mm_processor_kwargs() -> None:
     llm = _make_mock_llm()
     mm_processor_kwargs = {"num_crops": 4}
     sampling_params = SamplingParams(max_tokens=1)
 
-    _run_completion = Mock(return_value=["ok"])
-    monkeypatch.setattr(llm, "_run_completion", _run_completion)
+    llm._run_completion = Mock(return_value=["ok"])
 
     outputs = llm.generate(
         "prompt",
@@ -35,18 +31,17 @@ def test_generate_forwards_mm_processor_kwargs(monkeypatch: pytest.MonkeyPatch) 
     )
 
     assert outputs == ["ok"]
-    assert _run_completion.call_args.kwargs["mm_processor_kwargs"] == (
+    assert llm._run_completion.call_args.kwargs["mm_processor_kwargs"] == (
         mm_processor_kwargs
     )
 
 
-def test_enqueue_forwards_mm_processor_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_enqueue_forwards_mm_processor_kwargs() -> None:
     llm = _make_mock_llm()
     mm_processor_kwargs = {"do_resize": False}
     sampling_params = SamplingParams(max_tokens=1)
 
-    _add_completion_requests = Mock(return_value=["req-0"])
-    monkeypatch.setattr(llm, "_add_completion_requests", _add_completion_requests)
+    llm._add_completion_requests = Mock(return_value=["req-0"])
 
     request_ids = llm.enqueue(
         "prompt",
@@ -56,19 +51,18 @@ def test_enqueue_forwards_mm_processor_kwargs(monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert request_ids == ["req-0"]
-    assert _add_completion_requests.call_args.kwargs["mm_processor_kwargs"] == (
+    assert llm._add_completion_requests.call_args.kwargs["mm_processor_kwargs"] == (
         mm_processor_kwargs
     )
 
 
-def test_chat_forwards_mm_processor_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_chat_forwards_mm_processor_kwargs() -> None:
     llm = _make_mock_llm()
     mm_processor_kwargs = {"do_pan_and_scan": True}
     sampling_params = SamplingParams(max_tokens=1)
-    messages: list[ChatCompletionMessageParam] = [{"role": "user", "content": "hello"}]
+    messages = [{"role": "user", "content": "hello"}]
 
-    _run_chat = Mock(return_value=["ok"])
-    monkeypatch.setattr(llm, "_run_chat", _run_chat)
+    llm._run_chat = Mock(return_value=["ok"])
 
     outputs = llm.chat(
         messages,
@@ -77,19 +71,18 @@ def test_chat_forwards_mm_processor_kwargs(monkeypatch: pytest.MonkeyPatch) -> N
     )
 
     assert outputs == ["ok"]
-    assert _run_chat.call_args.kwargs["mm_processor_kwargs"] == mm_processor_kwargs
+    assert llm._run_chat.call_args.kwargs["mm_processor_kwargs"] == (
+        mm_processor_kwargs
+    )
 
 
-def test_enqueue_chat_forwards_mm_processor_kwargs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_enqueue_chat_forwards_mm_processor_kwargs() -> None:
     llm = _make_mock_llm()
     mm_processor_kwargs = {"do_pan_and_scan": True}
     sampling_params = SamplingParams(max_tokens=1)
-    messages: list[ChatCompletionMessageParam] = [{"role": "user", "content": "hello"}]
+    messages = [{"role": "user", "content": "hello"}]
 
-    _add_chat_requests = Mock(return_value=["req-0"])
-    monkeypatch.setattr(llm, "_add_chat_requests", _add_chat_requests)
+    llm._add_chat_requests = Mock(return_value=["req-0"])
 
     request_ids = llm.enqueue_chat(
         messages,
@@ -99,79 +92,67 @@ def test_enqueue_chat_forwards_mm_processor_kwargs(
     )
 
     assert request_ids == ["req-0"]
-    assert _add_chat_requests.call_args.kwargs["mm_processor_kwargs"] == (
+    assert llm._add_chat_requests.call_args.kwargs["mm_processor_kwargs"] == (
         mm_processor_kwargs
     )
 
 
-def test_run_chat_forwards_mm_processor_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_chat_forwards_mm_processor_kwargs() -> None:
     llm = _make_mock_llm()
     mm_processor_kwargs = {"num_crops": 8}
     sampling_params = SamplingParams(max_tokens=1)
-    messages: list[ChatCompletionMessageParam] = [{"role": "user", "content": "hello"}]
+    messages = [{"role": "user", "content": "hello"}]
     sentinel_output = ["done"]
 
-    _add_chat_requests = Mock()
-    monkeypatch.setattr(llm, "_add_chat_requests", _add_chat_requests)
-    _run_engine = Mock(return_value=sentinel_output)
-    monkeypatch.setattr(llm, "_run_engine", _run_engine)
+    llm._add_chat_requests = Mock()
+    llm._run_engine = Mock(return_value=sentinel_output)
 
     outputs = llm._run_chat(
         messages=messages,
         params=sampling_params,
-        output_type=RequestOutput,
+        output_type=object,
         use_tqdm=False,
         mm_processor_kwargs=mm_processor_kwargs,
     )
 
     assert outputs == sentinel_output
-    assert _add_chat_requests.call_args.kwargs["mm_processor_kwargs"] == (
+    assert llm._add_chat_requests.call_args.kwargs["mm_processor_kwargs"] == (
         mm_processor_kwargs
     )
 
 
-def test_run_completion_forwards_mm_processor_kwargs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_run_completion_forwards_mm_processor_kwargs() -> None:
     llm = _make_mock_llm()
     mm_processor_kwargs = {"min_pixels": 4 * 28 * 28}
     sampling_params = SamplingParams(max_tokens=1)
     sentinel_output = ["done"]
 
-    _add_completion_requests = Mock()
-    monkeypatch.setattr(llm, "_add_completion_requests", _add_completion_requests)
-    _run_engine = Mock(return_value=sentinel_output)
-    monkeypatch.setattr(llm, "_run_engine", _run_engine)
+    llm._add_completion_requests = Mock()
+    llm._run_engine = Mock(return_value=sentinel_output)
 
     outputs = llm._run_completion(
         prompts=["prompt"],
         params=sampling_params,
-        output_type=RequestOutput,
+        output_type=object,
         use_tqdm=False,
         mm_processor_kwargs=mm_processor_kwargs,
     )
 
     assert outputs == sentinel_output
-    assert _add_completion_requests.call_args.kwargs["mm_processor_kwargs"] == (
+    assert llm._add_completion_requests.call_args.kwargs["mm_processor_kwargs"] == (
         mm_processor_kwargs
     )
 
 
-def test_add_completion_requests_forwards_mm_processor_kwargs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_add_completion_requests_forwards_mm_processor_kwargs() -> None:
     llm = _make_mock_llm()
     mm_processor_kwargs = {"max_dynamic_patch": 4}
     sampling_params = SamplingParams(max_tokens=1)
 
-    _params_to_seq = Mock(return_value=[sampling_params])
-    monkeypatch.setattr(llm, "_params_to_seq", _params_to_seq)
-    _lora_request_to_seq = Mock(return_value=[None])
-    monkeypatch.setattr(llm, "_lora_request_to_seq", _lora_request_to_seq)
-    _priority_to_seq = Mock(return_value=[0])
-    monkeypatch.setattr(llm, "_priority_to_seq", _priority_to_seq)
-    _preprocess_cmpl_one = Mock(return_value={"prompt_token_ids": [1]})
-    monkeypatch.setattr(llm, "_preprocess_cmpl_one", _preprocess_cmpl_one)
+    llm._params_to_seq = Mock(return_value=[sampling_params])
+    llm._lora_request_to_seq = Mock(return_value=[None])
+    llm._priority_to_seq = Mock(return_value=[0])
+    llm._preprocess_cmpl_one = Mock(return_value={"prompt_token_ids": [1]})
 
     captured_prompts = []
 
@@ -179,8 +160,7 @@ def test_add_completion_requests_forwards_mm_processor_kwargs(
         captured_prompts.extend(prompts)
         return ["req-0"]
 
-    _render_and_add_requests = Mock(side_effect=fake_render_and_add_requests)
-    monkeypatch.setattr(llm, "_render_and_add_requests", _render_and_add_requests)
+    llm._render_and_add_requests = Mock(side_effect=fake_render_and_add_requests)
 
     request_ids = llm._add_completion_requests(
         prompts=["prompt"],
@@ -190,7 +170,7 @@ def test_add_completion_requests_forwards_mm_processor_kwargs(
     )
 
     assert request_ids == ["req-0"]
-    _preprocess_cmpl_one.assert_called_once_with(
+    llm._preprocess_cmpl_one.assert_called_once_with(
         "prompt",
         None,
         mm_processor_kwargs=mm_processor_kwargs,
@@ -203,7 +183,7 @@ def test_preprocess_cmpl_applies_mm_processor_kwargs_to_renderer(
 ) -> None:
     llm = _make_mock_llm()
     mm_processor_kwargs = {"num_crops": 8}
-    prompt: TextPrompt = {"prompt": "<image>", "multi_modal_data": {"image": object()}}
+    prompt = {"prompt": "<image>", "multi_modal_data": {"image": object()}}
 
     renderer = Mock()
     renderer.default_cmpl_tok_params = Mock()
@@ -233,7 +213,7 @@ def test_preprocess_cmpl_keeps_prompt_mm_processor_kwargs_when_no_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     llm = _make_mock_llm()
-    prompt: TextPrompt = {
+    prompt = {
         "prompt": "<image>",
         "multi_modal_data": {"image": object()},
         "mm_processor_kwargs": {"num_crops": 2},
@@ -263,9 +243,7 @@ def test_preprocess_cmpl_keeps_prompt_mm_processor_kwargs_when_no_override(
 def test_preprocess_chat_applies_mm_processor_kwargs_to_renderer() -> None:
     llm = _make_mock_llm()
     mm_processor_kwargs = {"num_crops": 8}
-    messages: list[list[ChatCompletionMessageParam]] = [
-        [{"role": "user", "content": "Describe this image."}]
-    ]
+    messages = [[{"role": "user", "content": "Describe this image."}]]
 
     renderer = Mock()
     renderer.tokenizer = object()
@@ -291,9 +269,7 @@ def test_preprocess_chat_applies_mm_processor_kwargs_to_renderer() -> None:
 
 def test_preprocess_chat_omits_mm_processor_kwargs_when_no_override() -> None:
     llm = _make_mock_llm()
-    messages: list[list[ChatCompletionMessageParam]] = [
-        [{"role": "user", "content": "Describe this image."}]
-    ]
+    messages = [[{"role": "user", "content": "Describe this image."}]]
 
     renderer = Mock()
     renderer.tokenizer = object()
@@ -315,9 +291,7 @@ def test_preprocess_chat_omits_mm_processor_kwargs_when_no_override() -> None:
 def test_preprocess_chat_defaults_add_special_tokens_to_false() -> None:
     # Matches `ChatCompletionRequest.add_special_tokens` on the server.
     llm = _make_mock_llm()
-    messages: list[list[ChatCompletionMessageParam]] = [
-        [{"role": "user", "content": "hi"}]
-    ]
+    messages = [[{"role": "user", "content": "hi"}]]
 
     renderer = Mock()
     renderer.tokenizer = object()
@@ -335,9 +309,7 @@ def test_preprocess_chat_defaults_add_special_tokens_to_false() -> None:
 
 def test_preprocess_chat_tokenization_kwargs_override_add_special_tokens() -> None:
     llm = _make_mock_llm()
-    messages: list[list[ChatCompletionMessageParam]] = [
-        [{"role": "user", "content": "hi"}]
-    ]
+    messages = [[{"role": "user", "content": "hi"}]]
 
     renderer = Mock()
     renderer.tokenizer = object()

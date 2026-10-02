@@ -199,7 +199,6 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
-                assert isinstance(images, ImageProcessorItems)
                 size = images.get_image_size(item_idx)
 
                 # Disable crop mode for multi-image input.

@@ -7,10 +7,10 @@ A video-chunk is the smallest independently processable unit of video.
 """
 
 from transformers import DeepseekV3Config
-from transformers.configuration_utils import PreTrainedConfig
+from transformers.configuration_utils import PretrainedConfig
 
 
-class KimiK25VisionConfig(PreTrainedConfig):
+class KimiK25VisionConfig(PretrainedConfig):
     model_type = "kimi_k25_vision"
 
     def __init__(
@@ -59,7 +59,7 @@ class KimiK25VisionConfig(PreTrainedConfig):
         self.projector_ln_eps = projector_ln_eps
 
 
-class KimiK25Config(PreTrainedConfig):
+class KimiK25Config(PretrainedConfig):
     """Kimi-K2.5 model configuration.
 
     Kimi-K2.5 extends Kimi-K2 with vision support using video-chunks.

@@ -7,11 +7,7 @@ import os
 import pytest
 import torch
 
-from vllm.compilation.counter import compilation_counter
-from vllm.compilation.wrapper import (
-    TorchCompileWithNoGuardsWrapper,
-    compile_model_with_stock_torch,
-)
+from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -119,44 +115,6 @@ def test_torch_compile_wrapper(use_bytecode_hook, monkeypatch):
         except Exception:
             return
         raise AssertionError("expected an exception to be raised")
-
-
-def test_compile_model_with_stock_torch(monkeypatch):
-    """The whole model is compiled in place with the configured backend."""
-    graphs: list[torch.fx.GraphModule] = []
-
-    def recording_backend(gm: torch.fx.GraphModule, example_inputs):
-        graphs.append(gm)
-        return gm.forward
-
-    monkeypatch.setattr(
-        CompilationConfig,
-        "init_backend",
-        lambda self, vllm_config, *args, **kwargs: recording_backend,
-    )
-
-    class Model(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.linear = torch.nn.Linear(4, 2)
-
-        def forward(self, x: torch.Tensor):
-            return self.linear(x).relu()
-
-    vllm_config = VllmConfig()
-    vllm_config.compilation_config = CompilationConfig(
-        mode=CompilationMode.STOCK_TORCH_COMPILE
-    )
-    model = Model()
-    x = torch.randn(3, 4)
-    expected = model(x)
-
-    torch._dynamo.reset()
-    with compilation_counter.expect(stock_torch_compile_count=1):
-        compile_model_with_stock_torch(model, vllm_config)
-    assert not graphs  # compilation is deferred to the first call
-    torch.testing.assert_close(model(x), expected)
-    assert len(graphs) == 1
 
 
 if __name__ == "__main__":

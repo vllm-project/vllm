@@ -31,7 +31,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -43,15 +43,12 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import FatreluAndMul, SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    GateLinear,
-    fused_experts,
-    fused_topk,
-)
+from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -112,10 +109,12 @@ class MiniCPMMoE(nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        self.gate = GateLinear(
+        self.gate = ReplicatedLinear(
             self.hidden_size,
             self.num_total_experts,
+            bias=False,
             params_dtype=self.params_dtype,
+            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -316,7 +315,7 @@ class MiniCPMAttention(nn.Module):
 class MiniCPMDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -427,7 +426,7 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
     def _init_layers(
         self,
         prefix: str,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
     ):

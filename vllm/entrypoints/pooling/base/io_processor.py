@@ -207,10 +207,7 @@ class PoolingIOProcessor:
         else:
             pooling_params = ctx.pooling_params
 
-        # Clone to avoid modifying the caller's pooling parameters.
-        params_seq = [
-            param.clone() for param in self._params_to_seq(pooling_params, num_requests)
-        ]
+        params_seq = self._params_to_seq(pooling_params, num_requests)
 
         for param in params_seq:
             if param.task is None:

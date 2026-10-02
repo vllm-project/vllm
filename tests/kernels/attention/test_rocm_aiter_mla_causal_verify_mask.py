@@ -82,7 +82,6 @@ def _run_verify_block():
     )
     from vllm.config import SpeculativeConfig
     from vllm.config.vllm import set_current_vllm_config
-    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAImpl
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
     from vllm.v1.worker.workspace import init_workspace_manager
@@ -107,7 +106,7 @@ def _run_verify_block():
     vllm_config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=QLEN - 1
     )
-    vllm_config.model_config.get_num_attention_heads = types.MethodType(  # type: ignore[method-assign]
+    vllm_config.model_config.get_num_attention_heads = types.MethodType(
         lambda self, parallel_config, arch_config=None: NUM_QUERY_HEADS,
         vllm_config.model_config,
     )
@@ -203,7 +202,6 @@ def _run_verify_block():
             lambda: spy,
         ),
     ):
-        assert isinstance(impl, AiterMLAImpl)
         impl.forward_mqa((q_nope, q_pe), kv_cache, metadata, layer=None)
 
     return metadata, captured

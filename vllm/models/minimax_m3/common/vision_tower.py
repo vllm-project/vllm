@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -14,23 +14,26 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
-from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
-from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import (
-    vit_mrope_setup,
-)
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import (
     get_vit_attn_backend,
     is_vit_use_data_parallel,
 )
+from vllm.platforms import current_platform
+
+# ROCm caps a kernel-launch gridDim.y at 65536. The HIP flash-attn Triton
+# rotary kernel launches grid.y = cdiv(seqlen, BLOCK_M), so it fails with
+# hipErrorInvalidValue once cdiv(seqlen, BLOCK_M) > 65536. Used below to decide
+# when RoPE must be applied per video segment instead of in one launch.
+_HIP_MAX_GRID_DIM_Y = 65536
 
 
 class MiniMaxVLPatchEmbed(nn.Module):
@@ -40,7 +43,7 @@ class MiniMaxVLPatchEmbed(nn.Module):
     and projects each to a hidden-size embedding.
     """
 
-    def __init__(self, config: PreTrainedConfig) -> None:
+    def __init__(self, config: PretrainedConfig) -> None:
         super().__init__()
         compression = config.img_token_compression_config
         temporal_patch_size = compression.get("temporal_patch_size", 2)
@@ -52,7 +55,7 @@ class MiniMaxVLPatchEmbed(nn.Module):
         self.num_channels = num_channels
         self.hidden_size = config.hidden_size
 
-        self.patch_embedding = Conv3dLayer(
+        self.patch_embedding = nn.Conv3d(
             in_channels=num_channels,
             out_channels=config.hidden_size,
             kernel_size=(temporal_patch_size, patch_size, patch_size),
@@ -121,13 +124,56 @@ class MiniMaxVLAttention(nn.Module):
             head_size=self.head_dim,
             prefix=f"{prefix}.attn",
         )
-        # Partial 3D RoPE geometry: rot_dim is split evenly across t/h/w
-        # (same formula as MiniMaxVLVisionTransformer; rot_dim may be <
-        # head_dim). mrope_section is in half-dim units for triton_mrope.
-        rope_dims = 2 * (self.head_dim // 2)
-        axis_dim = 2 * ((rope_dims // 3) // 2)
-        self.rotary_dim = 3 * axis_dim
-        self.mrope_section = [axis_dim // 2] * 3
+        # ApplyRotaryEmb handles the internal cos/sin repeat and partial
+        # rotation (ro_dim = half_rot_dim * 2 < head_dim for MiniMax).
+        # enable_fp32_compute=True runs the rotation in fp32 (q/k upcast,
+        # fp32 cos/sin), matching the reference ``_minimax_rope_applier``.
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True, enable_fp32_compute=True
+        )
+
+    def _apply_rotary_emb(
+        self,
+        qk_reshaped: torch.Tensor,
+        rotary_cos: torch.Tensor,
+        rotary_sin: torch.Tensor,
+        seq_len: int,
+        rotary_segment_lengths: list[int] | None,
+    ) -> torch.Tensor:
+        # Default fast path (all NVIDIA inputs, and ROCm short clips/images):
+        # a single rotary kernel launch. ``rotary_segment_lengths`` is only
+        # populated on ROCm (see ``MiniMaxVLVisionTransformer.forward``), so
+        # the per-segment path below is ROCm-only and never touches the
+        # NVIDIA/CUDA code path.
+        if not current_platform.is_rocm() or rotary_segment_lengths is None:
+            return self.apply_rotary_emb(qk_reshaped, rotary_cos, rotary_sin)
+
+        # ROCm only: the HIP flash-attn Triton rotary kernel fails with
+        # hipErrorInvalidValue once grid.y = cdiv(seqlen, BLOCK_M) exceeds
+        # _HIP_MAX_GRID_DIM_Y (65536). BLOCK_M is 8 for rotary_dim <= 128
+        # (MiniMax-M3 vision: rotary_dim=78), giving a hard limit of
+        # 65536 * BLOCK_M tokens — measured exactly as 524288 OK / 524289 fail.
+        # Only long videos cross it; since vision_segment_max_frames caps each
+        # segment at a few frames (<< limit), applying RoPE per segment keeps
+        # every sub-call in range. Splitting on segment boundaries is
+        # mathematically exact because rotary_cos/sin are precomputed per token.
+        # Images and short clips stay on the single-kernel fast path above.
+        rotary_dim = rotary_cos.shape[-1] * 2
+        block_m = 8 if rotary_dim <= 128 else 4
+        hip_rotary_max_seqlen = _HIP_MAX_GRID_DIM_Y * block_m
+        if seq_len <= hip_rotary_max_seqlen or len(rotary_segment_lengths) <= 1:
+            return self.apply_rotary_emb(qk_reshaped, rotary_cos, rotary_sin)
+
+        qk_segments = qk_reshaped.split(rotary_segment_lengths, dim=1)
+        cos_segments = rotary_cos.split(rotary_segment_lengths, dim=0)
+        sin_segments = rotary_sin.split(rotary_segment_lengths, dim=0)
+        return torch.cat(
+            [
+                self.apply_rotary_emb(qk_s, cos_s, sin_s)
+                for qk_s, cos_s, sin_s in zip(qk_segments, cos_segments, sin_segments)
+            ],
+            dim=1,
+        )
 
     def forward(
         self,
@@ -136,34 +182,33 @@ class MiniMaxVLAttention(nn.Module):
         rotary_cos: torch.Tensor,
         rotary_sin: torch.Tensor,
         max_seqlen: torch.Tensor,
+        rotary_segment_lengths: list[int] | None = None,
         sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # x: (N, 1, embed_dim)  [seq=N, batch=1, chan=embed_dim]
         x_qkv, _ = self.qkv_proj(x)  # (N, 1, 3 * heads_per_part * head_dim)
         seq_len, batch_size, _ = x_qkv.shape
 
-        qkv = x_qkv.view(seq_len, 3, self.num_heads_per_partition, self.head_dim)
-        v = qkv[:, 2].unsqueeze(0)  # (b=1, N, heads, head_dim) strided view
-
-        # In-place partial 3D RoPE on strided q/k views of the packed qkv
-        # tensor: one kernel launch, no repack/upcast copies. fp32 cos/sin
-        # make the kernel compute in fp32, matching the reference
-        # ``_minimax_rope_applier`` precision.
-        q = qkv[:, 0].reshape(seq_len, -1)
-        k = qkv[:, 1].reshape(seq_len, -1)
-        triton_mrope(
-            q,
-            k,
-            rotary_cos,
-            rotary_sin,
-            self.mrope_section,
-            self.head_dim,
-            self.rotary_dim,
-            mrope_interleaved=False,
-            is_neox_style=True,
+        # Rearrange to (b=1, N, 3, heads, head_dim) — same as Qwen2_5_VisionAttention
+        qkv = rearrange(
+            x_qkv,
+            "s b (three head d) -> b s three head d",
+            three=3,
+            head=self.num_heads_per_partition,
         )
-        q = q.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
-        k = k.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
+        qk, v = qkv[:, :, :2], qkv[:, :, 2]  # (b,N,2,h,d) and (b,N,h,d)
+
+        # Stack q/k → (2*b, N, heads, head_dim) for joint RoPE application.
+        # rotary_cos/sin: (N, half_rot_dim) — ApplyRotaryEmb expands internally
+        # and rotates only the first 2*half_rot_dim dims, passing the rest through.
+        qk_reshaped = rearrange(qk, "b s two h d -> (two b) s h d", two=2).contiguous()
+        qk_rotated = self._apply_rotary_emb(
+            qk_reshaped, rotary_cos, rotary_sin, seq_len, rotary_segment_lengths
+        )
+        qk_rotated = qk_rotated.view(
+            2, batch_size, seq_len, self.num_heads_per_partition, self.head_dim
+        )
+        q, k = qk_rotated.unbind(dim=0)  # each (b=1, N, heads, head_dim)
 
         # Flash attention → (b, N, heads, head_dim)
         context = self.attn(
@@ -186,7 +231,7 @@ class MiniMaxVLEncoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -226,6 +271,7 @@ class MiniMaxVLEncoderLayer(nn.Module):
         rotary_cos: torch.Tensor,
         rotary_sin: torch.Tensor,
         max_seqlen: torch.Tensor,
+        rotary_segment_lengths: list[int] | None = None,
         sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # x: (N, 1, hidden_size)
@@ -235,6 +281,7 @@ class MiniMaxVLEncoderLayer(nn.Module):
             rotary_cos,
             rotary_sin,
             max_seqlen,
+            rotary_segment_lengths,
             sequence_lengths,
         )
         residual = x
@@ -247,7 +294,7 @@ class MiniMaxVLEncoderLayer(nn.Module):
 class MiniMaxVLEncoder(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         num_hidden_layers_override: int | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -276,6 +323,7 @@ class MiniMaxVLEncoder(nn.Module):
         rotary_cos: torch.Tensor,
         rotary_sin: torch.Tensor,
         max_seqlen: torch.Tensor,
+        rotary_segment_lengths: list[int] | None = None,
         sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         for layer in self.layers:
@@ -285,6 +333,7 @@ class MiniMaxVLEncoder(nn.Module):
                 rotary_cos,
                 rotary_sin,
                 max_seqlen,
+                rotary_segment_lengths,
                 sequence_lengths,
             )
         return x
@@ -299,7 +348,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
 
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -377,6 +426,82 @@ class MiniMaxVLVisionTransformer(nn.Module):
         # out_hidden_size needed by run_dp_sharded_mrope_vision_model
         self.out_hidden_size = embed_dim
 
+    # ── RoPE helpers ─────────────────────────────────────────────────────
+
+    def _get_3d_rope_embed(
+        self, grid_t: int, grid_h: int, grid_w: int, spatial_merge_size: int
+    ) -> torch.Tensor:
+        """Compute 3D RoPE frequencies for a single (T, H, W) grid.
+
+        Returns (T*H*W, half_rot_dim) on the same device as inv_freq buffers.
+        Mirrors the reference ``_get_3d_rope_embed`` exactly.
+        """
+        tokens_per_frame = grid_h * grid_w
+
+        tpos_ids = (
+            torch.arange(grid_t, device=self.inv_freq_t.device)
+            .unsqueeze(1)
+            .expand(-1, tokens_per_frame)
+            .flatten()
+        )
+
+        hpos_ids = (
+            torch.arange(grid_h, device=self.inv_freq_h.device)
+            .unsqueeze(1)
+            .expand(-1, grid_w)
+            .reshape(
+                grid_h // spatial_merge_size,
+                spatial_merge_size,
+                grid_w // spatial_merge_size,
+                spatial_merge_size,
+            )
+            .permute(0, 2, 1, 3)
+            .unsqueeze(0)
+            .expand(grid_t, -1, -1, -1, -1)
+            .flatten()
+        )
+        wpos_ids = (
+            torch.arange(grid_w, device=self.inv_freq_w.device)
+            .unsqueeze(0)
+            .expand(grid_h, -1)
+            .reshape(
+                grid_h // spatial_merge_size,
+                spatial_merge_size,
+                grid_w // spatial_merge_size,
+                spatial_merge_size,
+            )
+            .permute(0, 2, 1, 3)
+            .unsqueeze(0)
+            .expand(grid_t, -1, -1, -1, -1)
+            .flatten()
+        )
+
+        max_t = max(grid_t, 1)
+        max_hw = max(grid_h, grid_w)
+
+        seq_t = torch.arange(
+            max_t, device=self.inv_freq_t.device, dtype=self.inv_freq_t.dtype
+        )
+        seq_hw = torch.arange(
+            max_hw, device=self.inv_freq_h.device, dtype=self.inv_freq_h.dtype
+        )
+
+        freqs_t = torch.outer(seq_t, self.inv_freq_t)  # (max_t, t_dim/2)
+        freqs_h = torch.outer(seq_hw, self.inv_freq_h)  # (max_hw, h_dim/2)
+        freqs_w = torch.outer(seq_hw, self.inv_freq_w)  # (max_hw, w_dim/2)
+
+        return torch.cat(
+            [freqs_t[tpos_ids], freqs_h[hpos_ids], freqs_w[wpos_ids]], dim=-1
+        )  # (T*H*W, half_rot_dim)
+
+    def _get_rope_embed_3d(
+        self, grid_thw: list[list[int]], spatial_merge_size: int
+    ) -> torch.Tensor:
+        embeds = [
+            self._get_3d_rope_embed(t, h, w, spatial_merge_size) for t, h, w in grid_thw
+        ]
+        return torch.cat(embeds, dim=0)  # (total_N, half_rot_dim)
+
     # ── Frame-limit helper (mirrors the reference) ───────────────────────
 
     def _apply_max_frames_limit(self, grid_thw: list[list[int]]) -> list[list[int]]:
@@ -392,94 +517,12 @@ class MiniMaxVLVisionTransformer(nn.Module):
                     out.append([min(max_f, t - i), h, w])
         return out
 
-    # ── Encoder metadata (shared by eager forward and CUDA graph replay) ──
-
-    def prepare_encoder_metadata(
-        self,
-        grid_thw: list[list[int]],
-        *,
-        device: torch.device,
-        max_batch_size: int | None = None,
-        max_seqlen_override: int | None = None,
-    ) -> dict[str, torch.Tensor | None]:
-        """Build all grid-dependent forward inputs as standalone tensors.
-
-        The eager path calls this per forward; encoder CUDA graphs call it at
-        capture (dummy grids, padded to fixed buffer sizes) and before each
-        replay (real grids, unpadded — the manager's padding logic completes
-        the captured buffers).
-
-        Args:
-            grid_thw: per-item [t, h, w] patch grids (host metadata).
-            device: device for the attention metadata tensors.
-            max_batch_size: pad cu_seqlens to this many segments with empty
-                (zero-length) trailing segments; None leaves it unpadded.
-            max_seqlen_override: bake this max_seqlen instead of deriving it
-                from the grids; CUDA graph capture passes a worst-case value
-                because max_seqlen is a CPU scalar baked into the graph.
-
-        """
-        limited = self._apply_max_frames_limit(grid_thw)
-
-        # Token-level cumulative sequence lengths (one segment per limited grid).
-        lens = [t * h * w for t, h, w in limited]
-        cu_seqlens_np = np.zeros(len(lens) + 1, dtype=np.int32)
-        np.cumsum(np.array(lens, dtype=np.int32), out=cu_seqlens_np[1:])
-
-        if max_batch_size is not None and len(lens) < max_batch_size:
-            pad = np.full(max_batch_size - len(lens), cu_seqlens_np[-1], dtype=np.int32)
-            cu_seqlens_np = np.concatenate([cu_seqlens_np, pad])
-
-        # Backend-specific encoder metadata. For FLASH_ATTN this returns the raw
-        # token cu_seqlens, the max segment length, and sequence_lengths=None;
-        # for FLASHINFER (cuDNN) it repacks cu_seqlens into element-offset
-        # indptrs, buckets max_seqlen, and builds padded per-sequence lengths.
-        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
-            self.attn_backend, cu_seqlens_np, device
-        )
-        max_seqlen = torch.tensor(
-            max_seqlen_override
-            if max_seqlen_override is not None
-            else MMEncoderAttention.compute_max_seqlen(
-                self.attn_backend, cu_seqlens_np
-            ),
-            dtype=torch.int32,
-        )
-        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
-            self.attn_backend,
-            cu_seqlens_np,
-            self.hidden_size,
-            self.tp_size,
-            device,
-        )
-
-        # 3D RoPE cos/sin: (3, total_N, half_rot_dim) fp32 t/h/w planes for
-        # triton_mrope from one fused setup kernel. Kept fp32 so the kernel
-        # computes the rotation in fp32, matching the reference.
-        rotary_cos, rotary_sin = vit_mrope_setup(
-            self.inv_freq_t,
-            self.inv_freq_h,
-            self.inv_freq_w,
-            limited,
-            self.spatial_merge_size,
-        )
-
-        return {
-            "rotary_cos": rotary_cos,
-            "rotary_sin": rotary_sin,
-            "cu_seqlens": cu_seqlens,
-            "max_seqlen": max_seqlen,
-            "sequence_lengths": sequence_lengths,
-        }
-
     # ── Forward ──────────────────────────────────────────────────────────
 
     def forward(
         self,
         pixel_values: torch.Tensor,
-        grid_thw: list[list[int]] | None = None,
-        *,
-        encoder_metadata: dict[str, torch.Tensor | None] | None = None,
+        grid_thw: list[list[int]],
     ) -> torch.Tensor:
         # pixel_values: (total_N, C * temporal_patch_size * patch_size²)
         # Output:       (total_N, hidden_size)
@@ -487,24 +530,47 @@ class MiniMaxVLVisionTransformer(nn.Module):
         hidden = self.embeddings(pixel_values)  # (total_N, hidden_size)
         hidden = self.pre_layrnorm(hidden)
 
-        if encoder_metadata is None:
-            assert grid_thw is not None
-            encoder_metadata = self.prepare_encoder_metadata(
-                grid_thw, device=hidden.device
-            )
+        limited = self._apply_max_frames_limit(grid_thw)
 
-        cu_seqlens = encoder_metadata["cu_seqlens"]
-        rotary_cos = encoder_metadata["rotary_cos"]
-        rotary_sin = encoder_metadata["rotary_sin"]
-        max_seqlen = encoder_metadata["max_seqlen"]
-        sequence_lengths = encoder_metadata.get("sequence_lengths")
-        assert cu_seqlens is not None
-        assert rotary_cos is not None
-        assert rotary_sin is not None
-        assert max_seqlen is not None
+        # Token-level cumulative sequence lengths (one segment per limited grid).
+        lens = [t * h * w for t, h, w in limited]
+        cu_seqlens_np = np.zeros(len(lens) + 1, dtype=np.int32)
+        np.cumsum(np.array(lens, dtype=np.int32), out=cu_seqlens_np[1:])
+
+        # Backend-specific encoder metadata. For FLASH_ATTN this returns the raw
+        # token cu_seqlens, the max segment length, and sequence_lengths=None;
+        # for FLASHINFER (cuDNN) it repacks cu_seqlens into element-offset
+        # indptrs, buckets max_seqlen, and builds padded per-sequence lengths.
+        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_seqlens_np, hidden.device
+        )
+        max_seqlen = torch.tensor(
+            MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens_np),
+            dtype=torch.int32,
+        )
+        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_seqlens_np,
+            self.hidden_size,
+            self.tp_size,
+            hidden.device,
+        )
+
+        # 3D RoPE: (total_N, half_rot_dim); ApplyRotaryEmb expands internally
+        freqs = self._get_rope_embed_3d(limited, self.spatial_merge_size)
+        freqs = freqs.to(device=hidden.device)
+        # Keep cos/sin in fp32; ApplyRotaryEmb(enable_fp32_compute=True) runs the
+        # rotation in fp32 to match the reference precision.
+        rotary_cos, rotary_sin = freqs.cos(), freqs.sin()
 
         # Encoder expects (N, 1, hidden_size) — add batch dim
         hidden = hidden.unsqueeze(1)
+        # On ROCm, the flash_attn Triton rotary kernel can fail with
+        # hipErrorInvalidValue when seqlen is very large, e.g. 192k video
+        # tokens; pass per-segment lengths so RoPE can be applied in chunks.
+        # On other platforms leave it None -> single-kernel fast path, so the
+        # NVIDIA/CUDA code path is unchanged.
+        rotary_segment_lengths = lens if current_platform.is_rocm() else None
 
         hidden = self.encoder(
             hidden,
@@ -512,6 +578,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
             rotary_cos,
             rotary_sin,
             max_seqlen,
+            rotary_segment_lengths,
             sequence_lengths=sequence_lengths,
         )
         hidden = hidden.squeeze(1)  # back to (total_N, hidden_size)
@@ -611,7 +678,7 @@ class MiniMaxVLVisionModel(nn.Module):
 
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         text_hidden_size: int,
         projector_hidden_size: int | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -661,15 +728,9 @@ class MiniMaxVLVisionModel(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        grid_thw: list[list[int]] | None = None,
-        *,
-        encoder_metadata: dict[str, torch.Tensor | None] | None = None,
+        grid_thw: list[list[int]],
     ) -> torch.Tensor:
-        hidden = self.vision_model(
-            pixel_values=pixel_values,
-            grid_thw=grid_thw,
-            encoder_metadata=encoder_metadata,
-        )
+        hidden = self.vision_model(pixel_values=pixel_values, grid_thw=grid_thw)
         if hidden.dim() == 3:
             hidden = hidden.squeeze(0)
         hidden = self.multi_modal_projector(hidden)

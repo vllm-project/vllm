@@ -72,9 +72,8 @@ class Qwen3ASRForcedAlignerForTokenClassification(
 
         # Remove the unused generation head created by the base class;
         # the forced aligner uses a classifier head instead.
-        language_model: nn.Module = self.language_model
-        language_model.lm_head = None
-        language_model.logits_processor = None
+        self.language_model.lm_head = None
+        self.language_model.logits_processor = None
 
         self.classify_num = thinker_config.classify_num
 

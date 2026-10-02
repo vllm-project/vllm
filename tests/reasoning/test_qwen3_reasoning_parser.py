@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer
 
 from tests.reasoning.utils import (
     StreamingReasoningReconstructor,
@@ -24,7 +24,7 @@ REASONING_MODEL_NAMES = [
 
 
 @pytest.fixture(scope="module", params=REASONING_MODEL_NAMES)
-def qwen3_tokenizer(request) -> PreTrainedTokenizerBase:
+def qwen3_tokenizer(request):
     return AutoTokenizer.from_pretrained(request.param)
 
 

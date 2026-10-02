@@ -142,10 +142,6 @@ class CompilerManager:
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
         self.loaded_artifacts: dict[str, Any] = {}
-        self.prefix: str = ""
-
-    def _log_prefix(self) -> str:
-        return f"[{self.prefix}] " if self.prefix else ""
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
@@ -183,7 +179,6 @@ class CompilerManager:
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
-        self.prefix = prefix
 
         if not disable_cache and os.path.exists(self.cache_file_path):
             # load the cache from the file
@@ -292,10 +287,9 @@ class CompilerManager:
                 # after loading the last graph for this shape, record the time.
                 # there can be multiple graphs due to piecewise compilation.
                 elapsed = time.perf_counter() - compilation_start_time
-                logger.info(
-                    "%sDirectly load the compiled graph(s) for compile "
-                    "range %s from the cache, took %.3f s",
-                    self._log_prefix(),
+                logger.info_once(
+                    "Directly load the compiled graph(s) for compile range %s "
+                    "from the cache, took %.3f s",
                     str(compile_range),
                     elapsed,
                 )
@@ -379,9 +373,8 @@ class CompilerManager:
             self.is_cache_updated = True
             if graph_index == 0:
                 # adds some info logging for the first graph
-                logger.info(
-                    "%sCache the graph of compile range %s for later use",
-                    self._log_prefix(),
+                logger.info_once(
+                    "Cache the graph of compile range %s for later use",
                     str(compile_range),
                 )
             logger.debug_once(
@@ -395,9 +388,8 @@ class CompilerManager:
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
             elapsed = time.perf_counter() - compilation_start_time
-            logger.info(
-                "%sCompiling a graph for compile range %s takes %.2f s",
-                self._log_prefix(),
+            logger.info_once(
+                "Compiling a graph for compile range %s takes %.2f s",
                 str(compile_range),
                 elapsed,
             )
@@ -873,9 +865,6 @@ class VllmBackend:
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
-    def _log_prefix(self) -> str:
-        return f"[{self.prefix}] " if self.prefix else ""
-
     def collect_standalone_compile_artifacts(
         self,
     ) -> tuple[Any, dict[str, list[int]] | None, dict[str, bool] | None]:
@@ -1096,11 +1085,10 @@ class VllmBackend:
         disable_cache = disable_cache or is_ngram_gpu_enabled
 
         if disable_cache:
-            logger.info("%svLLM's torch.compile cache is disabled.", self._log_prefix())
+            logger.info_once("vLLM's torch.compile cache is disabled.")
         else:
-            logger.info(
-                "%sUsing cache directory: %s for vLLM's torch.compile",
-                self._log_prefix(),
+            logger.info_once(
+                "Using cache directory: %s for vLLM's torch.compile",
                 local_cache_dir,
             )
 
@@ -1160,9 +1148,8 @@ class VllmBackend:
         current_perf = time.perf_counter()
         current_epoch = time.time()
         dynamo_time = current_perf - torch_compile_start_time
-        logger.info(
-            "%sDynamo bytecode transform time: %.2f s",
-            self._log_prefix(),
+        logger.info_once(
+            "Dynamo bytecode transform time: %.2f s",
             dynamo_time,
         )
 

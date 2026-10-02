@@ -46,12 +46,7 @@ pub(crate) struct ClientInner {
     /// Per-tensor byte threshold loaded from env variable
     /// `VLLM_MSGPACK_ZERO_COPY_THRESHOLD` when this inner client is created.
     msgpack_zero_copy_threshold: usize,
-    /// Whether the connected engines record stats. See
-    /// [`crate::EngineCoreClientConfig::engine_stats_enabled`].
-    engine_stats_enabled: bool,
-    /// Scheduler-stats metric handles, present only when engines record stats
-    /// so that gauges are not exported with values no engine ever reports.
-    scheduler_stats_recorder: Option<SchedulerStatsRecorder>,
+    scheduler_stats_recorder: SchedulerStatsRecorder,
     iteration_metrics: BTreeMap<u32, IterationMetricHandles>,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
@@ -66,11 +61,10 @@ impl ClientInner {
         input_send: RouterSendHalf,
         handle: Handle,
         model_name: String,
-        engine_stats_enabled: bool,
         engines: &[ConnectedEngine],
     ) -> Self {
-        let scheduler_stats_recorder = engine_stats_enabled
-            .then(|| SchedulerStatsRecorder::new(&METRICS.scheduler, &model_name, engines));
+        let scheduler_stats_recorder =
+            SchedulerStatsRecorder::new(&METRICS.scheduler, &model_name, engines);
         let iteration_metrics = engines
             .iter()
             .filter_map(|engine| {
@@ -84,7 +78,6 @@ impl ClientInner {
             handle,
             model_name,
             msgpack_zero_copy_threshold: msgpack_zero_copy_threshold(),
-            engine_stats_enabled,
             scheduler_stats_recorder,
             iteration_metrics,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
@@ -419,9 +412,7 @@ pub(crate) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
 ) {
-    // LoRA phases come from request lifecycle events, which engines only emit
-    // when they record stats.
-    let mut lora_info = inner.engine_stats_enabled.then(LoraInfoExporter::default);
+    let mut lora_info = LoraInfoExporter::default();
 
     let result: Result<()> = async {
         loop {
@@ -484,18 +475,14 @@ pub(crate) async fn run_output_dispatcher_loop(
                                 "dropping scheduler stats for unknown engine"
                             );
                         }
-                        if let Some(recorder) = &inner.scheduler_stats_recorder {
-                            recorder.record(batch.engine_index, scheduler_stats);
-                        }
+                        inner.scheduler_stats_recorder.record(batch.engine_index, scheduler_stats);
                     }
 
                     // The engine's scheduler stats never carry adapter names;
                     // the gauge is derived from the registry's frontend-side
                     // request tracking instead.
-                    if let Some(lora_info) = &mut lora_info {
-                        let (running, waiting) = inner.lora_adapter_states();
-                        lora_info.update(&METRICS.scheduler, running, waiting);
-                    }
+                    let (running, waiting) = inner.lora_adapter_states();
+                    lora_info.update(&METRICS.scheduler, running, waiting);
                 }
                 EngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
@@ -543,7 +530,6 @@ mod tests {
             send,
             Handle::current(),
             "test-model".to_string(),
-            true,
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),
                 ready_response: default_ready_response(),

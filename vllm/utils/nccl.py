@@ -3,11 +3,9 @@
 
 from __future__ import annotations
 
-import contextlib
 import ctypes
 import importlib.util
 import os
-from collections.abc import Iterator, Mapping
 
 import torch
 
@@ -85,10 +83,8 @@ def find_nccl_library_paths() -> list[str] | None:
     return paths or None
 
 
-def query_nccl_gin_type(
-    group: torch.distributed.ProcessGroup, *, railed: bool = False
-) -> int | None:
-    """Return the full or railed GIN type, or ``None`` on query failure."""
+def query_nccl_gin_type(group: torch.distributed.ProcessGroup) -> int | None:
+    """Return the GIN type for an initialized group, or ``None`` on failure."""
     from vllm.distributed.device_communicators.pynccl_wrapper import (
         NCCL_COMM_PROPERTIES_LAYOUT_VERSION,
         NCCLLibrary,
@@ -130,67 +126,4 @@ def query_nccl_gin_type(
     if result != 0:
         logger.warning("ncclCommQueryProperties returned error %d", result)
         return None
-    return props.railedGinType if railed else props.ginType
-
-
-# Values the variables set by `pin_nccl_env` had before it: None until something
-# is pinned, empty if NCCL cannot re-read them.
-_unpinned_env: dict[str, str | None] | None = None
-
-
-def pin_nccl_env(pins: dict[str, str]) -> None:
-    """Set NCCL variables for this process's own communicators.
-
-    NCCL never reconciles these across ranks, so communicators shared with a
-    process that does not set them are created without them, see
-    `unpinned_nccl_env`. NCCL caches most variables on first read; listing the
-    pins in NCCL_NO_CACHE makes it re-read them per communicator. NCCL parses
-    that list once, so this must run before the process's first NCCL call.
-    """
-    global _unpinned_env
-    launch_env = _swap_env(pins)
-    if _unpinned_env is not None:
-        return
-    _unpinned_env = launch_env if _nccl_has_no_cache() else {}
-    if _unpinned_env:
-        no_cache = os.environ.get("NCCL_NO_CACHE")
-        os.environ["NCCL_NO_CACHE"] = ",".join(filter(None, [no_cache, *pins]))
-
-
-@contextlib.contextmanager
-def unpinned_nccl_env() -> Iterator[None]:
-    """Create communicators shared with other processes without the pins."""
-    if _unpinned_env == {}:
-        logger.warning_once(
-            "NCCL_NO_CACHE needs CUDA NCCL >= 2.29.7, so the NCCL settings vLLM "
-            "pinned also apply here; a process sharing this communicator must "
-            "set the same NCCL_* variables or it will hang."
-        )
-    pinned = _swap_env(_unpinned_env or {})
-    try:
-        yield
-    finally:
-        _swap_env(pinned)
-
-
-def _nccl_has_no_cache() -> bool:
-    # NCCL_NO_CACHE arrived in NCCL 2.29.7; ask the library vLLM loads.
-    if torch.version.cuda is None:
-        return False
-    version = ctypes.c_int()
-    try:
-        ctypes.CDLL(find_nccl_library()).ncclGetVersion(ctypes.byref(version))
-    except Exception:
-        return False
-    return version.value >= 22907
-
-
-def _swap_env(values: Mapping[str, str | None]) -> dict[str, str | None]:
-    """Set (None: unset) the given variables and return their previous values."""
-    old = {name: os.environ.get(name) for name in values}
-    for name, value in values.items():
-        if value is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = value
-    return old
+    return props.ginType

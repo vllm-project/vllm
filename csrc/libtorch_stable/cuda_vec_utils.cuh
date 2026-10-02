@@ -320,6 +320,10 @@ __host__ __device__ __forceinline__ bool is_16byte_aligned(const void* ptr) {
   return (reinterpret_cast<uintptr_t>(ptr) & 15) == 0;
 }
 
+__host__ __device__ __forceinline__ bool is_32byte_aligned(const void* ptr) {
+  return (reinterpret_cast<uintptr_t>(ptr) & 31) == 0;
+}
+
 // ============================================================
 // Packed type conversion and arithmetic
 // ============================================================

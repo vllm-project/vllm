@@ -12,7 +12,6 @@ from PIL import Image
 from utils import _extract_step_logprobs, skip_if_not_cuda
 
 from vllm import LLM, SamplingParams
-from vllm.inputs import TextPrompt
 
 VLM_TEST_MODEL = os.getenv("VLLM_VLM_TEST_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 
@@ -31,8 +30,8 @@ def _make_image(seed: int, size: int) -> Image.Image:
     return Image.fromarray(rng.integers(0, 255, (size, size, 3), dtype=np.uint8))
 
 
-def _make_inputs(input_type: str, num_reqs: int) -> list[TextPrompt]:
-    inputs: list[TextPrompt] = []
+def _make_inputs(input_type: str, num_reqs: int) -> list[dict]:
+    inputs = []
     for i in range(num_reqs):
         if input_type == "image":
             prompt = IMAGE_PROMPT
@@ -55,7 +54,7 @@ def _make_inputs(input_type: str, num_reqs: int) -> list[TextPrompt]:
     return inputs
 
 
-def _assert_batch_invariant(llm: LLM, inputs: list[TextPrompt], sampling) -> None:
+def _assert_batch_invariant(llm: LLM, inputs: list[dict], sampling) -> None:
     bs1 = [
         _extract_step_logprobs(llm.generate([inp], sampling, use_tqdm=False)[0])
         for inp in inputs
@@ -135,4 +134,4 @@ def _run_vlm_batch_invariance(
         _assert_batch_invariant(llm, inputs, sampling)
     finally:
         with contextlib.suppress(Exception):
-            llm.llm_engine.engine_core.shutdown()
+            llm.shutdown()

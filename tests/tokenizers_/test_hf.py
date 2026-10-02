@@ -61,23 +61,7 @@ def test_thread_pool_tokenizer_pickle(model_id: str):
     unpickled_tokenizer = pickle.loads(pickle.dumps(pooled_tokenizer))
     assert unpickled_tokenizer is not None
     assert isinstance(unpickled_tokenizer, ThreadSafeHFTokenizerMixin)
-    assert unpickled_tokenizer.encode("prompt") == reference_tokenizer.encode("prompt")  # type: ignore[attr-defined]
+    assert unpickled_tokenizer.encode("prompt") == reference_tokenizer.encode("prompt")
 
     # Idempotence: wrapping an already-pooled tokenizer returns it unchanged.
-    assert maybe_make_thread_pool(pooled_tokenizer) is pooled_tokenizer  # type: ignore[type-var]
-
-
-@pytest.mark.parametrize("model_id", ["openai-community/gpt2"])
-def test_cached_tokenizer_max_token_id_is_a_valid_id(model_id: str):
-    """max_token_id is the largest valid id, one less than vocab_size."""
-    reference_tokenizer = AutoTokenizer.from_pretrained(model_id)
-    cached_tokenizer = get_cached_tokenizer(deepcopy(reference_tokenizer))
-
-    expected = max(
-        max(reference_tokenizer.get_vocab().values()),
-        reference_tokenizer.vocab_size - 1,
-    )
-    assert cached_tokenizer.max_token_id == expected
-    assert cached_tokenizer.max_token_id == max(
-        reference_tokenizer.get_vocab().values()
-    )
+    assert maybe_make_thread_pool(pooled_tokenizer) is pooled_tokenizer

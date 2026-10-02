@@ -5,14 +5,12 @@
 
 mod combined;
 mod gemma4;
-mod hf;
 mod hy;
 mod inkling;
 mod kimi_k3;
 
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
-pub use hf::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
 pub use hy::{HyV3UnifiedParser, HyV4UnifiedParser};
 pub use inkling::InklingUnifiedParser;
 pub use kimi_k3::{KimiK3StructuralTagBuilder, KimiK3UnifiedParser};
@@ -20,10 +18,10 @@ use thiserror::Error;
 use thiserror_ext::Macro;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
-use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
 use crate::reasoning::ReasoningError;
-use crate::tool::{Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput};
-use crate::utils::SpecialToken;
+use crate::tool::{
+    StructuralTagBuilder, Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput,
+};
 
 /// Result alias for unified parser operations.
 pub type Result<T> = std::result::Result<T, UnifiedParserError>;
@@ -242,12 +240,9 @@ pub trait UnifiedParser: Send {
         false
     }
 
-    /// Build the request output grammar after prompt-based initialization.
-    fn build_output_grammar(
-        &self,
-        _ctx: &OutputGrammarContext<'_>,
-    ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
-        Ok(None)
+    /// Return the xgrammar structural-tag builder used for strict tool calling.
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        None
     }
 
     /// Return the parser-provided ID for a tool call by index, if the model emitted one.
@@ -273,13 +268,8 @@ pub trait UnifiedParser: Send {
 #[derive(Debug, Error, Macro)]
 #[thiserror_ext(macro(path = "crate::unified", mangle))]
 pub enum UnifiedParserError {
-    /// The parser is built from inputs other than tools and a tokenizer, so
-    /// [`UnifiedParser::create`] cannot construct it.
-    #[error("the `{parser}` unified parser is built from {built_from}, not by name")]
-    NoNamedConstructor {
-        parser: &'static str,
-        built_from: &'static str,
-    },
+    #[error("combined parser is constructed from split parser instances")]
+    CombinedParserConstructor,
     #[error("tokenizer is missing unified parser token `{token}`")]
     MissingToken { token: String },
     #[error("unified parser parsing failed: {message}")]
@@ -294,13 +284,5 @@ pub enum UnifiedParserError {
 fn token_id(tokenizer: &dyn vllm_tokenizer::Tokenizer, token: &str) -> Result<u32> {
     tokenizer.token_to_id(token).ok_or_else(|| UnifiedParserError::MissingToken {
         token: token.to_string(),
-    })
-}
-
-/// Resolves `token` to a [`SpecialToken`], or an error if it's not found.
-fn special_token(tokenizer: &dyn vllm_tokenizer::Tokenizer, token: &str) -> Result<SpecialToken> {
-    Ok(SpecialToken {
-        id: token_id(tokenizer, token)?,
-        text: token.to_string(),
     })
 }

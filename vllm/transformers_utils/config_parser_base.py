@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 
 class ConfigParserBase(ABC):
@@ -16,5 +16,5 @@ class ConfigParserBase(ABC):
         revision: str | None = None,
         code_revision: str | None = None,
         **kwargs,
-    ) -> tuple[dict, PreTrainedConfig]:
+    ) -> tuple[dict, PretrainedConfig]:
         raise NotImplementedError

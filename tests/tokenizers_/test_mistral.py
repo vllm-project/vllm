@@ -10,7 +10,6 @@ from mistral_common.exceptions import InvalidMessageStructureException
 from mistral_common.guidance.grammar_factory import GrammarFactory
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy, SpecialTokens
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.tokenizers.mistral import (
@@ -22,9 +21,7 @@ from vllm.tokenizers.mistral import (
 
 def test_validate_apply_chat_template_args():
     # add_generation_prompt with assistant last message → error
-    messages: list[ChatCompletionMessageParam] = [
-        {"role": "assistant", "content": "Hello"}
-    ]
+    messages = [{"role": "assistant", "content": "Hello"}]
     with pytest.raises(ValueError):
         _validate_apply_chat_template_args(messages, add_generation_prompt=True)
 
@@ -35,9 +32,7 @@ def test_validate_apply_chat_template_args():
     # both add_generation_prompt and continue_final_message → error
     with pytest.raises(ValueError):
         _validate_apply_chat_template_args(
-            messages,
-            add_generation_prompt=True,
-            continue_final_message=True,
+            messages, add_generation_prompt=True, continue_final_message=True
         )
 
     # continue_final_message with assistant last message → ok
@@ -840,9 +835,7 @@ class TestMistralTokenizer:
         )
 
     def test_apply_chat_template_error(self, mistral_tokenizer: MistralTokenizer):
-        messages: list[ChatCompletionMessageParam] = [
-            {"role": "user", "content": "Hello world !"}
-        ]
+        messages = [{"role": "user", "content": "Hello world !"}]
 
         with pytest.raises(ValueError):
             mistral_tokenizer.apply_chat_template(
@@ -2174,15 +2167,13 @@ class TestMistralTokenizer:
     def test_apply_chat_template_tool_optional_fields(
         self,
         mistral_tokenizer: MistralTokenizer,
-        messages: list[ChatCompletionMessageParam],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         tekken_expected_substrings: list[str],
         spm_expected_substrings: list[str],
     ) -> None:
         output = mistral_tokenizer.apply_chat_template(
-            messages,
-            tools=tools,
-            add_generation_prompt=True,
+            messages, tools=tools, add_generation_prompt=True
         )
         decoded = mistral_tokenizer.tokenizer.decode(output, SpecialTokenPolicy.KEEP)
 
@@ -2197,7 +2188,7 @@ class TestMistralTokenizer:
     def test_apply_chat_template_tools_not_mutated(
         self, mistral_tokenizer: MistralTokenizer
     ) -> None:
-        messages: list[ChatCompletionMessageParam] = [
+        messages: list[dict[str, Any]] = [
             {"role": "user", "content": "Hello"},
         ]
         tools: list[dict[str, Any]] = [
@@ -2218,9 +2209,7 @@ class TestMistralTokenizer:
         original_tools = copy.deepcopy(tools)
 
         mistral_tokenizer.apply_chat_template(
-            messages,
-            tools=tools,
-            add_generation_prompt=True,
+            messages, tools=tools, add_generation_prompt=True
         )
 
         assert tools == original_tools
@@ -2246,8 +2235,7 @@ class TestMistralTokenizer:
         ]
 
         output = mistral_tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
+            messages, add_generation_prompt=True
         )
         decoded = mistral_tokenizer.tokenizer.decode(output, SpecialTokenPolicy.KEEP)
 
@@ -2322,7 +2310,6 @@ def v15_mistral_tokenizer() -> MistralTokenizer:
         return MistralTokenizer.from_pretrained("mistralai/Mistral-Small-4-119B-2603")
     except Exception:
         pytest.skip("v15 tokenizer unavailable")
-    raise AssertionError("unreachable")
 
 
 @pytest.fixture(scope="module")
@@ -2332,7 +2319,6 @@ def v13_mistral_tokenizer() -> MistralTokenizer:
         return MistralTokenizer.from_pretrained("mistralai/Magistral-Small-2509")
     except Exception:
         pytest.skip("v13 tokenizer unavailable")
-    raise AssertionError("unreachable")
 
 
 def test_v15_apply_chat_template_passes_reasoning_effort_high(

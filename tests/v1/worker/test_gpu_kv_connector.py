@@ -39,7 +39,9 @@ def _make_connector(
         kv_role="kv_consumer",
         kv_buffer_device="cpu",
     )
-    connector = ActiveKVConnector(SimpleNamespace(kv_transfer_config=kv_config), {})
+    connector = ActiveKVConnector(  # type: ignore[arg-type]
+        SimpleNamespace(kv_transfer_config=kv_config), {}
+    )
     events.clear()
     return connector
 
@@ -64,7 +66,7 @@ def test_load_start_phase(
     request_indices = torch.tensor([3, 1])
     request_ids = ["first", "second"]
     attn_metadata = {"layer": object()}
-    connector.pre_forward(
+    connector.pre_forward(  # type: ignore[arg-type]
         output,
         request_state_indices=request_indices,
         request_ids=request_ids,
@@ -83,7 +85,7 @@ def test_load_start_phase(
     assert kwargs["attn_metadata"] is attn_metadata
 
     # A subsequent step without a forward must not reuse the prior batch.
-    connector.no_forward(_scheduler_output(False))
+    connector.no_forward(_scheduler_output(False))  # type: ignore[arg-type]
     assert connector.kv_connector.start_load_kv.call_count == 2
     assert connector.kv_connector.start_load_kv.call_args.kwargs == {}
 
@@ -92,6 +94,6 @@ def test_no_forward_starts_deferred_load_once(monkeypatch: pytest.MonkeyPatch):
     events: list[str] = []
     connector = _make_connector(monkeypatch, events)
 
-    connector.no_forward(_scheduler_output(False))
+    connector.no_forward(_scheduler_output(False))  # type: ignore[arg-type]
 
-    assert events == ["handle", "bind", "start", "wait", "clear"]
+    assert events == ["handle", "bind", "start", "clear"]

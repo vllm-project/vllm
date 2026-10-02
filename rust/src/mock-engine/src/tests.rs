@@ -29,7 +29,6 @@ fn client_config(handshake_address: String, engine_count: usize) -> EngineCoreCl
         coordinator_mode: None,
         model_name: "mock-model".to_string(),
         client_index: 0,
-        engine_stats_enabled: true,
     }
 }
 
@@ -196,7 +195,6 @@ async fn utility_requests_return_minimal_success_responses() {
     assert!(client.reset_prefix_cache(false, false).await.expect("reset prefix cache"));
     client.reset_mm_cache().await.expect("reset mm cache");
     client.reset_encoder_cache().await.expect("reset encoder cache");
-    assert!(client.wake_up(Some(vec!["kv_cache".to_string()])).await.expect("wake up"));
 
     shutdown_mock(client, shutdown, task).await;
 }

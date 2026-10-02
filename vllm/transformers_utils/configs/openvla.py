@@ -9,10 +9,10 @@ configuration without executing Hugging Face remote code.
 
 from typing import Any
 
-from transformers import LlamaConfig, PreTrainedConfig
+from transformers import LlamaConfig, PretrainedConfig
 
 
-class OpenVLAConfig(PreTrainedConfig):
+class OpenVLAConfig(PretrainedConfig):
     """Configuration class for OpenVLA models."""
 
     model_type = "openvla"

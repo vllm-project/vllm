@@ -37,7 +37,6 @@ def server():
         json.dumps({"video": MAXIMUM_VIDEOS}),
         "--media-io-kwargs",
         json.dumps({"video": {"num_frames": 32}}),
-        "--trust-request-mm-kwargs",
     ]
 
     # ROCm: Increase timeouts to handle potential network delays and slower

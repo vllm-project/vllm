@@ -3,11 +3,11 @@
 
 from typing import Any
 
-from transformers import PreTrainedConfig, Qwen3Config
+from transformers import PretrainedConfig, Qwen3Config
 from transformers.models.whisper.configuration_whisper import WhisperConfig
 
 
-class MossTranscribeDiarizeConfig(PreTrainedConfig):
+class MossTranscribeDiarizeConfig(PretrainedConfig):
     """Configuration for MOSS-Transcribe-Diarize."""
 
     model_type = "moss_transcribe_diarize"

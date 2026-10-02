@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.inputs import MultiModalHashes
 
-from ..cache import BaseMultiModalProcessorCache
 from ..hasher import MultiModalHasher
 from ..parse import MultiModalDataItems, MultiModalUUIDItems
 
@@ -28,8 +27,6 @@ class ProcessorInputs:
     mm_uuid_items: MultiModalUUIDItems | None = None
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
     media_io_kwargs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
-
-    cache: BaseMultiModalProcessorCache | None = None
 
     def get_mm_hashes(
         self,

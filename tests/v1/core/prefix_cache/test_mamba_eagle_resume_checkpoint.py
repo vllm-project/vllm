@@ -6,7 +6,7 @@ Full attention hits where it holds a key; EAGLE prunes one hash unit off that
 candidate and drops it. Mamba materializes state only on its own block grid, so
 the pruned position holds nothing and the hit floors back a whole Mamba block.
 
-Gated by ``CacheConfig.enable_mamba_shared_prefix_checkpoint``. Every test here
+Gated by ``CacheConfig.enable_mamba_fine_grained_prefix_cache``. Every test here
 drives the real ``Scheduler._mamba_block_aligned_split`` and the real
 ``KVCacheManager``; no chunk boundary is hard-coded.
 """
@@ -32,7 +32,7 @@ def _manager(
     block_size,
     hash_block_size,
     *,
-    shared_prefix_checkpoint=True,
+    fine_grained=True,
     num_blocks=8192,
     eagle_group=None,
     num_prefill_lookahead=0,
@@ -52,7 +52,7 @@ def _manager(
         hash_block_size=hash_block_size,
         use_eagle=True,
         num_prefill_lookahead=num_prefill_lookahead,
-        enable_mamba_shared_prefix_checkpoint=shared_prefix_checkpoint,
+        enable_mamba_fine_grained_prefix_cache=fine_grained,
     )
 
 
@@ -76,8 +76,8 @@ def _stub(manager, block_size, hash_block_size, *, block_drop=True):
         hash_block_size=hash_block_size,
         mamba_has_prefill_checkpoint_blocks=False,  # forced False under eagle
         mamba_partial_cache_hit=partial_hit,
-        mamba_shared_prefix_checkpoint=(
-            partial_hit and manager.mamba_shared_prefix_checkpoint
+        mamba_fine_grained_prefix_cache=(
+            partial_hit and manager.mamba_fine_grained_prefix_cache
         ),
     )
 
@@ -151,7 +151,7 @@ def test_sibling_resumes_from_the_observed_junction():
     block_size, hash_block_size = 512, 32
     manager = _manager(block_size, hash_block_size)
     stub = _stub(manager, block_size, hash_block_size)
-    assert stub.mamba_shared_prefix_checkpoint, "the feature must be armed"
+    assert stub.mamba_fine_grained_prefix_cache, "the feature must be armed"
     _orphaned_full_attention_tail(manager, stub, 2020)
 
     consumer = make_request(
@@ -194,28 +194,6 @@ def test_sibling_resumes_below_the_block_grid_when_the_prefix_ends_early():
     resume = shared // block_size * block_size - hash_block_size
     hit = _sibling_hit(manager, shared, [-3] * 16, hash_block_size)
     assert hit == resume, f"expected the resume point at {resume}, got {hit}"
-
-
-@pytest.mark.parametrize("mtp_draft_group_identified", [False, True])
-def test_mamba_prefix_cache_drops_hash_block(mtp_draft_group_identified):
-    block_size, hash_block_size = 1024, 64
-    manager = _manager(
-        block_size,
-        hash_block_size,
-        eagle_group=0 if mtp_draft_group_identified else None,
-    )
-    prompt_a = PREFIX[:1600]
-    hit_after_mtp_block_drop = len(prompt_a) - hash_block_size
-
-    _prefill(
-        manager,
-        _stub(manager, block_size, hash_block_size),
-        make_request("A", prompt_a, hash_block_size, sha256),
-    )
-
-    tokens_after_a = [-1] * 500
-    hit = _sibling_hit(manager, len(prompt_a), tokens_after_a, hash_block_size)
-    assert hit == hit_after_mtp_block_drop
 
 
 # --------------------------------------------------------------------------
@@ -347,11 +325,11 @@ def test_enabling_never_reduces_reuse(eagle_group, num_prefill_lookahead):
     """
     block_size, hash_block_size = 512, 32
 
-    def sibling_hit(shared_prefix_checkpoint):
+    def sibling_hit(fine_grained):
         manager = _manager(
             block_size,
             hash_block_size,
-            shared_prefix_checkpoint=shared_prefix_checkpoint,
+            fine_grained=fine_grained,
             eagle_group=eagle_group,
             num_prefill_lookahead=num_prefill_lookahead,
         )
@@ -370,7 +348,7 @@ def test_enabling_never_reduces_reuse(eagle_group, num_prefill_lookahead):
 def test_disabled_by_default():
     """Off, the junction is block-floored and no resume point is registered."""
     block_size, hash_block_size = 512, 32
-    manager = _manager(block_size, hash_block_size, shared_prefix_checkpoint=False)
+    manager = _manager(block_size, hash_block_size, fine_grained=False)
     stub = _stub(manager, block_size, hash_block_size)
     _orphaned_full_attention_tail(manager, stub, 2020)
 

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from transformers import PreTrainedConfig, SiglipVisionConfig
+from transformers import PretrainedConfig, SiglipVisionConfig
 from transformers.models.qwen2 import Qwen2Config
 
 
-class BagelConfig(PreTrainedConfig):
+class BagelConfig(PretrainedConfig):
     """Configuration class for BAGEL model."""
 
     model_type = "bagel"

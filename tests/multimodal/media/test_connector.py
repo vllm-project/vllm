@@ -299,7 +299,6 @@ async def test_fetch_video_http(video_url: str, num_frames: int):
     assert metadata_sync == metadata_async
 
 
-@pytest.mark.flaky(reruns=3, reruns_delay=5)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 @pytest.mark.parametrize("max_duration", [1, 60, 1800])
@@ -321,11 +320,8 @@ async def test_fetch_video_http_with_dynamic_loader(
             }
         )
 
-        try:
-            video_sync, metadata_sync = connector.fetch_video(video_url)
-            video_async, metadata_async = await connector.fetch_video_async(video_url)
-        except (TimeoutError, asyncio.TimeoutError) as e:
-            pytest.skip(f"Timeout fetching video (CI network flakiness): {e}")
+        video_sync, metadata_sync = connector.fetch_video(video_url)
+        video_async, metadata_async = await connector.fetch_video_async(video_url)
 
         assert np.array_equal(video_sync, video_async)
         assert metadata_sync == metadata_async
@@ -383,7 +379,6 @@ def test_placeholder_range_extract_embeds_range(offset, is_embed, expected):
     assert pr.extract_embeds_range() == expected
 
 
-@pytest.mark.flaky(reruns=3, reruns_delay=5)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
@@ -399,12 +394,8 @@ async def test_allowed_media_domains(video_url: str, num_frames: int):
         ],
     )
 
-    try:
-        video_sync, metadata_sync = connector.fetch_video(video_url)
-        video_async, metadata_async = await connector.fetch_video_async(video_url)
-    except (TimeoutError, asyncio.TimeoutError) as e:
-        pytest.skip(f"Timeout fetching video (CI network flakiness): {e}")
-
+    video_sync, metadata_sync = connector.fetch_video(video_url)
+    video_async, metadata_async = await connector.fetch_video_async(video_url)
     assert np.array_equal(video_sync, video_async)
     assert metadata_sync == metadata_async
 

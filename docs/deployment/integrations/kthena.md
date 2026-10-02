@@ -2,9 +2,7 @@
 
 [**Kthena**](https://github.com/volcano-sh/kthena) is a Kubernetes-native LLM inference platform that transforms how organizations deploy and manage Large Language Models in production. Built with declarative model lifecycle management and intelligent request routing, it provides high performance and enterprise-grade scalability for LLM inference workloads.
 
-Kthena manages inference workloads through `ModelServing` and provides model-aware request routing through `ModelServer` and `ModelRoute`.
-
-This guide shows how to deploy a **multi-node vLLM** service on Kubernetes using `ModelServing` and expose it through a Kubernetes Service.
+This guide shows how to deploy a production-grade, **multi-node vLLM** service on Kubernetes.
 
 We’ll:
 
@@ -20,7 +18,7 @@ You need:
 
 - A Kubernetes cluster with **GPU nodes**.
 - `kubectl` access with cluster-admin or equivalent permissions.
-- **Volcano 1.14 or later** for the role-level gang scheduling used in this example.
+- **Volcano** installed for gang scheduling.
 - **Kthena** installed with the `ModelServing` CRD available.
 - A valid **Hugging Face token** if loading models from Hugging Face Hub.
 
@@ -32,22 +30,21 @@ helm repo update
 helm install volcano volcano-sh/volcano -n volcano-system --create-namespace
 ```
 
-Volcano provides the gang scheduling used in this example. It is optional for Kthena deployments that do not use Volcano scheduling.
+This provides the gang-scheduling and network topology features used by Kthena.
 
 ### 1.2 Install Kthena
 
 ```bash
-helm install kthena oci://ghcr.io/volcano-sh/charts/kthena --version v1.0.0 --namespace kthena-system --create-namespace
+helm install kthena oci://ghcr.io/volcano-sh/charts/kthena --version v0.1.0 --namespace kthena-system --create-namespace
 ```
 
 - The `kthena-system` namespace is created.
-- Kthena controllers and CRDs, including `ModelServing`, are installed.
+- Kthena controllers and CRDs, including `ModelServing`, are installed and healthy.
 
 Validate:
 
 ```bash
-kubectl get pods -n kthena-system
-kubectl get crd modelservings.workload.serving.volcano.sh
+kubectl get crd | grep modelserving
 ```
 
 You should see:
@@ -60,7 +57,7 @@ modelservings.workload.serving.volcano.sh   ...
 
 ## 2. The Multi-Node vLLM `ModelServing` Example
 
-Kthena provides an example manifest to deploy a **multi-node vLLM cluster running Llama**. Each role replica contains an entry pod and its worker pods.
+Kthena provides an example manifest to deploy a **multi-node vLLM cluster running Llama**. Conceptually this is equivalent to the vLLM production stack Helm deployment, but expressed with `ModelServing`.
 
 A simplified version of the example (`llama-multinode`) looks like:
 
@@ -119,9 +116,10 @@ Commands:
           - -c
           - >
             bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh
-            leader --ray_cluster_size=2;
-            vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8
-            --pipeline-parallel-size 2 --distributed-executor-backend ray
+            leader --ray_cluster_size=2; python3 -m
+            vllm.entrypoints.launchers.api_server.entry --port 8080 --model
+            meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8
+            --pipeline-parallel-size 2
         ```
 
         Worker:
@@ -168,9 +166,9 @@ Save one of the following manifests to `modelserving.yaml`:
             restartGracePeriodSeconds: 60
             gangPolicy:
               minRoleReplicas:
-                llama-405b: 1
+                405b: 1
             roles:
-              - name: llama-405b
+              - name: 405b
                 replicas: 2
                 entryTemplate:
                   spec:
@@ -258,9 +256,9 @@ Save one of the following manifests to `modelserving.yaml`:
             restartGracePeriodSeconds: 60
             gangPolicy:
               minRoleReplicas:
-                llama-405b: 1
+                405b: 1
             roles:
-              - name: llama-405b
+              - name: 405b
                 replicas: 2
                 entryTemplate:
                   spec:
@@ -277,7 +275,7 @@ Save one of the following manifests to `modelserving.yaml`:
                           - sh
                           - -c
                           - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2;
-                            vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend ray"
+                            vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2"
                         resources:
                           limits:
                             nvidia.com/gpu: "8"
@@ -385,24 +383,24 @@ kubectl get pod -owide -l modelserving.volcano.sh/name=llama-multinode
 Example output (from docs):
 
 ```text
-NAMESPACE   NAME                                   READY   STATUS    RESTARTS   AGE   IP            NODE           ...
-default     llama-multinode-0-llama-405b-0-0    1/1     Running   0          15m   10.244.0.56   192.168.5.12   ...
-default     llama-multinode-0-llama-405b-0-1    1/1     Running   0          15m   10.244.0.58   192.168.5.43   ...
-default     llama-multinode-0-llama-405b-1-0    1/1     Running   0          15m   10.244.0.57   192.168.5.58   ...
-default     llama-multinode-0-llama-405b-1-1    1/1     Running   0          15m   10.244.0.53   192.168.5.36   ...
+NAMESPACE   NAME                          READY   STATUS    RESTARTS   AGE   IP            NODE           ...
+default     llama-multinode-0-405b-0-0    1/1     Running   0          15m   10.244.0.56   192.168.5.12   ...
+default     llama-multinode-0-405b-0-1    1/1     Running   0          15m   10.244.0.58   192.168.5.43   ...
+default     llama-multinode-0-405b-1-0    1/1     Running   0          15m   10.244.0.57   192.168.5.58   ...
+default     llama-multinode-0-405b-1-1    1/1     Running   0          15m   10.244.0.53   192.168.5.36   ...
 ```
 
 Pod name pattern:
 
 - `llama-multinode-<group-idx>-<role-name>-<replica-idx>-<ordinal>`.
 
-The first index identifies the `ServingGroup`, followed by the role name (`llama-405b`), role replica index, and pod index.
+The first number indicates `ServingGroup`. The second (`405b`) is the `Role`. The remaining indices identify the pod within the role.
 
 ---
 
-## 5. Accessing the vLLM OpenAI-Compatible API
+## 6. Accessing the vLLM OpenAI-Compatible API
 
-Save the following Service as `service.yaml` to expose the entry pods:
+Expose the entry via a Service:
 
 ```yaml
 apiVersion: v1
@@ -414,6 +412,7 @@ spec:
   selector:
     modelserving.volcano.sh/name: llama-multinode
     modelserving.volcano.sh/entry: "true"
+    # optionally further narrow to leader role if you label it
   ports:
     - name: http
       port: 80
@@ -421,10 +420,9 @@ spec:
   type: ClusterIP
 ```
 
-Apply the Service, then port-forward from your local machine:
+Port-forward from your local machine:
 
 ```bash
-kubectl apply -f service.yaml
 kubectl port-forward svc/llama-multinode-openai 30080:80 -n default
 ```
 
@@ -452,12 +450,11 @@ You should see an OpenAI-style response from vLLM.
 
 ---
 
-## 6. Clean Up
+## 7. Clean Up
 
 To remove the deployment and its resources:
 
 ```bash
-kubectl delete -f service.yaml
 kubectl delete modelserving llama-multinode -n default
 ```
 
@@ -467,5 +464,3 @@ If you’re done with the entire stack:
 helm uninstall kthena -n kthena-system   # or your Kthena release name
 helm uninstall volcano -n volcano-system
 ```
-
-For model-aware routing and prefill-decode disaggregation, see the [Kthena documentation](https://kthena.volcano.sh/docs/user-guide/router-routing).

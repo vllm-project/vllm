@@ -27,6 +27,7 @@ from packaging.version import Version
 from transformers.utils.generic import ModelOutput
 
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
+from vllm.config.multimodal import AudioDummyOptions
 from vllm.config.utils import getattr_iter
 from vllm.inputs import (
     MultiModalDataBuiltins,
@@ -74,7 +75,7 @@ if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
 
     from vllm.config import VllmConfig
-    from vllm.config.multimodal import MultiModalDummyOptions
+    from vllm.config.multimodal import BaseDummyOptions
 
 logger = init_logger(__name__)
 
@@ -194,7 +195,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: "MultiModalDummyOptions",
+        mm_options: Mapping[str, "BaseDummyOptions"],
     ) -> MultiModalDataDict:
         data = MultiModalDataBuiltins()
         if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
@@ -203,16 +204,21 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             chunk_length = getattr(sub, "chunk_length", None) if sub else None
             if chunk_length is None:
                 chunk_length = 30
+            audio_len = int(chunk_length * sampling_rate)
+            audio_overrides = mm_options.get("audio")
+            assert audio_overrides is None or isinstance(
+                audio_overrides, AudioDummyOptions
+            )
             data["audio"] = self._get_dummy_audios(
-                length=int(chunk_length * sampling_rate),
+                length=audio_len,
                 num_audios=num_audios,
-                overrides=mm_options.get("audio"),
+                overrides=audio_overrides,
             )
         if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
-            width, height = self.info.get_image_size_with_most_features()
+            target_width, target_height = self.info.get_image_size_with_most_features()
             data["image"] = self._get_dummy_images(
-                width=width,
-                height=height,
+                width=target_width,
+                height=target_height,
                 num_images=num_images,
                 overrides=mm_options.get("image"),
             )

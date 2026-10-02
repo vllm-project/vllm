@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use vllm_chat::{
     ChatRequestProcessor, ChatTemplateContentFormatOption, LoadModelBackendsOptions,
-    ParserSelection, RendererSelection, ToolStrictLevel, load_model_backends,
+    ParserSelection, RendererSelection, load_model_backends,
 };
 use vllm_text::TextRequestProcessor;
 use vllm_text::backend::hf::HfOverrides;
@@ -32,7 +32,6 @@ pub struct RenderConfig {
     pub port: u16,
     pub tool_call_parser: ParserSelection,
     pub reasoning_parser: ParserSelection,
-    pub tool_strict_level: ToolStrictLevel,
     pub renderer: RendererSelection,
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
@@ -89,12 +88,10 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
-    let chat = ChatRequestProcessor::render_only(loaded.chat_backend)
-        .with_parser_selections(
-            config.tool_call_parser.clone(),
-            config.reasoning_parser.clone(),
-        )
-        .with_tool_strict_level(config.tool_strict_level);
+    let chat = ChatRequestProcessor::render_only(loaded.chat_backend).with_parser_selections(
+        config.tool_call_parser.clone(),
+        config.reasoning_parser.clone(),
+    );
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
@@ -157,7 +154,6 @@ mod tests {
         shutdown.cancel();
         let error = serve_render(
             RenderConfig {
-                tool_strict_level: ToolStrictLevel::Auto,
                 model: "test-model".to_string(),
                 revision: None,
                 hf_overrides: Default::default(),

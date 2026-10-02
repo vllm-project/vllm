@@ -36,7 +36,7 @@ import torch
 import torch.types
 from torch import nn
 from torch.nn.init import trunc_normal_
-from transformers import BatchFeature, PreTrainedConfig
+from transformers import BatchFeature, PretrainedConfig
 from transformers.dynamic_module_utils import (
     get_class_from_dynamic_module,
     resolve_trust_remote_code,
@@ -45,8 +45,9 @@ from typing_extensions import TypedDict, TypeVar
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import (
+    BaseDummyOptions,
     ImageDummyOptions,
-    MultiModalDummyOptions,
+    VideoDummyOptions,
 )
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -468,7 +469,7 @@ class Resampler4_5(Resampler2_5):
         return x
 
 
-def get_version_by_config(config: PreTrainedConfig) -> tuple[int, ...]:
+def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
     version_float = getattr(config, "version", None)
 
     # The old configs do not include version number
@@ -847,8 +848,9 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
+        num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
         image_width, image_height = self.info.get_image_size_with_most_features()
@@ -857,12 +859,14 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             seq_len, mm_counts
         )
 
+        image_overrides = mm_options.get("image")
         video_overrides = mm_options.get("video")
+        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
 
         # Convert video overrides to image overrides for per-frame image generation,
         # and apply num_frames override to num_video_frames.
         video_frame_overrides: ImageDummyOptions | None = None
-        if video_overrides is not None:
+        if isinstance(video_overrides, VideoDummyOptions):
             if video_overrides.num_frames:
                 num_video_frames = min(num_video_frames, video_overrides.num_frames)
             if video_overrides.width or video_overrides.height:
@@ -876,8 +880,8 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             "image": self._get_dummy_images(
                 width=image_width,
                 height=image_height,
-                num_images=mm_counts.get("image", 0),
-                overrides=mm_options.get("image"),
+                num_images=num_images,
+                overrides=image_overrides,
             ),
             "video": [
                 self._get_dummy_images(
@@ -1235,7 +1239,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         super().__init__()
         # All MiniCPM-V models disable `tie_word_embeddings` but
-        # `PreTrainedConfig.tie_word_embeddings` defaults to True; we cannot
+        # `PretrainedConfig.tie_word_embeddings` defaults to True; we cannot
         # check `tie_word_embeddings` until vLLM integrate MiniCPM-V model
         # and config class
         self.config = config
@@ -1425,7 +1429,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def init_vision_module(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -1957,7 +1961,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
 
     def init_vision_module(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2058,7 +2062,7 @@ class MiniCPMV2_5(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2154,7 +2158,7 @@ class MiniCPMV2_6(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2255,7 +2259,7 @@ class MiniCPMV4_0(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -2354,7 +2358,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
 
     def init_vision_module(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:

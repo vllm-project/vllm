@@ -75,7 +75,7 @@ class CustomQuantConfig(QuantizationConfig):
 
     def get_name(self) -> QuantizationMethods:
         """Name of the quantization method."""
-        return "custom_quant"  # type: ignore[return-value]  # Runtime registration extends built-in names.
+        return "custom_quant"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         """List of supported activation dtypes."""

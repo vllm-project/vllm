@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -15,7 +15,7 @@ REASONING_MODEL_NAME = "MiniMaxAI/MiniMax-M2"
 
 
 @pytest.fixture(scope="module")
-def minimax_m2_tokenizer() -> PreTrainedTokenizerBase:
+def minimax_m2_tokenizer():
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 
@@ -195,10 +195,10 @@ def test_reasoning(
 
     # Test extract_content
     if param_dict["content"] is not None:
-        content_ids = parser.extract_content_ids(output_ids)
-        assert content_ids == minimax_m2_tokenizer.convert_tokens_to_ids(
+        content = parser.extract_content_ids(output_ids)
+        assert content == minimax_m2_tokenizer.convert_tokens_to_ids(
             minimax_m2_tokenizer.tokenize(param_dict["content"])
         )
     else:
-        content_ids = parser.extract_content_ids(output)
-        assert content_ids == []
+        content = parser.extract_content_ids(output)
+        assert content == []

@@ -10,12 +10,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature, PreTrainedConfig
+from transformers import BatchFeature, PretrainedConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from typing_extensions import TypedDict
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import (
+    BaseDummyOptions,
+    ImageDummyOptions,
+    VideoDummyOptions,
+)
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -52,7 +56,6 @@ from vllm.transformers_utils.processors.mimo_v2_omni import (
 
 from .interfaces import (
     MultiModalEmbeddings,
-    SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -69,10 +72,7 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
 )
-from .qwen2_vl import (
-    Qwen2VLMultiModalDataParser,
-    _create_qwen2vl_field_factory,
-)
+from .qwen2_vl import _create_qwen2vl_field_factory
 from .utils import AutoWeightsLoader, IntermediateTensors, WeightsMapper, maybe_prefix
 
 
@@ -421,7 +421,7 @@ class MiMoVisionTransformer(nn.Module):
 
     def __init__(
         self,
-        vision_cfg: PreTrainedConfig,
+        vision_cfg: PretrainedConfig,
         *,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
@@ -673,14 +673,6 @@ class MiMoVisionTransformer(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class MiMoV2OmniMultiModalDataParser(Qwen2VLMultiModalDataParser):
-    # Video stays raw: get_video_replacement also reads second_per_grid_ts and
-    # video_start_times, which a metadata-only rewrite would not carry.
-    embedding_fields = {
-        "image": Qwen2VLMultiModalDataParser.embedding_fields["image"],
-    }
-
-
 class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
@@ -700,14 +692,9 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_data_parser(self):
-        # Without embedding_fields the EC producer publishes no metadata and
-        # the EPD proxy never rewrites the media item.
-        return MiMoV2OmniMultiModalDataParser(
-            self.get_hf_config().vision_config.spatial_merge_size,
-            target_sr=24000.0,
-            expected_hidden_size=self._get_expected_hidden_size(),
-            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
-        )
+        from vllm.multimodal.parse import MultiModalDataParser
+
+        return MultiModalDataParser(target_sr=24000.0)
 
     def get_mm_max_tokens_per_item(
         self,
@@ -1197,26 +1184,33 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
+        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
+        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=mm_counts.get("image", 0),
-                overrides=mm_options.get("image"),
+                num_images=num_images,
+                overrides=image_overrides,
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=mm_counts.get("video", 0),
-                overrides=mm_options.get("video"),
+                num_videos=num_videos,
+                overrides=video_overrides,
             ),
         }
 
@@ -1226,9 +1220,7 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
     info=MiMoV2OmniProcessingInfo,
     dummy_inputs=MiMoV2OmniDummyInputsBuilder,
 )
-class MiMoV2OmniForCausalLM(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant, SupportsEagle3
-):
+class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant):
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

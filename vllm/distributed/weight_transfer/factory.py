@@ -243,19 +243,6 @@ WeightTransferEngineFactory.register_engine(
     "ShardedRDTWeightTransferEngine",
 )
 
-WeightTransferEngineFactory.register_engine(
-    "nccl_m2n",
-    "vllm.distributed.weight_transfer.m2n_engine",
-    "M2NWeightTransferEngine",
-)
-
-
-WeightTransferEngineFactory.register_engine(
-    "modelexpress",
-    "vllm.distributed.weight_transfer.modelexpress_engine",
-    "ModelExpressWeightTransferEngine",
-)
-
 
 # Trainer-side engines, parallel to the worker registry above.
 WeightTransferTrainerFactory.register_engine(
@@ -280,10 +267,4 @@ WeightTransferTrainerFactory.register_engine(
     "sharded_rdt",
     "vllm.distributed.weight_transfer.sharded_rdt_trainer",
     "ShardedRDTTrainerWeightTransferEngine",
-)
-
-WeightTransferTrainerFactory.register_engine(
-    "nccl_m2n",
-    "vllm.distributed.weight_transfer.m2n_trainer",
-    "M2NTrainerWeightTransferEngine",
 )

@@ -47,20 +47,18 @@ async def client(server):
 
 @pytest.fixture(scope="session")
 def base64_encoded_audio() -> dict[str, str]:
-    encoded = {}
-    for audio_url in TEST_AUDIO_URLS:
-        audio, sample_rate = fetch_audio(audio_url)
-        encoded[audio_url] = encode_audio_base64(audio, int(sample_rate))
-    return encoded
+    return {
+        audio_url: encode_audio_base64(*fetch_audio(audio_url))
+        for audio_url in TEST_AUDIO_URLS
+    }
 
 
 @pytest.fixture(scope="session")
 def url_encoded_audio() -> dict[str, str]:
-    encoded = {}
-    for audio_url in TEST_AUDIO_URLS:
-        audio, sample_rate = fetch_audio(audio_url)
-        encoded[audio_url] = encode_audio_url(audio, int(sample_rate))
-    return encoded
+    return {
+        audio_url: encode_audio_url(*fetch_audio(audio_url))
+        for audio_url in TEST_AUDIO_URLS
+    }
 
 
 def dummy_messages_from_audio_url(

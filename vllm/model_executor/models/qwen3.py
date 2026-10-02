@@ -130,12 +130,6 @@ class Qwen3Attention(nn.Module):
             if attn_type == AttentionType.ENCODER_ONLY
             else Attention
         )
-        attention_kwargs: dict[str, Any] = {}
-        if dual_chunk_attention_config:
-            attention_kwargs = {
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -146,7 +140,12 @@ class Qwen3Attention(nn.Module):
             per_layer_sliding_window=per_layer_sliding_window,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
-            **attention_kwargs,
+            **{
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            }
+            if dual_chunk_attention_config
+            else {},
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)

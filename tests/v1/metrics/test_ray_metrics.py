@@ -6,7 +6,6 @@ from unittest.mock import MagicMock
 import pytest
 import ray
 
-from tests.utils import wait_for_memory_to_settle
 from vllm.config.model import ModelDType
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -47,39 +46,31 @@ def test_engine_log_metrics_ray(
 ) -> None:
     """Simple smoke test, verifying this can be used without exceptions.
     Need to start a Ray cluster in order to verify outputs."""
-    engine_args = AsyncEngineArgs(
-        model=model, dtype=dtype, disable_log_stats=False, enforce_eager=True
-    )
 
     @ray.remote(num_gpus=1)
     class EngineTestActor:
         async def run(self):
+            engine_args = AsyncEngineArgs(
+                model=model, dtype=dtype, disable_log_stats=False, enforce_eager=True
+            )
+
             engine = AsyncLLM.from_engine_args(
                 engine_args, stat_loggers=[RayPrometheusStatLogger]
             )
 
-            try:
-                for i, prompt in enumerate(example_prompts):
-                    results = engine.generate(
-                        request_id=f"request-id-{i}",
-                        prompt=prompt,
-                        sampling_params=SamplingParams(max_tokens=max_tokens),
-                    )
+            for i, prompt in enumerate(example_prompts):
+                results = engine.generate(
+                    request_id=f"request-id-{i}",
+                    prompt=prompt,
+                    sampling_params=SamplingParams(max_tokens=max_tokens),
+                )
 
-                    async for _ in results:
-                        pass
-            finally:
-                engine.shutdown()
+                async for _ in results:
+                    pass
 
     # Create the actor and call the async method
-    try:
-        actor = EngineTestActor.remote()  # type: ignore[attr-defined]
-        ray.get(actor.run.remote())
-    finally:
-        ray.shutdown()
-        wait_for_memory_to_settle(
-            threshold_ratio=1.0 - engine_args.gpu_memory_utilization
-        )
+    actor = EngineTestActor.remote()  # type: ignore[attr-defined]
+    ray.get(actor.run.remote())
 
 
 def test_sanitized_opentelemetry_name():

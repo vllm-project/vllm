@@ -138,7 +138,7 @@ def getattr_iter(
 ) -> Any:
     """A helper function that retrieves an attribute from an object which may
     have multiple possible names. This is useful when fetching attributes from
-    arbitrary `transformers.PreTrainedConfig` instances.
+    arbitrary `transformers.PretrainedConfig` instances.
 
     In the case where the first name in `names` is the preferred name, and
     any other names are deprecated aliases, setting `warn=True` will log a
@@ -158,20 +158,17 @@ def getattr_iter(
     return default_factory() if default_factory is not None else default
 
 
-def _get_own_attr_docs(cls: type[Any], out: dict[str, str]) -> None:
+def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     """Get any docstrings placed after attribute assignments in a class body.
 
     https://davidism.com/mit-license/
     """
-    try:
-        source = inspect.getsource(cls)
-    except (OSError, TypeError):
-        # ``object`` and classes without retrievable source (e.g. builtins).
-        return
+    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
 
-    cls_node = ast.parse(textwrap.dedent(source)).body[0]
     if not isinstance(cls_node, ast.ClassDef):
-        return
+        raise TypeError("Given object was not a class.")
+
+    out = {}
 
     # Consider each pair of nodes.
     for a, b in pairwise(cls_node.body):
@@ -196,20 +193,6 @@ def _get_own_attr_docs(cls: type[Any], out: dict[str, str]) -> None:
                 continue
 
             out[target.id] = doc
-
-
-def get_attr_docs(cls: type[Any]) -> dict[str, str]:
-    """Get any docstrings placed after attribute assignments in a class body or
-    its bases."""
-    if not isinstance(cls, type):
-        raise TypeError("Given object was not a class.")
-
-    out: dict[str, str] = {}
-
-    # Walk the MRO from the most-base class to ``cls`` so that a docstring
-    # redefined on a subclass overrides the one inherited from a base class.
-    for base in reversed(cls.__mro__):
-        _get_own_attr_docs(base, out)
 
     return out
 
@@ -331,7 +314,7 @@ def normalize_value(x):
         except Exception:
             return str(x)
 
-    # PreTrainedConfig (must be before dataclass branch as these are now dataclasses)
+    # PretrainedConfig (must be before dataclass branch as these are now dataclasses)
     if hasattr(x, "to_json_string") and callable(x.to_json_string):
         try:
             return x.to_json_string()

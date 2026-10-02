@@ -139,7 +139,6 @@ def test_olmoe_lora_mixed(olmoe_lora_files):
         max_loras=4,
         enforce_eager=True,
         trust_remote_code=True,
-        hf_overrides={"head_dtype": "float32"},
         enable_chunked_prefill=True,
     )
 

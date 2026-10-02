@@ -15,11 +15,7 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
 stop_pil_image = ImageAsset("stop_sign").pil_image
-baby_reading_video_asset = VideoAsset("baby_reading")
-baby_reading_video = (
-    baby_reading_video_asset.np_ndarrays,
-    baby_reading_video_asset.metadata,
-)
+baby_reading_np_ndarrays = VideoAsset("baby_reading").np_ndarrays
 
 
 def _build_renderer(
@@ -131,7 +127,7 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
 
     mm_data = {
         "image": [cherry_pil_image, stop_pil_image],
-        "video": baby_reading_video,
+        "video": baby_reading_np_ndarrays,
     }
 
     # Use a consistent two-image scenario across all configurations
@@ -211,7 +207,7 @@ def test_multi_modal_uuids_preserved_when_caching_disabled(mm_uuids, expected):
     request_id = "req-42"
     mm_data = {
         "image": [cherry_pil_image, stop_pil_image],
-        "video": baby_reading_video,
+        "video": baby_reading_np_ndarrays,
     }
 
     mm_processor = renderer.get_mm_processor()

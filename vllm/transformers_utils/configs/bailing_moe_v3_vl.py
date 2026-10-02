@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from transformers.configuration_utils import PreTrainedConfig
+from transformers.configuration_utils import PretrainedConfig
 
 
 def _normalize_mrope_parameters(
-    config: PreTrainedConfig,
+    config: PretrainedConfig,
     mrope_section: list[int],
 ) -> None:
     """Add the top-level Bailing M-RoPE split to a text config."""
@@ -50,7 +50,7 @@ def _build_layer_types(
     ]
 
 
-class BailingMoeV3TextConfig(PreTrainedConfig):
+class BailingMoeV3TextConfig(PretrainedConfig):
     model_type = "bailing_hybrid"
     base_config_key = "text_config"
     keys_to_ignore_at_inference = ["past_key_values"]
@@ -230,7 +230,7 @@ class BailingMoeV3TextConfig(PreTrainedConfig):
         self.validate_layer_type()
 
 
-class BailingMoeV3VisionConfig(PreTrainedConfig):
+class BailingMoeV3VisionConfig(PretrainedConfig):
     model_type = "qwen3_moe_vit"
     base_config_key = "vision_config"
 
@@ -273,7 +273,7 @@ class BailingMoeV3VisionConfig(PreTrainedConfig):
         self.initializer_range = initializer_range
 
 
-class BailingMoeV3VLConfig(PreTrainedConfig):
+class BailingMoeV3VLConfig(PretrainedConfig):
     model_type = "bailing_moe_v3_vl"
     keys_to_ignore_at_inference = ["past_key_values"]
     sub_configs = {

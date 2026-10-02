@@ -169,7 +169,6 @@ def main(args: argparse.Namespace):
     # Output JSON results if specified
     if args.output_json:
         results = {
-            "model_id": args.model,
             "avg_latency": np.mean(latencies),
             "latencies": latencies.tolist(),
             "percentiles": dict(zip(percentages, percentiles.tolist())),

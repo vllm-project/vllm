@@ -1,33 +1,20 @@
 <!-- markdownlint-disable -->
+PLEASE FILL IN THE PR DESCRIPTION HERE ENSURING ALL CHECKLIST ITEMS (AT THE BOTTOM) HAVE BEEN CONSIDERED.
 
-## Overview
+## Purpose
 
-<!-- Summarize the change in 1-2 lines. Link relevant issues and PRs. -->
+## Test Plan
 
-## Claims
-
-<!-- State the accomplishments in a few concrete bullets: speedups, feature support, bug fixes, etc. -->
-
-## Validation
-
-<!-- Show evidence that the claims are met by this change, and steps to reproduce validations. -->
-
-## Details
-
-<!-- Explain motivation, design decisions, root cause, tradeoffs, and limitations concisely. Link or collapse lengthy supporting material. -->
+## Test Result
 
 ---
-
 <details>
-<summary> Pull Request Checklist </summary>
+<summary> Essential Elements of an Effective PR Description Checklist </summary>
 
-- [ ] I used vLLM's `/pr-checklist` skill. (Mandatory for agents, optional for humans).
-- [ ] AI assistance was used during the creation of this PR.
-
-- [ ] **Design Fit:** Minimizes impact on core components, reuses existing functionality, and justifies added complexity.
-- [ ] **Testing and Validation:** Validates the change and ensures any added tests are meaningful and reliable, with CI coverage or documented CI resource constraints and validation performed outside CI.
-- [ ] **Code Quality and Style:** Keeps code and comments clear and concise, and updates relevant documentation and examples.
-- [ ] **Pull Request Contents:** Includes a brief summary and relevant links, supports claims with evidence, explains root causes and implementation trade-offs, and follows the contributing guide.
+- [ ] The purpose of the PR, such as "Fix some issue (link existing issues this PR will resolve)".
+- [ ] The test plan, such as providing test command.
+- [ ] The test results, such as pasting the results comparison before and after, or e2e results
+- [ ] (Optional) The necessary documentation update, such as updating `supported_models.md` and `examples` for a new model.
 </details>
 
 **BEFORE SUBMITTING, PLEASE READ <https://docs.vllm.ai/en/latest/contributing>** (anything written below this line will be removed by GitHub Actions)

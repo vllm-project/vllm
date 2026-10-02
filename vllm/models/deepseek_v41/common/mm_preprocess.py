@@ -19,14 +19,14 @@ boundaries freely).
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 from PIL import Image, ImageOps
 from transformers import BatchFeature
 
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
@@ -275,28 +275,15 @@ class DeepseekV4VLProcessingInfo(BaseProcessingInfo):
         hf_config = self.get_hf_config()
         patch_size = hf_config.vision_patch_size
         downsample_ratio = hf_config.vision_downsample_ratio
+        # A square maximizes the ViT patch count (area) within the token
+        # budget; solve the budget-derived size directly to keep the dummy
+        # image small.
         budget = hf_config.vision_max_n_token
-        max_wh_ratio = hf_config.vision_max_wh_ratio
-        best_h = best_w = 0
-        # Each LLM row costs an extra newline token. Maximize the ViT grid,
-        # including the patch rounding after the optional aspect-ratio clamp.
-        for n_llm_h in range(1, (budget - 2) // 2 + 1):
-            n_vit_h = n_llm_h * downsample_ratio
-            n_vit_w = ((budget - 2) // n_llm_h - 1) * downsample_ratio
-            if max_wh_ratio is not None:
-                n_vit_w = min(n_vit_w, math.ceil(n_vit_h * max_wh_ratio))
-            if n_vit_h * n_vit_w > best_h * best_w:
-                best_h, best_w = n_vit_h, n_vit_w
-        if best_h == 0:
-            raise ValueError(
-                "Image token budget and aspect ratio allow no image patches"
-            )
-        height, width = best_h * patch_size, best_w * patch_size
-        # Avoid the min-pixels upscaler perturbing the selected aspect ratio.
-        scale = 1
-        while height * width * scale * scale < hf_config.vision_min_pixels:
-            scale *= 2
-        return ImageSize(width=width * scale, height=height * scale)
+        side = budget * patch_size * downsample_ratio
+        best_h, best_w = solve_resize_ratio(
+            side, side, patch_size, downsample_ratio, budget
+        )
+        return ImageSize(width=best_w, height=best_h)
 
 
 class DeepseekV4VLDummyInputsBuilder(
@@ -309,7 +296,7 @@ class DeepseekV4VLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         size = self.info.get_image_size_with_most_features()
         return {
@@ -317,7 +304,7 @@ class DeepseekV4VLDummyInputsBuilder(
                 width=size.width,
                 height=size.height,
                 num_images=mm_counts.get("image", 0),
-                overrides=mm_options.get("image"),
+                overrides=cast(ImageDummyOptions | None, mm_options.get("image")),
             ),
         }
 

@@ -3,12 +3,12 @@
 
 import os
 
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.transformers_utils.utils import without_trust_remote_code
 
 
-class MedusaConfig(PreTrainedConfig):
+class MedusaConfig(PretrainedConfig):
     model_type = "medusa"
 
     def __init__(

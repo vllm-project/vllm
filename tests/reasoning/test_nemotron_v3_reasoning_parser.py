@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TypedDict, cast
+from typing import TypedDict
 
 import pytest
 import regex as re
-from transformers import PreTrainedTokenizerBase
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -49,8 +48,8 @@ class FakeNemotronTokenizer:
 
 
 @pytest.fixture
-def tokenizer() -> PreTrainedTokenizerBase:
-    return cast(PreTrainedTokenizerBase, FakeNemotronTokenizer())
+def tokenizer():
+    return FakeNemotronTokenizer()
 
 
 @pytest.mark.parametrize(
@@ -95,7 +94,7 @@ def tokenizer() -> PreTrainedTokenizerBase:
     ],
 )
 def test_nemotron_v3_reasoning(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: FakeNemotronTokenizer,
     streaming: bool,
     param_dict: ReasoningCase,
 ):
@@ -114,7 +113,7 @@ def test_nemotron_v3_reasoning(
 
 
 def test_nemotron_v3_without_thinking_moves_into_content(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: FakeNemotronTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(tokenizer)
@@ -138,7 +137,7 @@ def test_nemotron_v3_without_thinking_moves_into_content(
 
 
 def test_nemotron_v3_force_nonempty_content_moves_into_content(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: FakeNemotronTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(tokenizer)
@@ -160,7 +159,7 @@ def test_nemotron_v3_force_nonempty_content_moves_into_content(
 
 
 def test_nemotron_v3_force_nonempty_keeps_real_content(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: FakeNemotronTokenizer,
 ):
     # When real content follows the closing tag nothing is promoted: the
     # content after </think> is returned as-is and reasoning stays separate.
@@ -184,7 +183,7 @@ def test_nemotron_v3_force_nonempty_keeps_real_content(
 
 
 def test_nemotron_v3_with_thinking_keeps_truncated_reasoning(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: FakeNemotronTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(tokenizer)
@@ -243,7 +242,7 @@ def _run_parse_delta(parser, tokenizer, text, request):
 
 
 def test_nemotron_v3_streaming_promotes_reasoning_to_content(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: FakeNemotronTokenizer,
 ):
     # Model never closes <think>: reasoning streams normally AND is duplicated
     # into content on the terminal delta.
@@ -261,7 +260,7 @@ def test_nemotron_v3_streaming_promotes_reasoning_to_content(
 
 
 def test_nemotron_v3_streaming_no_promotion_with_real_content(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: FakeNemotronTokenizer,
 ):
     request = ChatCompletionRequest(
         model="test-model",
@@ -280,7 +279,7 @@ def test_nemotron_v3_streaming_no_promotion_with_real_content(
 
 
 def test_nemotron_v3_streaming_no_promotion_without_opt_in(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: FakeNemotronTokenizer,
 ):
     # Without enable_thinking=False / force_nonempty_content the fallback must
     # stay disabled: the response stays reasoning-only, content empty.

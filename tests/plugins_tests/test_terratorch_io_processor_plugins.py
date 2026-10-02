@@ -95,8 +95,7 @@ async def test_prithvi_mae_plugin_online(
     response = ret.json()
 
     # verify the request response is in the correct format
-    parsed_response: IOProcessorResponse = IOProcessorResponse(**response)
-    assert parsed_response
+    assert (parsed_response := IOProcessorResponse(**response))
 
     # verify the output is formatted as expected for this plugin
     plugin_data = parsed_response.data

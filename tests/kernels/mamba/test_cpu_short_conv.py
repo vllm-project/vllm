@@ -88,6 +88,11 @@ def test_short_conv_forward_native_prefill(vllm_config):
         state_indices_tensor_d=torch.empty((0, 1), dtype=torch.int32),
         num_accepted_tokens=None,
         query_start_loc_d=None,
+        block_idx_last_scheduled_token=None,
+        block_idx_first_scheduled_token_p=None,
+        block_idx_last_computed_token=None,
+        block_idx_last_scheduled_token_prev_step=None,
+        num_computed_tokens_p=None,
         seq_lens=torch.tensor([5]),
     )
 
@@ -140,6 +145,11 @@ def test_short_conv_forward_native_decode(vllm_config):
         state_indices_tensor_d=state_indices_tensor_d,
         num_accepted_tokens=None,
         query_start_loc_d=torch.tensor([0, 1, 2], dtype=torch.int32),
+        block_idx_last_scheduled_token=None,
+        block_idx_first_scheduled_token_p=None,
+        block_idx_last_computed_token=None,
+        block_idx_last_scheduled_token_prev_step=None,
+        num_computed_tokens_p=None,
         seq_lens=torch.tensor([1, 1]),
     )
 

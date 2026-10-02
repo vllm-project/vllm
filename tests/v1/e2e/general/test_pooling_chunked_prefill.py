@@ -77,13 +77,13 @@ def test_pooling_chunked_prefill(vllm_runner, monkeypatch):
 
         chunk_size = 10
 
-        # Cap the token budget to force chunked prefill; the
-        # long_prefill_token_threshold is not applied to a lone request.
+        # Set chunking parameters to force chunked prefill
+        # Note: Chunked prefill is automatically handled by vLLM
+        # internally based on the model size and prompt
         with vllm_runner(
             model_id,
             runner="pooling",
-            max_num_batched_tokens=chunk_size,
-            max_num_seqs=1,
+            long_prefill_token_threshold=chunk_size,
             tensor_parallel_size=1,
             enforce_eager=True,
             enable_chunked_prefill=True,

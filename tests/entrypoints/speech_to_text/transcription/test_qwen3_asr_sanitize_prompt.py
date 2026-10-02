@@ -47,7 +47,7 @@ def test_sanitize_handles_falsy_inputs() -> None:
     assert _sanitize_transcription_user_text("") == ""
     # The dataclass default for ``response_prefix`` is the empty string;
     # the sanitizer must accept that without exception or extra work.
-    assert _sanitize_transcription_user_text(None) == ""
+    assert _sanitize_transcription_user_text(None) == ""  # type: ignore[arg-type]
 
 
 def test_sanitize_is_idempotent() -> None:

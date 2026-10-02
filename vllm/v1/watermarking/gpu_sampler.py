@@ -36,8 +36,10 @@ class GPUWatermarkSampler(Sampler):
         self.watermarking.np.fill(True)
         self.watermarking.copy_to_uva()
 
-    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
-        super().add_request(req_idx, sampling_params)
+    def add_request(
+        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
+    ) -> None:
+        super().add_request(req_idx, prompt_len, sampling_params)
         self.watermarking.np[req_idx] = sampling_params.watermarking
         if sampling_params.watermarking and sampling_params.temperature == 0:
             logger.warning_once(
@@ -58,7 +60,7 @@ class GPUWatermarkSampler(Sampler):
         pos: torch.Tensor,
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
-        use_fused_sampler: bool,
+        use_flashinfer: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         enabled = self.watermarking.np[idx_mapping_np] & (
             self.sampling_states.temperature.np[idx_mapping_np] != 0
@@ -71,7 +73,7 @@ class GPUWatermarkSampler(Sampler):
                 pos,
                 top_k,
                 top_p,
-                use_fused_sampler,
+                use_flashinfer,
             )
 
         processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
@@ -119,9 +121,8 @@ class GPUWatermarkSampler(Sampler):
         self,
         expanded_idx_mapping: torch.Tensor,
         contexts: torch.Tensor,
-        expanded_local_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        repeated = repeated_context_mask(
+        return repeated_context_mask(
             self.req_states.all_token_ids.gpu,
             expanded_idx_mapping,
             self.req_states.prompt_len.gpu,
@@ -129,16 +130,8 @@ class GPUWatermarkSampler(Sampler):
             contexts,
             self.deduplicate_contexts_max_history,
             include_prompt=self.deduplicate_contexts == "all",
-            skip_partial_context=(
-                self.deduplicate_contexts == "all" and expanded_local_pos is None
-            ),
-            history_offsets=expanded_local_pos,
-            local_positions=expanded_local_pos,
-            num_speculative_steps=(
-                self.num_speculative_tokens if expanded_local_pos is not None else 0
-            ),
+            skip_partial_context=self.deduplicate_contexts == "all",
         )
-        return repeated
 
     def _get_contexts(
         self,

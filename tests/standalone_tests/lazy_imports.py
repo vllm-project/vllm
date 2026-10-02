@@ -17,6 +17,6 @@ module_names = ["torch._inductor.async_compile", "cv2"]
 # if we import any modules during `import vllm`, there would be a
 # hard error and nice stacktrace on the first import.
 for module_name in module_names:
-    sys.modules[module_name] = None
+    sys.modules[module_name] = None  # type: ignore[assignment]
 
 import vllm  # noqa

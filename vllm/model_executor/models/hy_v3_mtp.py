@@ -29,7 +29,7 @@ from collections.abc import Callable, Iterable
 import regex as re
 import torch
 from torch import nn
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import (
@@ -59,7 +59,7 @@ from .utils import (
 )
 
 
-def _is_moe(config: PreTrainedConfig) -> bool:
+def _is_moe(config: PretrainedConfig) -> bool:
     return bool(
         getattr(config, "num_experts", None)
         and (
@@ -69,7 +69,7 @@ def _is_moe(config: PreTrainedConfig) -> bool:
     )
 
 
-def _get_cla_factor(config: PreTrainedConfig) -> int:
+def _get_cla_factor(config: PretrainedConfig) -> int:
     if not getattr(config, "use_cla", False):
         return 1
     return getattr(config, "cla_share_factor", 1)
@@ -78,7 +78,7 @@ def _get_cla_factor(config: PreTrainedConfig) -> int:
 class HYV3SharedHead(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
@@ -93,7 +93,7 @@ class HYV3SharedHead(nn.Module):
 class HYV3MultiTokenPredictorLayer(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         prefix: str,
         model_config: ModelConfig,
         cache_config: CacheConfig | None = None,

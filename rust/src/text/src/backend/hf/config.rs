@@ -23,9 +23,6 @@ pub struct HfTokenizerConfig {
     /// containing "Tiktoken" which can be used as a hint for backend
     /// selection.
     pub tokenizer_class: Option<String>,
-    /// The Hugging Face `response_template`: a declarative description of the
-    /// model's output protocol, executed by the `hf` unified parser.
-    pub response_template: Option<serde_json::Value>,
 }
 
 /// Hugging Face named special tokens may be serialized as a string or an
@@ -87,11 +84,10 @@ impl HfSpecialTokens {
 
 /// Minimal subset of `config.json` (the model's main HF config).
 ///
-/// This intentionally supports only the layouts we currently care about in
+/// This intentionally supports only the two layouts we currently care about in
 /// the Rust frontend:
 /// - pure text models that keep text metadata at the top level
-/// - composite models that expose a single nested `text_config` or its
-///   `llm_config` alias (used by Nemotron)
+/// - composite models that expose a single nested `text_config`
 ///
 /// We do not support additional entry points such as `decoder`, `generator`, or
 /// `text_encoder`.
@@ -106,7 +102,6 @@ pub struct ModelConfig {
     n_routed_experts: Option<OneOrManyExpertCount>,
     num_local_experts: Option<OneOrManyExpertCount>,
     block_configs: Vec<BlockConfig>,
-    #[serde(alias = "llm_config")]
     text_config: Option<Box<ModelConfig>>,
 }
 
@@ -193,7 +188,7 @@ impl ModelConfig {
     /// Return the config that the Rust frontend treats as the text/LLM config.
     ///
     /// This is deliberately narrower than Python/transformers: we only support
-    /// either the top-level config itself or a single nested text config.
+    /// either the top-level config itself or a single nested `text_config`.
     fn effective_text_config(&self) -> &Self {
         self.text_config.as_deref().unwrap_or(self)
     }
@@ -238,8 +233,7 @@ impl ModelConfig {
     /// config.
     ///
     /// The only intentional simplification here is how we pick the text config:
-    /// Rust only looks at the top level or `text_config` (including its
-    /// `llm_config` alias), not the broader
+    /// Rust only looks at the top level or `text_config`, not the broader
     /// transformers composite-config surface.
     fn num_experts_from_block_configs(&self) -> u32 {
         self.effective_text_config()
@@ -409,27 +403,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.vocab_size().unwrap(), 151936);
-    }
-
-    #[test]
-    fn model_config_uses_llm_config_for_nemotron_composite_models() {
-        let config: ModelConfig = serde_json::from_str(
-            r#"{
-                "model_type": "nemotron_h_omni",
-                "llm_config": {
-                    "model_type": "nemotron_h",
-                    "vocab_size": 131072,
-                    "n_routed_experts": 256,
-                    "eos_token_id": 2
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(config.model_type(), Some("nemotron_h_omni"));
-        assert_eq!(config.vocab_size().unwrap(), 131072);
-        assert_eq!(config.eos_token_ids(), &[2]);
-        assert_eq!(config.num_experts(), 256);
     }
 
     #[test]

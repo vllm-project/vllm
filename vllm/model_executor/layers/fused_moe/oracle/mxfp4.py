@@ -844,7 +844,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     sf_block_size = 32  # mxfp4 block size
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming import (
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
             convert_to_humming_moe_kernel_format,
         )
 
@@ -1382,7 +1382,6 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     w2_bias: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
     activation: MoEActivation | None = None,
-    use_separated_a4w4: bool = False,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1429,7 +1428,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming import (
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
             convert_to_humming_moe_kernel_format,
         )
 
@@ -1597,7 +1596,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
             fp4_dtype = torch.float4_e2m1fn_x2
             e8m0_dtype = torch.float8_e8m0fnu
-            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+            # SiTUv2 flydsl uses separated gate/up layout (a4w4).
+            guinterleave = False
             w13 = rocm_aiter_ops.shuffle_weight_a16w4(
                 w13_weight.data.view(fp4_dtype), 16, guinterleave
             )
@@ -1627,16 +1627,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
 
-        # DeepSeek V4.1 a4w4 uses ATOM's SEPARATED gate/up layout instead of
-        # the default INTERLEAVE shuffle (INTERLEAVE + fp4x2 has no tuned
-        # kernel and produces garbage output). Must match GateMode.SEPARATED
-        # in rocm_aiter_moe.py.
-        is_guinterleave = not use_separated_a4w4
-
         w13_weight = torch.nn.Parameter(
             _shuf_w(
                 w13_weight.data.view(torch.float4_e2m1fn_x2),
-                is_guinterleave=is_guinterleave,
+                is_guinterleave=True,
                 gate_up=True,
             ),
             requires_grad=False,
@@ -1644,14 +1638,14 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         shuffled_w13_scale = _shuf_s(
             w13_weight_scale.reshape(-1, w13_weight_scale.shape[-1]),
             num_experts,
-            is_guinterleave,
+            True,
             True,
         )
 
         w2_weight = torch.nn.Parameter(
             _shuf_w(
                 w2_weight.data.view(torch.float4_e2m1fn_x2),
-                is_guinterleave=is_guinterleave,
+                is_guinterleave=True,
                 gate_up=False,
             ),
             requires_grad=False,
@@ -1660,7 +1654,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         shuffled_w2_scale = _shuf_s(
             w2_weight_scale.reshape(-1, w2_weight_scale.shape[-1]),
             num_experts,
-            is_guinterleave,
+            True,
             False,
         )
 
@@ -1972,7 +1966,7 @@ def make_mxfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming import (
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
             get_humming_moe_quant_config,
         )
 

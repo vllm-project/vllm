@@ -197,6 +197,11 @@ def test_decode_concat_ignores_negative_slots_for_cache(cache_format: str) -> No
     mixed_cache = initial_cache.clone()
     reference_cache = _reference_cache(cache_format, inputs, initial_cache, slots)
     scale_inv = torch.ones(1, device="cuda", dtype=torch.float32)
+    kwargs = {
+        "ds_mla": cache_format == "fp8_ds_mla",
+        "q_scale_inv": scale_inv if cache_format == "fp8" else None,
+        "cache_scale_inv": scale_inv if cache_format == "fp8" else None,
+    }
 
     output = fused_mla_decode_q_concat_kv_cache_insert(
         inputs["ql_nope"],
@@ -205,9 +210,7 @@ def test_decode_concat_ignores_negative_slots_for_cache(cache_format: str) -> No
         inputs["k_pe"],
         mixed_cache,
         slots,
-        ds_mla=cache_format == "fp8_ds_mla",
-        q_scale_inv=scale_inv if cache_format == "fp8" else None,
-        cache_scale_inv=scale_inv if cache_format == "fp8" else None,
+        **kwargs,
     )
 
     expected = _latent_query(inputs["ql_nope"], inputs["q_pe"])
@@ -219,8 +222,7 @@ def test_decode_concat_ignores_negative_slots_for_cache(cache_format: str) -> No
     _assert_cache_matches_reference(mixed_cache, reference_cache, initial_cache)
 
 
-@pytest.mark.parametrize("decode", [False, True])
-def test_ds_mla_cache_insert_bit_compatible_with_reference(decode: bool) -> None:
+def test_ds_mla_cache_insert_bit_compatible_with_reference() -> None:
     """Fused ds_mla insertion must match the reference bit-for-bit."""
     torch.manual_seed(0)
     num_tokens, num_blocks = 33, 16
@@ -240,18 +242,5 @@ def test_ds_mla_cache_insert_bit_compatible_with_reference(decode: bool) -> None
     got = ref.clone()
     scale = torch.ones(1, device="cuda", dtype=torch.float32)
     ops.concat_and_cache_mla(kv_c, k_pe.squeeze(1), ref, slots, "fp8_ds_mla", scale)
-    if decode:
-        ql_nope = torch.randn(
-            num_tokens, NUM_HEADS, KV_LORA_RANK, device="cuda", dtype=dt
-        )
-        fused_mla_decode_q_concat_kv_cache_insert(
-            ql_nope, q[..., -ROPE_HEAD_DIM:], kv_c, k_pe, got, slots, ds_mla=True
-        )
-    else:
-        fused_mla_key_concat_ds_mla_insert(q, k_nope, k_pe, kv_c, got, slots)
+    fused_mla_key_concat_ds_mla_insert(q, k_nope, k_pe, kv_c, got, slots)
     assert torch.equal(ref, got)
-    rows = got.view(-1, DS_MLA_CACHE_ENTRY)[slots[slots >= 0]]
-    scales = rows[:, KV_LORA_RANK : KV_LORA_RANK + 16].view(torch.float32)
-    torch.testing.assert_close(
-        torch.log2(scales), torch.log2(scales).round(), rtol=0, atol=0
-    )

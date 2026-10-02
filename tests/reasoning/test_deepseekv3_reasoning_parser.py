@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -17,7 +17,7 @@ REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-V3.1"
 
 
 @pytest.fixture(scope="module")
-def tokenizer() -> PreTrainedTokenizerBase:
+def tokenizer():
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 
@@ -87,14 +87,3 @@ def test_identity_reasoning_parser_basic(tokenizer):
         delta_token_ids=[],
     )
     assert result_none is None
-
-
-@pytest.mark.parametrize("thinking,expected", [(True, 3), (False, 0)])
-def test_count_reasoning_tokens_delegates(tokenizer, thinking, expected):
-    parser = DeepSeekV3ReasoningParser(
-        tokenizer, chat_template_kwargs={"thinking": thinking}
-    )
-    think = tokenizer.convert_tokens_to_ids(["<think>", "</think>"])
-    token_ids = [think[0], 11, 12, 13, think[1], 14]
-
-    assert parser.count_reasoning_tokens(token_ids) == expected

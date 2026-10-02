@@ -4,7 +4,7 @@
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.humming import (
+from vllm.model_executor.layers.quantization.utils.humming_utils import (
     apply_humming_linear,
     convert_linear_layer_to_humming_standard,
     get_humming_linear_compute_config,
@@ -92,7 +92,6 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return apply_humming_linear(
             layer,
             x,
-            skip_bias_add=bias is None,
             layer_config=self.layer_config,
             compute_config=self.compute_config,
             locks=self.locks,
@@ -159,7 +158,6 @@ class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return apply_humming_linear(
             layer,
             x,
-            skip_bias_add=bias is None,
             layer_config=self.layer_config,
             compute_config=self.compute_config,
             locks=self.locks,

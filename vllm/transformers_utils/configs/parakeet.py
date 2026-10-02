@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 
-from transformers import ParakeetEncoderConfig, PreTrainedConfig
+from transformers import ParakeetEncoderConfig, PretrainedConfig
 
 
 class ParakeetConfig(ParakeetEncoderConfig):
@@ -24,9 +24,9 @@ class ParakeetConfig(ParakeetEncoderConfig):
 
     @staticmethod
     def from_hf_config(
-        config: PreTrainedConfig, *, llm_hidden_size: int, max_model_len: int
+        config: PretrainedConfig, *, llm_hidden_size: int, max_model_len: int
     ) -> "ParakeetConfig":
-        assert isinstance(config, PreTrainedConfig)
+        assert isinstance(config, PretrainedConfig)
         return ParakeetConfig(
             **config.to_dict(),
             scale_input=False,
@@ -55,8 +55,8 @@ class ExtractorConfig:
     padding_value: float = 0.0
 
     @classmethod
-    def from_hf_config(cls, config: PreTrainedConfig) -> "ExtractorConfig":
-        assert isinstance(config, PreTrainedConfig)
+    def from_hf_config(cls, config: PretrainedConfig) -> "ExtractorConfig":
+        assert isinstance(config, PretrainedConfig)
         defaults = ("hop_length", "win_length", "preemphasis", "n_fft", "padding_value")
         optional_kwargs = {
             name: getattr(config, name) for name in defaults if hasattr(config, name)

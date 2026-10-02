@@ -173,7 +173,7 @@ class HarmonyPythonTool(Tool):
             processed = ResponseFunctionToolCallOutputItem(
                 id=f"fco_{random_uuid()}",
                 type="function_call_output",
-                call_id=last_msg.call_id,
+                call_id=f"call_{random_uuid()}",
                 output=msg.content[0].text,
                 status="completed",
             )

@@ -4,13 +4,11 @@
 import pytest
 import torch
 
-from vllm.models.qwen4_exp.nvidia.ops.cute_dsl.hc_down_silu import hc_down_silu
 from vllm.models.qwen4_exp.nvidia.ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
     hc_gate_mix,
-    hc_silu,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -24,13 +22,6 @@ HC = 4
 HIDDEN_SIZE = 2560
 HYPER_HIDDEN_SIZE = HC * HIDDEN_SIZE
 EPS = 1e-6
-LORA_RANK = 320
-DOWN_N = LORA_RANK + HC + 12  # merged down+inject weight, 16-row padded
-
-requires_sm90 = pytest.mark.skipif(
-    not current_platform.has_device_capability(90),
-    reason="fused HC down+SiLU requires SM90+",
-)
 
 
 def test_grouped_gemma_rmsnorm() -> None:
@@ -134,24 +125,3 @@ def test_hc_combine_norm_unit_injection(num_tokens: int) -> None:
     expected_norm = grouped_gemma_rmsnorm(expected, weight, EPS, HC)
     assert torch.equal(actual, expected)
     torch.testing.assert_close(actual_norm, expected_norm)
-
-
-@requires_sm90
-@pytest.mark.parametrize("num_tokens", [1, 3, 5, 17, 48])
-def test_hc_down_silu_fused(num_tokens: int) -> None:
-    # Compare computed columns with the unfused ll_bf16 + hc_silu reference.
-    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import ll_bf16_gemm
-
-    torch.manual_seed(0)
-    x = torch.randn(num_tokens, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-    weight = torch.randn(DOWN_N, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-
-    lora, injection = hc_down_silu(x, weight, LORA_RANK, HC)
-
-    down = ll_bf16_gemm(x, weight).to(torch.bfloat16)
-    torch.testing.assert_close(
-        lora, hc_silu(down[:, :LORA_RANK], HC), rtol=0.01, atol=0.01
-    )
-    torch.testing.assert_close(
-        injection, down[:, LORA_RANK : LORA_RANK + HC], rtol=0.01, atol=0.01
-    )

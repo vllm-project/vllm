@@ -335,7 +335,6 @@ def sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
     use_pcp: bool,
-    pcp_shard_decode_requests: bool,
     dense_mha_metadata_layer_name: LayerNameType,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
@@ -405,7 +404,6 @@ def sparse_attn_indexer(
             topk_indices_buffer,
             skip_k_cache_insert,
             use_pcp,
-            pcp_shard_decode_requests,
             dense_mha_metadata_layer_name,
             use_fp4_cache,
             candidate_blocks=candidate_blocks,
@@ -444,7 +442,6 @@ def sparse_attn_indexer(
             slot_mapping,
             num_decode_tokens,
             use_pcp,
-            pcp_shard_decode_requests=pcp_shard_decode_requests,
         )
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None
@@ -645,19 +642,6 @@ def sparse_attn_indexer(
         assert decode_metadata is not None
         kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
         decode_lens = decode_metadata.decode_lens
-        # requires_padding can be computed False for ragged warmup/mixed
-        # batches (seen on SM120 TP=2: 8 tokens over 6 seqs -> uniform
-        # reshape below would crash). The token-count/batch-size divisibility
-        # check is a necessary-but-not-sufficient proxy for "uniform batch"
-        # (e.g. decode_lens=[1, 2, 3] divides evenly by 3 but isn't uniform);
-        # it catches the specific case seen in practice without requiring a
-        # device sync to inspect decode_lens directly, which would break
-        # CUDA-graph-capture safety on this path. Shared by both the pack
-        # branch below and the matching unpack branch further down — they
-        # must agree on which path was taken.
-        needs_padded_path = decode_metadata.requires_padding or (
-            num_decode_tokens % decode_lens.shape[0] != 0
-        )
         if num_decode_tokens == 0:
             padded_q_quant_decode_tokens = q_quant[:1].reshape(1, 1, *q_quant.shape[1:])
             padded_q_scale = (
@@ -665,7 +649,7 @@ def sparse_attn_indexer(
                 if q_scale is not None
                 else None
             )
-        elif needs_padded_path:
+        elif decode_metadata.requires_padding:
             # pad in edge case where we have short chunked prefill length <
             # decode_threshold since we unstrictly split
             # prefill and decode by decode_threshold
@@ -789,7 +773,7 @@ def sparse_attn_indexer(
                 cp_kv_cache_interleave_size,
             )
 
-        if needs_padded_path:
+        if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
             topk_indices = unpack_seq_triton(
@@ -820,7 +804,6 @@ def sparse_attn_indexer_fake(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
     use_pcp: bool,
-    pcp_shard_decode_requests: bool,
     dense_mha_metadata_layer_name: LayerNameType,
     use_fp4_cache: bool = False,
     dcp_rank: int = 0,
@@ -873,6 +856,8 @@ class SparseAttnIndexer(CustomOp):
         candidate_blocks: torch.Tensor | None = None,
         candidate_block_size: int = 0,
         candidate_write: bool = False,
+        semantic_uncompressed_max_model_len: int = 0,
+        semantic_compress_ratio: int = 1,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -891,6 +876,8 @@ class SparseAttnIndexer(CustomOp):
         self.candidate_blocks = candidate_blocks
         self.candidate_block_size = candidate_block_size
         self.candidate_write = candidate_write
+        self.semantic_uncompressed_max_model_len = semantic_uncompressed_max_model_len
+        self.semantic_compress_ratio = semantic_compress_ratio
         self.dense_mha_metadata_layer_name = ""
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
@@ -902,7 +889,6 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
         self._cp_kv_cache_interleave_size: int | None = None
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
@@ -999,7 +985,6 @@ class SparseAttnIndexer(CustomOp):
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
             self.use_pcp,
-            self.pcp_shard_decode_requests,
             _encode_layer_name(self.dense_mha_metadata_layer_name),
             self.use_fp4_cache,
             self.dcp_rank,
@@ -1062,6 +1047,10 @@ class SparseAttnIndexer(CustomOp):
                 candidate_blocks=self.candidate_blocks,
                 candidate_block_size=self.candidate_block_size,
                 candidate_write=self.candidate_write,
+                semantic_uncompressed_max_model_len=(
+                    self.semantic_uncompressed_max_model_len
+                ),
+                semantic_compress_ratio=self.semantic_compress_ratio,
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path requires AITER or a supported "

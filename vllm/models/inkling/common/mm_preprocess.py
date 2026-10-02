@@ -13,7 +13,9 @@ import torch
 from transformers.feature_extraction_utils import BatchFeature
 
 from vllm.config.multimodal import (
-    MultiModalDummyOptions,
+    AudioDummyOptions,
+    BaseDummyOptions,
+    ImageDummyOptions,
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.multimodal.inputs import (
@@ -143,7 +145,7 @@ class InklingDummyInputsBuilder(BaseDummyInputsBuilder[InklingProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         config = self.info.get_hf_config()
         num_images = mm_counts.get("image", 0)
@@ -154,11 +156,12 @@ class InklingDummyInputsBuilder(BaseDummyInputsBuilder[InklingProcessingInfo]):
             patch_size = getattr(config.vision_config, "patch_size", 40)
             # A square image ~4 patches wide so the dummy emits several patches.
             side = patch_size * 4
+            image_overrides = mm_options.get("image")
             mm_data["image"] = self._get_dummy_images(
                 width=side,
                 height=side,
                 num_images=num_images,
-                overrides=mm_options.get("image"),
+                overrides=cast(ImageDummyOptions | None, image_overrides),
             )
         if num_audios:
             # Size the dummy at the maximum allowed audio so memory/encoder
@@ -166,10 +169,11 @@ class InklingDummyInputsBuilder(BaseDummyInputsBuilder[InklingProcessingInfo]):
             params = self.info.get_hf_processor().audio_feature_extractor.params
             hop = int(round(params.audio_token_duration_s * params.sample_rate))
             audio_len = MAX_AUDIO_TOKENS * hop
+            audio_overrides = mm_options.get("audio")
             mm_data["audio"] = self._get_dummy_audios(
                 length=audio_len,
                 num_audios=num_audios,
-                overrides=mm_options.get("audio"),
+                overrides=cast(AudioDummyOptions | None, audio_overrides),
             )
         return mm_data
 

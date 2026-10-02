@@ -29,7 +29,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -41,15 +41,12 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEFactory,
-    GateLinear,
-    MoERunner,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, MoERunner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -119,7 +116,7 @@ class Ernie4_5_MoeMLP(nn.Module):
 class Ernie4_5_MoeMoE(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
@@ -153,11 +150,12 @@ class Ernie4_5_MoeMoE(nn.Module):
                 f"the number of experts {config.moe_num_experts}."
             )
 
-        self.gate = GateLinear(
+        self.gate = ReplicatedLinear(
             config.hidden_size,
             config.moe_num_experts,
-            out_dtype=torch.float32,
+            bias=False,
             params_dtype=torch.float32,
+            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -201,7 +199,7 @@ class Ernie4_5_MoeMoE(nn.Module):
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
@@ -305,7 +303,7 @@ class Ernie4_5_MoeAttention(nn.Module):
 class Ernie4_5_MoeDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",

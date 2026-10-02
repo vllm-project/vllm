@@ -5,7 +5,6 @@
 import pytest
 import torch
 
-from tests.kernels.attention.test_triton_unified_attention import ref_paged_attn
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import (
@@ -82,7 +81,7 @@ def _alloc_segm_buffers(seq_threshold_3D: int, num_query_heads: int, head_size_v
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
 @torch.inference_mode()
-def test_triton_unified_attn_diffkv_vs_reference(
+def test_triton_unified_attn_diffkv_vs_fa(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_sizes: tuple[int, int],
@@ -94,13 +93,12 @@ def test_triton_unified_attn_diffkv_vs_reference(
 ) -> None:
     head_size_qk, head_size_v = head_sizes
 
-    # Keep the FA3/FA4 comparison on NVIDIA; ROCm uses the PyTorch oracle.
-    if not current_platform.is_rocm():
-        fa_version = get_flash_attn_version(
-            head_size=head_size_qk, head_size_v=head_size_v
-        )
-        if not is_flash_attn_varlen_func_available() or fa_version not in (3, 4):
-            pytest.skip(f"FA DiffKV needs FA3/FA4 (got version {fa_version}).")
+    # DiffKV requires FA3 (Hopper) / FA4 (Blackwell) as the reference.
+    fa_version = get_flash_attn_version(head_size=head_size_qk, head_size_v=head_size_v)
+    if not is_flash_attn_varlen_func_available() or fa_version not in (3, 4):
+        pytest.skip(f"FA DiffKV needs FA3/FA4 (got version {fa_version}).")
+
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
@@ -137,45 +135,28 @@ def test_triton_unified_attn_diffkv_vs_reference(
         0, NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
     )
 
-    if current_platform.is_rocm():
-        # FP32 also keeps the helper's in-place scaling off the kernel input.
-        ref_out = ref_paged_attn(
-            query.float(),
-            key_cache.float(),
-            value_cache.float(),
-            query_lens,
-            kv_lens,
-            block_tables,
-            scale,
-            sliding_window=sliding_window,
-            soft_cap=soft_cap,
-        ).to(dtype)
-    else:
-        from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
-
-        assert fa_version is not None
-        # FA's TMA path needs aligned singleton strides (num_kv_heads == 1).
-        fa_k = canonicalize_singleton_dim_strides(key_cache)
-        fa_v = canonicalize_singleton_dim_strides(value_cache)
-        ref_out = torch.empty(
-            sum(query_lens), num_query_heads, head_size_v, dtype=dtype
-        )
-        flash_attn_varlen_func(
-            q=query,
-            k=fa_k,
-            v=fa_v,
-            out=ref_out,
-            cu_seqlens_q=cu_query_lens,
-            max_seqlen_q=max_query_len,
-            seqused_k=kv_lens_t,
-            max_seqlen_k=max_kv_len,
-            softmax_scale=scale,
-            causal=True,
-            window_size=list(window_size),
-            block_table=block_tables,
-            softcap=soft_cap if soft_cap is not None else 0,
-            fa_version=fa_version,
-        )
+    # ---- FlashAttention DiffKV (ground truth) ---------------------------
+    # Mirror the backend: fix degenerate strides on size-1 dims so FA's
+    # TMA path sees ≥16-byte-aligned strides (matters for num_kv_heads==1).
+    fa_k = canonicalize_singleton_dim_strides(key_cache)
+    fa_v = canonicalize_singleton_dim_strides(value_cache)
+    fa_out = torch.empty(sum(query_lens), num_query_heads, head_size_v, dtype=dtype)
+    flash_attn_varlen_func(
+        q=query,
+        k=fa_k,
+        v=fa_v,
+        out=fa_out,
+        cu_seqlens_q=cu_query_lens,
+        max_seqlen_q=max_query_len,
+        seqused_k=kv_lens_t,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=list(window_size),
+        block_table=block_tables,
+        softcap=soft_cap if soft_cap is not None else 0,
+        fa_version=fa_version,
+    )
 
     # ---- Triton DiffKV --------------------------------------------------
     segm_output, segm_max, segm_expsum = _alloc_segm_buffers(
@@ -202,4 +183,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
         softmax_segm_expsum=segm_expsum,
     )
 
-    torch.testing.assert_close(triton_out, ref_out, atol=2e-2, rtol=2e-2)
+    (
+        torch.testing.assert_close(triton_out, fa_out, atol=2e-2, rtol=2e-2),
+        f"triton vs FA max abs diff: {torch.max(torch.abs(triton_out - fa_out))}",
+    )

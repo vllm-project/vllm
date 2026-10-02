@@ -96,7 +96,7 @@ class TestSiluAndMulPerBlockQuantConfigPicker:
         )
 
     def test_config_picker_no_configs(self):
-        config_keys: list[CaseKey] = []
+        config_keys: list[dict] = []
 
         args = _generate_fake_input(16, 4096, 128)
         selected_key = pick_config(args, config_keys)

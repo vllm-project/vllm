@@ -10,7 +10,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel impo
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUFp8BlockScaledMMKernel,
     CPUFp8PerTensorScaledMMLinearKernel,
-    CPUFP8W8A8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
@@ -70,6 +69,5 @@ __all__ = [
     "Fp8BlockScaledMMLinearKernel",
     "CPUFp8BlockScaledMMKernel",
     "CPUFp8PerTensorScaledMMLinearKernel",
-    "CPUFP8W8A8ScaledMMLinearKernel",
     "XPUFp8BlockScaledMMKernel",
 ]

@@ -4,7 +4,7 @@
 from pathlib import Path
 
 import pytest
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.transformers_utils.config import get_config_parser, register_config_parser
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
@@ -19,7 +19,7 @@ class CustomConfigParser(ConfigParserBase):
         revision: str | None = None,
         code_revision: str | None = None,
         **kwargs,
-    ) -> tuple[dict, PreTrainedConfig]:
+    ) -> tuple[dict, PretrainedConfig]:
         raise NotImplementedError
 
 

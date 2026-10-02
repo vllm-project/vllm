@@ -2,11 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
-from dataclasses import replace
-
 import torch
 from torch import nn
-from transformers import Glm5NextTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -17,14 +14,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.mamba.checkpoint import (
-    MambaPrefillCheckpointMetadata,
-)
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.kda_checkpoint import (
-    FlashKDAPrefillCheckpointExporter,
-    kda_prefill_checkpoint_alignment,
-)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -45,8 +35,8 @@ from vllm.model_executor.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -165,16 +155,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     num_heads: int
     conv_size: int
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
-        alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(alignment is not None),
-            prefill_checkpoint_alignment=alignment,
-        )
-
     def get_state_dtype(
         self,
     ) -> tuple[torch.dtype, torch.dtype]:
@@ -201,7 +181,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
     def __init__(
         self,
-        config: Glm5NextTextConfig,
+        config: Glm5NextConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
@@ -350,7 +330,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
         ) = None
-        self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
         if self.kda_prefill_backend == "flashkda":
             import vllm._flashkda_C  # noqa: F401
 
@@ -364,10 +343,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     (max_seqs, self.local_num_heads, self.head_dim, self.head_dim),
                     self.get_state_dtype()[1],
                 ),
-                (
-                    (max_seqs, self.local_num_heads, self.head_dim, self.head_dim),
-                    self.get_state_dtype()[1],
-                ),
                 ((workspace_size,), torch.uint8),
                 # Output buffer for steps that also carry spec-decode tokens:
                 # the non-spec tokens are then scattered by non_spec_token_indx.
@@ -375,9 +350,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     (1, max_tokens, self.local_num_heads, self.head_dim),
                     vllm_config.model_config.dtype,
                 ),
-            )
-            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
-                state_len=self.conv_size - 1
             )
 
     def _flashkda_prefill(
@@ -390,10 +362,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         initial_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
         out: torch.Tensor | None,
-        checkpoint: MambaPrefillCheckpointMetadata | None = None,
-        raw_qkv: torch.Tensor | None = None,
-        conv_state: torch.Tensor | None = None,
-        recurrent_state: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Fused KDA chunked prefill (FlashKDA). Takes the raw gate logits ``g``
         and raw ``beta`` logits, l2-normalizes q/k in-kernel and applies the
@@ -402,15 +370,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         attention output into ``out`` (a workspace buffer when ``None``) and
         returns ``(out, final_state)``."""
         assert self._flashkda_buffer_specs is not None
-        final_state, checkpoint_state, workspace, workspace_out = (
+        final_state, workspace, workspace_out = (
             current_workspace_manager().get_simultaneous(*self._flashkda_buffer_specs)
         )
         final_state = final_state[: initial_state.shape[0]]
-        checkpoint_state = (
-            checkpoint_state[: initial_state.shape[0]]
-            if checkpoint is not None
-            else None
-        )
         if out is None:
             out = workspace_out[:, : q.shape[1]]
         # FlashKDA hardcodes dense q/k/v/g strides; beta may be row-strided.
@@ -429,23 +392,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             initial_state.contiguous(),
             final_state,
             cu_seqlens.contiguous(),
-            checkpoint_state,
-            checkpoint.checkpoint_offsets.contiguous()
-            if checkpoint is not None
-            else None,
+            None,
+            None,
         )
-        if checkpoint is not None:
-            assert self._checkpoint_exporter is not None
-            assert raw_qkv is not None and conv_state is not None
-            assert recurrent_state is not None
-            self._checkpoint_exporter.export(
-                checkpoint,
-                raw_qkv=raw_qkv,
-                conv_state=conv_state,
-                recurrent_checkpoint=checkpoint_state,
-                recurrent_state=recurrent_state,
-                cu_seqlens=cu_seqlens,
-            )
         return out, final_state
 
     def forward(
@@ -616,7 +565,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             q_spec, k_spec, v_spec = qkv_spec.split(self.local_projection_size, dim=-1)
 
         # --- causal conv1d: non-spec path (prefill or plain decode) ---
-        raw_qkv_ns = qkv_ns
         q_ns = k_ns = v_ns = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert qkv_ns is not None
@@ -714,10 +662,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     initial_state=initial_state,
                     cu_seqlens=non_spec_query_start_loc,
                     out=ns_out,
-                    checkpoint=attn_metadata_narrowed.checkpoint,
-                    raw_qkv=raw_qkv_ns,
-                    conv_state=conv_state,
-                    recurrent_state=recurrent_state,
                 )
             else:
                 (

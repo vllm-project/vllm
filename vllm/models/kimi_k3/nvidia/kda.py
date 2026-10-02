@@ -21,10 +21,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.kda_checkpoint import (
-    FlashKDAPrefillCheckpointExporter,
-    kda_prefill_checkpoint_alignment,
-)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -53,15 +49,15 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     flashinfer_fused_kda_decode,
-    flashinfer_packed_fused_kda_decode,
     flashinfer_recurrent_kda,
     has_flashinfer_fused_kda_decode,
-    has_flashinfer_packed_fused_kda_decode,
     has_flashinfer_recurrent_kda,
 )
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -214,73 +210,6 @@ def is_flashinfer_fused_kda_decode_supported(
         and recurrent_state_dtype in (torch.float32, torch.bfloat16)
         and not is_conv_state_dim_first()
     )
-
-
-def is_flashinfer_fused_kda_spec_decode_supported(
-    num_heads: int,
-    head_dim: int,
-    conv_width: int,
-    num_spec: int,
-    input_dtype: torch.dtype,
-    conv_state_dtype: torch.dtype,
-    recurrent_state_dtype: torch.dtype,
-    lower_bound: float | None,
-    use_recoverssm: bool,
-) -> bool:
-    return (
-        has_flashinfer_packed_fused_kda_decode()
-        and current_platform.is_device_capability_family(100)
-        and num_heads in (12, 24, 32, 48, 96)
-        and head_dim == 128
-        and conv_width == 4
-        and 1 <= num_spec <= 7
-        and input_dtype == torch.bfloat16
-        and conv_state_dtype == torch.bfloat16
-        and recurrent_state_dtype in (torch.float32, torch.bfloat16)
-        and lower_bound is not None
-        and lower_bound < 0
-        and not use_recoverssm
-        and not is_conv_state_dim_first()
-    )
-
-
-def resolve_kda_spec_decode_backend(
-    backend: str,
-    num_heads: int,
-    head_dim: int,
-    conv_width: int,
-    num_spec: int,
-    input_dtype: torch.dtype,
-    conv_state_dtype: torch.dtype,
-    recurrent_state_dtype: torch.dtype,
-    lower_bound: float | None,
-    use_recoverssm: bool,
-) -> str:
-    if backend not in ("auto", "native", "flashinfer"):
-        raise ValueError(f"Unsupported KDA speculative decode backend: {backend}")
-    supported = is_flashinfer_fused_kda_spec_decode_supported(
-        num_heads,
-        head_dim,
-        conv_width,
-        num_spec,
-        input_dtype,
-        conv_state_dtype,
-        recurrent_state_dtype,
-        lower_bound,
-        use_recoverssm,
-    )
-    if backend == "flashinfer" and not supported:
-        raise RuntimeError(
-            "FlashInfer packed fused KDA decode requires its "
-            "packed_fused_kda_decode API, CUDA SM10x, bfloat16 inputs and "
-            "convolution state, float32 or bfloat16 recurrent state, D=128, "
-            "W=4, a bounded gate, 1-7 speculative tokens, a supported head "
-            "count, the SD convolution-state layout, and RecoverSSM disabled."
-        )
-    if supported and backend != "native":
-        logger.info_once("Using FlashInfer packed fused KDA speculative decode.")
-        return "flashinfer"
-    return "native"
 
 
 def resolve_kda_decode_backend(
@@ -460,6 +389,69 @@ def _flashinfer_kda_prefill(
     return output, initial_state
 
 
+@triton.jit
+def _store_cache_checkpoints_kernel(
+    x_ptr,
+    conv_state_ptr,
+    recurrent_checkpoint_ptr,
+    recurrent_state_ptr,
+    query_start_loc_ptr,
+    checkpoint_offsets_ptr,
+    checkpoint_state_indices_ptr,
+    x_stride_0: tl.constexpr,
+    x_stride_1: tl.constexpr,
+    state_stride_0: tl.constexpr,
+    state_stride_1: tl.constexpr,
+    state_stride_2: tl.constexpr,
+    checkpoint_stride_0: tl.constexpr,
+    recurrent_state_stride_0: tl.constexpr,
+    checkpoint_offset_stride: tl.constexpr,
+    STATE_LEN: tl.constexpr,
+    WIDTH: tl.constexpr,
+    RECURRENT_ROW_SIZE: tl.constexpr,
+    NULL_STATE_IDX: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # store checkpoints to cache
+    seq_idx = tl.program_id(0)
+    cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    state_idx = tl.load(checkpoint_state_indices_ptr + seq_idx).to(tl.int64)
+    checkpoint_offset = tl.load(
+        checkpoint_offsets_ptr + seq_idx * checkpoint_offset_stride
+    )
+    valid_checkpoint = (state_idx != NULL_STATE_IDX) & (checkpoint_offset > 0)
+    valid_conv = (
+        (cols < WIDTH * STATE_LEN) & valid_checkpoint & (checkpoint_offset >= STATE_LEN)
+    )
+    width_idx = cols // STATE_LEN
+    history_idx = cols % STATE_LEN
+    checkpoint_end = tl.load(query_start_loc_ptr + seq_idx) + checkpoint_offset
+    token_idx = checkpoint_end - STATE_LEN + history_idx
+    values = tl.load(
+        x_ptr + token_idx * x_stride_0 + width_idx * x_stride_1,
+        mask=valid_conv,
+    )
+    tl.store(
+        conv_state_ptr
+        + state_idx * state_stride_0
+        + width_idx * state_stride_1
+        + history_idx * state_stride_2,
+        values,
+        mask=valid_conv,
+    )
+
+    valid_recurrent = (cols < RECURRENT_ROW_SIZE) & valid_checkpoint
+    recurrent = tl.load(
+        recurrent_checkpoint_ptr + seq_idx * checkpoint_stride_0 + cols,
+        mask=valid_recurrent,
+    )
+    tl.store(
+        recurrent_state_ptr + state_idx * recurrent_state_stride_0 + cols,
+        recurrent,
+        mask=valid_recurrent,
+    )
+
+
 def resolve_kda_prefill_backend(
     backend: str,
     head_dim: int,
@@ -606,13 +598,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         self.conv_size = kda_config["short_conv_kernel_size"]
-        self.gate_lower_bound: float | None = kda_config.get("gate_lower_bound", None)
-        if self.gate_lower_bound is not None:
-            assert _KDA_GATE_LOGBOUND_MIN <= self.gate_lower_bound < 0, (
-                "KDA gate lower bound must be in "
-                f"[{_KDA_GATE_LOGBOUND_MIN}, 0). "
-                f"Got {self.gate_lower_bound}."
-            )
         assert kda_config.get("use_full_rank_gate", False), (
             "KimiK3DeltaAttention requires a full-rank gate"
         )
@@ -694,28 +679,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             conv_state_dtype,
             recurrent_state_dtype,
         )
-        spec_decode_backend = (
-            additional_config.get("kda_spec_decode_backend", "auto")
-            if isinstance(additional_config, dict)
-            else "auto"
-        )
-        self.kda_spec_decode_backend = resolve_kda_spec_decode_backend(
-            spec_decode_backend,
-            self.local_num_heads,
-            self.head_dim,
-            self.conv_size,
-            self.num_spec,
-            vllm_config.model_config.dtype,
-            conv_state_dtype,
-            recurrent_state_dtype,
-            self.gate_lower_bound,
-            self.use_recoverssm,
-        )
         decode_conv1d_weight = None
-        if (
-            self.kda_decode_backend != "triton"
-            or self.kda_spec_decode_backend == "flashinfer"
-        ):
+        if self.kda_decode_backend != "triton":
             decode_conv1d_weight = torch.empty(
                 3,
                 self.conv_size,
@@ -744,6 +709,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         set_weight_attrs(self.A_log, {"weight_loader": a_log_weight_loader(0)})
 
+        self.gate_lower_bound: float | None = kda_config.get("gate_lower_bound", None)
+        if self.gate_lower_bound is not None:
+            assert _KDA_GATE_LOGBOUND_MIN <= self.gate_lower_bound < 0, (
+                "KDA gate lower bound must be in "
+                f"[{_KDA_GATE_LOGBOUND_MIN}, 0). "
+                f"Got {self.gate_lower_bound}."
+            )
+
         backend = (
             additional_config.get("kda_prefill_backend", "auto")
             if isinstance(additional_config, dict)
@@ -762,7 +735,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self._flashinfer_kda_output_spec: tuple[tuple[int, ...], torch.dtype] | None = (
             None
         )
-        self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
         if self.kda_prefill_backend == "flashkda":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             N = vllm_config.scheduler_config.max_num_seqs
@@ -776,7 +748,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 ((N, H, D, D), self.get_state_dtype()[1]),
                 ((workspace_size,), torch.uint8),
             )
-            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter()
         elif self.kda_prefill_backend == "flashinfer":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             H, D = self.local_num_heads, self.head_dim
@@ -812,7 +783,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         self.gemm_rs_ar = None
         if run_gemm_rs_ar:
-            from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import (
                 get_gemm_rs_ar,
             )
 
@@ -829,11 +800,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
         spec = super().get_kv_cache_spec(vllm_config)
         assert isinstance(spec, MambaSpec)
-        alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
         return replace(
             spec,
-            num_prefill_checkpoint_blocks=int(alignment is not None),
-            prefill_checkpoint_alignment=alignment,
+            num_prefill_checkpoint_blocks=int(self.kda_prefill_backend == "flashkda"),
+            prefill_checkpoint_alignment=(
+                16 if self.kda_prefill_backend == "flashkda" else None
+            ),
         )
 
     def forward(
@@ -897,7 +869,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(core_attn_out):
-            return self.gemm_rs_ar.apply(core_attn_out, self.o_proj)
+            return self.gemm_rs_ar(core_attn_out, self.o_proj.weight)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
@@ -947,39 +919,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # The convolution kernels consume (..., dim, width - 1).
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
-
-        if (
-            self.kda_spec_decode_backend == "flashinfer"
-            and has_spec_decode
-            and m.num_prefills == 0
-            and m.num_decodes == 0
-        ):
-            assert self.decode_conv1d_weight is not None
-            assert self.decode_norm_weight is not None
-            assert spec_state_indices_tensor is not None
-            assert spec_query_start_loc is not None
-            assert num_accepted_tokens is not None
-            assert self.gate_lower_bound is not None
-            # "Packed" is FlashInfer's name for the varlen T>1 speculative path.
-            flashinfer_packed_fused_kda_decode(
-                x=mixed_qkv,
-                weight=self.decode_conv1d_weight,
-                conv_state=conv_state,
-                raw_gate=g1,
-                raw_beta=beta,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                state_indices=spec_state_indices_tensor,
-                query_start_loc=spec_query_start_loc,
-                num_accepted_tokens=num_accepted_tokens,
-                state=recurrent_state,
-                output_gate=g2[:num_actual_tokens],
-                norm_weight=self.decode_norm_weight,
-                lower_bound=self.gate_lower_bound,
-                norm_eps=self.o_norm.eps,
-                output=core_attn_out[:, :num_actual_tokens],
-            )
-            return
 
         if (
             self.kda_decode_backend != "triton"
@@ -1234,14 +1173,39 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         )
                         core_attn_out_non_spec = flashkda_out
                         last_recurrent_state = final_state
-                        assert self._checkpoint_exporter is not None
-                        self._checkpoint_exporter.export(
-                            checkpoint,
-                            raw_qkv=mixed_qkv_ns,
-                            conv_state=conv_state,
-                            recurrent_checkpoint=checkpoint_state,
-                            recurrent_state=recurrent_state,
-                            cu_seqlens=non_spec_query_start_loc,
+                        state_len = conv_state.shape[-1]
+                        width = mixed_qkv_ns.shape[-1]
+                        recurrent_row_size = checkpoint_state[0].numel()
+                        block_size = 256
+                        _store_cache_checkpoints_kernel[
+                            (
+                                checkpoint_offsets.numel(),
+                                triton.cdiv(
+                                    max(width * state_len, recurrent_row_size),
+                                    block_size,
+                                ),
+                            )
+                        ](
+                            mixed_qkv_ns,
+                            conv_state,
+                            checkpoint_state,
+                            recurrent_state,
+                            non_spec_query_start_loc,
+                            checkpoint_offsets,
+                            checkpoint.state_indices,
+                            mixed_qkv_ns.stride(0),
+                            mixed_qkv_ns.stride(1),
+                            conv_state.stride(0),
+                            conv_state.stride(1),
+                            conv_state.stride(2),
+                            checkpoint_state.stride(0),
+                            recurrent_state.stride(0),
+                            checkpoint_offsets.stride(0),
+                            state_len,
+                            width,
+                            recurrent_row_size,
+                            NULL_BLOCK_ID,
+                            block_size,
                         )
                     else:
                         (

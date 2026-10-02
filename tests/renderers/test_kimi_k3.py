@@ -40,7 +40,6 @@ class MockHFConfig:
 class MockModelConfig:
     runner_type: str = "generate"
     is_multimodal_model: bool = False
-    supports_multimodal_inputs: bool = False
     multimodal_config: Any = None
     hf_config: MockHFConfig = field(default_factory=MockHFConfig)
     allowed_local_media_path: str = ""

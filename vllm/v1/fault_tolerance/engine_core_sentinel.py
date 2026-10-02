@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import msgspec
 
+from vllm.config import set_current_vllm_config
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.utils import stateless_init_torch_distributed_process_group
 from vllm.logger import init_logger
@@ -122,7 +123,8 @@ class EngineCoreSentinel:
         engine = self.engine
         executor = engine.model_executor
 
-        ft_request.params.update(self._reinit_dp_group())
+        with set_current_vllm_config(engine.vllm_config):
+            ft_request.params.update(self._reinit_dp_group())
         if hasattr(engine, "step_counter"):
             engine.step_counter = 0
 
@@ -163,7 +165,6 @@ class EngineCoreSentinel:
                 parallel_config.data_parallel_size,
                 backend="gloo",
                 return_store=True,
-                timeout=parallel_config.cpu_distributed_timeout,
             )
         )
         return {"new_stateless_dp_group_ports": worker_ports}

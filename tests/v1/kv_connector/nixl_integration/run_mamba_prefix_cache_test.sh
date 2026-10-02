@@ -60,7 +60,7 @@ vllm serve "$MODEL" \
   --block-size 128 \
   --trust-remote-code \
   --enable-prefix-caching \
-  --mamba-cache-mode align \
+  --mamba-cache-mode all \
   --kv-transfer-config "$KV_CONFIG" \
   "${EXTRA_ARGS[@]}" &
 
@@ -78,7 +78,7 @@ vllm serve "$MODEL" \
   --block-size 128 \
   --trust-remote-code \
   --enable-prefix-caching \
-  --mamba-cache-mode align \
+  --mamba-cache-mode all \
   --kv-transfer-config "$KV_CONFIG" \
   "${EXTRA_ARGS[@]}" &
 

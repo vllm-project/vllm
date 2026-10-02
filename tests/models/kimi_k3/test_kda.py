@@ -14,33 +14,23 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
-from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
-from vllm.model_executor.layers.mamba.kda_checkpoint import (
-    FlashKDAPrefillCheckpointExporter,
-)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
-)
-from vllm.models.kimi_k3.amd.ops.third_party.kda import (
-    fused_recurrent_kda as fused_recurrent_kda_amd,
 )
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
 )
 from vllm.models.kimi_k3.nvidia import kda as nvidia_kda
 from vllm.models.kimi_k3.nvidia.kda import (
-    KimiK3DeltaAttention,
     _flashinfer_kda_prefill,
     _flashkda_prefill,
+    _store_cache_checkpoints_kernel,
     is_flashinfer_fused_kda_decode_supported,
-    is_flashinfer_fused_kda_spec_decode_supported,
     is_flashinfer_recurrent_kda_prefill_supported,
     is_flashkda_supported,
     is_fused_kda_decode_supported,
-    resolve_kda_spec_decode_backend,
 )
-from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadata
 from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
 from vllm.models.kimi_k3.nvidia.ops import recoverssm as recoverssm_ops
 from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
@@ -51,11 +41,9 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     chunk_kda,
     chunk_kda_with_fused_gate,
     fused_kda_gate,
+    fused_recurrent_kda,
     fused_recurrent_kda_fwd,
     fused_recurrent_kda_packed_decode,
-)
-from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
-    fused_recurrent_kda as fused_recurrent_kda_nvidia,
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
@@ -75,10 +63,6 @@ PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
 }
-SPEC_DECODE_IMPLS = {
-    "nvidia": fused_recurrent_kda_nvidia,
-    "amd": fused_recurrent_kda_amd,
-}
 
 
 def test_kda_warmup_skips_missing_metadata(monkeypatch):
@@ -92,25 +76,6 @@ def test_kda_warmup_skips_missing_metadata(monkeypatch):
     empty = torch.empty(0, device=DEVICE)
 
     assert layer._forward(empty, empty, empty, empty, empty) is None
-
-
-def test_resolve_kda_spec_decode_backend(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        "vllm.models.kimi_k3.nvidia.kda.is_flashinfer_fused_kda_spec_decode_supported",
-        lambda *args: True,
-    )
-    args = (12, 128, 4, 6, torch.bfloat16, torch.bfloat16, torch.float32, -5.0)
-    assert resolve_kda_spec_decode_backend("auto", *args, False) == "flashinfer"
-    assert resolve_kda_spec_decode_backend("native", *args, False) == "native"
-    assert resolve_kda_spec_decode_backend("flashinfer", *args, False) == "flashinfer"
-
-    monkeypatch.setattr(
-        "vllm.models.kimi_k3.nvidia.kda.is_flashinfer_fused_kda_spec_decode_supported",
-        lambda *args: False,
-    )
-    assert resolve_kda_spec_decode_backend("auto", *args, False) == "native"
-    with pytest.raises(RuntimeError, match="packed_fused_kda_decode"):
-        resolve_kda_spec_decode_backend("flashinfer", *args, False)
 
 
 def test_kda_recoverssm_config_state_layout():
@@ -500,51 +465,17 @@ def test_packed_kda_decode_correctness(
 
 
 @pytest.mark.parametrize(
-    ("impl", "H", "fuse_gate", "num_seqs", "query_len"),
-    [
-        *[
-            pytest.param(
-                impl,
-                H,
-                fuse_gate,
-                3,
-                3,
-                id=f"{impl}-H{H}-fuse-{fuse_gate}",
-            )
-            for impl in SPEC_DECODE_IMPLS
-            for H, fuse_gate in [
-                (12, True),
-                (12, False),
-                (12, None),
-                (96, None),
-            ]
-        ],
-        pytest.param("amd", 12, True, 1, 1, id="amd-single-token"),
-        pytest.param("amd", 12, True, 1, 8, id="amd-single-sequence-short"),
-        pytest.param(
-            "amd",
-            96,
-            None,
-            1,
-            8,
-            id="amd-single-sequence-many-heads",
-        ),
-        pytest.param("amd", 12, True, 2, 4, id="amd-uniform-two-sequences"),
-        pytest.param("amd", 12, True, 4, 4, id="amd-uniform-four-sequences"),
-        pytest.param("amd", 12, True, 8, 7, id="amd-uniform-eight-sequences"),
-    ],
+    ("H", "fuse_gate"),
+    [(12, True), (12, False), (12, None), (96, None)],
 )
 @pytest.mark.parametrize("lower_bound", [-5.0, None])
 @torch.inference_mode()
 def test_kda_spec_decode_correctness(
     H: int,
     fuse_gate: bool | None,
-    num_seqs: int,
-    query_len: int,
     lower_bound: float | None,
-    impl: str,
 ):
-    D = 128
+    num_seqs, query_len, D = 3, 3, 128
     T = num_seqs * query_len
     torch.manual_seed(1234)
 
@@ -588,8 +519,10 @@ def test_kda_spec_decode_correctness(
         dtype=torch.int32,
         device=DEVICE,
     ).view(num_seqs, query_len)
-    num_accepted_tokens = (
-        torch.arange(num_seqs, dtype=torch.int32, device=DEVICE) % query_len + 1
+    num_accepted_tokens = torch.tensor(
+        [1, 2, 3],
+        dtype=torch.int32,
+        device=DEVICE,
     )
     state_storage = 0.01 * torch.randn(
         T + 1,
@@ -642,12 +575,7 @@ def test_kda_spec_decode_correctness(
     expected = torch.cat(expected_outputs, dim=1)
 
     actual_state = state.clone()
-    extra_args = (
-        {"uniform_sequence_length": query_len}
-        if impl == "amd" and num_seqs in (2, 4, 8)
-        else {}
-    )
-    actual, _ = SPEC_DECODE_IMPLS[impl](
+    actual, _ = fused_recurrent_kda(
         q=q,
         k=k,
         v=v,
@@ -662,7 +590,6 @@ def test_kda_spec_decode_correctness(
         num_accepted_tokens=num_accepted_tokens,
         out=output,
         fuse_gate=fuse_gate,
-        **extra_args,
     )
 
     assert actual.data_ptr() == output.data_ptr()
@@ -1205,224 +1132,6 @@ def test_fused_kda_decode_correctness(
     torch.testing.assert_close(state_actual, state_ref, atol=3e-2, rtol=3e-2)
 
 
-@torch.inference_mode()
-@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
-def test_flashinfer_fused_kda_spec_decode_integration(
-    monkeypatch: pytest.MonkeyPatch,
-    state_dtype: torch.dtype,
-):
-    if not is_flashinfer_fused_kda_spec_decode_supported(
-        num_heads=12,
-        head_dim=128,
-        conv_width=4,
-        num_spec=6,
-        input_dtype=torch.bfloat16,
-        conv_state_dtype=torch.bfloat16,
-        recurrent_state_dtype=state_dtype,
-        lower_bound=-5.0,
-        use_recoverssm=False,
-    ):
-        pytest.skip("FlashInfer packed fused KDA decode is not supported")
-
-    generator = torch.Generator(device=DEVICE).manual_seed(20260820)
-    H, D, W, T = 12, 128, 4, 7
-    hidden_size = H * D
-    num_rows = 10
-    num_slots = 16
-
-    x = torch.randn(
-        num_rows,
-        3 * hidden_size,
-        dtype=torch.bfloat16,
-        device=DEVICE,
-        generator=generator,
-    )
-    conv_weight = 0.1 * torch.randn(
-        3 * hidden_size,
-        W,
-        dtype=torch.float32,
-        device=DEVICE,
-        generator=generator,
-    )
-    fused_weight = conv_weight.view(3, hidden_size, W).transpose(1, 2).contiguous()
-    raw_gate = torch.randn(
-        1, num_rows, H, D, dtype=torch.bfloat16, device=DEVICE, generator=generator
-    )
-    raw_beta = torch.randn(
-        1, num_rows, H, dtype=torch.bfloat16, device=DEVICE, generator=generator
-    )
-    output_gate = torch.randn(
-        num_rows, H, D, dtype=torch.bfloat16, device=DEVICE, generator=generator
-    )
-    A_log = torch.log(torch.arange(1, H + 1, dtype=torch.float32, device=DEVICE))
-    dt_bias = torch.empty(hidden_size, dtype=torch.float32, device=DEVICE).uniform_(
-        -7.0, -4.0, generator=generator
-    )
-    norm_weight = torch.randn(
-        D, dtype=torch.float32, device=DEVICE, generator=generator
-    )
-    norm_eps = 1e-5
-    state_indices = torch.tensor(
-        [
-            list(range(1, T + 1)),
-            list(range(T + 1, 2 * T + 1)),
-            [0] * T,
-        ],
-        dtype=torch.int32,
-        device=DEVICE,
-    )
-    query_start_loc = torch.tensor([0, 7, 10, 10], dtype=torch.int32, device=DEVICE)
-    num_accepted_tokens = torch.tensor([1, 4, 1], dtype=torch.int32, device=DEVICE)
-    conv_seed = (
-        0.5
-        * torch.randn(
-            num_slots,
-            T + W - 2,
-            3 * hidden_size,
-            dtype=torch.bfloat16,
-            device=DEVICE,
-            generator=generator,
-        )
-    ).transpose(1, 2)
-    state_seed = (
-        0.5
-        * torch.randn(
-            num_slots,
-            H,
-            D,
-            D,
-            dtype=torch.float32,
-            device=DEVICE,
-            generator=generator,
-        )
-    ).to(state_dtype)
-    metadata = KimiK3KDAMetadata(
-        num_prefills=0,
-        num_prefill_tokens=0,
-        num_decodes=0,
-        num_decode_tokens=0,
-        num_spec_decodes=2,
-        num_spec_decode_tokens=num_rows,
-        num_actual_tokens=num_rows,
-        spec_query_start_loc=query_start_loc,
-        spec_state_indices_tensor=state_indices,
-        num_accepted_tokens=num_accepted_tokens,
-    )
-    monkeypatch.setattr(
-        "vllm.models.kimi_k3.nvidia.kda.get_forward_context",
-        lambda: SimpleNamespace(attn_metadata={"test.layer": metadata}),
-    )
-
-    def clone_strided(tensor: torch.Tensor) -> torch.Tensor:
-        clone = torch.empty_strided(
-            tensor.shape, tensor.stride(), dtype=tensor.dtype, device=tensor.device
-        )
-        clone.copy_(tensor)
-        return clone
-
-    def composed_reference(
-        conv_state: torch.Tensor,
-        recurrent_state: torch.Tensor,
-    ) -> torch.Tensor:
-        mixed_qkv = causal_conv1d_update(
-            x,
-            conv_state,
-            conv_weight,
-            bias=None,
-            activation="silu",
-            conv_state_indices=state_indices[:, 0],
-            num_accepted_tokens=num_accepted_tokens,
-            query_start_loc=query_start_loc,
-            max_query_len=T,
-            validate_data=False,
-            out=torch.empty_like(x),
-        )
-        q, k, v = mixed_qkv.view(num_rows, 3, H, D).unbind(1)
-        recurrent_out, _ = fused_recurrent_kda_nvidia(
-            q=q.unsqueeze(0),
-            k=k.unsqueeze(0),
-            v=v.unsqueeze(0),
-            raw_g=raw_gate,
-            raw_beta=raw_beta,
-            A_log=A_log,
-            dt_bias=dt_bias,
-            lower_bound=-5.0,
-            initial_state=recurrent_state,
-            cu_seqlens=query_start_loc,
-            ssm_state_indices=state_indices,
-            num_accepted_tokens=num_accepted_tokens,
-        )
-        recurrent_float = recurrent_out.float()
-        return (
-            recurrent_float
-            * torch.rsqrt(
-                recurrent_float.square().mean(dim=-1, keepdim=True) + norm_eps
-            )
-            * norm_weight
-            * output_gate.float().sigmoid().unsqueeze(0)
-        ).to(torch.bfloat16)
-
-    def run_flashinfer(
-        conv_state: torch.Tensor,
-        recurrent_state: torch.Tensor,
-        output: torch.Tensor,
-    ) -> torch.Tensor:
-        layer = SimpleNamespace(
-            prefix="test.layer",
-            kv_cache=(conv_state.transpose(-1, -2), recurrent_state),
-            kda_spec_decode_backend="flashinfer",
-            decode_conv1d_weight=fused_weight,
-            decode_norm_weight=norm_weight,
-            gate_lower_bound=-5.0,
-            A_log=A_log,
-            dt_bias=dt_bias,
-            o_norm=SimpleNamespace(eps=norm_eps),
-        )
-        KimiK3DeltaAttention._forward(
-            layer,
-            mixed_qkv=x,
-            g1=raw_gate,
-            g2=output_gate,
-            beta=raw_beta,
-            core_attn_out=output,
-        )
-        return output
-
-    expected_conv = clone_strided(conv_seed)
-    expected_state = state_seed.clone()
-    expected = composed_reference(expected_conv, expected_state)
-    actual_conv = clone_strided(conv_seed)
-    actual_state = state_seed.clone()
-    output = torch.empty_like(expected)
-    actual = run_flashinfer(actual_conv, actual_state, output)
-
-    assert actual.data_ptr() == output.data_ptr()
-    torch.testing.assert_close(actual_conv, expected_conv, atol=0, rtol=0)
-    torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=3e-2)
-    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=3e-2)
-    assert torch.count_nonzero(actual[:, :7]) > 0
-    torch.testing.assert_close(actual_state[0], state_seed[0], atol=0, rtol=0)
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        captured = run_flashinfer(actual_conv, actual_state, output)
-
-    actual_conv.copy_(conv_seed)
-    actual_state.copy_(state_seed)
-    query_start_loc.copy_(torch.tensor([0, 6, 10, 10], device=DEVICE))
-    num_accepted_tokens.copy_(torch.tensor([3, 2, 1], device=DEVICE))
-    expected_conv.copy_(conv_seed)
-    expected_state.copy_(state_seed)
-    expected = composed_reference(expected_conv, expected_state)
-    graph.replay()
-    torch.accelerator.synchronize()
-
-    assert captured.data_ptr() == output.data_ptr()
-    torch.testing.assert_close(output, expected, atol=2e-2, rtol=3e-2)
-    torch.testing.assert_close(actual_conv, expected_conv, atol=0, rtol=0)
-    torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=3e-2)
-
-
 def test_fused_kda_decode_rejects_speculative_conv_state():
     assert not is_fused_kda_decode_supported(
         num_heads=12,
@@ -1789,13 +1498,36 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
     checkpoint_state_indices = torch.tensor(
         [1, NULL_BLOCK_ID], dtype=torch.int32, device=DEVICE
     )
-    FlashKDAPrefillCheckpointExporter().export(
-        MambaPrefillCheckpointMetadata(checkpoint_offsets, checkpoint_state_indices),
-        raw_qkv=conv_input,
-        conv_state=conv_state,
-        recurrent_checkpoint=checkpoint_state,
-        recurrent_state=recurrent_state,
-        cu_seqlens=cu_seqlens,
+    state_len = conv_state.shape[-1]
+    width = H * D
+    recurrent_row_size = checkpoint_state[0].numel()
+    block_size = 256
+    _store_cache_checkpoints_kernel[
+        (
+            checkpoint_state_indices.numel(),
+            (max(width * state_len, recurrent_row_size) + block_size - 1) // block_size,
+        )
+    ](
+        conv_input,
+        conv_state,
+        checkpoint_state,
+        recurrent_state,
+        cu_seqlens,
+        checkpoint_offsets,
+        checkpoint_state_indices,
+        conv_input.stride(0),
+        conv_input.stride(1),
+        conv_state.stride(0),
+        conv_state.stride(1),
+        conv_state.stride(2),
+        checkpoint_state.stride(0),
+        recurrent_state.stride(0),
+        checkpoint_offsets.stride(0),
+        state_len,
+        width,
+        recurrent_row_size,
+        NULL_BLOCK_ID,
+        block_size,
     )
     torch.testing.assert_close(conv_state[1], q[0, 13:16].flatten(1).transpose(0, 1))
     torch.testing.assert_close(recurrent_state[1], checkpoint_state[0])

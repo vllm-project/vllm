@@ -50,9 +50,7 @@ def test_flashinfer_trtllm_mxfp8_linear_numerics(
     x = torch.randn((m, k), dtype=torch.bfloat16, device="cuda")
     weight = torch.randn((n, k), dtype=torch.bfloat16, device="cuda")
     layer = _make_layer(weight)
-    kernel = FlashInferTrtllmMxfp8LinearKernel(
-        Mxfp8LinearLayerConfig(weight_shape=(n, k))
-    )
+    kernel = FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearLayerConfig())
     kernel.process_weights_after_loading(layer)
 
     output = kernel.apply_weights(layer, x)
@@ -71,9 +69,7 @@ def test_flashinfer_trtllm_mxfp8_custom_ops() -> None:
     x = torch.randn((7, 512), dtype=torch.bfloat16, device="cuda")
     weight = torch.randn((256, 512), dtype=torch.bfloat16, device="cuda")
     layer = _make_layer(weight)
-    kernel = FlashInferTrtllmMxfp8LinearKernel(
-        Mxfp8LinearLayerConfig(weight_shape=(256, 512))
-    )
+    kernel = FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearLayerConfig())
     kernel.process_weights_after_loading(layer)
 
     torch.library.opcheck(
@@ -108,9 +104,7 @@ def test_flashinfer_trtllm_mxfp8_linear_cuda_graph() -> None:
     m, n, k = 7, 130, 512
     weight = torch.randn((n, k), dtype=torch.bfloat16, device="cuda")
     layer = _make_layer(weight)
-    kernel = FlashInferTrtllmMxfp8LinearKernel(
-        Mxfp8LinearLayerConfig(weight_shape=(n, k))
-    )
+    kernel = FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearLayerConfig())
     kernel.process_weights_after_loading(layer)
 
     static_x = torch.randn((m, k), dtype=torch.bfloat16, device="cuda")

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import regex as re
 import torch
 from torch import nn
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -265,7 +265,7 @@ class QuantizationConfig(ABC):
     def maybe_update_config(  # noqa: B027
         self,
         model_name: str,
-        hf_config: PreTrainedConfig | None = None,
+        hf_config: PretrainedConfig | None = None,
         revision: str | None = None,
     ):
         """Interface to update values after config initialization.

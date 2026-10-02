@@ -52,11 +52,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     _minimax_m3_aiter_sparse_pa_requested,
 )
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    CommonAttentionMetadata,
-    max_decode_query_len,
-)
+from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -101,7 +97,10 @@ def aiter_indexer_max_decode_query_len(vllm_config: VllmConfig) -> int:
     since that is what the builder splits the batch on and therefore what the
     decode kernel will actually be handed.
     """
-    return max_decode_query_len(vllm_config)
+    spec = vllm_config.speculative_config
+    if spec is None or spec.num_speculative_tokens is None:
+        return 1
+    return 1 + (2 if spec.parallel_drafting else 1) * spec.num_speculative_tokens
 
 
 @cache

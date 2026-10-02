@@ -27,7 +27,7 @@
 
 import torch
 from torch import nn
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -52,7 +52,7 @@ from .utils import make_layers
 class MiniCPM3Attention(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -208,7 +208,7 @@ class MiniCPM3Model(MiniCPMModel):
     def _init_layers(
         self,
         prefix: str,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
     ):

@@ -15,7 +15,6 @@ from tests.utils import (
     multi_process_parallel,
 )
 from vllm.distributed import get_tp_group
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
     TrtLlmMxfp4ExpertsMonolithic,
 )
@@ -44,11 +43,12 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
         hidden_dim = LATENT_SIZE
         hidden_dim_unpadded = LATENT_SIZE
         experts_per_token = 16
-        _defer_moe_finalize = False
+        defer_moe_finalize = False
         defer_moe_finalize_max_num_tokens = -1
-        defer_moe_finalize = FusedMoEConfig.defer_moe_finalize
-        limit_deferred_moe_finalize = FusedMoEConfig.limit_deferred_moe_finalize
-        use_deferred_moe_finalize = FusedMoEConfig.use_deferred_moe_finalize
+
+        @property
+        def use_deferred_moe_finalize(self) -> bool:
+            return self.defer_moe_finalize
 
     moe_config = FakeMoEConfig()
     quant_method = SimpleNamespace(
@@ -99,7 +99,7 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
 
     latent_moe_runner.LatentMoERunner()
 
-    assert moe_config.use_deferred_moe_finalize
+    assert moe_config.defer_moe_finalize
     assert moe_config.defer_moe_finalize_max_num_tokens == 128
     assert initialized_with["experts_per_token"] == 16
 

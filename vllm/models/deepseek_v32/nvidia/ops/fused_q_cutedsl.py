@@ -35,12 +35,10 @@ def is_fused_q_cutedsl_supported(
 ) -> bool:
     if not (
         current_platform.has_device_capability(100)
-        and q_pe.dtype == torch.bfloat16
+        and quantize_mqa
+        and q_pe.dtype == ql_nope.dtype == torch.bfloat16
         and q_pe.shape[-1] == 64
-        and (
-            not quantize_mqa
-            or (ql_nope.dtype == torch.bfloat16 and ql_nope.shape[-1] == 512)
-        )
+        and ql_nope.shape[-1] == 512
         # One warp per head group; a non-multiple would trip the kernel's own
         # assert instead of falling back to Triton.
         and q_pe.shape[1] % 4 == 0
@@ -70,10 +68,9 @@ def fused_q_cutedsl(
     idx_weights_out: torch.Tensor,
     has_indexer: bool = True,
     index_rope_interleave: bool = True,
-    quantize_mqa: bool = True,
 ) -> None:
     _, num_heads, rope_dim = q_pe.shape
-    nope_dim = ql_nope.shape[-1] if quantize_mqa else 0
+    _, _, nope_dim = ql_nope.shape
     _, num_idx_heads, idx_dim = idx_q.shape
 
     if has_indexer:
@@ -101,8 +98,8 @@ def fused_q_cutedsl(
         positions,
         q_pe,
         rope_cache,
-        ql_nope if quantize_mqa else None,
-        q_scale.view(1) if quantize_mqa else None,
+        ql_nope,
+        q_scale.view(1),
         mqa_output,
         idx_q,
         idx_rope_cache,
@@ -124,7 +121,7 @@ class FusedQKernel:
         index_rope_interleave: bool,
     ) -> None:
         assert rope_dim == 64
-        assert nope_dim in (0, 512)
+        assert nope_dim == 512
         assert idx_dim in (128, 0)
 
         self.rope_dim = rope_dim
@@ -265,17 +262,6 @@ class FusedQKernel:
         cute.arch.griddepcontrol_wait()
 
         pos = positions[token_id]
-        # no need to do Q calculation for MHA
-        if cutlass.const_expr(self.nope_dim == 0):
-            q0, q1 = cvt.bf16x2_to_fp32x2(
-                cute.recast_tensor(q_pe, Uint32)[token_id, head_id, lane_id]
-            )
-            cos = q_pe_rope_cache[pos, lane_id].to(Float32)
-            sin = q_pe_rope_cache[pos, 32 + lane_id].to(Float32)
-            result = cvt.fp32x2_to_bf16x2(q0 * cos - q1 * sin, q1 * cos + q0 * sin)
-            cute.arch.griddepcontrol_launch_dependents()
-            cute.recast_tensor(mqa_output, Uint32)[token_id, head_id, lane_id] = result
-            return
         inv_scale = 1.0 / q_scale[0]
 
         cp_op = cute.nvgpu.CopyUniversalOp()
@@ -493,16 +479,12 @@ class FusedQKernel:
             BFloat16, (num_tokens, num_heads, rope_dim), divisibility=16
         )
         rope_cache = _make_fake_tensor(rope_type, (max_pos, rope_dim), divisibility=8)
-        ql_nope = (
-            _make_fake_tensor(
-                BFloat16, (num_tokens, num_heads, nope_dim), divisibility=16
-            )
-            if nope_dim
-            else None
+        ql_nope = _make_fake_tensor(
+            BFloat16, (num_tokens, num_heads, nope_dim), divisibility=16
         )
-        q_scale = _make_fake_tensor(Float32, (1,), divisibility=4) if nope_dim else None
+        q_scale = _make_fake_tensor(Float32, (1,), divisibility=4)
         mqa_output = _make_fake_tensor(
-            Float8E4M3FN if nope_dim else BFloat16,
+            Float8E4M3FN,
             (num_tokens, num_heads, nope_dim + rope_dim),
             divisibility=16,
         )

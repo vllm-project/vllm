@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
 
 
-def _init_text_config(self: PreTrainedConfig, **kwargs: Any) -> None:
-    PreTrainedConfig.__init__(self, **kwargs)
+def _init_text_config(self: PretrainedConfig, **kwargs: Any) -> None:
+    PretrainedConfig.__init__(self, **kwargs)
     # DiffusionGemma always uses MoE and K=V sharing for full_attention
     # layers. The HF reference removed these config fields entirely.
     if getattr(self, "num_experts", None):
@@ -15,14 +15,14 @@ def _init_text_config(self: PreTrainedConfig, **kwargs: Any) -> None:
     self.attention_k_eq_v = True
 
 
-class DiffusionGemmaTextConfig(PreTrainedConfig):
+class DiffusionGemmaTextConfig(PretrainedConfig):
     model_type = "diffusion_gemma_text"
 
     def __init__(self, **kwargs: Any):
         _init_text_config(self, **kwargs)
 
 
-class DiffusionGemmaConfig(PreTrainedConfig):
+class DiffusionGemmaConfig(PretrainedConfig):
     model_type = "diffusion_gemma"
 
     def __init__(
@@ -41,4 +41,4 @@ class DiffusionGemmaConfig(PreTrainedConfig):
         else:
             self.vision_config = vision_config
         self.audio_config = None
-        PreTrainedConfig.__init__(self, **kwargs)
+        PretrainedConfig.__init__(self, **kwargs)

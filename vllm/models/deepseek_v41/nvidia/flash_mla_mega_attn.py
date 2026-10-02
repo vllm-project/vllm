@@ -225,7 +225,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             z,
             recipe=self._einsum_recipe,
         )
-        return self._wo_b_proj(z.flatten(1))
+        return self.wo_b(z.flatten(1))
 
     # ---- weights -----------------------------------------------------------
 
@@ -422,7 +422,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             if not swa_only:
                 assert flashmla_metadata is not None
                 dequantize_and_gather_k_cache(
-                    kv_ws[:chunk_size, :chunk_n],
+                    kv_ws[:chunk_size],
                     self._compressed_kv_cache(),
                     seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
                     gather_lens=None,

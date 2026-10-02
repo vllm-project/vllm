@@ -176,7 +176,7 @@ def test_forward_core_split_matches_unified(
     builder = GDNAttentionMetadataBuilder(
         # GDNAttentionMetadataBuilder declares kv_cache_spec as AttentionSpec but
         # asserts isinstance(kv_cache_spec, MambaSpec). MambaSpec is correct here.
-        kv_cache_spec=MambaSpec(
+        kv_cache_spec=MambaSpec(  # type: ignore[arg-type]
             block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)
         ),
         layer_names=[PREFIX],

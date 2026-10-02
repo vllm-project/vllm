@@ -29,9 +29,7 @@ LORA_UNLOADING_SUCCESS_MESSAGE = (
 )
 
 
-async def _async_serving_models_init_with_mock() -> tuple[
-    OpenAIServingModels, MagicMock
-]:
+async def _async_serving_models_init() -> OpenAIServingModels:
     mock_engine_client = MagicMock(spec=EngineClient)
     # Set the max_model_len attribute to avoid missing attribute
     mock_model_config = MagicMock(spec=ModelConfig)
@@ -47,13 +45,6 @@ async def _async_serving_models_init_with_mock() -> tuple[
     )
     await serving_models.init_static_loras()
 
-    # The mock is returned separately: `engine_client` is typed as the protocol,
-    # so assertion helpers are not visible through it.
-    return serving_models, mock_engine_client
-
-
-async def _async_serving_models_init() -> OpenAIServingModels:
-    serving_models, _ = await _async_serving_models_init_with_mock()
     return serving_models
 
 
@@ -109,22 +100,6 @@ async def test_load_lora_adapter_duplicate():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("load_inplace", [False, True])
-async def test_load_lora_adapter_base_model_name(load_inplace: bool):
-    """A LoRA named after a served model would shadow it for all requests."""
-    serving_models, mock_engine_client = await _async_serving_models_init_with_mock()
-    request = LoadLoRAAdapterRequest(
-        lora_name=MODEL_NAME, lora_path="/path/to/adapter", load_inplace=load_inplace
-    )
-    response = await serving_models.load_lora_adapter(request)
-    assert isinstance(response, ErrorResponse)
-    assert response.error.type == "InvalidUserInput"
-    assert response.error.code == HTTPStatus.BAD_REQUEST
-    assert len(serving_models.lora_requests) == 0
-    mock_engine_client.add_lora.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_unload_lora_adapter_success():
     serving_models = await _async_serving_models_init()
     request = LoadLoRAAdapterRequest(
@@ -133,8 +108,8 @@ async def test_unload_lora_adapter_success():
     response = await serving_models.load_lora_adapter(request)
     assert len(serving_models.lora_requests) == 1
 
-    unload_request = UnloadLoRAAdapterRequest(lora_name="adapter1")
-    response = await serving_models.unload_lora_adapter(unload_request)
+    request = UnloadLoRAAdapterRequest(lora_name="adapter1")
+    response = await serving_models.unload_lora_adapter(request)
     assert response == LORA_UNLOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
     assert len(serving_models.lora_requests) == 0
 

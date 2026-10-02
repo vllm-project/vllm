@@ -158,7 +158,6 @@ fn render_message(
             thinking_mode == ThinkingMode::Thinking && after_or_at_last_user_turn,
             content,
         ),
-        ChatMessage::Custom { role, .. } => Err(Error::UnsupportedChatRole { role: role.clone() }),
     }
 }
 

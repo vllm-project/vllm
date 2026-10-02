@@ -25,25 +25,27 @@ import torch
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import ProcessorInputs, TimingContext
-from vllm.multimodal.processing.processor import (
-    MultiModalProcessingResult,
-    PlaceholderFeaturesInfo,
-    cached_encode,
+from vllm.model_executor.models.interfaces import (
+    SupportsRealtime,
 )
-from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.processor import cached_processor_from_config
-
-from .interfaces import SupportsRealtime
-from .qwen3_asr import (
+from vllm.model_executor.models.qwen3_asr import (
     Qwen3ASRDummyInputsBuilder,
     Qwen3ASRForConditionalGeneration,
     Qwen3ASRMultiModalProcessor,
     Qwen3ASRProcessingInfo,
     _get_feat_extract_output_lengths,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
+from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.processing.processor import (
+    BaseDummyInputsBuilder,
+    MultiModalProcessingResult,
+    PlaceholderFeaturesInfo,
+    cached_encode,
+)
+from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.transformers_utils.processor import cached_processor_from_config
 
 logger = init_logger(__name__)
 
@@ -99,13 +101,14 @@ class Qwen3ASRRealtimeBuffer:
 
 
 class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
-    def _cached_apply_hf_processor(
+    def __init__(
         self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
-    ) -> MultiModalProcessingResult:
-        # realtime can't make use of a cache yet
-        return self._apply_hf_processor(inputs, timing_ctx)
+        info: _I,
+        dummy_inputs: BaseDummyInputsBuilder[_I],
+        *,
+        cache: BaseMultiModalProcessorCache | None = None,
+    ) -> None:
+        super().__init__(info, dummy_inputs, cache=None)
 
     def _maybe_apply_prompt_updates(
         self,
@@ -120,7 +123,6 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
         )
 
         audio_data = audios[0]
-        assert audio_data is not None
         audio_feature_lengths = audio_data.get("audio_feature_lengths")
         if audio_feature_lengths is not None:
             if isinstance(audio_feature_lengths.data, torch.Tensor):

@@ -5,7 +5,6 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
 pytestmark = pytest.mark.skipif(
@@ -171,23 +170,22 @@ def test_block_tables_skip_custom_slot_mapping_groups():
 
 @pytest.mark.parametrize("cp_rank", range(4))
 def test_dcp_slot_mapping_with_smaller_kernel_blocks(cp_rank: int):
-    """Only sharded groups use DCP interleave in logical-block coordinates."""
+    """DCP interleave is expressed in logical-block token coordinates."""
     device = torch.device("cuda")
     block_tables = BlockTables(
-        block_sizes=[128, 128],
+        block_sizes=[128],
         max_num_reqs=1,
         max_num_batched_tokens=1024,
-        max_num_blocks_per_group=[2, 8],
+        max_num_blocks_per_group=[2],
         device=device,
-        kernel_block_sizes=[64, 64],
-        dcp_sharded=[True, False],
+        kernel_block_sizes=[64],
         cp_size=4,
         cp_rank=cp_rank,
         cp_interleave=128,
     )
     block_tables.append_block_ids(
         req_index=0,
-        new_block_ids=([5, 9], list(range(10, 18))),
+        new_block_ids=([5, 9],),
         overwrite=True,
     )
     block_tables.apply_staged_writes()
@@ -200,7 +198,7 @@ def test_dcp_slot_mapping_with_smaller_kernel_blocks(cp_rank: int):
         query_start_loc,
         positions,
         num_tokens_padded=1024,
-    )
+    )[0]
 
     expected = torch.full((1024,), -1, dtype=torch.int64, device=device)
     first_start = cp_rank * 128
@@ -211,8 +209,7 @@ def test_dcp_slot_mapping_with_smaller_kernel_blocks(cp_rank: int):
     expected[second_start : second_start + 128] = torch.arange(
         9 * 128, 10 * 128, dtype=torch.int64, device=device
     )
-    assert torch.equal(actual[0], expected)
-    assert torch.equal(actual[1], positions + 10 * 128)
+    assert torch.equal(actual, expected)
 
 
 def test_v1_block_table_move_row_clears_vacated_row():
@@ -276,41 +273,3 @@ def test_get_dummy_block_tables_returns_zeroed_rows():
     assert (dummy[0] == 0).all()
     # CUDA graph invariant: same persistent tensor, not a fresh allocation.
     assert dummy[0].data_ptr() == block_tables.input_block_tables[0].data_ptr()
-
-
-def test_dummy_request_slot_mapping_is_pad():
-    """idx_mapping == -1 marks a dummy (or CUDA-graph padding) request.
-
-    A dummy draft decode step must not resolve slots through the persistent
-    block-table row of a real request slot, which may be stale and point at
-    blocks that are now in the prefix cache.
-    """
-    device = torch.device("cuda")
-    block_tables = BlockTables(
-        block_sizes=[4],
-        max_num_reqs=2,
-        max_num_batched_tokens=16,
-        max_num_blocks_per_group=[4],
-        device=device,
-        kernel_block_sizes=[4],
-    )
-    block_tables.append_block_ids(req_index=0, new_block_ids=([7, 8],), overwrite=True)
-    block_tables.apply_staged_writes()
-    query_start_loc = torch.tensor([0, 3], dtype=torch.int32, device=device)
-    positions = torch.tensor([1, 2, 3], dtype=torch.int64, device=device)
-
-    real = block_tables.compute_slot_mappings(
-        torch.tensor([0], dtype=torch.int32, device=device),
-        query_start_loc,
-        positions,
-        num_tokens_padded=3,
-    )
-    assert real[0].tolist() == [7 * 4 + 1, 7 * 4 + 2, 7 * 4 + 3]
-
-    dummy = block_tables.compute_slot_mappings(
-        torch.tensor([-1], dtype=torch.int32, device=device),
-        query_start_loc,
-        positions,
-        num_tokens_padded=3,
-    )
-    assert dummy[0].tolist() == [PAD_SLOT_ID] * 3

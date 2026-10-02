@@ -72,28 +72,6 @@ fn spaced_dsml_streaming_preserves_shared_schema_coercion() {
 }
 
 #[test]
-fn spaced_dsml_keeps_parameter_without_string_attr() {
-    let wire = concat!(
-        "<｜DSML｜ calls>\n",
-        "<｜DSML｜ invoke name=\"lookup\">\n",
-        "<｜DSML｜ parameter name=\"query\">value</｜DSML｜ parameter>\n",
-        "<｜DSML｜ parameter name=\"limit\">2</｜DSML｜ parameter>\n",
-        "</｜DSML｜ invoke>\n",
-        "</｜DSML｜ calls>",
-    );
-    let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
-
-    let output = collect_stream(parser.as_mut(), &[wire]);
-
-    assert!(output.normal_text().is_empty());
-    assert_eq!(output.calls().len(), 1);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&output.calls()[0].arguments).unwrap(),
-        json!({ "query": "value", "limit": 2 })
-    );
-}
-
-#[test]
 fn v4_tags_remain_text_in_v41_dialect() {
     let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
     let output = collect_stream(parser.as_mut(), &["before<｜DSML｜tool_calls>after"]);
@@ -102,7 +80,7 @@ fn v4_tags_remain_text_in_v41_dialect() {
 }
 
 #[test]
-fn structural_tag_respects_parameter_schemas_and_strict() {
+fn structural_tag_ignores_parameter_schemas_and_strict() {
     let parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
     let builder = parser.structural_tag_builder().unwrap();
     let options = StructuralTagOptions::default().with_reasoning(false);
@@ -128,13 +106,7 @@ fn structural_tag_respects_parameter_schemas_and_strict() {
             ] {
                 let mut function = FunctionDefinition::new("lookup").with_parameters(parameters);
                 function.strict = strict;
-                let tag = build(function);
-                if strict == Some(false) {
-                    assert_eq!(tag, expected);
-                } else {
-                    assert_ne!(tag, expected);
-                }
-                assert!(tag.to_json_string().unwrap().contains("deepseek_v4_1_xml"));
+                assert_eq!(build(function), expected);
             }
         }
     }

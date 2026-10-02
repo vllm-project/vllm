@@ -26,7 +26,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
@@ -43,10 +43,7 @@ from vllm.model_executor.layers.attention import (
     Attention,
     StaticSinkAttention,
 )
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEFactory,
-    GateLinear,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -134,7 +131,7 @@ class OpenPanguMLP(nn.Module):
 class OpenPanguMoE(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -152,9 +149,11 @@ class OpenPanguMoE(nn.Module):
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         check_ffn_act_fn(config.hidden_act)
 
-        self.gate = GateLinear(
+        self.gate = ReplicatedLinear(
             config.hidden_size,
             config.n_routed_experts,
+            bias=False,
+            quant_config=None,
             prefix=f"{prefix}.gate",
         )
         if (
@@ -176,7 +175,6 @@ class OpenPanguMoE(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.shared_experts: OpenPanguMLP | None
         if config.n_shared_experts is not None:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
             self.shared_experts = OpenPanguMLP(
@@ -240,7 +238,7 @@ class OpenPanguMoE(nn.Module):
 class OpenPanguMLAAttention(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -285,7 +283,7 @@ class OpenPanguMLAAttention(nn.Module):
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
-                self.q_lora_rank,
+                q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,
@@ -389,7 +387,7 @@ class OpenPanguMLAAttention(nn.Module):
 class OpenPanguEmbeddedAttention(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -501,7 +499,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
 
     def _init_rotary_emb(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
@@ -522,7 +520,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
 class OpenPanguSinkAttention(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -570,9 +568,6 @@ class OpenPanguSinkAttention(nn.Module):
         self.qk_nope_dim = getattr(config, "qk_nope_dim", None)
         self.qk_rope_dim = getattr(config, "qk_rope_dim", None)
         self.v_channels = getattr(config, "v_channels", None)
-        assert self.qk_nope_dim is not None
-        assert self.qk_rope_dim is not None
-        assert self.v_channels is not None
         self.head_dim = self.qk_rope_dim + self.qk_nope_dim
         self.q_size = self.num_heads * self.head_dim
         self.k_size = self.num_kv_heads * self.head_dim
@@ -743,7 +738,7 @@ class OpenPanguSinkAttention(nn.Module):
 
     def _init_rotary_emb(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         rope_parameters: dict[str, Any] | None,
         quant_config: QuantizationConfig | None,
     ) -> None:
@@ -769,7 +764,7 @@ class OpenPanguSinkAttention(nn.Module):
 class OpenPanguDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
     ) -> None:

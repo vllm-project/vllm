@@ -3,7 +3,7 @@
 """Inference-only IBM Granite Speech Plus model."""
 
 import torch
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -68,7 +68,7 @@ class GraniteSpeechPlusForConditionalGeneration(GraniteSpeechForConditionalGener
 
     def _build_encoder(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> GraniteSpeechCTCEncoder:

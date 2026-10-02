@@ -13,10 +13,7 @@ def test_version_is_defined():
 
 
 def test_version_tuple():
-    # (major, minor, patch) plus optional pre-release tag, dev-distance, and
-    # git-hash components - setuptools_scm can emit any combination of them,
-    # e.g. 6 when a dev build sits on top of an rc-tagged commit.
-    assert len(version.__version_tuple__) >= 3
+    assert len(version.__version_tuple__) in (3, 4, 5)
 
 
 @pytest.mark.parametrize(

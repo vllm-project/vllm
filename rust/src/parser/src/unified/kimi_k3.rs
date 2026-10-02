@@ -26,14 +26,6 @@
 //! starts *inside* that channel without re-emitting the open tag;
 //! [`UnifiedParser::initialize`] detects this from the prompt token IDs.
 //!
-//! Channel markers are structural only when their `<|open|>` / `<|close|>` /
-//! `<|sep|>` bytes come from the dedicated special tokens. The model can spell
-//! the same text with ordinary BPE tokens (for example while quoting a
-//! configuration snippet in its reasoning); such text stays content in the
-//! current channel. The parser therefore expects token-attributed input from
-//! the incremental detokenizer: fed unattributed text, it treats every marker
-//! as content. Channel names such as `think` are ordinary text either way.
-//!
 //! Argument decoding mirrors the renderer's type tagging (inverse encoding):
 //! `type="string"` values pass the raw text through, other types are
 //! JSON-decoded, and a raw `json` block is passed through unmodified. Attribute
@@ -42,33 +34,26 @@
 //! Known limitation (shared with the Python parser): string argument and
 //! response bodies are emitted raw, so a value that literally contains
 //! `<|close|>argument<|sep|>` or `<|close|>response<|sep|>` is
-//! indistinguishable from a real closing marker. With token attribution this
-//! now only applies to `argument` and `json` blocks inside a call body, which
-//! are still parsed from text.
+//! indistinguishable from a real closing marker.
 
 mod structural_tag;
 
 pub use structural_tag::KimiK3StructuralTagBuilder;
 
 use serde_json::{Map, Value};
-use vllm_tokenizer::{DecodedText, DynTokenizer, Tokenizer};
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, eof, preceded, repeat, seq, terminated};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
+use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_till, take_until, take_while};
 
 use self::structural_tag::KIMI_K3_STRUCTURAL_TAG_BUILDER;
-use super::{Result, UnifiedParser, UnifiedParserOutput, special_token};
-use crate::output_grammar::{
-    self, BuiltOutputGrammar, OutputGrammarContext, visible_format_from_builder,
-};
-use crate::tool::{Tool, ToolCallDelta};
+use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
+use crate::tool::{StructuralTagBuilder, Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
-use crate::utils::{
-    Attributed, AttributedExt as _, Marker, MarkerScanState, SpecialToken,
-    parse_buffered_event_attributed, safe_text_len_mul, take_until_marker,
-};
+use crate::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
 
 const OPEN: &str = "<|open|>";
 const CLOSE: &str = "<|close|>";
@@ -82,82 +67,31 @@ const RESPONSE_CLOSE: &str = "<|close|>response<|sep|>";
 const TOOLS_OPEN: &str = "<|open|>tools<|sep|>";
 const TOOLS_CLOSE: &str = "<|close|>tools<|sep|>";
 const MESSAGE_CLOSE: &str = "<|close|>message<|sep|>";
+const CALL_OPEN: &str = "<|open|>call";
 const CALL_CLOSE: &str = "<|close|>call<|sep|>";
 const ARG_OPEN: &str = "<|open|>argument";
 const ARG_CLOSE: &str = "<|close|>argument<|sep|>";
 const JSON_OPEN: &str = "<|open|>json";
 const JSON_CLOSE: &str = "<|close|>json<|sep|>";
 
+const IDLE_MARKERS: &[&str] = &[
+    THINK_OPEN,
+    RESPONSE_OPEN,
+    TOOLS_OPEN,
+    MESSAGE_CLOSE,
+    END_OF_MSG,
+];
+const REASONING_MARKERS: &[&str] = &[THINK_CLOSE, END_OF_MSG];
+const RESPONSE_MARKERS: &[&str] = &[RESPONSE_CLOSE, TOOLS_OPEN, MESSAGE_CLOSE, END_OF_MSG];
+const EPILOGUE_MARKERS: &[&str] = &[TOOLS_OPEN, MESSAGE_CLOSE, END_OF_MSG];
+const TOOLS_MARKERS: &[&str] = &[CALL_OPEN, TOOLS_CLOSE, MESSAGE_CLOSE, END_OF_MSG];
+
 /// Channel tags are a couple of text tokens; longer `<|open|>…<|sep|>` spans in
 /// the prompt tail (attribute-bearing message opens, message bodies) never name
 /// a generation channel.
 const MAX_PREFILL_TAG_TOKENS: usize = 8;
 
-type KimiK3Input<'i> = Attributed<'i, Markers>;
-
-/// The K3 structural special tokens, resolved once from the active tokenizer.
-struct SpecialTokens {
-    open: SpecialToken,
-    close: SpecialToken,
-    sep: SpecialToken,
-    end_of_msg: SpecialToken,
-}
-
-impl SpecialTokens {
-    fn new(tokenizer: &dyn Tokenizer) -> Result<Self> {
-        Ok(Self {
-            open: special_token(tokenizer, OPEN)?,
-            close: special_token(tokenizer, CLOSE)?,
-            sep: special_token(tokenizer, SEP)?,
-            end_of_msg: special_token(tokenizer, END_OF_MSG)?,
-        })
-    }
-}
-
-/// The K3 channel markers, with their special-token segments guarded by the
-/// active tokenizer's IDs.
-///
-/// One definition serves both the `alt` branches that consume a marker and the
-/// safe-text scans that stop in front of one, so the two can never disagree on
-/// whether a spelling is structural.
-#[derive(Debug)]
-struct Markers {
-    think_open: Marker,
-    think_close: Marker,
-    response_open: Marker,
-    response_close: Marker,
-    tools_open: Marker,
-    tools_close: Marker,
-    message_close: Marker,
-    end_of_msg: Marker,
-    /// `<|open|>call`; the tag attributes and the terminating `<|sep|>` follow.
-    call_open: Marker,
-    call_close: Marker,
-    sep: Marker,
-}
-
-impl Markers {
-    fn new(tokens: &SpecialTokens) -> Self {
-        let open =
-            |tag: &str| Marker::special(&tokens.open).then_text(tag).then_special(&tokens.sep);
-        let close =
-            |tag: &str| Marker::special(&tokens.close).then_text(tag).then_special(&tokens.sep);
-
-        Self {
-            think_open: open("think"),
-            think_close: close("think"),
-            response_open: open("response"),
-            response_close: close("response"),
-            tools_open: open("tools"),
-            tools_close: close("tools"),
-            message_close: close("message"),
-            end_of_msg: Marker::special(&tokens.end_of_msg),
-            call_open: Marker::special(&tokens.open).then_text("call"),
-            call_close: close("call"),
-            sep: Marker::special(&tokens.sep),
-        }
-    }
-}
+type KimiK3Input<'i> = Partial<&'i str>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum KimiK3Event {
@@ -211,25 +145,26 @@ enum KimiK3Mode {
 pub struct KimiK3UnifiedParser {
     buffer: DecodedText,
     mode: KimiK3Mode,
-    markers: Markers,
     /// Number of calls emitted in the current response.
     emitted_call_count: usize,
     tokenizer: DynTokenizer,
-    special_tokens: SpecialTokens,
+    open_token_id: u32,
+    sep_token_id: u32,
 }
 
 impl KimiK3UnifiedParser {
-    /// Create a Kimi K3 parser expecting token-attributed input.
+    /// Create a Kimi K3 parser.
     pub fn new(_tools: &[Tool], tokenizer: DynTokenizer) -> Result<Self> {
-        let special_tokens = SpecialTokens::new(tokenizer.as_ref())?;
+        let open_token_id = token_id(tokenizer.as_ref(), OPEN)?;
+        let sep_token_id = token_id(tokenizer.as_ref(), SEP)?;
 
         Ok(Self {
             buffer: DecodedText::default(),
             mode: KimiK3Mode::default(),
-            markers: Markers::new(&special_tokens),
             emitted_call_count: 0,
             tokenizer,
-            special_tokens,
+            open_token_id,
+            sep_token_id,
         })
     }
 
@@ -242,14 +177,11 @@ impl KimiK3UnifiedParser {
     fn initialize_mode(&mut self, prompt_token_ids: &[u32]) {
         self.mode = KimiK3Mode::Idle;
 
-        let Some(sep_pos) =
-            prompt_token_ids.iter().rposition(|&id| id == self.special_tokens.sep.id)
-        else {
+        let Some(sep_pos) = prompt_token_ids.iter().rposition(|&id| id == self.sep_token_id) else {
             return;
         };
-        let Some(open_pos) = prompt_token_ids[..sep_pos]
-            .iter()
-            .rposition(|&id| id == self.special_tokens.open.id)
+        let Some(open_pos) =
+            prompt_token_ids[..sep_pos].iter().rposition(|&id| id == self.open_token_id)
         else {
             return;
         };
@@ -343,24 +275,16 @@ impl UnifiedParser for KimiK3UnifiedParser {
         true
     }
 
-    fn build_output_grammar(
-        &self,
-        ctx: &OutputGrammarContext<'_>,
-    ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
-        Ok(
-            visible_format_from_builder(Some(&KIMI_K3_STRUCTURAL_TAG_BUILDER), ctx)?
-                .map(BuiltOutputGrammar::final_output_only),
-        )
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(&KIMI_K3_STRUCTURAL_TAG_BUILDER)
     }
 
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         self.buffer.append(delta);
 
-        while let Some((event, consumed_len)) =
-            parse_buffered_event_attributed(&self.buffer, &self.markers, |input| {
-                parse_next_kimi_k3_event(input, &mut self.mode)
-            })?
-        {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
+            parse_next_kimi_k3_event(input, &mut self.mode)
+        })? {
             let piece = self.buffer.drain_prefix(consumed_len);
             self.apply_event(event, piece, output)?;
         }
@@ -414,11 +338,10 @@ fn parse_next_kimi_k3_event(
 
 /// Parse an event while waiting for the next channel open.
 fn parse_idle_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
     alt((
-        markers.think_open.value(KimiK3Event::ThinkOpen),
-        markers.response_open.value(KimiK3Event::ResponseOpen),
-        markers.tools_open.value(KimiK3Event::ToolsOpen),
+        literal(THINK_OPEN).value(KimiK3Event::ThinkOpen),
+        literal(RESPONSE_OPEN).value(KimiK3Event::ResponseOpen),
+        literal(TOOLS_OPEN).value(KimiK3Event::ToolsOpen),
         message_end_event,
         safe_idle_text_event,
     ))
@@ -427,12 +350,11 @@ fn parse_idle_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
 
 /// Parse an event inside the `think` channel.
 fn parse_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
     alt((
-        markers.think_close.value(KimiK3Event::ThinkClose),
+        literal(THINK_CLOSE).value(KimiK3Event::ThinkClose),
         // `<|end_of_msg|>` can reach the parser under `ignore_eos` or
         // `include_stop_str_in_output`; never leak it into reasoning.
-        markers.end_of_msg.value(KimiK3Event::MessageEnd),
+        literal(END_OF_MSG).value(KimiK3Event::MessageEnd),
         safe_reasoning_event,
     ))
     .parse_next(input)
@@ -440,11 +362,10 @@ fn parse_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event
 
 /// Parse an event inside the `response` channel.
 fn parse_response_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
     alt((
-        markers.response_close.value(KimiK3Event::ResponseClose),
+        literal(RESPONSE_CLOSE).value(KimiK3Event::ResponseClose),
         // The response body also implicitly ends at a `tools` channel.
-        markers.tools_open.value(KimiK3Event::ToolsOpen),
+        literal(TOOLS_OPEN).value(KimiK3Event::ToolsOpen),
         message_end_event,
         safe_response_text_event,
     ))
@@ -453,9 +374,8 @@ fn parse_response_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event>
 
 /// Parse an event after the response channel closed.
 fn parse_epilogue_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
     alt((
-        markers.tools_open.value(KimiK3Event::ToolsOpen),
+        literal(TOOLS_OPEN).value(KimiK3Event::ToolsOpen),
         message_end_event,
         skip_epilogue_noise_event,
     ))
@@ -464,10 +384,9 @@ fn parse_epilogue_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event>
 
 /// Parse an event inside the `tools` channel, between `call` blocks.
 fn parse_tools_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
     alt((
         call_open_event,
-        markers.tools_close.value(KimiK3Event::ToolsClose),
+        literal(TOOLS_CLOSE).value(KimiK3Event::ToolsClose),
         // Defensive: an unterminated tools channel still ends with the message.
         message_end_event,
         skip_tools_noise_event,
@@ -477,8 +396,7 @@ fn parse_tools_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
 
 /// Parse a message close or end-of-message marker.
 fn message_end_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
-    alt((&markers.message_close, &markers.end_of_msg))
+    alt((literal(MESSAGE_CLOSE), literal(END_OF_MSG)))
         .value(KimiK3Event::MessageEnd)
         .parse_next(input)
 }
@@ -490,82 +408,35 @@ fn parse_done_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
 
 /// Parse safe text while waiting for the next channel marker.
 fn safe_idle_text_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
-    safe_text_len_mul(
-        input,
-        &[
-            &markers.think_open,
-            &markers.response_open,
-            &markers.tools_open,
-            &markers.message_close,
-            &markers.end_of_msg,
-        ],
-    )
-    .map(|_| KimiK3Event::Text)
+    safe_text_len_mul(input, IDLE_MARKERS).map(|_| KimiK3Event::Text)
 }
 
 /// Parse safe reasoning before the think close marker.
 fn safe_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
-    safe_text_len_mul(input, &[&markers.think_close, &markers.end_of_msg])
-        .map(|_| KimiK3Event::Reasoning)
+    safe_text_len_mul(input, REASONING_MARKERS).map(|_| KimiK3Event::Reasoning)
 }
 
 /// Parse safe response text before the next channel marker.
 fn safe_response_text_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
-    safe_text_len_mul(
-        input,
-        &[
-            &markers.response_close,
-            &markers.tools_open,
-            &markers.message_close,
-            &markers.end_of_msg,
-        ],
-    )
-    .map(|_| KimiK3Event::Text)
+    safe_text_len_mul(input, RESPONSE_MARKERS).map(|_| KimiK3Event::Text)
 }
 
 /// Skip non-content noise after the response channel closed.
 fn skip_epilogue_noise_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
-    safe_text_len_mul(
-        input,
-        &[
-            &markers.tools_open,
-            &markers.message_close,
-            &markers.end_of_msg,
-        ],
-    )
-    .map(|_| KimiK3Event::Skip)
+    safe_text_len_mul(input, EPILOGUE_MARKERS).map(|_| KimiK3Event::Skip)
 }
 
 /// Skip non-content noise between `call` blocks.
 fn skip_tools_noise_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
-    safe_text_len_mul(
-        input,
-        &[
-            &markers.call_open,
-            &markers.tools_close,
-            &markers.message_close,
-            &markers.end_of_msg,
-        ],
-    )
-    .map(|_| KimiK3Event::Skip)
+    safe_text_len_mul(input, TOOLS_MARKERS).map(|_| KimiK3Event::Skip)
 }
 
 /// Parse a `call` open tag into its tool name and one-based index.
-///
-/// The attributes end at the structural `<|sep|>`; an ordinary spelling of
-/// `<|sep|>` inside an attribute value stays attribute text.
 fn call_open_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
-    let mut scan = MarkerScanState::default();
     let (attrs,) = seq!(
-        _: &markers.call_open,
-        take_until_marker(&markers.sep, &mut scan),
-        _: &markers.sep,
+        _: literal(CALL_OPEN),
+        take_until(0.., SEP),
+        _: literal(SEP),
     )
     .parse_next(input)?;
     let attrs = parse_tag_attrs(attrs)?;
@@ -584,10 +455,9 @@ fn call_body_event(
     input: &mut KimiK3Input<'_>,
     scan: &mut MarkerScanState,
 ) -> ModalResult<KimiK3Event> {
-    let markers = input.markers();
     let (body,) = seq!(
-        take_until_marker(&markers.call_close, scan),
-        _: &markers.call_close,
+        take_until_marker(CALL_CLOSE, scan),
+        _: literal(CALL_CLOSE),
     )
     .parse_next(input)?;
     let arguments = parse_call_arguments(body)?;
@@ -735,11 +605,9 @@ mod tests {
     }
 
     impl UnifiedParserTestExt for KimiK3UnifiedParser {
-        /// Parse `chunk` as the detokenizer would deliver it: markers spelled in
-        /// full are structural special tokens, everything else ordinary text.
         fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput> {
             let mut output = UnifiedParserOutput::default();
-            self.parse_into(decode_ids(&structural(chunk)), &mut output)?;
+            self.parse_into(DecodedText::unattributed(chunk), &mut output)?;
             Ok(output)
         }
 
@@ -788,41 +656,14 @@ mod tests {
         }
     }
 
-    /// The parser as constructed in production: markers must be spelled by
-    /// their special tokens.
     fn test_parser() -> KimiK3UnifiedParser {
         KimiK3UnifiedParser::new(&[], Arc::new(tokenizer())).unwrap()
     }
 
-    /// Run token IDs through the real incremental decoder to obtain attributed
-    /// input, exactly as the frontend does.
-    fn decode_ids(ids: &[u32]) -> DecodedText {
-        let tokenizer = tokenizer();
-        let mut decoder = tokenizer.create_decode_stream(&[], false, 0);
-        for &id in ids {
-            decoder.push_token(id).unwrap();
-        }
-        decoder.flush(None).unwrap().1
-    }
-
-    /// Encode with the special tokens, so markers are structural.
-    fn structural(text: &str) -> Vec<u32> {
-        tokenizer().encode(text, false).unwrap()
-    }
-
-    /// Encode as ordinary bytes only, so marker spellings are content.
-    fn ordinary(text: &str) -> Vec<u32> {
-        tokenizer().encode_ordinary(text).unwrap()
-    }
-
-    /// Stream the structural encoding of the concatenated `chunks`, split at the
-    /// chunk boundaries, so a marker split across chunks keeps its token anchor.
     fn collect_stream(parser: &mut KimiK3UnifiedParser, chunks: &[&str]) -> UnifiedParserOutput {
-        let mut rest = decode_ids(&structural(&chunks.concat()));
         let mut output = UnifiedParserOutput::default();
         for chunk in chunks {
-            let piece = rest.drain_prefix(chunk.len());
-            parser.parse_into(piece, &mut output).unwrap();
+            output.append(parser.parse_chunk(chunk).unwrap());
         }
         output.append(parser.finish().unwrap());
         output
@@ -1285,141 +1126,5 @@ mod tests {
         let raw = parser.reset();
 
         assert_eq!(raw, "<|close|>resp");
-    }
-
-    // --- Ordinary marker spellings ------------------------------------------
-
-    fn start_in_reasoning(parser: &mut KimiK3UnifiedParser) {
-        parser.initialize(&structural(THINK_OPEN)).unwrap();
-    }
-
-    fn parse_decoded(
-        parser: &mut KimiK3UnifiedParser,
-        decoded: DecodedText,
-    ) -> UnifiedParserOutput {
-        let mut output = UnifiedParserOutput::default();
-        parser.parse_into(decoded, &mut output).unwrap();
-        output.append(parser.finish().unwrap());
-        output
-    }
-
-    #[test]
-    fn kimi_k3_markers_spell_the_documented_strings() {
-        let special_tokens = super::SpecialTokens::new(&tokenizer()).unwrap();
-        let markers = super::Markers::new(&special_tokens);
-
-        assert_eq!(markers.think_open.as_str(), THINK_OPEN);
-        assert_eq!(markers.think_close.as_str(), THINK_CLOSE);
-        assert_eq!(markers.response_open.as_str(), RESPONSE_OPEN);
-        assert_eq!(markers.response_close.as_str(), RESPONSE_CLOSE);
-        assert_eq!(markers.tools_open.as_str(), TOOLS_OPEN);
-        assert_eq!(markers.tools_close.as_str(), TOOLS_CLOSE);
-        assert_eq!(markers.message_close.as_str(), super::MESSAGE_CLOSE);
-        assert_eq!(markers.call_close.as_str(), super::CALL_CLOSE);
-        assert_eq!(markers.end_of_msg.as_str(), END_OF_MSG);
-    }
-
-    #[test]
-    fn kimi_k3_ordinary_close_marker_text_stays_in_reasoning() {
-        // The production incident: the model spells `<|close|>think<|sep|>` with
-        // ordinary tokens while reasoning, then really closes the channel later.
-        let mut ids = ordinary(THINK_CLOSE);
-        ids.extend(structural(&format!(
-            " after{THINK_CLOSE}{RESPONSE_OPEN}answer{RESPONSE_CLOSE}<|close|>message{SEP}"
-        )));
-        let decoded = decode_ids(&ids);
-        assert!(
-            decoded.text.starts_with(THINK_CLOSE),
-            "same bytes as the structural marker"
-        );
-
-        let mut parser = test_parser();
-        start_in_reasoning(&mut parser);
-        let output = parse_decoded(&mut parser, decoded);
-
-        assert_eq!(output.reasoning_text(), format!("{THINK_CLOSE} after"));
-        assert_eq!(output.normal_text(), "answer");
-    }
-
-    #[test]
-    fn kimi_k3_ordinary_open_marker_text_stays_in_reasoning() {
-        let mut ids = structural("config: ");
-        ids.extend(ordinary(THINK_OPEN));
-        ids.extend(structural(&format!(
-            "{THINK_CLOSE}{RESPONSE_OPEN}ok{RESPONSE_CLOSE}"
-        )));
-
-        let mut parser = test_parser();
-        start_in_reasoning(&mut parser);
-        let output = parse_decoded(&mut parser, decode_ids(&ids));
-
-        assert_eq!(output.reasoning_text(), format!("config: {THINK_OPEN}"));
-        assert_eq!(output.normal_text(), "ok");
-    }
-
-    #[test]
-    fn kimi_k3_attributed_streaming_splits_at_every_char_boundary() {
-        // A lookalike close inside reasoning, then genuine markers and a call.
-        let mut ids = structural(THINK_OPEN);
-        ids.extend(ordinary(THINK_CLOSE));
-        ids.extend(structural(&format!(
-            " step{THINK_CLOSE}{RESPONSE_OPEN}the answer{RESPONSE_CLOSE}{TOOLS_OPEN}{}{TOOLS_CLOSE}<|close|>message{SEP}",
-            call("tool=\"calc\" index=\"1\"", &arg("x", "number", "42")),
-        )));
-        let full = decode_ids(&ids);
-
-        for split in (0..=full.text.len()).filter(|&index| full.text.is_char_boundary(index)) {
-            let mut rest = full.clone();
-            let head = rest.drain_prefix(split);
-            let mut parser = test_parser();
-            let mut output = UnifiedParserOutput::default();
-            parser.parse_into(head, &mut output).unwrap();
-            parser.parse_into(rest, &mut output).unwrap();
-            output.append(parser.finish().unwrap());
-
-            assert_eq!(
-                output.reasoning_text(),
-                format!("{THINK_CLOSE} step"),
-                "split {split}"
-            );
-            assert_eq!(output.normal_text(), "the answer", "split {split}");
-            assert_eq!(
-                first_call(&output).arguments,
-                r#"{"x":42}"#,
-                "split {split}"
-            );
-        }
-    }
-
-    #[test]
-    fn kimi_k3_incomplete_utf8_before_structural_close_still_closes() {
-        // A stray incomplete byte right before the close marker: the decoder
-        // anchors the special token at its own spelling, so the boundary holds.
-        let mut ids = vec![0xe4];
-        ids.extend(structural(&format!(
-            "{THINK_CLOSE}{RESPONSE_OPEN}ok{RESPONSE_CLOSE}"
-        )));
-
-        let mut parser = test_parser();
-        start_in_reasoning(&mut parser);
-        let output = parse_decoded(&mut parser, decode_ids(&ids));
-
-        assert_eq!(output.reasoning_text(), "\u{FFFD}");
-        assert_eq!(output.normal_text(), "ok");
-    }
-
-    #[test]
-    fn kimi_k3_ordinary_sep_text_inside_call_attributes_stays_attribute_text() {
-        let mut ids = structural(&format!("{TOOLS_OPEN}{OPEN}call tool=\"a"));
-        ids.extend(ordinary(SEP));
-        ids.extend(structural(&format!(
-            "b\" index=\"1\"{SEP}{}<|close|>call{SEP}{TOOLS_CLOSE}",
-            arg("x", "number", "1")
-        )));
-
-        let output = parse_decoded(&mut test_parser(), decode_ids(&ids));
-
-        assert_eq!(first_call(&output).name, Some(format!("a{SEP}b")));
-        assert_eq!(first_call(&output).arguments, r#"{"x":1}"#);
     }
 }

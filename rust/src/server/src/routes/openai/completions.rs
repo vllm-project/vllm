@@ -13,7 +13,7 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::Event;
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde_json::Value;
@@ -45,7 +45,7 @@ use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
-use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
+use crate::utils::{ResolvedRequestContext, resolve_request_context, unix_timestamp};
 
 pub(crate) fn lower_completion_request(
     request: CompletionRequest,
@@ -111,7 +111,7 @@ pub async fn completions(
         );
         let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
 
-        sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
+        Sse::new(sse_stream).into_response()
     } else {
         let response = match collect_completion(
             text_stream,
@@ -694,7 +694,6 @@ mod tests {
                     ))),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                 }),
             )),
         ]);
@@ -807,7 +806,6 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                 }),
             )),
         ]);
@@ -860,7 +858,6 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                 }),
             )),
         ]);
@@ -916,7 +913,6 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                 }),
             )),
         ]);
@@ -989,7 +985,6 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                 }),
             )),
         ]);
@@ -1064,7 +1059,6 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
-                    sampling_mask: None,
                 }),
             )),
         ]);

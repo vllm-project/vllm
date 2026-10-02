@@ -16,6 +16,7 @@ from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.engine.protocol import StreamingInput
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
@@ -25,10 +26,10 @@ from vllm.model_executor.models.voxtral import (
     VoxtralMultiModalProcessor,
     VoxtralProcessingInfo,
 )
-from vllm.model_executor.models.whisper_causal import WhisperCausalEncoder
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import ProcessorInputs, TimingContext
+from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     MultiModalProcessingResult,
     PlaceholderFeaturesInfo,
@@ -37,26 +38,30 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from .utils import _flatten_embeddings
+from .utils import (
+    _flatten_embeddings,
+)
 
 logger = init_logger(__name__)
 
 
 class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
-    def _cached_apply_hf_processor(
+    def __init__(
         self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
-    ) -> MultiModalProcessingResult:
+        info: _I,
+        dummy_inputs: BaseDummyInputsBuilder[_I],
+        *,
+        cache: BaseMultiModalProcessorCache | None = None,
+    ) -> None:
         # realtime can't make use of a cache yet
-        return self._apply_hf_processor(inputs, timing_ctx)
+        super().__init__(info, dummy_inputs, cache=None)
 
     def _maybe_apply_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         mm_res: MultiModalProcessingResult,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        mm_kwargs = mm_res.kwargs.require_data()
+        mm_kwargs = mm_res.kwargs
 
         # there are no placeholder audio tokens for streaming
         # so we need to build the place placeholder positions manually
@@ -69,9 +74,7 @@ class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
         tokenizer = self.info.get_tokenizer()
         audio_config = tokenizer.instruct.audio_encoder.audio_config
 
-        audio_array = audios[0]["audio_arrays"].data
-        assert isinstance(audio_array, (torch.Tensor, np.ndarray))
-        num_audio_samples = audio_array.shape[0]
+        num_audio_samples = audios[0]["audio_arrays"].data.shape[0]
         length = audio_config.num_audio_tokens(num_audio_samples)
 
         features_info = PlaceholderFeaturesInfo(
@@ -164,7 +167,7 @@ class VoxtralRealtimeBuffer:
         for token in tokens:
             await self._token_queue.put(token)
 
-    async def get_input_stream(self) -> AsyncGenerator[TokensPrompt]:
+    async def get_input_stream(self) -> AsyncGenerator[StreamingInput]:
         for frame_size, num_tokens in self._generate_frame_size_and_num_tokens():
             next_tokens = [await self._token_queue.get() for _ in range(num_tokens)]
 
@@ -190,9 +193,11 @@ class VoxtralRealtimeBuffer:
 
             self._leftover = audio_array[stride:]
 
-            yield TokensPrompt(
-                prompt_token_ids=next_tokens,
-                multi_modal_data={"audio": (frame, None)},
+            yield StreamingInput(
+                TokensPrompt(
+                    prompt_token_ids=next_tokens,
+                    multi_modal_data={"audio": (frame, None)},
+                )
             )
 
 
@@ -274,8 +279,8 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         token_task = asyncio.create_task(feed_tokens())
 
         try:
-            async for prompt in buffer.get_input_stream():
-                yield prompt
+            async for streaming_input in buffer.get_input_stream():
+                yield streaming_input.prompt
         finally:
             audio_task.cancel()
             token_task.cancel()
@@ -420,7 +425,6 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
 
         seq_lens = [mel.shape[1] for mel in mel_features]
         # [total_num_20ms_frames, hidden_size]
-        assert isinstance(self.whisper_encoder.whisper_encoder, WhisperCausalEncoder)
         audio_embeddings = self.whisper_encoder.whisper_encoder.forward_conv(
             mel_features
         )

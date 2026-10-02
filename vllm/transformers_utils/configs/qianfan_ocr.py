@@ -3,11 +3,11 @@
 
 from typing import Any
 
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 from transformers.models.auto import CONFIG_MAPPING
 
 
-class QianfanOCRVisionConfig(PreTrainedConfig):
+class QianfanOCRVisionConfig(PretrainedConfig):
     model_type = "qianfan_ocr_vision"
 
     def __init__(
@@ -53,7 +53,7 @@ class QianfanOCRVisionConfig(PreTrainedConfig):
         self.use_mean_pooling = use_mean_pooling
 
 
-class QianfanOCRConfig(PreTrainedConfig):
+class QianfanOCRConfig(PretrainedConfig):
     model_type = "qianfan_ocr"
 
     def __init__(

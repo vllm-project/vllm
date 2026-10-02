@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from itertools import groupby, product
+import os
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 import torch
@@ -40,8 +41,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
 from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
@@ -52,6 +53,47 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 
 logger = init_logger(__name__)
+
+
+def _b2_ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def _b2_full_dummy_descriptor_valid(
+    *,
+    num_tokens: int,
+    num_reqs: int | None,
+    max_query_len: int | None,
+) -> bool:
+    if max_query_len is None or num_reqs is None:
+        return True
+    if num_reqs <= 0:
+        return False
+    return _b2_ceil_div(num_tokens, num_reqs) <= max_query_len
+
+
+def _b2_apply_full_capture_capacity_hint(
+    *,
+    input_batch: InputBatch,
+    block_tables: BlockTables,
+    kv_cache_config: KVCacheConfig,
+    max_model_len: int | None,
+) -> None:
+    if max_model_len is None:
+        return
+
+    query_len = input_batch.max_query_len or int(input_batch.num_scheduled_tokens.max())
+    capture_context_len = max(int(max_model_len) - int(query_len), 0)
+    if not capture_context_len:
+        return
+
+    set_dummy_context(
+        input_batch,
+        block_tables,
+        capture_context_len,
+        kv_cache_config.num_blocks,
+        int(max_model_len),
+    )
 
 
 class AttentionState(NamedTuple):
@@ -69,8 +111,7 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     # Upper bound on per-request query length. Varlen decode graphs leave
-    # uniform_token_count unset, so this is what keeps a prefill batch out of one:
-    # the runner passes None for any batch with a prefill.
+    # uniform_token_count unset, so this is what keeps a prefill batch out of one.
     max_query_len: int | None = None
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
@@ -139,6 +180,34 @@ def has_compiled_submodule(model: nn.Module) -> bool:
     )
 
 
+def allow_rocm_deepseek_v4_piecewise_without_compile(
+    vllm_config: VllmConfig,
+) -> bool:
+    """Allow the historical gfx1151 DeepSeek V4 piecewise path on ROCm.
+
+    The validated non-stage1 DSpark route on gfx1151 used
+    ``VLLM_USE_BREAKABLE_CUDAGRAPH=0`` and still reached successful PIECEWISE
+    capture on DeepSeek V4. Newer startup logic requires either breakable
+    cudagraphs or an active compiled submodule and otherwise downgrades
+    ``FULL_AND_PIECEWISE`` to ``FULL_DECODE_ONLY``. That regresses the known
+    working ROCm route.
+
+    Keep the bypass tightly scoped:
+    - ROCm only
+    - explicit launcher opt-in via ``VLLM_GFX1151_ALLOW_FP8_MQA_CUDAGRAPH=1``
+    - DeepSeek V4 main / MTP architectures only
+    """
+    if not current_platform.is_rocm():
+        return False
+
+    if os.environ.get("VLLM_GFX1151_ALLOW_FP8_MQA_CUDAGRAPH", "0") != "1":
+        return False
+
+    model_config = vllm_config.model_config
+    architectures = set(model_config.architectures if model_config else [])
+    return bool(architectures & {"DeepseekV4ForCausalLM", "DeepSeekV4MTPModel"})
+
+
 class CudaGraphManager:
     def __init__(
         self,
@@ -161,6 +230,7 @@ class CudaGraphManager:
         # DBO supports FULL CUDA graphs only.
         self.ubatch_runner = ubatch_runner
 
+        self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
@@ -350,12 +420,21 @@ class CudaGraphManager:
                 # from the forward context; in-graph kernels handle the token padding
                 # themselves from the padded slot_mapping (rows with slot == -1).
                 num_reqs = None
+                max_query_len = None
                 if mixed_mode == CUDAGraphMode.FULL:
                     num_reqs = min(num_tokens, self.max_num_reqs)
+                    max_query_len = self.decode_query_len
+                    if not _b2_full_dummy_descriptor_valid(
+                        num_tokens=num_tokens,
+                        num_reqs=num_reqs,
+                        max_query_len=max_query_len,
+                    ):
+                        continue
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
                     num_tokens=num_tokens,
                     num_reqs=num_reqs,
+                    max_query_len=max_query_len,
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[mixed_mode].append(desc)
@@ -383,23 +462,6 @@ class CudaGraphManager:
                         key = (i, num_active_loras)
                         self._candidates.setdefault(key, []).extend(matching)
                     current_range_start = num_tokens + 1
-
-    @property
-    def dp_size(self) -> int:
-        # Not cached: elastic EP rewrites parallel_config in place on scale.
-        return self.vllm_config.parallel_config.data_parallel_size
-
-    def release_graphs(self) -> None:
-        """Drop the captured graphs so a later capture() can refill them.
-
-        Elastic EP reallocates the MoE workspace when it grows, which leaves
-        every captured graph holding a stale data pointer. `_capture_descs` is
-        kept, so `needs_capture()` still reports the work to redo.
-        """
-        self.graphs.clear()
-        self._graphs_captured = False
-        if self.breakable_cg_runner is not None:
-            BreakableCUDAGraphWrapper.clear_all_graphs()
 
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
@@ -481,6 +543,7 @@ class CudaGraphManager:
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
+
                         if self.pool is not None:
                             set_graph_pool_id(self.pool)
                         else:
@@ -621,7 +684,9 @@ class ModelCudaGraphManager(CudaGraphManager):
             self.init_breakable_cg_runner(model)
 
         if self.cudagraph_mode.has_piecewise_cudagraphs() and not (
-            self.use_breakable_cg or has_compiled_submodule(model)
+            self.use_breakable_cg
+            or has_compiled_submodule(model)
+            or allow_rocm_deepseek_v4_piecewise_without_compile(self.vllm_config)
         ):
             raise RuntimeError(
                 f"{type(model).__name__}: piecewise CUDA graphs "
@@ -658,9 +723,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                     )
                 for k, v in intermediate_tensors.tensors.items():
                     self.intermediate_tensors[k][:num_tokens] = v
-
         def create_forward_fn(
-            desc: BatchExecutionDescriptor, warmup: bool
+            desc: BatchExecutionDescriptor,
+            warmup: bool,
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
@@ -678,7 +743,6 @@ class ModelCudaGraphManager(CudaGraphManager):
             model_inputs = {
                 "input_ids": input_buffers.input_ids[:num_tokens],
                 "positions": input_buffers.positions[:num_tokens],
-                "intermediate_tensors": None,
                 **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
             }
             if not self.is_first_pp_rank:
@@ -721,8 +785,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
-                max_query_len=desc.max_query_len or desc.uniform_token_count,
+                max_query_len=desc.max_query_len,
                 pcp_manager=pcp_manager,
+                max_model_len=self.vllm_config.model_config.max_model_len,
             )
 
             # Capture with dummy rows marked as padding.
@@ -791,17 +856,21 @@ def prepare_inputs_to_capture(
     full_cudagraph: bool,
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
+    max_model_len: int | None = None,
 ) -> AttentionState:
-    if full_cudagraph and max_query_len is None:
-        # Mixed graphs can replay a single prefill spanning the entire batch,
-        # even when the dummy batch distributes one token to each request.
-        max_query_len = num_tokens
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
     if pcp_manager is not None:
         input_batch = pcp_manager.prepare_inputs_to_capture(input_batch)
 
+    if full_cudagraph:
+        _b2_apply_full_capture_capacity_hint(
+            input_batch=input_batch,
+            block_tables=block_tables,
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+        )
     block_table_provider = pcp_manager or block_tables
     input_block_tables = block_table_provider.get_dummy_block_tables(num_reqs)
     slot_mappings = block_table_provider.get_dummy_slot_mappings(num_tokens)
@@ -809,16 +878,15 @@ def prepare_inputs_to_capture(
         slot_mappings, kv_cache_config
     )
 
-    if block_tables.cp_size > 1:
-        input_batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
-            input_buffers.dcp_local_seq_lens,
-            input_batch.seq_lens,
-            input_batch.num_reqs,
-            block_tables.cp_size,
-            block_tables.cp_rank,
-            block_tables.cp_interleave,
-            num_reqs_padded=input_batch.num_reqs_after_padding,
-        )
+    input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+        input_buffers.dcp_local_seq_lens,
+        input_batch.seq_lens,
+        input_batch.num_reqs,
+        block_tables.cp_size,
+        block_tables.cp_rank,
+        block_tables.cp_interleave,
+        num_reqs_padded=input_batch.num_reqs_after_padding,
+    )
 
     # NOTE(woosuk): Attention metadata is required not just by standard attention
     # kernels, but also by specialized attention-like operations (e.g., Inkling's sconv,

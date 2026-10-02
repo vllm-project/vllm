@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -15,7 +15,7 @@ REASONING_MODEL_NAME = "MiniMaxAI/MiniMax-M2"
 
 
 @pytest.fixture(scope="module")
-def minimax_m2_tokenizer() -> PreTrainedTokenizerBase:
+def minimax_m2_tokenizer():
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 

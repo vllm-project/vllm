@@ -21,12 +21,6 @@ from tests.utils import RemoteOpenAIServer
 
 TOL = 0.05  # Absolute tolerance for accuracy comparison
 
-# gpt-oss >= 0.0.7 explicitly sends its 131072-token default as the output
-# budget, which leaves no room for the prompt in GPT-OSS's 131072-token context.
-# This test originally ran with a 32768-token model context, so retain that
-# proven generation budget while using the current evaluator package.
-MAX_OUTPUT_TOKENS = 32_768
-
 # Path to tiktoken encoding files
 TIKTOKEN_DATA_DIR = Path(__file__).parent / "data"
 
@@ -56,7 +50,10 @@ def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> floa
     # Build the command to run the evaluation
     cmd = [
         sys.executable,
-        str(Path(__file__).with_name("run_gpqa_eval.py")),
+        "-m",
+        "gpt_oss.evals",
+        "--eval",
+        "gpqa",
         "--model",
         model_name,
         "--reasoning-effort",
@@ -65,8 +62,6 @@ def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> floa
         base_url,
         "--n-threads",
         "200",
-        "--max-output-tokens",
-        str(MAX_OUTPUT_TOKENS),
     ]
 
     try:

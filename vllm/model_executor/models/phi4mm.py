@@ -10,14 +10,14 @@ import torch
 import torch.nn as nn
 from transformers import (
     BatchFeature,
-    PreTrainedConfig,
+    PretrainedConfig,
     ProcessorMixin,
     SequenceFeatureExtractor,
     SiglipVisionConfig,
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -123,7 +123,7 @@ class Phi4MMImageEncoder(nn.Module):
 
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
         model_dir: str = "",
@@ -839,21 +839,28 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
+        num_audios = mm_counts.get("audio", 0)
+        num_images = mm_counts.get("image", 0)
+
         target_width, target_height = self.info.get_image_size_with_most_features()
+
+        image_overrides = mm_options.get("image")
+        audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         mm_data = {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=mm_counts.get("image", 0),
-                overrides=mm_options.get("image"),
+                num_images=num_images,
+                overrides=image_overrides,
             ),
             "audio": self._get_dummy_audios(
                 length=_AUDIO_MAX_SOUNDFILE_SIZE,
-                num_audios=mm_counts.get("audio", 0),
-                overrides=mm_options.get("audio"),
+                num_audios=num_audios,
+                overrides=audio_overrides,
             ),
         }
 
@@ -1297,7 +1304,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 

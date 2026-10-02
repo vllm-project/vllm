@@ -86,10 +86,9 @@ class MockModelConfig:
     generation_config: str = "auto"
     override_generation_config: dict[str, Any] = field(default_factory=dict)
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skip_tokenizer_init: bool = False
+    skip_tokenizer_init = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
-    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
     enable_prompt_embeds: bool = False
 
@@ -225,7 +224,7 @@ def online_renderer(model_config: MockModelConfig, request) -> OnlineRenderer:
     renderer.tokenizer = MagicMock()
 
     return OnlineRenderer(
-        model_config=model_config,
+        model_config=model_config,  # type: ignore[arg-type]
         renderer=renderer,
         request_logger=None,
         chat_template=None,
@@ -233,7 +232,6 @@ def online_renderer(model_config: MockModelConfig, request) -> OnlineRenderer:
         enable_auto_tools=True,
         tool_parser="openai",
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
-        trust_request_mm_kwargs=True,
     )
 
 

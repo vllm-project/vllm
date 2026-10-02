@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen4Exp weight-free QSA indexer."""
 
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import torch
 from torch import nn
-from transformers import Qwen4ExpTextConfig
 
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
@@ -14,6 +13,9 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.transformers_utils.configs.qwen4_exp import (
+    Qwen4ExpTextConfig,
+)
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
@@ -21,10 +23,7 @@ from ..common.qsa_cache import (
     QSAKeyStateCache,
     canonical_qsa_rope_positions,
 )
-from .ops.qsa_prepare import qsa_prepare
-
-if TYPE_CHECKING:
-    from .qsa import Qwen4ExpQSAAttention
+from .ops.qsa_pre_indexer import qsa_pre_indexer
 
 
 def apply_qsa_rope(
@@ -236,11 +235,7 @@ class QSAIndexer(nn.Module):
         projected_qk: torch.Tensor,
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
-        *,
-        attn: "Qwen4ExpQSAAttention",
-        qkv: torch.Tensor | None = None,
-        slot_mapping: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+    ) -> torch.Tensor:
         """Update side caches and select token indices from pre-projected Q/K.
 
         Returns the packed buffer of shape [num_tokens, output_width + 1]:
@@ -248,17 +243,12 @@ class QSAIndexer(nn.Module):
         request-relative token indices, and the trailing column is the row's
         valid-entry count (the attention kernel's loop bound, never a token
         index).
-
-        With ``attn.use_fused_qsa_prepare``, the same launch also writes
-        ``attn``'s K/V into ``attn.kv_cache`` at ``slot_mapping`` and prepares
-        its Q and gate from ``qkv``, returned as the second element (None
-        otherwise). ``qkv`` and ``slot_mapping`` are only read in that mode.
         """
         metadata = self._metadata()
         if metadata is None:
             # Preserve step-0 indices when later MTP steps reuse the buffer.
             if self.skip_topk and out is not None:
-                return out, None
+                return out
             result = torch.full(
                 (projected_qk.shape[0], self.packed_output_width),
                 -1,
@@ -269,8 +259,8 @@ class QSAIndexer(nn.Module):
             result[:, -1] = 0
             if out is not None:
                 out.copy_(result)
-                return out, None
-            return result, None
+                return out
+            return result
 
         from .ops.qsa import qsa_compress_groups_with_ratio, qsa_store_cache_rows
         from .ops.qsa_indexer import (
@@ -294,20 +284,14 @@ class QSAIndexer(nn.Module):
         raw_key_state_cache = self.raw_key_cache
         compressed_key_cache = self.compressed_key_cache.kv_cache
 
-        main_outputs: tuple[torch.Tensor, torch.Tensor] | None = None
-        if attn.use_fused_qsa_prepare:
-            if qkv is None or slot_mapping is None:
-                raise ValueError("fused QSA prepare requires qkv and slot_mapping")
+        if self.use_fused_pre_indexer:
             q = projected_q.new_empty(
                 num_tokens,
                 self.index_n_heads,
                 self.index_head_dim,
                 dtype=self.indexer_dtype,
             )
-            main_kv_cache = attn.kv_cache.transpose(1, 2)
-            if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-                main_kv_cache = main_kv_cache.view(torch.float8_e4m3fn)
-            main_outputs = qsa_prepare(
+            qsa_pre_indexer(
                 projected_q,
                 raw_keys,
                 positions,
@@ -331,14 +315,6 @@ class QSAIndexer(nn.Module):
                     if raw_key_state_cache.rope_position_cache is not None
                     else None
                 ),
-                main_qkv=qkv[:num_tokens],
-                main_q_norm_weight=attn.q_norm.weight,
-                main_k_norm_weight=attn.k_norm.weight,
-                main_eps=attn.q_norm.variance_epsilon,
-                main_kv_cache=main_kv_cache,
-                main_slot_mapping=slot_mapping[:num_tokens],
-                main_k_scale=attn._k_scale_float,
-                main_v_scale=attn._v_scale_float,
             )
         else:
             # Unfused reference path
@@ -409,7 +385,7 @@ class QSAIndexer(nn.Module):
         if self.skip_topk:
             if out is None:
                 raise RuntimeError("QSA top-k reuse requires an output buffer")
-            return out, main_outputs
+            return out
 
         if out is None:
             out = torch.empty(
@@ -472,7 +448,7 @@ class QSAIndexer(nn.Module):
             self.token_topk,
             out,
         )
-        return out, main_outputs
+        return out
 
 
 __all__ = ["QSAIndexer", "apply_qsa_rope"]

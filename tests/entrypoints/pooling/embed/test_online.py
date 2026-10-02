@@ -12,13 +12,9 @@ import requests
 import torch
 import torch.nn.functional as F
 
-from tests.models.language.pooling.embed_utils import (
-    float_embeddings,
-    run_embedding_correctness_test,
-)
+from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.utils import (
@@ -149,7 +145,7 @@ async def test_completion_request(
     assert embeddings.usage.prompt_tokens == len(input_tokens)
     assert embeddings.usage.total_tokens == len(input_tokens)
 
-    vllm_outputs = float_embeddings(embeddings)
+    vllm_outputs = [d.embedding for d in embeddings.data]
     run_embedding_correctness_test(hf_model, [input_text], vllm_outputs)
 
     # test input: list[int]
@@ -169,7 +165,7 @@ async def test_completion_request(
     assert embeddings.usage.prompt_tokens == len(input_tokens)
     assert embeddings.usage.total_tokens == len(input_tokens)
 
-    vllm_outputs = float_embeddings(embeddings)
+    vllm_outputs = [d.embedding for d in embeddings.data]
     run_embedding_correctness_test(hf_model, [input_text], vllm_outputs)
 
 
@@ -198,7 +194,7 @@ async def test_completion_request_batched(
     assert embeddings.usage.prompt_tokens == len(input_tokens) * N
     assert embeddings.usage.total_tokens == len(input_tokens) * N
 
-    vllm_outputs = float_embeddings(embeddings)
+    vllm_outputs = [d.embedding for d in embeddings.data]
     run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
     # test list[list[int]]
@@ -218,7 +214,7 @@ async def test_completion_request_batched(
     assert embeddings.usage.prompt_tokens == len(input_tokens) * N
     assert embeddings.usage.total_tokens == len(input_tokens) * N
 
-    vllm_outputs = float_embeddings(embeddings)
+    vllm_outputs = [d.embedding for d in embeddings.data]
     run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
 
@@ -335,7 +331,7 @@ async def test_padding(client: openai.AsyncOpenAI, model_name: str):
 async def test_chat_request(
     server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
 ):
-    messages: list[ChatCompletionMessageParam] = [
+    messages = [
         {
             "role": "user",
             "content": "The cat sat on the mat.",
@@ -386,8 +382,8 @@ async def test_chat_request(
     assert chat_embeddings.created <= completion_embeddings.created
     # Use tolerance-based comparison for embeddings
     check_embeddings_close(
-        embeddings_0_lst=float_embeddings(chat_embeddings),
-        embeddings_1_lst=float_embeddings(completion_embeddings),
+        embeddings_0_lst=[d.embedding for d in chat_embeddings.data],
+        embeddings_1_lst=[d.embedding for d in completion_embeddings.data],
         name_0="chat",
         name_1="completion",
     )
@@ -492,7 +488,7 @@ async def test_invocations_completion_request(
 
 @pytest.mark.asyncio
 async def test_invocations_chat_request(server: RemoteOpenAIServer):
-    messages: list[ChatCompletionMessageParam] = [
+    messages = [
         {
             "role": "user",
             "content": "The cat sat on the mat.",

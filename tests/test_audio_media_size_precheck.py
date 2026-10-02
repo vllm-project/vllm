@@ -144,6 +144,6 @@ async def test_audio_connector_threads_byte_limit_to_http_reader(
             assert kwargs["max_bytes"] == MiB_bytes
             raise VLLMValidationError("Maximum file size exceeded")
 
-    connector = MediaConnector(connection=_Connection())
+    connector = MediaConnector(connection=_Connection())  # type: ignore[arg-type]
     with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
         await connector.fetch_audio_async("https://example.test/audio")

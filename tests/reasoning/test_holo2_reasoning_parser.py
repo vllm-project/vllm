@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -15,7 +15,7 @@ REASONING_MODEL_NAME = "HCompany/Holo2-4B"
 
 
 @pytest.fixture(scope="module")
-def tokenizer() -> PreTrainedTokenizerBase:
+def tokenizer():
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 

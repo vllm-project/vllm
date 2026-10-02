@@ -128,7 +128,7 @@ def test_lru_cache():
 
 
 def test_lru_cache_put_if_fits():
-    cache = LRUCache[str, int](10, getsizeof=lambda x: x)
+    cache = LRUCache(10, getsizeof=lambda x: x)
 
     assert cache.put_if_fits("ok", 4) is True
     assert cache["ok"] == 4

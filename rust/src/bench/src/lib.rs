@@ -10,7 +10,6 @@ mod datasets;
 mod error;
 mod hub;
 mod metrics;
-mod mm_processor;
 mod multi_run;
 mod multi_turn;
 mod output;
@@ -26,7 +25,6 @@ pub use cli::{
     BackendKind, BenchServeArgs, DatasetName, LoraAssignment, RampUpStrategy, SpeedBenchConfig,
 };
 use config::BenchConfig;
-pub use mm_processor::{MmProcessorArgs, run_mm_processor};
 
 /// Prepare process-wide resources for a benchmark run.
 pub fn prepare_process() {

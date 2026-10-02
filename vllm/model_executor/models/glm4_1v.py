@@ -36,7 +36,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import transformers
 from einops import rearrange
+from packaging.version import Version
 from transformers import BatchFeature, Glm4vProcessor
 from transformers.image_processing_base import ImageProcessingMixin
 from transformers.models.glm4v.configuration_glm4v import (
@@ -52,7 +54,7 @@ from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -61,10 +63,6 @@ from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
-from vllm.model_executor.layers.fusion.mm_input_norm import (
-    IdentityInputNorm,
-    build_mm_input_norm,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -133,6 +131,8 @@ logger = init_logger(__name__)
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 600
+
+TRANSFORMERS_WITH_GA = Version(transformers.__version__) >= Version("5.10.0.dev0")
 
 
 def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
@@ -620,7 +620,6 @@ class Glm4vVisionTransformer(nn.Module):
         vision_config: Glm4vVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
-        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -647,7 +646,6 @@ class Glm4vVisionTransformer(nn.Module):
             in_channels=in_channels,
             hidden_size=self.hidden_size,
         )
-        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
@@ -930,7 +928,7 @@ class Glm4vVisionTransformer(nn.Module):
             encoder_metadata = self.prepare_encoder_metadata(grid_thw)
 
         # patchify
-        x = self.input_norm(x.to(device=self.device), self.dtype)
+        x = x.to(device=self.device, dtype=self.dtype)
         x = self.patch_embed(x)
         x = self.post_conv_layernorm(x)
 
@@ -1391,6 +1389,17 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         timestamps_list = full_second_idxs[::2]
         return list(timestamps_list)
 
+    def _get_video_frame_embed_token_id(self, hf_processor: object) -> int:
+        attr = (
+            "image_token_id"
+            if isinstance(hf_processor, Glm4vProcessor) or TRANSFORMERS_WITH_GA
+            else "video_token_id"
+        )
+        token_id = getattr(hf_processor, attr, None)
+        if not isinstance(token_id, int):
+            raise ValueError(f"Processor has no valid {attr}")
+        return token_id
+
     def _construct_video_placeholder(
         self,
         video_array: np.ndarray,
@@ -1428,7 +1437,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         num_tokens_per_frame = int(H * W) // merge_length
         placeholder = []
         placeholder.append(bov_token_id)
-        frame_embed_token_id = hf_processor.image_token_id
+        frame_embed_token_id = self._get_video_frame_embed_token_id(hf_processor)
         for frame_idx in frames_idx_token:
             placeholder.append(boi_token_id)
             placeholder.extend([frame_embed_token_id] * num_tokens_per_frame)
@@ -1461,26 +1470,33 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
+        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
+
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=mm_counts.get("image", 0),
-                overrides=mm_options.get("image"),
+                num_images=num_images,
+                overrides=image_overrides,
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=mm_counts.get("video", 0),
-                overrides=mm_options.get("video"),
+                num_videos=num_videos,
+                overrides=video_overrides,
             ),
         }
 
@@ -1585,7 +1601,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         processor = self.info.get_hf_processor(**hf_kwargs)
 
-        if not isinstance(processor, Glm4vProcessor):
+        use_direct_path = (
+            not isinstance(processor, Glm4vProcessor) and TRANSFORMERS_WITH_GA
+        )
+        if use_direct_path:
             prepared_data, prepared_kwargs = self._get_direct_path_inputs(
                 hf_data, hf_kwargs
             )
@@ -1608,6 +1627,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             del hf_data["videos"]
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
+            frame_embed_token_id = self.info._get_video_frame_embed_token_id(processor)
+            swap_video_frame_tokens = frame_embed_token_id == processor.image_token_id
             for item in videos:
                 video_array, metadata = item
 
@@ -1630,10 +1651,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     video_mm_kwargs,
                 )
                 input_ids = video_outputs.pop("input_ids")
-
-                input_ids[input_ids == processor.image_token_id] = (
-                    processor.video_token_id
-                )
+                if swap_video_frame_tokens:
+                    input_ids[input_ids == processor.image_token_id] = (
+                        processor.video_token_id
+                    )
                 video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
                 prompt_text = prompt_text.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
@@ -1649,15 +1670,17 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             )
         else:
             video_outputs = dict()
+            swap_video_frame_tokens = False
 
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_kwargs),
             dict(text=prompt_text, **hf_data),
             hf_kwargs,
         )
-        input_ids = processed_data["input_ids"]
-        input_ids[input_ids == processor.video_token_id] = processor.image_token_id
-        processed_data["input_ids"] = input_ids
+        if swap_video_frame_tokens:
+            input_ids = processed_data["input_ids"]
+            input_ids[input_ids == processor.video_token_id] = processor.image_token_id
+            processed_data["input_ids"] = input_ids
 
         processed_data.update(video_outputs)
         return self._finalize_hf_mm_data(
@@ -1705,7 +1728,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             )
             return PromptUpdateDetails.select_token_id(
                 placeholder,
-                embed_token_id=hf_processor.image_token_id,
+                embed_token_id=self.info._get_video_frame_embed_token_id(hf_processor),
             )
 
         return [
@@ -1761,7 +1784,6 @@ class Glm4vForConditionalGeneration(
 
     supports_encoder_tp_data = True
     supports_tower_connector_lora = True
-    supports_mm_device_do_normalize = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -1793,7 +1815,6 @@ class Glm4vForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
                 quant_config=quant_config,
-                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -1875,7 +1896,7 @@ class Glm4vForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
-            pixel_values = image_input["pixel_values"]
+            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
@@ -1896,7 +1917,9 @@ class Glm4vForConditionalGeneration(
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
-            pixel_values_videos = video_input["pixel_values_videos"]
+            pixel_values_videos = video_input["pixel_values_videos"].type(
+                self.visual.dtype
+            )
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,
@@ -2104,11 +2127,8 @@ class Glm4vForConditionalGeneration(
         flattened_patch_size = (
             in_channels * temporal_patch_size * patch_size * patch_size
         )
-        dummy_pixel_values = torch.zeros(
-            total_patches,
-            flattened_patch_size,
-            device=device,
-            dtype=self.visual.input_norm.input_dtype or dtype,
+        dummy_pixel_values = torch.randn(
+            total_patches, flattened_patch_size, device=device, dtype=dtype
         )
 
         # Override max_seqlen with a safe upper bound for capture.

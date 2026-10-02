@@ -16,7 +16,6 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import (
     PrefillStats,
     RequestSpecDecodeMetrics,
@@ -158,7 +157,6 @@ class EngineCoreRequest(
     abort_immediately: bool = False
 
     session_id: str | None = None
-    kv_hints: KvHintsEnvelope | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -235,9 +233,6 @@ class EngineCoreOutput(
     # Per-request spec-decode acceptance; attached only on the final output.
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
-
-    # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
-    prompt_token_id_logprobs: torch.Tensor | None = None
 
     @property
     def finished(self) -> bool:

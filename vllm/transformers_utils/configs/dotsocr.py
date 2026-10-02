@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers.configuration_utils import PreTrainedConfig
+from transformers.configuration_utils import PretrainedConfig
 from transformers.models.qwen2 import Qwen2Config
 
 
-class DotsVisionConfig(PreTrainedConfig):
+class DotsVisionConfig(PretrainedConfig):
     model_type: str = "dots_vit"
 
     def __init__(

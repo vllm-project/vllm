@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from functools import cache
 from io import BytesIO
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
 import numpy as np
@@ -975,26 +975,32 @@ class RandomMultiModalDataset(RandomDataset):
             dtype=np.uint8,
         )
 
+        # Create a temporary video file in memory
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         fps = 30  # frames per second
 
-        with TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir) / "video.mp4"
+        with NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
+            temp_path = temp_file.name
 
+            # Create video writer
             video_writer = cv2.VideoWriter(
-                str(temp_path), fourcc=fourcc, fps=fps, frameSize=(width, height)
+                temp_path, fourcc=fourcc, fps=fps, frameSize=(width, height)
             )
 
-            try:
-                if not video_writer.isOpened():
-                    raise RuntimeError("Failed to create video writer")
+            if not video_writer.isOpened():
+                raise RuntimeError("Failed to create video writer")
 
-                for frame in random_pixels:
-                    video_writer.write(frame)
-            finally:
-                video_writer.release()
+            for frame in random_pixels:
+                video_writer.write(frame)
 
-            return {"bytes": temp_path.read_bytes()}
+            video_writer.release()
+            temp_file.close()
+
+            # Read the video file content
+            with open(temp_path, "rb") as f:
+                video_content = f.read()
+
+            return {"bytes": video_content}
 
     def map_config_to_modality(self, config: tuple[int, int, int]) -> str:
         """Map the configuration to the modality."""
@@ -2142,9 +2148,7 @@ def get_samples(
             dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
         )
         # For the "sonnet" dataset, formatting depends on the backend.
-        # Chat-style backends leave templating to the server; completions
-        # backends need the prompt rendered client side.
-        if args.backend in ("openai-chat", "openai-responses"):
+        if args.backend == "openai-chat":
             input_requests = sonnet_dataset.sample(
                 num_requests=args.num_prompts,
                 input_len=args.sonnet_input_len,

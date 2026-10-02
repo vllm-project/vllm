@@ -455,7 +455,7 @@ def test_structured_output(
                 structured_outputs=StructuredOutputsParams(grammar="not a grammar"),
             )
             with pytest.raises(
-                VLLMValidationError, match="Invalid grammar specification"
+                VLLMValidationError, match="Failed to convert the grammar "
             ):
                 runner.llm.generate(
                     (

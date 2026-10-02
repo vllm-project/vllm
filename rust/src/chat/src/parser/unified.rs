@@ -6,8 +6,8 @@
 use std::sync::LazyLock;
 
 pub use vllm_parser::unified::{
-    Gemma4UnifiedParser, HfTemplateError, HfUnifiedParser, HyV3UnifiedParser, HyV4UnifiedParser,
-    InklingUnifiedParser, KimiK3UnifiedParser, ResponseTemplate, UnifiedParser,
+    Gemma4UnifiedParser, HyV3UnifiedParser, HyV4UnifiedParser, InklingUnifiedParser,
+    KimiK3UnifiedParser, UnifiedParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -21,11 +21,6 @@ pub mod names {
     pub const HY_V4: &str = "hy_v4";
     pub const INKLING: &str = "inkling";
     pub const KIMI_K3: &str = "kimi_k3";
-
-    /// Executes the checkpoint's Hugging Face `response_template`. Registered for
-    /// name resolution only: it is built from the model's template, never by its
-    /// registry constructor.
-    pub const HF: &str = "hf";
 }
 
 /// Constructor signature for one registered unified parser implementation.
@@ -53,8 +48,6 @@ impl UnifiedParserFactory {
         factory.register_parser::<HyV4UnifiedParser>(names::HY_V4);
         factory.register_parser::<InklingUnifiedParser>(names::INKLING);
         factory.register_parser::<KimiK3UnifiedParser>(names::KIMI_K3);
-        // Opt-in only: no model patterns map to it.
-        factory.register_parser::<HfUnifiedParser>(names::HF);
 
         factory
             .register_pattern("gemma-4", names::GEMMA4)
@@ -148,8 +141,7 @@ mod tests {
         let tokenizer = TestTokenizer::new()
             .with_regular_token("<|open|>", 1001)
             .with_regular_token("<|close|>", 1002)
-            .with_regular_token("<|sep|>", 1003)
-            .with_regular_token("<|end_of_msg|>", 1004);
+            .with_regular_token("<|sep|>", 1003);
 
         assert!(factory.contains(names::KIMI_K3));
         assert_eq!(

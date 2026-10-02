@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from typing import cast
 
 import pytest
 
@@ -16,7 +15,6 @@ from vllm.exceptions import VLLMValidationError
 from vllm.parser.kimi_k3 import KimiK3Parser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
-from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
 
 OPEN = "<|open|>"
@@ -37,10 +35,6 @@ class DummyTokenizer:
         if text == THINK_CLOSE:
             return [4, 2, 3]
         return [ord(ch) for ch in text]
-
-
-def _dummy_tokenizer() -> TokenizerLike:
-    return cast(TokenizerLike, DummyTokenizer())
 
 
 class KimiK3DelegatingParser(KimiK3Parser):
@@ -130,7 +124,7 @@ def _tools(*calls: str) -> str:
 
 
 def test_extract_tool_calls_with_response_and_typed_arguments():
-    parser = KimiK3ToolParser(_dummy_tokenizer())
+    parser = KimiK3ToolParser(DummyTokenizer())
 
     output = _response("answer") + _tools(
         _call(
@@ -156,7 +150,7 @@ def test_extract_tool_calls_with_response_and_typed_arguments():
 
 
 def test_delegating_parser_preserves_tool_calls_after_reasoning():
-    parser = KimiK3DelegatingParser(_dummy_tokenizer())
+    parser = KimiK3DelegatingParser(DummyTokenizer())
     output = (
         f"{THINK_OPEN}step{THINK_CLOSE}"
         + _response("answer")
@@ -178,7 +172,7 @@ def test_delegating_parser_preserves_tool_calls_after_reasoning():
 
 
 def test_delegating_parser_required_tool_choice_uses_xtml_parser():
-    parser = KimiK3DelegatingParser(_dummy_tokenizer())
+    parser = KimiK3DelegatingParser(DummyTokenizer())
     request = _request().model_copy(update={"tool_choice": "required"})
     output = (
         f"{THINK_OPEN}step{THINK_CLOSE}"
@@ -201,7 +195,7 @@ def test_delegating_parser_required_tool_choice_uses_xtml_parser():
 
 
 def test_delegating_parser_named_tool_choice_uses_xtml_parser():
-    parser = KimiK3DelegatingParser(_dummy_tokenizer())
+    parser = KimiK3DelegatingParser(DummyTokenizer())
     output = (
         f"{THINK_OPEN}step{THINK_CLOSE}"
         + _response("")
@@ -224,7 +218,7 @@ def test_delegating_parser_named_tool_choice_uses_xtml_parser():
 
 def test_delegating_parser_auto_no_call_strips_consumed_response_prefix():
     parser = KimiK3DelegatingParser(
-        _dummy_tokenizer(), chat_template_kwargs={"thinking": False}
+        DummyTokenizer(), chat_template_kwargs={"thinking": False}
     )
     request = _request().model_copy(
         update={"chat_template_kwargs": {"thinking": False}}
@@ -243,7 +237,7 @@ def test_delegating_parser_auto_no_call_strips_consumed_response_prefix():
 
 def test_delegating_parser_required_call_strips_consumed_response_prefix():
     parser = KimiK3DelegatingParser(
-        _dummy_tokenizer(), chat_template_kwargs={"thinking": False}
+        DummyTokenizer(), chat_template_kwargs={"thinking": False}
     )
     request = _request().model_copy(
         update={
@@ -269,7 +263,7 @@ def test_delegating_parser_required_call_strips_consumed_response_prefix():
 
 def test_delegating_parser_truncated_tools_do_not_leak_xtml():
     parser = KimiK3DelegatingParser(
-        _dummy_tokenizer(), chat_template_kwargs={"thinking": False}
+        DummyTokenizer(), chat_template_kwargs={"thinking": False}
     )
     request = _request().model_copy(
         update={
@@ -290,7 +284,7 @@ def test_delegating_parser_truncated_tools_do_not_leak_xtml():
 
 
 def test_extract_tool_calls_unescapes_attributes():
-    parser = KimiK3ToolParser(_dummy_tokenizer())
+    parser = KimiK3ToolParser(DummyTokenizer())
 
     output = _tools(_call("a&amp;b&quot;c", 1, _arg("k&amp;q", "string", "v")))
     extracted = parser.extract_tool_calls(output, _request())
@@ -301,7 +295,7 @@ def test_extract_tool_calls_unescapes_attributes():
 
 
 def test_extract_tool_calls_allows_less_than_in_attributes():
-    parser = KimiK3ToolParser(_dummy_tokenizer())
+    parser = KimiK3ToolParser(DummyTokenizer())
 
     output = _tools(_call("calc<beta", 1, _arg("foo<bar", "string", "raw")))
     extracted = parser.extract_tool_calls(output, _request())
@@ -312,7 +306,7 @@ def test_extract_tool_calls_allows_less_than_in_attributes():
 
 
 def test_extract_content_from_whitespace_degraded_markers():
-    parser = KimiK3ToolParser(_dummy_tokenizer())
+    parser = KimiK3ToolParser(DummyTokenizer())
 
     extracted = parser.extract_tool_calls(
         f"{OPEN} response {SEP}answer{CLOSE} response {SEP}",
@@ -324,7 +318,7 @@ def test_extract_content_from_whitespace_degraded_markers():
 
 
 def test_streaming_split_markers_do_not_leak():
-    parser = KimiK3ToolParser(_dummy_tokenizer())
+    parser = KimiK3ToolParser(DummyTokenizer())
     request = _request()
     previous_text = ""
     previous_ids: list[int] = []
@@ -368,7 +362,6 @@ def test_streaming_split_markers_do_not_leak():
     assert OPEN not in content
     assert SEP not in content
     assert len(tool_deltas) == 1
-    assert tool_deltas[0].function is not None
     assert tool_deltas[0].function.name == "calc"
     assert json.loads(tool_deltas[0].function.arguments) == {"x": 1}
 
@@ -376,14 +369,14 @@ def test_streaming_split_markers_do_not_leak():
 def test_tool_call_ids_are_unique_across_messages():
     output = _tools(_call("calc", 1))
 
-    first = KimiK3ToolParser(_dummy_tokenizer()).extract_tool_calls(output, _request())
-    second = KimiK3ToolParser(_dummy_tokenizer()).extract_tool_calls(output, _request())
+    first = KimiK3ToolParser(DummyTokenizer()).extract_tool_calls(output, _request())
+    second = KimiK3ToolParser(DummyTokenizer()).extract_tool_calls(output, _request())
 
     assert first.tool_calls[0].id != second.tool_calls[0].id
 
 
 def test_streaming_consumed_response_prefix_no_call_keeps_content():
-    parser = KimiK3ToolParser(_dummy_tokenizer())
+    parser = KimiK3ToolParser(DummyTokenizer())
     request = _request()
     previous_text = ""
     previous_ids: list[int] = []
@@ -413,7 +406,7 @@ def test_streaming_consumed_response_prefix_no_call_keeps_content():
 
 def test_delegating_parser_tool_choice_none_strips_xtml_and_suppresses_calls():
     parser = KimiK3DelegatingParser(
-        _dummy_tokenizer(), chat_template_kwargs={"thinking": False}
+        DummyTokenizer(), chat_template_kwargs={"thinking": False}
     )
     request = _request().model_copy(
         update={
@@ -450,7 +443,7 @@ def test_delegating_parser_tool_choice_none_strips_xtml_and_suppresses_calls():
 
 
 def test_adjust_request_keeps_xtml_markers_contiguous():
-    parser = KimiK3ToolParser(_dummy_tokenizer())
+    parser = KimiK3ToolParser(DummyTokenizer())
     request = _request()
 
     adjusted = parser.adjust_request(request)
@@ -462,7 +455,7 @@ def test_adjust_request_keeps_xtml_markers_contiguous():
 
 
 def test_adjust_request_required_uses_xtml_parser_not_json_guidance():
-    parser = KimiK3ToolParser(_dummy_tokenizer())
+    parser = KimiK3ToolParser(DummyTokenizer())
     request = _request().model_copy(update={"tool_choice": "required"})
 
     adjusted = parser.adjust_request(request)
@@ -483,7 +476,7 @@ def test_adjust_request_required_uses_xtml_parser_not_json_guidance():
     ],
 )
 def test_adjust_request_rejects_named_tool_choice(tool_request):
-    parser = KimiK3ToolParser(_dummy_tokenizer())
+    parser = KimiK3ToolParser(DummyTokenizer())
 
     with pytest.raises(VLLMValidationError) as exc_info:
         parser.adjust_request(tool_request)
@@ -519,7 +512,7 @@ def test_responses_chat_params_keeps_template_tool_choice_when_api_auto():
 
 def test_responses_required_tool_choice_uses_xtml_parser():
     parser = KimiK3DelegatingParser(
-        _dummy_tokenizer(), chat_template_kwargs={"thinking": False}
+        DummyTokenizer(), chat_template_kwargs={"thinking": False}
     )
     request = _responses_request(tool_choice="required").model_copy(
         update={"chat_template_kwargs": {"thinking": False}}
@@ -545,7 +538,7 @@ def test_responses_required_tool_choice_uses_xtml_parser():
 
 def test_responses_named_tool_choice_uses_xtml_parser():
     parser = KimiK3DelegatingParser(
-        _dummy_tokenizer(), chat_template_kwargs={"thinking": False}
+        DummyTokenizer(), chat_template_kwargs={"thinking": False}
     )
     request = _responses_request(
         tool_choice={"type": "function", "name": "calc"}

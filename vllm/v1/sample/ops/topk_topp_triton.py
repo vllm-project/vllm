@@ -103,7 +103,7 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
     return min_larger, num_min_larger
 
 
-@triton.jit(do_not_specialize_on_alignment=["BATCH_SIZE"])
+@triton.jit
 def _topk_topp_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
@@ -1225,7 +1225,7 @@ def _topp_sb_combine(
     )
 
 
-@triton.jit(do_not_specialize_on_alignment=["ROUND"])
+@triton.jit
 def _topp_sb_step_kernel(
     LOGITS,
     LOGITS_STRIDE_0,

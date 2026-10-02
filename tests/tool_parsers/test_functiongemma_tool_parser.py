@@ -27,7 +27,6 @@ def mock_request():
     request = MagicMock(spec=ChatCompletionRequest)
     request.tools = []
     request.tool_choice = "auto"
-    request.parallel_tool_calls = True
     return request
 
 

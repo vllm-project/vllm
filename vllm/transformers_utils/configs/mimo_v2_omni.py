@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 
-class Mimo_VLVisionConfig(PreTrainedConfig):
+class Mimo_VLVisionConfig(PretrainedConfig):
     model_type = "mimovl"
     base_config_key = "vision_config"
 

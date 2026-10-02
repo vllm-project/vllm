@@ -35,7 +35,9 @@ class KVConnector:
     def finish_forward(self) -> None:
         pass
 
-    def post_forward(self, finished_req_ids: set[str]) -> KVConnectorOutput | None:
+    def post_forward(
+        self, finished_req_ids: set[str], wait_for_save: bool = True
+    ) -> KVConnectorOutput | None:
         return None
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
@@ -95,7 +97,9 @@ class ActiveKVConnector(KVConnector):
     def reset_capture_state(self) -> None:
         self.kv_connector.reset_capture_state()
 
-    def post_forward(self, finished_req_ids: set[str]) -> KVConnectorOutput | None:
+    def post_forward(
+        self, finished_req_ids: set[str], wait_for_save: bool = True
+    ) -> KVConnectorOutput | None:
         if self._disabled:
             return None
 
@@ -103,7 +107,8 @@ class ActiveKVConnector(KVConnector):
             self._start_load_kv()
 
         output = KVConnectorOutput()
-        self.kv_connector.wait_for_save()
+        if wait_for_save:
+            self.kv_connector.wait_for_save()
         transfer_results = self.kv_connector.get_transfer_results(finished_req_ids)
         output.finished_sending = transfer_results.finished_sending or None
         output.finished_recving = transfer_results.finished_recving or None
@@ -124,7 +129,7 @@ class ActiveKVConnector(KVConnector):
         self.pre_forward(scheduler_output)
         self.finish_forward()
         finished_req_ids = scheduler_output.finished_req_ids
-        kv_connector_output = self.post_forward(finished_req_ids)
+        kv_connector_output = self.post_forward(finished_req_ids, wait_for_save=False)
         return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
     def set_disabled(self, disabled: bool) -> None:

@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Configuration for Moondream3 model."""
 
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 
-class Moondream3VisionConfig(PreTrainedConfig):
+class Moondream3VisionConfig(PretrainedConfig):
     """Vision encoder configuration for Moondream3."""
 
     model_type = "moondream3_vision"
@@ -43,7 +43,7 @@ class Moondream3VisionConfig(PreTrainedConfig):
         self.image_size = crop_size
 
 
-class Moondream3TextConfig(PreTrainedConfig):
+class Moondream3TextConfig(PretrainedConfig):
     """Text decoder configuration for Moondream3."""
 
     model_type = "moondream3_text"
@@ -101,7 +101,7 @@ class Moondream3TextConfig(PreTrainedConfig):
         self.num_experts_per_tok = self.moe_experts_per_token
 
 
-class Moondream3Config(PreTrainedConfig):
+class Moondream3Config(PretrainedConfig):
     """Combined configuration for Moondream3 multimodal model."""
 
     model_type = "moondream3"

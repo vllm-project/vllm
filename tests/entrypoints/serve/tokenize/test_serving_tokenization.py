@@ -19,7 +19,6 @@ from vllm.entrypoints.serve.tokenize.api_router import attach_router
 from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeChatRequest,
     TokenizeCompletionRequest,
-    TokenizeResponse,
 )
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
@@ -57,10 +56,9 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skip_tokenizer_init: bool = False
+    skip_tokenizer_init = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
-    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
@@ -96,7 +94,7 @@ async def test_tokenize_chat_skips_mm_cache_for_renderer_only_path():
     mock_engine.renderer = MagicMock()
 
     serving = _build_serving_tokenization(mock_engine)
-    serving.online_renderer.preprocess_chat = AsyncMock(  # type: ignore[method-assign]
+    serving.online_renderer.preprocess_chat = AsyncMock(
         return_value=(
             [{"role": "user", "content": "Test"}],
             [{"prompt_token_ids": [1, 2, 3]}],
@@ -110,7 +108,7 @@ async def test_tokenize_chat_skips_mm_cache_for_renderer_only_path():
 
     response = await serving.create_tokenize(request, MagicMock(headers={}))
 
-    assert isinstance(response, TokenizeResponse) and response.tokens == [1, 2, 3]
+    assert response.tokens == [1, 2, 3]
     assert (
         serving.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
         is True
@@ -126,7 +124,7 @@ async def test_tokenize_completion_skips_mm_cache_for_renderer_only_path():
     mock_engine.renderer = MagicMock()
 
     serving = _build_serving_tokenization(mock_engine)
-    serving.online_renderer.preprocess_completion = AsyncMock(  # type: ignore[method-assign]
+    serving.online_renderer.preprocess_completion = AsyncMock(
         return_value=[{"prompt_token_ids": [1, 2, 3]}]
     )
 
@@ -137,7 +135,7 @@ async def test_tokenize_completion_skips_mm_cache_for_renderer_only_path():
 
     response = await serving.create_tokenize(request, MagicMock(headers={}))
 
-    assert isinstance(response, TokenizeResponse) and response.tokens == [1, 2, 3]
+    assert response.tokens == [1, 2, 3]
     assert (
         serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
         is True

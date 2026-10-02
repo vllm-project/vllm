@@ -19,10 +19,8 @@ from tests.v1.simple_kv_offload.test_scheduler import (
     SchedulerFixture,
     _alloc_and_register,
     _allocate_cp_gpu_blocks,
-    _allocate_gpu_blocks,
     _make_cp_request,
     _make_kv_cache_config,
-    _make_scratch_kv_cache_config,
     _make_vllm_config,
     make_request,
     make_scheduler_output,
@@ -260,7 +258,6 @@ def test_block_stored_per_group_metadata_full_attention() -> None:
     )
     assert ev.block_hashes == [expected_hash_0]
     assert ev.parent_block_hash is None
-    assert req.prompt_token_ids is not None
     assert ev.token_ids == req.prompt_token_ids[0:BLOCK_SIZE]
 
     # Second block's parent_block_hash equals the first block's hash.
@@ -297,7 +294,7 @@ def test_eager_store_lora_metadata() -> None:
         f"expected lora_name='test-lora', got {ev.lora_name!r}"
     )
     assert ev.extra_keys is not None, "expected extra_keys for lora request"
-    assert any(keys is not None and "test-lora" in keys for keys in ev.extra_keys), (
+    assert any("test-lora" in keys for keys in ev.extra_keys), (
         f"expected 'test-lora' in extra_keys, got {ev.extra_keys}"
     )
     assert len(ev.token_ids) == BLOCK_SIZE
@@ -373,7 +370,6 @@ def test_finished_eager_store_emits_all_storage_events() -> None:
     secondary_event_hash = maybe_convert_block_hash(get_block_hash(secondary_hash))
     by_hash = {event.block_hashes[0]: event for event in stored}
     assert set(by_hash) == {*primary_event_hashes, secondary_event_hash}
-    assert req.prompt_token_ids is not None
     assert (
         by_hash[primary_event_hashes[0]].token_ids == req.prompt_token_ids[:BLOCK_SIZE]
     )
@@ -453,7 +449,6 @@ def test_secondary_hash_block_stored_metadata() -> None:
     by_hash = {event.block_hashes[0]: event for event in stored}
     assert set(by_hash) == {primary_event_hash, secondary_event_hash}
     assert by_hash[primary_event_hash].block_size == BLOCK_SIZE
-    assert req.prompt_token_ids is not None
     assert by_hash[primary_event_hash].token_ids == req.prompt_token_ids[:BLOCK_SIZE]
     assert by_hash[secondary_event_hash].block_size == BLOCK_SIZE // 2
     assert (
@@ -755,7 +750,6 @@ def test_mamba_align_skips_positional_event_metadata() -> None:
     stored = [e for e in events if isinstance(e, BlockStored)]
     assert len(stored) == 2
     assert {ev.group_idx for ev in stored} == {0}
-    assert req.prompt_token_ids is not None
     for idx, ev in enumerate(stored):
         assert ev.block_size == vbs
         assert ev.token_ids == req.prompt_token_ids[idx * vbs : (idx + 1) * vbs]
@@ -763,37 +757,3 @@ def test_mamba_align_skips_positional_event_metadata() -> None:
             get_block_hash(make_block_hash_with_group_id(req.block_hashes[idx], 0))
         )
         assert ev.block_hashes == [expected_hash]
-
-
-def test_scratch_group_store_emits_events_for_cacheable_groups_only() -> None:
-    """Event metadata is resolved only for prefix-cacheable groups.
-
-    A scratch group (GLM-5.3-Flash kpool tail) has a block size that does not
-    divide the hash block size, so viewing the request hashes at its block
-    size is impossible; the store must skip it and still emit BlockStored
-    for the attention blocks.
-    """
-    fix = make_events_scheduler(kv_cache_config=_make_scratch_kv_cache_config(16))
-    sched = fix.scheduler
-    gpu_pool = fix.gpu_block_pool
-    num_blocks = 2
-
-    req = make_request(num_blocks=num_blocks)
-    fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
-    scratch_block = gpu_pool.get_new_blocks(1)
-    kv_blocks = KVCacheBlocks(blocks=(fa_blocks, scratch_block))
-    req.num_computed_tokens = num_blocks * BLOCK_SIZE
-    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
-    sched_out = make_scheduler_output(
-        {req.request_id: num_blocks * BLOCK_SIZE},
-        new_reqs={req.request_id: kv_blocks.get_block_ids()},
-    )
-    meta = sched.build_connector_meta(sched_out)
-    assert sorted(meta.store_gpu_blocks) == sorted(b.block_id for b in fa_blocks)
-    simulate_store_completion(sched, meta.store_event)
-
-    events = list(sched.take_events())
-    assert len(events) == num_blocks
-    assert all(isinstance(e, BlockStored) for e in events)
-    assert {e.group_idx for e in events} == {0}
-    assert all(len(e.token_ids) == BLOCK_SIZE for e in events)

@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
-from transformers.configuration_utils import PreTrainedConfig
+from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -36,7 +36,7 @@ from vllm.sequence import IntermediateTensors
 from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
 
 
-def _get_draft_hf_config(vllm_config: VllmConfig) -> PreTrainedConfig:
+def _get_draft_hf_config(vllm_config: VllmConfig) -> PretrainedConfig:
     speculative_config = vllm_config.speculative_config
     if speculative_config is not None:
         draft_model_config = speculative_config.draft_model_config
@@ -48,7 +48,7 @@ def _get_draft_hf_config(vllm_config: VllmConfig) -> PreTrainedConfig:
 class BailingMTPSharedHead(nn.Module):
     def __init__(
         self,
-        config: PreTrainedConfig,
+        config: PretrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
     ) -> None:

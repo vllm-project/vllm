@@ -3,7 +3,6 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal
 
-import regex as re
 import torch
 import torch.nn as nn
 from transformers import AriaConfig, AriaTextConfig, BatchFeature
@@ -11,7 +10,7 @@ from transformers.models.aria.modeling_aria import AriaCrossAttention
 from transformers.models.aria.processing_aria import AriaProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
@@ -223,7 +222,6 @@ class AriaTextMoELayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
-            is_fused_checkpoint_transposed=True,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -269,17 +267,14 @@ class AriaTextModel(LlamaModel, SupportsQuant):
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    # The fused expert loader expects names without the .weight suffix.
+    # Aria packs all experts into single (transposed) fc1/fc2 tensors, which is
+    # exactly the pre-fused checkpoint layout FusedMoE self-loads once fc1/fc2
+    # are renamed to the fused gate_up_proj/down_proj names.
     hf_to_vllm_mapper = LlamaModel.hf_to_vllm_mapper | WeightsMapper(
-        orig_to_new_regex={
-            re.compile(r"experts\.fc1\.weight$"): "experts.gate_up_proj",
-            re.compile(r"experts\.fc2\.weight$"): "experts.down_proj",
-        },
-        # Quantization configs also use the expert module names.
         orig_to_new_substr={
             "experts.fc1": "experts.gate_up_proj",
             "experts.fc2": "experts.down_proj",
-        },
+        }
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -320,18 +315,22 @@ class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         vision_config = self.info.get_vision_config()
 
         max_image_size = vision_config.image_size
+        num_images = mm_counts.get("image", 0)
+
+        image_overrides = mm_options.get("image")
+        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=max_image_size,
                 height=max_image_size,
-                num_images=mm_counts.get("image", 0),
-                overrides=mm_options.get("image"),
+                num_images=num_images,
+                overrides=image_overrides,
             )
         }
 
@@ -526,9 +525,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

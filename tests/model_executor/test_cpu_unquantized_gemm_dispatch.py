@@ -6,59 +6,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers import utils
-from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch_utils import set_default_torch_dtype
-
-
-def test_dispatch_prepacks_arm_bf16_causal_conv(monkeypatch):
-    monkeypatch.setattr(
-        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.ARM
-    )
-    monkeypatch.setattr(torch.cpu, "get_capabilities", lambda: {"bf16": True})
-    monkeypatch.setattr(torch.cpu, "_is_avx512_bf16_supported", lambda: False)
-
-    packed = torch.randn(32, 4, dtype=torch.bfloat16)
-    pack_inputs = []
-
-    def pack(weight):
-        pack_inputs.append(weight.clone())
-        return packed
-
-    monkeypatch.setattr(utils.ops, "causal_conv1d_weight_pack", pack)
-    original = torch.randn(32, 1, 4, dtype=torch.bfloat16)
-    layer = torch.nn.Module()
-    layer.weight = torch.nn.Parameter(original.clone(), requires_grad=False)
-
-    utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
-
-    assert len(pack_inputs) == 1
-    # Check causal_conv1d_weight_pack received the expected weights
-    torch.testing.assert_close(pack_inputs[0], original.view(32, 4))
-    # Check we have correctly stashed the unpacked weights
-    torch.testing.assert_close(layer._cpu_unpacked_conv_weight, original.view(32, 4))
-    # Check we have correctly stored the packed weights
-    assert layer.weight.data_ptr() == packed.data_ptr()
-
-
-def test_dispatch_does_not_pack_3d_expert_weight(monkeypatch):
-    monkeypatch.setattr(
-        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.ARM
-    )
-    monkeypatch.setattr(torch.cpu, "get_capabilities", lambda: {"bf16": True})
-    monkeypatch.setattr(torch.cpu, "_is_avx512_bf16_supported", lambda: False)
-    pack_calls = []
-    monkeypatch.setattr(
-        utils.ops,
-        "causal_conv1d_weight_pack",
-        lambda weight: pack_calls.append(weight),
-    )
-
-    layer = torch.nn.Module()
-    layer.weight = torch.nn.Parameter(
-        torch.randn(8, 32, 4, dtype=torch.bfloat16), requires_grad=False
-    )
-    utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
-    assert pack_calls == []
+from vllm.platforms import current_platform
 
 
 @pytest.fixture(scope="module")
@@ -141,25 +89,3 @@ def test_dispatch_cpu_unquantized_gemm_logs_zentorch_dispatch(monkeypatch):
             expected_prepacked,
         )
     ]
-
-
-@pytest.mark.usefixtures("_mock_zentorch_linear_unary")
-@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float16, torch.float32])
-def test_dispatch_cpu_unquantized_gemm_remove_weight_keeps_dtype(
-    monkeypatch, weight_dtype
-):
-    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
-
-    layer = torch.nn.Linear(16, 8, bias=False, dtype=weight_dtype)
-    loading_dtype = (
-        torch.float32 if weight_dtype is not torch.float32 else torch.bfloat16
-    )
-    with set_default_torch_dtype(loading_dtype):
-        utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
-
-    assert layer.weight.numel() == 0
-    assert layer.weight.dtype is weight_dtype
-
-    x = torch.randn(4, 16, dtype=weight_dtype)
-    output = layer.cpu_linear(x, layer.weight, None)
-    assert not output.isnan().any()

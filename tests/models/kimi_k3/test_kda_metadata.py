@@ -49,8 +49,6 @@ PRUNED_METADATA_FIELDS = {
     "prefill_state_indices",
     "prefill_has_initial_state",
     "spec_sequence_masks",
-    "spec_sequence_masks_cpu",
-    "uniform_spec_sequence_length",
     "flashinfer_prefill_query_start_loc",
     "flashinfer_prefill_seq_order",
 }
@@ -411,7 +409,6 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
         "num_speculative_tokens",
         "full_cuda_graph",
         "is_prefilling",
-        "expected_uniform_spec_sequence_length",
     ),
     [
         pytest.param(
@@ -420,7 +417,6 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
             2,
             False,
             [False, False],
-            3,
             id="pure-spec-decode",
         ),
         pytest.param(
@@ -429,7 +425,6 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
             2,
             False,
             [True, False, False],
-            3,
             id="mixed-prefill-and-spec-decode",
         ),
         pytest.param(
@@ -438,7 +433,6 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
             0,
             False,
             [False, False],
-            None,
             id="regular-decode",
         ),
         pytest.param(
@@ -447,17 +441,7 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
             2,
             False,
             [False, False],
-            None,
             id="no-scheduled-draft-tokens",
-        ),
-        pytest.param(
-            BatchSpec(seq_lens=[50, 30], query_lens=[3, 2]),
-            [2, 1],
-            2,
-            False,
-            [False, False],
-            None,
-            id="ragged-spec-decode",
         ),
     ],
 )
@@ -467,7 +451,6 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
     num_speculative_tokens: int,
     full_cuda_graph: bool,
     is_prefilling: list[bool],
-    expected_uniform_spec_sequence_length: int | None,
 ):
     kwargs: dict[str, torch.Tensor] = {}
     if num_decode_draft_tokens is not None:
@@ -500,9 +483,6 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
 
     assert isinstance(actual, KimiK3KDAMetadata)
     _assert_matches_shared_gdn(reference, actual)
-    assert (
-        reference.uniform_spec_sequence_length == expected_uniform_spec_sequence_length
-    )
 
 
 def test_mixed_regular_and_spec_decode_uses_packed_decode_metadata():

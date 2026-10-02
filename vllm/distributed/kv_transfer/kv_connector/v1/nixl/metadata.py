@@ -48,9 +48,8 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  10: Add dense virtual transfer pages for compressed MLA caches
 #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
 #  12: Add per-region member names for PP push
-#  13: Add packed-member layouts and order-independent packed-push backend hashes
 #
-NIXL_CONNECTOR_VERSION: int = 13
+NIXL_CONNECTOR_VERSION: int = 12
 
 
 @dataclass
@@ -75,8 +74,6 @@ class NixlAgentMetadata:
     pcp_size: int = 1
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
-    # Packed member -> (byte offset in its region's block, bytes per page).
-    packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass

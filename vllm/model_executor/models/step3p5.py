@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from torch.nn.parameter import Parameter
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -24,7 +25,6 @@ from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
-    GateLinear,
     MoERunner,
     fused_moe_make_expert_params_mapping,
 )
@@ -33,6 +33,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -49,7 +50,7 @@ from vllm.v1.attention.backend import AttentionType
 if typing.TYPE_CHECKING:
     from vllm.transformers_utils.configs.step3p5 import Step3p5Config
 else:
-    from transformers import PreTrainedConfig as Step3p5Config
+    from transformers import PretrainedConfig as Step3p5Config
 
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
@@ -65,6 +66,17 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class FP32ReplicatedLinear(ReplicatedLinear):
+    """Use FP32 for higher precision."""
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        assert self.params_dtype == torch.float32
+        return super().forward(x.to(torch.float32))
 
 
 class Step3p5MLP(nn.Module):
@@ -314,12 +326,12 @@ class FusedMoEBlock(nn.Module):
                 f"the number of experts {config.moe_num_experts}."
             )
 
-        # Router logits are accumulated in FP32 for higher precision.
-        self.gate = GateLinear(
+        self.gate = FP32ReplicatedLinear(
             config.hidden_size,
             config.moe_num_experts,
-            out_dtype=torch.float32,
-            params_dtype=torch.float32,
+            bias=False,
+            quant_config=None,
+            params_dtype=torch.float32,  # Use FP32 for higher precision.
             prefix=f"{prefix}.gate",
         )
         self.use_moe_router_bias = config.use_moe_router_bias

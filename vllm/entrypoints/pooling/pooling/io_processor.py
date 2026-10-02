@@ -168,7 +168,7 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
             pooling_params = ctx.pooling_params
 
         params_seq: list[PoolingParams] = [
-            self.io_processor.merge_pooling_params(param.clone())
+            self.io_processor.merge_pooling_params(param)
             for param in self._params_to_seq(
                 pooling_params,
                 num_requests,

@@ -58,15 +58,6 @@ def flash_attn_maxseqlen_wrapper(
             max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-    supports_out = not current_platform.is_rocm()
-    if supports_out:
-        if current_platform.is_cuda() and torch.cuda.is_current_stream_capturing():
-            # workaround for encoder CUDA-graph replay paddings with NaNs edge case
-            kwargs["out"] = torch.zeros(
-                q.shape[0], q.shape[1], v.shape[-1], dtype=q.dtype, device=q.device
-            )
-        else:
-            kwargs["out"] = torch.empty_like(q, memory_format=torch.contiguous_format)
     output = flash_attn_varlen_func(
         q,
         k,
@@ -80,8 +71,6 @@ def flash_attn_maxseqlen_wrapper(
         softmax_scale=scale,
         **kwargs,
     )
-    if not supports_out:
-        output = output.contiguous()
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
     return context_layer
 
@@ -97,7 +86,7 @@ def flash_attn_maxseqlen_wrapper_fake(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q, memory_format=torch.contiguous_format)
+    return torch.empty_like(q)
 
 
 direct_register_custom_op(
@@ -183,7 +172,7 @@ def triton_attn_wrapper(
             max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-    output = torch.empty_like(q, memory_format=torch.contiguous_format)
+    output = torch.empty_like(q)
     context_attention_fwd(
         q,
         k,
@@ -211,7 +200,7 @@ def triton_attn_wrapper_fake(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q, memory_format=torch.contiguous_format)
+    return torch.empty_like(q)
 
 
 direct_register_custom_op(
@@ -252,17 +241,9 @@ def apply_sdpa(
     (batch_size x seq_len x num_heads x head_size)
     """
     q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-    if current_platform.is_zen_cpu() and hasattr(torch.ops.zentorch, "zentorch_sdpa"):
-        # Schema: (query, key, value, dropout_p=0., is_causal=False, *,
-        # attn_mask=None, scale=None) -> (attention, logsumexp).
-        # No enable_gqa: GQA is inferred from key.size(1) vs query.size(1).
-        output, _ = torch.ops.zentorch.zentorch_sdpa(
-            q, k, v, dropout_p=0.0, is_causal=False, scale=scale
-        )
-    else:
-        output = F.scaled_dot_product_attention(
-            q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
-        )
+    output = F.scaled_dot_product_attention(
+        q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
+    )
     output = einops.rearrange(output, "b h s d -> b s h d ")
     return output
 
@@ -285,7 +266,7 @@ def torch_sdpa_wrapper(
         v = v.contiguous()
 
     if cu_seqlens is None:
-        return apply_sdpa(q, k, v, scale=scale, enable_gqa=enable_gqa).contiguous()
+        return apply_sdpa(q, k, v, scale=scale, enable_gqa=enable_gqa)
 
     outputs = []
 
@@ -306,11 +287,11 @@ def torch_sdpa_wrapper_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: float | None = None,
-    cu_seqlens: torch.Tensor | None = None,
+    scale: float | None,
+    cu_seqlens: torch.Tensor | None,
     enable_gqa: bool = False,
 ) -> torch.Tensor:
-    return torch.empty_like(q, memory_format=torch.contiguous_format)
+    return torch.empty_like(q)
 
 
 direct_register_custom_op(
@@ -372,11 +353,6 @@ def flashinfer_wrapper(
     with gpu_sync_allowed():
         max_seqlen = max_seqlen.item()
 
-    output_buffer = torch.empty_like(
-        q,
-        dtype=o_data_type,
-        memory_format=torch.contiguous_format,
-    )
     output, _ = cudnn_batch_prefill_with_kv_cache(
         q,
         k,
@@ -397,7 +373,6 @@ def flashinfer_wrapper(
         k_scale=k_scale,
         v_scale=v_scale,
         o_data_type=o_data_type,
-        out=output_buffer,
     )
 
     if is_reshaped:
@@ -420,11 +395,7 @@ def vit_flashinfer_wrapper_fake(
     v_scale: torch.Tensor | None = None,
     o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(
-        q,
-        dtype=o_data_type,
-        memory_format=torch.contiguous_format,
-    )
+    return torch.empty_like(q, dtype=o_data_type or q.dtype)
 
 
 direct_register_custom_op(

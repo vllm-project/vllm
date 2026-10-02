@@ -4,12 +4,12 @@
 
 from copy import copy
 
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 
 
 def gemma4_layer_config(
-    text_config: PreTrainedConfig, layer_idx: int
-) -> PreTrainedConfig:
+    text_config: PretrainedConfig, layer_idx: int
+) -> PretrainedConfig:
     """The Gemma4 text config as it applies to one layer.
 
     Gemma4 uses a larger head dimension on its full attention layers than on its

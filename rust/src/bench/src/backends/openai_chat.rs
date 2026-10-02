@@ -96,6 +96,10 @@ impl OpenAIChatBackend {
                                 continue;
                             }
 
+                            // Python chat backend: timestamp is captured for ALL
+                            // non-DONE messages, and most_recent_timestamp is updated
+                            // unconditionally (outside `if choices:`). This differs from
+                            // completions which only timestamps content chunks.
                             let timestamp = Instant::now();
 
                             let data: ChatChunk = match serde_json::from_str(chunk) {
@@ -122,9 +126,6 @@ impl OpenAIChatBackend {
                                 }
 
                                 generated_text.push_str(content);
-                                // Only token chunks advance the request end;
-                                // the trailing usage chunk carries no token.
-                                most_recent_timestamp = timestamp;
                             }
                             // Separate `if` (not `else if`) — Dynamo may send
                             // both choices and usage in the same chunk.
@@ -133,6 +134,8 @@ impl OpenAIChatBackend {
                             {
                                 output.output_tokens = ct as usize;
                             }
+
+                            most_recent_timestamp = timestamp;
                         }
                     }
 
@@ -356,76 +359,6 @@ mod tests {
         let a: serde_json::Value = serde_json::from_slice(&fragment_payload).unwrap();
         let b: serde_json::Value = serde_json::from_slice(&chat_payload).unwrap();
         assert_eq!(a, b);
-    }
-
-    /// Serve one streaming chat response over a raw socket: `num_tokens`
-    /// content chunks back-to-back, then `usage_delay` of silence, then the
-    /// choice-less usage chunk and `[DONE]`. Returns the endpoint URL.
-    fn spawn_sse_server(num_tokens: usize, usage_delay: std::time::Duration) -> String {
-        use std::io::{BufRead, BufReader, Read, Write};
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut content_length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    content_length = v.trim().parse().unwrap();
-                }
-                if line == "\r\n" {
-                    break;
-                }
-            }
-            reader.read_exact(&mut vec![0; content_length]).unwrap();
-
-            let mut send = |s: &str| {
-                stream.write_all(s.as_bytes()).unwrap();
-                stream.flush().unwrap();
-            };
-            send("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n");
-            for _ in 0..num_tokens {
-                send("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n");
-            }
-            std::thread::sleep(usage_delay);
-            send(&format!(
-                "data: {{\"choices\":[],\"usage\":{{\"completion_tokens\":{num_tokens}}}}}\n\n"
-            ));
-            send("data: [DONE]\n\n");
-        });
-        format!("http://{addr}/v1/chat/completions")
-    }
-
-    /// The trailing usage chunk carries no token, so it must not extend the
-    /// request's end: `latency - ttft` has to equal `sum(itl)`, otherwise
-    /// E2EL and TPOT absorb whatever gap precedes the usage chunk. Mirrors the
-    /// Python fix in vllm-project/vllm#55508.
-    #[tokio::test]
-    async fn test_usage_chunk_does_not_extend_latency() {
-        // The gap before the usage chunk is the quantity under test, so a
-        // real delay is needed here; there is no observable event to wait on.
-        let usage_delay = std::time::Duration::from_millis(150);
-        let input = RequestFuncInput {
-            api_url: spawn_sse_server(3, usage_delay),
-            model: "test-model".to_string(),
-            output_len: 3,
-            ..Default::default()
-        };
-
-        let output = OpenAIChatBackend.send_request(&input, &reqwest::Client::new()).await.unwrap();
-
-        assert!(output.success, "{}", output.error);
-        assert_eq!(output.output_tokens, 3);
-        assert_eq!(output.itl.len(), 2);
-        let decode_time = output.latency - output.ttft;
-        let itl_sum: f64 = output.itl.iter().sum();
-        assert!(
-            (decode_time - itl_sum).abs() < 1e-6,
-            "latency - ttft ({decode_time}s) != sum(itl) ({itl_sum}s)"
-        );
     }
 
     /// ignore_eos and extra_body must survive the raw-splice path.

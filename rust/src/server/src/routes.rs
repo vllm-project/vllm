@@ -6,7 +6,6 @@ mod cache;
 mod collective_rpc;
 mod health;
 mod inference;
-mod kv_event_sources;
 mod load;
 mod lora;
 mod metrics;
@@ -18,7 +17,6 @@ mod server_info;
 mod sleep;
 mod tokenize;
 mod version;
-mod weight_checker;
 mod weight_transfer;
 mod world_size;
 
@@ -93,7 +91,6 @@ fn build_router_with_options(
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         .route("/version", get(version::version))
-        .route("/kv_event_sources", get(kv_event_sources::kv_event_sources))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
@@ -143,13 +140,8 @@ fn build_router_with_options(
                 post(weight_transfer::update_weight_version),
             )
             .route("/weight_info", get(weight_transfer::weight_info))
-            .route("/weight_checker", post(weight_checker::weight_checker))
             .route("/abort_requests", post(abort_requests::abort_requests))
             .route("/sleep", post(sleep::sleep))
-            .route(
-                "/release_kv_cache_memory",
-                post(sleep::release_kv_cache_memory),
-            )
             .route("/wake_up", post(sleep::wake_up))
             .route("/is_sleeping", get(sleep::is_sleeping))
             .route("/pause", post(pause::pause))

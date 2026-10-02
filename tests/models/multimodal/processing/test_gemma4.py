@@ -202,26 +202,26 @@ def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+@pytest.mark.parametrize("kwargs_on_init", [False, True])
 @pytest.mark.parametrize(
     "image_kwargs", [{"rescale_factor": 1 / 127.5}, {"max_soft_tokens": 560}]
 )
 @pytest.mark.parametrize("video_uuid", [None, "same-video"])
 def test_video_cache_is_independent_of_image_kwargs(
     model_id: str,
+    kwargs_on_init: bool,
     image_kwargs: dict[str, object],
     video_uuid: str | None,
 ):
-    """Request image overrides must not change video frames or make results
-    depend on cache warmth.
-    """
-    request_kwargs = {"images_kwargs": image_kwargs}
+    """Image overrides must not change video frames or depend on cache warmth."""
+    kwargs = {"images_kwargs": image_kwargs}
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": 1, "video": 1},
         mm_processor_cache_gb=1,
     )
     cache = MultiModalProcessorOnlyCache(ctx.model_config)
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=cache)
     hf_processor = processor.info.get_hf_processor()
     image = PILImage.new("RGB", (48, 48), color=(128, 128, 128))
     frames = np.stack([np.asarray(image)] * 2)
@@ -230,23 +230,29 @@ def test_video_cache_is_independent_of_image_kwargs(
         {"image": image, "video": [(frames, metadata)]}
     )
 
-    def process(mm_kwargs, cache):
+    def process(mm_kwargs):
         return processor(
             hf_processor.image_token + hf_processor.video_token,
             mm_items,
             mm_uuid_items={"video": [video_uuid]},
             hf_processor_mm_kwargs=mm_kwargs,
-            cache=cache,
         )
 
-    # Populate the video cache without image overrides, then change only
-    # images_kwargs on the next request. Since images_kwargs are excluded from
-    # the video hash, and must not affect the processed video, the cached result
-    # must match a fresh recomputation.
-    baseline = process({}, cache=cache)
-    cached = process(request_kwargs, cache=cache)
+    baseline = process({})
+    if kwargs_on_init:
+        ctx = build_model_context(
+            model_id,
+            mm_processor_kwargs=kwargs,
+            limit_mm_per_prompt={"image": 1, "video": 1},
+            mm_processor_cache_gb=1,
+        )
+        cache = MultiModalProcessorOnlyCache(ctx.model_config)
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=cache)
+    request_kwargs = {} if kwargs_on_init else kwargs
+    process(request_kwargs)
+    cached = process(request_kwargs)
     cache.clear_cache()
-    fresh = process(request_kwargs, cache=cache)
+    fresh = process(request_kwargs)
 
     def pixels(result, modality, field):
         return result["mm_kwargs"][modality][0][field].data

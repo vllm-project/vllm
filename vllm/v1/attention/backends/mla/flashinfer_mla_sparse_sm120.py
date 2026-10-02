@@ -125,11 +125,10 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             if num_decode_tokens:
                 topk_indices_physical = cast(
                     torch.Tensor,
-                    index_group.convert_logical_to_physical_topk(
+                    index_group.convert_decode_logical_to_physical_topk(
                         self.index_group_index,
                         topk_indices[:num_decode_tokens],
                         attn_metadata,
-                        block_stride_rows=None,
                         return_valid_counts=False,
                     ),
                 )

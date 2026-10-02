@@ -51,11 +51,7 @@ class PoolingRunner:
         self.pooling_params: dict[int, PoolingParams] = {}
         self.pooling_states: dict[int, PoolingStates] = {}
         self.prompt_token_ids: dict[int, torch.Tensor] = {}
-        pooler_config = self.model_config.pooler_config
-        self.late_interaction_runner = LateInteractionRunner(
-            enable_flash=pooler_config is None
-            or getattr(pooler_config, "enable_flash_late_interaction", True)
-        )
+        self.late_interaction_runner = LateInteractionRunner()
 
     @staticmethod
     def get_supported_tasks(model: nn.Module) -> list[PoolingTask]:

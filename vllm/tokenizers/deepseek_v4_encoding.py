@@ -224,7 +224,7 @@ def flatten_content_blocks(content: Any) -> Any:
             raise ValueError(
                 f"Unsupported content block type: {block.get('type')!r}"
             )
-    return "\n\n".join(parts)
+    return "".join(parts)
 
 
 def render_message(
@@ -267,7 +267,7 @@ def render_message(
     )
 
     role = msg.get("role")
-    content = flatten_content_blocks(msg.get("content"))
+    content = msg.get("content")
     tools = msg.get("tools")
     response_format = msg.get("response_format")
     tool_calls = msg.get("tool_calls")
@@ -337,7 +337,7 @@ def render_message(
                     parts.append(f"[Unsupported {block_type}]")
             prompt += "\n\n".join(parts)
         else:
-            prompt += content or ""
+            prompt += flatten_content_blocks(content) or ""
 
     elif role == "latest_reminder":
         prompt += LATEST_REMINDER_SP_TOKEN + latest_reminder_msg_template.format(content=content)

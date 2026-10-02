@@ -209,6 +209,7 @@ class Moondream3Processor(ProcessorMixin):
             "revision",
             "subfolder",
             "token",
+            "use_fast",
         ):
             if key in kwargs:
                 tokenizer_kwargs[key] = kwargs[key]

@@ -64,14 +64,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 len(meta.local_physical_block_ids),
                 len(meta.remote.block_ids),
             )
-            # Full local hits and aborted cleanup only notify P; no recv is awaited.
-            # On a full local hit:
-            # - Notification failure must not fail the request: its KV is local.
-            # - Receive completion must not be reported: num_external_tokens == 0,
-            #   so the scheduler never entered WAITING_FOR_REMOTE_KVS to begin with.
-            # Aborted cleanup requests have already been removed from the scheduler.
-            if meta.awaiting_kvs or any(meta.local_block_ids):
-                self._recving_metadata[req_id] = meta
+            # always store metadata for failure recovery
+            self._recving_metadata[req_id] = meta
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
@@ -84,14 +78,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
-            req_id, meta = self._ready_requests.get_nowait()
-            assert meta.remote is not None
-            if meta.remote.engine_id not in self._remote_agents:
-                # The engine was released after its handshake completed, so
-                # handshake again. This fails if the engine is gone.
-                self._background_nixl_handshake(req_id, meta.remote.engine_id, meta)
-                continue
-            self._read_blocks_for_req(req_id, meta)
+            self._read_blocks_for_req(*self._ready_requests.get_nowait())
 
         if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             # Replicated-KV PCP: only PCP rank 0 serves the KV, so this rank
@@ -162,11 +149,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
             )
             self.xfer_stats.record_kv_expired_req()
-            # KV expiry is reported separately from transport failures, so only
-            # the state cleanup side of _handle_failed_transfer runs here.
-            self._handle_failed_transfer(
-                req_id, None, self._recv_failures, record_failed_transfer=False
-            )
+            self._handle_failed_transfer(req_id, None, self._recv_failures)
             return
 
         if any(len(group) > 0 for group in meta.local_block_ids):
@@ -198,6 +181,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     "Different NIXL cache-group layouts are only supported for "
                     "pure MLA models"
                 )
+            assert len(plan.all_source_ranks) == 1
             if self.block_size != remote_info.remote_block_size:
                 raise NotImplementedError(
                     "Region-mapped NIXL transfers require matching physical block sizes"
@@ -219,6 +203,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 and meta.local_num_computed_blocks
                 and all(group >= 0 for group in local_region_groups)
                 and all(group >= 0 for group in remote_region_groups)
+                and not dcp_active
             ):
                 transfer_groups = self.kv_cache_config.transfer_group_ids
                 num_computed_blocks = [
@@ -229,34 +214,32 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 num_remote_blocks = cdiv(
                     meta.remote.num_tokens, remote_info.remote_block_size
                 )
-            elif any(local_by_region) and (
-                dcp_active
-                or remote_info.remote_physical_blocks_per_logical
+            elif (
+                remote_info.remote_physical_blocks_per_logical
                 != self._physical_blocks_per_logical_kv_block
             ):
                 raise NotImplementedError(
-                    "Region-mapped pulls with DCP or different logical block sizes "
-                    "require remote_num_tokens, per-group prefix counts "
-                    "and unshared regions"
+                    "Region-mapped pulls with different logical block sizes require "
+                    "remote_num_tokens, per-group prefix counts, unshared regions "
+                    "and DCP=1"
                 )
+            matched_local, matched_remote = self._apply_prefix_caching_by_region(
+                local_by_region,
+                remote_by_region,
+                num_computed_blocks=num_computed_blocks,
+                num_remote_blocks=num_remote_blocks,
+            )
+            meta.region_blocks_to_zero = [
+                list(blocks[len(matched) :])
+                for blocks, matched in zip(local_by_region, matched_local, strict=True)
+            ]
             read_specs = [
                 ReadSpec(
-                    rank,
-                    *self._apply_prefix_caching_by_region(
-                        local_by_region,
-                        remote_by_region,
-                        num_computed_blocks=num_computed_blocks,
-                        num_remote_blocks=num_remote_blocks,
-                        remote_rank=rank,
-                        remote_dcp_size=remote_info.remote_dcp_size,
-                    ),
+                    remote_rank=plan.all_source_ranks[0],
+                    local_block_ids=matched_local,
+                    remote_block_ids=matched_remote,
                     block_ids_by_region=True,
                 )
-                for rank in plan.all_source_ranks
-            ]
-            meta.region_blocks_to_zero = [
-                list(blocks[sum(len(spec.local_block_ids[r]) for spec in read_specs) :])
-                for r, blocks in enumerate(local_by_region)
             ]
         else:
             remote_logical_block_ids = meta.remote.block_ids
@@ -381,20 +364,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
                 if rank_to_notify != (0, read_specs[0].remote_rank):
-                    try:
-                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
-                    except Exception as e:
-                        self._log_failure(
-                            failure_type="notification_failed",
-                            msg="Remote rank will not update request state. "
-                            "This may indicate network issues.",
-                            req_id=req_id,
-                            error=e,
-                            dst_engine_id=meta.remote.engine_id,
-                            remote_rank=rank_to_notify[1],
-                            remote_agent_name=agent,
-                        )
-                        self.xfer_stats.record_failed_notification()
+                    self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
     def _read_blocks(
         self,
@@ -660,7 +630,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
                 ):
-                    self.xfer_stats.record_notification_after_expiry()
                     logger.error(
                         "Potentially invalid KV blocks for "
                         "unrecognized request %s were retrieved by "

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Correctness tests for MiniMax M3 MSA sparse attention (CUTLASS decode and
-NVFP4 KV cache)."""
+"""Correctness tests for MiniMax M3 CUTLASS sparse decode."""
 
 import math
 from types import SimpleNamespace
@@ -9,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.kernels.quantization.nvfp4_utils import dequant_nvfp4_kv_cache
 from vllm import _custom_ops as ops
 from vllm.config import AttentionConfig, CUDAGraphMode
 from vllm.forward_context import ForwardContext, override_forward_context
@@ -20,7 +18,6 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseMetadata,
     MiniMaxM3SparseMetadataBuilder,
-    MiniMaxM3SparsePrefillMetadata,
     MiniMaxM3SparseTritonImpl,
     select_main_backend_and_impl_cls,
 )
@@ -31,7 +28,6 @@ from vllm.models.minimax_m3.nvidia.model import MiniMaxM3SparseAttention
 from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
     MSACutlassDecodePlanCache,
     msa_cutlass_sparse_decode,
-    nvfp4_kv_cache_views,
     prepare_decode_metadata,
     should_prepare_decode_metadata,
 )
@@ -40,7 +36,6 @@ from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
     MiniMaxM3SparseMSADecodeMetadata,
     MiniMaxM3SparseMSAImpl,
     MiniMaxM3SparseMSAMetadataBuilder,
-    MiniMaxM3SparseMSANvfp4Backend,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -167,53 +162,6 @@ def test_msa_cutlass_decode_static_dispatch_requires_sm100(
         page_size=BLOCK_SIZE,
         topk_blocks=TOPK,
     )
-
-
-@pytest.mark.parametrize("decode_backend", ["cutlass", "triton"])
-def test_msa_cutlass_decode_static_dispatch_nvfp4_has_no_fallback(
-    decode_backend: str,
-) -> None:
-    """NVFP4 has no Triton decode, so it plans CUTLASS for any batch size."""
-    assert should_prepare_decode_metadata(
-        1,
-        DEFAULT_QUERY_LEN,
-        decode_backend=decode_backend,  # type: ignore[arg-type]
-        num_q_heads=16,
-        num_kv_heads=1,
-        kv_cache_dtype="nvfp4",
-        page_size=BLOCK_SIZE,
-        topk_blocks=TOPK,
-    )
-
-
-def test_nvfp4_selects_msa_nvfp4_backend_and_requires_sm100(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    backend_cls, impl_cls = select_main_backend_and_impl_cls(
-        topk_blocks=TOPK,
-        kv_cache_dtype="nvfp4",
-        num_kv_heads=1,
-    )
-    assert backend_cls is MiniMaxM3SparseMSANvfp4Backend
-    assert impl_cls is MiniMaxM3SparseMSAImpl
-    with pytest.raises(ValueError, match="nvfp4_4over6"):
-        select_main_backend_and_impl_cls(
-            topk_blocks=TOPK,
-            kv_cache_dtype="nvfp4_4over6",
-            num_kv_heads=1,
-        )
-
-    monkeypatch.setattr(
-        current_platform,
-        "is_device_capability_family",
-        lambda _: False,
-    )
-    with pytest.raises(ValueError, match="NVFP4"):
-        select_main_backend_and_impl_cls(
-            topk_blocks=TOPK,
-            kv_cache_dtype="nvfp4",
-            num_kv_heads=1,
-        )
 
 
 @pytest.mark.parametrize(
@@ -439,7 +387,7 @@ def test_query_fp8_stays_valid_when_cutlass_plan_appears_on_replay(
         assert capture.num_eager_breaks == 1
         assert observed_ptrs == []
 
-        decode.msa_cutlass = object()
+        decode.msa_cutlass = object()  # type: ignore[assignment]
         for _ in range(3):
             capture.replay()
         stream.synchronize()
@@ -691,391 +639,3 @@ def test_msa_cutlass_decode_matches_triton_with_interleaved_cache(
         graph.replay()
         current_platform.synchronize()
         torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.02)
-
-
-def _make_paged_layout(
-    seq_lens_list: list[int],
-) -> tuple[torch.Tensor, int]:
-    """Block table over a shuffled physical page pool."""
-    pages_per_request = [math.ceil(seq_len / BLOCK_SIZE) for seq_len in seq_lens_list]
-    num_pages = sum(pages_per_request)
-    block_table = torch.zeros(
-        len(seq_lens_list), max(pages_per_request), dtype=torch.int32, device="cuda"
-    )
-    physical_pages = torch.randperm(num_pages, dtype=torch.int32, device="cuda")
-    offset = 0
-    for request, request_pages in enumerate(pages_per_request):
-        block_table[request, :request_pages] = physical_pages[
-            offset : offset + request_pages
-        ]
-        offset += request_pages
-    return block_table, num_pages
-
-
-def _make_nvfp4_kv_cache(
-    num_pages: int,
-    num_kv_heads: int,
-    kv_cache_dtype: str,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Write random K/V through the NVFP4 ``reshape_and_cache_flash`` writer,
-    whose pages hold every head's data then every head's scales per side, and
-    repack them into head slots.
-
-    Returns the packed HND cache ``[pages, 2 * Hkv, 128, 72]`` and its BF16
-    dequantization ``[pages, Hkv, 128, 2 * 128]`` for the Triton reference.
-    """
-    num_slots = num_pages * BLOCK_SIZE
-    key = torch.randn(
-        num_slots, num_kv_heads, HEAD_DIM, dtype=torch.bfloat16, device="cuda"
-    )
-    value = torch.randn_like(key)
-    written = torch.zeros(
-        num_pages,
-        2 * num_kv_heads,
-        BLOCK_SIZE,
-        HEAD_DIM // 2 + HEAD_DIM // 16,
-        dtype=torch.uint8,
-        device="cuda",
-    )
-    k_cache, v_cache = written.transpose(1, 2).split(num_kv_heads, dim=-2)
-    ops.reshape_and_cache_flash(
-        key,
-        value,
-        k_cache,
-        v_cache,
-        torch.arange(num_slots, dtype=torch.int64, device="cuda"),
-        kv_cache_dtype,
-        k_scale,
-        v_scale,
-    )
-
-    kv_cache = torch.empty_like(written)
-    head_slot_views = iter(nvfp4_kv_cache_views(kv_cache))
-    dequantized = []
-    for side, global_scale, swizzled in (
-        (written[:, :num_kv_heads], k_scale, False),
-        (written[:, num_kv_heads:], v_scale, True),
-    ):
-        data = side.as_strided(
-            (num_pages, num_kv_heads, BLOCK_SIZE, HEAD_DIM // 2),
-            (side.stride(0), BLOCK_SIZE * HEAD_DIM // 2, HEAD_DIM // 2, 1),
-        )
-        scale = side.as_strided(
-            (num_pages, num_kv_heads, BLOCK_SIZE, HEAD_DIM // 16),
-            (side.stride(0), BLOCK_SIZE * HEAD_DIM // 16, HEAD_DIM // 16, 1),
-            side.storage_offset() + num_kv_heads * BLOCK_SIZE * HEAD_DIM // 2,
-        )
-        next(head_slot_views).copy_(data)
-        next(head_slot_views).copy_(scale)
-        dequantized.append(
-            dequant_nvfp4_kv_cache(
-                data,
-                scale,
-                global_scale.item(),
-                HEAD_DIM,
-                BLOCK_SIZE,
-                swizzled_scales=swizzled,
-            )
-        )
-    return kv_cache, torch.cat(dequantized, dim=-1).to(torch.bfloat16)
-
-
-def test_nvfp4_kv_cache_views_address_head_slots() -> None:
-    """Slot 2h (K) and 2h + 1 (V) hold head h's data then scales, so each head
-    is one contiguous run of the page: a TP rank's page is a byte slice."""
-    num_kv_heads, slot_bytes = 4, BLOCK_SIZE * (HEAD_DIM // 2 + HEAD_DIM // 16)
-    kv_cache = torch.randint(
-        0,
-        256,
-        (3, 2 * num_kv_heads, BLOCK_SIZE, HEAD_DIM // 2 + HEAD_DIM // 16),
-        dtype=torch.uint8,
-    )
-    k_data, k_sf, v_data, v_sf = nvfp4_kv_cache_views(kv_cache)
-    runs = kv_cache.view(3, num_kv_heads, 2 * slot_bytes)
-    for head in range(num_kv_heads):
-        expected = torch.cat(
-            [v[:, head].flatten(1) for v in (k_data, k_sf, v_data, v_sf)], dim=1
-        )
-        assert torch.equal(runs[:, head], expected)
-
-
-@pytest.mark.parametrize(
-    ("num_q_heads", "num_kv_heads", "num_request_pairs", "query_len", "capture"),
-    [
-        pytest.param(64, 4, 1, 1, True, id="tp1-small-batch-query-len-1"),
-        pytest.param(64, 4, 8, 8, False, id="tp1-query-len-8"),
-        pytest.param(16, 1, 16, 4, True, id="tp4-query-len-4"),
-    ],
-)
-def test_msa_cutlass_decode_nvfp4_matches_triton_on_dequantized_cache(
-    num_q_heads: int,
-    num_kv_heads: int,
-    num_request_pairs: int,
-    query_len: int,
-    capture: bool,
-) -> None:
-    """CUTLASS decode reads vLLM's packed NVFP4 pages, including swizzled V
-    scales and device global scales, as their exact dequantized values."""
-    torch.manual_seed(0)
-    seq_lens_list = [257, 513] * num_request_pairs
-    seq_lens_cpu = torch.tensor(seq_lens_list, dtype=torch.int32)
-    seq_lens = seq_lens_cpu.cuda()
-    block_table, num_pages = _make_paged_layout(seq_lens_list)
-    k_scale = torch.tensor(0.5, dtype=torch.float32, device="cuda")
-    v_scale = torch.tensor(2.0, dtype=torch.float32, device="cuda")
-    kv_cache, kv_reference = _make_nvfp4_kv_cache(
-        num_pages, num_kv_heads, "nvfp4", k_scale, v_scale
-    )
-
-    num_query_tokens = len(seq_lens_list) * query_len
-    query = torch.randn(
-        num_query_tokens, num_q_heads, HEAD_DIM, dtype=torch.bfloat16, device="cuda"
-    )
-    query_fp8 = query.to(torch.float8_e4m3fn)
-    topk = _make_topk(seq_lens_list, num_kv_heads, query_len)
-    expected = torch.empty_like(query)
-    minimax_m3_sparse_attn_decode(
-        query_fp8.to(torch.bfloat16),
-        kv_reference,
-        topk.transpose(0, 1),
-        block_table,
-        seq_lens,
-        num_kv_heads,
-        SM_SCALE,
-        expected,
-        query_len,
-    )
-
-    assert should_prepare_decode_metadata(
-        len(seq_lens_list),
-        query_len,
-        decode_backend="triton",
-        num_q_heads=num_q_heads,
-        num_kv_heads=num_kv_heads,
-        kv_cache_dtype="nvfp4",
-        page_size=BLOCK_SIZE,
-        topk_blocks=TOPK,
-    )
-    metadata = prepare_decode_metadata(
-        block_table,
-        seq_lens,
-        seq_lens_cpu,
-        query_len,
-        num_q_heads=num_q_heads,
-        num_kv_heads=num_kv_heads,
-        page_size=BLOCK_SIZE,
-        topk_blocks=TOPK,
-    )
-    actual = torch.zeros_like(query)
-
-    def run() -> None:
-        msa_cutlass_sparse_decode(
-            query_fp8,
-            kv_cache,
-            topk,
-            actual,
-            metadata,
-            scale=SM_SCALE,
-            q_scale_float=1.0,
-            k_scale_float=1.0,
-            v_scale_float=1.0,
-            k_scale=k_scale,
-            v_scale=v_scale,
-        )
-
-    if capture:
-        run()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            run()
-        actual.zero_()
-        graph.replay()
-    else:
-        run()
-    current_platform.synchronize()
-    torch.testing.assert_close(actual, expected, atol=0.05, rtol=0.05)
-
-
-@pytest.mark.parametrize(
-    ("num_q_heads", "num_kv_heads"),
-    [pytest.param(64, 4, id="tp1"), pytest.param(16, 1, id="tp4")],
-)
-def test_msa_prefill_nvfp4_matches_triton_on_dequantized_cache(
-    num_q_heads: int,
-    num_kv_heads: int,
-) -> None:
-    """MSA prefill reads NVFP4 pages as their exact dequantized values,
-    including chunked prefill over cached context, and takes q from its fp8
-    copy (the only one the fused insert writes on this path)."""
-    torch.manual_seed(0)
-    q_lens = [300, 128, 77]
-    seq_lens_list = [300, 640, 1100]
-    block_table, num_pages = _make_paged_layout(seq_lens_list)
-    k_scale = torch.tensor(0.5, dtype=torch.float32, device="cuda")
-    v_scale = torch.tensor(2.0, dtype=torch.float32, device="cuda")
-    kv_cache, kv_reference = _make_nvfp4_kv_cache(
-        num_pages, num_kv_heads, "nvfp4", k_scale, v_scale
-    )
-
-    total_q = sum(q_lens)
-    seq_lens = torch.tensor(seq_lens_list, dtype=torch.int32, device="cuda")
-    context_lens = seq_lens - torch.tensor(q_lens, dtype=torch.int32, device="cuda")
-    cu_seqlens_q = torch.zeros(len(q_lens) + 1, dtype=torch.int32, device="cuda")
-    cu_seqlens_q[1:] = torch.tensor(q_lens, device="cuda").cumsum(0)
-    cu_seqlens_k = torch.zeros_like(cu_seqlens_q)
-    cu_seqlens_k[1:] = seq_lens.cumsum(0)
-    prefill = MiniMaxM3SparsePrefillMetadata(
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        seq_lens=seq_lens,
-        context_lens=context_lens,
-        block_table=block_table,
-        max_query_len=max(q_lens),
-        max_seq_len=max(seq_lens_list),
-        total_kv_blocks=sum(math.ceil(n / BLOCK_SIZE) for n in seq_lens_list),
-    )
-    metadata = MiniMaxM3SparseMetadata(
-        seq_lens=seq_lens,
-        max_seq_len=max(seq_lens_list),
-        slot_mapping=torch.empty(total_q, dtype=torch.int64, device="cuda"),
-        num_actual_tokens=total_q,
-        num_decodes=0,
-        num_decode_tokens=0,
-        num_prefills=len(q_lens),
-        num_prefill_tokens=total_q,
-        prefill=prefill,
-    )
-
-    # Every causally visible page (<= TOPK per query), ending with the local one.
-    topk = torch.full(
-        (total_q, num_kv_heads, TOPK), -1, dtype=torch.int32, device="cuda"
-    )
-    token = 0
-    for q_len, seq_len in zip(q_lens, seq_lens_list):
-        for local_q in range(q_len):
-            visible = (seq_len - q_len + local_q) // BLOCK_SIZE + 1
-            assert visible <= TOPK
-            topk[token, :, :visible] = torch.arange(visible, device="cuda")
-            token += 1
-
-    layer_name = "model.layers.0.self_attn.attn"
-    q_scale = 0.5
-    layer = SimpleNamespace(
-        layer_name=layer_name,
-        topk_indices_buffer=topk,
-        _q_scale_float=q_scale,
-        _k_scale=k_scale,
-        _v_scale=v_scale,
-    )
-    query_fp8 = (
-        torch.randn(
-            total_q, num_q_heads * HEAD_DIM, dtype=torch.bfloat16, device="cuda"
-        )
-        / q_scale
-    ).to(torch.float8_e4m3fn)
-    query = query_fp8.to(torch.bfloat16) * q_scale
-    common = dict(
-        num_heads=num_q_heads,
-        head_size=HEAD_DIM,
-        scale=SM_SCALE,
-        num_kv_heads=num_kv_heads,
-        topk_blocks=TOPK,
-        sparse_block_size=BLOCK_SIZE,
-    )
-    forward_context = ForwardContext(
-        no_compile_layers={},
-        attn_metadata={layer_name: metadata},
-        slot_mapping={},
-    )
-    with override_forward_context(forward_context):
-        expected = MiniMaxM3SparseTritonImpl(**common).forward(
-            layer, query, kv_reference, torch.empty_like(query)
-        )
-        actual = MiniMaxM3SparseMSAImpl(**common, kv_cache_dtype="nvfp4").forward(
-            layer,
-            torch.full_like(query, float("nan")),
-            kv_cache,
-            torch.zeros_like(query),
-            query_fp8=query_fp8,
-        )
-    current_platform.synchronize()
-    torch.testing.assert_close(actual, expected, atol=0.05, rtol=0.05)
-
-
-def test_msa_triton_decode_fallback_reads_dequantized_query_fp8() -> None:
-    """With CUTLASS decode on but not planned for the batch, the Triton decode
-    fallback attends with the dequantized fp8 q, the only q written."""
-    torch.manual_seed(0)
-    num_q_heads, num_kv_heads, q_scale = 16, 1, 0.5
-    seq_lens_list = [257, 513, 129]
-    seq_lens = torch.tensor(seq_lens_list, dtype=torch.int32, device="cuda")
-    block_table, num_pages = _make_paged_layout(seq_lens_list)
-    kv_cache = (
-        torch.randn(
-            num_pages,
-            num_kv_heads,
-            BLOCK_SIZE,
-            2 * HEAD_DIM,
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
-        * 0.25
-    ).to(torch.float8_e4m3fn)
-    num_tokens = len(seq_lens_list)
-    metadata = MiniMaxM3SparseMetadata(
-        seq_lens=seq_lens,
-        max_seq_len=max(seq_lens_list),
-        slot_mapping=torch.empty(num_tokens, dtype=torch.int64, device="cuda"),
-        num_actual_tokens=num_tokens,
-        num_decodes=num_tokens,
-        num_decode_tokens=num_tokens,
-        num_prefills=0,
-        num_prefill_tokens=0,
-        decode=MiniMaxM3SparseMSADecodeMetadata(
-            seq_lens=seq_lens,
-            block_table=block_table,
-            decode_query_len=1,
-            msa_cutlass=None,
-        ),
-    )
-    layer_name = "model.layers.0.self_attn.attn"
-    layer = SimpleNamespace(
-        layer_name=layer_name,
-        topk_indices_buffer=_make_topk(seq_lens_list, num_kv_heads, 1),
-        _q_scale_float=q_scale,
-    )
-    query_fp8 = torch.randn(
-        num_tokens, num_q_heads * HEAD_DIM, dtype=torch.bfloat16, device="cuda"
-    ).to(torch.float8_e4m3fn)
-    query = query_fp8.to(torch.bfloat16) * q_scale
-    common = dict(
-        num_heads=num_q_heads,
-        head_size=HEAD_DIM,
-        scale=SM_SCALE,
-        num_kv_heads=num_kv_heads,
-        kv_cache_dtype="fp8",
-        topk_blocks=TOPK,
-        sparse_block_size=BLOCK_SIZE,
-    )
-    impl = MiniMaxM3SparseMSAImpl(**common, msa_decode_backend="cutlass")
-    assert impl.use_cutlass_decode
-    forward_context = ForwardContext(
-        no_compile_layers={},
-        attn_metadata={layer_name: metadata},
-        slot_mapping={},
-    )
-    with override_forward_context(forward_context):
-        expected = MiniMaxM3SparseTritonImpl(**common).forward(
-            layer, query, kv_cache, torch.empty_like(query)
-        )
-        actual = impl.forward(
-            layer,
-            torch.full_like(query, float("nan")),
-            kv_cache,
-            torch.zeros_like(query),
-            query_fp8=query_fp8,
-        )
-    current_platform.synchronize()
-    torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.02)

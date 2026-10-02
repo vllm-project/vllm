@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
-use winnow::combinator::{alt, delimited, eof, opt, preceded, repeat, seq, terminated};
+use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
@@ -293,16 +293,13 @@ fn parse_invoke_params(invoke_body: &str, tokens: DsmlTokens) -> ModalResult<Vec
 }
 
 /// Parse a DSML parameter block.
-///
-/// The `string` attribute is optional: the model sometimes omits it, and
-/// failing the whole invoke would leak the block into the text output. A
-/// missing or non-`"true"` value is treated like `string="false"`.
 fn parse_parameter(input: &mut &str, tokens: DsmlTokens) -> ModalResult<DsmlParameter> {
     seq! {DsmlParameter {
         _: literal(tokens.parameter_start),
         _: ws1,
         name: name_attr.map(|name: &str| name.to_string()),
-        is_string: opt(preceded(ws1, string_attr)).map(|value| value == Some("true")),
+        _: ws1,
+        is_string: string_attr.map(|value| value == "true"),
         _: ws0,
         _: ">",
         value: take_until(0.., tokens.parameter_end).map(str::to_string),
@@ -318,7 +315,7 @@ fn name_attr<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
 
 /// Parse a string attribute.
 fn string_attr<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
-    delimited("string=\"", take_until(0.., "\""), "\"").parse_next(input)
+    delimited("string=\"", alt(("true", "false")), "\"").parse_next(input)
 }
 
 /// Parse a DSML name attribute.

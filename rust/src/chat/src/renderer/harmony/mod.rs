@@ -188,8 +188,7 @@ fn peel_leading_instructions(
         )),
         ChatMessage::User { .. }
         | ChatMessage::Assistant { .. }
-        | ChatMessage::ToolResponse { .. }
-        | ChatMessage::Custom { .. } => Ok((None, None, messages)),
+        | ChatMessage::ToolResponse { .. } => Ok((None, None, messages)),
     }
 }
 
@@ -328,9 +327,6 @@ fn to_harmony_message(
                 .with_channel("commentary")
                 .with_recipient("assistant"),
             ]
-        }
-        ChatMessage::Custom { role, .. } => {
-            return Err(Error::UnsupportedChatRole { role: role.clone() });
         }
     })
 }
