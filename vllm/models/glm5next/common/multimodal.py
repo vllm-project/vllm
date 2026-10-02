@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash vision tower and multimodal processor."""
 
+import math
 from collections.abc import Mapping
 from functools import partial
 from typing import Any
@@ -671,6 +672,29 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         if (override := mm_kwargs.get("max_pixels")) is not None:
             return int(override)
         return self._processor_pixel_budget(self.get_hf_processor().video_processor)[1]
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        # The inherited square probe strands budget whenever the token
+        # ceiling is not a perfect square: with max_image_tokens=8000 the
+        # square refits to 2492x2492 (89x89 = 7921 tokens) while a
+        # 2240x2800 canvas reaches 80x100 = 8000, so the encoder cache came
+        # up short of the processor's own maximum and refused valid images
+        # (#59539). Factor the ceiling exactly instead of probing a square.
+        vision_config = self.get_hf_config().vision_config
+        factor = (
+            vision_config.patch_size
+            * vision_config.spatial_merge_size
+            * self.get_hf_processor().image_processor.patch_expand_factor
+        )
+        pixels_per_token = vision_config.temporal_patch_size * factor * factor
+        max_tokens = max(1, self._get_image_max_pixels() // pixels_per_token)
+        short_side = math.isqrt(max_tokens)
+        while max_tokens % short_side:
+            short_side -= 1
+        return ImageSize(
+            width=(max_tokens // short_side) * factor,
+            height=short_side * factor,
+        )
 
     def _get_video_second_idx_glm46v(
         self, metadata: dict[str, Any], total_frames: int
