@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import ClassVar, cast
 
 import torch
@@ -20,10 +21,15 @@ from vllm.model_executor.layers.attention.attention import (
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    Qwen4ExpQSAQKVIndexerLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import (
@@ -411,6 +417,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.use_fused_qsa_prepare = (
             self.use_fused_qk_norm_rope_gate and self.indexer.use_fused_pre_indexer
         )
+        self.fuse_indexer_projection = vllm_config.lora_config is None
+        if self.fuse_indexer_projection:
+            self.index_qk_size = self.indexer.index_qk_proj.output_size
+            self.qkv_proj = Qwen4ExpQSAQKVIndexerLinear(
+                self.qkv_proj,
+                self.index_qk_size,
+                model.without_modelopt_fp4(quant_config),
+            )
+            del self.indexer.index_qk_proj
+
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         # PACKED selection buffer: the trailing column holds each row's
         # valid-entry count (written by the expand kernel) — never a token
@@ -431,6 +447,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if self.layer_name in static_context:
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         static_context[self.layer_name] = self
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        mapper = None
+        if self.fuse_indexer_projection:
+            mapper = WeightsMapper(
+                orig_to_new_stacked={
+                    "indexer.index_qk_proj.": ("qkv_proj.", 3),
+                }
+            )
+        return AutoWeightsLoader(self).load_weights(weights, mapper=mapper)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
@@ -518,6 +544,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        if self.fuse_indexer_projection:
+            qkv, projected_qk = qkv.split(
+                [2 * self.q_size + 2 * self.kv_size, self.index_qk_size], dim=-1
+            )
+        else:
+            projected_qk, _ = self.indexer.index_qk_proj(hidden_states)
         num_tokens = hidden_states.shape[0]
         if not self.use_fused_qsa_prepare:
             q, k, v, gate = self._project_qkv_gate(qkv, positions)
@@ -529,8 +561,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             # Norm/RoPE/gate and the K/V cache write happen inside _run_qsa.
             query = key = value = gate = None
         attn_output = qkv.new_empty(num_tokens, self.num_heads, self.head_dim)
-        # Keep the index projection outside the eager break.
-        projected_qk, _ = self.indexer.index_qk_proj(hidden_states)
         self._run_qsa(
             projected_qk,
             positions,

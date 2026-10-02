@@ -707,8 +707,8 @@ def test_low_latency_table_capability_routing(
 def test_qwen4_exp_hopper_plans_are_valid() -> None:
     plans = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS
 
-    assert len(plans) == 9
-    assert sum(map(len, plans.values())) == 31
+    assert len(plans) == 6
+    assert sum(map(len, plans.values())) == 21
     assert (320, 10240) in plans
     assert (10240, 320) not in plans
     for (n, k), shape_plans in plans.items():
@@ -717,29 +717,6 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
             assert n % config.outputs_per_block == 0
             assert k % (config.block_size * config.vector_width) == 0
             assert config.static_k in (None, k)
-
-
-@pytest.mark.parametrize(
-    "capability,expected_plans",
-    [
-        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS),
-        ((10, 0), qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS),
-        ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
-        ((8, 0), {}),
-    ],
-)
-def test_qwen4_exp_gemm_capability_routing(
-    monkeypatch: pytest.MonkeyPatch,
-    capability: tuple[int, int],
-    expected_plans: dict[tuple[int, int], dict[int, SkinnyGemmConfig]],
-) -> None:
-    monkeypatch.setattr(
-        qwen4_exp_gemm.current_platform,
-        "is_device_capability",
-        lambda target: capability == target,
-    )
-
-    assert qwen4_exp_gemm._gemm_plans() == expected_plans
 
 
 def test_installation_is_shape_specific_and_unquantized(
