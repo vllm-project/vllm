@@ -138,6 +138,7 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
+        self._checkpoint_scheduler_pause_state: PauseState | None = None
         self._pooler_config_logged = False
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
@@ -1009,7 +1010,10 @@ class EngineCore:
             mode: Pause mode - how to deal with any existing requests.
 
         """
+        pause_state = self.scheduler.pause_state
         pause_future = self.pause_scheduler(mode=mode, clear_cache=True)
+        if self._checkpoint_scheduler_pause_state is None:
+            self._checkpoint_scheduler_pause_state = pause_state
 
         model_executor = self.model_executor
         if pause_future is None:
@@ -1032,7 +1036,14 @@ class EngineCore:
     def resume(self) -> None:
         """Resume GPU state from CUDA checkpoint."""
         self.model_executor.resume()
-        self.resume_scheduler()
+        pause_state = self._checkpoint_scheduler_pause_state
+        if pause_state is not None:
+            if pause_state == PauseState.UNPAUSED:
+                self.resume_scheduler()
+            else:
+                # Restore a pause held before checkpoint suspension.
+                self.scheduler.set_pause_state(pause_state)
+            self._checkpoint_scheduler_pause_state = None
 
     def is_checkpoint_suspended(self) -> bool:
         """Check if engine is checkpoint-suspended."""
