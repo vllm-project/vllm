@@ -167,6 +167,7 @@ SparseIndexerTopkBackend = Literal[
     "per_row",
     "flashinfer",
     "torch",
+    "aiter",
 ]
 
 # Architectures whose model code wires up the flashinfer moe_ep experts. MTP
@@ -289,6 +290,8 @@ class KernelConfig:
     - "per_row": Use vLLM's top_k_per_row_decode kernel
     - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
     - "torch": Use a plain torch.topk implementation (debug reference)
+    - "aiter": Use AITER's top_k_per_row_decode kernel (ROCm gfx950 only,
+      requires VLLM_ROCM_USE_AITER)
 
     Explicit values raise RuntimeError when their constraints are not met.
     """
