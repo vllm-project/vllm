@@ -110,6 +110,10 @@ def _xpress_latent_kernel(
         H: MLP hidden size.
         BP: B rounded up to a power of two (tile size).
         HT: MLP hidden tile size.
+        DO_MLP: whether to run the SwiGLU MLP here. False stops after the mixer
+            and hands its output back, so the caller can run the SwiGLU as
+            cuBLAS GEMMs instead -- see the comment at the MLP loop for why
+            that is faster.
 
     """
     n = tl.program_id(0).to(tl.int64)

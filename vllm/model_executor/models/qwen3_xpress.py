@@ -267,7 +267,7 @@ class Qwen3XPressModel(DFlashQwen3Model):
         )
         self.draft_vocab_size = draft_vocab_size
         if getattr(config, "xpress_compile_head", True):
-            self.xpress_head.refine_bias = torch.compile(
+            self.xpress_head.refine_bias = torch.compile(  # type: ignore[method-assign]
                 self.xpress_head.refine_bias, dynamic=False
             )
             logger.info("XPress head refine_bias wrapped with torch.compile")
@@ -276,6 +276,7 @@ class Qwen3XPressModel(DFlashQwen3Model):
 class Qwen3XPressForCausalLM(DFlashQwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
+        assert vllm_config.speculative_config is not None
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:

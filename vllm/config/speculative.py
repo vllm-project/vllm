@@ -635,7 +635,7 @@ class SpeculativeConfig:
             "extract_hidden_states",
             "dflash",
             "dspark",
-                    )
+        )
         factors.append(uses_aux_hidden_states)
         if self.method == "dspark":
             factors.append(self.enable_adaptive_verification)
@@ -1329,7 +1329,7 @@ class SpeculativeConfig:
                     "eagle3",
                     "dflash",
                     "dspark",
-                                    ):
+                ):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
