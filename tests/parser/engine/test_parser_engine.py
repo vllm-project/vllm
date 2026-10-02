@@ -20,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaToolCall,
     FunctionDefinition,
+    TokenPhaseCounts,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -954,6 +955,90 @@ _CombinedReasoningAdapter, _CombinedToolAdapter = make_adapters(_CombinedTestEng
 class _CombinedDelegating(DelegatingParser):
     reasoning_parser_cls = _CombinedReasoningAdapter
     tool_parser_cls = _CombinedToolAdapter
+
+
+class _CombinedReasoningOnlyDelegating(DelegatingParser):
+    reasoning_parser_cls = _CombinedReasoningAdapter
+
+
+def test_parser_engine_classifies_reasoning_content_and_control_tokens():
+    parser = _CombinedTestEngine(make_mock_tokenizer(_VOCAB))
+    token_ids = [ord("a"), ord("b"), 201, ord("c")]
+    parser.parse(
+        "ab</think>c",
+        _make_delegating_request(),
+        model_output_token_ids=token_ids,
+    )
+    counts = parser.classify_token_phases(token_ids)
+    assert counts == TokenPhaseCounts(
+        reasoning=2,
+        content=1,
+        unclassified=1,
+    )
+    assert counts.reasoning == parser.count_reasoning_tokens(token_ids)
+
+
+def test_delegating_engine_adapter_does_not_provisionally_count_reasoning_as_content():
+    parser = _CombinedReasoningOnlyDelegating(make_mock_tokenizer(_VOCAB))
+
+    assert parser.classify_token_phases([ord("a"), ord("b")]) == TokenPhaseCounts(
+        reasoning=2,
+        content=0,
+        unclassified=0,
+    )
+    token_ids = [ord("a"), ord("b"), 201, ord("c")]
+    assert parser.classify_token_phases(token_ids) == TokenPhaseCounts(
+        reasoning=2,
+        content=1,
+        unclassified=1,
+    )
+
+
+def test_delegating_streaming_engine_classifies_content_after_reasoning_transition():
+    parser = _CombinedReasoningOnlyDelegating(make_mock_tokenizer(_VOCAB))
+    reasoning_ids = [ord("a"), ord("b")]
+    parser.reasoning_parser.extract_reasoning_streaming(
+        "", "ab", "ab", [], reasoning_ids, reasoning_ids
+    )
+    assert parser.classify_token_phases(reasoning_ids) == TokenPhaseCounts(
+        reasoning=2,
+        content=0,
+        unclassified=0,
+    )
+
+    boundary_ids = [201]
+    parser.reasoning_parser.extract_reasoning_streaming(
+        "ab",
+        "ab</think>",
+        "</think>",
+        reasoning_ids,
+        reasoning_ids + boundary_ids,
+        boundary_ids,
+    )
+    all_ids = reasoning_ids + boundary_ids + [ord("c"), ord("d")]
+    assert parser.classify_token_phases(all_ids) == TokenPhaseCounts(
+        reasoning=2,
+        content=2,
+        unclassified=1,
+    )
+
+
+def test_delegating_streaming_engine_keeps_truncated_reasoning_out_of_content():
+    parser = _CombinedReasoningOnlyDelegating(make_mock_tokenizer(_VOCAB))
+    token_ids = [ord("a"), ord("b")]
+    parser.reasoning_parser.extract_reasoning_streaming(
+        "", "ab", "ab", [], token_ids, token_ids
+    )
+
+    # Stream finalization emits a synthetic REASONING_END to flush parser
+    # state, but no input token actually transitioned into content.
+    parser.reasoning_parser.finish_streaming()
+
+    assert parser.classify_token_phases(token_ids) == TokenPhaseCounts(
+        reasoning=2,
+        content=0,
+        unclassified=0,
+    )
 
 
 def test_parser_manager_preserves_shared_engine_adapters(monkeypatch):

@@ -176,11 +176,18 @@ class StreamingParserEngine:
     def reasoning_token_count(self) -> int:
         return self._reasoning_token_count
 
-    def _record_reasoning_tokens(self, events: Sequence[SemanticEvent]) -> None:
+    @property
+    def content_token_count(self) -> int:
+        return self._content_token_count
+
+    def _record_phase_tokens(self, events: Sequence[SemanticEvent]) -> None:
         self._reasoning_token_count += sum(
             event.token_count
             for event in events
             if event.type == EventType.REASONING_CHUNK
+        )
+        self._content_token_count += sum(
+            event.token_count for event in events if event.type == EventType.TEXT_CHUNK
         )
 
     def _reset_args_state(self) -> None:
@@ -209,6 +216,7 @@ class StreamingParserEngine:
         self.tool_index = -1
         self._ever_had_token_ids = False
         self._reasoning_token_count = 0
+        self._content_token_count = 0
         # DO NOT reset skip_tool_parsing here — callers set it before
         # calling methods that trigger reset() (e.g. extract_reasoning),
         # and clearing it silently breaks non-streaming tool-call-as-
@@ -246,7 +254,7 @@ class StreamingParserEngine:
                 events = self._emit_for_state(
                     delta_text, token_count=len(delta_token_ids)
                 )
-                self._record_reasoning_tokens(events)
+                self._record_phase_tokens(events)
                 return events
 
         scanner_items = self._scanner.scan(delta_text, delta_token_ids)
@@ -261,11 +269,11 @@ class StreamingParserEngine:
                 )
             else:
                 events = self._process_lex_tokens(lex_tokens)
-            self._record_reasoning_tokens(events)
+            self._record_phase_tokens(events)
             return events
 
         events = self._process_scanner_items(scanner_items)
-        self._record_reasoning_tokens(events)
+        self._record_phase_tokens(events)
         return events
 
     def _process_scanner_items(
@@ -345,7 +353,7 @@ class StreamingParserEngine:
                 self._message_header_token_count = 0
             self.state = ParserState.CONTENT
 
-        self._record_reasoning_tokens(events)
+        self._record_phase_tokens(events)
         return events
 
     def parse_complete(self, text: str) -> list[SemanticEvent]:

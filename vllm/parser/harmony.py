@@ -29,6 +29,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     DeltaToolCall,
     FunctionCall,
+    TokenPhaseCounts,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -90,6 +91,10 @@ class ChunkResult:
 
 
 class HarmonyParser(DelegatingParser):
+    @classmethod
+    def supports_token_phase_classification(cls) -> bool:
+        return True
+
     def __init__(self, tokenizer, tools=None, *args, **kwargs):
         super().__init__(tokenizer, tools, *args, **kwargs)
 
@@ -113,6 +118,7 @@ class HarmonyParser(DelegatingParser):
 
         self._num_counted_tokens = 0
         self._num_reasoning_tokens = 0
+        self._num_content_tokens = 0
 
         # For error recovery
         self._current_message_tokens: list[int] = []
@@ -334,6 +340,7 @@ class HarmonyParser(DelegatingParser):
 
         segments: list[Segment] = []
         reasoning_token_count = 0
+        encoding = get_encoding()
         for token_id in token_ids:
             try:
                 self._harmony_parser.process(token_id)
@@ -354,6 +361,11 @@ class HarmonyParser(DelegatingParser):
             if self._is_reasoning_token(token_id, channel, recipient):
                 reasoning_token_count += 1
 
+            segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
+            is_payload_token = not encoding.is_special_token(token_id)
+            if segment_type == _SegmentType.CONTENT and is_payload_token:
+                self._num_content_tokens += 1
+
             segments.append(
                 Segment(
                     channel=channel,
@@ -372,21 +384,55 @@ class HarmonyParser(DelegatingParser):
             reasoning_token_count=reasoning_token_count,
         )
 
+    def classify_token_phases(
+        self, token_ids: Sequence[int]
+    ) -> TokenPhaseCounts | None:
+        if self._num_counted_tokens != len(token_ids):
+            return self._analyze_complete_output(token_ids)
+        return TokenPhaseCounts(
+            reasoning=self._num_reasoning_tokens,
+            content=self._num_content_tokens,
+            unclassified=max(
+                0,
+                self._num_counted_tokens
+                - self._num_reasoning_tokens
+                - self._num_content_tokens,
+            ),
+        )
+
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         if len(token_ids) == self._num_counted_tokens:
             return self._num_reasoning_tokens
 
+        return self._analyze_complete_output(token_ids).reasoning
+
+    def _analyze_complete_output(self, token_ids: Sequence[int]) -> TokenPhaseCounts:
+        """Analyze a complete output without changing streaming state."""
         parser = get_streamable_parser_for_assistant()
-        count = 0
+        reasoning_token_count = 0
+        content_token_count = 0
+        encoding = get_encoding()
         for token_id in token_ids:
             try:
                 parser.process(token_id)
             except HarmonyError:
                 continue
+            channel = parser.current_channel
             recipient = self._normalize_recipient(parser.current_recipient)
-            if self._is_reasoning_token(token_id, parser.current_channel, recipient):
-                count += 1
-        return count
+            if self._is_reasoning_token(token_id, channel, recipient):
+                reasoning_token_count += 1
+            segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
+            is_payload_token = not encoding.is_special_token(token_id)
+            if segment_type == _SegmentType.CONTENT and is_payload_token:
+                content_token_count += 1
+        return TokenPhaseCounts(
+            reasoning=reasoning_token_count,
+            content=content_token_count,
+            unclassified=max(
+                0,
+                len(token_ids) - reasoning_token_count - content_token_count,
+            ),
+        )
 
     @staticmethod
     def _is_reasoning_token(

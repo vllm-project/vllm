@@ -118,6 +118,9 @@ async def init_generate_state(
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_per_request_metrics=args.enable_per_request_metrics,
+            enable_per_request_output_token_metrics=(
+                args.enable_per_request_output_token_metrics
+            ),
             enable_log_outputs=args.enable_log_outputs,
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
@@ -145,6 +148,9 @@ async def init_generate_state(
         enable_log_outputs=args.enable_log_outputs,
         enable_log_deltas=args.enable_log_deltas,
         enable_per_request_metrics=args.enable_per_request_metrics,
+        enable_per_request_output_token_metrics=(
+            args.enable_per_request_output_token_metrics
+        ),
     )
     state.openai_serving_chat = (
         OpenAIServingChat(**_chat_kwargs) if "generate" in supported_tasks else None

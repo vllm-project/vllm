@@ -815,6 +815,45 @@ class TestProcessChunk:
             (s.channel, s.recipient, s.delta) for s in result.segments if s.delta
         ] == [("final", None, "Hello")]
 
+    def test_token_phase_counts_remain_stable_after_reparse(
+        self, harmony_parser, chat_request
+    ):
+        token_ids = get_model_output_tokens(
+            [assistant("😀😃😄", "analysis"), assistant("😀😃😄", "final")]
+        )
+
+        chunk = harmony_parser.process_chunk(token_ids)
+        harmony_parser.flush()
+        counts = harmony_parser.classify_token_phases(token_ids)
+        assert counts is not None
+        assert counts.reasoning == chunk.reasoning_token_count
+        assert counts.reasoning == harmony_parser.count_reasoning_tokens(token_ids)
+        assert counts.content == 5
+        assert counts.reasoning + counts.content + counts.unclassified == len(token_ids)
+
+        # The non-streaming metrics path first consumes deltas for timing and
+        # then parses the complete output to build the response.
+        harmony_parser.parse(
+            get_encoding().decode_utf8(token_ids),
+            chat_request,
+            model_output_token_ids=token_ids,
+        )
+        assert harmony_parser.count_reasoning_tokens(token_ids) == counts.reasoning
+        assert harmony_parser.classify_token_phases(token_ids) == counts
+
+    def test_tool_call_tokens_follow_usage_reasoning_accounting(self, harmony_parser):
+        token_ids = get_model_output_tokens(
+            [tool_call("functions.get_weather", '{"location": "SF"}')]
+        )
+
+        harmony_parser.process_chunk(token_ids)
+        counts = harmony_parser.classify_token_phases(token_ids)
+        assert counts is not None
+        assert counts.reasoning > 0
+        assert counts.reasoning == harmony_parser.count_reasoning_tokens(token_ids)
+        assert counts.content == 0
+        assert counts.reasoning + counts.unclassified == len(token_ids)
+
     def test_constrained_output_segment_recipient_normalized(self, harmony_parser):
         result = harmony_parser.process_chunk(
             encode_output(
