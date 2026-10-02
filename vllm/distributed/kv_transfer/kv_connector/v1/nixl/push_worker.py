@@ -42,6 +42,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 import msgspec
+import regex as re
 import torch
 
 from vllm import envs
@@ -80,20 +81,23 @@ logger = init_logger(__name__)
 # while active, slightly more CPU.
 _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 
-# Per-layer write task handed from the forward thread to the writer:
-# (req_id, layer_idx, cuda_event, enqueue_time). ``cuda_event`` is ``None``
-# for completeness-sweep tasks, which are enqueued post-forward when all KV
-# is already resident and therefore need no gating.
+# Per-region write task handed from the forward thread to the writer:
+# (req_id, region_idx, cuda_event, enqueue_time). ``region_idx`` indexes the
+# NIXL region list (``region_names`` order, i.e. the transfer plan's order).
+# ``cuda_event`` fences the GPU work that produced the region; sweep tasks
+# carry an event recorded at seal (end of the forward's GPU work).
 LayerWriteTask = tuple[ReqId, int, torch.cuda.Event | None, float]
+
+# Model-layer prefix (e.g. ``model.layers.3``) used to group a layer's regions.
+_MODEL_LAYER_PREFIX_RE = re.compile(r"^(.*?\.layers\.\d+)\.")
 
 
 @dataclass
 class _LayerPushPlan:
     """Cached per-request WRITE geometry for the layer-wise push path.
 
-    The descriptor lists cover every region of every layer in region-major
-    order, so layer ``i``'s slice is ``[i * span, (i + 1) * span)`` with
-    ``span = regions_per_layer * num_blocks``.
+    The descriptor lists cover every NIXL region in region-major order, so
+    region ``r``'s slice is ``[r * num_blocks, (r + 1) * num_blocks)``.
     """
 
     local_xfer_handle: int
@@ -101,7 +105,6 @@ class _LayerPushPlan:
     local_descs: list[int]
     remote_descs: list[int]
     num_blocks: int
-    regions_per_layer: int
     decode_engine_id: str
     notif_id: bytes
 
@@ -185,9 +188,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # handshake before the request is failed (blocks freed via lease; the
         # D watchdog fails it).
         self._lw_defer_timeout = envs.VLLM_NIXL_LAYERWISE_DEFER_TIMEOUT
-        # Ordered layer names as registered (index == region group order).
+        # Name of each NIXL region, in transfer-plan order (index == region
+        # index == descriptor slice). NOT ``kv_caches`` order, which differs
+        # (e.g. DSA indexer caches are grouped first).
         self._lw_layer_names: list[str] = []
-        self._lw_layer_index: dict[str, int] = {}
+        # Hooked layer name -> region indices that layer's CUDA event fences.
+        self._lw_layer_index: dict[str, list[int]] = {}
         # Forward-thread -> writer: per-layer write tasks.
         self._lw_task_q: queue.Queue[LayerWriteTask] = queue.Queue()
         # Writer-owned: tasks awaiting a D registration / handshake.
@@ -220,13 +226,24 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 "NixlPushConnector does not support mixed-memory KV caches"
             )
         if self._layerwise:
-            self._lw_layer_names = list(kv_caches.keys())
-            self._lw_layer_index = {
-                name: i for i, name in enumerate(self._lw_layer_names)
-            }
+            from vllm.config import get_layers_from_vllm_config
+            from vllm.model_executor.layers.attention.attention import Attention
+            from vllm.model_executor.layers.attention.mla_attention import (
+                MLAAttention,
+            )
+
+            attn_layer_names = set(
+                get_layers_from_vllm_config(self.vllm_config, Attention, kv_caches)
+            ) | set(
+                get_layers_from_vllm_config(self.vllm_config, MLAAttention, kv_caches)
+            )
+            self._lw_layer_names = list(self.region_names)
+            self._lw_layer_index = self._lw_build_hook_index(
+                self._lw_layer_names, attn_layer_names
+            )
             logger.info(
-                "NIXL layer-wise push ENABLED: %d layers, %d regions",
-                len(self._lw_layer_names),
+                "NIXL layer-wise push ENABLED: %d hook names, %d regions",
+                len(self._lw_layer_index),
                 self.num_regions,
             )
         if self._push_writer_thread is None:
@@ -237,6 +254,35 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
+
+    @staticmethod
+    def _lw_build_hook_index(
+        region_names: list[str], attn_layer_names: set[str]
+    ) -> dict[str, list[int]]:
+        """Map each hook-firing layer name to the region indices it fences.
+
+        A region is always claimed by the hook of its own layer name. Regions
+        with no attention layer of their own (e.g. the DSA ``indexer.k_cache``,
+        which never fires ``save_kv_layer``) are also claimed by the attention
+        layer of the same model layer: they are produced earlier in that
+        layer's forward, so its attention event fences them too. Regions with
+        no unique attention owner are left to the seal sweep.
+        """
+        index: dict[str, list[int]] = defaultdict(list)
+        attn_by_prefix: dict[str, list[str]] = defaultdict(list)
+        for name in attn_layer_names:
+            m = _MODEL_LAYER_PREFIX_RE.match(name)
+            if m is not None:
+                attn_by_prefix[m.group(1)].append(name)
+        for region_idx, name in enumerate(region_names):
+            index[name].append(region_idx)
+            if name in attn_layer_names:
+                continue
+            m = _MODEL_LAYER_PREFIX_RE.match(name)
+            owners = attn_by_prefix.get(m.group(1), []) if m is not None else []
+            if len(owners) == 1:
+                index[owners[0]].append(region_idx)
+        return dict(index)
 
     def shutdown(self) -> None:
         self._push_writer_stop.set()
@@ -851,8 +897,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """
         if not self._layerwise or not metadata.reqs_to_save:
             return
-        layer_idx = self._lw_layer_index.get(layer_name)
-        if layer_idx is None:
+        region_idxs = self._lw_layer_index.get(layer_name)
+        if not region_idxs:
             return
         event = torch.cuda.Event()
         event.record()
@@ -862,13 +908,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             with self._lw_lock:
                 if req_id in self._lw_failed:
                     continue
-                if layer_idx in self._lw_scheduled_layers[req_id]:
+                scheduled = self._lw_scheduled_layers[req_id]
+                new_idxs = [i for i in region_idxs if i not in scheduled]
+                if not new_idxs:
                     continue
-                self._lw_scheduled_layers[req_id].add(layer_idx)
+                scheduled.update(new_idxs)
                 # Cache the logical local block ids (same every layer/step).
                 if req_id not in self._lw_reg and req_id not in self._lw_plan:
                     self._lw_local_blocks[req_id] = meta.local_block_ids
-            self._lw_task_q.put((req_id, layer_idx, event, now))
+            for region_idx in new_idxs:
+                self._lw_task_q.put((req_id, region_idx, event, now))
             woke = True
         if woke:
             self._push_writer_wake.set()
@@ -882,24 +931,27 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """
         if not self._layerwise or not metadata.reqs_to_save:
             return
-        # Completeness sweep: any region NOT covered by a matching per-layer
-        # save_kv_layer call (e.g. GLM DSA indexer caches whose layer_name is
-        # not in _lw_layer_index) would otherwise NEVER be written, leaving
-        # stale KV on D -> garbage output. Post-forward all KV is resident, so
-        # enqueue the missing region indices with event=None (no gating). This
-        # guarantees byte-complete KV; covered layers still overlap during the
-        # forward. If coverage is already full, missing is empty (no-op).
+        # Completeness sweep: any region NOT covered by a per-layer
+        # save_kv_layer call (no hook claims it in _lw_layer_index) would
+        # otherwise NEVER be written, leaving stale KV on D. This runs on the
+        # CPU once the forward is *launched*; the GPU may still be computing,
+        # so the swept regions are fenced on an event recorded here (after
+        # all forward work on the stream). If coverage is full, no-op.
         num_layers = len(self._lw_layer_names)
         now = time.perf_counter()
+        seal_event: torch.cuda.Event | None = None
         with self._lw_lock:
             for req_id in metadata.reqs_to_save:
                 if req_id in self._lw_failed:
                     continue
                 covered = set(self._lw_scheduled_layers[req_id])
                 missing = [i for i in range(num_layers) if i not in covered]
+                if missing and seal_event is None:
+                    seal_event = torch.cuda.Event()
+                    seal_event.record()
                 for idx in missing:
                     self._lw_scheduled_layers[req_id].add(idx)
-                    self._lw_task_q.put((req_id, idx, None, now))
+                    self._lw_task_q.put((req_id, idx, seal_event, now))
                 self._lw_expected[req_id] = len(self._lw_scheduled_layers[req_id])
                 self._lw_sealed.add(req_id)
                 logger.debug(
@@ -947,7 +999,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         Returns True if the task was handled (executed or the req is
         failed/terminal), False if it must remain deferred.
         """
-        req_id, layer_idx, event, _ = task
+        req_id, region_idx, event, _ = task
         if req_id in self._lw_failed:
             return True
 
@@ -985,12 +1037,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return True
 
         try:
-            self._lw_write_layer(req_id, plan, layer_idx, event)
+            self._lw_write_layer(req_id, plan, region_idx, event)
         except Exception:
             logger.exception(
-                "NIXL layer-wise push: WRITE failed for req %s layer %d",
+                "NIXL layer-wise push: WRITE failed for req %s region %d",
                 req_id,
-                layer_idx,
+                region_idx,
             )
             self._lw_mark_failed(req_id)
         return True
@@ -1126,35 +1178,31 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         ).tolist()
         num_regions = self.num_regions
         num_blocks = len(local0)
-        num_layers = len(self._lw_layer_names)
+        # Task indices are region indices, so the region list must line up
+        # 1:1 with the region-major descriptor layout.
         if (
             len(local_descs) != len(remote_descs)
             or num_regions == 0
-            or num_layers == 0
-            or num_regions % num_layers != 0
+            or len(self._lw_layer_names) != num_regions
             or len(local_descs) != num_regions * num_blocks
         ):
             logger.debug(
                 "NIXL lw[P] build_plan FALLBACK req=%s reason=desc_geometry "
-                "n_local_descs=%d n_remote_descs=%d num_regions=%d num_layers=%d "
-                "num_blocks=%d",
+                "n_local_descs=%d n_remote_descs=%d num_regions=%d "
+                "n_region_names=%d num_blocks=%d",
                 req_id,
                 len(local_descs),
                 len(remote_descs),
                 num_regions,
-                num_layers,
+                len(self._lw_layer_names),
                 num_blocks,
             )
             return _PlanFallback.UNSUPPORTED
-        regions_per_layer = num_regions // num_layers
         logger.debug(
-            "NIXL lw[P] build_plan OK req=%s num_regions=%d num_layers=%d "
-            "num_blocks=%d regions_per_layer=%d n_descs=%d",
+            "NIXL lw[P] build_plan OK req=%s num_regions=%d num_blocks=%d n_descs=%d",
             req_id,
             num_regions,
-            num_layers,
             num_blocks,
-            regions_per_layer,
             len(local_descs),
         )
 
@@ -1165,7 +1213,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             local_descs=local_descs,
             remote_descs=remote_descs,
             num_blocks=num_blocks,
-            regions_per_layer=regions_per_layer,
             decode_engine_id=decode_engine_id,
             notif_id=f"{decode_request_id}:{self.world_size}".encode(),
         )
@@ -1174,20 +1221,19 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self,
         req_id: str,
         plan: _LayerPushPlan,
-        layer_idx: int,
+        region_idx: int,
         event: torch.cuda.Event | None,
     ) -> None:
-        """Post one WRITE for a single layer's region slice (no notif).
+        """Post one WRITE for a single region's slice (no notif).
 
-        The layer's KV must be resident before the NIC reads it, so we block
-        on its CUDA event first (same guard MoRI-IO uses to avoid a
-        compute/transfer race). Sweep tasks pass event=None: they are enqueued
-        post-forward when all KV is already resident, so no gating is needed."""
+        The region's KV must be resident before the NIC reads it, so we block
+        on the CUDA event of the hook that produced it (or the seal event for
+        sweep tasks) first (same guard MoRI-IO uses to avoid a
+        compute/transfer race)."""
         if event is not None:
             event.synchronize()
-        span = plan.regions_per_layer * plan.num_blocks
-        start = layer_idx * span
-        end = start + span
+        start = region_idx * plan.num_blocks
+        end = start + plan.num_blocks
         local_descs = plan.local_descs[start:end]
         remote_descs = plan.remote_descs[start:end]
         if not local_descs:
