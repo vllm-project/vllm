@@ -202,6 +202,23 @@ def test_enabler_leaves_off_sm10x_model_untouched(
     )
 
 
+def _force_platform_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force all platform capability gates on so tests are arch-independent."""
+    from vllm.model_executor.models import deepseek_v2 as dv2_mod
+
+    monkeypatch.setattr(dv2_mod.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        dv2_mod.current_platform,
+        "is_device_capability",
+        lambda maj: True,
+    )
+    monkeypatch.setattr(
+        dv2_mod.current_platform,
+        "is_device_capability_family",
+        lambda fam: True,
+    )
+
+
 def test_glm52_fused_qkv_a_shape_passes_min_latency_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -214,23 +231,12 @@ def test_glm52_fused_qkv_a_shape_passes_min_latency_gate(
     ``min_latency_fused_qkv_a_proj`` custom op, whose num_tokens dispatch IS
     torch.compile-safe.
     """
-    from vllm.model_executor.models import deepseek_v2 as dv2_mod
     from vllm.model_executor.models.deepseek_v2 import (
         _can_use_min_latency_fused_qkv_a_gemm,
     )
 
-    # Platform gates forced on so the test is arch-independent.
-    monkeypatch.setattr(dv2_mod.current_platform, "is_cuda", lambda: True)
-    monkeypatch.setattr(
-        dv2_mod.current_platform,
-        "is_device_capability",
-        lambda maj: True,
-    )
-    monkeypatch.setattr(
-        dv2_mod.current_platform,
-        "is_device_capability_family",
-        lambda fam: True,
-    )
+    _force_platform_gates(monkeypatch)
+    monkeypatch.delenv("VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM", raising=False)
 
     # GLM-5.2 fused-QKV-A weight (N=2624, K=6144) must qualify.
     glm_weight = torch.empty(2624, 6144, dtype=torch.bfloat16, device="meta")
@@ -247,3 +253,33 @@ def test_glm52_fused_qkv_a_shape_passes_min_latency_gate(
     # Non-BF16 must not qualify even for the GLM-5.2 shape.
     fp16 = torch.empty(2624, 6144, dtype=torch.float16, device="meta")
     assert not _can_use_min_latency_fused_qkv_a_gemm(fp16)
+
+
+def test_glm52_fused_qkv_a_respects_disable_toggle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The feature toggle must also disable the fused-QKV-A custom-op path.
+
+    Without this, the toggle A/B comparison only measures the secondary CuTe-DSL
+    projections (3 gate_up layers) instead of the full optimisation (78 QKV-A +
+    3 gate_up), shrinking the measurable delta to noise.
+    """
+    from vllm.model_executor.models.deepseek_v2 import (
+        _can_use_min_latency_fused_qkv_a_gemm,
+    )
+
+    _force_platform_gates(monkeypatch)
+
+    glm_weight = torch.empty(2624, 6144, dtype=torch.bfloat16, device="meta")
+    dsv3_weight = torch.empty(2112, 7168, dtype=torch.bfloat16, device="meta")
+
+    # Toggle OFF (disabled): GLM-5.2 QKV-A must NOT qualify.
+    monkeypatch.setenv("VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM", "1")
+    assert not _can_use_min_latency_fused_qkv_a_gemm(glm_weight)
+
+    # DeepSeek-V3 must remain unaffected by the GLM-5.2 toggle.
+    assert _can_use_min_latency_fused_qkv_a_gemm(dsv3_weight)
+
+    # Toggle ON (enabled): GLM-5.2 QKV-A must qualify.
+    monkeypatch.delenv("VLLM_DISABLE_GLM52_LOW_LATENCY_GEMM", raising=False)
+    assert _can_use_min_latency_fused_qkv_a_gemm(glm_weight)
