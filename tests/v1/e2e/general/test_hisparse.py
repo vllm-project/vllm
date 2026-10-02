@@ -95,6 +95,8 @@ def test_hisparse_spill_and_prefix_restore(
 
     A regression omitted attention metadata before FULL graph replay, so decode
     completed normally while its newly written KV rows were never copied to host.
+    MTP layers write after the target forward; their rows used to be mirrored
+    before the drafter wrote them, so the drafter later read stale host rows.
     """
     capability = current_platform.get_device_capability()
     if capability is None or capability.major < 9:
@@ -171,49 +173,70 @@ def test_hisparse_spill_and_prefix_restore(
             model_runner.cudagraph_manager, "run_fullgraph", record_fullgraph
         )
 
+        # The MTP layer writes its rows after the target forward, so it is
+        # mirrored at the start of the next step instead of in finish_forward.
+        draft_layers = set(worker._draft_layers)
+        assert draft_layers
         original_finish_forward = worker.finish_forward
-        verified_full_replay_rows = 0
+        original_finish_previous_step = worker._finish_previous_step
+        verified_rows = {"target": 0, "draft": 0}
         copied_nonzero_kv = False
+        draft_check_pending = False
+
+        def check_host_rows(layer_indices: set[int], kind: str) -> None:
+            nonlocal copied_nonzero_kv
+            # Synchronize only the test's inspection, not the worker itself.
+            with gpu_sync_allowed():
+                torch.accelerator.synchronize()
+            assert worker._row_mirrors
+            for layer_index in layer_indices:
+                cache = worker.cache_handles[layer_index]
+                source_index = cache.runtime.resident_source_index
+                for mirror in worker._row_mirrors:
+                    source_row = mirror.source_starts[source_index]
+                    destination_row = mirror.destination_start
+                    num_rows = mirror.num_rows
+                    source_block, source_offset = divmod(
+                        source_row, worker.kernel_block_size
+                    )
+                    with gpu_sync_allowed():
+                        gpu_rows = worker.resident_caches[layer_index][
+                            source_block, source_offset : source_offset + num_rows
+                        ].cpu()
+                    host_rows = worker.host_caches[layer_index][
+                        destination_row : destination_row + num_rows
+                    ]
+                    assert torch.equal(host_rows, gpu_rows)
+                    copied_nonzero_kv |= bool(torch.count_nonzero(gpu_rows).item())
+                    verified_rows[kind] += num_rows
 
         def finish_forward():
-            nonlocal full_replay_pending, verified_full_replay_rows
-            nonlocal copied_nonzero_kv
+            nonlocal full_replay_pending, draft_check_pending
             try:
                 original_finish_forward()
                 if not full_replay_pending:
                     return
-                # Synchronize only the test's inspection, not finish_forward itself.
-                with gpu_sync_allowed():
-                    torch.accelerator.synchronize()
-                assert worker._row_mirrors
-                for layer_index, cache in enumerate(worker.cache_handles):
-                    source_index = cache.runtime.resident_source_index
-                    for mirror in worker._row_mirrors:
-                        source_row = mirror.source_starts[source_index]
-                        destination_row = mirror.destination_start
-                        num_rows = mirror.num_rows
-                        source_block, source_offset = divmod(
-                            source_row, worker.kernel_block_size
-                        )
-                        with gpu_sync_allowed():
-                            gpu_rows = worker.resident_caches[layer_index][
-                                source_block, source_offset : source_offset + num_rows
-                            ].cpu()
-                        host_rows = worker.host_caches[layer_index][
-                            destination_row : destination_row + num_rows
-                        ]
-                        assert torch.equal(host_rows, gpu_rows)
-                        copied_nonzero_kv |= bool(torch.count_nonzero(gpu_rows).item())
-                        verified_full_replay_rows += num_rows
+                target_layers = set(range(len(worker.cache_handles))) - draft_layers
+                check_host_rows(target_layers, "target")
+                draft_check_pending = True
             finally:
                 full_replay_pending = False
 
+        def finish_previous_step():
+            nonlocal draft_check_pending
+            original_finish_previous_step()
+            if draft_check_pending:
+                draft_check_pending = False
+                check_host_rows(draft_layers, "draft")
+
         monkeypatch.setattr(worker, "finish_forward", finish_forward)
+        monkeypatch.setattr(worker, "_finish_previous_step", finish_previous_step)
 
         expected = runner.generate_greedy([target], max_tokens=8)
 
         assert full_graph_calls > 0
-        assert verified_full_replay_rows > 0
+        assert verified_rows["target"] > 0
+        assert verified_rows["draft"] > 0
         assert copied_nonzero_kv
 
         runner.generate_greedy(pressure, max_tokens=8)
