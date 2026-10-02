@@ -15,6 +15,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
+    AutoProcessor,
 )
 from transformers import __version__ as TRANSFORMERS_VERSION
 
@@ -292,6 +293,8 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
+        # The checkpoint's stale `auto_map` points at remote code that no longer exists
+        hf_processor=AutoProcessor.from_pretrained,
         single_image_prompts=IMAGE_ASSETS.prompts(
             {
                 "stop_sign": "<vlm_image>Please describe the image shortly.",
