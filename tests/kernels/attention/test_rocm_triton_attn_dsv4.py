@@ -41,17 +41,11 @@ def _on_gfx950() -> bool:
 # architectures take the fallback decode kernel, so its tests are skipped there.
 requires_split_decode_arch = pytest.mark.skipif(
     not _on_split_decode_arch(),
-    reason="split-K decode kernel is only tuned for AMD gfx942/gfx950",
+    reason="split-K decode and the V4.1 combine tests need an AMD gfx942/gfx950",
 )
 requires_gfx950 = pytest.mark.skipif(
     not _on_gfx950(),
     reason="optimized sparse decode partial is gfx950-only",
-)
-# combine_topk_swa_indices is selected by the source on every ROCm arch, so its
-# tests run wherever the kernel does.
-requires_rocm_cdna3_or_newer = pytest.mark.skipif(
-    not _on_split_decode_arch(),
-    reason="V4.1 combine kernel needs an AMD gfx942/gfx950 device",
 )
 
 NOPE_HEAD_DIM = 448
@@ -2433,15 +2427,15 @@ def _v41_combine_case(case, window):
         rows = 96
     # What the SWA builder gathers: the query plus up to window - 1 rows before it.
     gl = torch.minimum(sl, qsl[1:] - qsl[:-1] + window - 1)
-    gen = torch.Generator(device="cpu").manual_seed(0)
-    ti = torch.randint(0, 4096, (rows, max(topk, 1)), generator=gen, dtype=torch.int32)
+    set_random_seed(0)
+    ti = torch.randint(0, 4096, (rows, max(topk, 1)), dtype=torch.int32)
     if case == "invalid_topk":
         # Failed candidates stay -1 instead of pointing into another request.
         ti[:, ::7] = -1
     return ti.to(dev), qsl, sl, gl, window, ratio, topk, 100000, 4096
 
 
-@requires_rocm_cdna3_or_newer
+@requires_split_decode_arch
 @pytest.mark.parametrize(
     "case,window",
     [
