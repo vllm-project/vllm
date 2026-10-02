@@ -89,15 +89,9 @@ def is_shared_expert_quant_fse_compatible(
         return True, None
 
     online_quant_config = quant_config.online_quantization_config
+    shared_expert_targets = None
     if online_quant_config is not None:
-        from vllm.model_executor.layers.fused_moe import RoutedExperts
-        from vllm.model_executor.layers.linear import (
-            LinearBase,
-            UnquantizedLinearMethod,
-        )
-        from vllm.model_executor.layers.quantization.online.base import (
-            ONLINE_SHARED_EXPERT_QUANTIZERS,
-        )
+        from vllm.model_executor.layers.linear import LinearBase
 
         online_quant_config.packed_modules_mapping = quant_config.packed_modules_mapping
         shared_expert_targets = [
@@ -106,6 +100,15 @@ def is_shared_expert_quant_fse_compatible(
             )
             for projection_name in projection_names
         ]
+        if all(target is None for target in shared_expert_targets):
+            shared_expert_targets = None
+
+    if shared_expert_targets is not None:
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
+        from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+        from vllm.model_executor.layers.quantization.online.base import (
+            ONLINE_SHARED_EXPERT_QUANTIZERS,
+        )
 
         # NOTE: online shared experts quantization check is only implemented for quark
         # quant method at the moment. This can be extended here for other quant methods.
@@ -134,7 +137,11 @@ def is_shared_expert_quant_fse_compatible(
 
         for shared_expert_target in shared_expert_targets:
             if shared_expert_target is None:
-                return (False, "shared expert is not quantized")
+                return (
+                    False,
+                    "online quantization targets only part of the shared expert at "
+                    f"{shared_expert_prefix}",
+                )
 
             _, _, _, shared_quant_spec, shared_method_cls = shared_expert_target
             if shared_method_cls in (None, UnquantizedLinearMethod):
