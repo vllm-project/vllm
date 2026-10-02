@@ -529,7 +529,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         elif current_platform.is_xpu():
             self.gdn_decode_kernel = "XPU"
 
-        self.enable_fused_gdn_decode = (
+        self.enable_fused_gdn_spec_decode = (
             self.gdn_decode_kernel == "cuda" and self.speculative_config is not None
         )
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
@@ -911,7 +911,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ba, _ = self.in_proj_ba(hidden_states)
 
         use_fused_gdn_decode = (
-            self.enable_fused_gdn_decode
+            self.enable_fused_gdn_spec_decode
             and hidden_states.dtype == torch.bfloat16
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
