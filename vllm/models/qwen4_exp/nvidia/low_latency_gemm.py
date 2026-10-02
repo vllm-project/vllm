@@ -142,6 +142,12 @@ QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
         2: SkinnyGemmConfig(2, 64, 2, k_unroll=2, static_k=1536),
         4: SkinnyGemmConfig(4, 64, 2, k_unroll=2, static_k=1536),
     },
+    # QSA fused QKV/gate + replicated indexer Q/K, TP=4.
+    (4224, 2560): {
+        1: SkinnyGemmConfig(1, 128, 4, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 64, 4, vector_width=4, static_k=2560),
+    },
     # GDN fused QKVZ projection, TP=4.
     (4096, 2560): {
         1: SkinnyGemmConfig(1, 128, 2, vector_width=4, static_k=2560),
