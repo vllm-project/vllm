@@ -356,7 +356,7 @@ class K3DSparkModel(nn.Module):
             # Grouped context KV insert assumes that all layers share the same
             # cache dtype and block layout.
 
-            if isinstance(context_slot_mapping, (list, tuple)):
+            if isinstance(context_slot_mapping, list | tuple):
                 per_layer_slot_mappings = [
                     s for s in context_slot_mapping if s is not None
                 ]
@@ -388,7 +388,7 @@ class K3DSparkModel(nn.Module):
         for layer_idx, attn in enumerate(cache_layers):
             slot_mapping = (
                 context_slot_mapping[layer_idx]
-                if isinstance(context_slot_mapping, (list, tuple))
+                if isinstance(context_slot_mapping, list | tuple)
                 else context_slot_mapping
             )
             if slot_mapping is None:
