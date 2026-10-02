@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -13,11 +14,17 @@ from vllm.config.kernel import (
     FLASHINFER_MOE_EP_DEEP_GEMM,
     MEGA_MOE_BACKENDS,
     NATIVE_MEGA_MOE_BACKENDS,
+    PASSTHROUGH_ALL2ALL_BACKEND,
+    bind_passthrough_all2all_backend,
     validate_flashinfer_moe_ep_model,
 )
+from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.fused_moe import flashinfer_moe_ep as fi_ep
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
@@ -25,7 +32,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (
     FlashInferMoeEpExperts,
-    FlashInferMoeEpPrepareAndFinalize,
     epilogue_from_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -46,6 +52,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     backend_to_kernel_cls as nvfp4_backend_to_kernel_cls,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.passthrough import (
+    PassThroughPrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -54,6 +63,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def test_flashinfer_backends_are_megakernels_outside_the_native_model_path():
@@ -234,13 +244,14 @@ def test_megakernel_is_a_modular_kernel_with_pass_through_stages():
     )
     quant_config = FusedMoEQuantConfig.make("nvfp4", weight_dtype="nvfp4")
     kernel = mk.FusedMoEKernel(
-        FlashInferMoeEpPrepareAndFinalize(),
+        PassThroughPrepareAndFinalize(),
         FlashInferMoeEpExperts(moe, quant_config),
     )
 
     assert not kernel.is_monolithic
     assert kernel.prepare_finalize.output_is_reduced()
-    assert kernel.prepare_finalize.topk_indices_dtype() is torch.int32
+    # Generic stages: the int32 top-k ids the megakernel wants are its concern.
+    assert kernel.prepare_finalize.topk_indices_dtype() is None
     assert kernel.fused_experts.expects_unquantized_inputs
     assert isinstance(
         kernel.fused_experts.finalize_weight_and_reduce_impl(), TopKWeightAndReduceNoOP
@@ -315,3 +326,52 @@ def test_nvfp4_kernel_format_passes_megakernel_weights_through():
         is_act_and_mul=True,
     )
     assert all(out is src for out, src in zip(converted, tensors))
+
+
+def test_passthrough_all2all_backend_selects_the_pass_through_stages():
+    """``all2all_backend="passthrough"`` is how the oracles get the
+    pass-through prepare/finalize."""
+    moe = make_dummy_moe_config(
+        num_experts=8, experts_per_token=2, hidden_dim=256, intermediate_size=128
+    )
+    moe.moe_parallel_config = replace(
+        moe.moe_parallel_config, all2all_backend=PASSTHROUGH_ALL2ALL_BACKEND
+    )
+    assert not moe.moe_parallel_config.use_all2all_kernels
+
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe, FusedMoEQuantConfig.make("nvfp4", weight_dtype="nvfp4")
+    )
+
+    assert isinstance(prepare_finalize, PassThroughPrepareAndFinalize)
+
+
+def test_passthrough_all2all_backend_is_not_a_cli_choice():
+    """Users cannot pick the passthrough all2all backend explicitly."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--all2all-backend", PASSTHROUGH_ALL2ALL_BACKEND])
+    parser.parse_args(["--all2all-backend", "deepep_low_latency"])
+
+
+def test_megakernel_moe_backend_binds_the_all2all_backend():
+    """A megakernel deployment gets its all2all backend by default."""
+    parallel = SimpleNamespace(all2all_backend="allgather_reducescatter")
+    bind_passthrough_all2all_backend(FLASHINFER_MOE_EP_CUTEDSL, parallel)
+    assert parallel.all2all_backend == PASSTHROUGH_ALL2ALL_BACKEND
+    bind_passthrough_all2all_backend(FLASHINFER_MOE_EP_CUTEDSL, parallel)
+
+    with pytest.raises(ValueError, match="cannot be paired"):
+        bind_passthrough_all2all_backend(
+            FLASHINFER_MOE_EP_DEEP_GEMM,
+            SimpleNamespace(all2all_backend="deepep_low_latency"),
+        )
+    with pytest.raises(ValueError, match="only valid with"):
+        bind_passthrough_all2all_backend(
+            "flashinfer_trtllm",
+            SimpleNamespace(all2all_backend=PASSTHROUGH_ALL2ALL_BACKEND),
+        )
+
+    untouched = SimpleNamespace(all2all_backend="deepep_low_latency")
+    bind_passthrough_all2all_backend("flashinfer_trtllm", untouched)
+    assert untouched.all2all_backend == "deepep_low_latency"

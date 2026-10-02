@@ -2060,22 +2060,13 @@ def make_mxfp4_moe_kernel(
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
 
-    prepare_finalize: mk.FusedMoEPrepareAndFinalize | None
-    if mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS:
-        from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (  # noqa: E501
-            FlashInferMoeEpPrepareAndFinalize,
-        )
-
-        # The megakernel dispatches and combines itself.
-        prepare_finalize = FlashInferMoeEpPrepareAndFinalize()
-    else:
-        prepare_finalize = maybe_make_prepare_finalize(
-            moe=moe_config,
-            quant_config=moe_quant_config,
-            routing_tables=routing_tables,
-            allow_new_interface=True,
-            use_monolithic=is_monolithic,
-        )
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=moe_quant_config,
+        routing_tables=routing_tables,
+        allow_new_interface=True,
+        use_monolithic=is_monolithic,
+    )
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)

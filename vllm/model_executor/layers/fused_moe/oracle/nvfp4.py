@@ -612,23 +612,14 @@ def make_nvfp4_moe_kernel(
     per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
-    prepare_finalize: mk.FusedMoEPrepareAndFinalize | None
-    if backend == NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL:
-        from vllm.model_executor.layers.fused_moe.experts.flashinfer_moe_ep import (  # noqa: E501
-            FlashInferMoeEpPrepareAndFinalize,
-        )
-
-        # The megakernel dispatches and combines itself.
-        prepare_finalize = FlashInferMoeEpPrepareAndFinalize()
-    else:
-        prepare_finalize = maybe_make_prepare_finalize(
-            moe=moe_config,
-            quant_config=moe_quant_config,
-            routing_tables=routing_tables,
-            allow_new_interface=True,
-            use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
-            input_dtype=moe_config.in_dtype if per_token_activation else None,
-        )
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=moe_quant_config,
+        routing_tables=routing_tables,
+        allow_new_interface=True,
+        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        input_dtype=moe_config.in_dtype if per_token_activation else None,
+    )
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)

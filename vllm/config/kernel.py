@@ -3,7 +3,7 @@
 import contextlib
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, fields
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import Field, field_validator
 
@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.parallel import ParallelConfig
 
 logger = init_logger(__name__)
 
@@ -153,6 +154,9 @@ FLASHINFER_MOE_EP_BACKENDS = frozenset(
         FLASHINFER_MOE_EP_DEEP_GEMM,
     }
 )
+# Those backends dispatch and combine themselves, so the framework must not
+# run a separate all2all around them.
+PASSTHROUGH_ALL2ALL_BACKEND: Final = "passthrough"
 
 # "Native" here meaning that the backend does not use the fused MoE path.
 # Currently only relevant for the vLLM provided DeepGEMM MegaMoE.,
@@ -182,6 +186,43 @@ FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
         "DeepseekV41ForCausalLM",
     }
 )
+
+
+def bind_passthrough_all2all_backend(
+    moe_backend: str, parallel_config: "ParallelConfig"
+) -> None:
+    """Bind ``all2all_backend="passthrough"`` to MoE backends that own their
+    expert-parallel communication (currently the FlashInfer MoE-EP megakernels).
+
+    Such a deployment gets ``passthrough`` when the all2all backend is left at
+    its default and rejects any other explicit choice; the value is meaningless
+    with a MoE backend that relies on the framework to communicate. The CLI does
+    not offer the value; the early return keeps repeated
+    ``set_platform_defaults`` calls idempotent.
+    """
+    a2a = parallel_config.all2all_backend
+    if moe_backend in FLASHINFER_MOE_EP_BACKENDS:
+        if a2a == PASSTHROUGH_ALL2ALL_BACKEND:
+            return
+        if a2a != "allgather_reducescatter":
+            raise ValueError(
+                f"moe_backend={moe_backend!r} dispatches and combines itself and "
+                f"cannot be paired with all2all_backend={a2a!r}; leave "
+                f"--all2all-backend unset."
+            )
+        logger.info_once(
+            "moe_backend=%r: using all2all_backend=%r (dispatch and combine run "
+            "inside the MoE backend).",
+            moe_backend,
+            PASSTHROUGH_ALL2ALL_BACKEND,
+        )
+        parallel_config.all2all_backend = PASSTHROUGH_ALL2ALL_BACKEND
+    elif a2a == PASSTHROUGH_ALL2ALL_BACKEND:
+        raise ValueError(
+            f"all2all_backend={a2a!r} is only valid with a moe_backend that "
+            f"dispatches and combines itself ({sorted(FLASHINFER_MOE_EP_BACKENDS)}),"
+            f" got moe_backend={moe_backend!r}."
+        )
 
 
 def validate_flashinfer_moe_ep_model(
@@ -391,6 +432,7 @@ class KernelConfig:
             validate_flashinfer_moe_ep_model(
                 self.moe_backend, vllm_config.model_config.architectures
             )
+        bind_passthrough_all2all_backend(self.moe_backend, vllm_config.parallel_config)
 
         platform_op_priority = current_platform.get_default_ir_op_priority(vllm_config)
         logger.debug(

@@ -28,9 +28,6 @@ from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
     supports_current_device,
     validate_flashinfer_moe_ep_layer,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
-    MoEPrepareAndFinalizeNoDPEPModular,
-)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -55,34 +52,6 @@ _supported_weight_quant_schemes: frozenset[QuantKey] = frozenset(
 )
 
 _supported_activations: frozenset[MoEActivation] = frozenset((MoEActivation.SILU,))
-
-
-class FlashInferMoeEpPrepareAndFinalize(MoEPrepareAndFinalizeNoDPEPModular):
-    """Pass-through stages: the megakernel dispatches, combines and reduces."""
-
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        return torch.int32
-
-    def output_is_reduced(self) -> bool:
-        return True
-
-    def supports_deferred_moe_finalize(self) -> bool:
-        # The megakernel applies the top-k weights and combines internally;
-        # there is no finalize left for a consumer to take over.
-        return False
-
-    def prepare(
-        self,
-        a1: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: torch.Tensor | None,
-        apply_router_weight_on_input: bool,
-        quant_config: FusedMoEQuantConfig,
-        defer_input_quant: bool = False,
-    ) -> mk.PrepareResultType:
-        return a1, None, None, None, None
 
 
 class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
@@ -211,7 +180,9 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
     ) -> None:
         if self._adapter is None:
             raise RuntimeError("FlashInfer MoE-EP weights have not been processed")
-        output.copy_(self._adapter(hidden_states, topk_ids, topk_weights))
+        output.copy_(
+            self._adapter(hidden_states, topk_ids.to(torch.int32), topk_weights)
+        )
 
 
 def epilogue_from_quant_config(
