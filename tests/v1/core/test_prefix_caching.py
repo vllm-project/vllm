@@ -40,6 +40,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, Request
+from vllm.v1.core.kv_cache_priority import KVCachePriority
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -66,6 +67,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_hints.actions import SetPriority
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -6192,3 +6194,144 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+@pytest.fixture
+def priority_pool():
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 5),
+        max_model_len=128,
+        hash_block_size=16,
+        enable_caching=True,
+    )
+    request = make_request("cached", list(range(64)), 16, sha256)
+    manager.allocate_slots(request, 64)
+    manager.free(request)
+    pool = manager.block_pool
+    clock = SimpleNamespace(now=0.0)
+    pool.kv_cache_priority = KVCachePriority(pool, clock=lambda: clock.now)
+    return pool, pool.free_block_queue.get_all_free_blocks(), clock
+
+
+def _priority(value=10, revision=1, claim_id="router/claim", ttl_seconds=10):
+    return SetPriority(
+        "request_cached",
+        "local_g1",
+        claim_id,
+        revision,
+        value,
+        ttl_seconds if value is not None else None,
+    )
+
+
+@pytest.mark.parametrize(
+    "value,order", [(10, [0, 2, 3, 1]), (-10, [1, 0, 2, 3]), (0, [0, 1, 2, 3])]
+)
+def test_priority_orders_victims_without_reducing_capacity(priority_pool, value, order):
+    pool, blocks, _ = priority_pool
+    pool.kv_cache_priority.apply(_priority(value), blocks[1:2])
+    assert pool.get_num_free_blocks() == 4
+    assert pool.get_new_blocks(4) == [blocks[i] for i in order]
+
+
+def test_priority_preserves_references_and_lru_after_expiry(priority_pool):
+    pool, blocks, clock = priority_pool
+    pool.kv_cache_priority.apply(_priority(-10), blocks[:1])
+    pool.touch(blocks[:1])
+    assert pool.get_new_blocks(1) == blocks[1:2]
+    pool.free_blocks(blocks[:1])
+    clock.now = 10
+    assert pool.get_new_blocks(3) == [blocks[2], blocks[3], blocks[0]]
+
+
+@pytest.mark.parametrize("release", ["clear", "expire"])
+def test_priority_overlap_reveals_remaining_claim(priority_pool, release):
+    pool, blocks, clock = priority_pool
+    priority = pool.kv_cache_priority
+    target = blocks[2:3]
+    priority.apply(_priority(-10, claim_id="router/low", ttl_seconds=100), target)
+    priority.apply(_priority(20), target)
+    assert pool.get_new_blocks(1) == blocks[:1]
+    if release == "clear":
+        priority.apply(_priority(None, revision=2), target)
+    else:
+        clock.now = 10
+    assert pool.get_new_blocks(1) == target
+
+
+def test_priority_replay_cannot_renew_expired_or_cleared_claim(priority_pool):
+    pool, blocks, clock = priority_pool
+    priority = pool.kv_cache_priority
+    priority.apply(_priority(), blocks[:1])
+    clock.now = 9
+    assert priority.apply(_priority(), blocks[:1]).status == "duplicate"
+    clock.now = 11
+    assert priority.apply(_priority(), blocks[:1]).status == "duplicate"
+    assert pool.get_new_blocks(1) == blocks[:1]
+    priority.apply(_priority(revision=2), blocks[1:2])
+    priority.apply(_priority(None, revision=3), blocks[1:2])
+    assert priority.apply(_priority(revision=2), blocks[1:2]).status == "duplicate"
+    assert pool.get_new_blocks(1) == blocks[1:2]
+
+
+def test_priority_new_revision_updates_value_and_expiry(priority_pool):
+    pool, blocks, clock = priority_pool
+    priority = pool.kv_cache_priority
+    priority.apply(_priority(-10), blocks[:1])
+    clock.now = 9
+    priority.apply(_priority(20, revision=2), blocks[:1])
+    clock.now = 11
+    # An old expiry must not erase a newer declaration.
+    assert pool.get_new_blocks(1) == blocks[1:2]
+    clock.now = 19
+    assert pool.get_new_blocks(1) == blocks[:1]
+
+
+def test_priority_expiring_during_compaction_still_returns_to_lru(priority_pool):
+    pool, blocks, _ = priority_pool
+    priority = pool.kv_cache_priority
+    for revision in range(96):
+        priority.apply(_priority(revision=revision, ttl_seconds=1), blocks[:1])
+    priority.clock = iter([0.0, 2.0, 3.0]).__next__
+    priority.apply(_priority(revision=96, ttl_seconds=1), blocks[:1])
+    assert pool.get_new_blocks(1) == blocks[:1]
+
+
+@pytest.mark.parametrize("cleanup", ["reuse", "invalidate", "reset"])
+def test_priority_does_not_follow_recycled_block_ids(priority_pool, cleanup):
+    pool, blocks, _ = priority_pool
+    priority = pool.kv_cache_priority
+    priority.apply(_priority(), blocks[:1])
+    old_hash = blocks[0].block_hash
+    if cleanup == "reuse":
+        pool.get_new_blocks(4)
+        pool.free_blocks(blocks[:1])
+    elif cleanup == "invalidate":
+        pool.evict_blocks({blocks[0].block_id})
+    else:
+        assert pool.reset_prefix_cache()
+    blocks[0].set_block_hash(old_hash)
+    # A different cached copy can use the same claim ID and revision.
+    assert priority.apply(_priority(-10), blocks[:1]).status == "applied"
+    assert pool.get_new_blocks(1) == blocks[:1]
+
+
+def test_priority_conflict_rejects_entire_scope(priority_pool):
+    pool, blocks, _ = priority_pool
+    priority = pool.kv_cache_priority
+    priority.apply(_priority(), blocks[1:2])
+    assert priority.apply(_priority(20), blocks[:2]).status == "rejected"
+    assert pool.get_new_blocks(1) == blocks[:1]
+
+
+def test_priority_claim_limit_preserves_existing_declarations(priority_pool):
+    pool, blocks, _ = priority_pool
+    priority = pool.kv_cache_priority
+    for i in range(16):
+        priority.apply(_priority(claim_id=f"router/{i}"), blocks[:1])
+    assert priority.apply(_priority(-10), blocks[:1]).status == "rejected"
+    updated = priority.apply(
+        _priority(-10, revision=2, claim_id="router/0"), blocks[:1]
+    )
+    assert updated.status == "applied"
+    assert pool.get_new_blocks(1) == blocks[1:2]
