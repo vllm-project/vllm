@@ -393,8 +393,8 @@ void mamba_chunk_scan_fwd_cpu_impl(at::Tensor& out, at::Tensor& final_states,
                                    const c10::optional<at::Tensor>& z,
                                    const at::Tensor& cu_seqlens);
 
-torch::Tensor fused_gumbel_argmax(const torch::Tensor& logits,
-                                  const torch::Tensor& seeds);
+torch::Tensor bucketed_rejection_sample(const torch::Tensor& logits,
+                                        const torch::Tensor& seeds);
 
 torch::Tensor greedy_argmax(const torch::Tensor& logits);
 
@@ -984,9 +984,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
 
-  // Fused sampling kernels
-  ops.def("fused_gumbel_argmax(Tensor logits, Tensor seeds) -> Tensor");
-  ops.impl("fused_gumbel_argmax", torch::kCPU, &fused_gumbel_argmax);
+  // Sampling kernels
+  ops.def("bucketed_rejection_sample(Tensor logits, Tensor seeds) -> Tensor");
+  ops.impl("bucketed_rejection_sample", torch::kCPU,
+           &bucketed_rejection_sample);
 
   ops.def("greedy_argmax(Tensor logits) -> Tensor");
   ops.impl("greedy_argmax", torch::kCPU, &greedy_argmax);
