@@ -111,102 +111,6 @@ steps:
 #                                                                                                                                       #
 #########################################################################################################################################
 
-- label: ":computer: (CPU) Basic Models Other" # TBD
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  dind: false
-  agent_pool: mi250_1
-  no_gpu: true
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/models/test_utils.py
-  - tests/models/test_vision.py
-  - tests/models/test_adapters.py
-  - tests/models/transformers/fusers/
-  - tests/model_executor/layers/test_activation.py
-  - tests/models/test_qwen3_5_mtp_config.py
-  commands:
-  - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ model_executor/layers/test_activation.py
-
-- label: ":computer: (CPU) Multimodal Processor Shard %N" # TBD
-  timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  dind: false
-  agent_pool: mi250_1
-  no_gpu: true
-  parallelism: 6
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/models/multimodal
-  - tests/models/registry.py
-  commands:
-  - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-
-- label: ":computer: (CPU) V1 Others" # TBD
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  dind: false
-  agent_pool: mi250_1
-  no_gpu: true
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1
-  commands:
-  - pytest -v -s -m 'cpu_test' v1/core
-  - pytest -v -s v1/structured_output
-  - pytest -v -s v1/test_serial_utils.py
-  - pytest -v -s v1/test_kv_cache_spec_registry.py
-  - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
-  - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
-  - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
-  - pytest -v -s -m 'cpu_test' v1/metrics
-
-- label: ":computer: (CPU) Async Engine, Inputs, Utils, Worker, Config" # TBD
-  timeout_in_minutes: 80
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  dind: false
-  agent_pool: mi250_1
-  no_gpu: true
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/test_envs.py
-  - tests/test_outputs.py
-  - tests/test_pooling_params.py
-  - tests/test_ray_env.py
-  - tests/test_sampling_params.py
-  - tests/multimodal
-  - tests/renderers
-  - tests/standalone_tests/lazy_imports.py
-  - tests/tokenizers_
-  - tests/reasoning
-  - tests/tool_parsers
-  - tests/parser
-  - tests/transformers_utils
-  - tests/config
-  commands:
-  - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s test_envs.py
-  - pytest -v -s test_outputs.py
-  - pytest -v -s test_pooling_params.py
-  - pytest -v -s test_ray_env.py
-  - pytest -v -s test_sampling_params.py
-  - pytest -v -s -m 'cpu_test' multimodal
-  - pytest -v -s renderers
-  - pytest -v -s reasoning
-  - pytest -v -s tool_parsers
-  - pytest -v -s tokenizers_
-  - pytest -v -s parser
-  - pytest -v -s transformers_utils
-  - pytest -v -s config --ignore=config/test_mp_reducer.py
-
 - label: ":computer: (CPU) Rust Frontend Cargo Style + Clippy" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -454,7 +358,7 @@ steps:
   - tests/v1/e2e/general/
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
+  - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_async_scheduling_accuracy.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
 
 - label: ":amd: (MI250) E2E Scheduling" # TBD
   timeout_in_minutes: 55
@@ -469,6 +373,20 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/general/test_async_scheduling.py
+
+- label: ":amd: (MI250) E2E Scheduling Accuracy" # TBD
+  timeout_in_minutes: 55
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  dind: false
+  agent_pool: mi250_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/
+  - tests/v1/e2e/general/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s v1/e2e/general/test_async_scheduling_accuracy.py
 
 - label: ":amd: (MI250) V1 Engine" # TBD
   timeout_in_minutes: 45
@@ -1859,6 +1777,7 @@ steps:
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s -x lora/test_gptoss_tp.py; fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s -x lora/test_qwen35_densemodel_lora.py; fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s -x lora/test_gemma4_tp.py; fi
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s -x lora/test_sequence_classification.py::test_batched_loras_tp; fi
 
 #------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
 
@@ -2652,6 +2571,20 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/general/test_async_scheduling.py
+
+- label: ":amd: (MI300) E2E Scheduling Accuracy" # TBD
+  timeout_in_minutes: 55
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/
+  - tests/v1/e2e/general/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s v1/e2e/general/test_async_scheduling_accuracy.py
 
 - label: ":amd: (MI300) V1 Engine" # TBD
   timeout_in_minutes: 45
