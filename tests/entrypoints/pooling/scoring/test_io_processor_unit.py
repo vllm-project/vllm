@@ -47,7 +47,7 @@ def llm_reranker_processor() -> CrossEncoderIOProcessor:
     )
 
     processor = CrossEncoderIOProcessor.__new__(CrossEncoderIOProcessor)
-    processor.model_config = SimpleNamespace(enable_prompt_embeds=False)  # type: ignore[assignment]
+    processor.model_config = SimpleNamespace(enable_prompt_embeds=False)
     processor.tokenizer = TokenizersBackend(
         tokenizer_object=backend,
         unk_token="[UNK]",
@@ -96,7 +96,7 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
     )
 
     processed_prompt = tok_params.apply_post_tokenization(
-        tokenizer,  # type: ignore[arg-type]
+        tokenizer,
         prompt,
     )
     assert "prompt_token_ids" in processed_prompt
