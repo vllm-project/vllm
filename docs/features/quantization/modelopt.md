@@ -33,13 +33,7 @@ following `quantization.quant_algo` values:
     `flashinfer_cutlass`, `flashinfer_cutedsl`, `flashinfer_trtllm`,
     `flashinfer_cudnn`, and `marlin`; see `KernelConfig` on the
     [Engine Arguments](../../configuration/engine_args.md) page and shown by
-    `vllm serve --help=KernelConfig`. For `W4A16_NVFP4`, `auto` selects the
-    FlashInfer CuTe-DSL backend on SM100/SM103 GPUs when FlashInfer's BF16 x
-    FP4 GEMM is available, and Marlin on other GPUs or when it is not. `auto`
-    does not check the activation dtype, and the CuTe-DSL kernel requires
-    BF16, so FP16 models on SM100/SM103 should pass `--linear-backend marlin`.
-    Models with BF16 activations can explicitly select the FlashInfer CuTe-DSL
-    backend with `--linear-backend flashinfer_cutedsl`.
+    `vllm serve --help=KernelConfig`.
 
 !!! note
     For models quantized to MXFP8 with BF16 activations on SM100-family GPUs,
