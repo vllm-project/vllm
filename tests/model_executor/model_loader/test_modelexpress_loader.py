@@ -3,12 +3,11 @@
 
 import sys
 from types import ModuleType, SimpleNamespace
-from typing import cast
 
 import pytest
 from torch import nn
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.modelexpress_loader import (
@@ -62,7 +61,7 @@ def test_modelexpress_loader_delegates_to_modelexpress(monkeypatch):
     _install_fake_modelexpress(monkeypatch)
     loader = ModelExpressModelLoader(LoadConfig(load_format="modelexpress"))
     model = nn.Module()
-    model_config = cast(ModelConfig, SimpleNamespace())
+    model_config = SimpleNamespace()
     vllm_config = SimpleNamespace()
 
     loader.download_model(model_config)
@@ -126,7 +125,7 @@ def test_modelexpress_load_format_allows_object_storage_model_weights():
         model_weights="s3://bucket/model",
     )
     vllm_config = object.__new__(VllmConfig)
-    vllm_config.model_config = cast(ModelConfig, model_config)
+    vllm_config.model_config = model_config
     vllm_config.load_config = LoadConfig(load_format="modelexpress")
 
     vllm_config.try_verify_and_update_config()

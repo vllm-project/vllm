@@ -5,7 +5,6 @@ import os
 import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
 
@@ -845,12 +844,11 @@ class TestProtonConfig:
         ],
     )
     def test_rejects_invalid_typed_options(self, field, tmp_path):
-        invalid_option: dict[str, Any] = {field: "invalid"}
         with pytest.raises(ValidationError):
             ProfilerConfig(
                 profiler="proton",
                 proton_profiler_dir=str(tmp_path),
-                **invalid_option,
+                **{field: "invalid"},
             )
 
     @pytest.mark.parametrize(
@@ -1254,9 +1252,12 @@ def test_gpu_worker_creates_proton_profiler():
         Worker.profile(worker)
 
     wrapper.assert_called_once_with(worker.profiler_config, worker_name="rank1")
-    worker.profiler.start.assert_called_once_with(
+    # mypy still narrows worker.profiler to the None assigned above, so check
+    # the started wrapper directly and that it is the one the worker kept.
+    wrapper.return_value.start.assert_called_once_with(
         delay_iterations=None, max_iterations=None
     )
+    assert worker.profiler is wrapper.return_value
 
 
 @_requires_cuda_for_proton

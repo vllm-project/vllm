@@ -152,11 +152,11 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
 
     # Create processing info
     info = Qwen3OmniMoeThinkerProcessingInfo(mock_ctx)
-    info._get_expected_hidden_size = lambda: 100
-    info.get_hf_config = Mock(return_value=mock_qwen3_omni_config)
-    info.get_hf_processor = Mock(return_value=mock_processor)
-    info.get_tokenizer = Mock(return_value=mock_tokenizer)
-    info.get_image_processor = Mock(return_value=mock_image_processor)
+    info._get_expected_hidden_size = lambda: 100  # type: ignore[method-assign]  # stub
+    info.get_hf_config = Mock(return_value=mock_qwen3_omni_config)  # type: ignore[method-assign]  # stub
+    info.get_hf_processor = Mock(return_value=mock_processor)  # type: ignore[method-assign]  # stub
+    info.get_tokenizer = Mock(return_value=mock_tokenizer)  # type: ignore[method-assign]  # stub
+    info.get_image_processor = Mock(return_value=mock_image_processor)  # type: ignore[method-assign]  # stub
 
     # Create a mock dummy_inputs builder
     mock_dummy_inputs = Mock()
@@ -229,7 +229,7 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
 
 @pytest.mark.skip_global_cleanup
 def test_qwen3_omni_exposes_eagle3_to_its_text_backbone():
-    from vllm.model_executor.models.interfaces import EagleModelMixin, supports_eagle3
+    from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
     from vllm.model_executor.models.qwen3_omni_moe_thinker import (
         Qwen3OmniMoeThinkerForConditionalGeneration,
     )
@@ -248,12 +248,14 @@ def test_qwen3_omni_exposes_eagle3_to_its_text_backbone():
             return input_ids
 
     model = Qwen3OmniMoeThinkerForConditionalGeneration.__new__(
-        Qwen3OmniMoeThinkerForConditionalGeneration
+        Qwen3OmniMoeThinkerForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
     )
     nn.Module.__init__(model)
     model.language_model = DummyLanguageModel()
 
-    assert supports_eagle3(model)
+    # Same check as supports_eagle3(), which mypy resolves to its
+    # type[object] overload here and so narrows model to a class.
+    assert isinstance(model, SupportsEagle3)
     model.set_aux_hidden_state_layers((1, 2))
     assert model.language_model.model.aux_hidden_state_layers == (1, 2)
 
@@ -285,12 +287,16 @@ def test_qwen3_omni_text_model_collects_post_deepstack_aux_hidden_states():
         "vllm.model_executor.models.qwen3_omni_moe_thinker.get_pp_group",
         return_value=pp_group,
     ):
-        output, aux_hidden_states = model.forward(
+        result = model.forward(
             input_ids=None,
             positions=torch.tensor([0]),
             inputs_embeds=inputs_embeds,
             deepstack_input_embeds=deepstack_inputs,
         )
+
+    # aux_hidden_state_layers is set, so forward() returns a tuple.
+    assert isinstance(result, tuple)
+    output, aux_hidden_states = result
 
     torch.testing.assert_close(output, torch.tensor([[15.0]]))
     assert len(aux_hidden_states) == 1
@@ -301,7 +307,9 @@ def _dspark_vocab_stub(input_vocab_size: int, draft_vocab_size: int):
     """A Qwen3 DSpark model with only what `load_weights` reads."""
     from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 
-    model = Qwen3DSparkForCausalLM.__new__(Qwen3DSparkForCausalLM)
+    model = Qwen3DSparkForCausalLM.__new__(
+        Qwen3DSparkForCausalLM  # type: ignore[type-abstract]  # protocol attrs unset
+    )
     nn.Module.__init__(model)
     object.__setattr__(
         model,

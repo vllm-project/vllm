@@ -379,9 +379,9 @@ class TestTieringOffloadingManager:
         secondary_event1 = OffloadingEvent(to_keys([2]), Medium.STORAGE, removed=False)
         secondary_event2 = OffloadingEvent(to_keys([3]), Medium.STORAGE, removed=True)
 
-        self.primary_tier.take_events = MagicMock(return_value=[primary_event])
-        self.secondary_tier1.take_events = MagicMock(return_value=[secondary_event1])
-        self.secondary_tier2.take_events = MagicMock(return_value=[secondary_event2])
+        self.primary_tier.take_events = MagicMock(return_value=[primary_event])  # type: ignore[method-assign]  # stub
+        self.secondary_tier1.take_events = MagicMock(return_value=[secondary_event1])  # type: ignore[method-assign]  # stub
+        self.secondary_tier2.take_events = MagicMock(return_value=[secondary_event2])  # type: ignore[method-assign]  # stub
 
         assert list(self.manager.take_events()) == [
             primary_event,
@@ -412,10 +412,10 @@ class TestTieringOffloadingManager:
         """Test that chunks are cascaded to ALL secondary tiers."""
         chunks = to_keys(range(3))
 
-        self.secondary_tier1.submit_store = MagicMock(
+        self.secondary_tier1.submit_store = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.submit_store
         )
-        self.secondary_tier2.submit_store = MagicMock(
+        self.secondary_tier2.submit_store = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier2.submit_store
         )
 
@@ -457,6 +457,7 @@ class TestTieringOffloadingManager:
         # (one for each secondary tier)
         for key in chunks:
             chunk = self.primary_tier._policy.get(key)
+            assert chunk is not None
             # ref_cnt should be 2 (one for each secondary tier)
             assert chunk.ref_cnt == 2
 
@@ -470,6 +471,7 @@ class TestTieringOffloadingManager:
         # been polled yet because the per-step guard skipped the second call.
         for key in chunks:
             chunk = self.primary_tier._policy.get(key)
+            assert chunk is not None
             assert chunk.ref_cnt == 2
 
         # Secondary tiers have completed jobs waiting to be drained
@@ -483,6 +485,7 @@ class TestTieringOffloadingManager:
         # After cascade completes, ref_cnt should be 0
         for key in chunks:
             chunk = self.primary_tier._policy.get(key)
+            assert chunk is not None
             assert chunk.ref_cnt == 0
 
         # All completed jobs have been drained
@@ -588,7 +591,7 @@ class TestTieringOffloadingManager:
                 )
             )
 
-        self.secondary_tier1.submit_load = submit_partial
+        self.secondary_tier1.submit_load = submit_partial  # type: ignore[method-assign]  # stub
 
         for chunk in chunks:
             assert self.manager.lookup(chunk, _CTX) is LookupResult.HIT_PENDING
@@ -701,7 +704,7 @@ class TestTieringOffloadingManager:
         ctx = ReqContext(req_id="req_lookup_finish")
         self._start_request(ctx)
         chunk = to_keys(range(1))[0]
-        self.secondary_tier1.lookup = MagicMock(
+        self.secondary_tier1.lookup = MagicMock(  # type: ignore[method-assign]  # stub
             side_effect=[LookupResult.RETRY, LookupResult.HIT]
         )
 
@@ -783,8 +786,8 @@ class TestTieringOffloadingManager:
         # for secondary tiers to drain jobs, so primary tier's chunks are evictable.
         self._simulate_on_schedule_end()
 
-        self.secondary_tier1.touch = MagicMock(wraps=self.secondary_tier1.touch)
-        self.secondary_tier2.touch = MagicMock(wraps=self.secondary_tier2.touch)
+        self.secondary_tier1.touch = MagicMock(wraps=self.secondary_tier1.touch)  # type: ignore[method-assign]  # spy
+        self.secondary_tier2.touch = MagicMock(wraps=self.secondary_tier2.touch)  # type: ignore[method-assign]  # spy
 
         # Touch chunks
         self.manager.touch(chunks, _CTX)
@@ -851,10 +854,10 @@ class TestTieringOffloadingManager:
         """Test that failed GPU→primary store doesn't cascade."""
         chunks = to_keys(range(3))
 
-        self.secondary_tier1.submit_store = MagicMock(
+        self.secondary_tier1.submit_store = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.submit_store
         )
-        self.secondary_tier2.submit_store = MagicMock(
+        self.secondary_tier2.submit_store = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier2.submit_store
         )
 
@@ -880,7 +883,7 @@ class TestTieringOffloadingManager:
         for chunk in chunks:
             self.secondary_tier1.chunks[chunk] = True
 
-        self.secondary_tier1.submit_load = MagicMock(
+        self.secondary_tier1.submit_load = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.submit_load
         )
 
@@ -918,7 +921,7 @@ class TestTieringOffloadingManager:
         shared_chunk = to_keys([0])[0]
         self.secondary_tier1.chunks[shared_chunk] = True
 
-        self.secondary_tier1.submit_load = MagicMock(
+        self.secondary_tier1.submit_load = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.submit_load
         )
 
@@ -945,7 +948,7 @@ class TestTieringOffloadingManager:
         """complete_store cascades to secondary tiers with the correct req_context."""
         chunks = to_keys(range(2))
 
-        self.secondary_tier1.submit_store = MagicMock(
+        self.secondary_tier1.submit_store = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.submit_store
         )
 
@@ -967,7 +970,7 @@ class TestTieringOffloadingManager:
         ctx = ReqContext(req_id="req_delayed_secondary")
         calls: list[tuple[str, str]] = []
 
-        self.primary_tier.on_request_finished = MagicMock(
+        self.primary_tier.on_request_finished = MagicMock(  # type: ignore[method-assign]  # stub
             side_effect=lambda req_context: calls.append(
                 ("primary_finish", req_context.req_id)
             )
@@ -984,14 +987,14 @@ class TestTieringOffloadingManager:
             calls.append(("submit_store_2", job_metadata.req_context.req_id))
             return original_submit_store2(job_metadata)
 
-        self.secondary_tier1.submit_store = MagicMock(side_effect=submit_store1)
-        self.secondary_tier2.submit_store = MagicMock(side_effect=submit_store2)
-        self.secondary_tier1.on_request_finished = MagicMock(
+        self.secondary_tier1.submit_store = MagicMock(side_effect=submit_store1)  # type: ignore[method-assign]  # stub
+        self.secondary_tier2.submit_store = MagicMock(side_effect=submit_store2)  # type: ignore[method-assign]  # stub
+        self.secondary_tier1.on_request_finished = MagicMock(  # type: ignore[method-assign]  # stub
             side_effect=lambda req_context: calls.append(
                 ("secondary_finish_1", req_context.req_id)
             )
         )
-        self.secondary_tier2.on_request_finished = MagicMock(
+        self.secondary_tier2.on_request_finished = MagicMock(  # type: ignore[method-assign]  # stub
             side_effect=lambda req_context: calls.append(
                 ("secondary_finish_2", req_context.req_id)
             )
@@ -1020,16 +1023,16 @@ class TestTieringOffloadingManager:
         chunks = to_keys(range(2))
         ctx = ReqContext(req_id="req_failed_store_finalize")
 
-        self.secondary_tier1.submit_store = MagicMock(
+        self.secondary_tier1.submit_store = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.submit_store
         )
-        self.secondary_tier2.submit_store = MagicMock(
+        self.secondary_tier2.submit_store = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier2.submit_store
         )
-        self.secondary_tier1.on_request_finished = MagicMock(
+        self.secondary_tier1.on_request_finished = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.on_request_finished
         )
-        self.secondary_tier2.on_request_finished = MagicMock(
+        self.secondary_tier2.on_request_finished = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier2.on_request_finished
         )
 
@@ -1052,10 +1055,10 @@ class TestTieringOffloadingManager:
         """Requests with no pending stores finalize secondary tiers immediately."""
         ctx = ReqContext(req_id="req_zero_store_finalize")
 
-        self.secondary_tier1.on_request_finished = MagicMock(
+        self.secondary_tier1.on_request_finished = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.on_request_finished
         )
-        self.secondary_tier2.on_request_finished = MagicMock(
+        self.secondary_tier2.on_request_finished = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier2.on_request_finished
         )
 
@@ -1071,10 +1074,10 @@ class TestTieringOffloadingManager:
         chunks = to_keys(range(2))
         ctx = ReqContext(req_id="req_reset_finalize_secondary")
 
-        self.secondary_tier1.on_request_finished = MagicMock(
+        self.secondary_tier1.on_request_finished = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.on_request_finished
         )
-        self.secondary_tier2.on_request_finished = MagicMock(
+        self.secondary_tier2.on_request_finished = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier2.on_request_finished
         )
 
@@ -1099,10 +1102,10 @@ class TestTieringOffloadingManager:
         resumed_chunks = to_keys(range(2, 4))
         ctx = ReqContext(req_id="req_reset_resume")
 
-        self.secondary_tier1.on_request_finished = MagicMock(
+        self.secondary_tier1.on_request_finished = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.on_request_finished
         )
-        self.secondary_tier2.on_request_finished = MagicMock(
+        self.secondary_tier2.on_request_finished = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier2.on_request_finished
         )
 
@@ -1137,7 +1140,7 @@ class TestTieringOffloadingManager:
         assert ctx.req_id not in self.manager._req_state
 
         # Escalate: tier1 requests REQUEST_LEVEL
-        self.secondary_tier1.on_new_request = lambda req_context: (
+        self.secondary_tier1.on_new_request = lambda req_context: (  # type: ignore[method-assign]  # stub
             RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         )
 
@@ -1171,7 +1174,7 @@ class TestTieringOffloadingManager:
         self._simulate_on_schedule_end()
 
         # Make tier1 request-level, tier2 stays chunk-level
-        self.secondary_tier1.on_new_request = lambda req_context: (
+        self.secondary_tier1.on_new_request = lambda req_context: (  # type: ignore[method-assign]  # stub
             RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         )
 
@@ -1179,10 +1182,10 @@ class TestTieringOffloadingManager:
         self.manager.on_new_request(ctx)
 
         # Spy on submit_store
-        self.secondary_tier1.submit_store = MagicMock(
+        self.secondary_tier1.submit_store = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.submit_store
         )
-        self.secondary_tier2.submit_store = MagicMock(
+        self.secondary_tier2.submit_store = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier2.submit_store
         )
 
@@ -1205,21 +1208,24 @@ class TestTieringOffloadingManager:
     def _make_request_level_request(self, req_id: str) -> ReqContext:
         """Start a request for which tier1 asks for request-level offloading,
         with tier1's submit_store wrapped so the cascade can be observed."""
-        self.secondary_tier1.on_new_request = lambda req_context: (
+        self.secondary_tier1.on_new_request = lambda req_context: (  # type: ignore[method-assign]  # stub
             RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         )
         ctx = ReqContext(req_id=req_id)
         self.manager.on_new_request(ctx)
-        self.secondary_tier1.submit_store = MagicMock(
+        self.secondary_tier1.submit_store = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.submit_store
         )
         return ctx
 
     def _cascaded_keys_for(self, req_id: str) -> list[set[OffloadKey]]:
         """Key sets tier1 was asked to store on behalf of `req_id`."""
+        # _make_request_level_request() wrapped submit_store in a MagicMock.
+        submit_store = self.secondary_tier1.submit_store
+        assert isinstance(submit_store, MagicMock)
         return [
             set(call.args[0].keys)
-            for call in self.secondary_tier1.submit_store.call_args_list
+            for call in submit_store.call_args_list
             if call.args[0].req_context.req_id == req_id
         ]
 
@@ -1234,7 +1240,7 @@ class TestTieringOffloadingManager:
         self._simulate_on_schedule_end()
 
         ctx = self._make_request_level_request("req_cascade")
-        self.manager.primary_tier.lookup = lambda key, req_context: (LookupResult.RETRY)
+        self.manager.primary_tier.lookup = lambda key, req_context: (LookupResult.RETRY)  # type: ignore[method-assign]  # stub
 
         with pytest.raises(AssertionError):
             self.manager._cascade_existing_chunks_to_request_level_tiers(keys, ctx, {0})
@@ -1331,7 +1337,7 @@ class TestTieringOffloadingManager:
         assert self.manager._pending_load_submissions
 
         # Request-level tier registration.
-        self.secondary_tier1.on_new_request = lambda req_context: (
+        self.secondary_tier1.on_new_request = lambda req_context: (  # type: ignore[method-assign]  # stub
             RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         )
         rl_ctx = ReqContext(req_id="rl")
@@ -1342,7 +1348,7 @@ class TestTieringOffloadingManager:
         self.manager._processed_jobs_this_step = True
 
         # Spy: pending submission must NOT reach the tier.
-        self.secondary_tier1.submit_load = MagicMock(
+        self.secondary_tier1.submit_load = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.submit_load
         )
 
@@ -1371,10 +1377,10 @@ class TestTieringOffloadingManager:
         read junk from, a primary slot that the post-reset path has
         reallocated.
         """
-        self.secondary_tier1.drain_jobs = MagicMock(
+        self.secondary_tier1.drain_jobs = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier1.drain_jobs
         )
-        self.secondary_tier2.drain_jobs = MagicMock(
+        self.secondary_tier2.drain_jobs = MagicMock(  # type: ignore[method-assign]  # spy
             wraps=self.secondary_tier2.drain_jobs
         )
 
@@ -1412,7 +1418,7 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.chunks[chunks[1]] = True
 
         # Secondaries have medium=CPU, so load_tier_filter skips them.
-        self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
+        self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)  # type: ignore[method-assign]  # spy
 
         ctx = ReqContext(req_id="r1", load_tier_filter=load_tier_filter)
         assert self.manager.lookup(chunks[0], ctx) is LookupResult.HIT
@@ -1435,7 +1441,7 @@ class TestTieringOffloadingManager:
         chunks = to_keys(range(1))
         self.secondary_tier1.chunks[chunks[0]] = True
 
-        self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
+        self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)  # type: ignore[method-assign]  # spy
 
         ctx = ReqContext(req_id="r2", load_tier_filter=load_tier_filter)
         assert self.manager.lookup(chunks[0], ctx) is LookupResult.HIT_PENDING

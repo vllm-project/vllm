@@ -23,6 +23,13 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
+from vllm.v1.worker.utils import AttentionGroup
+
+
+def _recoverssm_attn_groups(layer_name: str) -> list[list[AttentionGroup]]:
+    """RecoverSSMState.record_step reads only each group's ``layer_names``."""
+    group = SimpleNamespace(layer_names=[layer_name])
+    return [[group]]  # type: ignore[list-item]  # layer_names-only stand-in
 
 
 def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -356,9 +363,9 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     num_sampled = torch.tensor([3, 1], dtype=torch.int32)
     idx_mapping = torch.tensor([0, 1], dtype=torch.int32)
     num_accepted_tokens = torch.ones(2, dtype=torch.int32)
-    group = SimpleNamespace(layer_names=["layer"])
+    attn_groups = _recoverssm_attn_groups("layer")
 
-    state.record_step({"layer": metadata}, [[group]], for_capture=False)
+    state.record_step({"layer": metadata}, attn_groups, for_capture=False)
     state.commit_step(
         num_sampled,
         idx_mapping,
@@ -395,9 +402,9 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -
     )
     num_sampled = torch.tensor([2, 3], dtype=torch.int32, device="cuda")
     idx_mapping = torch.tensor([3, 1], dtype=torch.int32, device="cuda")
-    group = SimpleNamespace(layer_names=["layer"])
+    attn_groups = _recoverssm_attn_groups("layer")
 
-    state.recoverssm.record_step({"layer": metadata}, [[group]], for_capture=False)
+    state.recoverssm.record_step({"layer": metadata}, attn_groups, for_capture=False)
 
     state.postprocess_state(idx_mapping, num_sampled)
 

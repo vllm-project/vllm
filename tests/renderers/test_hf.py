@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import cast
-
 import jinja2
 import pytest
 
@@ -258,9 +256,6 @@ def test_resolve_chat_template_kwargs(sample_json_schema, model, expected_kwargs
         tools=tools,
         model_config=model_config,
     )
-    # The rest of this test feeds the resolved template to the kwargs resolver,
-    # so a tokenizer without one would fail confusingly further down.
-    assert chat_template is not None
     with pytest.raises(
         ValueError, match="Found unexpected chat template kwargs from request"
     ):
@@ -582,9 +577,8 @@ def test_resolve_content_format_examples(template_path, expected_format):
         model,
         trust_remote_code=model_config.trust_remote_code,
     )
-    # `chat_template` exists on the underlying transformers tokenizer but is
-    # not part of the `TokenizerLike` protocol. Clearing it forces resolution
-    # to fall back to the template loaded below.
+    # Clear the HF tokenizer's own template so resolution falls back to the
+    # one loaded below; ``chat_template`` is not part of ``TokenizerLike``.
     dummy_tokenizer.chat_template = None  # type: ignore[attr-defined]
 
     chat_template = load_chat_template(EXAMPLES_DIR / template_path)
@@ -647,13 +641,13 @@ def test_get_gen_prompt(
         continue_final_message=continue_final_message,
     )
 
-    # Call the function and get the result
-    result = safe_apply_chat_template(
+    # Call the function and get the result. The plain role/content request
+    # messages are already in conversation shape, which mypy cannot see
+    # through ``ChatCompletionMessageParam``.
+    result = safe_apply_chat_template(  # type: ignore[call-overload]
         model_config,
         tokenizer,
-        # The test messages are plain role/content dicts, so they are already
-        # in conversation shape and need no `parse_chat_messages` pass.
-        cast(list[ConversationMessage], mock_request.messages),
+        mock_request.messages,
         tools=None,
         chat_template=mock_request.chat_template or template_content,
         add_generation_prompt=mock_request.add_generation_prompt,
@@ -670,7 +664,7 @@ def test_get_gen_prompt(
 
 class TestConvertDeveloperToSystem:
     def test_converts_role(self):
-        conversation: list[ConversationMessage] = [
+        conversation = [
             {"role": "developer", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
         ]
@@ -680,7 +674,7 @@ class TestConvertDeveloperToSystem:
         assert result[1]["role"] == "user"
 
     def test_removes_tools_key(self):
-        conversation: list[ConversationMessage] = [
+        conversation = [
             {
                 "role": "developer",
                 "content": "Instructions",
@@ -691,7 +685,7 @@ class TestConvertDeveloperToSystem:
         assert "tools" not in result[0]
 
     def test_no_developer_messages_unchanged(self):
-        conversation: list[ConversationMessage] = [
+        conversation = [
             {"role": "system", "content": "System prompt"},
             {"role": "user", "content": "Hello"},
         ]
@@ -700,7 +694,7 @@ class TestConvertDeveloperToSystem:
         assert result[1]["role"] == "user"
 
     def test_does_not_mutate_original(self):
-        original: ConversationMessage = {
+        original = {
             "role": "developer",
             "content": "Instructions",
             "tools": [{"type": "function"}],
@@ -1020,7 +1014,7 @@ def test_template_error_reason_falls_back_to_message():
 
 class TestConsolidateSystemMessages:
     def test_no_system_messages_unchanged(self):
-        conversation: list[ConversationMessage] = [
+        conversation = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi"},
         ]
@@ -1028,7 +1022,7 @@ class TestConsolidateSystemMessages:
         assert result == conversation
 
     def test_single_system_at_start_unchanged(self):
-        conversation: list[ConversationMessage] = [
+        conversation = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
         ]
@@ -1036,7 +1030,7 @@ class TestConsolidateSystemMessages:
         assert result == conversation
 
     def test_system_at_non_first_position_moved(self):
-        conversation: list[ConversationMessage] = [
+        conversation = [
             {"role": "user", "content": "Hello"},
             {"role": "system", "content": "You are helpful."},
         ]
@@ -1047,7 +1041,7 @@ class TestConsolidateSystemMessages:
         assert result[1]["content"] == "Hello"
 
     def test_multiple_system_messages_merged(self):
-        conversation: list[ConversationMessage] = [
+        conversation = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
             {"role": "system", "content": "Be concise."},
@@ -1059,7 +1053,7 @@ class TestConsolidateSystemMessages:
         assert result[1]["role"] == "user"
 
     def test_list_content_handled(self):
-        conversation: list[ConversationMessage] = [
+        conversation = [
             {"role": "user", "content": "Hello"},
             {
                 "role": "system",
@@ -1075,7 +1069,7 @@ class TestConsolidateSystemMessages:
         assert result[1]["role"] == "user"
 
     def test_does_not_mutate_original(self):
-        conversation: list[ConversationMessage] = [
+        conversation = [
             {"role": "user", "content": "Hello"},
             {"role": "system", "content": "You are helpful."},
         ]

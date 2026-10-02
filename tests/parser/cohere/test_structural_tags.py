@@ -325,10 +325,7 @@ class TestAdjustRequestFoldFromStructuredOutputs:
 
     def test_json_userdict_mapping_unwrapped(self) -> None:
         inner = {"type": "object", "properties": {"u": {"type": "number"}}}
-        # ``json`` is annotated ``str | dict | None``; the non-``dict``
-        # ``Mapping`` branch of ``_schema_dict_from_structured_outputs`` is
-        # what this test covers, so the off-annotation value is the point.
-        so = StructuredOutputsParams(json=UserDict(inner))  # type: ignore[arg-type]
+        so = StructuredOutputsParams(json=UserDict(inner))
         assert _schema_dict_from_structured_outputs(so) == inner
 
     @pytest.mark.parametrize(

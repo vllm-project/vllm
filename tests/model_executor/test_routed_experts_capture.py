@@ -63,7 +63,7 @@ def _capturer_with_buffer(
 class DummyRouter(BaseRouter):
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return RoutingMethodType.FUSED_TOPK
+        return RoutingMethodType.TopK
 
     def _compute_routing(
         self, hidden_states, router_logits, indices_type, *, input_ids=None

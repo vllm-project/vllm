@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import inspect
 import io
-from typing import Final, cast
+from typing import Final
 from unittest import mock
 
 import pybase64 as base64
@@ -23,7 +23,6 @@ from vllm.entrypoints.chat_utils import (
     MM_PARSER_MAP,
     MODALITY_PLACEHOLDERS_MAP,
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
-    ChatCompletionMessageParam,
     parse_chat_messages,
     parse_chat_messages_async,
 )
@@ -140,7 +139,7 @@ def test_parse_chat_messages_openai_format():
     b64 = _encode_tensor(t)
     mc = _make_mock_model_config()
 
-    messages: list[ChatCompletionMessageParam] = [
+    messages = [
         {
             "role": "user",
             "content": [
@@ -247,7 +246,7 @@ def test_parse_chat_messages_string_format_preserves_position(
             # Parser emits ONE sentinel per part.
             expected_parts.append(PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
-    messages: list[ChatCompletionMessageParam] = [{"role": "user", "content": content}]
+    messages = [{"role": "user", "content": content}]
     conv, mm_data, _ = parse_chat_messages(
         messages,
         mc,
@@ -256,10 +255,8 @@ def test_parse_chat_messages_string_format_preserves_position(
 
     assert conv[0]["content"] == "\n".join(expected_parts)
     assert mm_data is not None and "prompt_embeds" in mm_data
-    got_embeds = mm_data["prompt_embeds"]
-    assert isinstance(got_embeds, list)
-    assert len(got_embeds) == len(expected_embeds)
-    for got, want in zip(got_embeds, expected_embeds, strict=True):
+    assert len(mm_data["prompt_embeds"]) == len(expected_embeds)
+    for got, want in zip(mm_data["prompt_embeds"], expected_embeds, strict=True):
         assert torch.equal(got, want)
 
 
@@ -268,7 +265,7 @@ def test_parse_chat_messages_requires_flag():
     b64 = _encode_tensor(t)
     mc = _make_mock_model_config(enable_prompt_embeds=False)
 
-    messages: list[ChatCompletionMessageParam] = [
+    messages = [
         {
             "role": "user",
             "content": [{"type": "prompt_embeds", "data": b64}],
@@ -287,7 +284,7 @@ def test_parse_chat_messages_rejects_missing_data():
     # malformed requests without `data` must surface a clear validation error
     # rather than being silently dropped.
     mc = _make_mock_model_config()
-    messages: list[ChatCompletionMessageParam] = [
+    messages = [
         {
             "role": "user",
             "content": [{"type": "prompt_embeds"}],  # no `data`
@@ -324,7 +321,7 @@ _PLACEHOLDER_ERROR_PATTERN: Final[str] = re.sub(
 )
 def test_parse_chat_messages_rejects_placeholder_in_user_text(content):
     mc = _make_mock_model_config()  # enable_prompt_embeds=True by default
-    messages: list[ChatCompletionMessageParam] = [{"role": "user", "content": content}]
+    messages = [{"role": "user", "content": content}]
     with pytest.raises(VLLMValidationError, match=_PLACEHOLDER_ERROR_PATTERN):
         parse_chat_messages(messages, mc, content_format="openai")
 
@@ -333,7 +330,7 @@ def test_parse_chat_messages_allows_placeholder_in_text_when_feature_disabled():
     # When `enable_prompt_embeds=False` the tokenizer is never mutated, so the
     # literal `<prompt_embeds>` is just ordinary text and must pass through.
     mc = _make_mock_model_config(enable_prompt_embeds=False)
-    messages: list[ChatCompletionMessageParam] = [
+    messages = [
         {
             "role": "user",
             "content": f"benign mention of {PROMPT_EMBEDS_PLACEHOLDER_TOKEN} here",
@@ -622,8 +619,7 @@ def test_truncation_keeps_the_mixed_mask_aligned_with_the_prompt():
         truncation_side="left",
     )
 
-    # An EmbedsPrompt goes in, so an EmbedsPrompt comes back out.
-    result = cast(EmbedsPrompt, tok_params.apply_post_tokenization(None, prompt))
+    result = tok_params.apply_post_tokenization(None, prompt)
 
     # Keeping the last 8 of 20 positions starts inside the embed span, so the
     # first 3 surviving positions are embed rows and the rest are real tokens.

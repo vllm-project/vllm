@@ -3,13 +3,11 @@
 
 import math
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -22,10 +20,6 @@ from vllm.v1.worker.utils import (
     KVBlockZeroer,
     _zero_kv_blocks_kernel,
 )
-
-# KVBlockZeroer never reads AttentionGroup.backend, so these fixtures leave it
-# unset rather than standing up a real backend class.
-_NO_BACKEND = cast("type[AttentionBackend]", None)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -55,7 +49,7 @@ def test_attention_blocks_are_zeroed(spec):
     layer_name = "draft.self_attn"
     zeroer = KVBlockZeroer(
         device,
-        attn_groups_iter=[AttentionGroup(_NO_BACKEND, [layer_name], spec, 0)],
+        attn_groups_iter=[AttentionGroup(None, [layer_name], spec, 0)],
         kernel_block_sizes=[2],
         static_forward_context={
             layer_name: SimpleNamespace(kv_cache=storage),
@@ -95,7 +89,7 @@ def test_layers_in_one_group_may_use_different_kernel_pages_per_block():
         device,
         attn_groups_iter=[
             AttentionGroup(
-                _NO_BACKEND,
+                None,
                 ["wide", "narrow"],
                 spec,
                 0,
@@ -256,7 +250,7 @@ def test_large_dsv4_launch_geometry(monkeypatch):
     zeroer = KVBlockZeroer(
         device,
         attn_groups_iter=[
-            AttentionGroup(_NO_BACKEND, [name], spec, group_id)
+            AttentionGroup(None, [name], spec, group_id)
             for group_id, name in enumerate(layer_names)
         ],
         kernel_block_sizes=[1] * n_segs,
@@ -378,7 +372,7 @@ def test_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
     views = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
     groups = [
         AttentionGroup(
-            backend=_NO_BACKEND,
+            backend=None,
             layer_names=[f"layer.{i}" for i in range(num_layers)],
             kv_cache_spec=spec,
             kv_cache_group_id=0,

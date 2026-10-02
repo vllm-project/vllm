@@ -18,7 +18,6 @@ import pytest
 from tests.parser.engine.replay_harness import (
     CHUNK_SIZES,
     MockTokenizer,
-    as_tokenizer,
     collect_output,
     replay_streaming,
 )
@@ -166,7 +165,7 @@ class TestUfffdReasoningTransition:
         vocab = dict(_MODEL_CONFIGS[0].values[0])
 
         tokenizer = ByteFallbackMockTokenizer(vocab, tokens, ufffd_ids)
-        parser = _Glm47Delegating(as_tokenizer(tokenizer))
+        parser = _Glm47Delegating(tokenizer)
         deltas = replay_streaming(
             parser,
             tokens,

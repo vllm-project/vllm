@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,6 +10,7 @@ import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from vllm.config import LoRAConfig
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -27,13 +29,19 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
     runner.is_last_pp_rank = False
     local_batch = object()
     global_batch = SimpleNamespace(idx_mapping=object())
+    # Keep handles on the mocks: the runner's attributes are typed as the real
+    # PCPManager / PPHandler / ModelState, which have no assert_* methods.
+    restore_for_sampling = Mock()
     runner.pcp_manager = SimpleNamespace(
         global_batch=global_batch,
-        restore_for_sampling=Mock(),
+        restore_for_sampling=restore_for_sampling,
     )
-    runner.pp_handler = SimpleNamespace(receive=Mock(return_value=False))
-    runner.postprocess_num_computed_tokens = Mock()
-    runner.model_state = SimpleNamespace(postprocess_state=Mock())
+    pp_receive = Mock(return_value=False)
+    runner.pp_handler = SimpleNamespace(receive=pp_receive)
+    postprocess_num_computed_tokens = Mock()
+    runner.postprocess_num_computed_tokens = postprocess_num_computed_tokens  # type: ignore[method-assign]  # stub
+    postprocess_state = Mock()
+    runner.model_state = SimpleNamespace(postprocess_state=postprocess_state)
     runner.kv_connector = SimpleNamespace(post_forward=Mock(return_value=None))
     runner.eplb = SimpleNamespace(step=Mock())
     runner.execute_model_state = ExecuteModelState(
@@ -51,12 +59,10 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
 
     runner.sample_tokens(None)
 
-    runner.pp_handler.receive.assert_called_once_with(global_batch)
-    runner.postprocess_num_computed_tokens.assert_called_once_with(global_batch)
-    runner.model_state.postprocess_state.assert_called_once_with(
-        global_batch.idx_mapping, 0
-    )
-    runner.pcp_manager.restore_for_sampling.assert_not_called()
+    pp_receive.assert_called_once_with(global_batch)
+    postprocess_num_computed_tokens.assert_called_once_with(global_batch)
+    postprocess_state.assert_called_once_with(global_batch.idx_mapping, 0)
+    restore_for_sampling.assert_not_called()
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
@@ -237,7 +243,8 @@ def test_append_block_ids_rejects_write_past_row_capacity():
     block_tables = BlockTables.__new__(BlockTables)
     block_tables.num_kv_cache_groups = 1
     block_tables.blocks_per_kv_block = [1]
-    block_tables.block_tables = [_BlockTable()]
+    # append_block_ids only touches .gpu and .stage_write on each table.
+    block_tables.block_tables = [_BlockTable()]  # type: ignore[list-item]  # duck-typed stub
     block_tables.num_blocks = SimpleNamespace(
         np=torch.tensor([[0, 3]], dtype=torch.int32)
     )
@@ -255,6 +262,14 @@ def test_append_block_ids_rejects_write_past_row_capacity():
     assert block_tables.num_blocks.np[0, 1] == 3
 
 
+@contextlib.contextmanager
+def _no_dummy_loras(
+    lora_config: LoRAConfig | None, remove_lora: bool = True
+) -> Iterator[None]:
+    """No-op stand-in for LoRAModelRunnerMixin.maybe_setup_dummy_loras."""
+    yield
+
+
 def _make_capture_runner(captured: bool) -> GPUModelRunner:
     """Minimal V2 runner for capture_model: fakes everything except the
     cudagraph_manager's needs_capture decision."""
@@ -267,7 +282,7 @@ def _make_capture_runner(captured: bool) -> GPUModelRunner:
         capture=lambda *args, **kwargs: None,
     )
     runner.lora_config = None
-    runner.maybe_setup_dummy_loras = lambda _cfg: contextlib.nullcontext()
+    runner.maybe_setup_dummy_loras = _no_dummy_loras  # type: ignore[method-assign]  # stub
     runner.speculator = None
     runner.adaptive_verification = None
     runner.model = None

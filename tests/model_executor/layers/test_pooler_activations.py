@@ -3,13 +3,11 @@
 """Unit tests for vllm.model_executor.layers.pooler.activations."""
 
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig
 from vllm.model_executor.layers.pooler.activations import (
     LambdaPoolerActivation,
     PoolerClassify,
@@ -226,12 +224,11 @@ class TestResolveClassifierActFn:
         model_config = SimpleNamespace(
             hf_config=SimpleNamespace(num_labels=3, problem_type="")
         )
-        result = resolve_classifier_act_fn(cast(ModelConfig, model_config), act_fn=None)
+        result = resolve_classifier_act_fn(model_config, act_fn=None)
         assert isinstance(result, PoolerClassify)
         assert result.num_labels == 3
 
     def test_passes_through_provided_act_fn(self):
         custom = PoolerIdentity()
-        # model_config is not consulted when act_fn is provided.
-        result = resolve_classifier_act_fn(None, act_fn=custom)  # type: ignore[arg-type]
+        result = resolve_classifier_act_fn(None, act_fn=custom)
         assert result is custom

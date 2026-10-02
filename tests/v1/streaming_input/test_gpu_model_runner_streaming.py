@@ -189,7 +189,6 @@ def test_e2e_streaming_with_multimodal_features(mock_model_runner_with_input_bat
     # Verify prompt tokens include intermediate output (100) and new tokens
     # Initial: 2 + 10 (mm1) + 2 = 14 tokens
     # New: 2 + 10 (mm1) + 2 + 1 (output 100) + 5 (mm2) + 1 = 21 tokens
-    assert updated_req_state.prompt_token_ids is not None
     assert len(updated_req_state.prompt_token_ids) == 21
     assert updated_req_state.prompt_token_ids == [1, 2] + [0] * 10 + [3, 4, 100] + [
         0

@@ -46,11 +46,6 @@ class CachedState(TypedDict):
 
 
 class DummyRequest(Request):
-    # Narrower than the base class: this test double always builds a request
-    # with concrete prompt token ids and sampling params, never None.
-    prompt_token_ids: list[int]
-    sampling_params: SamplingParams
-
     def __init__(
         self,
         request_id,
@@ -120,6 +115,7 @@ class TestStreamingScheduler(unittest.TestCase):
                 scheduled = scheduler.schedule()
 
                 continuation = DummyRequest("session", prompt_token_ids=[4, 5])
+                assert continuation.sampling_params is not None
                 assert continuation.sampling_params.logprobs is None
                 if continuation_queued:
                     scheduler.add_request(continuation)
@@ -183,9 +179,7 @@ class TestStreamingScheduler(unittest.TestCase):
         scheduler.add_request(next_request)
 
         assert next_request.status == RequestStatus.WAITING
-        streaming_queue = scheduler.requests["test_request"].streaming_queue
-        assert streaming_queue is not None
-        assert len(streaming_queue) == 1
+        assert len(scheduler.requests["test_request"].streaming_queue) == 1
 
     def test_update_request_as_session_max_token(self):
         scheduler = create_scheduler()
@@ -204,11 +198,10 @@ class TestStreamingScheduler(unittest.TestCase):
         new_request.sampling_params = SamplingParams(max_tokens=10)
         new_request.max_tokens = 10  # Additional max_tokens from new request
 
-        # from_request() only returns None for non-resumable requests.
         update = StreamingUpdate.from_request(new_request)
-        assert update is not None
         scheduler._update_request_as_session(session, update)
 
+        assert session.sampling_params is not None
         assert session.sampling_params.max_tokens == 10
         assert session.max_tokens == 10
 
@@ -221,9 +214,9 @@ class TestStreamingScheduler(unittest.TestCase):
         new_request2.sampling_params = SamplingParams(max_tokens=4)
         new_request2.max_tokens = 4
         update2 = StreamingUpdate.from_request(new_request2)
-        assert update2 is not None
         scheduler._update_request_as_session(session, update2)
 
+        assert session.sampling_params is not None
         assert session.sampling_params.max_tokens == 4
         assert session.max_tokens == 4
 
@@ -243,11 +236,11 @@ class TestStreamingScheduler(unittest.TestCase):
         new_request.sampling_params = SamplingParams(max_tokens=10)
 
         update = StreamingUpdate.from_request(new_request)
-        assert update is not None
         scheduler._update_request_as_session(session, update)
 
         assert session.prompt_token_ids == [1, 2, 3, 4, 5, 6]
         assert session._all_token_ids == [1, 2, 3, 4, 5, 6]
+        assert session.sampling_params is not None
         assert session.sampling_params.max_tokens == 10
         assert session.status == RequestStatus.WAITING
 
@@ -279,7 +272,6 @@ class TestStreamingScheduler(unittest.TestCase):
             mm_features=[mm_feature],
         )
         update = StreamingUpdate.from_request(new_request)
-        assert update is not None
         scheduler._update_request_as_session(session, update)
 
         assert len(session.mm_features) == 2
@@ -376,7 +368,6 @@ class TestStreamingScheduler(unittest.TestCase):
         )
 
         update = StreamingUpdate.from_request(new_request)
-        assert update is not None
         scheduler._update_request_as_session(session, update)
 
         # _update_request_as_session keeps computed output tokens (they become

@@ -4,7 +4,6 @@
 import gc
 from collections.abc import Generator
 from functools import partial
-from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -203,7 +202,7 @@ def can_initialize(
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-        kwargs: dict[str, Any] = {}
+        kwargs = {}
         if not model_info.enable_prefix_caching:
             kwargs["enable_prefix_caching"] = False
 

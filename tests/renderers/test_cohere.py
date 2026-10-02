@@ -14,17 +14,11 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 
-from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ConversationMessage,
-)
-from vllm.inputs import TextPrompt
 from vllm.renderers import ChatParams
 from vllm.renderers.cohere import (
     CohereRenderer,
@@ -596,7 +590,7 @@ class TestConversationToMelody:
         # shapes it doesn't recognise; the renderer must skip those
         # rather than let a ``None`` reach melody.
         conv = [{"role": "tool", "tool_call_id": "c", "content": "ignored"}]
-        v2_content: dict[int, list[dict[str, Any]]] = {
+        v2_content = {
             0: [
                 {"type": "text", "text": "keep me"},
                 {"type": "mystery", "unexpected": True},
@@ -1028,7 +1022,7 @@ async def test_async_cohere_renderer_does_not_block_event_loop():
 
     mock_tokenizer = Mock(spec=HfTokenizer)
     renderer = CohereRenderer(
-        cast(VllmConfig, _MockVllmConfig(_MockModelConfig(), _MockParallelConfig())),
+        _MockVllmConfig(_MockModelConfig(), _MockParallelConfig()),
         tokenizer=mock_tokenizer,
     )
 
@@ -1054,9 +1048,9 @@ async def test_async_cohere_renderer_does_not_block_event_loop():
         await asyncio.sleep(0.1)
 
     _, prompt = await task
-    # The Cohere renderer always produces a TextPrompt.
-    text_prompt = cast(TextPrompt, prompt)
-    assert text_prompt["prompt"] == expected_prompt, (
+    # ``.get`` because ``prompt`` is typed as any ``DictPrompt``, and the
+    # encoder-decoder member of that union has no top-level ``prompt``.
+    assert prompt.get("prompt") == expected_prompt, (
         "Mocked blocking render was not called"
     )
     assert blocked_count == 0, "Event loop blocked during rendering"
@@ -1108,8 +1102,8 @@ class TestRequestCitationsReachRenderedPrompt:
 
     @staticmethod
     def _openai_msgs_to_conversation(
-        openai_messages: list[ChatCompletionMessageParam],
-    ) -> list[ConversationMessage]:
+        openai_messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         """Cheap stand-in for ``parse_chat_messages`` on text-only inputs.
 
         ``_convert_v2_to_chat_completion`` emits OpenAI-shape assistant
@@ -1120,7 +1114,7 @@ class TestRequestCitationsReachRenderedPrompt:
         list-of-parts shape ``_conversation_to_melody_messages`` expects
         and preserve every other key the renderer reads.
         """
-        conv: list[ConversationMessage] = []
+        conv: list[dict[str, Any]] = []
         for m in openai_messages:
             entry: dict[str, Any] = dict(m)
             content = entry.get("content")
@@ -1128,9 +1122,7 @@ class TestRequestCitationsReachRenderedPrompt:
                 entry["content"] = [{"type": "text", "text": content}]
             elif content is None:
                 entry["content"] = []
-            # The renderer reads keys beyond those ConversationMessage
-            # declares (e.g. "citations"), so the dict is built untyped.
-            conv.append(cast(ConversationMessage, entry))
+            conv.append(entry)
         return conv
 
     def test_document_citation_survives_to_prompt(self):

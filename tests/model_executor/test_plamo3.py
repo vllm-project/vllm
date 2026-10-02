@@ -2,15 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 import torch
 from torch import nn
 
-from vllm.config import SpeculativeConfig
 from vllm.model_executor.models import plamo3 as plamo3_mod
-from vllm.model_executor.models.interfaces import supports_eagle3
+from vllm.model_executor.models.interfaces import SupportsEagle3
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
@@ -42,7 +40,7 @@ def test_plamo3_returns_dflash_selected_auxiliary_hidden_states(monkeypatch):
     model.do_not_compile = True
 
     target = plamo3_mod.Plamo3ForCausalLM.__new__(
-        plamo3_mod.Plamo3ForCausalLM  # type: ignore[type-abstract]
+        plamo3_mod.Plamo3ForCausalLM  # type: ignore[type-abstract]  # protocol attrs unset
     )
     nn.Module.__init__(target)
     target.model = model
@@ -53,10 +51,9 @@ def test_plamo3_returns_dflash_selected_auxiliary_hidden_states(monkeypatch):
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
 
-    assert supports_eagle3(target)
-    # nn.Module matches the type[object] overload of supports_eagle3(), so its
-    # TypeIs narrows target to type[SupportsEagle3]; restore the instance type.
-    target = cast(plamo3_mod.Plamo3ForCausalLM, target)
+    # Same check as supports_eagle3(), which mypy resolves to its
+    # type[object] overload here and so narrows target to a class.
+    assert isinstance(target, SupportsEagle3)
     assert target.get_eagle3_default_aux_hidden_state_layers() == (2, 4, 5)
 
     spec_config = SimpleNamespace(
@@ -64,7 +61,7 @@ def test_plamo3_returns_dflash_selected_auxiliary_hidden_states(monkeypatch):
             hf_config=SimpleNamespace(dflash_config={"target_layer_ids": [0, 1]})
         )
     )
-    set_eagle3_aux_hidden_state_layers(target, cast(SpeculativeConfig, spec_config))
+    set_eagle3_aux_hidden_state_layers(target, spec_config)
     assert decoder.aux_hidden_state_layers == (1, 2)
 
     output, aux_hidden_states = target(
