@@ -71,32 +71,14 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     )
 
                 from vllm.model_executor.layers.quantization.humming import (
-                    HummingLayerQuantizationConfig,
                     HummingMoEMethod,
                 )
-                from vllm.utils.humming import BaseInputSchema, BaseWeightSchema
 
-                weight_schema = BaseWeightSchema.from_config(
-                    {
-                        **weight_quant.model_dump(exclude_none=True),
-                        "quant_method": "compressed-tensors",
-                        "format": format,
-                    }
-                )
-                input_schema = BaseInputSchema.from_config(
-                    {
-                        **input_quant.model_dump(exclude_none=True),
-                        "quant_method": "compressed-tensors",
-                        "format": format,
-                    }
-                )
-                return HummingMoEMethod(
-                    HummingLayerQuantizationConfig(
-                        weight_schema=weight_schema,
-                        input_schema=input_schema,
-                        allow_input_schema_fallback=False,
-                    ),
-                    layer.moe_config,
+                return HummingMoEMethod.from_compressed_tensors(
+                    weight_quant=weight_quant,
+                    input_quant=input_quant,
+                    compression_format=format,
+                    moe=layer.moe_config,
                 )
 
             from .compressed_tensors_moe_w4a4_mxfp4 import (

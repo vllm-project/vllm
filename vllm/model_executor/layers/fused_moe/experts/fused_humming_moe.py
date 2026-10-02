@@ -156,7 +156,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def init_humming_moe(self):
         from vllm.utils.humming import GemmType, MmaType, dtypes, get_heuristics_config
 
-        self.use_m_major_input_scale = (
+        self.supports_m_major_w4a8 = (
             self.humming_gemm_type() == GemmType.GROUPED_CONTIGUOUS
             and all(
                 config.sm_version == 90
@@ -168,7 +168,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 and config.use_fused_e8m0_scale
                 and config.input_scale_group_size == 128
                 and config.weight_scale_group_size == 32
-                and config.num_experts > 0
                 for config in self.humming_configs.values()
             )
         )
@@ -176,28 +175,31 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
             "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
             "gemm_type": self.humming_gemm_type().value,
-            "use_m_major_input_scale": self.use_m_major_input_scale,
+            "use_m_major_input_scale": self.supports_m_major_w4a8,
         }
-        self.w13_tuning_config = get_heuristics_config(
-            layer_config=self.humming_configs["w13"],
-            use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
-            use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
-            gemm_type=self.humming_gemm_type(),
-            use_m_major_input_scale=self.use_m_major_input_scale,
-        )
-        self.w2_tuning_config = get_heuristics_config(
-            layer_config=self.humming_configs["w2"],
-            use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
-            use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
-            gemm_type=self.humming_gemm_type(),
-            use_m_major_input_scale=self.use_m_major_input_scale,
-        )
+        def tuning_config(sublayer_name: str, m_major: bool) -> dict | list:
+            return get_heuristics_config(
+                layer_config=self.humming_configs[sublayer_name],
+                use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
+                use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
+                gemm_type=self.humming_gemm_type(),
+                use_m_major_input_scale=m_major,
+            )
+
+        self.w13_tuning_config = tuning_config("w13", self.supports_m_major_w4a8)
+        self.w2_tuning_config = tuning_config("w2", self.supports_m_major_w4a8)
         self.compute_config_str = json.dumps(self.compute_config)
         self.w13_tuning_config_str = json.dumps(self.w13_tuning_config)
         self.w2_tuning_config_str = json.dumps(self.w2_tuning_config)
-        if self.use_m_major_input_scale:
-            self.generic_compute_config_str = json.dumps(
+        if self.supports_m_major_w4a8:
+            self.row_major_compute_config_str = json.dumps(
                 {**self.compute_config, "use_m_major_input_scale": False}
+            )
+            self.row_major_w13_tuning_config_str = json.dumps(
+                tuning_config("w13", False)
+            )
+            self.row_major_w2_tuning_config_str = json.dumps(
+                tuning_config("w2", False)
             )
 
     def process_input(
@@ -220,7 +222,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         quant_config = self.quant_config
         config = self.humming_configs[sublayer_name]
         if use_m_major_input_scale is None:
-            use_m_major_input_scale = self.use_m_major_input_scale
+            use_m_major_input_scale = self.supports_m_major_w4a8
         if input_scale is not None:
             assert scatter_idx is None
             if activation is not None:
@@ -968,23 +970,26 @@ class HummingGroupedExperts(HummingExpertsBase):
         """
         assert not apply_router_weight_on_input
 
-        # Only DeepEP v2's expanded, exact-row layout uses the specialized
-        # W4A8 path. Other backends and padded decode use generic Humming.
-        use_optimized_expanded = (
-            self.use_m_major_input_scale
+        # DeepEP v2 expanded rows use the M-major W4A8 schedule. Other
+        # layouts, including padded decode, retain their row-major schedule.
+        use_m_major_w4a8 = (
+            self.supports_m_major_w4a8
             and expert_tokens_meta is not None
             and expert_tokens_meta.deepep_v2_do_expand
             and expert_tokens_meta.expert_num_tokens is not None
         )
-        if use_optimized_expanded:
-            valid_shape_m = topk_ids.numel()
-        else:
-            valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
-        if self.use_m_major_input_scale and not use_optimized_expanded:
-            compute_config_str = self.generic_compute_config_str
-            # Humming infers and caches the generic grouped schedule.
-            w13_tuning_config_str = None
-            w2_tuning_config_str = None
+        use_row_major_fallback = (
+            self.supports_m_major_w4a8 and not use_m_major_w4a8
+        )
+        valid_shape_m = (
+            topk_ids.numel()
+            if use_m_major_w4a8
+            else self.estimate_local_valid_shape_m(topk_ids)
+        )
+        if use_row_major_fallback:
+            compute_config_str = self.row_major_compute_config_str
+            w13_tuning_config_str = self.row_major_w13_tuning_config_str
+            w2_tuning_config_str = self.row_major_w2_tuning_config_str
         else:
             compute_config_str = self.compute_config_str
             w13_tuning_config_str = self.w13_tuning_config_str
@@ -1028,7 +1033,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             quanted_input=buffers.get("quanted_gate_up_input", None),
             scatter_idx=scatter_idx,
             num_valid_tokens=num_valid_tokens,
-            use_m_major_input_scale=use_optimized_expanded,
+            use_m_major_input_scale=use_m_major_w4a8,
         )
 
         self.humming_forward(
@@ -1050,7 +1055,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             quanted_input=buffers["quanted_down_input"],
             activation=activation,
             num_valid_tokens=expert_offsets[-1:],
-            use_m_major_input_scale=use_optimized_expanded,
+            use_m_major_input_scale=use_m_major_w4a8,
         )
 
         self.humming_forward(
