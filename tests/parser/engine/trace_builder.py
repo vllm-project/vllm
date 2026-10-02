@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import functools
 import json
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Any
 
 from tests.parser.engine.replay_harness import (
@@ -28,18 +29,24 @@ from tests.parser.engine.replay_harness import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
+from vllm.parser import plamo3
 from vllm.parser.engine.registered_adapters import (
     DeepSeekV4Parser,
     DeepSeekV32Parser,
     DeepSeekV41Parser,
     Gemma4Parser,
     Glm47MoeParser,
+    GraniteParser,
+    GraniteThinkingParser,
     InklingParser,
     KimiK2Parser,
+    MiMoParser,
     MinimaxM2Parser,
     NemotronV3Parser,
+    Plamo3Parser,
     Qwen3Parser,
     SeedOssParser,
+    Step3p5Parser,
 )
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -352,7 +359,12 @@ def _qwen3_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
     ]
 
 
-def _qwen3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+def _qwen3_segments(
+    scenario: Scenario,
+    tool_segments: Callable[[ToolCallSpec], list[tuple[str, bool]]] = (
+        _qwen3_tool_segments
+    ),
+) -> list[tuple[str, bool]]:
     segs: list[tuple[str, bool]] = []
     if scenario.reasoning is not None:
         segs.append((scenario.reasoning, False))
@@ -365,7 +377,7 @@ def _qwen3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
         segs.append((scenario.content, False))
     if scenario.tool_calls:
         for tc in scenario.tool_calls:
-            segs.extend(_qwen3_tool_segments(tc))
+            segs.extend(tool_segments(tc))
     return segs
 
 
@@ -385,6 +397,9 @@ def _build_qwen3(
     parser_cls: type = Qwen3Parser,
     strip_trailing_ws: bool = False,
     validate: bool = True,
+    tool_segments: Callable[[ToolCallSpec], list[tuple[str, bool]]] = (
+        _qwen3_tool_segments
+    ),
 ) -> Sample:
     expected_reasoning: str | None
     if scenario.reasoning is not None:
@@ -399,7 +414,7 @@ def _build_qwen3(
         sample_id=f"{name}-{scenario.id}",
         description=scenario.description,
         vocab=_QWEN3_VOCAB,
-        segments=_qwen3_segments(scenario),
+        segments=_qwen3_segments(scenario, tool_segments),
         expected_reasoning=expected_reasoning,
         expected_content=_qwen3_expected_content(scenario),
         expected_tool_calls=_expected_tc(scenario),
@@ -408,6 +423,44 @@ def _build_qwen3(
     if validate:
         _validate_sample(sample, parser_cls)
     return sample
+
+
+# ── MiMo (compact Qwen3 XML, no newlines between tags) ───────────────
+
+
+def _mimo_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    parts = [f"<function={tc.name}>"]
+    for key, value in tc.arguments.items():
+        parts.append(f"<parameter={key}>{_qwen3_arg_value(value)}</parameter>")
+    parts.append("</function>")
+    return [
+        ("<tool_call>", True),
+        ("".join(parts), False),
+        ("</tool_call>", True),
+    ]
+
+
+def _build_mimo(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="mimo",
+        parser_cls=MiMoParser,
+        validate=validate,
+        tool_segments=_mimo_tool_segments,
+    )
+
+
+# ── Step-3.5 (Qwen3 XML, trailing reasoning whitespace stripped) ────
+
+
+def _build_step3p5(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="step3p5",
+        parser_cls=Step3p5Parser,
+        strip_trailing_ws=True,
+        validate=validate,
+    )
 
 
 # ── MiniMax M2 (XML invoke format, starts in REASONING) ──────────────
@@ -591,6 +644,30 @@ def _build_nemotron_v3(scenario: Scenario, validate: bool = True) -> Sample:
         strip_trailing_ws=True,
         validate=validate,
     )
+
+
+def _build_granite_thinking(scenario: Scenario, validate: bool = True) -> Sample:
+    """Granite 4.2: the Nemotron V3 grammar plus leading-newline stripping on
+    content after ``</think>``."""
+    sample = _build_qwen3(
+        scenario,
+        name="granite_thinking_parser",
+        parser_cls=GraniteThinkingParser,
+        strip_trailing_ws=True,
+        validate=False,
+    )
+    sample = replace(
+        sample,
+        expected_content=(
+            sample.expected_content.lstrip("\n")
+            if sample.expected_content
+            else sample.expected_content
+        ),
+        content_lstrip="\n",
+    )
+    if validate:
+        _validate_sample(sample, GraniteThinkingParser)
+    return sample
 
 
 # ── Seed-OSS (Qwen3 XML grammar with Seed wrapper tokens) ────────────
@@ -1042,6 +1119,153 @@ def _build_inkling(scenario: Scenario, validate: bool = True) -> Sample:
     return sample
 
 
+# ── PLaMo3 (literal nested tool-request wrappers) ───────────────────
+
+_PLAMO3_MARKERS = (
+    plamo3.BEGIN_THINK,
+    plamo3.END_THINK,
+    plamo3.BEGIN_TOOL_REQUESTS,
+    plamo3.END_TOOL_REQUESTS,
+    plamo3.BEGIN_TOOL_REQUEST,
+    plamo3.END_TOOL_REQUEST,
+    plamo3.BEGIN_TOOL_NAME,
+    plamo3.END_TOOL_NAME,
+    plamo3.BEGIN_TOOL_ARGUMENTS,
+    plamo3.END_TOOL_ARGUMENTS,
+    plamo3.EOT,
+)
+_PLAMO3_VOCAB = {marker: 300 + i for i, marker in enumerate(_PLAMO3_MARKERS)}
+
+
+def _plamo3_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    args = json.dumps(tc.arguments, ensure_ascii=False, separators=(",", ":"))
+    return [
+        (plamo3.BEGIN_TOOL_REQUEST, True),
+        (plamo3.BEGIN_TOOL_NAME, True),
+        (tc.name, False),
+        (plamo3.END_TOOL_NAME, True),
+        (plamo3.BEGIN_TOOL_ARGUMENTS, True),
+        (args, False),
+        (plamo3.END_TOOL_ARGUMENTS, True),
+        (plamo3.END_TOOL_REQUEST, True),
+    ]
+
+
+def _plamo3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = [
+        (plamo3.BEGIN_THINK, True),
+        (scenario.reasoning or "", False),
+        (plamo3.END_THINK, True),
+    ]
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls is not None:
+        segs.append((plamo3.BEGIN_TOOL_REQUESTS, True))
+        for tool_call in scenario.tool_calls:
+            segs.extend(_plamo3_tool_segments(tool_call))
+        segs.append((plamo3.END_TOOL_REQUESTS, True))
+    return segs
+
+
+def _build_plamo3(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"plamo3-{scenario.id}",
+        description=scenario.description,
+        vocab=_PLAMO3_VOCAB,
+        segments=_plamo3_segments(scenario),
+        expected_reasoning=scenario.reasoning or "",
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, Plamo3Parser)
+    return sample
+
+
+# ── Granite (JSON-array tool bodies, no reasoning) ───────────────────────
+
+_GRANITE_VOCAB: dict[str, int] = {
+    "<|tool_call|>": 49154,
+}
+
+
+def _granite_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.content:
+        # Granite has no reasoning; prose is plain content preceding the marker.
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        segs.append(("<|tool_call|>", True))
+        payload = json.dumps(
+            [
+                {"name": tc.name, "arguments": tc.arguments}
+                for tc in scenario.tool_calls
+            ],
+            ensure_ascii=False,
+            separators=(", ", ": "),
+        )
+        segs.append((" " + payload, False))
+    return segs
+
+
+def _granite_expected_content(scenario: Scenario) -> str | None:
+    if scenario.tool_calls:
+        if not scenario.content:
+            return None
+        return scenario.content.strip() or None
+    return scenario.content
+
+
+def _build_granite(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"granite-{scenario.id}",
+        description=scenario.description,
+        vocab=_GRANITE_VOCAB,
+        segments=_granite_segments(scenario),
+        expected_reasoning=None,
+        expected_content=_granite_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, GraniteParser)
+    return sample
+
+
+# Granite has no reasoning, so the shared reasoning-centric SCENARIOS do not
+# apply; these exercise the JSON-array tool body (single, parallel, surrounding
+# text) instead.
+_GRANITE_SCENARIOS: list[Scenario] = [
+    Scenario(
+        id="single-tool",
+        description="Single tool call",
+        tool_calls=[_READ_TOOL],
+    ),
+    Scenario(
+        id="parallel-tools",
+        description="Parallel tool calls in one JSON array",
+        tool_calls=[_BASH_TOOL, _WEATHER_TOOL],
+    ),
+    Scenario(
+        id="complex-json-args",
+        description="Tool call with nested objects, arrays, numbers, booleans",
+        tool_calls=[_COMPLEX_TOOL],
+    ),
+    Scenario(
+        id="content-only",
+        description="Plain content response without tool calls",
+        content="Hello! How can I help you today?",
+    ),
+    Scenario(
+        id="surrounding-text",
+        description="Prose content preceding the tool call",
+        content="Let me check the weather.",
+        tool_calls=[_WEATHER_TOOL],
+    ),
+]
+
+
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
@@ -1049,13 +1273,18 @@ _BUILDERS: dict[str, Any] = {
     "deepseek_v4": _build_deepseek_v4,
     "deepseek_v41": functools.partial(_build_deepseek_v4, v41=True),
     "gemma4": _build_gemma4,
+    "granite": _build_granite,
     "minimax_m2": _build_minimax_m2,
     "nemotron_v3": _build_nemotron_v3,
+    "granite_thinking_parser": _build_granite_thinking,
     "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
     "qwen3": _build_qwen3,
+    "mimo": _build_mimo,
+    "step3p5": _build_step3p5,
     "inkling": _build_inkling,
+    "plamo3": _build_plamo3,
 }
 
 
@@ -1065,23 +1294,3 @@ def build_samples(model: str) -> tuple[Sample, ...]:
     builder = _BUILDERS[model]
     scenarios = _KIMI_K2_SCENARIOS if model == "kimi_k2" else SCENARIOS
     return tuple(s for s in (builder(sc) for sc in scenarios) if s is not None)
-
-
-def build_sample(model: str, scenario: Scenario) -> Sample | None:
-    """Build a single sample for one model + scenario."""
-    return _BUILDERS[model](scenario)
-
-
-def build_scaling_sample(
-    model: str, token_count: int, validate: bool = False
-) -> Sample:
-    """Build a sample with approximately *token_count* tokens."""
-    sentence = "The quick brown fox jumps over the lazy dog. "
-    text = sentence * (token_count // 10 + 1)
-    scenario = Scenario(
-        id=f"scaling-{token_count}",
-        description=f"Scaling test with ~{token_count} tokens",
-        reasoning=text,
-        tool_calls=[_READ_TOOL],
-    )
-    return _BUILDERS[model](scenario, validate=validate)
