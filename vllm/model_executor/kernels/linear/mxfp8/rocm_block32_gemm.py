@@ -41,6 +41,10 @@ Either can split K. The partials are normally summed in the same launch by
 the last program of each output tile to finish, in split order, so the result
 does not depend on scheduling. Otherwise a second launch reduces them.
 
+Either can also take the bf16 activation and quantize each tile in registers
+(``QUANT_X``), bit-identically to ``mxfp8_e4m3_quantize``, which saves the
+separate quantization launch.
+
 The packed kernel and the in-launch split-K reduction on one XCD
 (``_split_tile``, ``_sum_splits``, ``_split_counters``, ``_k_partition``) are
 adapted from the group32 GEMM in ROCm/aiter#5750.
@@ -50,6 +54,9 @@ from typing import NamedTuple
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    mxfp8_e4m3_quantize,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -61,6 +68,22 @@ BLOCK_ROWS = 32
 _XCD_STRIDE = 8
 # One arrival counter per output tile of an in-launch split-K GEMM.
 _SPLIT_COUNTERS = 1 << 16
+_E4M3_MAX = tl.constexpr(448.0)
+_F32_TINY = tl.constexpr(1.1754943508222875e-38)
+
+
+@triton.jit
+def _quant_mxfp8(x):
+    """MXFP8-quantize an [R, C] tile per 32 columns, with the arithmetic of
+    ``_mxfp8_quant_triton_kernel`` so the result is bit-identical."""
+    R: tl.constexpr = x.shape[0]
+    C: tl.constexpr = x.shape[1]
+    groups = x.to(tl.float32).reshape(R, C // 32, 32)
+    amax = tl.maximum(tl.max(tl.abs(groups), axis=2), _F32_TINY)
+    sb = tl.ceil(tl.log2(amax / _E4M3_MAX)) + 127.0
+    sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
+    xq = (groups * tl.exp2(127.0 - sb)[:, :, None]).to(tl.float8e4nv)
+    return xq.reshape(R, C), sb.to(tl.uint8)
 
 
 @triton.jit
@@ -109,6 +132,7 @@ def _block32_tiled_kernel(
     M,
     N: tl.constexpr,
     K: tl.constexpr,
+    stride_xm,
     stride_om,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -117,6 +141,7 @@ def _block32_tiled_kernel(
     N_FIRST: tl.constexpr,
     EVEN_K: tl.constexpr,
     FUSED_SPLITS: tl.constexpr,
+    QUANT_X: tl.constexpr,
 ):
     if FUSED_SPLITS > 1:
         pid_m, pid_n, tile, pid_k = _split_tile(N, BLOCK_N, FUSED_SPLITS)
@@ -137,7 +162,7 @@ def _block32_tiled_kernel(
     k0 = pid_k * K_PER_SPLIT
     offs_k = k0 + tl.arange(0, BLOCK_K)
     offs_sk = k0 // 32 + tl.arange(0, BLOCK_K // 32)
-    x_ptrs = x_ptr + offs_m[:, None] * K + offs_k[None, :]
+    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :]
     xs_ptrs = xs_ptr + offs_m[:, None] * (K // 32) + offs_sk[None, :]
     w_ptrs = w_ptr + offs_n[:, None] * K + offs_k[None, :]
     ws_ptrs = ws_ptr + (offs_n[:, None] // 32) * (K // 32) + offs_sk[None, :]
@@ -145,16 +170,20 @@ def _block32_tiled_kernel(
     for kk in range(0, K_PER_SPLIT, BLOCK_K):
         if EVEN_K:
             x = tl.load(x_ptrs, mask=m_mask[:, None], other=0.0)
-            xs = tl.load(xs_ptrs, mask=m_mask[:, None], other=0)
+            if not QUANT_X:
+                xs = tl.load(xs_ptrs, mask=m_mask[:, None], other=0)
             w = tl.load(w_ptrs, mask=n_mask[:, None], other=0.0)
             ws = tl.load(ws_ptrs, mask=n_mask[:, None], other=0)
         else:
             k_ok = (offs_k + kk) < K
             s_ok = (offs_sk + kk // 32) < K // 32
             x = tl.load(x_ptrs, mask=m_mask[:, None] & k_ok[None, :], other=0.0)
-            xs = tl.load(xs_ptrs, mask=m_mask[:, None] & s_ok[None, :], other=0)
+            if not QUANT_X:
+                xs = tl.load(xs_ptrs, mask=m_mask[:, None] & s_ok[None, :], other=0)
             w = tl.load(w_ptrs, mask=n_mask[:, None] & k_ok[None, :], other=0.0)
             ws = tl.load(ws_ptrs, mask=n_mask[:, None] & s_ok[None, :], other=0)
+        if QUANT_X:
+            x, xs = _quant_mxfp8(x)
         acc = tl.dot_scaled(x, xs, "e4m3", w.T, ws, "e4m3", acc=acc)
         x_ptrs += BLOCK_K
         w_ptrs += BLOCK_K
@@ -190,6 +219,7 @@ def _block32_packed_kernel(
     M,
     N: tl.constexpr,
     K: tl.constexpr,
+    stride_xm,
     stride_om,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -198,6 +228,7 @@ def _block32_packed_kernel(
     K_PER_SPLIT: tl.constexpr,
     EVEN_K: tl.constexpr,
     FUSED_SPLITS: tl.constexpr,
+    QUANT_X: tl.constexpr,
 ):
     if FUSED_SPLITS > 1:
         pid_m, pid_n, tile, pid_k = _split_tile(N, BLOCK_N, FUSED_SPLITS)
@@ -238,9 +269,14 @@ def _block32_packed_kernel(
             w_mask = w_mask & (wk < K)
             xs_mask = xs_mask & (xg < K // 32)
             ws_mask = ws_mask & (wg < K // 32)
-        x = tl.load(x_ptr + rows[:, None] * K + xk, mask=x_mask, other=0.0)
+        x = tl.load(x_ptr + rows[:, None] * stride_xm + xk, mask=x_mask, other=0.0)
         w = tl.load(w_ptr + cols[:, None] * K + wk, mask=w_mask, other=0.0)
-        xs = tl.load(xs_ptr + rows[:, None] * (K // 32) + xg, mask=xs_mask, other=0)
+        if QUANT_X:
+            # Panels start on 32-column boundaries, so each row's groups are
+            # exactly the activation's MX blocks.
+            x, xs = _quant_mxfp8(x)
+        else:
+            xs = tl.load(xs_ptr + rows[:, None] * (K // 32) + xg, mask=xs_mask, other=0)
         ws = tl.load(
             ws_ptr + (cols[:, None] // 32) * (K // 32) + wg, mask=ws_mask, other=0
         )
@@ -542,6 +578,94 @@ _TUNED: dict[tuple[int, int], list[tuple[int, _Config]]] = {
 }
 
 
+# (N, K) -> [(max M, config), ...] for the in-kernel activation quantization,
+# tuned the same way. Each shape stops at the largest M where it beats a
+# separate quantization launch by 5%; above it every N tile re-quantizing the
+# same activation rows costs more than the launch it saves.
+_TUNED_QUANT_X: dict[tuple[int, int], list[tuple[int, _Config]]] = {
+    # shared expert gate_up, TP4
+    (1152, 5120): [
+        (4, _packed(4, 16, 256, 4, 4, 2, 16, 0, 5)),
+        (8, _packed(8, 32, 256, 4, 4, 2, 16, 0, 5)),
+        (16, _packed(16, 32, 512, 2, 4, 2, 16, 1, 5)),
+    ],
+    # fused wq_a|wkv (replicated)
+    (1792, 5120): [
+        (1, _packed(4, 64, 256, 4, 4, 2, 16, 0, 5)),
+        (2, _packed(4, 64, 256, 4, 4, 2, 16, 1, 5)),
+        (4, _packed(4, 64, 256, 4, 4, 2, 16, 0, 5)),
+        (8, _packed(8, 64, 256, 4, 4, 2, 16, 1, 5)),
+        (16, _packed(16, 64, 512, 2, 4, 2, 16, 1, 5)),
+    ],
+    # shared expert gate_up, TP2
+    (2304, 5120): [
+        (1, _packed(4, 64, 256, 4, 4, 2, 16, 0, 5)),
+        (2, _packed(4, 64, 256, 4, 4, 2, 16, 1, 5)),
+        (4, _packed(4, 64, 256, 4, 4, 2, 16, 0, 5)),
+        (8, _packed(8, 64, 256, 4, 4, 2, 16, 0, 5)),
+        (16, _packed(16, 64, 512, 2, 4, 2, 16, 1, 5)),
+        (24, _tiled(32, 64, 512, 1, True, 8, 2, 16, 1, 5)),
+        (32, _tiled(32, 64, 512, 1, True, 8, 2, 16, 0, 5)),
+    ],
+    # indexer wq_b
+    (4096, 1280): [
+        (1, _packed(4, 16, 128, 4, 4, 3, 16, 0)),
+        (4, _packed(4, 16, 128, 4, 4, 3, 16, 1)),
+        (8, _packed(8, 16, 256, 4, 4, 2, 16, 1)),
+        (16, _packed(16, 16, 128, 2, 4, 3, 16, 1)),
+        (32, _packed(16, 16, 128, 2, 4, 3, 16, 0)),
+    ],
+    # shared expert down, TP4
+    (5120, 576): [
+        (4, _packed(4, 32, 128, 4, 4, 3, 16, 1)),
+        (8, _packed(8, 32, 128, 2, 4, 3, 16, 1)),
+        (16, _packed(8, 64, 128, 2, 4, 3, 16, 1)),
+        (32, _packed(16, 64, 256, 1, 4, 3, 16, 1)),
+        (48, _tiled(16, 64, 256, 1, True, 4, 2, 16, 0)),
+        (64, _tiled(32, 64, 128, 1, True, 8, 3, 16, 1)),
+    ],
+    # shared expert down, TP2
+    (5120, 1152): [
+        (2, _packed(4, 32, 128, 4, 4, 3, 16, 0)),
+        (4, _packed(4, 32, 128, 4, 4, 3, 16, 1)),
+        (8, _packed(8, 32, 128, 4, 4, 3, 16, 0)),
+        (16, _packed(16, 16, 128, 2, 4, 3, 16, 0)),
+    ],
+    # wo_b, TP4
+    (5120, 2048): [
+        (1, _packed(4, 32, 256, 4, 2, 2, 16, 1)),
+        (4, _packed(4, 16, 256, 4, 4, 3, 16, 0)),
+        (8, _packed(8, 32, 256, 4, 4, 3, 16, 0)),
+    ],
+    # wo_b, TP2
+    (5120, 4096): [
+        (1, _packed(4, 32, 512, 4, 4, 3, 16, 0)),
+        (4, _packed(4, 16, 256, 4, 4, 2, 16, 0)),
+        (8, _packed(8, 32, 128, 2, 4, 2, 16, 0, 5)),
+        (16, _packed(16, 64, 256, 1, 4, 2, 16, 0, 5)),
+        (24, _packed(32, 32, 128, 1, 4, 2, 16, 0, 5)),
+    ],
+    # wq_b, TP4
+    (8192, 1280): [
+        (1, _packed(4, 32, 128, 4, 4, 3, 16, 0)),
+        (2, _packed(4, 16, 128, 4, 4, 3, 16, 0)),
+        (4, _packed(4, 32, 128, 4, 4, 3, 16, 1)),
+        (8, _packed(8, 32, 128, 4, 4, 3, 16, 0)),
+        (16, _packed(16, 16, 128, 2, 4, 3, 16, 0)),
+    ],
+    # wq_b, TP2
+    (16384, 1280): [
+        (4, _packed(4, 32, 128, 4, 4, 3, 16, 0)),
+        (8, _packed(8, 32, 128, 4, 4, 3, 16, 0)),
+        (16, _packed(16, 64, 256, 1, 4, 2, 16, 1)),
+    ],
+}
+
+# Untuned shapes: the config most tuned shapes settle on, which also beat a
+# separate quantization on every untuned shape tried up to M=4.
+_DEFAULT_QUANT_X = [(4, _packed(4, 32, 128, 4, 4, 3, 16, 0))]
+
+
 def _default_config(M: int, N: int, K: int) -> _Config:
     """Untuned shapes: the tiers most tuned shapes settle on."""
     if M <= 8:
@@ -594,13 +718,16 @@ def _k_partition(K: int, splits: int, step: int) -> tuple[int, int]:
 
 def _launch(
     x: torch.Tensor,
-    x_scale: torch.Tensor,
+    x_scale: torch.Tensor | None,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out: torch.Tensor,
     cfg: _Config,
 ) -> None:
+    """Launch the GEMM; ``x_scale=None`` takes a bf16 ``x`` and quantizes it
+    inside the kernel."""
     M, K = x.shape
+    quant_x = x_scale is None
     N = weight.shape[0]
     opts = dict(
         num_warps=cfg.num_warps,
@@ -638,11 +765,13 @@ def _launch(
             grid = (grid_m, grid_n, splits)
         else:
             grid = (grid_n, grid_m, splits)
-    args = (x, x_scale, weight, weight_scale, target, slots, counters, M, N, K)
+    xs = x if quant_x else x_scale  # Unused by the kernels when quantizing.
+    args = (x, xs, weight, weight_scale, target, slots, counters, M, N, K)
     stride = out.stride(0) if splits == 1 or fused > 1 else N
     if cfg.packed:
         _block32_packed_kernel[grid](
             *args,
+            x.stride(0),
             stride,
             BLOCK_M=cfg.block_m,
             BLOCK_N=cfg.block_n,
@@ -651,11 +780,13 @@ def _launch(
             K_PER_SPLIT=k_per_split,
             EVEN_K=K % step == 0,
             FUSED_SPLITS=fused,
+            QUANT_X=quant_x,
             **opts,
         )
     else:
         _block32_tiled_kernel[grid](
             *args,
+            x.stride(0),
             stride,
             BLOCK_M=cfg.block_m,
             BLOCK_N=cfg.block_n,
@@ -664,6 +795,7 @@ def _launch(
             N_FIRST=cfg.n_first,
             EVEN_K=K % k_per_split == 0,
             FUSED_SPLITS=fused,
+            QUANT_X=quant_x,
             **opts,
         )
     if fused == 1 and splits > 1:
@@ -735,3 +867,74 @@ def rocm_mxfp8_block32_gemm(
     return torch.ops.vllm.rocm_mxfp8_block32_gemm(
         x, x_scale, weight, weight_scale, out_dtype
     )
+
+
+def _quant_x_config(M: int, N: int, K: int) -> _Config | None:
+    """The in-kernel quantization config for this shape, or None where a
+    separate quantization launch is faster."""
+    tiers = _TUNED_QUANT_X.get((N, K), _DEFAULT_QUANT_X)
+    for max_m, cfg in tiers:
+        if max_m >= M:
+            return cfg
+    return None
+
+
+def _rocm_mxfp8_block32_linear_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    M, K = x.shape
+    N = weight.shape[0]
+    out = torch.empty((M, N), dtype=out_dtype, device=x.device)
+    if M == 0:
+        return out
+    if x.stride(1) != 1:
+        x = x.contiguous()
+    cfg = _quant_x_config(M, N, K)
+    if cfg is not None:
+        _launch(x, None, weight, weight_scale, out, cfg)
+    else:
+        x_q, x_scale = mxfp8_e4m3_quantize(x)
+        _launch(x_q, x_scale, weight, weight_scale, out, _config(M, N, K))
+    return out
+
+
+def _rocm_mxfp8_block32_linear_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]), dtype=out_dtype)
+
+
+direct_register_custom_op(
+    op_name="rocm_mxfp8_block32_linear",
+    op_func=_rocm_mxfp8_block32_linear_impl,
+    fake_impl=_rocm_mxfp8_block32_linear_fake,
+)
+
+
+def rocm_mxfp8_block32_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """``x @ weight.T`` for a high-precision ``x`` and a 32x32 block-scaled
+    MXFP8 weight, with ``x`` quantized to MXFP8 as ``mxfp8_e4m3_quantize``
+    does. Small M quantize inside the GEMM, saving a launch.
+
+    Args:
+        x: [M, K] bf16 activation with unit stride along K.
+        weight: [N, K] e4m3 weight, contiguous.
+        weight_scale: [ceil(N / 32), K / 32] E8M0 (uint8) weight block scales.
+        out_dtype: Output dtype.
+
+    Returns:
+        The [M, N] product.
+
+    """
+    return torch.ops.vllm.rocm_mxfp8_block32_linear(x, weight, weight_scale, out_dtype)
