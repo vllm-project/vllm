@@ -1076,6 +1076,12 @@ class ROCMAiterMLASparseImpl(
                 ragged_indices=source.paged_kv_indices,
                 ragged_indptr=source.paged_kv_indptr,
                 allow_aiter_opus=not self.use_hisparse_triton_attn,
+                q_scale=(
+                    layer._q_scale if self.kv_cache_dtype.startswith("fp8") else None
+                ),
+                kv_scale=(
+                    layer._k_scale if self.kv_cache_dtype.startswith("fp8") else None
+                ),
             )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None

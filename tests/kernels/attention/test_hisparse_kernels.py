@@ -553,3 +553,58 @@ def test_hisparse_gather_registered_host_device_alias():
         torch.accelerator.synchronize()
         error = torch.cuda.cudart().cudaHostUnregister(registered.data_ptr())
         assert error.value == 0
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm sparse attention")
+@pytest.mark.parametrize("scales", [(1.0, 1.0), (0.25, 2.0)])
+@pytest.mark.parametrize("capture", [False, True])
+def test_hisparse_fp8_attention_applies_scales(scales, capture):
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+
+    generator = torch.Generator(device=DEVICE).manual_seed(91)
+    q_scale, kv_scale = scales
+    q = (torch.randn((2, 16, 576), generator=generator, device=DEVICE) / q_scale).to(
+        current_platform.fp8_dtype()
+    )
+    kv = (torch.randn((5, 1, 576), generator=generator, device=DEVICE) / kv_scale).to(
+        current_platform.fp8_dtype()
+    )
+    indices = torch.tensor([4, 1, 3, 2], dtype=torch.int32, device=DEVICE)
+    indptr = torch.tensor([0, 3, 4], dtype=torch.int32, device=DEVICE)
+    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl.num_heads = 16
+    impl.kv_lora_rank = 512
+    impl.kv_cache_dtype = "fp8"
+    impl.scale = 576**-0.5
+    impl.sinks = None
+    impl.use_hisparse_triton_attn = True
+    metadata = SimpleNamespace(
+        paged_kv_indices=indices,
+        paged_kv_indptr=indptr,
+        attn_out_dtype=torch.bfloat16,
+    )
+    layer = SimpleNamespace(
+        _q_scale=torch.tensor(q_scale, device=DEVICE),
+        _k_scale=torch.tensor(kv_scale, device=DEVICE),
+    )
+    output, _ = impl._forward_mla(layer, q, kv, metadata)
+    if capture:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output, _ = impl._forward_mla(layer, q, kv, metadata)
+        graph.replay()
+    q_reference = q.float() * q_scale
+    kv_reference = kv.float()[:, 0] * kv_scale
+    selected = kv_reference[indices[:3].long()]
+    scores = q_reference[0] @ selected.T * impl.scale
+    expected = torch.stack(
+        (
+            scores.softmax(-1) @ selected[:, :512],
+            kv_reference[2, :512].expand(16, -1),
+        )
+    )
+    torch.testing.assert_close(output.float(), expected, atol=0.03, rtol=0.03)
