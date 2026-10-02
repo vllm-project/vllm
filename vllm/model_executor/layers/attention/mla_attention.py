@@ -609,6 +609,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -784,6 +785,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             slot_mapping,
             attn_metadata.num_decode_tokens if attn_metadata is not None else None,
             self.use_pcp,
+            pcp_shard_decode_requests=self.pcp_shard_decode_requests,
         )
         assert slot_mapping is not None
         if cache is not None:
@@ -1350,6 +1352,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         common_kwargs = dict(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
