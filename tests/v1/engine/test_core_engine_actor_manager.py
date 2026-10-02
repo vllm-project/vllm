@@ -509,3 +509,30 @@ def test_add_dp_placement_groups_noop_without_growth():
     assert CoreEngineActorManager.add_dp_placement_groups(
         _elastic_ep_config(dp_size=2, world_size=1, master_ip="10.0.0.1"), 2
     ) == ([], [])
+
+
+def test_shutdown_skips_ray_cleanup_after_driver_disconnect(monkeypatch):
+    """Cleanup must not reconnect a driver whose Ray job already ended."""
+    import threading
+
+    manager = CoreEngineActorManager.__new__(CoreEngineActorManager)
+    manager.manager_stopped = threading.Event()
+    manager.local_engine_actors = [object()]
+    manager.remote_engine_actors = [object()]
+    manager.created_placement_groups = [object()]
+
+    kills: list[Any] = []
+    removed: list[Any] = []
+    monkeypatch.setattr(ray, "kill", kills.append)
+    monkeypatch.setattr(ray.util, "remove_placement_group", removed.append)
+
+    # Driver already disconnected: no Ray calls may happen.
+    monkeypatch.setattr(ray, "is_initialized", lambda: False)
+    manager.shutdown()
+    assert manager.manager_stopped.is_set()
+    assert kills == [] and removed == []
+
+    # Driver still connected: normal cleanup proceeds.
+    monkeypatch.setattr(ray, "is_initialized", lambda: True)
+    manager.shutdown()
+    assert len(kills) == 2 and len(removed) == 1
