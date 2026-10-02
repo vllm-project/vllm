@@ -448,6 +448,11 @@ class DraftModelSpeculator(BaseSpeculator):
         return sampled
 
     def _draft_sampler(self) -> Callable[..., torch.Tensor]:
+        """Return the sampler for one sample_draft batch.
+
+        Parallel drafters, which pass all steps at once flattened as
+        (request, step), override this.
+        """
         if self.draft_watermarker is None:
             return gumbel_sample
         return self.draft_watermarker.sample
