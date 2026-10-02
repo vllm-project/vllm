@@ -42,6 +42,7 @@ class UMBPStoreConnectorWorker:
         layout: KVLayoutPlanner | None = None,
         *,
         codec: BlockIdentityCodec | None = None,
+        report_failed_requests: bool = False,
     ) -> None:
         self.runtime = runtime
         self.layout = layout
@@ -51,6 +52,9 @@ class UMBPStoreConnectorWorker:
         self._pending_stores: list[_StoreBatch] = []
         self._worker_meta = UMBPConnectorWorkerMetadata()
         self._finished_recving: set[str] = set()
+        # Core maps block-level load failures to requests only with one group.
+        self._report_failed_requests = report_failed_requests
+        self._failed_recving: set[str] = set()
         self._load_error_block_ids: set[int] = set()
         self._report_load_completions = False
         self._active_store_event = -1
@@ -148,7 +152,10 @@ class UMBPStoreConnectorWorker:
                 result.error,
             )
         if is_load:
-            self._load_error_block_ids.update(result.failed_block_ids)
+            if not self._report_failed_requests:
+                self._load_error_block_ids.update(result.failed_block_ids)
+            elif not succeeded:
+                self._failed_recving.add(request_id)
         elif succeeded:
             self.runtime.publish(result)
         return succeeded
@@ -258,6 +265,11 @@ class UMBPStoreConnectorWorker:
                 del self._load_jobs[request_id]
                 if self._report_load_completions:
                     self._finished_recving.add(request_id)
+
+    def get_failed_recving(self) -> set[str]:
+        failed = self._failed_recving - self._load_jobs.keys()
+        self._failed_recving.difference_update(failed)
+        return failed
 
     def build_connector_worker_meta(self) -> UMBPConnectorWorkerMetadata:
         result = self._worker_meta

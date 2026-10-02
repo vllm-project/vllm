@@ -926,7 +926,9 @@ def test_scheduler_stores_from_cores_current_block_table():
                 resumed_req_ids=set(),
             ),
             num_scheduled_tokens={"r": 32},
-            kv_connector_block_state=SimpleNamespace(get_block_ids=current.get),
+            kv_connector_block_state=SimpleNamespace(
+                get_block_ids=current.get, boundary_state_offloads={}
+            ),
         )
     )
 

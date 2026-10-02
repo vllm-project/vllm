@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
+    SupportsHMA,
 )
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
-class UMBPStoreConnector(KVConnectorBase_V1):
+class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """vLLM connector lifecycle shared by every UMBP runtime mode."""
 
     def __init__(
@@ -54,6 +55,19 @@ class UMBPStoreConnector(KVConnectorBase_V1):
         if topology.pp_size > 1:
             raise NotImplementedError(
                 f"{runtime_config.mode} UMBP does not support pipeline parallelism"
+            )
+        # A restored prefix skips the draft model's prefill too, so its KV must
+        # come from the pool along with the target's.
+        cacheable = set(kv_cache_config.prefix_cacheable_group_ids)
+        skipped_drafts = [
+            group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if getattr(group, "is_eagle_group", False) and group_id not in cacheable
+        ]
+        if skipped_drafts:
+            raise NotImplementedError(
+                f"{runtime_config.mode} UMBP cannot restore draft-model KV cache "
+                f"groups {skipped_drafts}: they are not prefix-cacheable"
             )
         runtime = UMBPRuntimeFactory.build(runtime_config)
         namespace = UMBPNamespace.from_vllm_config(vllm_config, kv_cache_config)
@@ -87,6 +101,7 @@ class UMBPStoreConnector(KVConnectorBase_V1):
                 ),
                 layout,
                 codec=codec,
+                report_failed_requests=len(kv_cache_config.kv_cache_groups) > 1,
             )
 
     def get_num_new_matched_tokens(
@@ -123,6 +138,25 @@ class UMBPStoreConnector(KVConnectorBase_V1):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, (block_ids,))
+
+    def request_finished_all_groups(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request, block_ids)
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.register_finished_partial_tail(
+            request, block_ids, partial_tail_offloads
+        )
 
     def update_connector_output(self, connector_output: Any) -> None:
         assert self.connector_scheduler is not None
@@ -203,6 +237,7 @@ class UMBPStoreConnector(KVConnectorBase_V1):
         return KVConnectorTransferResults(
             finished_sending=set(finished_sending or ()),
             finished_recving=set(finished_recving or ()),
+            failed_recving=self.connector_worker.get_failed_recving(),
         )
 
     def get_block_ids_with_load_errors(self) -> set[int]:

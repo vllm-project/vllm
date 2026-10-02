@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
 )
 
 
@@ -247,7 +248,29 @@ def _kv_cache_config() -> KVCacheConfig:
     )
 
 
-def _vllm_config(extra: dict, **parallel_overrides) -> SimpleNamespace:
+def _hybrid_kv_cache_config() -> KVCacheConfig:
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16
+    )
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], full),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
+    )
+
+
+def _vllm_config(
+    extra: dict, prefix_match_unit: int | None = None, **parallel_overrides
+) -> SimpleNamespace:
     parallel = {
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
@@ -262,6 +285,7 @@ def _vllm_config(extra: dict, **parallel_overrides) -> SimpleNamespace:
         cache_config=SimpleNamespace(
             block_size=16,
             enable_prefix_caching=True,
+            prefix_match_unit=prefix_match_unit,
         ),
         model_config=SimpleNamespace(
             model="test-model",

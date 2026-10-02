@@ -523,6 +523,7 @@ class LoadSpec:
 
     local_tokens: int
     external_tokens: int
+    block_hashes_by_group: tuple[tuple[bytes | None, ...], ...] = ()
 
     @property
     def num_tokens_to_load(self) -> int:

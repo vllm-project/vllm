@@ -7,23 +7,32 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
-from typing import Any
+from typing import Any, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    get_block_hash,
+    make_block_hash_with_group_id,
     resolve_dcp_kv_block_size,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
+    MambaSpec,
+    SparseCacheRole,
+    iter_layer_specs,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -77,6 +86,40 @@ class _PendingLookup:
     future: Future[Sequence[bool]]
 
 
+class _LookupBlockPool(BlockPool):
+    """Request-scoped residency view for the core hit-window algorithms."""
+
+    def __init__(self, hash_block_size: int) -> None:
+        super().__init__(
+            num_gpu_blocks=1,
+            enable_caching=True,
+            hash_block_size=hash_block_size,
+            enable_kv_cache_events=False,
+        )
+        self.hits: list[set[bytes]] = []
+        self.hit_blocks: dict[bytes, KVCacheBlock] = {}
+
+    def get_cached_block(
+        self, block_hash: bytes, kv_cache_group_ids: list[int]
+    ) -> list[KVCacheBlock] | None:
+        if any(block_hash not in self.hits[group] for group in kv_cache_group_ids):
+            return None
+        block = self.hit_blocks.get(block_hash)
+        if block is None:
+            block = KVCacheBlock(
+                block_id=len(self.hit_blocks) + 1,
+                _block_hash=make_block_hash_with_group_id(
+                    BlockHash(block_hash), kv_cache_group_ids[0]
+                ),
+            )
+            self.hit_blocks[block_hash] = block
+        return [block] * len(kv_cache_group_ids)
+
+    def clear_lookup(self) -> None:
+        self.hits = []
+        self.hit_blocks.clear()
+
+
 class UMBPStoreConnectorScheduler:
     """Own vLLM prefix matching while the runtime owns lookup transport."""
 
@@ -97,6 +140,17 @@ class UMBPStoreConnectorScheduler:
             group_id: resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size)
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         }
+        # Mamba "align" block tables are not append-only: a position may hold
+        # the live state the next step writes, or a speculative block core will
+        # relocate, so positional stores would read or pin the wrong block.
+        # Core hands off each committed boundary state instead
+        # (_add_boundary_state_plans).
+        self._boundary_handoff_groups = frozenset(
+            group_id
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if isinstance(group.kv_cache_spec, MambaSpec)
+            and getattr(group.kv_cache_spec, "mamba_cache_mode", None) == "align"
+        )
         self.runtime = runtime
         self.codec = codec
         self.topology = topology or RankTopology()
@@ -104,22 +158,97 @@ class UMBPStoreConnectorScheduler:
         assert transfer_config is not None
         extra = transfer_config.kv_connector_extra_config
         self.load_async = bool(extra.get("load_async", True))
+        if not self.load_async and (
+            len(kv_cache_config.kv_cache_groups) > 1
+            or any(
+                isinstance(spec, MambaSpec)
+                or getattr(spec, "cache_role", None) == SparseCacheRole.INDEXER
+                for group in kv_cache_config.kv_cache_groups
+                for spec in iter_layer_specs(group.kv_cache_spec)
+            )
+        ):
+            # Core accepts only request-level load failures for several cache
+            # groups, and acts on them only while the request waits for an
+            # asynchronous load. Mamba-style and sparse-attention indexer
+            # layers also read restored state before any wait_for_layer_load.
+            logger.warning(
+                "UMBP loads asynchronously for models with several KV cache "
+                "groups, Mamba-style or sparse-attention indexer layers; "
+                "load_async=false is ignored"
+            )
+            self.load_async = True
         self.enable_lookup = bool(extra.get("enable_lookup", True))
         self.lookup_async = bool(extra.get("lookup_async", False))
         self.save_decode_cache = bool(extra.get("save_decode_cache", False))
         # A kv_consumer only restores from the pool, as with other store
         # connectors; it never offloads its own KV.
         self.store_enabled = getattr(transfer_config, "kv_role", None) != "kv_consumer"
+        self.enable_partial_hash_hits = bool(
+            extra.get("enable_partial_hash_hits", False)
+        )
         # Request.block_hashes are computed at this size; keys index into them.
         self.hash_block_size = resolved_hash_block_size
+        lookup_groups = [
+            kv_cache_config.kv_cache_groups[group_id]
+            for group_id in kv_cache_config.prefix_cacheable_group_ids
+        ]
+        model_config = getattr(vllm_config, "model_config", None)
         speculative_config = getattr(vllm_config, "speculative_config", None)
-        self.use_eagle = bool(
+        use_eagle = bool(
             speculative_config is not None and speculative_config.use_eagle_block_drop()
         )
+        self.use_eagle = use_eagle
+        max_model_len = getattr(
+            model_config,
+            "max_model_len",
+            kv_cache_config.num_blocks * self.block_size,
+        )
+        lookup_config = replace(
+            kv_cache_config,
+            kv_cache_groups=lookup_groups,
+            num_blocks=1,
+        )
+        self._lookup_coordinator = (
+            get_kv_cache_coordinator(
+                kv_cache_config=lookup_config,
+                max_model_len=max_model_len,
+                max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+                use_eagle=use_eagle,
+                enable_caching=True,
+                enable_kv_cache_events=False,
+                dcp_world_size=dcp_size,
+                pcp_world_size=getattr(
+                    vllm_config.parallel_config,
+                    "prefill_context_parallel_size",
+                    1,
+                ),
+                scheduler_block_size=self.block_size,
+                hash_block_size=self.hash_block_size,
+                # As core's scheduler builds its coordinator.
+                num_prefill_lookahead=vllm_config.num_prefill_lookahead_tokens,
+                allow_partial_hash_hits=self.enable_partial_hash_hits,
+            )
+            if len(lookup_groups) > 1
+            else None
+        )
+        self._lookup_pool = _LookupBlockPool(self.hash_block_size)
+        if self._lookup_coordinator is not None:
+            self._lookup_coordinator.block_pool = self._lookup_pool
+            for manager in self._lookup_coordinator.single_type_managers:
+                manager.block_pool = self._lookup_pool
+                manager._null_block = self._lookup_pool.null_block
         self._pending_loads: dict[str, list[BlockTransferPlan] | BlockLoadBatch] = {}
         self._load_specs: dict[str, LoadSpec] = {}
         self._lookup_units = {
-            group_id: self.group_block_sizes[group_id]
+            group_id: (
+                self.hash_block_size
+                if self.enable_partial_hash_hits
+                and (
+                    self._lookup_coordinator is None
+                    or self._lookup_coordinator.enable_partial_hash_hits
+                )
+                else self.group_block_sizes[group_id]
+            )
             for group_id in kv_cache_config.prefix_cacheable_group_ids
         }
         self._pending_lookups: dict[str, _PendingLookup] = {}
@@ -129,6 +258,7 @@ class UMBPStoreConnectorScheduler:
         )
         self._requests: dict[str, Request] = {}
         self._request_trackers: dict[str, RequestTracker] = {}
+        self._pending_finished_stores: dict[str, list[BlockTransferPlan]] = {}
         self._gpu_block_pool: BlockPool | None = None
         self._store_events: dict[int, _StoreEvent] = {}
         self._num_workers = getattr(vllm_config.parallel_config, "world_size", 1)
@@ -155,7 +285,10 @@ class UMBPStoreConnectorScheduler:
                 self._pending_lookups.pop(request.request_id)
                 pending.future.cancel()
                 pending = None
-        if not hashes or request.num_tokens < self.block_size:
+        align = (
+            self.hash_block_size if self.enable_partial_hash_hits else self.block_size
+        )
+        if not hashes or request.num_tokens < align:
             return 0, False
         if num_computed_tokens % self.block_size != 0:
             return 0, False
@@ -210,16 +343,39 @@ class UMBPStoreConnectorScheduler:
                     for index in range(0, len(group_hits), per_rank)
                 ]
             )
-        group_id = group_ids[0]
-        matched_blocks = 0
-        for hit in logical_hits_by_group[group_id]:
-            if not hit:
-                break
-            matched_blocks += 1
-        if self.use_eagle:
-            # As core's coordinator: the drafter recomputes the last block.
-            matched_blocks = max(0, matched_blocks - 1)
-        need_to_load = matched_blocks * self._lookup_units[group_id]
+        if self._lookup_coordinator is None:
+            group_id = group_ids[0]
+            group_hits = logical_hits_by_group[group_id]
+            units_per_block = (
+                self.group_block_sizes[group_id] // self._lookup_units[group_id]
+            )
+            matched_units = 0
+            for index in range(units_per_block - 1, len(group_hits), units_per_block):
+                if not group_hits[index]:
+                    break
+                matched_units = index + 1
+            # Interior hashes are sparse: only the saved tail needs to exist.
+            for index in range(
+                min(matched_units + units_per_block - 1, len(group_hits)) - 1,
+                matched_units - 1,
+                -1,
+            ):
+                if group_hits[index]:
+                    matched_units = index + 1
+                    break
+            if self.use_eagle:
+                # As core's coordinator: the drafter recomputes the last block.
+                matched_units = max(0, matched_units - units_per_block)
+            need_to_load = matched_units * self._lookup_units[group_id]
+            block_hashes_by_group: tuple[tuple[bytes | None, ...], ...] = ()
+        else:
+            need_to_load, block_hashes_by_group = self._coordinate_external_hits(
+                list(context.hashes),
+                num_computed_tokens,
+                max_external_token - num_computed_tokens,
+                logical_objects_by_group,
+                logical_hits_by_group,
+            )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "UMBP lookup result request=%s keys=%s group_hits=%s load_tokens=%d",
@@ -234,6 +390,7 @@ class UMBPStoreConnectorScheduler:
         self._load_specs[request.request_id] = LoadSpec(
             local_tokens=num_computed_tokens,
             external_tokens=matched_tokens,
+            block_hashes_by_group=block_hashes_by_group,
         )
         return need_to_load, self.load_async
 
@@ -253,6 +410,52 @@ class UMBPStoreConnectorScheduler:
         return _LookupContext(
             request, local_tokens, request.num_tokens, hashes, objects, keys
         )
+
+    def _coordinate_external_hits(
+        self,
+        request_hashes: list[bytes],
+        local_tokens: int,
+        max_external_tokens: int,
+        logical_objects_by_group: dict[int, list[tuple[bytes, tuple[str, ...]]]],
+        logical_hits_by_group: dict[int, list[bool]],
+    ) -> tuple[int, tuple[tuple[bytes | None, ...], ...]]:
+        """Apply the core KV cache coordinator to runtime lookup results."""
+        coordinator = self._lookup_coordinator
+        assert coordinator is not None
+        pool = self._lookup_pool
+        try:
+            pool.hits = [
+                {
+                    block_hash
+                    for (block_hash, _), hit in zip(
+                        logical_objects_by_group[group_id],
+                        logical_hits_by_group[group_id],
+                        strict=True,
+                    )
+                    if hit
+                }
+                for group_id in self.kv_cache_config.prefix_cacheable_group_ids
+            ]
+            skipped_hashes = local_tokens // self.hash_block_size
+            hit_blocks, hit_length, _ = coordinator.find_longest_cache_hit(
+                cast(list[BlockHash], request_hashes)[skipped_hashes:],
+                max_external_tokens,
+            )
+            block_hashes_by_group = tuple(
+                tuple(
+                    None
+                    if block.is_null or block.block_hash is None
+                    else get_block_hash(block.block_hash)
+                    for block in group_blocks
+                )
+                for group_blocks in hit_blocks
+            )
+            return hit_length, block_hashes_by_group
+        finally:
+            self._reset_lookup_coordinator()
+
+    def _reset_lookup_coordinator(self) -> None:
+        self._lookup_pool.clear_lookup()
 
     def update_state_after_alloc(
         self,
@@ -420,6 +623,22 @@ class UMBPStoreConnectorScheduler:
             if preempted_tracker := self._request_trackers.get(request_id):
                 preempted_tracker.reset()
 
+        if (
+            self.store_enabled
+            and block_state is not None
+            and block_state.boundary_state_offloads
+        ):
+            self._add_boundary_state_plans(
+                block_state.boundary_state_offloads,
+                meta,
+                set(scheduler_output.finished_req_ids),
+                set(scheduler_output.preempted_req_ids or ()),
+            )
+
+        finished_stores = self._pending_finished_stores
+        self._pending_finished_stores = {}
+        for plans in finished_stores.values():
+            meta.store_plans.extend(plans)
         event_plans = tuple(meta.store_plans)
         if event_plans:
             event = self._store_event_counter
@@ -435,7 +654,69 @@ class UMBPStoreConnectorScheduler:
                         )
                     ]
                 )
+                # Transfer ownership from request-finish pins to the event.
+                for plans in finished_stores.values():
+                    self._gpu_block_pool.free_blocks(
+                        self._gpu_block_pool.blocks[block_id]
+                        for block_id in dict.fromkeys(plan.block_id for plan in plans)
+                    )
         return meta
+
+    def _add_boundary_state_plans(
+        self,
+        offloads: dict[str, list[tuple[int, int, int]]],
+        meta: UMBPConnectorMetadata,
+        finished: set[str],
+        preempted: set[str],
+    ) -> None:
+        """Store exact Mamba/hybrid boundary blocks handed off by core."""
+        prefix_groups = set(self.kv_cache_config.prefix_cacheable_group_ids)
+        for request_id, entries in offloads.items():
+            if request_id in finished or request_id in preempted:
+                logger.debug(
+                    "UMBP boundary offloads dropped request=%s entries=%d: %s",
+                    request_id,
+                    len(entries),
+                    "finished" if request_id in finished else "preempted",
+                )
+                continue
+            request = self._requests.get(request_id)
+            tracker = self._request_trackers.get(request_id)
+            if request is None or tracker is None:
+                logger.debug(
+                    "UMBP boundary offloads dropped request=%s entries=%d: untracked",
+                    request_id,
+                    len(entries),
+                )
+                continue
+            plans: list[BlockTransferPlan] = []
+            for group_id, block_id, boundary_tokens in entries:
+                if group_id not in prefix_groups or block_id == NULL_BLOCK_ID:
+                    continue
+                if boundary_tokens <= 0:
+                    continue
+                hash_index = boundary_tokens // self.hash_block_size - 1
+                if not 0 <= hash_index < len(request.block_hashes):
+                    continue
+                block_hash = request.block_hashes[hash_index]
+                plans.append(
+                    BlockTransferPlan(
+                        key=self.codec.key(block_hash, group_id),
+                        block_id=block_id,
+                        request_id=request_id,
+                        group_id=group_id,
+                    )
+                )
+            logger.debug(
+                "UMBP boundary offloads request=%s offered=%d stored=%d boundaries=%s",
+                request_id,
+                len(entries),
+                len(plans),
+                sorted({entry[2] for entry in entries}),
+            )
+            if plans:
+                meta.store_plans.extend(plans)
+                meta.store_requests.setdefault(request_id, []).extend(plans)
 
     def _tracker_for_request(self, request_id: str) -> RequestTracker:
         return self._request_trackers.setdefault(request_id, RequestTracker())
@@ -455,6 +736,26 @@ class UMBPStoreConnectorScheduler:
         keys: list[str] = []
         destinations: list[int] = []
         groups: list[int] = []
+        if spec is not None and spec.block_hashes_by_group:
+            for group_index, group_id in enumerate(group_ids):
+                group_block_size = self.group_block_sizes[group_id]
+                start_block = local_tokens // group_block_size
+                for relative_index, block_hash in enumerate(
+                    spec.block_hashes_by_group[group_index]
+                ):
+                    if block_hash is None:
+                        continue
+                    block_index = start_block + relative_index
+                    block_id = block_groups[group_index][block_index]
+                    if block_id == NULL_BLOCK_ID:
+                        raise RuntimeError(
+                            "UMBP external hit mapped a runtime object to a null "
+                            f"destination block for group {group_id}"
+                        )
+                    keys.append(self.codec.key(block_hash, group_id=group_id))
+                    destinations.append(block_id)
+                    groups.append(group_id)
+            return BlockLoadBatch(keys, destinations, groups, request.request_id)
         for group_index, group_id in enumerate(group_ids):
             group_block_size = self.group_block_sizes[group_id]
             start_block = local_tokens // group_block_size
@@ -468,6 +769,20 @@ class UMBPStoreConnectorScheduler:
                     )
                 )
                 destinations.append(block_groups[group_index][block_index])
+                groups.append(group_id)
+        partial_tokens = end_tokens % self.block_size
+        if partial_tokens and self.enable_partial_hash_hits:
+            hash_index = end_tokens // self.hash_block_size - 1
+            for group_index, group_id in enumerate(group_ids):
+                block_index = end_tokens // self.group_block_sizes[group_id]
+                group_block_ids = block_groups[group_index]
+                if (
+                    block_index >= len(group_block_ids)
+                    or group_block_ids[block_index] == NULL_BLOCK_ID
+                ):
+                    raise RuntimeError("UMBP partial hit has no destination block")
+                keys.append(self.codec.key(request.block_hashes[hash_index], group_id))
+                destinations.append(group_block_ids[block_index])
                 groups.append(group_id)
         return BlockLoadBatch(keys, destinations, groups, request.request_id)
 
@@ -510,6 +825,7 @@ class UMBPStoreConnectorScheduler:
                 min(save_to // self.group_block_sizes[group_id], len(block_ids)),
             )
             for group_id, block_ids in zip(group_ids, block_groups)
+            if group_id not in self._boundary_handoff_groups
         }
         resident_blocks = (
             self._restored_store_blocks(
@@ -618,6 +934,76 @@ class UMBPStoreConnectorScheduler:
             pending.future.cancel()
         return False, None
 
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Pin finished boundary pages without delaying core request cleanup."""
+        pool = self._gpu_block_pool
+        if not self.store_enabled or not partial_tail_offloads or pool is None:
+            return False
+        if request.request_id in self._pending_finished_stores:
+            return False
+        prefix_groups = set(self.kv_cache_config.prefix_cacheable_group_ids)
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None:
+            return False
+        boundaries = {entry[2] for entry in partial_tail_offloads}
+        if len(boundaries) != 1:
+            logger.warning("UMBP partial tail entries span several boundaries")
+            return False
+        boundary = boundaries.pop()
+        if (
+            boundary <= 0
+            or boundary % self.hash_block_size != 0
+            or boundary != request.num_computed_tokens
+            or bool(getattr(request, "num_in_flight_tokens", 0))
+        ):
+            return False
+        hash_index = boundary // self.hash_block_size - 1
+        if hash_index >= len(request.block_hashes):
+            return False
+        sources = {
+            group_id: block_id for group_id, block_id, _ in partial_tail_offloads
+        }
+        if not sources.keys() <= prefix_groups:
+            return False
+        # Core hands off Mamba state pages. Include the matching FA tail page
+        # so every group can resolve the same fine-grained prefix boundary.
+        for group_id in prefix_groups:
+            spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+            if (
+                isinstance(spec, FullAttentionSpec)
+                and boundary % self.group_block_sizes[group_id]
+            ):
+                index = boundary // self.group_block_sizes[group_id]
+                if index >= len(block_ids[group_id]):
+                    return False
+                sources.setdefault(group_id, block_ids[group_id][index])
+        plans: list[BlockTransferPlan] = []
+        for group_id, block_id in sources.items():
+            if block_id == NULL_BLOCK_ID or not 0 <= block_id < len(pool.blocks):
+                return False
+            if pool.blocks[block_id].is_null:
+                return False
+            plans.append(
+                BlockTransferPlan(
+                    request_id=request.request_id,
+                    block_id=block_id,
+                    group_id=group_id,
+                    key=self.codec.key(request.block_hashes[hash_index], group_id),
+                )
+            )
+        # A Mamba page is a state snapshot, not a token-addressable byte array.
+        # Store full pages for both state and attention, matching restore.
+        pool.touch(
+            [pool.blocks[block_id] for block_id in dict.fromkeys(sources.values())]
+        )
+        self._pending_finished_stores[request.request_id] = plans
+        return False
+
     def update_connector_output(self, output: KVConnectorOutput) -> None:
         metadata = output.kv_connector_worker_meta
         if not isinstance(metadata, UMBPConnectorWorkerMetadata):
@@ -638,10 +1024,10 @@ class UMBPStoreConnectorScheduler:
                 )
 
     def has_pending_push_work(self) -> bool:
-        return bool(self._store_events)
+        return bool(self._pending_finished_stores) or bool(self._store_events)
 
     def reset_store(self) -> bool:
-        if self._store_events:
+        if self._store_events or self._pending_finished_stores:
             return False
         for pending in self._pending_lookups.values():
             pending.future.cancel()
