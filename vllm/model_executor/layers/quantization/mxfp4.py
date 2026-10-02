@@ -433,7 +433,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -472,6 +472,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
 
@@ -736,6 +737,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_bias=w2_bias,
                 _cache_permute_indices=self._cache_permute_indices,
                 activation=self.moe.activation,
+                use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
             )
         )
 
@@ -860,7 +862,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -899,4 +901,5 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )

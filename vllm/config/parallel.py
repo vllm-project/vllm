@@ -4,6 +4,7 @@
 import os
 import socket
 from collections.abc import Callable
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import regex as re
@@ -38,7 +39,9 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
-EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
+EPLBCommunicatorBackend = Literal[
+    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
+]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -47,6 +50,7 @@ All2AllBackend = Literal[
     "deepep_v2",
     "mori_high_throughput",
     "mori_low_latency",
+    "moonep",
     "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
@@ -94,9 +98,11 @@ class EPLBConfig:
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
     - "torch_gloo": Use torch.distributed gloo with CPU staging
+    - "torch_xccl": Use torch.distributed XCCL device P2P on XPU
     - "nixl": Use NIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
-    - None: Auto-select backend (prefers "nixl", falls back to "torch_gloo")
+    - None: Auto-select backend ("torch_xccl" on XPU, prefers "nixl" 
+      on CUDA, falls back to "torch_gloo")
     """
 
     @model_validator(mode="after")
@@ -202,6 +208,7 @@ class ParallelConfig:
     - "deepep_low_latency": Use deepep low-latency kernels
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
+    - "moonep": MoonEP balanced EP with dynamic redundant experts (NVLink)
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
@@ -270,9 +277,6 @@ class ParallelConfig:
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
     will be determined based on the platform."""
-    sd_worker_cls: str = "auto"
-    """The full name of the worker class to use for speculative decoding.
-    If "auto", the worker class will be determined based on the platform."""
     worker_extension_cls: str = ""
     """The full name of the worker extension class to use. The worker extension
     class is dynamically inherited by the worker class. This is used to inject
@@ -525,10 +529,10 @@ class ParallelConfig:
             )
 
         if self.enable_eplb:
-            if not current_platform.is_cuda_alike():
+            if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
-                    "CUDA devices or ROCm devices now."
+                    "CUDA devices or ROCm devices or XPU devices now."
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
@@ -593,6 +597,19 @@ class ParallelConfig:
         return self.world_size * self.data_parallel_size
 
     @property
+    def pcp_shard_decode_requests(self) -> bool:
+        """Whether PCP can shard decode requests across its ranks.
+
+        PCP-only execution replicates the KV cache, so each decode request can
+        have a single PCP owner. DCP shards the KV cache and therefore requires
+        every decode request to run on every participating DCP rank.
+        """
+        return (
+            self.prefill_context_parallel_size > 1
+            and self.decode_context_parallel_size == 1
+        )
+
+    @property
     def use_ubatching(self) -> bool:
         return self.enable_dbo or self.ubatch_size > 1
 
@@ -606,6 +623,11 @@ class ParallelConfig:
         Client manages local EngineCores in hybrid and external LB case.
         """
         return self.data_parallel_external_lb or self.data_parallel_hybrid_lb
+
+    @property
+    def cpu_distributed_timeout(self) -> timedelta | None:
+        seconds = self.cpu_distributed_timeout_seconds
+        return timedelta(seconds=seconds) if seconds is not None else None
 
     def get_next_dp_init_port(self) -> int:
         """We might need to initialize process groups in multiple
@@ -688,6 +710,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
+                    timeout=self.cpu_distributed_timeout,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -717,6 +740,7 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "deepep_v2",
                 "flashinfer_nvlink_one_sided",
                 "mori_high_throughput",
                 "mori_low_latency",
@@ -753,12 +777,30 @@ class ParallelConfig:
 
     @property
     def nnodes_within_dp(self) -> int:
+        """Number of nodes one DP replica spans.
+
+        External LB pins ``data_parallel_size_local`` to 1, so the ratio
+        rounds down to 0 once DP replicas outnumber nodes. A replica that
+        does not span nodes still occupies exactly one.
+        """
         if self.nnodes == 1:
             return 1
         data_parallel_node_size = (
             self.data_parallel_size // self.data_parallel_size_local
         )
-        return self.nnodes // data_parallel_node_size
+        nnodes_within_dp = self.nnodes // data_parallel_node_size
+        if self.data_parallel_external_lb:
+            return max(nnodes_within_dp, 1)
+        if self.nnodes % data_parallel_node_size != 0:
+            raise ValueError(
+                "Invalid data parallel configuration: "
+                f"nnodes ({self.nnodes}) must be divisible by the number of "
+                "data parallel node groups "
+                f"({data_parallel_node_size} = data_parallel_size "
+                f"{self.data_parallel_size} / data_parallel_size_local "
+                f"{self.data_parallel_size_local})"
+            )
+        return nnodes_within_dp
 
     @property
     def local_world_size(self) -> int:
@@ -849,7 +891,6 @@ class ParallelConfig:
             "placement_group",
             "distributed_executor_backend",
             "worker_cls",
-            "sd_worker_cls",
             "worker_extension_cls",
             "_api_process_count",
             "_api_process_rank",
@@ -1033,7 +1074,10 @@ class ParallelConfig:
             # See https://github.com/pytorch/pytorch/issues/174288
             from vllm.distributed.nixl_utils import is_nixl_available
 
-            if is_nixl_available():
+            if current_platform.is_xpu():
+                # On XPU, use the device-native XCCL P2P backend.
+                self.eplb_config.communicator = "torch_xccl"
+            elif is_nixl_available():
                 self.eplb_config.communicator = "nixl"
             elif self.enable_elastic_ep:
                 self.eplb_config.communicator = "pynccl"
@@ -1051,10 +1095,6 @@ class ParallelConfig:
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
         from vllm.v1.executor import Executor
-
-        # Enable batch invariance settings if requested
-        if envs.VLLM_BATCH_INVARIANT:
-            self.disable_custom_all_reduce = True
 
         if (
             self.distributed_executor_backend is not None

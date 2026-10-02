@@ -23,6 +23,8 @@ class ECTransferConfig:
     safetensors) and ``ECMooncakeConnector`` (Mooncake TransferEngine RDMA;
     requires ``mooncake-transfer-engine`` and matching producer/consumer
     ``ec_connector_extra_config``; see ``mooncake_ec_connector`` module docstring).
+    Set ``cross_encoder_cache`` in Mooncake extra config to reuse shared
+    Encoder outputs from Store before encoding, retaining P2P delivery.
     """
 
     engine_id: str | None = None
@@ -39,15 +41,6 @@ class ECTransferConfig:
     ec_role: ECRole | None = None
     """Whether this vLLM instance produces, consumes EC cache, or both. Choices
     are 'ec_producer', 'ec_consumer', 'ec_both'."""
-
-    ec_rank: int | None = None
-    """The rank of this vLLM instance in the EC cache transfer. Typical value:
-    0 for encoder, 1 for pd instance.
-    Currently only 1P1D is supported."""
-
-    ec_parallel_size: int = 1
-    """The number of parallel instances for EC cache transfer. For
-    PyNcclConnector, this should be 2."""
 
     ec_ip: str = "127.0.0.1"
     """The EC connector ip, used to build distributed connection."""
