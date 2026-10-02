@@ -154,11 +154,9 @@ class DraftWatermarker:
         pos: torch.Tensor,
         apply_temperature: bool,
         is_drafting: bool,
-        num_steps: int,
         logits_cache: torch.Tensor | None = None,
         logits_cache_col: torch.Tensor | None = None,
         use_fp64: bool = False,
-        logits_cache_source: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Sample drafts flattened as (request, step), one step at a time.
 
@@ -167,6 +165,7 @@ class DraftWatermarker:
         their logits were computed in parallel.
         """
         assert logits_cache_col is not None
+        num_steps = self.num_speculative_steps
         num_reqs = logits.shape[0] // num_steps
 
         def by_step(tensor: torch.Tensor) -> torch.Tensor:
@@ -176,7 +175,6 @@ class DraftWatermarker:
         idx_mapping = by_step(idx_mapping)
         pos = by_step(pos)
         logits_cache_col = by_step(logits_cache_col)
-        source = None if logits_cache_source is None else by_step(logits_cache_source)
         sampled = torch.empty(
             num_reqs, num_steps, dtype=torch.int64, device=logits.device
         )
@@ -192,7 +190,6 @@ class DraftWatermarker:
                 logits_cache=logits_cache,
                 logits_cache_col=logits_cache_col[:, step],
                 use_fp64=use_fp64,
-                logits_cache_source=None if source is None else source[:, step],
             )
         return sampled.view(-1)
 
