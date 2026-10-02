@@ -135,13 +135,19 @@ which the writer drains to drop stale ``_push_finished_blocks`` /
 Either side can arrive first. The writer matches in both directions:
 when a ``PUSH_REG`` arrives we look up ``_push_finished_blocks``, and
 when finished blocks arrive we look up ``_pending_d_registrations``.
-
-Requests are matched by the ``transfer_id`` that the router sets in
-the ``kv_transfer_params`` of both requests, with a new value for
-every dispatch. D sends it to P in ``PUSH_REG``.
-
-If a request has no ``transfer_id`` (older router or peer), P falls
-back to comparing request ids without their random suffix.
+Both lookups match on the per-dispatch ``transfer_id`` the router sets in the
+``kv_transfer_params`` of both requests (D sends it in ``PUSH_REG``).
+If either side has none, they fall back
+to comparing the ids after stripping the trailing per-engine random
+suffix (via ``get_base_request_id``). The fallback exists because the
+proxy hands the same ``X-Request-Id`` to both legs, so P and D wrap it
+into the same ``cmpl-<uuid>-<index>`` form and differ only by the
+8-hex randomization suffix that ``input_processor.assign_request_id``
+appends per engine. Stripping just that suffix normalizes both sides
+to the same id while preserving the completion index (so multi-prompt
+sub-requests stay distinct). It also works whether or not
+``VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`` is set, which matters since
+that env var is slated for removal upstream.
 
 ## Wire format
 
@@ -155,7 +161,7 @@ Fields in the dict:
 
 | Field                | Set by | Meaning                                                                |
 |----------------------|--------|------------------------------------------------------------------------|
-| ``request_id``       | D      | D's own vLLM request id; echoed in the completion notif                |
+| ``request_id``       | D      | D's own vLLM request id; fallback key, echoed in the completion notif  |
 | ``transfer_id``      | router | per-dispatch id from the router; P's match key                         |
 | ``decode_engine_id`` | D      | D's engine id (P uses this for the reverse handshake)                  |
 | ``decode_host``      | D      | D's NIXL side-channel host                                             |
