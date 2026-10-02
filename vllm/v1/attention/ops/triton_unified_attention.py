@@ -35,6 +35,7 @@ logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
+
 @triton.jit
 def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
     """Cast a loaded KV tile to Q's dtype, dequantizing if needed.
@@ -998,7 +999,7 @@ def unified_attention(
                 launch_num_stages = 2
                 TILE_SIZE_PREFILL = 128
                 tuned_large_head = True
-            elif head_size == 512:
+            elif head_size == 512 and q.shape[0] * num_kv_heads >= 2048:
                 BLOCK_M = 32
                 launch_num_warps = 8
                 launch_num_stages = 2
@@ -1011,7 +1012,7 @@ def unified_attention(
                 launch_num_stages = 1
                 TILE_SIZE_PREFILL = 128
                 tuned_large_head = True
-            elif head_size == 512:
+            elif head_size == 512 and q.shape[0] * num_kv_heads >= 2048:
                 BLOCK_M = 32
                 launch_num_warps = 8
                 launch_num_stages = 1
@@ -1024,7 +1025,7 @@ def unified_attention(
                 launch_num_stages = 1
                 TILE_SIZE_PREFILL = 64
                 tuned_large_head = True
-            elif head_size == 512:
+            elif head_size == 512 and q.shape[0] * num_kv_heads >= 2048:
                 BLOCK_M = 32
                 launch_num_warps = 8
                 launch_num_stages = 1
