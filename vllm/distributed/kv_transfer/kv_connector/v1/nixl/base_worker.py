@@ -428,22 +428,31 @@ class NixlBaseConnectorWorker:
             region_idx
         ):
             return False
-        # Draft models are loaded with the "draft_model" layer prefix.
-        # An MLA target may have its own SPLIT attention regions; those retain
-        # the target mapping rather than using the draft's KV head count.
+        # Draft layers may use a draft_model prefix or be numbered after the
+        # target's layers (e.g. DFlash's model.layers.78 after 78 target layers).
+        # A target SPLIT region must keep the target mapping.
         region_name = self.region_names[region_idx]
         if not region_name.startswith("draft_model."):
-            return False
+            spec_config = self.vllm_config.speculative_config
+            draft_config = spec_config.draft_model_config if spec_config else None
+            if draft_config is None:
+                return False
+            match = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", region_name)
+            if match is None:
+                return False
+            layer_idx = int(match.group(1))
+            target_layers = self.vllm_config.model_config.get_total_num_hidden_layers()
+            draft_layers = draft_config.get_total_num_hidden_layers()
+            if not target_layers <= layer_idx < target_layers + draft_layers:
+                return False
         region_kv_heads = self._region_num_kv_heads[region_idx]
         assert (
             region_kv_heads is not None
             and region_kv_heads <= self._head_sharded_draft_kv_heads
         ), (
-            f"Region {region_idx} is SPLIT under a fully-MLA target but its "
-            f"recorded KV head count ({region_kv_heads}) is not consistent "
-            "with the resolved head-sharded draft "
-            f"({self._head_sharded_draft_kv_heads} total KV heads); expected "
-            "every SPLIT region here to belong to that draft."
+            f"Draft region {region_idx} ({region_name!r}) has "
+            f"{region_kv_heads} local KV heads, inconsistent with the "
+            f"draft's {self._head_sharded_draft_kv_heads} total KV heads."
         )
         return True
 

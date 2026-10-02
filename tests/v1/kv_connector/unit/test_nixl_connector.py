@@ -1472,9 +1472,19 @@ class TestNixlHandshake:
     ):
         worker, _, _, _ = self._mla_target_with_gqa_draft(4, 0, 1)
         assert worker._is_head_sharded_draft_region(1)
-        worker.region_names[1] = "model.layers.1.self_attn"
+        worker.region_names[1] = "model.layers.77.self_attn.attn"
         worker._region_num_kv_heads[1] = 1
+        worker.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(get_total_num_hidden_layers=lambda: 78),
+            speculative_config=SimpleNamespace(
+                draft_model_config=SimpleNamespace(
+                    get_total_num_hidden_layers=lambda: 6
+                )
+            ),
+        )
         assert not worker._is_head_sharded_draft_region(1)
+        worker.region_names[1] = "model.layers.78.self_attn.attn"
+        assert worker._is_head_sharded_draft_region(1)
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
