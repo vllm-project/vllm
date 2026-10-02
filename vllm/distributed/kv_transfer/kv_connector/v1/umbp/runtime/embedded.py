@@ -10,19 +10,21 @@ import os
 import socket
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 import msgspec
+import numpy as np
 import regex as re
 import torch
 
 from vllm.logger import init_logger
 
 from ..data import (
+    BlockLoadBatch,
     BlockTransferPlan,
     KVLayoutDescriptor,
     RankTopology,
@@ -282,6 +284,21 @@ class _MoriSchedulerHandle(UMBPSchedulerHandle):
         return contacted and success
 
 
+class _BlockLoadLayout(NamedTuple):
+    bases: np.ndarray
+    strides: np.ndarray
+    sizes: list[int]
+    offsets: list[int]
+    num_blocks: int
+    num_bytes: int
+
+
+_LoadArgs = tuple[list[str], list[list[int]], list[list[int]], list[list[int]]]
+_StoreArgs = tuple[
+    list[str], list[int], list[list[int]], list[list[int]], list[list[int]]
+]
+
+
 class _MoriWorkerHandle(UMBPWorkerHandle):
     def __init__(
         self,
@@ -290,6 +307,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         topology: RankTopology,
         lookup_dir: str,
         max_workers: int,
+        layout: KVLayoutDescriptor | None = None,
         lookup_instance: str = "",
     ) -> None:
         self.client = client
@@ -305,6 +323,8 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             thread_name_prefix="umbp-embedded-transfer",
         )
         self._futures: dict[int, Future[TransferJobState]] = {}
+        self._layout = layout
+        self._load_layouts: dict[int, _BlockLoadLayout] = {}
 
     def register_buffers(self, kv_caches: dict[str, torch.Tensor]) -> None:
         try:
@@ -333,6 +353,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             if location == MemoryLocationType.GPU and device >= 0:
                 self._gpu_devices.add(device)
 
+        self._register_load_layouts(kv_caches)
         if self._lookup_server is None:
             self._lookup_server = _MoriLookupServer(
                 _lookup_socket_path(
@@ -344,6 +365,97 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                 self,
             )
             self._lookup_server.start()
+
+    def _register_load_layouts(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        self._load_layouts = {}
+        if self._layout is None:
+            return
+        for group_id in {r.group_id for r in self._layout.regions}:
+            bases: list[int] = []
+            strides: list[int] = []
+            sizes: list[int] = []
+            offsets: list[int] = []
+            counts: list[int] = []
+            for region in self._layout.regions:
+                if region.group_id != group_id:
+                    continue
+                cache = kv_caches.get(region.layer_name)
+                if cache is None or cache.ndim == 0:
+                    break
+                stride = cache.stride(0) * cache.element_size()
+                if (
+                    stride <= 0
+                    or stride > region.block_stride
+                    or region.block_stride % stride
+                    or region.block_bytes > stride
+                ):
+                    break
+                bases.append(cache.data_ptr())
+                strides.append(stride)
+                offsets.append(sum(sizes))
+                sizes.append(region.block_bytes)
+                counts.append(cache.shape[0])
+            else:
+                self._load_layouts[group_id] = _BlockLoadLayout(
+                    np.asarray(bases, dtype=np.uint64),
+                    np.asarray(strides, dtype=np.uint64),
+                    sizes,
+                    offsets,
+                    min(counts),
+                    sum(sizes),
+                )
+
+    def _bulk_load_args(
+        self, plans: Sequence[BlockTransferPlan]
+    ) -> tuple[_LoadArgs, tuple[int, ...]] | None:
+        groups: dict[int, list[tuple[int, int]]] = {}
+        entries: Iterable[tuple[int | None, int]]
+        if isinstance(plans, BlockLoadBatch):
+            entries = zip(plans.group_ids, plans.block_ids, strict=True)
+            keys = plans.keys
+        else:
+            if any(p.ranges for p in plans):
+                return None
+            entries = ((p.group_id, p.block_id) for p in plans)
+            keys = [p.key for p in plans]
+        for index, (group_id, block_id) in enumerate(entries):
+            if group_id is None:
+                return None
+            layout = self._load_layouts.get(group_id)
+            if layout is None or not 0 <= block_id < layout.num_blocks:
+                return None
+            groups.setdefault(group_id, []).append((index, block_id))
+        pointers: list[list[int]] = [[]] * len(plans)
+        sizes: list[list[int]] = [[]] * len(plans)
+        offsets: list[list[int]] = [[]] * len(plans)
+        plan_bytes = [0] * len(plans)
+        for group_id, group_entries in groups.items():
+            layout = self._load_layouts[group_id]
+            ids = np.asarray([block for _, block in group_entries], dtype=np.uint64)
+            addresses = (
+                layout.bases[None, :] + ids[:, None] * layout.strides[None, :]
+            ).tolist()
+            for (index, _), row in zip(group_entries, addresses, strict=True):
+                pointers[index] = row
+                sizes[index] = layout.sizes
+                offsets[index] = layout.offsets
+                plan_bytes[index] = layout.num_bytes
+        return (
+            (keys, pointers, sizes, offsets),
+            tuple(plan_bytes),
+        )
+
+    def load_blocks(
+        self, plans: Sequence[BlockTransferPlan]
+    ) -> TransferJobState | None:
+        prepared = self._bulk_load_args(plans)
+        if prepared is None:
+            return None
+        args, _ = prepared
+        return self._submit_load(
+            plans if isinstance(plans, BlockLoadBatch) else tuple(plans),
+            args,
+        )
 
     def batch_exists(self, keys: Sequence[str]) -> Sequence[bool]:
         return [bool(value) for value in self.client.batch_exists(keys)]
@@ -376,20 +488,36 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
     def load(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
         return self._submit_load(tuple(plans))
 
-    def _submit_load(self, plans: tuple[BlockTransferPlan, ...]) -> TransferJobState:
+    def _submit_load(
+        self,
+        plans: tuple[BlockTransferPlan, ...] | BlockLoadBatch,
+        range_args: _LoadArgs | None = None,
+    ) -> TransferJobState:
         job = TransferJobState(plans)
         job.start()
-        self._futures[id(job)] = self._executor.submit(self._load_sync, job, plans)
+        self._futures[id(job)] = self._executor.submit(
+            self._load_sync, job, plans, range_args
+        )
         return job
 
     def _load_sync(
-        self, job: TransferJobState, plans: tuple[BlockTransferPlan, ...]
+        self,
+        job: TransferJobState,
+        plans: tuple[BlockTransferPlan, ...] | BlockLoadBatch,
+        range_args: _LoadArgs | None = None,
     ) -> TransferJobState:
         if not plans:
             job.complete()
             return job
-        keys, _, pointers, sizes, offsets = self._range_args(plans, for_store=False)
-        request_id = plans[0].request_id
+        if range_args is None:
+            keys, _, pointers, sizes, offsets = self._range_args(plans, for_store=False)
+        else:
+            keys, pointers, sizes, offsets = range_args
+        request_id = (
+            plans.request_id
+            if isinstance(plans, BlockLoadBatch)
+            else plans[0].request_id
+        )
         started_at = time.monotonic()
         logger.debug(
             "MORI UMBP range load started request=%s plans=%d ranges=%d bytes=%d",
@@ -413,10 +541,27 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             job.fail(failed, "MORI UMBP range load failed")
         return job
 
+    def store_blocks(
+        self, plans: Sequence[BlockTransferPlan]
+    ) -> TransferJobState | None:
+        """Store whole blocks from registered layouts; None requests ranges."""
+        prepared = self._bulk_load_args(plans)
+        if prepared is None:
+            return None
+        (keys, pointers, sizes, offsets), plan_bytes = prepared
+        return self._submit_store(
+            tuple(plans),
+            (keys, list(plan_bytes), pointers, sizes, offsets),
+        )
+
     def store(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
         return self._submit_store(tuple(plans))
 
-    def _submit_store(self, plans: tuple[BlockTransferPlan, ...]) -> TransferJobState:
+    def _submit_store(
+        self,
+        plans: tuple[BlockTransferPlan, ...],
+        range_args: _StoreArgs | None = None,
+    ) -> TransferJobState:
         job = TransferJobState(plans)
         job.start()
         ready_events: list[torch.Event] = []
@@ -426,7 +571,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                 event.record(torch.accelerator.current_stream())
                 ready_events.append(event)
         self._futures[id(job)] = self._executor.submit(
-            self._store_sync, job, plans, ready_events
+            self._store_sync, job, plans, ready_events, range_args
         )
         return job
 
@@ -435,13 +580,16 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         job: TransferJobState,
         plans: tuple[BlockTransferPlan, ...],
         ready_events: list[torch.Event],
+        range_args: _StoreArgs | None = None,
     ) -> TransferJobState:
         for event in ready_events:
             event.synchronize()
         if not plans:
             job.complete()
             return job
-        keys, object_sizes, pointers, sizes, offsets = self._range_args(plans)
+        keys, object_sizes, pointers, sizes, offsets = (
+            self._range_args(plans) if range_args is None else range_args
+        )
         results = self.client.batch_put_ranges_from_ptr(
             keys, object_sizes, pointers, sizes, offsets
         )
@@ -598,7 +746,6 @@ class EmbeddedRuntime(IUMBPRuntime):
         topology: RankTopology,
         layout: KVLayoutDescriptor,
     ) -> UMBPWorkerHandle:
-        del layout
         try:
             from mori.cpp import UMBPClient, UMBPConfig
         except ImportError as exc:
@@ -626,6 +773,7 @@ class EmbeddedRuntime(IUMBPRuntime):
             topology,
             self.lookup_dir,
             int(self.options.get("num_workers", 4)),
+            layout,
             lookup_instance=self.lookup_instance,
         )
 

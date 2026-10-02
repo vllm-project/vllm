@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 
 from .data import (
     BlockIdentityCodec,
+    BlockLoadBatch,
     BlockTransferPlan,
     KVLayoutPlanner,
     StoreEventResult,
@@ -99,8 +100,31 @@ class UMBPStoreConnectorWorker:
             if plans:
                 self._submit_loads(request_id, plans)
 
-    def _submit_loads(self, request_id: str, plans: list[BlockTransferPlan]) -> None:
-        materialized = self._materialize_plans(plans)
+    def _submit_loads(
+        self, request_id: str, plans: list[BlockTransferPlan] | BlockLoadBatch
+    ) -> None:
+        load_blocks = getattr(self.runtime, "load_blocks", None)
+        if load_blocks is not None:
+            localized: list[BlockTransferPlan] | BlockLoadBatch
+            if isinstance(plans, BlockLoadBatch):
+                localized = plans
+                if self.codec is not None:
+                    localized = replace(
+                        plans,
+                        keys=[
+                            self._localize_key(key, group)
+                            for key, group in zip(
+                                plans.keys, plans.group_ids, strict=True
+                            )
+                        ],
+                    )
+            else:
+                localized = [self._localize_plan(plan) for plan in plans]
+            job = load_blocks(localized)
+            if job is not None:
+                self._load_jobs[request_id] = {None: job}
+                return
+        materialized = self._materialize_plans(list(plans))
         logger.debug(
             "UMBP load submitted request=%s plans=%d ranges=%d bytes=%d",
             request_id,
@@ -166,6 +190,12 @@ class UMBPStoreConnectorWorker:
     ) -> None:
         if not plans:
             return
+        store_blocks = getattr(self.runtime, "store_blocks", None)
+        if store_blocks is not None:
+            job = store_blocks([self._localize_plan(plan) for plan in plans])
+            if job is not None:
+                self._store_jobs[request_id] = job
+                return
         materialized = self._materialize_plans(plans)
         self._store_jobs[request_id] = self.runtime.store(materialized)
 

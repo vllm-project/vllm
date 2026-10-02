@@ -29,6 +29,7 @@ from vllm.v1.request import Request
 
 from .data import (
     BlockIdentityCodec,
+    BlockLoadBatch,
     BlockTransferPlan,
     LoadSpec,
     RankTopology,
@@ -97,7 +98,7 @@ class UMBPStoreConnectorScheduler:
         self.use_eagle = bool(
             speculative_config is not None and speculative_config.use_eagle_block_drop()
         )
-        self._pending_loads: dict[str, list[BlockTransferPlan]] = {}
+        self._pending_loads: dict[str, list[BlockTransferPlan] | BlockLoadBatch] = {}
         self._load_specs: dict[str, LoadSpec] = {}
         self._lookup_units = {
             group_id: self.group_block_sizes[group_id]
@@ -390,31 +391,30 @@ class UMBPStoreConnectorScheduler:
         tracker: RequestTracker,
         block_groups: tuple[list[int], ...],
         num_external_tokens: int,
-    ) -> list[BlockTransferPlan]:
-        """Plan the logical objects selected by the external hit window."""
+    ) -> BlockLoadBatch:
+        """Batch the logical objects selected by the external hit window."""
         group_ids = self.kv_cache_config.prefix_cacheable_group_ids
         spec = tracker.load_spec
         local_tokens = spec.local_tokens if spec is not None else 0
         end_tokens = local_tokens + num_external_tokens
-        plans: list[BlockTransferPlan] = []
+        keys: list[str] = []
+        destinations: list[int] = []
+        groups: list[int] = []
         for group_index, group_id in enumerate(group_ids):
             group_block_size = self.group_block_sizes[group_id]
             start_block = local_tokens // group_block_size
             num_full_blocks = end_tokens // group_block_size
             for block_index in range(start_block, num_full_blocks):
                 token_end = (block_index + 1) * group_block_size
-                block_hash = self._object_hash_at_token_end(
-                    request.block_hashes, token_end
-                )
-                plans.append(
-                    BlockTransferPlan(
-                        key=self.codec.key(block_hash, group_id=group_id),
-                        block_id=block_groups[group_index][block_index],
-                        request_id=request.request_id,
+                keys.append(
+                    self.codec.key(
+                        self._object_hash_at_token_end(request.block_hashes, token_end),
                         group_id=group_id,
                     )
                 )
-        return plans
+                destinations.append(block_groups[group_index][block_index])
+                groups.append(group_id)
+        return BlockLoadBatch(keys, destinations, groups, request.request_id)
 
     def _object_hash_at_token_end(
         self, hashes: Sequence[bytes], token_end: int
@@ -456,12 +456,20 @@ class UMBPStoreConnectorScheduler:
             )
             for group_id, block_ids in zip(group_ids, block_groups)
         }
+        resident_blocks = (
+            self._restored_store_blocks(
+                request, block_ranges, tracker.load_spec.external_tokens, block_groups
+            )
+            if tracker.load_spec is not None
+            else {}
+        )
         for group_id, block_ids in zip(group_ids, block_groups):
             if group_id not in block_ranges:
                 continue
             group_block_size = self.group_block_sizes[group_id]
+            resident = resident_blocks.get(group_id, ())
             for index in block_ranges[group_id]:
-                if block_ids[index] == NULL_BLOCK_ID:
+                if block_ids[index] == NULL_BLOCK_ID or index in resident:
                     continue
                 token_end = (index + 1) * group_block_size
                 block_hash = self._object_hash_at_token_end(
@@ -476,6 +484,73 @@ class UMBPStoreConnectorScheduler:
                     )
                 )
         return plans
+
+    def _restored_store_blocks(
+        self,
+        request: Any,
+        block_ranges: dict[int, range],
+        restored_tokens: int,
+        block_groups: tuple[list[int], ...],
+    ) -> dict[int, set[int]]:
+        """Query residency before constructing plans for restored blocks."""
+        # block_ranges covers only positionally stored groups; block_groups
+        # follows prefix_cacheable_group_ids.
+        blocks_of = dict(
+            zip(
+                self.kv_cache_config.prefix_cacheable_group_ids,
+                block_groups,
+                strict=True,
+            )
+        )
+        candidates = {
+            group_id: [
+                index
+                for index in range(
+                    indices.start,
+                    min(
+                        indices.stop,
+                        restored_tokens // self.group_block_sizes[group_id],
+                    ),
+                )
+                if blocks_of[group_id][index] != NULL_BLOCK_ID
+            ]
+            for group_id, indices in block_ranges.items()
+        }
+        keys = [
+            key
+            for group_id, indices in candidates.items()
+            for index in indices
+            for key in _rank_keys(
+                self.codec,
+                self.topology,
+                self._object_hash_at_token_end(
+                    request.block_hashes, (index + 1) * self.group_block_sizes[group_id]
+                ),
+                group_id,
+            )
+        ]
+        if not keys:
+            return {}
+        try:
+            hits = list(self.runtime.lookup(keys))
+        except Exception as exc:
+            logger.debug("UMBP store residency check failed: %s", exc)
+            return {}
+        if len(hits) != len(keys):
+            return {}
+        ranks = self.topology.rank_count
+        offset = 0
+        resident = {}
+        for group_id, indices in candidates.items():
+            resident[group_id] = {
+                index
+                for position, index in enumerate(indices)
+                if all(
+                    hits[offset + position * ranks : offset + (position + 1) * ranks]
+                )
+            }
+            offset += len(indices) * ranks
+        return resident
 
     def request_finished(
         self, request: Request, block_ids: tuple[list[int], ...]

@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockIdentityCodec,
+    BlockLoadBatch,
     BlockTransferPlan,
     KVLayoutDescriptor,
     KVLayoutPlanner,
@@ -54,6 +55,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
 def test_block_identity_codec_does_not_use_physical_block_id():
@@ -510,6 +512,23 @@ def test_scheduler_emits_async_load_without_scheduled_model_tokens():
     assert scheduler._pending_loads == {}
 
 
+def test_load_batch_metadata_roundtrip_preserves_destinations_and_identity():
+    batch = BlockLoadBatch(["g1", "g0"], [7, 3], [1, 0], "r")
+    meta = UMBPConnectorMetadata(load_requests={"r": batch})
+    restored = (
+        MsgpackDecoder(UMBPConnectorMetadata)
+        .decode(MsgpackEncoder().encode(meta))
+        .load_requests["r"]
+    )
+    assert list(restored) == [
+        BlockTransferPlan("g1", 7, group_id=1, request_id="r"),
+        BlockTransferPlan("g0", 3, group_id=0, request_id="r"),
+    ]
+    assert restored[:1] == [restored[0]]
+    with pytest.raises(ValueError, match="equal lengths"):
+        BlockLoadBatch(["missing-destination"], [], [0], "r")
+
+
 def test_scheduler_cached_decode_uses_save_watermark_and_new_blocks():
     scheduler = UMBPStoreConnectorScheduler(
         _vllm_config(
@@ -674,6 +693,42 @@ def test_kv_consumer_never_stores(kv_role):
     stored = [plan.block_id for plan in metadata.store_plans]
     assert stored == ([] if kv_role == "kv_consumer" else [3, 4])
     assert bool(metadata.store_requests) == (kv_role != "kv_consumer")
+
+
+@pytest.mark.parametrize("resident", [False, True])
+def test_restored_prefix_skips_resident_blocks(resident):
+    """A restored block that is still in the pool is not stored again."""
+    codec = BlockIdentityCodec(UMBPNamespace("restored-residency"))
+    handle = _SchedulerHandle({})
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config({"mode": "embedded"}), _kv_cache_config(), handle, codec
+    )
+    request = SimpleNamespace(
+        request_id="req",
+        req_id="req",
+        num_tokens=49,
+        block_hashes=[b"a", b"b", b"c"],
+        block_ids=([1, 2, 3],),
+        num_computed_tokens=0,
+    )
+    scheduler.update_state_after_alloc(
+        request, SimpleNamespace(get_block_ids=lambda group_ids: request.block_ids), 0
+    )
+    scheduler._request_trackers["req"].load_spec = LoadSpec(0, 32)
+    handle.hits = {codec.key(h, 0): resident for h in (b"a", b"b")}
+    meta = scheduler.build_connector_meta(
+        SimpleNamespace(
+            finished_req_ids=set(),
+            preempted_req_ids=set(),
+            scheduled_new_reqs=[request],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+            num_scheduled_tokens={"req": 48},
+        )
+    )
+
+    stored = [b"c"] if resident else [b"a", b"b", b"c"]
+    assert [plan.key for plan in meta.store_plans] == [codec.key(h, 0) for h in stored]
+    scheduler.close()
 
 
 def test_store_event_owns_refs_until_all_ranks_finish():
@@ -1598,29 +1653,34 @@ def test_worker_localizes_scheduler_plan_key_to_its_tp_rank(
 
 
 @pytest.mark.parametrize("tp_rank", [0, 3])
-def test_load_localizes_rank_without_changing_request_or_destination(tp_rank):
+@pytest.mark.parametrize("fast_path", [False, True])
+def test_batched_load_localizes_rank_without_changing_request_or_destination(
+    tp_rank, fast_path
+):
+    """Fast and fallback loads target the same rank and GPU blocks."""
     codec = BlockIdentityCodec(UMBPNamespace("rank-local"), tp_rank=tp_rank)
     scheduler_codec = replace(codec, tp_rank=0)
     calls = []
 
     def load(plans):
         calls.append(plans)
-        job = TransferJobState(tuple(plans))
+        job = TransferJobState(plans if fast_path else tuple(plans))
         job.start()
         job.complete([codec.key(b"a", 0)])
         job.fail([codec.key(b"b", 1)], "injected load failure")
         return job
 
-    worker = UMBPStoreConnectorWorker(SimpleNamespace(load=load), codec=codec)
-    plans = [
-        BlockTransferPlan(
-            scheduler_codec.key(b"a", 0), 7, request_id="request", group_id=0
-        ),
-        BlockTransferPlan(
-            scheduler_codec.key(b"b", 1), 9, request_id="request", group_id=1
-        ),
-    ]
-    worker.start_load_kv(None, UMBPConnectorMetadata(load_requests={"request": plans}))
+    handle = SimpleNamespace(load=load)
+    if fast_path:
+        handle.load_blocks = load
+    worker = UMBPStoreConnectorWorker(handle, codec=codec)
+    batch = BlockLoadBatch(
+        [scheduler_codec.key(b"a", 0), scheduler_codec.key(b"b", 1)],
+        [7, 9],
+        [0, 1],
+        "request",
+    )
+    worker.start_load_kv(None, UMBPConnectorMetadata(load_requests={"request": batch}))
 
     assert len(calls) == 1
     assert [(p.key, p.block_id, p.group_id, p.request_id) for p in calls[0]] == [
@@ -1629,6 +1689,7 @@ def test_load_localizes_rank_without_changing_request_or_destination(tp_rank):
     ]
     job = worker._load_jobs["request"][None]
     assert job.failed_block_ids == {9}
+    assert batch.keys == [scheduler_codec.key(b"a", 0), scheduler_codec.key(b"b", 1)]
 
 
 @pytest.mark.parametrize("empty_group", [False, True])

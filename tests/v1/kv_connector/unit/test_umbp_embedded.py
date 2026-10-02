@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockIdentityCodec,
+    BlockLoadBatch,
     BlockTransferPlan,
     KVLayoutDescriptor,
     KVLayoutPlanner,
@@ -42,6 +43,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.embedded import (
     _MoriSchedulerHandle,
     _MoriWorkerHandle,
     _rank_namespace_from_key_prefix,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
+    UMBPStoreConnectorWorker,
 )
 
 
@@ -97,6 +101,153 @@ def test_mori_range_arguments_preserve_sparse_offsets_and_empty_objects(for_stor
         [[], [16, 8]],
         [[], [48, 0]],
     )
+
+
+@pytest.fixture
+def bulk_worker(monkeypatch, tmp_path):
+    calls: list[
+        tuple[list[str], list[int], list[list[int]], list[list[int]], list[list[int]]]
+    ] = []
+
+    def get(keys, pointers, sizes, offsets):
+        calls.append((keys, [], pointers, sizes, offsets))
+        return [key != "missing" for key in keys]
+
+    def put(keys, object_sizes, pointers, sizes, offsets):
+        calls.append((keys, object_sizes, pointers, sizes, offsets))
+        return [True] * len(keys)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "mori.cpp",
+        SimpleNamespace(MemoryLocationType=SimpleNamespace(CPU=0, GPU=1)),
+    )
+    client = SimpleNamespace(
+        register_memory=lambda *a: True,
+        deregister_memory=lambda *a: True,
+        batch_get_ranges_into_ptr=get,
+        batch_put_ranges_from_ptr=put,
+        flush=lambda: True,
+        close=lambda: None,
+    )
+    planner = KVLayoutPlanner(
+        [
+            KVRegion("a", 0, 64, 32, 0, 16),
+            KVRegion("b", 1, 32, 16, 32, 16),
+            KVRegion("c", 0, 128, 64, 48, 16),
+        ]
+    )
+    handle = _MoriWorkerHandle(
+        client,
+        "bulk",
+        RankTopology(),
+        str(tmp_path),
+        1,
+        planner.describe(RankTopology()),
+    )
+    worker = UMBPStoreConnectorWorker(handle, planner)
+    buffers = {
+        r.layer_name: torch.empty((8, r.block_stride), dtype=torch.uint8)
+        for r in planner.regions
+    }
+    worker.register_kv_caches(buffers)
+    yield worker, buffers, calls
+    handle.close()
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_bulk_load_preserves_group_order_failures_and_new_buffers(
+    bulk_worker, batched, monkeypatch
+):
+    worker, buffers, calls = bulk_worker
+    plans = [
+        BlockTransferPlan("group1", 3, group_id=1, request_id="r"),
+        BlockTransferPlan("missing", 4, group_id=0, request_id="r"),
+        BlockTransferPlan("group0", 6, group_id=0, request_id="r"),
+    ]
+    for caches in (buffers, {name: torch.empty_like(t) for name, t in buffers.items()}):
+        worker.register_kv_caches(caches)
+        expected = _MoriWorkerHandle._range_args(
+            [worker.layout.materialize(p) for p in plans], for_store=False
+        )
+        supplied = plans
+        if batched:
+            supplied = BlockLoadBatch(
+                [p.key for p in plans],
+                [p.block_id for p in plans],
+                [p.group_id for p in plans],
+                "r",
+            )
+            monkeypatch.setattr(
+                BlockLoadBatch,
+                "__getitem__",
+                lambda *a: pytest.fail(
+                    "bulk loading must not materialize per-block plans"
+                ),
+            )
+        job = worker.runtime.load_blocks(supplied)
+        assert job is not None
+        result = worker.runtime.wait(job)
+        assert calls[-1] == expected
+        assert result.plans is supplied if batched else result.plans == tuple(plans)
+        assert result.failed_block_ids == {4}
+        assert result.completed_keys == {"group0", "group1"}
+    assert len(calls) == 2
+    assert calls[0][2] != calls[1][2]
+
+
+def test_bulk_store_matches_materialized_ranges(bulk_worker, monkeypatch):
+    worker, _, calls = bulk_worker
+    plans = [
+        BlockTransferPlan("group1", 3, group_id=1, request_id="r"),
+        BlockTransferPlan("group0", 6, group_id=0, request_id="r"),
+    ]
+    expected = _MoriWorkerHandle._range_args(
+        [worker.layout.materialize(p) for p in plans]
+    )
+    monkeypatch.setattr(
+        worker.layout,
+        "materialize",
+        lambda *a: pytest.fail("bulk stores must not materialize per-block plans"),
+    )
+
+    worker.enqueue_stores(UMBPConnectorMetadata(store_requests={"r": plans}))
+    (job,) = worker._store_jobs.values()
+    result = worker.runtime.wait(job)
+
+    assert calls == [expected]
+    assert result.plans == tuple(plans)
+    assert result.completed_keys == {"group0", "group1"}
+
+
+@pytest.mark.parametrize("special", ["subblocks", "materialized", "batch-subblocks"])
+def test_bulk_load_falls_back_for_entire_mixed_batch(bulk_worker, special):
+    worker, buffers, calls = bulk_worker
+    plans = [
+        BlockTransferPlan("a", 1, group_id=1),
+        BlockTransferPlan("c", 2, group_id=0),
+    ]
+    if special in ("subblocks", "batch-subblocks"):
+        buffers["c"] = torch.empty((16, 32), dtype=torch.uint8)
+        worker.register_kv_caches(buffers)
+        if special == "batch-subblocks":
+            plans = BlockLoadBatch(
+                [p.key for p in plans],
+                [p.block_id for p in plans],
+                [p.group_id for p in plans],
+                "r",
+            )
+    else:
+        plans[1] = worker.layout.materialize(plans[1])
+    assert worker.runtime.load_blocks(plans) is None
+    assert not calls
+    expected = _MoriWorkerHandle._range_args(
+        [p if p.ranges else worker.layout.materialize(p) for p in plans],
+        for_store=False,
+    )
+    worker.start_load_kv(None, UMBPConnectorMetadata(load_requests={"r": plans}))
+    worker.wait_for_layer_load("")
+    assert calls == [expected]
 
 
 def test_embedded_runtime_maps_dram_options_to_mori_config():
@@ -595,15 +746,33 @@ def test_mori_transfer_keeps_buffers_owned_until_completion(tmp_path, blocked_st
         RankTopology(),
         str(tmp_path),
         1,
+        KVLayoutDescriptor((KVRegion("layer0", 0, 1024, 1024, 0),), RankTopology()),
     )
     handle.register_buffers({"layer0": source})
-    size = source.numel()
-    plan = BlockTransferPlan(
-        "owned-buffer-key",
-        0,
-        ranges=(KVRange("layer0", 0, 0, source.data_ptr(), size, size, 0),),
+    job = (
+        handle.load_blocks([BlockTransferPlan("owned-buffer-key", 0, group_id=0)])
+        if blocked_stage == "load"
+        else handle.store(
+            [
+                BlockTransferPlan(
+                    "owned-buffer-key",
+                    0,
+                    ranges=(
+                        KVRange(
+                            "layer0",
+                            0,
+                            0,
+                            source.data_ptr(),
+                            source.numel(),
+                            source.numel(),
+                            0,
+                        ),
+                    ),
+                )
+            ]
+        )
     )
-    job = handle.load([plan]) if blocked_stage == "load" else handle.store([plan])
+    assert job is not None
     assert client.started.wait(5)
     assert handle.poll(job) is None
     assert handle.batch_exists(["owned-buffer-key"]) == [False]

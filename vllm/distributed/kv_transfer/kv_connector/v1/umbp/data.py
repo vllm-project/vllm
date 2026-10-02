@@ -14,7 +14,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, overload
 
 import torch
 
@@ -480,6 +480,43 @@ class BlockTransferPlan:
     group_id: int | None = None
 
 
+@dataclass(frozen=True)
+class BlockLoadBatch(Sequence[BlockTransferPlan]):
+    """Whole-block loads with request metadata shared across the batch."""
+
+    keys: list[str]
+    block_ids: list[int]
+    group_ids: list[int]
+    request_id: str
+
+    def __post_init__(self) -> None:
+        if len(self.keys) != len(self.block_ids) or len(self.keys) != len(
+            self.group_ids
+        ):
+            raise ValueError("load batch columns must have equal lengths")
+
+    def __len__(self) -> int:
+        return len(self.keys)
+
+    @overload
+    def __getitem__(self, index: int) -> BlockTransferPlan: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[BlockTransferPlan]: ...
+
+    def __getitem__(
+        self, index: int | slice
+    ) -> BlockTransferPlan | list[BlockTransferPlan]:
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        return BlockTransferPlan(
+            key=self.keys[index],
+            block_id=self.block_ids[index],
+            group_id=self.group_ids[index],
+            request_id=self.request_id,
+        )
+
+
 @dataclass
 class LoadSpec:
     """Scheduler decision for one externally loaded prefix."""
@@ -544,7 +581,7 @@ class TransferJobStatus(str, Enum):
 class TransferJobState:
     """Per-key completion state; one failed key does not fail its siblings."""
 
-    plans: tuple[BlockTransferPlan, ...]
+    plans: tuple[BlockTransferPlan, ...] | BlockLoadBatch
     status: TransferJobStatus = TransferJobStatus.PENDING
     completed_keys: set[str] = field(default_factory=set)
     failed_keys: set[str] = field(default_factory=set)
@@ -552,6 +589,8 @@ class TransferJobState:
 
     @property
     def keys(self) -> Sequence[str]:
+        if isinstance(self.plans, BlockLoadBatch):
+            return self.plans.keys
         return tuple(plan.key for plan in self.plans)
 
     def start(self) -> None:
@@ -570,6 +609,14 @@ class TransferJobState:
 
     @property
     def failed_block_ids(self) -> set[int]:
+        if isinstance(self.plans, BlockLoadBatch):
+            return {
+                block_id
+                for key, block_id in zip(
+                    self.plans.keys, self.plans.block_ids, strict=True
+                )
+                if key in self.failed_keys
+            }
         return {plan.block_id for plan in self.plans if plan.key in self.failed_keys}
 
     def _finish_if_done(self) -> None:
@@ -588,7 +635,9 @@ class UMBPConnectorMetadata(KVConnectorMetadata):
 
     async_load: bool = False
     store_plans: list[BlockTransferPlan] = field(default_factory=list)
-    load_requests: dict[str, list[BlockTransferPlan]] = field(default_factory=dict)
+    load_requests: dict[str, list[BlockTransferPlan] | BlockLoadBatch] = field(
+        default_factory=dict
+    )
     store_requests: dict[str, list[BlockTransferPlan]] = field(default_factory=dict)
     preempted_request_ids: set[str] = field(default_factory=set)
     store_event: int = -1

@@ -35,8 +35,20 @@ class UMBPWorkerHandle(Protocol):
     def load(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
         """Start loading the requested plans."""
 
+    def load_blocks(
+        self, plans: Sequence[BlockTransferPlan]
+    ) -> TransferJobState | None:
+        """Optionally load logical blocks; None requests ordinary materialization."""
+        return None
+
     def store(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
         """Start storing the requested plans."""
+
+    def store_blocks(
+        self, plans: Sequence[BlockTransferPlan]
+    ) -> TransferJobState | None:
+        """Optionally store logical blocks; None requests ordinary materialization."""
+        return None
 
     def wait(self, job: TransferJobState) -> TransferJobState:
         """Block until the job is final and its buffers are safe to reuse."""
