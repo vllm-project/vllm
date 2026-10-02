@@ -296,6 +296,45 @@ def parsed_derenderer(tokenizer):
     return dr
 
 
+def test_non_streaming_derender_initializes_parser_prefix(
+    derenderer, tokenizer, monkeypatch
+):
+    from unittest.mock import MagicMock
+
+    from vllm.entrypoints.generate.base.protocol import FunctionCall
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+
+    parser = MagicMock()
+    parser.parse.return_value = (
+        None,
+        None,
+        [FunctionCall(name="tool", arguments="{}")],
+    )
+    monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    generated_ids = tokenizer.encode("answer", add_special_tokens=False)
+    response = GenerateResponse(
+        request_id="test",
+        prompt_token_ids=[11, 12],
+        choices=[
+            GenerateResponseChoice(
+                index=0,
+                token_ids=generated_ids,
+                finish_reason="length",
+            )
+        ],
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "question"}],
+    )
+
+    choices = derenderer._derender_chat(response, request)
+
+    parser.set_prompt_token_ids.assert_called_once_with([11, 12])
+    assert choices[0].message.tool_calls[0].function.name == "tool"
+    assert choices[0].finish_reason == "length"
+
+
 class TestDetokenizeDelta:
     """_detokenize_delta: chunked decode must equal one shot decode."""
 
