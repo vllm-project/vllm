@@ -184,8 +184,11 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         if quant_config is None:
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if isinstance(quant_config, ModelOptMixedPrecisionConfig):
-            if quant_config._resolve_quant_algo(prefix) == "FP8":
+            quant_algo = quant_config._resolve_quant_algo(prefix)
+            if quant_algo == "FP8":
                 return Qwen4ExpPLEFp8EmbeddingMethod()
+            if quant_algo == "NVFP4":
+                return Qwen4ExpPLENvFp4EmbeddingMethod()
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if isinstance(
             quant_config, ModelOptQuantConfigBase

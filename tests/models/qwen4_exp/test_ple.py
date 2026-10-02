@@ -451,6 +451,29 @@ def test_nvfp4_ple_uses_explicit_storage_dtype_in_mixed_checkpoint():
     )
 
 
+def test_nvfp4_ple_resolves_from_mixed_precision_quantized_layers():
+    prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+    config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "kv_cache_quant_algo": None,
+                "quantized_layers": {
+                    prefix: {"quant_algo": "NVFP4", "group_size": 16},
+                    "model.language_model.layers.0.mlp.experts": {
+                        "quant_algo": "NVFP4",
+                        "group_size": 16,
+                    },
+                },
+            }
+        }
+    )
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(config, prefix),
+        Qwen4ExpPLENvFp4EmbeddingMethod,
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("pinned", [False, True])
 @pytest.mark.parametrize("rank", [0, 1])
