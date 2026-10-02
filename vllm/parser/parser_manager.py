@@ -112,6 +112,15 @@ class ParserManager:
             tool_parser_name, enable_auto_tools, model_name
         )
 
+        if tool_parser_cls is not None and tokenizer is not None:
+            try:
+                tool_parser_cls(tokenizer, tools=None)
+            except (TypeError, ValueError, RuntimeError) as e:
+                raise TypeError(
+                    f"Tool parser '{tool_parser_name}' is incompatible "
+                    f"with the model's tokenizer: {e}"
+                ) from e
+
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 
