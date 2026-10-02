@@ -18,6 +18,7 @@ from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
     SupportsMultiModal,
     SupportsPP,
     SupportsTranscription,
@@ -176,29 +177,6 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
             ),
         }
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions,
-    ) -> ProcessorInputs:
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
-
-        num_audios = mm_counts.get("audio", 0)
-        dummy_tokens = (
-            [198]
-            if num_audios == 0
-            else [
-                KimiAudioProcessor.KIMIA_MEDIA_BEGIN,
-                KimiAudioProcessor.KIMIA_TEXT_BLANK,
-                KimiAudioProcessor.KIMIA_MEDIA_END,
-            ]
-            * num_audios
-        )
-
-        return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
-
 
 # Field config for Kimi-Audio multimodal data
 _KIMIAUDIO_FIELD_CONFIG = {
@@ -228,6 +206,30 @@ class KimiAudioMultiModalDataParser(MultiModalDataParser):
 class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingInfo]):
     """vLLM multi-modal processor wrapper for Kimi-Audio."""
 
+    def get_dummy_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        builder = self.dummy_inputs
+        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+
+        num_audios = mm_counts.get("audio", 0)
+        dummy_tokens = (
+            [198]
+            if num_audios == 0
+            else [
+                KimiAudioProcessor.KIMIA_MEDIA_BEGIN,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK,
+                KimiAudioProcessor.KIMIA_MEDIA_END,
+            ]
+            * num_audios
+        )
+
+        return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
+
     def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
@@ -239,6 +241,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         # KimiAudioProcessor expects raw numpy arrays
         mm_data = hf_inputs.hf_data
         if audios := mm_data.pop("audio", []):
+            assert isinstance(audios, Sequence)
             audio_arrays = []
             for aud in audios:
                 if isinstance(aud, (tuple, list)) and len(aud) == 2:
@@ -484,7 +487,7 @@ class KimiAudioForConditionalGeneration(
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: tuple[torch.Tensor, ...] | None = None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:

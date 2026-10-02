@@ -30,8 +30,10 @@ from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.async_utils import make_async
+from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.kv_hints import KvHintsEnvelope
 
 logger = init_logger(__name__)
 
@@ -52,6 +54,7 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
+        self.diffusion_config = vllm_config.diffusion_config
         # Load the custom logits processor classes once; the returned callable
         # runs their validate_params hooks per request at admission.
         self.validate_logits_processors_params = (
@@ -62,7 +65,7 @@ class InputProcessor:
 
         self.renderer = renderer or renderer_from_config(vllm_config)
 
-        self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(model_config)
+        self.supports_mm_inputs = model_config.supports_multimodal_inputs
         self.mm_encoder_cache_size = 0
         self.skip_prompt_length_check = False
         if self.supports_mm_inputs:
@@ -94,6 +97,9 @@ class InputProcessor:
         params validator for the active model runner."""
         custom_logitsprocs = self.model_config.logits_processors
         if self.vllm_config.use_v2_model_runner:
+            if self.model_config.runner_type == "pooling" and not custom_logitsprocs:
+                return lambda _: None
+
             from vllm.v1.worker.gpu.sample.logits_processor import (
                 build_custom_logits_processors_params_validator,
             )
@@ -125,8 +131,34 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+            if params.prompt_logprob_token_ids is not None:
+                if not self.vllm_config.use_v2_model_runner:
+                    raise VLLMValidationError(
+                        "prompt_logprob_token_ids requires the V2 model runner "
+                        "(VLLM_USE_V2_MODEL_RUNNER=1).",
+                        parameter="prompt_logprob_token_ids",
+                    )
+                if self.vllm_config.cache_config.kv_sharing_fast_prefill:
+                    raise VLLMValidationError(
+                        "prompt_logprob_token_ids is incorrect with "
+                        "--kv-sharing-fast-prefill; disable it for scoring.",
+                        parameter="prompt_logprob_token_ids",
+                    )
 
             self.validate_logits_processors_params(params)
+
+            if self.model_config.is_diffusion:
+                # Without --diffusion-config the served canvas is unknown here;
+                # the ids and the read-only normalisation are still checked.
+                validate_diffusion_sampling_params(
+                    params,
+                    canvas_length=(
+                        self.diffusion_config.canvas_length
+                        if self.diffusion_config is not None
+                        else None
+                    ),
+                    vocab_size=self.model_config.get_vocab_size(),
+                )
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
@@ -318,6 +350,7 @@ class InputProcessor:
         data_parallel_rank: int | None = None,
         resumable: bool = False,
         session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> EngineCoreRequest:
         self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
@@ -395,6 +428,13 @@ class InputProcessor:
                 sampling_params.max_tokens = (
                     self.model_config.max_model_len - prompt_len
                 )
+                # min_tokens is not checked while max_tokens is unset.
+                if sampling_params.min_tokens > sampling_params.max_tokens:
+                    raise VLLMValidationError(
+                        f"min_tokens must be less than or equal to "
+                        f"max_tokens={sampling_params.max_tokens}, got "
+                        f"{sampling_params.min_tokens}."
+                    )
 
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,
@@ -461,6 +501,7 @@ class InputProcessor:
             trace_headers=trace_headers,
             resumable=resumable,
             session_id=session_id,
+            kv_hints=kv_hints,
         )
 
     def _validate_prompt_len(
@@ -515,9 +556,6 @@ class InputProcessor:
         prompt_input: SingletonInput,
         prompt_type: Literal["encoder", "decoder"],
     ) -> None:
-        model_config = self.model_config
-        tokenizer = self.tokenizer
-
         prompt_ids = (
             None
             if prompt_input["type"] == "embeds"
@@ -529,6 +567,15 @@ class InputProcessor:
 
         prompt_len = length_from_prompt_token_ids_or_embeds(prompt_ids, prompt_embeds)
         self._validate_prompt_len(prompt_len, prompt_type)
+
+        if prompt_input["type"] == "embeds":
+            is_token_ids = prompt_input.get("is_token_ids")
+            if is_token_ids is not None and len(is_token_ids) != prompt_len:
+                raise VLLMValidationError(
+                    "prompt_is_token_ids must have the same length as prompt_embeds "
+                    f"(expected {prompt_len}, got {len(is_token_ids)}).",
+                    parameter="prompt_is_token_ids",
+                )
 
         if prompt_input["type"] == "multimodal":
             decoder_mm_positions = prompt_input["mm_placeholders"]
@@ -545,34 +592,9 @@ class InputProcessor:
                             f"by setting --limit-mm-per-prompt at startup."
                         )
 
-        if prompt_ids and tokenizer is not None:
-            max_input_id = max(prompt_ids, default=0)
-            min_input_id = min(prompt_ids, default=0)
-
-            # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
-            # self.model_config.get_vocab_size() is the model’s vocab size.
-            # For Qwen3 models, the language model has extra tokens that do
-            # not exist in the tokenizer, and vice versa for multimodal
-            # placeholder tokens in some multimodal models.
-            # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399 # noqa: E501
-            # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421 # noqa: E501
-
-            # Here we take the max of the two to determine if a token id is
-            # truly out-of-vocabulary.
-            model_vocab_size = model_config.get_vocab_size()
-            # A negative id is out of vocabulary just like an over-large one,
-            # but is not caught by the upper-bound check below. Reject it here
-            # so it is not used as an embedding index downstream. This
-            # validation path is shared by generate, embedding and pooling
-            # requests, so the check covers all three.
-            if min_input_id < 0:
-                raise VLLMValidationError(
-                    f"Token id {min_input_id} is out of vocabulary"
-                )
-            if max_input_id > max(tokenizer.max_token_id, model_vocab_size - 1):
-                raise VLLMValidationError(
-                    f"Token id {max_input_id} is out of vocabulary"
-                )
+        # Shared by generate, embedding and pooling requests.
+        if prompt_ids:
+            self.renderer.validate_token_ids(prompt_ids)
 
     def _validate_model_inputs(
         self,

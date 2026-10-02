@@ -28,7 +28,7 @@ from vllm.exceptions import (
     VLLMValidationError,
 )
 from vllm.inputs import EngineInput, PromptType
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
@@ -53,6 +53,7 @@ from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollec
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
     StatLoggerManager,
@@ -121,6 +122,8 @@ class AsyncLLM(EngineClient):
             None
 
         """
+        configure_logging_if_needed(vllm_config.logging_config)
+
         # Ensure we can serialize custom transformer configs
         maybe_register_config_serialize_by_value()
 
@@ -208,9 +211,11 @@ class AsyncLLM(EngineClient):
             pass
 
         self.profiler = profiler
+        configured_activities = vllm_config.profiler_config.torch_profiler_activities
         if (
             vllm_config.profiler_config.profiler == "torch"
             and not vllm_config.profiler_config.ignore_frontend
+            and (configured_activities is None or "CPU" in configured_activities)
         ):
             profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
@@ -384,6 +389,7 @@ class AsyncLLM(EngineClient):
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
         if self.errored:
@@ -418,6 +424,7 @@ class AsyncLLM(EngineClient):
                 priority,
                 data_parallel_rank,
                 session_id,
+                kv_hints,
             )
 
         # Convert Input --> Request.
@@ -451,6 +458,7 @@ class AsyncLLM(EngineClient):
                     priority=priority,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    kv_hints=kv_hints,
                 )
             else:
                 # Raw prompts require tokenization and possibly multimodal
@@ -467,6 +475,7 @@ class AsyncLLM(EngineClient):
                     priority=priority,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    kv_hints=kv_hints,
                 )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
@@ -555,6 +564,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> RequestOutputCollector:
         self._validate_streaming_input_sampling_params(sampling_params)
 
@@ -567,6 +577,7 @@ class AsyncLLM(EngineClient):
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             session_id=session_id,
+            kv_hints=kv_hints,
         )
 
         if not sampling_params.skip_clone:
@@ -668,6 +679,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         session_id: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -708,6 +720,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
                 session_id=session_id,
+                kv_hints=kv_hints,
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
@@ -1097,11 +1110,13 @@ class AsyncLLM(EngineClient):
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, 0)
 
-    async def wake_up(self, tags: list[str] | None = None) -> None:
+    async def wake_up(self, tags: list[str] | None = None) -> bool:
         fully_awake = await self.engine_core.wake_up_async(tags)
 
         if self.logger_manager is not None and fully_awake:
             self.logger_manager.record_sleep_state(0, 0)
+
+        return fully_awake
 
     async def checkpoint_prepare(self) -> None:
         await self.collective_rpc("checkpoint_prepare")
@@ -1111,6 +1126,9 @@ class AsyncLLM(EngineClient):
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
+
+    async def compute_weight_checksums(self) -> list[dict[str, str]]:
+        return await self.engine_core.compute_weight_checksums_async()
 
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
