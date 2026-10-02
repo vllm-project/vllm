@@ -482,8 +482,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.layer_name = prefix
         self.indexer = indexer
         self.non_causal_multi_token_decode = non_causal_multi_token_decode
-        # Stored for a platform decode epilogue. The default path does not read it.
-        self.rotary_emb = rotary_emb
+        # Stored for a platform decode epilogue under a name subclasses do not
+        # already use. The default path does not read it.
+        self._epilogue_rotary_emb = rotary_emb
         self._rope_positions: torch.Tensor | None = None
         self.sliding_window = sliding_window
         self.num_kv_heads = 1
@@ -854,7 +855,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         The default is the existing concat and does not write the cache.
         Overrides receive the latent KV, cache, and ``num_mqa_tokens`` so a
         platform epilogue can replace this without editing ``forward_impl``.
-        ``self._rope_positions`` and ``self.rotary_emb`` are available there.
+        ``self._rope_positions`` and ``self._epilogue_rotary_emb`` are available there.
         """
         del k_c_normed, k_pe, kv_cache, attn_metadata, num_mqa_tokens
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
