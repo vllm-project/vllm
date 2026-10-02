@@ -27,7 +27,7 @@ from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObjectStore,
 )
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
@@ -108,8 +108,8 @@ class AuxOutputWorkerConnector:
         self._lock = Lock()
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
         # Every TP rank participates in capture collectives, but only the
-        # executor output rank owns the auxiliary output data plane.
-        if not (get_tp_group().is_first_rank and get_pp_group().is_last_rank):
+        # first TP rank of each PP stage owns the auxiliary output data plane.
+        if not get_tp_group().is_first_rank:
             return
 
         shape_per_token = self._capturer.shape_per_token
@@ -121,9 +121,15 @@ class AuxOutputWorkerConnector:
         block_nbytes = hash_block_size * int(np.prod(shape_per_token)) * dtype.itemsize
         max_bytes = vllm_config.aux_output_config.max_bytes
         if max_bytes is None:
-            max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
+            num_slots = kv_cache_config.num_blocks * hashes_per_kv_block
+        else:
+            # max_bytes covers all PP stages, which must hold the same blocks.
+            num_layers = vllm_config.model_config.get_total_num_hidden_layers()
+            num_slots = max_bytes // (block_nbytes // shape_per_token[0] * num_layers)
         self._store = BackgroundBlockObjectStore(
-            BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
+            BlockObjectStore(
+                max_bytes=num_slots * block_nbytes, object_nbytes=block_nbytes
+            ),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )
         self._buffer = RoutedExpertsBuffer(
@@ -133,18 +139,6 @@ class AuxOutputWorkerConnector:
             vllm_config.scheduler_config.max_num_seqs,
             max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
-        )
-
-    def send_stage_output(self, input_batch: InputBatch) -> None:
-        """Send this PP stage's layer span of the step's routing data.
-
-        Gated exactly like prepare_output: a step the last rank does not
-        snapshot must not be sent, or the p2p pairs shift by one step.
-        """
-        if self._step_metadata is None:
-            return
-        self._capturer.send_stage_routing_data(
-            int(input_batch.query_start_loc_np[input_batch.num_reqs])
         )
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:

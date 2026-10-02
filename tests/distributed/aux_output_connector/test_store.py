@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from vllm.distributed.aux_output_connector.connector import (
+    AuxOutputAggregator,
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
@@ -1421,6 +1422,35 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     output = {"request": AuxRequestOutput(0, routing)}
     request.num_computed_tokens = 4
     np.testing.assert_array_equal(connector.take_output(request, output), routing)
+
+
+def test_aggregator_concatenates_pp_stage_layers_in_order():
+    first = np.zeros((2, 1, 2), dtype=np.uint8)
+    last = np.ones((2, 2, 2), dtype=np.uint8)
+    first_output = ModelRunnerOutput(
+        [], {}, aux_output_connector_output={"request": AuxRequestOutput(3, first)}
+    )
+    last_output = ModelRunnerOutput(
+        ["request"],
+        {"request": 0},
+        aux_output_connector_output={"request": AuxRequestOutput(3, last)},
+    )
+    outputs: list[ModelRunnerOutput | None] = [first_output, None, last_output, None]
+
+    aggregator = AuxOutputAggregator(range(0, 4, 2))
+
+    assert aggregator.aggregate(outputs, output_rank=2) is last_output
+    merged = last_output.aux_output_connector_output["request"]
+    assert merged.token_start == 3
+    np.testing.assert_array_equal(merged.rows, np.concatenate((first, last), axis=1))
+
+
+def test_aggregator_passes_through_step_without_aux_outputs():
+    """Warmup steps carry no auxiliary outputs on any PP stage."""
+    output = ModelRunnerOutput([], {})
+    outputs: list[ModelRunnerOutput | None] = [ModelRunnerOutput([], {}), output]
+
+    assert AuxOutputAggregator(range(2)).aggregate(outputs, output_rank=1) is output
 
 
 def test_scheduler_starts_worker_output_at_requested_prompt_token():

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 from collections.abc import Iterator
+from copy import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ import torch
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
     LogprobsTensors,
     ModelRunnerOutput,
@@ -22,6 +24,7 @@ from vllm.v1.worker.utils import raise_if_nan_logits
 if TYPE_CHECKING:
     from vllm.distributed.aux_output_connector.worker import PendingAuxOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.pp_utils import PendingRecv
 
 
 @dataclass(frozen=True)
@@ -259,6 +262,46 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         self.copy_event.synchronize()
         self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
+
+
+class AsyncAuxOutput(AsyncModelRunnerOutput):
+    """Non-last PP stage output whose auxiliary outputs await the PP broadcast."""
+
+    def __init__(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        pending_aux_output: "PendingAuxOutput",
+        pending_recv: "PendingRecv | None",
+        main_stream: torch.cuda.Stream,
+        copy_stream: torch.cuda.Stream,
+    ):
+        self.model_runner_output = model_runner_output
+        self.pending_aux_output = pending_aux_output
+        # Keeps the broadcast tensors alive until the copy stream reads them.
+        self.pending_recv = pending_recv
+        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        self.copy_event = torch.cuda.Event(blocking=True)
+
+        with stream(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
+            if pending_recv is None:
+                # No request samples this step, so nothing was broadcast.
+                num_reqs = len(pending_aux_output.request_ids)
+                num_sampled = num_rejected = np.zeros(num_reqs, dtype=np.int32)
+            else:
+                copy_stream.wait_event(pending_recv.event)
+                num_sampled = async_copy_to_np(pending_recv.num_sampled)
+                num_rejected = async_copy_to_np(pending_recv.num_rejected)
+            pending_aux_output.enqueue_cpu_copy(num_sampled, num_rejected)
+            self.copy_event.record(copy_stream)
+
+    def get_output(self) -> ModelRunnerOutput:
+        self.copy_event.synchronize()
+        output = self.model_runner_output
+        if output is EMPTY_MODEL_RUNNER_OUTPUT:
+            output = copy(output)
+        output.aux_output_connector_output = self.pending_aux_output.process_output()
+        return output
 
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:

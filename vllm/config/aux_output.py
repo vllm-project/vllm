@@ -15,7 +15,8 @@ class AuxOutputConfig:
     """Capture and return routed-experts auxiliary outputs."""
 
     max_bytes: int | None = Field(default=None, gt=0)
-    """LRU capacity, or ``None`` to derive it from the KV cache capacity."""
+    """LRU capacity, or ``None`` to derive it from the KV cache capacity.
+    Under pipeline parallelism, this is the total across all stages."""
 
     @property
     def enabled(self) -> bool:

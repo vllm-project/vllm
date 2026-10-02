@@ -47,9 +47,7 @@ class RoutedExpertsCapturer:
 
     Layer-level hooks call :meth:`capture` inside the forward pass. Routing
     rows owned by this DP rank are written into a preallocated device buffer.
-    Under pipeline parallelism a stage only fills its own layer span, so
-    :meth:`send_stage_routing_data` sends that span to the last stage, where
-    :meth:`snapshot_routing_data` reassembles every layer.
+    Under pipeline parallelism the buffer only covers this stage's layers.
 
     The device buffer uses ``int32``. Stable snapshots use the narrowest dtype
     that can represent every logical expert ID.
@@ -68,7 +66,11 @@ class RoutedExpertsCapturer:
         num_layers, num_experts, num_experts_per_tok = _get_routed_experts_shape(
             vllm_config
         )
-        self.shape_per_token = (num_layers, num_experts_per_tok)
+        pp_group = get_pp_group()
+        self.start_layer, end_layer = get_pp_indices(
+            num_layers, pp_group.rank_in_group, pp_group.world_size
+        )
+        self.shape_per_token = (end_layer - self.start_layer, num_experts_per_tok)
         self.output_dtype_name = "uint8" if num_experts <= 256 else "uint16"
         self.output_dtype = getattr(torch, self.output_dtype_name)
         logger.info(
@@ -76,7 +78,7 @@ class RoutedExpertsCapturer:
             "max_tokens=%d, num_layers=%d, num_experts_per_tok=%d "
             "(hf_config.model_type=%s)",
             max_num_batched_tokens,
-            num_layers,
+            self.shape_per_token[0],
             num_experts_per_tok,
             vllm_config.model_config.hf_text_config.model_type,
         )
@@ -88,41 +90,17 @@ class RoutedExpertsCapturer:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-        # setup PP group for R3
-        pp_group = get_pp_group()
-        pp_size = pp_group.world_size
-        self.pp_layers = slice(
-            *get_pp_indices(num_layers, pp_group.rank_in_group, pp_size)
-        )
-        self.pp_dst = -1
-        self.pp_peers: list[tuple[int, slice]] = []
-        if pp_size == 1:
-            return
-
-        self.pp_comm = pp_group.make_sibling_device_group(
-            group_desc="pp_routed_experts"
-        )
-
-        if not get_tp_group().is_first_rank:
-            return
-        if not pp_group.is_last_rank:
-            self.pp_dst = pp_group.last_rank
-            self.pp_stream = torch.cuda.Stream()
-            return
-
-        for pp_rank in range(pp_size - 1):
-            layers = slice(*get_pp_indices(num_layers, pp_rank, pp_size))
-            self.pp_peers.append((pp_group.ranks[pp_rank], layers))
-
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
-        if not 0 <= layer_id < self.device_buffer.shape[1]:
+        local_layer_id = layer_id - self.start_layer
+        if not 0 <= local_layer_id < self.device_buffer.shape[1]:
             raise IndexError(
-                f"routed-experts layer {layer_id} exceeds capture buffer "
-                f"layer count {self.device_buffer.shape[1]}"
+                f"routed-experts layer {layer_id} is outside the capture buffer "
+                f"layers [{self.start_layer}, "
+                f"{self.start_layer + self.device_buffer.shape[1]})"
             )
 
         local_topk_ids = self._restore_local_topk_ids(topk_ids, get_forward_context())
-        self.device_buffer[: len(local_topk_ids), layer_id] = local_topk_ids
+        self.device_buffer[: len(local_topk_ids), local_layer_id] = local_topk_ids
 
     def _restore_local_topk_ids(
         self, topk_ids: torch.Tensor, ctx: ForwardContext
@@ -183,40 +161,9 @@ class RoutedExpertsCapturer:
             f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
         )
 
-    def send_stage_routing_data(self, num_tokens: int) -> None:
-        """Send this PP stage's layer span to the last stage.
-
-        Sent on a side stream so the main stream does not block on the last
-        stage's matching receive. The narrowed copy is independent of
-        ``device_buffer``; it is sent as bytes since NCCL lacks uint16.
-        """
-        if self.pp_dst < 0:
-            return
-        rows = self.device_buffer[:num_tokens, self.pp_layers].to(self.output_dtype)
-        main_stream = torch.cuda.current_stream()
-        with torch.cuda.stream(self.pp_stream):
-            self.pp_stream.wait_stream(main_stream)
-            rows.record_stream(self.pp_stream)
-            torch.distributed.send(
-                rows.view(torch.uint8), dst=self.pp_dst, group=self.pp_comm
-            )
-
     def snapshot_routing_data(self, num_tokens: int) -> torch.Tensor:
-        """Return a stable snapshot of the current routing data.
-
-        Under PP the other stages' layer spans are received here. They were
-        sent steps ago, so the receives complete without waiting.
-        """
-        snapshot = self.device_buffer[:num_tokens].to(self.output_dtype)
-        for src, layers in self.pp_peers:
-            rows = torch.empty(
-                (num_tokens, layers.stop - layers.start, snapshot.shape[2]),
-                dtype=snapshot.dtype,
-                device=snapshot.device,
-            )
-            torch.distributed.recv(rows.view(torch.uint8), src=src, group=self.pp_comm)
-            snapshot[:, layers] = rows
-        return snapshot
+        """Return a stable snapshot of the current routing data."""
+        return self.device_buffer[:num_tokens].to(self.output_dtype)
 
 
 class RoutedExpertsSink:

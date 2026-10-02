@@ -186,14 +186,13 @@ class PPHandler:
                 send, src=self.last_rank, group=self.broadcast_group
             )
 
-    def receive(self, input_batch: InputBatch) -> bool:
-        """Returns True iff sampled tokens need to be gathered from *all*
-        requests in the batch."""
+    def receive(self, input_batch: InputBatch) -> PendingRecv | None:
+        """Returns this step's pending receive, or None if no request is sampled."""
         assert not self.is_last_rank
         need_sampled_mask = compute_need_sampled_mask(input_batch)
         if need_sampled_mask is None:
             # Leave this step's reserved slot as None.
-            return False
+            return None
 
         # Snapshot the per-slot generation counter so a later free of any of
         # these RequestStates request indices is detectable at consume time.
@@ -231,7 +230,7 @@ class PPHandler:
             combined.record_stream(self.main_stream)
             if draft_tokens is not None:
                 draft_tokens.record_stream(self.main_stream)
-        self.queue[-1] = PendingRecv(
+        pending_recv = PendingRecv(
             event,
             sampled_tokens,
             num_sampled,
@@ -242,7 +241,8 @@ class PPHandler:
             gen_at_receive_np,
             draft_tokens,
         )
-        return bool(need_sampled_mask.all())
+        self.queue[-1] = pending_recv
+        return pending_recv
 
     def broadcast(
         self,

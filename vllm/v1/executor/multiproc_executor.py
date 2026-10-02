@@ -28,6 +28,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
+from vllm.distributed.aux_output_connector.connector import AuxOutputAggregator
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -362,6 +363,7 @@ class MultiprocExecutor(Executor):
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
             kv_output_aggregator=self.kv_output_aggregator,
             ec_output_aggregator=self.ec_output_aggregator,
+            aux_output_aggregator=self.aux_output_aggregator,
         )
 
     def execute_dummy_batch(self) -> None:
@@ -389,6 +391,7 @@ class MultiprocExecutor(Executor):
         unique_reply_rank: int | None = None,
         kv_output_aggregator: KVOutputAggregator | None = None,
         ec_output_aggregator: ECOutputAggregator | None = None,
+        aux_output_aggregator: AuxOutputAggregator | None = None,
     ) -> Any:
         """Returns single result if unique_reply_rank and/or an output
         aggregator is provided, otherwise list."""
@@ -401,10 +404,17 @@ class MultiprocExecutor(Executor):
         deadline = None if timeout is None else time.monotonic() + timeout
         kwargs = kwargs or {}
 
-        aggregators = [a for a in (kv_output_aggregator, ec_output_aggregator) if a]
+        aggregators = [
+            a
+            for a in (kv_output_aggregator, ec_output_aggregator, aux_output_aggregator)
+            if a
+        ]
+        reply_ranks: Sequence[int] | None = None
         aggregate: Callable[[Any], Any]
         if aggregators:
-            output_rank = None
+            if aux_output_aggregator is not None and len(aggregators) == 1:
+                # Auxiliary outputs come only from each PP stage's first rank.
+                reply_ranks = aux_output_aggregator.stage_ranks
 
             def _aggregate(outputs: Any) -> Any:
                 # Each aggregator merges its own connector's output onto
@@ -416,28 +426,30 @@ class MultiprocExecutor(Executor):
                 return result
 
             aggregate = _aggregate
+        elif unique_reply_rank is not None:
+            reply_ranks = (unique_reply_rank,)
+            aggregate = lambda outputs: outputs[unique_reply_rank]
         else:
-            output_rank = unique_reply_rank
             aggregate = lambda x: x
 
         if isinstance(method, str):
             send_method = method
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
-        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, reply_ranks))
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
-        if output_rank is not None:
-            response_mqs = (response_mqs[output_rank],)
+        ranks = range(len(response_mqs)) if reply_ranks is None else reply_ranks
 
         def get_response():
-            responses = []
-            for mq in response_mqs:
+            # Indexed by rank; ranks that do not reply stay None.
+            responses: list[Any] = [None] * len(response_mqs)
+            for rank in ranks:
                 dequeue_timeout = (
                     None if deadline is None else max(0.0, deadline - time.monotonic())
                 )
                 try:
-                    status, result = mq.dequeue(timeout=dequeue_timeout)
+                    status, result = response_mqs[rank].dequeue(timeout=dequeue_timeout)
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
@@ -445,8 +457,8 @@ class MultiprocExecutor(Executor):
                         f"Worker failed with error '{result}', please check the"
                         " stack trace above for the root cause"
                     )
-                responses.append(result)
-            return responses[0] if output_rank is not None else responses
+                responses[rank] = result
+            return responses
 
         future = FutureWrapper(
             self.futures_queue, get_response=get_response, aggregate=aggregate
@@ -1042,10 +1054,12 @@ class WorkerProc:
 
     def _execute_worker_rpc(
         self,
-        rpc_request: tuple[str | bytes, tuple[Any, ...], dict[str, Any], int | None],
+        rpc_request: tuple[
+            str | bytes, tuple[Any, ...], dict[str, Any], Sequence[int] | None
+        ],
     ) -> None:
         """Execute one RPC in a separate frame from the dequeue loop."""
-        method, args, kwargs, output_rank = rpc_request
+        method, args, kwargs, reply_ranks = rpc_request
         try:
             if isinstance(method, str):
                 func = getattr(self.worker, method)
@@ -1054,7 +1068,7 @@ class WorkerProc:
 
             output = func(*args, **kwargs)
 
-            if output_rank is None or self.rank == output_rank:
+            if reply_ranks is None or self.rank in reply_ranks:
                 self.handle_output(output)
         except Exception as e:
             # Notes have been introduced in python 3.11
@@ -1063,7 +1077,7 @@ class WorkerProc:
             logger.exception("WorkerProc hit an exception.")
             # enqueue_output converts the exception to a FAILURE response
             # containing its string representation before transport.
-            if output_rank is None or self.rank == output_rank:
+            if reply_ranks is None or self.rank in reply_ranks:
                 self.handle_output(e)
 
     @staticmethod
