@@ -22,6 +22,7 @@ from vllm.entrypoints.chat_utils import (
     validate_chat_template,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -30,6 +31,8 @@ from .utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
+
+logger = init_logger(__name__)
 
 
 class LoRAParserAction(argparse.Action):
@@ -363,7 +366,10 @@ class FrontendArgs(BaseFrontendArgs):
     """
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
-    Can significantly improve late-interaction scoring performance."""
+    Can significantly improve late-interaction scoring performance.
+    When disabled, the setting is also propagated to the engine's
+    `PoolerConfig`, so the engine-side scorer uses the reference MaxSim
+    path instead of the fused Triton kernel."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -463,6 +469,14 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
+    if args.chat_template is not None and "hf" in (
+        args.tool_call_parser,
+        getattr(args, "reasoning_parser", None),
+    ):
+        logger.warning(
+            "--chat-template is set; the hf parser still expects "
+            "the checkpoint's output format."
+        )
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
@@ -498,3 +512,20 @@ def create_parser_for_docs() -> FlexibleArgumentParser:
         prog="-m vllm.entrypoints.launchers.api_server.entry"
     )
     return make_arg_parser(parser_for_docs)
+
+
+def propagate_flash_late_interaction(args, engine_args) -> None:
+    """Propagate `--no-enable-flash-late-interaction` into the engine config.
+
+    The frontend flag alone only disables the API-server scoring path;
+    mirroring it into `PoolerConfig.enable_flash_late_interaction` lets the
+    engine-side scorer fall back to the reference MaxSim path too.
+    """
+    if getattr(args, "enable_flash_late_interaction", True):
+        return
+    from vllm.config.pooler import PoolerConfig
+
+    if engine_args.pooler_config is None:
+        engine_args.pooler_config = PoolerConfig(enable_flash_late_interaction=False)
+    else:
+        engine_args.pooler_config.enable_flash_late_interaction = False
