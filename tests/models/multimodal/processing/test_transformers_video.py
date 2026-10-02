@@ -42,14 +42,19 @@ VIDEO_MODEL_SETTINGS = {
 }
 
 
-def _video(num_frames: int = 8, seed: int = 0) -> tuple[np.ndarray, dict]:
+def _video(
+    num_frames: int = 8,
+    seed: int = 0,
+    fps: float = 1.0,
+    do_sample_frames: bool = False,
+) -> tuple[np.ndarray, dict]:
     rng = np.random.default_rng(seed)
     frames = rng.integers(256, size=(num_frames, 64, 64, 3), dtype=np.uint8)
     metadata = {
-        "fps": 1.0,
+        "fps": fps,
         "total_num_frames": num_frames,
         "frames_indices": list(range(num_frames)),
-        "do_sample_frames": False,
+        "do_sample_frames": do_sample_frames,
     }
     return frames, metadata
 
@@ -61,7 +66,7 @@ def _hf_video_kwargs(*videos):
             {k: v for k, v in metadata.items() if k != "do_sample_frames"}
             for _, metadata in videos
         ],
-        "do_sample_frames": False,
+        "do_sample_frames": videos[0][1]["do_sample_frames"],
     }
 
 
@@ -108,7 +113,7 @@ def test_video_multimodal_processor(model_id):
 @pytest.mark.parametrize("model_id", list(VIDEO_MODEL_SETTINGS))
 def test_video_multiple_inputs(model_id):
     """Multiple videos per prompt are each detected as a separate placeholder
-    and multi-modal item by the Transformers modelling backend."""
+    and multi-modal item by the Transformers modeling backend."""
     mm_processor = MULTIMODAL_REGISTRY.create_processor(
         ModelConfig(model=model_id, model_impl="transformers")
     )
@@ -218,3 +223,55 @@ def test_merged_token_fields_split_per_video():
 
     items = result["mm_kwargs"]["video"]
     assert [len(item["video_compression_mask"].data) for item in items] == [128, 64]
+
+
+def test_video_sampled_by_processor():
+    """Frames left for the processor to sample yield the tokens HF does."""
+    model_id = "Qwen/Qwen3-VL-2B-Instruct"
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
+    )
+    hf_processor = mm_processor.info.get_hf_processor()
+    prompt = VIDEO_MODEL_SETTINGS[model_id]["prompt"]
+    video = _video(64, fps=30.0, do_sample_frames=True)
+
+    result = mm_processor(
+        prompt=prompt,
+        mm_items=mm_processor.info.parse_mm_data({"video": video}),
+        hf_processor_mm_kwargs={},
+    )
+    hf_inputs = hf_processor(
+        text=prompt,
+        **_hf_video_kwargs(video),
+        return_mm_token_type_ids=True,
+        return_tensors="pt",
+    )
+
+    assert result["prompt_token_ids"] == hf_inputs["input_ids"][0].tolist()
+    (placeholder,) = result["mm_placeholders"]["video"]
+    assert placeholder.get_num_embeds() == int(
+        (hf_inputs["mm_token_type_ids"] == 2).sum()
+    )
+
+
+@pytest.mark.parametrize("model_id", list(VIDEO_MODEL_SETTINGS))
+def test_dummy_video_has_the_most_tokens(model_id):
+    """Profiling must build a dummy video with exactly the most tokens a video
+    can produce, or memory is under- or over-reserved."""
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
+    )
+    info = mm_processor.info
+    seq_len = info.ctx.model_config.max_model_len
+
+    result = mm_processor.get_dummy_mm_inputs({"video": 1})
+
+    (placeholder,) = result["mm_placeholders"]["video"]
+    max_tokens = info.get_max_video_tokens(seq_len, {"video": 1})
+    assert placeholder.get_num_embeds() == max_tokens
+    # Shrinking the dummy frames must never cost tokens
+    num_frames = info.get_num_frames_with_most_features(seq_len, {"video": 1})
+    (huge_frame_tokens,) = info.get_hf_processor()._get_num_multimodal_tokens(
+        video_sizes=[[num_frames, 10_000, 10_000]]
+    )["num_video_tokens"]
+    assert max_tokens >= huge_frame_tokens
