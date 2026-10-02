@@ -391,18 +391,14 @@ def maybe_apply_hybrid_eagle_retention_default(
         return
     if not is_hybrid or not use_eagle:
         return
-    interval = HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS * cache_config.block_size
-    if interval <= cache_config.block_size:
+    retention_blocks = max(2, HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS)
+    if retention_blocks != HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS:
         logger.warning(
-            "HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS=%s gives a "
-            "prefix_cache_retention_interval of %s (<= 1 block of size %s), "
-            "which reachable_block_mask treats as dense. Leaving "
-            "prefix_cache_retention_interval unchanged.",
+            "HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS=%s is below 2; "
+            "clamping to 2 blocks.",
             HYBRID_EAGLE_PREFIX_CACHE_RETENTION_BLOCKS,
-            interval,
-            cache_config.block_size,
         )
-        return
+    interval = retention_blocks * cache_config.block_size
     if cache_config.prefix_cache_retention_interval == interval:
         return
     cache_config.prefix_cache_retention_interval = interval
