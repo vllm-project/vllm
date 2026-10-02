@@ -59,15 +59,22 @@ class LoRALayerWeights:
         cls,
         module_name: str,
         peft_helper: PEFTHelper,
+        peft_module_name: str | None = None,
     ) -> "LoRALayerWeights":
+        """`peft_module_name` is the module name in the adapter checkpoint, used
+        to resolve `rank_pattern` / `alpha_pattern`. Defaults to `module_name`.
+        """
+        rank, scaling = peft_helper.get_rank_and_scaling(
+            peft_module_name or module_name
+        )
         # lora_a and lora_b are set to None for config-based construction
         return cls(
             module_name,
-            peft_helper.r,
+            rank,
             peft_helper.lora_alpha,
             None,
             None,
-            peft_helper.vllm_lora_scaling_factor,
+            scaling,
         )
 
     @classmethod
@@ -201,10 +208,12 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         w1_lora_b = torch.stack(w1_lora_b_lst, dim=0)  # (num_experts,output_size,rank)
         w2_lora_b = torch.stack(w2_lora_b_lst, dim=0)
 
-        # All w1, w2, w3 have the same scaling factor. Use the per-adapter
-        # scaling (e.g. alpha/sqrt(r) for rsLoRA) instead of alpha/rank.
-        scaling = first_lora.scaling
-        last_scaling = scaling
+        # Use each projection's own scaling (e.g. alpha/sqrt(r) for rsLoRA, or
+        # per-module values from rank_pattern / alpha_pattern) instead of
+        # alpha/rank. All experts of one projection share the same scaling.
+        w1_scaling = loras[0].scaling  # type: ignore[union-attr]
+        w2_scaling = loras[1].scaling  # type: ignore[union-attr]
+        last_scaling = loras[2].scaling if loras[2] is not None else w1_scaling
 
         if is_non_gated_moe:
             # For non-gated MoE, reuse w1 tensors for w3 to avoid memory waste
@@ -224,7 +233,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             [lora_alpha, lora_alpha, lora_alpha],
             [w1_lora_a, w2_lora_a, w3_lora_a],
             [w1_lora_b, w2_lora_b, w3_lora_b],
-            scaling=[scaling, scaling, last_scaling],
+            scaling=[w1_scaling, w2_scaling, last_scaling],
         )
         return obj
 
@@ -251,14 +260,13 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         assert w1_lora is not None and w2_lora is not None and w3_lora is not None
         rank = w1_lora.rank
         lora_alpha = w1_lora.lora_alpha
-        scaling = w1_lora.scaling
         return cls(
             module_name,
             rank,
             [lora_alpha, lora_alpha, lora_alpha],
             [w1_lora.lora_a, w2_lora.lora_a, w3_lora.lora_a],
             [w1_lora.lora_b, w2_lora.lora_b, w3_lora.lora_b],
-            scaling=[scaling, scaling, scaling],
+            scaling=[w1_lora.scaling, w2_lora.scaling, w3_lora.scaling],
         )
 
     def optimize(self) -> "PackedLoRALayerWeights":
