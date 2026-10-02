@@ -90,16 +90,13 @@ def is_shared_expert_quant_fse_compatible(
 
     online_quant_config = quant_config.online_quantization_config
     if online_quant_config is not None:
-        from vllm.model_executor.layers.fused_moe import (
-            RoutedExperts,
-            UnquantizedFusedMoEMethod,
-        )
-        from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-            FusedMoEMethodBase,
-        )
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
         from vllm.model_executor.layers.linear import (
             LinearBase,
             UnquantizedLinearMethod,
+        )
+        from vllm.model_executor.layers.quantization.online.base import (
+            ONLINE_SHARED_EXPERT_QUANTIZERS,
         )
 
         online_quant_config.packed_modules_mapping = quant_config.packed_modules_mapping
@@ -117,7 +114,7 @@ def is_shared_expert_quant_fse_compatible(
         # - Retrieve routed activation quant key
         # and ensure the online quantization set on shared expert match them.
         if isinstance(quant_config, QuarkConfig):
-            routed_weight_key, routed_activation_key, routed_method_cls = (
+            routed_weight_key, routed_activation_key, _ = (
                 quant_config.get_quant_method_target(expert_prefix, RoutedExperts)
             )
         else:
@@ -128,19 +125,11 @@ def is_shared_expert_quant_fse_compatible(
             logger.warning(reason)
             return False, reason
 
-        if routed_method_cls in (None, UnquantizedFusedMoEMethod):
-            return False, "routed-expert quantization target is unavailable"
-        assert routed_method_cls is not None
-        if not issubclass(routed_method_cls, FusedMoEMethodBase):
-            return False, "routed-expert quantization is not a fused-MoE method"
-        assert issubclass(routed_method_cls, FusedMoEMethodBase)
-        if (
-            routed_method_cls.shared_expert_online_loader
-            is FusedMoEMethodBase.shared_expert_online_loader
-        ):
+        if routed_weight_key not in ONLINE_SHARED_EXPERT_QUANTIZERS:
             return (
                 False,
-                "routed-expert quantization has no shared-expert online loader",
+                "online shared-expert quantization is not supported for routed "
+                f"expert weight key {routed_weight_key}",
             )
 
         for shared_expert_target in shared_expert_targets:

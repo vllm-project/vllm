@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from enum import Enum
 from types import MappingProxyType
 from typing import Any
@@ -60,6 +60,7 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
     find_matching_patterns,
     get_layer_name_after_index,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Static128BlockSym,
@@ -101,6 +102,15 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kMxfp4Static: Mxfp4OnlineMoEMethod,
     kInt8StaticChannelSym: Int8OnlineMoEMethod,
     kNvfp4Static: Nvfp4OnlineMoEMethod,
+}
+
+# Quantizers for full-precision fused shared-expert weights, keyed by the routed
+# experts' weight QuantKey. Each shard is quantized to the checkpoint layout on
+# arrival, so only block-local schemes are supported.
+ONLINE_SHARED_EXPERT_QUANTIZERS: dict[
+    QuantKey, Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
+] = {
+    kMxfp4Static: mxfp4_quantize,
 }
 
 

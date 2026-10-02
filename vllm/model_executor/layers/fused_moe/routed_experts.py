@@ -23,10 +23,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.linear import (
-    LinearBase,
-    UnquantizedLinearMethod,
-)
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     resolve_quant_method,
@@ -145,6 +142,7 @@ class RoutedExperts(PluggableLayer):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
+        self._fused_shared_expert_quantizer = self._get_fused_shared_expert_quantizer()
 
         self.quant_method = self._get_quant_method(
             self.layer_name,
@@ -622,6 +620,31 @@ class RoutedExperts(PluggableLayer):
         # _to_scalar's reshape(()) would reject the size-2 weight_shape.
         param_data[expert_id] = loaded_weight
 
+    def _get_fused_shared_expert_quantizer(
+        self,
+    ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None:
+        """Return the quantizer for an online-quantized fused shared expert."""
+        online_config = getattr(self.quant_config, "online_quantization_config", None)
+        prefix = self.moe_config.shared_expert_prefix
+        if (
+            online_config is None
+            or prefix is None
+            or self.expert_map_manager.num_fused_shared_experts == 0
+        ):
+            return None
+        # FSE compatibility checks require every shared-expert projection to
+        # use the routed experts' weight key.
+        resolved = online_config.resolve_quant_method_cls(
+            LinearBase, f"{prefix}.down_proj"
+        )
+        if resolved is None:
+            return None
+        from vllm.model_executor.layers.quantization.online.base import (
+            ONLINE_SHARED_EXPERT_QUANTIZERS,
+        )
+
+        return ONLINE_SHARED_EXPERT_QUANTIZERS[resolved[3].weight]
+
     @overload
     def weight_loader(
         self,
@@ -678,6 +701,35 @@ class RoutedExperts(PluggableLayer):
             # Failed to load this param since it's not local to this rank
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
+
+        # A full-precision fused shared expert is quantized into the checkpoint
+        # layout, then loaded like a pre-quantized expert weight and scale.
+        if (
+            self._fused_shared_expert_quantizer is not None
+            and self.moe_config.num_logical_experts
+            <= global_expert_id
+            < self.moe_config.num_logical_experts
+            + self.expert_map_manager.num_fused_shared_experts
+            and weight_name.endswith("_weight")
+            and loaded_weight.is_floating_point()
+            and loaded_weight.dtype != param.dtype
+        ):
+            weight, weight_scale = self._fused_shared_expert_quantizer(
+                loaded_weight.to(param.device)
+            )
+            stem = "w2" if shard_id == "w2" else "w13"
+            self.weight_loader(
+                getattr(self, f"{stem}_weight_scale"),
+                weight_scale,
+                f"{weight_name}_scale",
+                shard_id,
+                global_expert_id,
+                return_success=True,
+            )
+            loaded = self.weight_loader(
+                param, weight, weight_name, shard_id, global_expert_id, True
+            )
+            return loaded if return_success else None
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ/AWQ (K-first format).
@@ -911,54 +963,6 @@ class RoutedExperts(PluggableLayer):
 
         return False if return_success else None
 
-    def should_load_online_quantized_fused_shared_expert(
-        self,
-        global_expert_id: int,
-        shard_id: str,
-        loaded_weight: torch.Tensor,
-        weight_name: str,
-    ) -> bool:
-        """Whether to load a fused shared expert through online quantization.
-
-        Returns:
-            Whether the online shared-expert loader should handle this weight.
-
-        """
-        is_fused_shared_expert = (
-            self.expert_map_manager.num_fused_shared_experts > 0
-            and self.moe_config.num_logical_experts <= global_expert_id
-            and global_expert_id
-            < self.moe_config.num_logical_experts
-            + self.expert_map_manager.num_fused_shared_experts
-        )
-        if (
-            loaded_weight.dim() == 3
-            or not weight_name.endswith(".weight")
-            or not is_fused_shared_expert
-            or isinstance(self.quant_method, UnquantizedFusedMoEMethod)
-        ):
-            return False
-
-        online_quantization_config = (
-            self.quant_config.online_quantization_config
-            if self.quant_config is not None
-            else None
-        )
-        shared_expert_prefix = self.moe_config.shared_expert_prefix
-        if online_quantization_config is None or shared_expert_prefix is None:
-            return False
-
-        projection_name = "down_proj" if shard_id == "w2" else "gate_up_proj"
-        quant_method_metadata = online_quantization_config.resolve_quant_method_cls(
-            LinearBase, f"{shared_expert_prefix}.{projection_name}"
-        )
-        if quant_method_metadata is None:
-            return False
-
-        _, _, _, _, shared_expert_quant_method_cls = quant_method_metadata
-
-        return shared_expert_quant_method_cls not in (None, UnquantizedLinearMethod)
-
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
@@ -990,33 +994,6 @@ class RoutedExperts(PluggableLayer):
                         for fused_name in ("gate_up_proj", "w13")
                     )
                 )
-
-                # Online quantization for shared expert with
-                # quant_method.shared_expert_online_loader.
-                if self.should_load_online_quantized_fused_shared_expert(
-                    global_expert_id=expert_id,
-                    shard_id=shard_id,
-                    loaded_weight=loaded_weight,
-                    weight_name=qual_name,
-                ):
-                    shared_expert_online_loader = (
-                        self.quant_method.shared_expert_online_loader
-                    )
-                    loaded_params = shared_expert_online_loader.load(
-                        self,
-                        global_expert_id=expert_id,
-                        shard_id=shard_id,
-                        loaded_weight=loaded_weight,
-                        weight_name=qual_name,
-                    )
-
-                    # shared expert not loaded on this EP rank.
-                    if loaded_params is not None:
-                        yield from loaded_params
-
-                    # Do not fall through to the packed checkpoint loader.
-                    break
-
                 weight_name = qual_name.replace(weight_name, param_name)
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name, None)

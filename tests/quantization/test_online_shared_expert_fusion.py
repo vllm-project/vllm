@@ -19,9 +19,6 @@ from vllm.config.quantization import (
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
-from vllm.model_executor.layers.quantization.online.moe_shared_expert import (
-    OnlineMxfp4SharedExpertLoader,
-)
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
@@ -182,23 +179,19 @@ def _write_minimal_moe_config(model_path: Path, architecture: str) -> None:
     (model_path / "config.json").write_text(json.dumps(config))
 
 
-def test_online_shared_expert_quantization_fusion_tp() -> None:
-    """TP shared-expert weights are sharded on each projection's TP dimension."""
-    loader = OnlineMxfp4SharedExpertLoader()
-    w13 = torch.arange(48).reshape(8, 6)
-    w2 = torch.arange(48).reshape(6, 8)
-
-    assert torch.equal(loader._tp_shard(w13, "w1", tp_size=2, tp_rank=0), w13[:4])
-    assert torch.equal(loader._tp_shard(w2, "w2", tp_size=2, tp_rank=0), w2[:, :4])
-    assert torch.equal(loader._tp_shard(w13, "w3", tp_size=2, tp_rank=1), w13[4:])
-    assert torch.equal(loader._tp_shard(w2, "w2", tp_size=2, tp_rank=1), w2[:, 4:])
-
-
+@pytest.mark.parametrize(
+    "load_path", ["load_weights", "fused_gate_up", "weight_loader"]
+)
 def test_online_shared_expert_loads_bf16_weights_into_mxfp4_slot(
     default_vllm_config,
     dist_init,
+    load_path: str,
 ) -> None:
-    """A BF16 shared expert is quantized while routed MXFP4 weights are loaded."""
+    """A BF16 shared expert is quantized while routed MXFP4 weights are loaded.
+
+    `weight_loader` covers DeepSeek-style model loaders, which bypass
+    `RoutedExperts.load_weights`.
+    """
     default_vllm_config.model_config = ModelConfig()
     hidden_size = intermediate_size = 64
     num_routed_experts = 2
@@ -237,18 +230,34 @@ def test_online_shared_expert_loads_bf16_weights_into_mxfp4_slot(
         shared_up = torch.randn(intermediate_size, hidden_size, dtype=torch.bfloat16)
         shared_down = torch.randn(hidden_size, intermediate_size, dtype=torch.bfloat16)
 
-        list(
-            layer.load_weights(
-                [
-                    ("0.gate_proj.weight", routed_gate),
-                    ("0.up_proj.weight", routed_up),
-                    ("0.down_proj.weight", routed_down),
-                    ("2.gate_proj.weight", shared_gate),
-                    ("2.up_proj.weight", shared_up),
-                    ("2.down_proj.weight", shared_down),
-                ]
-            )
-        )
+        weights = [
+            ("0.gate_proj.weight", routed_gate),
+            ("0.up_proj.weight", routed_up),
+            ("0.down_proj.weight", routed_down),
+        ]
+        if load_path == "load_weights":
+            weights += [
+                ("2.gate_proj.weight", shared_gate),
+                ("2.up_proj.weight", shared_up),
+                ("2.down_proj.weight", shared_down),
+            ]
+        elif load_path == "fused_gate_up":
+            weights += [
+                ("2.gate_up_proj.weight", torch.cat([shared_gate, shared_up])),
+                ("2.down_proj.weight", shared_down),
+            ]
+        list(layer.load_weights(weights))
+
+        if load_path == "weight_loader":
+            for stem, shard_id, weight in (
+                ("w13", "w1", shared_gate),
+                ("w13", "w3", shared_up),
+                ("w2", "w2", shared_down),
+            ):
+                param = getattr(layer, f"{stem}_weight")
+                param.weight_loader(
+                    param, weight, f"{layer.layer_name}.{stem}_weight", shard_id, 2
+                )
 
     expected_gate, expected_gate_scale = mxfp4_quantize(shared_gate)
     expected_up, expected_up_scale = mxfp4_quantize(shared_up)
