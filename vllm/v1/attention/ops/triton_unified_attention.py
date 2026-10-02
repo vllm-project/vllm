@@ -34,19 +34,6 @@ from vllm.v1.kv_cache_interface import KVQuantMode
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
-_DEVICE_SM_COUNT: dict[int, int] = {}
-
-
-def _get_sm_count(device: torch.device) -> int:
-    if not torch.cuda.is_available():
-        return 128
-    idx = device.index if device.index is not None else torch.cuda.current_device()
-    if idx not in _DEVICE_SM_COUNT:
-        _DEVICE_SM_COUNT[idx] = torch.cuda.get_device_properties(
-            idx
-        ).multi_processor_count
-    return _DEVICE_SM_COUNT[idx]
-
 
 @triton.jit
 def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
@@ -1135,12 +1122,10 @@ def unified_attention(
         or is_batch_invariant
     )
 
-    # For short sliding windows, keep 3D segmented decode unless the 2D
-    # grid already launches enough CTAs to saturate all GPU SMs.
+    # 3D kernel is slower for short sliding windows (e.g. Gemma3 with 512/1024)
+    # because the segment reduction overhead outweighs the parallelism benefit.
     if use_3d and 0 < sliding_window_val < max_seqlen_k:
-        num_sms = _get_sm_count(q.device)
-        if total_num_q_blocks * num_kv_heads >= 2 * num_sms:
-            use_3d = False
+        use_3d = False
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
