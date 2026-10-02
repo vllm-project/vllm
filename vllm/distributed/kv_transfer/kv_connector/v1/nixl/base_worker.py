@@ -350,7 +350,12 @@ class NixlBaseConnectorWorker:
             "Head-sharded attention reads with P_TP > D_TP and heterogeneous "
             "block sizes are not supported"
         )
-        src_blocks_list = src_blocks_data.tolist()
+        # Mixed DRAM/VRAM registration (HiSparse) yields a list of tuples.
+        src_blocks_list = (
+            src_blocks_data.tolist()
+            if isinstance(src_blocks_data, np.ndarray)
+            else list(src_blocks_data)
+        )
 
         for p_idx, p_rank in enumerate(plan.all_source_ranks):
             fa_slot = plan.rank_to_attention_slot.get(p_rank, 0)

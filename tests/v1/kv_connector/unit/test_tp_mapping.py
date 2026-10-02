@@ -314,3 +314,17 @@ def test_csa_linear_tp_layout_boundary(total_kv_heads, local_tp, remote_tp, comp
     else:
         with pytest.raises(ValueError, match="KV-head sharding boundary"):
             worker._validate_csa_linear_tp_layout(remote_tp)
+
+
+def test_build_src_split_handles_accepts_tuple_list():
+    """Mixed DRAM/VRAM registration hands the splitter a list of tuples."""
+    plan = _compute_mapping(tp_rank=0, tp_size=1, remote_tp_size=2)
+    worker = _make_mock_worker_for_splits((FullAttentionSpec,))
+    blocks = [(0x2000 + i * 1024, 1024, 0) for i in range(4)]
+    from_list = list(worker._build_local_splits_from_plan(plan, blocks, len(blocks)))
+    from_array = list(
+        worker._build_local_splits_from_plan(
+            plan, np.array(blocks, dtype=np.uint64), len(blocks)
+        )
+    )
+    assert from_list == from_array
