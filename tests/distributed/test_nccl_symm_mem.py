@@ -170,7 +170,9 @@ def nccl_symm_mem_allgather_worker(local_rank: int, world_size: int):
             graph.replay()
             torch.accelerator.synchronize()
             torch.testing.assert_close(graph_first, first_expected, atol=0.0, rtol=0.0)
-            torch.testing.assert_close(graph_second, second_expected, atol=0.0, rtol=0.0)
+            torch.testing.assert_close(
+                graph_second, second_expected, atol=0.0, rtol=0.0
+            )
 
 
 @pytest.mark.skipif(
@@ -267,7 +269,9 @@ def nccl_symm_mem_reduce_scatter_worker(local_rank: int, world_size: int):
             graph.replay()
             torch.accelerator.synchronize()
             torch.testing.assert_close(graph_first, first_expected, atol=0.0, rtol=0.0)
-            torch.testing.assert_close(graph_second, second_expected, atol=0.0, rtol=0.0)
+            torch.testing.assert_close(
+                graph_second, second_expected, atol=0.0, rtol=0.0
+            )
 
 
 @pytest.mark.skipif(
