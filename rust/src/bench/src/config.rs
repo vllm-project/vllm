@@ -309,6 +309,14 @@ impl BenchConfig {
             }
         }
 
+        if uses_server_default_temperature(args.backend, extra_body.as_ref()) {
+            tracing::warn!(
+                "vllm-bench does not set temperature==0 (greedy) in requests by default. \
+                 The default will be determined on the server side and can be \
+                 model/API specific. For greedy decoding, include --temperature=0."
+            );
+        }
+
         // Parse metadata
         let metadata = match &args.metadata {
             None => None,
@@ -862,6 +870,21 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
     }))
 }
 
+/// Whether generation requests leave `temperature` to the server-side default.
+///
+/// Python `vllm bench serve` defaulted to greedy decoding before v0.15, so
+/// results are only comparable with older runs when temperature is set explicitly.
+/// An explicit `"temperature": null` also falls back to the server default.
+fn uses_server_default_temperature(
+    backend: BackendKind,
+    extra_body: Option<&serde_json::Value>,
+) -> bool {
+    !backend.is_pooling()
+        && extra_body
+            .and_then(|b| b.get("temperature"))
+            .is_none_or(serde_json::Value::is_null)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -908,6 +931,42 @@ mod tests {
             crate::cli::SpeedBenchConfig::Throughput8k
         ));
         assert_eq!(args.speed_bench_output_len, 4096);
+    }
+
+    /// Temperature left unset is flagged, since older Python versions defaulted to greedy.
+    #[test]
+    fn test_uses_server_default_temperature() {
+        let check = |backend, extra: &[&str]| {
+            let mut argv = vec!["vllm-bench", "--model", "test-model", "--backend", backend];
+            argv.extend_from_slice(extra);
+            let config = BenchConfig::from_args(&parse_args(argv)).unwrap();
+            uses_server_default_temperature(config.backend, config.extra_body.as_ref())
+        };
+
+        assert!(check("openai-chat", &[]));
+        assert!(check("vllm", &["--extra-body", r#"{"top_p": 0.9}"#]));
+        assert!(!check("openai-chat", &["--temperature", "0"]));
+        assert!(!check(
+            "openai",
+            &["--extra-body", r#"{"temperature": 0.6}"#]
+        ));
+        assert!(!check("openai-embeddings", &[]));
+
+        // `"temperature": null` leaves it to the server, and `--extra-body`
+        // overrides `--temperature`, so both cases must still warn.
+        assert!(check(
+            "openai-chat",
+            &["--extra-body", r#"{"temperature": null}"#]
+        ));
+        assert!(check(
+            "openai-chat",
+            &[
+                "--temperature",
+                "0",
+                "--extra-body",
+                r#"{"temperature": null}"#
+            ]
+        ));
     }
 
     #[test]
