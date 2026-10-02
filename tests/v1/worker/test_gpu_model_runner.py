@@ -2380,6 +2380,91 @@ class TestReloadDraftWeights:
         assert draft_model.model.rebuild_calls == 2
         assert draft_model.model.captured is restored.cache
 
+    def test_disk_reload_keeps_parameterless_shared_modules_attached(self):
+        """A rotary embedding shared through get_rope's instance cache has no
+        parameters; detaching it would break draft load_weights code that reads
+        it mid-load (dflash/dspark _build_fused_kv_buffers), while a shared
+        parameter-bearing module is still detached.
+        """
+
+        class _Rotary(nn.Module):
+            # Like RotaryEmbedding: config attributes and a non-persistent
+            # buffer, no parameters.
+            def __init__(self):
+                super().__init__()
+                self.head_size = 4
+                self.register_buffer("cos_sin_cache", torch.zeros(4), persistent=False)
+
+        class _Target(nn.Module):
+            def __init__(self, rotary: nn.Module):
+                super().__init__()
+                self.embed_tokens = nn.Embedding(8, 4)
+                self.rotary_emb = rotary
+
+            def load_weights(self, weights):
+                return set()
+
+        class _Inner(nn.Module):
+            def __init__(self, target: nn.Module):
+                super().__init__()
+                self.embed_tokens = target.embed_tokens
+                self.rotary_emb = target.rotary_emb
+                self.proj = nn.Linear(4, 4, bias=False)
+                self.seen: list[tuple[nn.Module, nn.Module, int]] = []
+
+            def _build_fused_kv_buffers(self) -> None:
+                # What qwen3_dflash reads while rebuilding its fused buffers.
+                self.seen.append(
+                    (self.rotary_emb, self.embed_tokens, self.rotary_emb.head_size)
+                )
+
+            def load_weights(self, weights):
+                for _ in weights:
+                    pass
+                self._build_fused_kv_buffers()
+                return set()
+
+        class _Draft(nn.Module):
+            def __init__(self, target: nn.Module):
+                super().__init__()
+                self.model = _Inner(target)
+
+            def load_weights(self, weights):
+                return self.model.load_weights(weights)
+
+        shared_rotary = _Rotary()
+        target_model = _Target(shared_rotary)
+        draft_model = _Draft(target_model)
+        assert draft_model.model.rotary_emb is target_model.rotary_emb
+        assert draft_model.model.embed_tokens is target_model.embed_tokens
+
+        runner = self._make_runner()
+        runner.get_draft_model = Mock(return_value=draft_model)
+        runner.get_model = Mock(return_value=target_model)
+        model_loader = Mock()
+        model_loader.get_all_weights.side_effect = lambda _config, _model: iter([])
+
+        with (
+            patch.object(
+                gpu_model_runner_module,
+                "get_model_loader",
+                return_value=model_loader,
+            ),
+            patch.object(gpu_model_runner_module, "initialize_layerwise_reload"),
+            patch.object(gpu_model_runner_module, "finalize_layerwise_reload"),
+        ):
+            runner.reload_weights()
+
+        # During the draft load: the parameterless shared rotary embedding is
+        # still the live object (readable), the shared embedding is detached.
+        rotary_during_load, embed_during_load, head_size = draft_model.model.seen[0]
+        assert rotary_during_load is shared_rotary
+        assert head_size == 4
+        assert embed_during_load is not target_model.embed_tokens
+        # Afterwards both aliases are restored.
+        assert draft_model.model.rotary_emb is target_model.rotary_emb
+        assert draft_model.model.embed_tokens is target_model.embed_tokens
+
     def test_disk_reload_detaches_repeated_lm_head_aliases(self):
         """MTP shares one target lm_head at draft.lm_head and each shared_head."""
 
