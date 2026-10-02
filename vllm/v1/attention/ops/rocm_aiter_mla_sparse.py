@@ -33,18 +33,6 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 
 @functools.cache
-def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | None:
-    try:
-        from aiter.ops.topk import (
-            top_k_per_row_decode,
-            top_k_per_row_prefill,
-        )
-    except ImportError:
-        return None
-    return top_k_per_row_prefill, top_k_per_row_decode
-
-
-@functools.cache
 def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -58,9 +46,6 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
     return pa_sparse_prefill_opus
 
 
-_GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
-_GFX950_C4A_NATIVE_MAX_ROWS = 256
-_GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
 # count, but Triton stays faster below this measured crossover.
 _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
@@ -69,43 +54,6 @@ _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
 def _indexer_k_is_c4a_block_flat(compress_ratio: int) -> bool:
     """V4.0 C4A is block-flat (NORMAL). Ratio 1 and 2 are 16×16 SHUFFLE."""
     return compress_ratio == 4
-
-
-def _get_aiter_top_k_kernel(
-    *,
-    is_prefill: bool,
-    compress_ratio: int,
-    num_rows: int,
-    max_valid_seq_len: int | None = None,
-    num_columns: int | None = None,
-    topk_tokens: int = 1024,
-    on_gfx950: bool = _ON_GFX950,
-) -> Callable[..., None] | None:
-    if compress_ratio <= 1 or not on_gfx950:
-        return None
-
-    if not is_prefill:
-        assert max_valid_seq_len is not None
-        if (
-            topk_tokens == 512
-            and 0 < num_rows <= 384
-            and num_columns is not None
-            and num_columns <= _GFX950_DSV4_NATIVE_MAX_COLUMNS
-        ):
-            return None
-        # AITER v0.1.19 decode is one-block only. This measured gfx950
-        # FP32/k=1024 compressed-row boundary is independent of the native
-        # split-count boundary in sampler.cu.
-        if (
-            num_rows <= _GFX950_C4A_NATIVE_MAX_ROWS
-            and max_valid_seq_len > _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN
-        ):
-            return None
-
-    topk_ops = _get_aiter_topk_ops()
-    if topk_ops is None:
-        return None
-    return topk_ops[0] if is_prefill else topk_ops[1]
 
 
 @triton.jit
@@ -145,44 +93,18 @@ def _localize_aiter_prefill_topk(
 
 
 def _launch_aiter_top_k_per_row_prefill(
-    top_k_per_row_prefill: Callable[..., None],
     logits: torch.Tensor,
     row_starts: torch.Tensor,
     row_ends: torch.Tensor,
     indices: torch.Tensor,
     topk_tokens: int,
 ) -> None:
-    top_k_per_row_prefill(
-        logits,
-        row_starts,
-        row_ends,
-        indices,
-        None,
-        logits.shape[0],
-        logits.stride(0),
-        logits.stride(1),
-        k=topk_tokens,
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    rocm_aiter_ops.indexer_top_k_prefill(
+        logits, row_starts, row_ends, indices, topk_tokens
     )
     _localize_aiter_prefill_topk(indices, row_starts)
-
-
-def _launch_aiter_top_k_per_row_decode(
-    top_k_per_row_decode: Callable[..., None],
-    logits: torch.Tensor,
-    seq_lens: torch.Tensor,
-    indices: torch.Tensor,
-    topk_tokens: int,
-) -> None:
-    top_k_per_row_decode(
-        logits,
-        1,
-        seq_lens.reshape(-1),
-        indices,
-        logits.shape[0],
-        logits.stride(0),
-        logits.stride(1),
-        k=topk_tokens,
-    )
 
 
 @triton.jit
@@ -1195,6 +1117,8 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
 ) -> torch.Tensor:
+    from vllm._aiter_ops import rocm_aiter_ops
+
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
@@ -1347,14 +1271,12 @@ def rocm_aiter_sparse_attn_indexer(
 
             num_rows = logits.shape[0]
 
-            aiter_topk_kernel = _get_aiter_top_k_kernel(
+            if rocm_aiter_ops.is_indexer_top_k_supported(
                 is_prefill=True,
                 compress_ratio=compress_ratio,
                 num_rows=num_rows,
-            )
-            if aiter_topk_kernel is not None:
+            ):
                 _launch_aiter_top_k_per_row_prefill(
-                    aiter_topk_kernel,
                     logits,
                     chunk.cu_seqlen_ks,
                     chunk.cu_seqlen_ke,
@@ -1448,19 +1370,20 @@ def rocm_aiter_sparse_attn_indexer(
             max_compressed_seq_len = max_model_len
         else:
             max_compressed_seq_len = layer_attn_metadata.max_seq_len // compress_ratio
-        aiter_topk_kernel = _get_aiter_top_k_kernel(
+        if rocm_aiter_ops.is_indexer_top_k_supported(
             is_prefill=False,
             compress_ratio=compress_ratio,
             num_rows=num_rows,
             max_valid_seq_len=max_compressed_seq_len,
+        ) and not rocm_aiter_ops.dsv4_indexer_prefers_native_top_k(
+            num_rows=num_rows,
             num_columns=logits.shape[1],
             topk_tokens=topk_tokens,
-        )
-        if aiter_topk_kernel is not None:
-            _launch_aiter_top_k_per_row_decode(
-                aiter_topk_kernel,
+        ):
+            rocm_aiter_ops.indexer_top_k_decode(
                 logits,
-                decode_metadata.seq_lens,
+                1,
+                decode_metadata.seq_lens.reshape(-1),
                 topk_indices,
                 topk_tokens,
             )
@@ -2190,6 +2113,7 @@ def _sparse_attn_prefill_ragged_kernel(
     num_kv,
     scale,
     HAS_ATTN_SINK: tl.constexpr,
+    OUT_DV: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -2280,7 +2204,7 @@ def _sparse_attn_prefill_ragged_kernel(
         + head_offsets[:, None] * out_stride_h
         + dim_offsets[None, :] * out_stride_d,
         out,
-        mask=head_mask[:, None] & dim_mask[None, :],
+        mask=head_mask[:, None] & (dim_offsets[None, :] < OUT_DV),
     )
 
 
@@ -3442,6 +3366,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     attn_sink: torch.Tensor | None,
     nope_head_dim: int,
     rope_head_dim: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
@@ -3472,7 +3397,15 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     block_d = triton.next_power_of_2(head_dim)
     block_k = 16 if head_dim >= 256 else 32
     num_warps = 4
-    out = torch.empty_like(q)
+    if out is None:
+        out = torch.empty_like(q)
+    else:
+        assert out.shape[:2] == q.shape[:2], (
+            f"expected out=[{num_queries},{num_heads},*], got {out.shape}"
+        )
+        assert out.shape[-1] in (nope_head_dim, head_dim), (
+            f"expected out width {nope_head_dim} or {head_dim}, got {out.shape[-1]}"
+        )
     _sparse_attn_prefill_ragged_kernel[(num_queries, triton.cdiv(num_heads, block_h))](
         q,
         kv,
@@ -3493,6 +3426,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         kv.shape[0],
         float(scale),
         HAS_ATTN_SINK=has_attn_sink,
+        OUT_DV=out.shape[-1],
         BLOCK_H=block_h,
         BLOCK_D=block_d,
         BLOCK_K=block_k,
@@ -3510,6 +3444,7 @@ def _rocm_sparse_attn_prefill_triton(
     nope_head_dim: int,
     rope_head_dim: int,
     topk_length: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
         indices,
@@ -3527,6 +3462,7 @@ def _rocm_sparse_attn_prefill_triton(
         attn_sink=attn_sink,
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
+        out=out,
     )
 
 
@@ -4180,7 +4116,7 @@ def rocm_sparse_attn_prefill(
             return
 
     if ragged_indices is not None and ragged_indptr is not None:
-        output_chunk = _rocm_sparse_attn_prefill_ragged_triton(
+        _rocm_sparse_attn_prefill_ragged_triton(
             q=q,
             kv=kv.squeeze(1),
             indices=ragged_indices,
@@ -4189,11 +4125,12 @@ def rocm_sparse_attn_prefill(
             attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
+            out=output,
         )
     else:
         assert indices is not None
         indices_2d = indices.reshape(indices.shape[0], -1)
-        output_chunk = _rocm_sparse_attn_prefill_triton(
+        _rocm_sparse_attn_prefill_triton(
             q=q,
             kv=kv.squeeze(1),
             indices=indices_2d,
@@ -4202,8 +4139,8 @@ def rocm_sparse_attn_prefill(
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
             topk_length=topk_length,
+            out=output,
         )
-    output.copy_(output_chunk[..., : output.shape[-1]].to(output.dtype))
 
 
 def rocm_sparse_attn_decode(
