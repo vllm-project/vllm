@@ -415,8 +415,31 @@ class TestChunkedEmbeddingProcessing:
         handler.enable_chunked_processing = True
         return handler
 
+    @pytest.mark.parametrize("cache_salt", [None, "tenant-a"])
+    def test_chunked_processing_preserves_cache_salt(self, cache_salt):
+        handler = self._make_handler()
+        ctx = self._make_context(cache_salt)
+
+        handler.maybe_pre_process_chunked(ctx)
+
+        assert ctx.engine_inputs is not None
+        assert len(ctx.engine_inputs) == 3
+        assert [
+            item["prompts"].get("prompt_token_ids") for item in ctx.engine_inputs
+        ] == [
+            [0, 1, 2],
+            [3, 4],
+            [10, 11],
+        ]
+        assert all(
+            item["prompts"].get("cache_salt") == cache_salt
+            for item in ctx.engine_inputs
+        )
+
     @staticmethod
-    def _make_context() -> PoolingServeContext[EmbeddingCompletionRequest]:
+    def _make_context(
+        cache_salt: str | None = None,
+    ) -> PoolingServeContext[EmbeddingCompletionRequest]:
         request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
@@ -432,13 +455,17 @@ class TestChunkedEmbeddingProcessing:
             request_id="embd-client-prompt-999-chunk-888",
             engine_inputs=[
                 PoolingEngineInput(
-                    prompts=tokens_input(prompt_token_ids=[0, 1, 2, 3, 4]),
+                    prompts=tokens_input(
+                        prompt_token_ids=[0, 1, 2, 3, 4], cache_salt=cache_salt
+                    ),
                     params=pooling_params,
                     lora_requests=None,
                     priorities=0,
                 ),
                 PoolingEngineInput(
-                    prompts=tokens_input(prompt_token_ids=[10, 11]),
+                    prompts=tokens_input(
+                        prompt_token_ids=[10, 11], cache_salt=cache_salt
+                    ),
                     params=pooling_params,
                     lora_requests=None,
                     priorities=0,
