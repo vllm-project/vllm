@@ -131,7 +131,7 @@ def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
     rocm_portable_tests = {
         "test_sparse_backend_decode_correctness",
         "test_sparse_backend_prefill_correctness",
-        "test_rocm_fused_v32_routes_dense_prefill",
+        "test_rocm_fused_v32_dense_prefill_matches_mqa",
     }
     if (
         current_platform.is_rocm()
@@ -4011,75 +4011,115 @@ def test_sparse_mla_common_impl_resolves_buffer_lazily():
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm model implementation")
-@pytest.mark.parametrize("num_decodes", [0, 1])
-@pytest.mark.parametrize("fp8_kv", [False, True])
-def test_rocm_fused_v32_routes_dense_prefill(monkeypatch, num_decodes, fp8_kv):
-    """The fused model must pass unabsorbed queries and normalized KV to MHA."""
-    from vllm.models.deepseek_v32.amd import rocm as model_mod
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_rocm_fused_v32_dense_prefill_matches_mqa(
+    tmp_path, vllm_runner, kv_cache_dtype
+):
+    """Fused normalization, RoPE and mixed dispatch preserve generation/logprobs.
 
-    num_tokens = 3
-    metadata = SimpleNamespace(num_actual_tokens=num_tokens, num_decodes=num_decodes)
-    kv_c = torch.arange(12, dtype=torch.float32).view(num_tokens, 4)
-    k_pe = torch.arange(3, dtype=torch.float32).view(num_tokens, 1)
-    q_c = torch.ones(num_tokens, 2)
-    q = torch.arange(18, dtype=torch.float32).view(num_tokens, 2, 3)
-    output = torch.zeros(num_tokens, 4)
+    Chunking unequal prompts exercises prefill alongside decode. The two long
+    prompts straddle the dense-prefill threshold. No pretrained weights or
+    tokenizer download is needed.
+    """
+    import json
 
-    def norm_rope(*args, **kwargs):
-        kwargs["kv_c_out"].copy_(kv_c + 7)
-        kwargs["k_pe_out"].copy_(k_pe + 11)
-        return q_c + 3
+    from vllm import SamplingParams
 
-    def prepare_query(*args, **kwargs):
-        assert not kwargs["quantize_mqa"]
-        return None, None, args[1] + 13
+    config = {
+        "architectures": ["DeepseekV32ForCausalLM"],
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 0,
+        "eos_token_id": 1,
+        "ep_size": 1,
+        "first_k_dense_replace": 1,
+        "hidden_act": "silu",
+        "hidden_size": 2048,
+        "index_head_dim": 128,
+        "index_n_heads": 64,
+        "index_topk": 2048,
+        "initializer_range": 0.02,
+        "intermediate_size": 4096,
+        "kv_lora_rank": 512,
+        "max_position_embeddings": 8192,
+        "model_type": "deepseek_v32",
+        "moe_intermediate_size": 512,
+        "moe_layer_freq": 1,
+        "n_group": 1,
+        "n_routed_experts": 8,
+        "n_shared_experts": 1,
+        "norm_topk_prob": True,
+        "num_attention_heads": 32,
+        "num_experts_per_tok": 2,
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 32,
+        "num_nextn_predict_layers": 0,
+        "q_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "rms_norm_eps": 1e-06,
+        "rope_scaling": {
+            "beta_fast": 32,
+            "beta_slow": 1,
+            "factor": 40,
+            "mscale": 1.0,
+            "mscale_all_dim": 1.0,
+            "original_max_position_embeddings": 4096,
+            "type": "yarn",
+        },
+        "rope_theta": 10000,
+        "routed_scaling_factor": 2.5,
+        "scoring_func": "sigmoid",
+        "tie_word_embeddings": False,
+        "topk_group": 1,
+        "topk_method": "noaux_tc",
+        "torch_dtype": "bfloat16",
+        "transformers_version": "4.44.2",
+        "use_cache": True,
+        "v_head_dim": 128,
+        "vocab_size": 4096,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    prompts = [
+        {"prompt_token_ids": [2 + (i * 17 + j * 13) % 4000 for i in range(n)]}
+        for j, n in enumerate([64, 128, 2048, 2049])
+    ]
+    sampling = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True, logprobs=5)
+    results = []
+    for force_mqa in [True, False]:
+        with vllm_runner(
+            str(tmp_path),
+            load_format="dummy",
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            kv_cache_dtype=kv_cache_dtype,
+            seed=42,
+            max_model_len=4096,
+            max_num_seqs=4,
+            max_num_batched_tokens=256,
+            block_size=64,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=False,
+            enforce_eager=True,
+            gpu_memory_utilization=0.25,
+            attention_config={
+                "backend": "ROCM_AITER_MLA_SPARSE",
+                "sparse_mla_force_mqa": force_mqa,
+            },
+        ) as runner:
+            outputs = runner.llm.generate(prompts, sampling, use_tqdm=False)
+            results.append([request.outputs[0] for request in outputs])
 
-    fused_mqa = MagicMock(side_effect=AssertionError("Dense prefill used sparse MQA"))
-    forward_impl = MagicMock(side_effect=lambda *args: args[-1].fill_(1))
-    layer = SimpleNamespace(
-        layer_name="layer",
-        indexer=None,
-        kv_cache=torch.zeros(1, 4),
-        kv_cache_dtype="fp8" if fp8_kv else "auto",
-        _k_scale=torch.tensor(1.0),
-        _q_scale=torch.tensor(1.0),
-        q_a_layernorm=SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-6),
-        kv_a_layernorm=SimpleNamespace(weight=torch.ones(4), variance_epsilon=1e-6),
-        rotary_emb=SimpleNamespace(cos_sin_cache=torch.zeros(1)),
-        topk_indices_buffer=torch.zeros(num_tokens, 4, dtype=torch.int32),
-        _index_rope_interleave=False,
-        _fp8_kv=fp8_kv,
-        _use_sparse_mha=lambda _: True,
-        num_local_heads=2,
-        qk_head_dim=3,
-        qk_nope_head_dim=2,
-        qk_rope_head_dim=1,
-        q_b_proj=MagicMock(return_value=(q.flatten(1), None)),
-        _compute_ql_nope=fused_mqa,
-        impl=SimpleNamespace(forward_mqa=fused_mqa),
-        forward_impl=forward_impl,
-    )
-    monkeypatch.setattr(
-        model_mod,
-        "get_forward_context",
-        lambda: SimpleNamespace(
-            attn_metadata={"layer": metadata}, slot_mapping={"layer": None}
-        ),
-    )
-    monkeypatch.setattr(model_mod, "fused_norm_rope", norm_rope)
-    monkeypatch.setattr(model_mod, "fused_q", prepare_query)
-
-    model_mod.DeepseekV32MLAAttention._fused_attention(
-        layer, torch.arange(num_tokens), q_c, kv_c, k_pe, None, None, output
-    )
-
-    fused_mqa.assert_not_called()
-    forward_impl.assert_called_once()
-    args = forward_impl.call_args.args
-    torch.testing.assert_close(args[0], torch.cat((q[..., :2], q[..., 2:] + 13), -1))
-    torch.testing.assert_close(args[1], kv_c + 7)
-    torch.testing.assert_close(args[2], (k_pe + 11).unsqueeze(1))
-    assert args[3] is layer.kv_cache
-    assert args[4] is metadata
-    assert args[5] is output
-    torch.testing.assert_close(output, torch.ones_like(output))
+    for reference, actual in zip(*results):
+        assert len(actual.token_ids) == 16
+        assert actual.token_ids == reference.token_ids
+        assert actual.logprobs is not None and reference.logprobs is not None
+        for token, expected, observed in zip(
+            actual.token_ids, reference.logprobs, actual.logprobs
+        ):
+            torch.testing.assert_close(
+                torch.tensor(observed[token].logprob),
+                torch.tensor(expected[token].logprob),
+                rtol=0.01,
+                atol=0.01,
+            )
