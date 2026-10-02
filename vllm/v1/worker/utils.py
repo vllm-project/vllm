@@ -26,7 +26,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     MultipleOf,
 )
-from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy, get_replayssm_ring_layout
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -465,8 +465,13 @@ def allocate_replayssm_caches(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
 ) -> dict[str, tuple[torch.Tensor, ...]]:
-    """Allocate FlashInfer ReplaySSM rings outside canonical Mamba pages."""
+    """Allocate one block-major ReplaySSM ring pool overlaid across Mamba groups."""
     caches: dict[str, tuple[torch.Tensor, ...]] = {}
+    ring_bytes, offsets, _ = get_replayssm_ring_layout(kv_cache_config.kv_cache_groups)
+    if not offsets:
+        return caches
+    num_blocks = kv_cache_config.num_blocks
+    raw = torch.zeros(num_blocks * ring_bytes, dtype=torch.uint8, device=device)
     for group in kv_cache_config.kv_cache_groups:
         group_spec = group.kv_cache_spec
         layer_specs: Iterable[tuple[str, KVCacheSpec]]
@@ -474,21 +479,27 @@ def allocate_replayssm_caches(
             layer_specs = group_spec.kv_cache_specs.items()
         else:
             layer_specs = ((name, group_spec) for name in group.layer_names)
-
         for layer_name, spec in layer_specs:
-            if not isinstance(spec, MambaSpec) or not spec.replayssm_shapes:
+            if layer_name not in offsets:
                 continue
+            assert isinstance(spec, MambaSpec)
             assert layer_name not in caches
-            caches[layer_name] = tuple(
-                torch.zeros(
-                    (kv_cache_config.num_blocks, *shape),
-                    dtype=dtype,
-                    device=device,
+            states = []
+            for shape, dtype, offset in zip(
+                spec.replayssm_shapes,
+                spec.replayssm_dtypes,
+                offsets[layer_name],
+                strict=True,
+            ):
+                state_bytes = math.prod(shape) * dtype.itemsize
+                state = torch.as_strided(
+                    raw,
+                    size=(num_blocks, state_bytes),
+                    stride=(ring_bytes, 1),
+                    storage_offset=offset,
                 )
-                for shape, dtype in zip(
-                    spec.replayssm_shapes, spec.replayssm_dtypes, strict=True
-                )
-            )
+                states.append(state.view(dtype).view(num_blocks, *shape))
+            caches[layer_name] = tuple(states)
     return caches
 
 

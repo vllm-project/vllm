@@ -76,7 +76,7 @@ def _temporary_replayssm_autotune_state(
 ) -> Iterator[None]:
     from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 
-    reset_tensors: dict[int, torch.Tensor] = {}
+    reset_tensors: list[torch.Tensor] = []
     reset_trackers: dict[int, torch.Tensor] = {}
     for module in runner.get_model().modules():
         if not isinstance(module, MambaMixer2) or not module.use_replayssm:
@@ -87,7 +87,9 @@ def _temporary_replayssm_autotune_state(
         tensors = (*module.kv_cache, *module.replayssm_cache)
         for tensor in tensors:
             if tensor.numel():
-                reset_tensors.setdefault(tensor.data_ptr(), tensor)
+                # Overlaid groups may start at the same address with different
+                # widths. Preserve each bounded view; clearing twice is harmless.
+                reset_tensors.append(tensor)
         for tensor in (ring_start, prev_num_accepted):
             if tensor.numel():
                 reset_trackers.setdefault(tensor.data_ptr(), tensor)
@@ -115,7 +117,7 @@ def _temporary_replayssm_autotune_state(
             for block_table, block_ids in zip(block_tables, saved_block_ids):
                 block_table.block_table.np[:max_num_reqs, 0] = block_ids
             runner.input_batch.block_table.commit_block_table(max_num_reqs)
-        for tensor in reset_tensors.values():
+        for tensor in reset_tensors:
             tensor[1 : max_num_reqs + 1].zero_()
         for tensor in reset_trackers.values():
             tensor.zero_()

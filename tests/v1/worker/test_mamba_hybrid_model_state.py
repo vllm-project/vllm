@@ -193,8 +193,10 @@ def test_replayssm_prefill_staging_retains_inflight_masks(monkeypatch) -> None:
     second = torch.empty_like(first)
     blocker = torch.cuda.Event()
     with torch.cuda.stream(stream):
-        # Warm the sleep kernel before queuing the deliberate GPU backlog.
+        # Warm the sleep kernel and prepare allocations on this stream before
+        # queuing the deliberate GPU backlog.
         torch.cuda._sleep(1)
+        state.prepare_attn(input_batch=input_batch, **kwargs)
         stream.synchronize()
         torch.cuda._sleep(1_000_000_000)
         blocker.record(stream)

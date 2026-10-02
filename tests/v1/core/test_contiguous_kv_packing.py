@@ -25,6 +25,8 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
+    get_max_concurrency_for_kv_cache_config,
+    get_replayssm_ring_layout,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.hisparse.layout import _build_hisparse_kv_cache_tensors
@@ -41,7 +43,11 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
-from vllm.v1.worker.utils import allocate_kv_cache, allocate_replayssm_caches
+from vllm.v1.worker.utils import (
+    allocate_kv_cache,
+    allocate_replayssm_caches,
+    copy_kv_cache_blocks_inplace,
+)
 
 MEMORY = 8 * 1024 * 1024
 
@@ -153,7 +159,7 @@ def test_replayssm_rings_do_not_expand_canonical_mamba_page(
     assert full_spec.page_size_bytes == mamba_spec.page_size_bytes == 128
     assert mamba_spec.replayssm_size_bytes == 16
     canonical_bytes = 128 * layers_per_group
-    ring_bytes = 16 * num_groups * layers_per_group
+    ring_bytes = 16 * layers_per_group
     # Trackers are allocated once per group, rather than once per layer.
     tracker_bytes = 8 * num_groups
     total_bytes = canonical_bytes + ring_bytes + tracker_bytes
@@ -181,14 +187,13 @@ def test_replayssm_rings_do_not_expand_canonical_mamba_page(
         != replayssm_caches[layer_name][0].untyped_storage().data_ptr()
     )
     assert caches[layer_name].untyped_storage().nbytes() == 4 * canonical_bytes
-    assert (
-        sum(
-            state.numel() * state.element_size()
-            for states in replayssm_caches.values()
-            for state in states
-        )
-        == 4 * ring_bytes
-    )
+    ring_storages = {
+        state.untyped_storage().data_ptr(): state.untyped_storage().nbytes()
+        for states in replayssm_caches.values()
+        for state in states
+    }
+    assert len(ring_storages) == 1
+    assert sum(ring_storages.values()) == 4 * ring_bytes
     assert [tuple(state.shape) for state in replayssm_caches[layer_name]] == [
         (4, 2),
         (4, 1),
@@ -197,6 +202,154 @@ def test_replayssm_rings_do_not_expand_canonical_mamba_page(
     replayssm_caches[layer_name][0].fill_(7)
     assert torch.count_nonzero(caches[layer_name]) == 0
     assert torch.count_nonzero(replayssm_caches[layer_name][1]) == 0
+
+
+def test_replayssm_ring_overlay_alignment_and_block_copy(monkeypatch):
+    first = MambaSpec(
+        block_size=2,
+        shapes=((8,), (8,)),
+        dtypes=(torch.float32,) * 2,
+        replayssm_shapes=((3,), (1,), (1,)),
+        replayssm_dtypes=(torch.bfloat16, torch.float32, torch.bfloat16),
+    )
+    second = replace(
+        first,
+        replayssm_shapes=((1,), (1,), (1,)),
+        replayssm_dtypes=(torch.bfloat16, torch.float64, torch.bfloat16),
+    )
+    groups = [KVCacheGroupSpec(["a0", "a1"], first), KVCacheGroupSpec(["b0"], second)]
+    stride, offsets, trackers = get_replayssm_ring_layout(groups)
+    # Odd BF16 content requires padding before FP32/FP64; final stride must
+    # preserve alignment for every block, not only the first one.
+    assert offsets == {"a0": (0, 8, 12), "a1": (14, 20, 24), "b0": (0, 8, 16)}
+    assert stride == 32 and trackers == 16
+    total_stride = 2 * first.page_size_bytes + stride + trackers
+    config = get_kv_cache_config_from_groups(
+        _mock_vllm_config("LBNHC"), groups, 4 * total_stride
+    )
+    caches = allocate_replayssm_caches(config, torch.device("cpu"))
+    assert config.num_blocks == 4
+    storage = caches["a0"][0].untyped_storage()
+    assert storage.nbytes() == 4 * stride
+    for name, states in caches.items():
+        for state, offset in zip(states, offsets[name], strict=True):
+            assert state.untyped_storage().data_ptr() == storage.data_ptr()
+            assert state.data_ptr() - storage.data_ptr() == offset
+            assert state.stride(0) * state.element_size() == stride
+            assert state.data_ptr() % state.element_size() == 0
+    # Group A owns block1, group B owns block2. Every layer/state within A is
+    # disjoint. Group aliasing must never turn different block IDs into aliases.
+    for index, state in enumerate([*caches["a0"], *caches["a1"]], start=1):
+        state[1].fill_(index)
+    for index, state in enumerate([*caches["a0"], *caches["a1"]], start=1):
+        assert torch.all(state[1] == index)
+    for state in caches["b0"]:
+        state[2].fill_(9)
+    for index, state in enumerate([*caches["a0"], *caches["a1"]], start=1):
+        assert torch.all(state[1] == index)
+    raw = torch.empty(0, dtype=torch.uint8).set_(storage).view(4, stride)
+    assert torch.count_nonzero(raw[0]) == 0  # null slot isolated from real blocks
+    before = raw.clone()
+    monkeypatch.setattr(
+        "vllm.v1.worker.utils.async_tensor_h2d",
+        lambda data, device: torch.as_tensor(data, device=device),
+    )
+    copy_kv_cache_blocks_inplace(
+        [state for states in caches.values() for state in states], 4, [(1, 3)]
+    )
+    assert torch.equal(raw[3], before[1])
+    assert torch.equal(raw[:3], before[:3])
+    # A released block can change group owner without touching any live block.
+    for state in caches["b0"]:
+        state[3].zero_()
+    assert torch.equal(raw[:3], before[:3])
+
+
+def test_replayssm_ring_overlay_super_mtp_storage_and_ownership():
+    # Real Super TP4 geometry: forty Mamba layers in five groups of eight;
+    # nine attention layers include the MTP layer. Each ring has twenty slots.
+    mamba = MambaSpec(
+        block_size=2176,
+        shapes=((2560, 6), (32, 64, 128)),
+        dtypes=(torch.bfloat16, torch.float16),
+        page_size_padded=557056,
+        replayssm_shapes=((32, 20, 64), (32, 20), (2, 20, 128)),
+        replayssm_dtypes=(torch.bfloat16, torch.float32, torch.bfloat16),
+        mamba_cache_mode="align",
+    )
+    attention = FullAttentionSpec(
+        block_size=2176, num_kv_heads=1, head_size=128, dtype=torch.uint8
+    )
+    groups = [KVCacheGroupSpec([f"attention{i}" for i in range(9)], attention)]
+    groups += [
+        KVCacheGroupSpec([f"mamba{g}_{i}" for i in range(8)], mamba) for g in range(5)
+    ]
+    assert mamba.replayssm_size_bytes == 94720
+    canonical = 9 * 557056
+    rings, _, trackers = get_replayssm_ring_layout(groups)
+    assert rings == 8 * 94720 and trackers == 5 * 8
+    assert _get_kv_cache_bytes_per_block(groups) == canonical + rings + trackers
+    no_replay = [
+        groups[0],
+        *[
+            KVCacheGroupSpec(
+                g.layer_names,
+                replace(
+                    mamba,
+                    replayssm_shapes=(),
+                    replayssm_dtypes=(),
+                    num_speculative_blocks=3,
+                ),
+            )
+            for g in groups[1:]
+        ],
+    ]
+    assert _get_kv_cache_bytes_per_block(no_replay) == canonical
+    vllm_config = _mock_vllm_config("LBNHC")
+    vllm_config.model_config.max_model_len = 114688
+    vllm_config.parallel_config.decode_context_parallel_size = 1
+    vllm_config.cache_config.mamba_cache_mode = "align"
+    base_config = get_kv_cache_config_from_groups(
+        vllm_config, no_replay, 48072 * canonical
+    )
+    config = get_kv_cache_config_from_groups(vllm_config, groups, 48072 * canonical)
+    assert base_config.num_blocks == 48072 and config.num_blocks == 41759
+    baseline_capacity = get_max_concurrency_for_kv_cache_config(
+        vllm_config, base_config
+    )
+    replay_capacity = get_max_concurrency_for_kv_cache_config(vllm_config, config)
+    assert baseline_capacity == base_config.num_blocks / 78
+    assert replay_capacity == config.num_blocks / 63
+    assert replay_capacity > baseline_capacity
+    small = get_kv_cache_config_from_groups(
+        _mock_vllm_config("LBNHC"), groups, 3 * (canonical + rings + trackers)
+    )
+    caches = allocate_replayssm_caches(small, torch.device("cpu"))
+    storages = {
+        state.untyped_storage().data_ptr(): state.untyped_storage().nbytes()
+        for states in caches.values()
+        for state in states
+    }
+    assert len(storages) == 1 and sum(storages.values()) == 3 * rings
+    assert allocate_replayssm_caches(base_config, torch.device("cpu")) == {}
+    # Scheduler managers supplying the ring block IDs share one pool, whose
+    # null block0 is permanently reserved; disjoint allocations prove ownership.
+    manager = KVCacheManager(
+        generate_scheduler_kv_cache_config([small]),
+        max_model_len=114688,
+        enable_caching=True,
+        hash_block_size=2176,
+        scheduler_block_size=2176,
+    )
+    assert all(
+        m.block_pool is manager.block_pool
+        for m in manager.coordinator.single_type_managers
+    )
+    ids = [
+        m.block_pool.get_new_blocks(1)[0].block_id
+        for m in manager.coordinator.single_type_managers[1:3]
+    ]
+    assert len(set(ids)) == 2 and 0 not in ids
 
 
 MAIN_KV_PAGE_BYTES = 2_048

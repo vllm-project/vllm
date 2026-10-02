@@ -1658,23 +1658,50 @@ def _get_kv_cache_main_bytes_per_block(
     return round_up(bytes_per_block, math.lcm(*alignments))
 
 
-def _get_replayssm_bytes_per_block(
+def get_replayssm_ring_layout(
     kv_cache_groups: list[KVCacheGroupSpec],
-) -> int:
-    # ReplaySSM rings and trackers are standalone allocations and cannot
-    # overlay canonical cache storage. Rings are per layer; the two int32
-    # trackers are shared by all FlashInfer ReplaySSM layers in a cache group.
-    total = 0
+) -> tuple[int, dict[str, tuple[int, ...]], int]:
+    """Return the block-major ring stride, layer offsets, and tracker bytes.
+
+    Mamba managers use the coordinator's shared block pool: a non-null physical
+    block belongs to only one cache group at a time. Rings can therefore overlay
+    across groups, while layers and states within a group must be disjoint.
+    Trackers retain separate group storage and are accounted for independently.
+    """
+    ring_bytes = 0
+    alignment = 1
+    tracker_bytes = 0
+    offsets: dict[str, tuple[int, ...]] = {}
     for group in kv_cache_groups:
+        group_bytes = 0
         has_replayssm = False
         for layer_name in group.layer_names:
             spec = _get_per_layer_spec(group, layer_name)
-            if isinstance(spec, MambaSpec) and spec.replayssm_shapes:
-                total += spec.replayssm_size_bytes
-                has_replayssm = True
+            if not isinstance(spec, MambaSpec) or not spec.replayssm_shapes:
+                continue
+            assert layer_name not in offsets
+            has_replayssm = True
+            state_offsets = []
+            for shape, dtype in zip(
+                spec.replayssm_shapes, spec.replayssm_dtypes, strict=True
+            ):
+                element_size = get_dtype_size(dtype)
+                alignment = math.lcm(alignment, element_size)
+                group_bytes = round_up(group_bytes, element_size)
+                state_offsets.append(group_bytes)
+                group_bytes += math.prod(shape) * element_size
+            offsets[layer_name] = tuple(state_offsets)
+        ring_bytes = max(ring_bytes, group_bytes)
         if has_replayssm:
-            total += 2 * get_dtype_size(torch.int32)
-    return total
+            tracker_bytes += 2 * get_dtype_size(torch.int32)
+    return round_up(ring_bytes, alignment), offsets, tracker_bytes
+
+
+def _get_replayssm_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    ring_bytes, _, tracker_bytes = get_replayssm_ring_layout(kv_cache_groups)
+    return ring_bytes + tracker_bytes
 
 
 def validate_kv_cache_layout(

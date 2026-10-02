@@ -118,6 +118,47 @@ def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
     assert result is None
 
 
+@pytest.mark.parametrize("fail_warmup", [False, True])
+def test_replayssm_autotune_clears_overlaid_views_with_different_widths(fail_warmup):
+    raw = torch.full((5, 16), 3.0)
+    mixers = []
+    for width in (3, 11):
+        mixer = MambaMixer2.__new__(MambaMixer2)
+        torch.nn.Module.__init__(mixer)
+        mixer.use_replayssm = True
+        mixer.replayssm_buffer_len = 16
+        mixer.kv_cache = (torch.empty(0),)
+        mixer.replayssm_cache = (raw[:, :width],)
+        mixer._replayssm_ring_start = torch.full((5,), 3, dtype=torch.int32)
+        mixer._replayssm_prev_num_accepted = torch.full((5,), 3, dtype=torch.int32)
+        mixers.append(mixer)
+    assert (
+        mixers[0].replayssm_cache[0].data_ptr()
+        == mixers[1].replayssm_cache[0].data_ptr()
+    )
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(use_v2_model_runner=True),
+        block_tables=SimpleNamespace(get_dummy_block_tables=Mock()),
+        get_model=lambda: SimpleNamespace(modules=lambda: mixers),
+    )
+    error = (
+        pytest.raises(RuntimeError, match="warmup failed")
+        if fail_warmup
+        else nullcontext()
+    )
+    with error, warmup._temporary_replayssm_autotune_state(runner, 2):
+        mixers[1].replayssm_cache[0][1:3].fill_(9)
+        if fail_warmup:
+            raise RuntimeError("warmup failed")
+    assert torch.count_nonzero(raw[1:3, :11]) == 0
+    assert torch.all(raw[0] == 3)  # null slot remains outside bounded cleanup
+    assert torch.all(raw[3:] == 3)  # large-cache tail is untouched
+    assert torch.all(raw[1:3, 11:] == 3)
+    for mixer in mixers:
+        assert torch.count_nonzero(mixer._replayssm_ring_start) == 0
+        assert torch.count_nonzero(mixer._replayssm_prev_num_accepted) == 0
+
+
 @pytest.mark.parametrize("use_v2", [False, True])
 @pytest.mark.parametrize("fail_warmup", [False, True])
 def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, fail_warmup):

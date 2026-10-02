@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.worker.utils import allocate_replayssm_caches
 
 try:
     import flashinfer.mamba  # noqa: F401
@@ -79,9 +80,40 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_
     # Slot 1 is an immutable cached prefix, copied to private live slot 3.
     state[3].copy_(state[1])
     original = state.clone()
-    x = torch.randn(slots, heads, ring_len, dim, device="cuda", dtype=torch.bfloat16)
-    dt = torch.full((slots, heads, ring_len), 0.01, device="cuda")
-    B = torch.randn(slots, 1, ring_len, dstate, device="cuda", dtype=torch.bfloat16)
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((heads, dim, dstate),),
+        dtypes=(torch.float32,),
+        replayssm_shapes=(
+            (heads, ring_len, dim),
+            (heads, ring_len),
+            (1, ring_len, dstate),
+        ),
+        replayssm_dtypes=(torch.bfloat16, torch.float32, torch.bfloat16),
+    )
+    config = KVCacheConfig(
+        num_blocks=slots,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["mixer", "neighbor"], spec),
+            KVCacheGroupSpec(["other_group"], spec),
+        ],
+    )
+    rings = allocate_replayssm_caches(config, torch.device("cuda"))
+    x, dt, B = rings["mixer"]
+    x.normal_()
+    dt.fill_(0.01)
+    B.normal_()
+    assert not x.is_contiguous() and not dt.is_contiguous() and not B.is_contiguous()
+    assert x.data_ptr() == rings["other_group"][0].data_ptr()
+    # The other layer is disjoint within this group. Group B owns physical4,
+    # while materialization only uses group A's live3 and destination2.
+    for tensor in rings["neighbor"]:
+        tensor.fill_(7)
+    neighbor_before = [tensor.clone() for tensor in rings["neighbor"]]
+    for tensor in rings["other_group"]:
+        tensor[4].fill_(9)
+    other_owned_before = [tensor[4].clone() for tensor in rings["other_group"]]
     A = -torch.ones(heads, device="cuda")
     mixer = SimpleNamespace(
         kv_cache=(torch.empty(0, device="cuda"), state),
@@ -140,6 +172,10 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_
         torch.testing.assert_close(state[slot], original[slot], atol=0, rtol=0)
     assert mixer._replayssm_prev_num_accepted[3].item() == 5
     assert mixer._replayssm_prev_num_accepted[2].item() == 0
+    for tensor, before in zip(rings["neighbor"], neighbor_before, strict=True):
+        torch.testing.assert_close(tensor, before, atol=0, rtol=0)
+    for tensor, before in zip(rings["other_group"], other_owned_before, strict=True):
+        torch.testing.assert_close(tensor[4], before, atol=0, rtol=0)
 
 
 def test_default_backend_is_triton():
