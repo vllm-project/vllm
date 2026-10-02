@@ -412,6 +412,7 @@ fn to_template_message<'a>(
             tools: None,
             reasoning: None,
             reasoning_content: None,
+            thoughts: None,
             tool_calls: None,
             tool_call_id: None,
         },
