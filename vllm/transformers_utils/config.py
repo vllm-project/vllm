@@ -5,7 +5,7 @@ import math
 import os
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from functools import cache, partial, wraps
 from importlib.metadata import version
 from pathlib import Path
@@ -54,6 +54,10 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+_ST_TRANSFORMER_MODULE_TYPES = {
+    "sentence_transformers.models.Transformer",
+    "sentence_transformers.base.modules.transformer.Transformer",
+}
 _ST_POOLING_MODULE_TYPES = {
     "sentence_transformers.models.Pooling",
     "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
@@ -67,6 +71,11 @@ _DENSE_MODULE_TYPES = {
     "sentence_transformers.models.Dense",
     "sentence_transformers.base.modules.dense.Dense",
     "pylate.models.Dense.Dense",
+}
+
+_ST_LOGIT_SCORE_MODULE_TYPES = {
+    "sentence_transformers.cross_encoder.modules.LogitScore",
+    "sentence_transformers.cross_encoder.modules.logit_score.LogitScore",
 }
 
 if Version(version("transformers")) < Version("5.0.0"):
@@ -973,6 +982,29 @@ def get_config(
     return config
 
 
+@dataclass(frozen=True)
+class SentenceTransformersDenseConfig:
+    in_features: int
+    out_features: int
+    bias: bool
+    activation_function: str
+    folder: str = field(compare=False)
+
+
+@dataclass(frozen=True)
+class SentenceTransformersCrossEncoderConfig:
+    """Effective scoring semantics, independent of checkpoint artifact paths."""
+
+    activation_fn: str
+    seq_pooling_type: Literal["CLS", "MEAN", "LAST"]
+    uses_message_format: bool
+    dense_config: SentenceTransformersDenseConfig | None = None
+    logit_score_token_ids: tuple[int, ...] | None = None
+    prompts: dict[str, str] = field(default_factory=dict)
+    default_prompt_name: str | None = None
+    chat_template_kwargs: dict[str, bool] = field(default_factory=dict)
+
+
 @cache
 def get_pooling_config(
     model: str,
@@ -1289,12 +1321,14 @@ def try_get_tokenizer_config(
     pretrained_model_name_or_path: str | os.PathLike,
     trust_remote_code: bool,
     revision: str | None = None,
+    hf_token: bool | str | None = None,
 ) -> dict[str, Any] | None:
     try:
         return get_tokenizer_config(
             pretrained_model_name_or_path,
             trust_remote_code=trust_remote_code,
             revision=revision,
+            token=hf_token,
         )
     except Exception:
         return None
@@ -1304,9 +1338,10 @@ def try_get_tokenizer_config(
 def try_get_dense_modules(
     model: str | Path,
     revision: str | None = None,
+    hf_token: bool | str | None = None,
 ) -> list[dict[str, Any]] | None:
     try:
-        modules = get_hf_file_to_dict("modules.json", model, revision)
+        modules = get_hf_file_to_dict("modules.json", model, revision, token=hf_token)
         if not modules:
             return None
 
@@ -1322,7 +1357,9 @@ def try_get_dense_modules(
             folder = module.get("path", "")
 
             config_path = f"{folder}/config.json" if folder else "config.json"
-            layer_config = get_hf_file_to_dict(config_path, model, revision)
+            layer_config = get_hf_file_to_dict(
+                config_path, model, revision, token=hf_token
+            )
             if not layer_config:
                 continue
             layer_config["folder"] = folder
@@ -1330,6 +1367,309 @@ def try_get_dense_modules(
         return layer_configs
     except Exception:
         return None
+
+
+def get_sentence_transformers_cross_encoder_config(
+    model: str | Path,
+    revision: str | None = None,
+    hf_token: bool | str | None = None,
+) -> SentenceTransformersCrossEncoderConfig | None:
+    """Get metadata for the supported modular CrossEncoder layout.
+
+    Traditional sequence-classification checkpoints keep their existing path.
+    Recognized modular layouts fail closed on unsupported semantics.
+
+    Args:
+        model: Local checkpoint path or Hugging Face model ID.
+        revision: Model revision to inspect.
+        hf_token: Hugging Face token for authenticated checkpoint access.
+
+    Returns:
+        Metadata for Transformer-Pooling-Dense or Transformer-LogitScore,
+        or ``None`` for other checkpoint formats.
+
+    Raises:
+        ValueError: If a modular CrossEncoder uses unsupported semantics.
+
+    """
+    model_config = get_hf_file_to_dict(
+        "config_sentence_transformers.json", model, revision, token=hf_token
+    )
+    if model_config is None:
+        return None
+    if not isinstance(model_config, dict):
+        raise ValueError(
+            "config_sentence_transformers.json must contain a JSON object."
+        )
+    if model_config.get("model_type") != "CrossEncoder":
+        return None
+
+    def read_config(filename: str) -> dict[str, Any]:
+        config = get_hf_file_to_dict(filename, model, revision, token=hf_token)
+        if not isinstance(config, dict):
+            raise ValueError(f"Unable to load Sentence Transformers {filename}.")
+        return config
+
+    modules = get_hf_file_to_dict("modules.json", model, revision, token=hf_token)
+    if not isinstance(modules, list) or not modules:
+        return None
+    if not all(isinstance(module, dict) for module in modules):
+        raise ValueError("Sentence Transformers modules.json must contain objects.")
+
+    if len(modules) == 1 and modules[0].get("type") in _ST_TRANSFORMER_MODULE_TYPES:
+        return None
+    is_logit_score = (
+        len(modules) == 2
+        and modules[0].get("type") in _ST_TRANSFORMER_MODULE_TYPES
+        and modules[1].get("type") in _ST_LOGIT_SCORE_MODULE_TYPES
+    )
+    is_supported_topology = is_logit_score or (
+        len(modules) == 3
+        and modules[0].get("type") in _ST_TRANSFORMER_MODULE_TYPES
+        and modules[1].get("type") in _ST_POOLING_MODULE_TYPES
+        and modules[2].get("type") in _DENSE_MODULE_TYPES
+    )
+    if not is_supported_topology:
+        raise ValueError(
+            "Unsupported modular CrossEncoder topology. vLLM supports "
+            "Transformer -> Pooling -> Dense or Transformer -> LogitScore."
+        )
+
+    if any(module.get("kwargs") for module in modules):
+        raise ValueError(
+            "vLLM does not support per-module kwargs in Sentence Transformers "
+            "CrossEncoder checkpoints."
+        )
+
+    if not is_logit_score and (
+        model_config.get("prompts") or model_config.get("default_prompt_name")
+    ):
+        raise ValueError(
+            "vLLM does not support saved prompts in Sentence Transformers "
+            "CrossEncoder checkpoints."
+        )
+    activation_fn = model_config.get("activation_fn")
+    if not isinstance(activation_fn, str) or not activation_fn:
+        raise ValueError(
+            "The Sentence Transformers CrossEncoder must define activation_fn."
+        )
+
+    transformer_module = modules[0]
+    if transformer_module.get("path", ""):
+        raise ValueError(
+            "The Transformer module must be stored at the checkpoint root."
+        )
+    transformer_config = read_config("sentence_bert_config.json")
+    tasks = (
+        {"text-generation", "any-to-any"} if is_logit_score else {"feature-extraction"}
+    )
+    if transformer_config.get("transformer_task", "feature-extraction") not in tasks:
+        raise ValueError(
+            f"The Sentence Transformers Transformer must use one of {sorted(tasks)}."
+        )
+    output_name = "causal_logits" if is_logit_score else "token_embeddings"
+    if transformer_config.get("module_output_name", output_name) != output_name:
+        raise ValueError(
+            f"The Sentence Transformers Transformer must output {output_name}."
+        )
+    processing_kwargs = transformer_config.get("processing_kwargs") or {}
+    chat_template_kwargs = {}
+    if is_logit_score:
+        if not isinstance(processing_kwargs, dict) or set(processing_kwargs) - {
+            "chat_template"
+        }:
+            raise ValueError(
+                "LogitScore supports only chat_template processing_kwargs."
+            )
+        chat_template_kwargs = processing_kwargs.get("chat_template", {})
+        if (
+            not isinstance(chat_template_kwargs, dict)
+            or set(chat_template_kwargs) - {"add_generation_prompt", "enable_thinking"}
+            or any(type(value) is not bool for value in chat_template_kwargs.values())
+        ):
+            raise ValueError(
+                "LogitScore supports only boolean add_generation_prompt and "
+                "enable_thinking chat template settings."
+            )
+    elif processing_kwargs:
+        raise ValueError(
+            "vLLM does not support processing_kwargs in Sentence Transformers "
+            "CrossEncoder checkpoints."
+        )
+
+    uses_message_format = False
+    method_output_name = "logits" if is_logit_score else "last_hidden_state"
+    modality_config = transformer_config.get("modality_config")
+    if modality_config is not None:
+        if not isinstance(modality_config, dict):
+            raise ValueError("modality_config must contain a JSON object.")
+        for modality, modality_params in modality_config.items():
+            if not isinstance(modality_params, dict) or (
+                modality_params.get("method") != "forward"
+                or modality_params.get("method_output_name") != method_output_name
+            ):
+                raise ValueError(
+                    f"Each modality must use forward and output {method_output_name}; "
+                    f"got unsupported settings for {modality!r}."
+                )
+        if message_config := modality_config.get("message"):
+            if message_config.get("format") != "structured":
+                raise ValueError(
+                    "vLLM supports only structured Sentence Transformers "
+                    "message inputs."
+                )
+            uses_message_format = True
+
+    prompts: dict[str, str] = {}
+    default_prompt_name = None
+    if is_logit_score:
+        prompts = model_config.get("prompts") or {}
+        default_prompt_name = model_config.get("default_prompt_name")
+        if not isinstance(prompts, dict) or not all(
+            isinstance(name, str) and isinstance(prompt, str)
+            for name, prompt in prompts.items()
+        ):
+            raise ValueError("Saved CrossEncoder prompts must map names to strings.")
+        if default_prompt_name is not None and (
+            not isinstance(default_prompt_name, str)
+            or default_prompt_name not in prompts
+        ):
+            raise ValueError(
+                "default_prompt_name must name a saved CrossEncoder prompt."
+            )
+        if not uses_message_format and (prompts or chat_template_kwargs):
+            raise ValueError("LogitScore prompts require structured message inputs.")
+
+    if uses_message_format:
+        has_template_file = file_or_path_exists(
+            model=model,
+            config_name="chat_template.jinja",
+            revision=revision,
+            token=hf_token,
+        )
+        tokenizer_config = get_hf_file_to_dict(
+            "tokenizer_config.json", model, revision, token=hf_token
+        )
+        has_inline_template = isinstance(tokenizer_config, dict) and bool(
+            tokenizer_config.get("chat_template")
+        )
+        if not has_template_file and not has_inline_template:
+            raise ValueError(
+                "Structured Sentence Transformers CrossEncoder inputs require "
+                "a saved chat template."
+            )
+
+    if is_logit_score:
+        folder = modules[1].get("path", "")
+        if not folder:
+            raise ValueError("The LogitScore module must have its own config folder.")
+        logit_score_config = read_config(f"{folder}/config.json")
+        true_id = logit_score_config.get("true_token_id")
+        false_id = logit_score_config.get("false_token_id")
+        if (
+            type(true_id) is not int
+            or true_id < 0
+            or (false_id is not None and (type(false_id) is not int or false_id < 0))
+        ):
+            raise ValueError("LogitScore token IDs must be non-negative integers.")
+        if (
+            logit_score_config.get("module_input_name", "causal_logits")
+            != "causal_logits"
+        ):
+            raise ValueError("The LogitScore module must read causal_logits.")
+        return SentenceTransformersCrossEncoderConfig(
+            activation_fn=activation_fn,
+            seq_pooling_type="LAST",
+            uses_message_format=uses_message_format,
+            logit_score_token_ids=(true_id,)
+            if false_id is None
+            else (false_id, true_id),
+            prompts=prompts,
+            default_prompt_name=default_prompt_name,
+            chat_template_kwargs=chat_template_kwargs,
+        )
+
+    pooling_module = modules[1]
+    pooling_folder = pooling_module.get("path", "")
+    pooling_config_path = (
+        f"{pooling_folder}/config.json" if pooling_folder else "config.json"
+    )
+    pooling_config = read_config(pooling_config_path)
+
+    pooling_mode = pooling_config.get("pooling_mode")
+    if isinstance(pooling_mode, list):
+        if len(pooling_mode) != 1:
+            raise ValueError(
+                "The Sentence Transformers CrossEncoder must use exactly one "
+                "pooling mode."
+            )
+        pooling_mode = pooling_mode[0]
+    pooling_types: dict[str, Literal["CLS", "MEAN", "LAST"]] = {
+        "cls": "CLS",
+        "mean": "MEAN",
+        "lasttoken": "LAST",
+    }
+    if pooling_mode not in pooling_types:
+        raise ValueError(
+            "The Sentence Transformers CrossEncoder pooling mode must be "
+            "cls, mean, or lasttoken."
+        )
+    if pooling_mode == "cls":
+        tokenizer_pooling_config = get_hf_file_to_dict(
+            "tokenizer_config.json", model, revision, token=hf_token
+        )
+        if (
+            isinstance(tokenizer_pooling_config, dict)
+            and tokenizer_pooling_config.get("padding_side") == "left"
+        ):
+            raise ValueError(
+                "CLS pooling is not supported with left-padded Sentence "
+                "Transformers CrossEncoder inputs."
+            )
+    if pooling_config.get("include_prompt", True) is not True:
+        raise ValueError(
+            "The Sentence Transformers CrossEncoder must use include_prompt=true."
+        )
+
+    dense_module = modules[2]
+    dense_folder = dense_module.get("path", "")
+    dense_config_path = f"{dense_folder}/config.json" if dense_folder else "config.json"
+    dense_config = read_config(dense_config_path)
+
+    if dense_config.get("use_residual", False):
+        raise ValueError(
+            "vLLM does not support a residual Dense module in a Sentence "
+            "Transformers CrossEncoder."
+        )
+    module_input_name = dense_config.get("module_input_name", "sentence_embedding")
+    module_output_name = dense_config.get("module_output_name", module_input_name)
+    if module_input_name != "sentence_embedding" or module_output_name != "scores":
+        raise ValueError("The Dense module must map sentence_embedding to scores.")
+
+    in_features = dense_config.get("in_features")
+    if not isinstance(in_features, int) or in_features < 1:
+        raise ValueError("The Dense module must define a positive in_features.")
+    out_features = dense_config.get("out_features")
+    if not isinstance(out_features, int) or out_features < 1:
+        raise ValueError("The Dense module must define a positive out_features.")
+    dense_activation = dense_config.get("activation_function")
+    if not isinstance(dense_activation, str) or not dense_activation:
+        raise ValueError(
+            "The Sentence Transformers Dense module must define activation_function."
+        )
+
+    return SentenceTransformersCrossEncoderConfig(
+        activation_fn=activation_fn,
+        seq_pooling_type=pooling_types[pooling_mode],
+        dense_config=SentenceTransformersDenseConfig(
+            in_features=in_features,
+            out_features=out_features,
+            bias=dense_config.get("bias", True),
+            activation_function=dense_activation,
+            folder=dense_folder,
+        ),
+        uses_message_format=uses_message_format,
+    )
 
 
 def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:

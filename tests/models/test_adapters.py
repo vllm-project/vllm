@@ -2,18 +2,43 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for model adapter weight loading (adapters.py)."""
 
+import json
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 import torch
+from safetensors.torch import save_file
 from transformers import Gemma3Config, PreTrainedConfig, Qwen2Config
 
+from tests.transformers_utils.utils import (
+    update_json,
+    write_cross_encoder_metadata,
+    write_json,
+)
+from vllm.model_executor.models import adapters as adapters_module
 from vllm.model_executor.models.adapters import (
     _create_pooling_model_cls,
+    _load_dense_weights,
+    _load_st_projector,
     _resolve_num_labels,
+    as_seq_cls_model,
+    seq_cls_model_loader,
+)
+from vllm.model_executor.models.bert import BertEmbeddingModel
+from vllm.model_executor.models.interfaces import SupportsCrossEncoding
+from vllm.model_executor.models.interfaces_base import (
+    VllmModelForPooling,
+    get_score_type,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     StageMissingLayer,
     WeightsMapper,
+)
+from vllm.transformers_utils.config import (
+    SentenceTransformersCrossEncoderConfig,
+    get_sentence_transformers_cross_encoder_config,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -262,27 +287,410 @@ def test_resolve_num_labels_text_only_config():
     assert _resolve_num_labels(config, config.get_text_config()) == 7
 
 
-def test_resolve_num_labels_defaults_when_undeclared():
-    config = _composite_config()
-    assert (
-        _resolve_num_labels(config, config.get_text_config())
-        == PreTrainedConfig().num_labels
+@pytest.mark.parametrize(
+    "outer,inner,expected",
+    [
+        (None, None, PreTrainedConfig().num_labels),
+        (20, None, 20),
+        (None, 5, 5),
+        (20, 5, 20),
+    ],
+)
+def test_resolve_num_labels_composite_config(outer, inner, expected):
+    config = _composite_config(outer_labels=outer, inner_labels=inner)
+    assert _resolve_num_labels(config, config.get_text_config()) == expected
+
+
+def test_load_current_sentence_transformers_dense_module(tmp_path):
+    write_cross_encoder_metadata(tmp_path, hidden_size=4)
+    dense_path = tmp_path / "2_Dense"
+    update_json(
+        dense_path / "config.json",
+        bias=False,
+        activation_function="torch.nn.modules.linear.Identity",
+    )
+    score_weight = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+    save_file({"linear.weight": score_weight}, dense_path / "model.safetensors")
+
+    projector = _load_st_projector(
+        SimpleNamespace(
+            model=str(tmp_path),
+            revision=None,
+            hf_token=None,
+            head_dtype=torch.float32,
+            sentence_transformers_config=None,
+        )
+    )
+
+    assert isinstance(projector, torch.nn.Sequential)
+    assert isinstance(projector[0], torch.nn.Linear)
+    assert isinstance(projector[1], torch.nn.Identity)
+    torch.testing.assert_close(projector[0].weight, score_weight)
+    torch.testing.assert_close(
+        projector(torch.ones(2, 4)),
+        torch.full((2, 1), 10.0),
     )
 
 
-def test_resolve_num_labels_declared_on_outer_config():
-    """Multimodal checkpoints keep id2label/problem_type on the top-level config."""
-    config = _composite_config(outer_labels=20)
-    assert config.get_text_config().num_labels == PreTrainedConfig().num_labels
-    assert _resolve_num_labels(config, config.get_text_config()) == 20
+@pytest.mark.parametrize(
+    ("configured_bias", "saved_bias"),
+    [(True, False), (False, True)],
+)
+def test_dense_loader_rejects_bias_mismatch(
+    tmp_path,
+    configured_bias,
+    saved_bias,
+):
+    dense_path = tmp_path / "2_Dense"
+    dense_path.mkdir()
+    state_dict = {"linear.weight": torch.ones(1, 4)}
+    if saved_bias:
+        state_dict["linear.bias"] = torch.ones(1)
+    save_file(state_dict, dense_path / "model.safetensors")
+
+    loaded = _load_dense_weights(
+        torch.nn.Linear(4, 1, bias=configured_bias),
+        "2_Dense",
+        SimpleNamespace(model=str(tmp_path), revision=None, hf_token=None),
+    )
+
+    assert not loaded
 
 
-def test_resolve_num_labels_declared_on_text_config():
-    """Overrides written into text_config keep working."""
-    config = _composite_config(inner_labels=5)
-    assert _resolve_num_labels(config, config.get_text_config()) == 5
+class ExistingEmbeddingModel(torch.nn.Module, VllmModelForPooling):
+    is_pooling_model = True
+
+    def __init__(self, *, vllm_config, prefix="", **kwargs):
+        super().__init__()
+        self.backbone = torch.nn.Linear(4, 4, bias=False)
+        self.pooler = torch.nn.Linear(4, 2, bias=False)
+
+    def embed_input_ids(self, input_ids):
+        return input_ids
+
+    def forward(self, input_ids, positions):
+        return self.backbone(input_ids)
+
+    def load_weights(self, weights):
+        loaded = set()
+        for name, weight in weights:
+            if name == "backbone.weight":
+                with torch.no_grad():
+                    self.backbone.weight.copy_(weight)
+                loaded.add(name)
+        return loaded
 
 
-def test_resolve_num_labels_outer_wins_when_both_declared():
-    config = _composite_config(outer_labels=20, inner_labels=5)
-    assert _resolve_num_labels(config, config.get_text_config()) == 20
+class NativeCrossEncoder(ExistingEmbeddingModel, SupportsCrossEncoding):
+    pass
+
+
+class _CapturingBertBackbone(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(vocab_size=32)
+        self.input_ids = None
+
+    def forward(self, input_ids, **_kwargs):
+        self.input_ids = input_ids.clone()
+        return input_ids
+
+
+def test_sequence_classification_adapted_bert_preserves_token_type_ids():
+    model_cls = as_seq_cls_model(BertEmbeddingModel)
+    model = model_cls.__new__(model_cls)
+    torch.nn.Module.__init__(model)
+    backbone = _CapturingBertBackbone()
+    model.model = backbone
+
+    input_ids = torch.tensor([2, 5, 3, 6, 3], dtype=torch.int32)
+    positions = torch.arange(input_ids.shape[0], dtype=torch.int32)
+    token_type_ids = torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32)
+    expected = input_ids | (token_type_ids << 30)
+
+    actual = model(
+        input_ids.clone(),
+        positions,
+        token_type_ids=token_type_ids,
+    )
+
+    assert torch.equal(actual, expected)
+    assert torch.equal(backbone.input_ids, expected)
+
+
+def test_sequence_classification_preserves_native_cross_encoder():
+    assert as_seq_cls_model(NativeCrossEncoder) is NativeCrossEncoder
+
+
+@pytest.mark.parametrize(
+    "tp,pp,quantized,lora",
+    [
+        (2, 1, False, False),
+        (1, 2, False, False),
+        (1, 1, True, False),
+        (1, 1, False, True),
+    ],
+)
+def test_logit_score_rejects_unvalidated_loading_modes(tp, pp, quantized, lora):
+    """Reject modes for which deriving a static scoring row is not validated."""
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=Qwen2Config(),
+            model="unused",
+            revision=None,
+            hf_token=None,
+            sentence_transformers_config=SentenceTransformersCrossEncoderConfig(
+                activation_fn="torch.nn.Sigmoid",
+                seq_pooling_type="LAST",
+                uses_message_format=False,
+                logit_score_token_ids=(7,),
+            ),
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp, pipeline_parallel_size=pp
+        ),
+        quant_config=object() if quantized else None,
+        lora_config=object() if lora else None,
+    )
+    with pytest.raises(ValueError, match="LogitScore requires unquantized merged"):
+        as_seq_cls_model(ExistingEmbeddingModel)(vllm_config=config)
+
+
+def test_cross_encoder_dense_head_loads_only_during_weight_loading(
+    monkeypatch,
+    tmp_path,
+):
+    from vllm.model_executor.layers.pooler import DispatchPooler
+    from vllm.model_executor.model_loader.reload import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+    from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+    write_cross_encoder_metadata(tmp_path, hidden_size=4)
+    modules_path = tmp_path / "modules.json"
+    modules = json.loads(modules_path.read_text())
+    update_json(
+        tmp_path / "config_sentence_transformers.json",
+        activation_fn="torch.nn.Sigmoid",
+    )
+    dense_path = tmp_path / "2_Dense/config.json"
+    update_json(
+        dense_path,
+        bias=False,
+        activation_function="torch.nn.modules.linear.Identity",
+    )
+
+    reload_weight = torch.full((1, 4), 2.0)
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        revision=None,
+        hf_token=None,
+        hf_config=Qwen2Config(num_labels=1),
+        pooler_config=object(),
+        get_hidden_size=lambda: 4,
+        head_dtype=torch.float32,
+        dtype=torch.float32,
+        convert_type="classify",
+        sentence_transformers_config=get_sentence_transformers_cross_encoder_config(
+            str(tmp_path)
+        ),
+    )
+    vllm_config = SimpleNamespace(model_config=model_config, quant_config=None)
+
+    loaded_folders = []
+
+    def load_dense(linear, folder, _model_config):
+        loaded_folders.append(folder)
+        weight_loader = getattr(
+            linear.weight,
+            "weight_loader",
+            default_weight_loader,
+        )
+        weight_loader(linear.weight, reload_weight)
+        return True
+
+    monkeypatch.setattr(adapters_module, "_load_dense_weights", load_dense)
+    replacement_pooler = torch.nn.Identity()
+    monkeypatch.setattr(
+        DispatchPooler,
+        "for_seq_cls",
+        lambda _pooler_config, *, classifier: replacement_pooler,
+    )
+
+    model_cls = as_seq_cls_model(ExistingEmbeddingModel)
+    model = model_cls(vllm_config=vllm_config)
+
+    # The discarded embedding pooler must not load the scoring Dense either.
+    assert _load_st_projector(model_config) is None
+    assert loaded_folders == []
+    assert get_score_type(model_cls) == "cross-encoder"
+    assert model.pooler is replacement_pooler
+    assert isinstance(model.score[0], torch.nn.Linear)
+    assert isinstance(model.score[1], torch.nn.Identity)
+    assert not any(
+        name.startswith("pooler.weight") for name, _ in model.named_parameters()
+    )
+
+    loaded = model.load_weights(
+        [("backbone.weight", torch.ones_like(model.backbone.weight))]
+    )
+    assert loaded == {"backbone.weight", "score.0.weight"}
+    torch.testing.assert_close(model.score[0].weight, reload_weight)
+
+    from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+
+    DefaultModelLoader.track_weights_loading(object(), model, loaded)
+
+    record_metadata_for_reloading(model)
+    reload_weight.fill_(7.0)
+    write_json(tmp_path / "head/config.json", json.loads(dense_path.read_text()))
+    modules[-1]["path"] = "head"
+    write_json(modules_path, modules)
+    initialize_layerwise_reload(model)
+    reloaded = model.load_weights([])
+    finalize_layerwise_reload(model, model_config)
+
+    assert reloaded == {"score.0.weight"}
+    assert loaded_folders == ["2_Dense", "head"]
+    torch.testing.assert_close(model.score[0].weight, reload_weight)
+
+    saved_parameters = {
+        name: parameter.detach().clone() for name, parameter in model.named_parameters()
+    }
+    reload_weight.fill_(11.0)
+    update_json(tmp_path / "1_Pooling/config.json", pooling_mode="lasttoken")
+    with pytest.raises(ValueError, match="incompatible .*CrossEncoder semantics"):
+        model.load_weights(
+            [("backbone.weight", torch.full_like(model.backbone.weight, 13.0))]
+        )
+
+    assert loaded_folders == ["2_Dense", "head"]
+    for name, parameter in model.named_parameters():
+        torch.testing.assert_close(parameter, saved_parameters[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("tokens", [(6,), (5, 6)])
+@pytest.mark.parametrize(
+    "outer_tied,text_tied", [(True, False), (False, True), (False, False)]
+)
+def test_token_classifier_resolves_tied_heads_from_outer_and_text_config(
+    monkeypatch, tokens, outer_tied, text_tied
+):
+    """Composite configs store tying at either level across Transformers versions."""
+    from vllm.model_executor.layers import vocab_parallel_embedding
+
+    class LMHead(torch.nn.Linear):
+        def __init__(self, vocab_size, hidden_size):
+            super().__init__(hidden_size, vocab_size, bias=False)
+
+        def tie_weights(self, embeddings):
+            self.weight = embeddings.weight
+            return self
+
+    monkeypatch.setattr(vocab_parallel_embedding, "ParallelLMHead", LMHead)
+    monkeypatch.setattr("vllm.tokenizers.get_tokenizer", lambda *_args, **_kwargs: None)
+    text_config = SimpleNamespace(
+        vocab_size=8,
+        hidden_size=4,
+        tie_word_embeddings=text_tied,
+        classifier_from_token=tokens,
+    )
+    hf_config = SimpleNamespace(
+        get_text_config=lambda: text_config,
+        tie_word_embeddings=outer_tied,
+        method="no_post_processing" if len(tokens) == 1 else "from_2_way_softmax",
+    )
+    model = torch.nn.Module()
+    model.config = hf_config
+    model.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=hf_config,
+            tokenizer="unused",
+            tokenizer_revision=None,
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+        )
+    )
+    model.model = torch.nn.Module()
+    model.model.embed_tokens = torch.nn.Embedding(8, 4)
+    model.score = torch.nn.Linear(4, 1, bias=False)
+    model._load_pooling_model_weights = lambda weights: AutoWeightsLoader(
+        model
+    ).load_weights(weights)
+    embedding_weight = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+    weights = [("model.embed_tokens.weight", embedding_weight)]
+    lm_head_weight = embedding_weight if outer_tied or text_tied else -embedding_weight
+    if not (outer_tied or text_tied):
+        weights.append(("lm_head.weight", lm_head_weight))
+
+    loaded = seq_cls_model_loader(model, iter(weights))
+
+    expected = lm_head_weight[[tokens[-1]]]
+    if len(tokens) == 2:
+        expected = expected - lm_head_weight[[tokens[0]]]
+    torch.testing.assert_close(model.score.weight, expected)
+    assert loaded == {"model.embed_tokens.weight", "score.weight"}
+    assert not hasattr(model, "lm_head")
+
+
+def test_sentence_transformers_cross_encoder_pooling_order():
+    from vllm.config import PoolerConfig, set_current_vllm_config
+    from vllm.model_executor.layers.pooler.seqwise import pooler_for_classify
+    from vllm.pooling_params import PoolingParams
+    from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
+
+    hf_config = Qwen2Config(num_labels=2)
+    hf_config.sentence_transformers = {
+        "activation_fn": "torch.nn.modules.activation.Sigmoid"
+    }
+    pooler_config = PoolerConfig(seq_pooling_type="MEAN", use_activation=True)
+    model_config = SimpleNamespace(
+        head_dtype=torch.float32,
+        hf_config=hf_config,
+        pooler_config=pooler_config,
+    )
+    vllm_config = SimpleNamespace(model_config=model_config)
+
+    score = torch.nn.Sequential(
+        torch.nn.Linear(3, 2, bias=True),
+        torch.nn.Tanh(),
+    )
+    with torch.no_grad():
+        score[0].weight.copy_(torch.tensor([[0.2, -0.4, 0.6], [-0.3, 0.5, 0.1]]))
+        score[0].bias.copy_(torch.tensor([0.1, -0.2]))
+
+    hidden_states = torch.tensor(
+        [
+            [1.0, 2.0, 3.0],
+            [2.0, 4.0, 6.0],
+            [-1.0, 0.0, 1.0],
+            [3.0, 1.0, -1.0],
+        ]
+    )
+    pooling_metadata = PoolingMetadata(
+        prompt_lens=torch.tensor([2, 2], dtype=torch.int32),
+        prompt_token_ids=None,
+        prompt_token_ids_cpu=None,
+        pooling_params=[
+            PoolingParams(task="classify", use_activation=True),
+            PoolingParams(task="classify", use_activation=True),
+        ],
+        pooling_states=[PoolingStates(), PoolingStates()],
+    )
+    pooling_metadata.build_pooling_cursor(
+        np.array([2, 2]),
+        torch.tensor([2, 2], dtype=torch.int32),
+        torch.device("cpu"),
+    )
+
+    with set_current_vllm_config(vllm_config):
+        pooler = pooler_for_classify(pooler_config, classifier=score)
+    actual = pooler(hidden_states, pooling_metadata)
+
+    mean_pooled = torch.stack(
+        [hidden_states[:2].mean(dim=0), hidden_states[2:].mean(dim=0)]
+    )
+    expected = torch.sigmoid(score(mean_pooled))
+    torch.testing.assert_close(actual, expected)

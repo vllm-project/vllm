@@ -16,9 +16,15 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.tasks import PoolingTask
+from vllm.transformers_utils.config import SentenceTransformersCrossEncoderConfig
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from ...chat_utils import ChatTemplateResolutionError
+from ...chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateResolutionError,
+    ConversationMessage,
+    parse_chat_messages,
+)
 from ..base.io_processor import PoolingIOProcessor
 from ..pooling.protocol import PoolingCompletionRequest
 from ..typing import (
@@ -51,6 +57,53 @@ from .utils import (
 logger = init_logger(__name__)
 
 ScoringServeContext: TypeAlias = PoolingServeContext[ScoringRequest]
+
+
+def _validate_sentence_transformers_tokenizer(
+    tokenizer: Any,
+    sentence_transformers_config: SentenceTransformersCrossEncoderConfig | None,
+) -> None:
+    if (
+        sentence_transformers_config is not None
+        and sentence_transformers_config.seq_pooling_type == "CLS"
+        and getattr(tokenizer, "padding_side", None) == "left"
+    ):
+        raise ValueError(
+            "CLS pooling is not supported with left-padded Sentence "
+            "Transformers CrossEncoder inputs."
+        )
+
+
+def _truncate_message_text_content(
+    message: ConversationMessage,
+    tokenizer: Any,
+    max_tokens: int,
+) -> ConversationMessage:
+    content = message["content"]
+    if not isinstance(content, list):
+        raise ValueError("Structured scoring messages must contain content parts.")
+
+    remaining = max_tokens
+    truncated_content: list[Any] = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "text":
+            truncated_content.append(part)
+            continue
+
+        text = part.get("text")
+        if not isinstance(text, str):
+            raise ValueError("Structured text content must contain a string.")
+
+        truncated_text = (
+            truncate_text_to_tokens(text, tokenizer, remaining) if remaining > 0 else ""
+        )
+        remaining -= len(tokenizer.encode(truncated_text, add_special_tokens=False))
+        truncated_content.append({**part, "text": truncated_text})
+
+    return ConversationMessage(
+        role=message["role"],
+        content=cast(Any, truncated_content),
+    )
 
 
 def _apply_post_tokenization_to_token_type_ids(
@@ -427,6 +480,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         self.supports_score_template = supports_score_template(model)
         self.model = model if self.supports_score_template else None
         self.use_sep_token = self.model_config.use_sep_token
+        self.sentence_transformers_config = (
+            self.model_config.sentence_transformers_config
+        )
+        _validate_sentence_transformers_tokenizer(
+            self.tokenizer,
+            self.sentence_transformers_config,
+        )
 
         if (
             getattr(self.model_config.hf_config, "is_original_qwen3_reranker", False)
@@ -466,6 +526,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         )
 
         tok_params = request.build_tok_params(self.model_config)
+        if (
+            self.sentence_transformers_config is not None
+            and "truncate_prompt_tokens" not in request.model_fields_set
+        ):
+            tok_params = tok_params.with_kwargs(truncate_prompt_tokens=-1)
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
@@ -506,9 +571,19 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
+        tok_params = self.renderer.default_cmpl_tok_params
+        if (
+            self.sentence_transformers_config is not None
+            and tok_params.truncate_prompt_tokens is None
+        ):
+            tok_params = tok_params.with_kwargs(truncate_prompt_tokens=-1)
+        tokenization_kwargs = dict(ctx.tokenization_kwargs or {})
+        if (
+            self.sentence_transformers_config is not None
+            and tokenization_kwargs.get("truncation") is False
+        ):
+            tokenization_kwargs["truncation"] = "do_not_truncate"
+        tok_params = tok_params.with_kwargs(**tokenization_kwargs)
         prompt_extras = ctx.pooling_params.extra_kwargs
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
@@ -565,7 +640,34 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             else None,
         )
 
+        prompt_length = len(engine_prompt["prompt_token_ids"])
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+
+        max_length = tok_params.truncate_prompt_tokens
+        if max_length is not None and max_length < 0:
+            max_length = tok_params.max_input_tokens
+        sentence_transformers_config = self.sentence_transformers_config
+        if (
+            sentence_transformers_config is not None
+            and sentence_transformers_config.uses_message_format
+            and max_length is not None
+            and prompt_length >= max_length
+            and all(
+                isinstance(data, str) or all(part["type"] == "text" for part in data)
+                for data in (render_params["data_1"], render_params["data_2"])
+            )
+        ):
+            chat_template_kwargs = (
+                prompt_extras.get("chat_template_kwargs", {}) if prompt_extras else {}
+            ) or {}
+            if chat_template_kwargs.get("restore_suffix", True):
+                suffix = self._get_sentence_transformers_chat_suffix(
+                    render_params["chat_template"], chat_template_kwargs
+                )
+                end = min(prompt_length, max_length)
+                keep = min(len(suffix), end)
+                if keep:
+                    engine_prompt["prompt_token_ids"][end - keep : end] = suffix[-keep:]
 
         if token_type_ids := engine_prompt.pop("token_type_ids", None):
             params = params.clone()
@@ -602,6 +704,52 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             priorities=render_params["priorities"],
         )
 
+    def _get_sentence_transformers_chat_suffix(
+        self,
+        chat_template: str | None,
+        chat_template_kwargs: dict[str, Any],
+    ) -> list[int]:
+        # Match ST Transformer._chat_template_suffix_ids: common tokens after
+        # two different text fillers are the template tail, not document text.
+        template_kwargs = {
+            key: value
+            for key, value in chat_template_kwargs.items()
+            if key
+            not in {
+                "padding",
+                "truncation",
+                "max_length",
+                "return_tensors",
+                "restore_suffix",
+            }
+        }
+        renders: list[list[int]] = []
+        try:
+            for filler in ("0", "1 2 3 4"):
+                # Use the scoring path to preserve saved system prompts and
+                # generation settings when deriving the template tail.
+                _, prompt = self.get_score_prompt(
+                    filler,
+                    filler,
+                    {},
+                    chat_template=chat_template,
+                    chat_template_kwargs=template_kwargs,
+                )
+                renders.append(prompt["prompt_token_ids"])
+        except Exception:
+            logger.debug(
+                "Unable to derive the Sentence Transformers chat suffix.", exc_info=True
+            )
+            return []
+
+        first, second = renders
+        count = 0
+        for left, right in zip(reversed(first), reversed(second)):
+            if left != right:
+                break
+            count += 1
+        return first[-count:] if 0 < count < min(len(first), len(second)) else []
+
     def get_score_prompt(
         self,
         data_1: ScoreData,
@@ -615,19 +763,87 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         model_config = self.model_config
         tokenizer = self.tokenizer
 
-        prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
-            data_1,
-            data_2,
-            model_config,
+        sentence_transformers_config = self.sentence_transformers_config
+        uses_message_format = (
+            sentence_transformers_config is not None
+            and sentence_transformers_config.uses_message_format
         )
+        chat_template_kwargs = dict(chat_template_kwargs or {})
+        if uses_message_format:
+            chat_template_kwargs.pop("restore_suffix", None)
 
-        # Limit the query and document separately before composing them.
-        if max_tokens_per_query > 0 and isinstance(prompt_1, str):
-            prompt_1 = truncate_text_to_tokens(
-                prompt_1, tokenizer, max_tokens_per_query
+        system_prompt = None
+        if (
+            sentence_transformers_config is not None
+            and sentence_transformers_config.logit_score_token_ids is not None
+        ):
+            chat_template_kwargs = {
+                **sentence_transformers_config.chat_template_kwargs,
+                **chat_template_kwargs,
+            }
+            prompt_name = chat_template_kwargs.pop("prompt_name", None)
+            if prompt_name is None:
+                prompt_name = sentence_transformers_config.default_prompt_name
+            system_prompt = chat_template_kwargs.pop("prompt", None)
+            if system_prompt is None and prompt_name is not None:
+                prompts = sentence_transformers_config.prompts
+                if not isinstance(prompt_name, str) or prompt_name not in prompts:
+                    raise ValueError(
+                        f"Unknown saved CrossEncoder prompt: {prompt_name!r}."
+                    )
+                system_prompt = prompts[prompt_name]
+            if system_prompt is not None and not isinstance(system_prompt, str):
+                raise ValueError("The CrossEncoder prompt must be a string.")
+            if system_prompt and not uses_message_format:
+                raise ValueError(
+                    "LogitScore prompts require structured message inputs."
+                )
+
+        prompt_1 = prompt_2 = ""
+        messages: list[ConversationMessage] | None = None
+        if uses_message_format:
+            messages, mm_data, mm_uuids = parse_chat_messages(
+                cast(
+                    list[ChatCompletionMessageParam],
+                    [
+                        {"role": "query", "content": data_1},
+                        {"role": "document", "content": data_2},
+                    ],
+                ),
+                model_config,
+                content_format="openai",
             )
-        if max_tokens_per_doc > 0 and isinstance(prompt_2, str):
-            prompt_2 = truncate_text_to_tokens(prompt_2, tokenizer, max_tokens_per_doc)
+            if max_tokens_per_query > 0:
+                messages[0] = _truncate_message_text_content(
+                    messages[0], tokenizer, max_tokens_per_query
+                )
+            if max_tokens_per_doc > 0:
+                messages[1] = _truncate_message_text_content(
+                    messages[1], tokenizer, max_tokens_per_doc
+                )
+            if system_prompt:
+                messages.insert(
+                    0,
+                    ConversationMessage(
+                        role="system",
+                        content=cast(Any, [{"type": "text", "text": system_prompt}]),
+                    ),
+                )
+        else:
+            prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
+                data_1,
+                data_2,
+                model_config,
+            )
+
+            if max_tokens_per_query > 0:
+                prompt_1 = truncate_text_to_tokens(
+                    prompt_1, tokenizer, max_tokens_per_query
+                )
+            if max_tokens_per_doc > 0:
+                prompt_2 = truncate_text_to_tokens(
+                    prompt_2, tokenizer, max_tokens_per_doc
+                )
 
         def default_tokenizer_encode():
             local_kwargs = encode_kwargs.copy()
@@ -670,40 +886,62 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
             return full_prompt, prompt_inputs
 
-        # FIXME: For now, we only apply a template when one is explicitly provided.
-        # We cannot rely on the tokenizer's chat template because many models
-        # inherit junk templates from their base LLM, which breaks both the models
-        # and the tests that use them.
-        if chat_template is None:
+        # Most CrossEncoders use tokenizer pair encoding. Structured modular
+        # CrossEncoders are the narrow exception: Sentence Transformers
+        # converts pairs to query/document messages before tokenization.
+        if chat_template is None and not uses_message_format:
             full_prompt, prompt_inputs = default_tokenizer_encode()
         else:
-            # FIXME:
-            # Try applying a score template from the CLI arg or tokenizer_config.json
-            # If that fails because there is no such template,
-            # fall back to the default implementation.
             try:
                 _safe_kwargs = chat_template_kwargs or {}
-                _reserved = {"chat_template", "tools", "tokenize"}
+                _reserved = {
+                    "chat_template",
+                    "return_assistant_tokens_mask",
+                    "tokenize",
+                    "tools",
+                }
                 _unexpected = _reserved & _safe_kwargs.keys()
                 if _unexpected:
                     raise ValueError(
                         "chat_template_kwargs contains reserved keys that "
                         f"conflict with fixed scorer arguments: {_unexpected}"
                     )
-                full_prompt = safe_apply_chat_template(
-                    model_config,
-                    tokenizer,
-                    [
-                        {"role": "query", "content": prompt_1},
-                        {"role": "document", "content": prompt_2},
-                    ],
-                    chat_template=chat_template,
-                    tools=None,
-                    tokenize=False,
-                    **_safe_kwargs,
+
+                if uses_message_format:
+                    assert messages is not None
+                else:
+                    messages = [
+                        ConversationMessage(role="query", content=cast(Any, prompt_1)),
+                        ConversationMessage(
+                            role="document", content=cast(Any, prompt_2)
+                        ),
+                    ]
+
+                full_prompt = cast(
+                    str,
+                    safe_apply_chat_template(
+                        model_config,
+                        tokenizer,
+                        messages,
+                        chat_template=chat_template,
+                        tools=None,
+                        tokenize=False,
+                        **_safe_kwargs,
+                    ),
                 )
-                prompt_inputs = tokenizer(full_prompt, **encode_kwargs)
-            except ChatTemplateResolutionError:
+                template_encode_kwargs = encode_kwargs
+                if uses_message_format:
+                    template_encode_kwargs = {
+                        **encode_kwargs,
+                        "add_special_tokens": False,
+                    }
+                prompt_inputs = tokenizer(full_prompt, **template_encode_kwargs)
+            except ChatTemplateResolutionError as exc:
+                if uses_message_format:
+                    raise ValueError(
+                        "Unable to apply the saved Sentence Transformers "
+                        "CrossEncoder chat template."
+                    ) from exc
                 full_prompt, prompt_inputs = default_tokenizer_encode()
 
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["input_ids"])

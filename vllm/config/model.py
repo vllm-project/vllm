@@ -30,12 +30,14 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
+    SentenceTransformersCrossEncoderConfig,
     checkpoint_has_lm_head,
     get_config,
     get_hf_image_processor_config,
     get_hf_text_config,
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
+    get_sentence_transformers_cross_encoder_config,
     is_encoder_decoder,
     is_rope_parameters_nested,
     mrope_num_dims,
@@ -199,6 +201,10 @@ class ModelConfig:
     """Whether this is a submodule view derived by `VllmConfig.with_hf_config`
     (e.g. a multimodal model's text stack). Its architecture list is empty, so
     deployment-level validation must not run against it."""
+    sentence_transformers_config: SentenceTransformersCrossEncoderConfig | None = field(
+        init=False
+    )
+    """Validated modular CrossEncoder metadata loaded with the model config."""
     word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
     """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
     contains an `lm_head` of its own. The two may still turn out to be identical, in
@@ -465,6 +471,7 @@ class ModelConfig:
             "logits_processors",
             "io_processor_plugin",
             "pooler_config",
+            "sentence_transformers_config",
             "multimodal_config",
             "limit_mm_per_prompt",
             "media_io_kwargs",
@@ -656,6 +663,51 @@ class ModelConfig:
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        # A complete HF token-classifier contract takes precedence over ST metadata.
+        classifier_tokens = getattr(
+            hf_config,
+            "classifier_from_token",
+            getattr(self.hf_text_config, "classifier_from_token", None),
+        )
+        uses_hf_classifier = classifier_tokens is not None and (
+            self.convert == "classify"
+            or any(
+                try_match_architecture_defaults(
+                    arch, runner_type="pooling", convert_type="classify"
+                )
+                for arch in hf_config.architectures or []
+            )
+        )
+        self.sentence_transformers_config = sentence_transformers_config = (
+            None
+            if uses_hf_classifier
+            else get_sentence_transformers_cross_encoder_config(
+                self.model, self.revision, self.hf_token
+            )
+        )
+        if sentence_transformers_config is not None:
+            dense_config = sentence_transformers_config.dense_config
+            token_ids = sentence_transformers_config.logit_score_token_ids
+            if token_ids is not None and any(
+                token_id >= self.hf_text_config.vocab_size for token_id in token_ids
+            ):
+                raise ValueError("LogitScore token ID is outside the model vocabulary.")
+            self.hf_config.sentence_transformers = {
+                "activation_fn": sentence_transformers_config.activation_fn
+            }
+            for config in (self.hf_config, self.hf_text_config):
+                config.num_labels = (
+                    dense_config.out_features if dense_config is not None else 1
+                )
+                if token_ids is not None:
+                    config.classifier_from_token = list(token_ids)
+                    config.method = (
+                        "no_post_processing"
+                        if len(token_ids) == 1
+                        else "from_2_way_softmax"
+                    )
+                    # ST tokenizes pairs when no message template is used.
+                    config.use_sep_token = True
         self.model_arch_config = self.get_model_arch_config()
         self.attention_chunk_size = getattr(
             self.hf_text_config, "attention_chunk_size", None
@@ -708,6 +760,20 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
+        if (
+            sentence_transformers_config is not None
+            and self.runner_type == "pooling"
+            and self.convert_type == "classify"
+            and self.using_transformers_backend()
+            and getattr(self.hf_text_config, "type_vocab_size", 0) > 0
+        ):
+            raise ValueError(
+                "Modular Sentence Transformers CrossEncoders with token type "
+                "embeddings are not supported by the Transformers backend. "
+                "Use model_impl='vllm' (--model-impl vllm) if this backbone has "
+                "a native vLLM implementation."
+            )
+
         # Set default tokenizer modes based on model architecture
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":
@@ -747,7 +813,14 @@ class ModelConfig:
                     if getattr(self.pooler_config, k) is not None
                 }
 
-            base_config = get_pooling_config(self.model, self.revision)
+            base_config = (
+                {
+                    "seq_pooling_type": sentence_transformers_config.seq_pooling_type,
+                    "use_activation": True,
+                }
+                if sentence_transformers_config is not None
+                else get_pooling_config(self.model, self.revision)
+            )
             if base_config is not None:
                 # Only set values that are not overridden by the user
                 for k, v in base_config.items():
@@ -1249,6 +1322,8 @@ class ModelConfig:
     ) -> RunnerType:
         registry = self.registry
 
+        if self.sentence_transformers_config is not None:
+            return "pooling"
         # Some Sentence Transformers models use *ForCausalLM archs
         if get_pooling_config(self.model, self.revision):
             return "pooling"
@@ -1298,6 +1373,8 @@ class ModelConfig:
     ) -> ConvertType:
         registry = self.registry
 
+        if runner_type == "pooling" and self.sentence_transformers_config is not None:
+            return "classify"
         for arch in architectures:
             if arch in registry.get_supported_archs():
                 if runner_type == "generate" and registry.is_text_generation_model(
@@ -2089,23 +2166,27 @@ class ModelConfig:
         override = getattr(self.hf_config, "embedding_size", None)
         if override is not None:
             return override
-        dense_modules = try_get_dense_modules(self.model, revision=self.revision)
+        dense_modules = try_get_dense_modules(
+            self.model, revision=self.revision, hf_token=self.hf_token
+        )
         if dense_modules is not None:
             return dense_modules[-1]["out_features"]
         return self.get_hidden_size()
 
     def get_and_verify_max_len(self, max_model_len: int):
-        # Consider max_model_len in tokenizer_config only when
-        # pooling models use absolute position_embedding.
+        # Sentence Transformers CrossEncoders save their processing limit in
+        # tokenizer_config.json, including for configs that omit the default
+        # absolute position_embedding_type.
         tokenizer_config = None
-        if (
-            self.runner_type == "pooling"
-            and getattr(self.hf_config, "position_embedding_type", "") == "absolute"
+        if self.runner_type == "pooling" and (
+            getattr(self.hf_config, "position_embedding_type", "") == "absolute"
+            or hasattr(self.hf_config, "sentence_transformers")
         ):
             tokenizer_config = try_get_tokenizer_config(
                 self.tokenizer,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.tokenizer_revision,
+                hf_token=self.hf_token,
             )
         max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
@@ -2510,12 +2591,11 @@ def _get_and_verify_max_len(
         max_len_key = "sliding_window"
         derived_max_model_len = sliding_window
 
-    # Consider model_max_length in tokenizer_config
-    if tokenizer_config:
-        tokenizer_model_max_length = tokenizer_config.get(
+    # A tokenizer limit can supply the fallback for an unknown architecture.
+    if tokenizer_config and derived_max_model_len == float("inf"):
+        derived_max_model_len = tokenizer_config.get(
             "model_max_length", derived_max_model_len
         )
-        derived_max_model_len = min(derived_max_model_len, tokenizer_model_max_length)
 
     # If none of the keys were found in the config, use a default and
     # log a warning.
@@ -2586,6 +2666,13 @@ def _get_and_verify_max_len(
         # Do this outside loop since all layer types should have the same scaling
         derived_max_model_len *= scaling_factor
 
+    # The tokenizer's processing limit is not extended by RoPE scaling.
+    if tokenizer_config:
+        derived_max_model_len = min(
+            derived_max_model_len,
+            tokenizer_config.get("model_max_length", derived_max_model_len),
+        )
+
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
 
@@ -2598,11 +2685,10 @@ def _get_and_verify_max_len(
         if rope_parameters is not None and any(
             rp["rope_type"] == "longrope" for rp in rope_parameters.values()
         ):
-            max_model_len = int(
-                getattr(
-                    hf_config, "original_max_position_embeddings", derived_max_model_len
-                )
+            original_max_model_len = getattr(
+                hf_config, "original_max_position_embeddings", derived_max_model_len
             )
+            max_model_len = int(min(derived_max_model_len, original_max_model_len))
         else:
             max_model_len = int(derived_max_model_len)
         max_model_len = current_platform.check_max_model_len(max_model_len)

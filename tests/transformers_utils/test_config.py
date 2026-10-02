@@ -7,20 +7,29 @@ only get the `eos_token_id` from the tokenizer as defined by
 
 import json
 import math
+from copy import deepcopy
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import PreTrainedConfig
+from transformers import BertConfig, LlamaConfig, PreTrainedConfig, Qwen3Config
 
+from tests.transformers_utils.utils import (
+    update_json,
+    write_cross_encoder_metadata,
+    write_json,
+)
 from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
 from vllm.transformers_utils.config import (
+    SentenceTransformersDenseConfig,
     get_safetensors_params_metadata,
+    get_sentence_transformers_cross_encoder_config,
     mrope_num_dims,
     patch_legacy_rope_type,
+    try_get_dense_modules,
     try_get_generation_config,
     uses_mrope,
 )
@@ -294,3 +303,583 @@ def test_mrope_num_dims_from_nested_rope_parameters():
 
 def test_mrope_num_dims_without_mrope():
     assert mrope_num_dims(PreTrainedConfig()) == 0
+
+
+def test_optional_cross_encoder_metadata_probe_is_best_effort(monkeypatch):
+    get_hf_file_to_dict = MagicMock(return_value=None)
+    monkeypatch.setattr(config_module, "get_hf_file_to_dict", get_hf_file_to_dict)
+    monkeypatch.setattr(
+        config_module,
+        "file_or_path_exists",
+        MagicMock(side_effect=AssertionError("unexpected repository listing")),
+    )
+
+    assert (
+        get_sentence_transformers_cross_encoder_config(
+            "org/ordinary-model", revision="main", hf_token="secret"
+        )
+        is None
+    )
+    get_hf_file_to_dict.assert_called_once_with(
+        "config_sentence_transformers.json",
+        "org/ordinary-model",
+        "main",
+        token="secret",
+    )
+
+
+def test_cross_encoder_metadata_must_be_an_object(monkeypatch):
+    monkeypatch.setattr(
+        config_module,
+        "get_hf_file_to_dict",
+        lambda *_args, **_kwargs: [],
+    )
+
+    with pytest.raises(ValueError, match="must contain a JSON object"):
+        get_sentence_transformers_cross_encoder_config(
+            "org/malformed-cross-encoder", revision="main"
+        )
+
+
+def _write_sentence_transformers_cross_encoder(path):
+    BertConfig(
+        architectures=["BertModel"],
+        hidden_size=8,
+        intermediate_size=16,
+        max_position_embeddings=32,
+        num_attention_heads=2,
+        num_hidden_layers=1,
+        vocab_size=32,
+    ).save_pretrained(path)
+    write_cross_encoder_metadata(path)
+
+
+@pytest.mark.parametrize("model_impl", ["auto", "vllm", "transformers"])
+def test_modular_segment_cross_encoder_requires_native_backend(tmp_path, model_impl):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    if model_impl == "transformers":
+        with pytest.raises(ValueError, match="Use model_impl='vllm'"):
+            ModelConfig(str(tmp_path), model_impl=model_impl, dtype="float32")
+    else:
+        config = ModelConfig(str(tmp_path), model_impl=model_impl, dtype="float32")
+        assert not config.using_transformers_backend()
+        assert config.runner_type == "pooling"
+        assert config.convert_type == "classify"
+
+
+@pytest.mark.parametrize("architecture", ["BertModel", "BertForSequenceClassification"])
+def test_non_modular_bert_can_use_transformers_backend(tmp_path, architecture):
+    BertConfig(architectures=[architecture]).save_pretrained(tmp_path)
+    config = ModelConfig(str(tmp_path), model_impl="transformers", dtype="float32")
+    assert config.sentence_transformers_config is None
+    assert config.using_transformers_backend()
+    assert config.runner_type == "pooling"
+
+
+def test_current_sentence_transformers_cross_encoder_config(tmp_path):
+    """Resolve metadata once and preserve it when runtime config is copied."""
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    dense_config = json.loads((tmp_path / "2_Dense/config.json").read_text())
+
+    cross_encoder_config = get_sentence_transformers_cross_encoder_config(
+        str(tmp_path), revision=None
+    )
+    assert cross_encoder_config is not None
+    assert cross_encoder_config.activation_fn == "torch.nn.modules.linear.Identity"
+    assert cross_encoder_config.seq_pooling_type == "MEAN"
+    assert cross_encoder_config.dense_config == SentenceTransformersDenseConfig(
+        in_features=8,
+        out_features=1,
+        bias=True,
+        activation_function=dense_config["activation_function"],
+        folder="2_Dense",
+    )
+    assert not cross_encoder_config.uses_message_format
+    assert try_get_dense_modules(str(tmp_path), revision=None) == [
+        {**dense_config, "folder": "2_Dense"}
+    ]
+
+    with patch(
+        "vllm.config.model.get_sentence_transformers_cross_encoder_config",
+        wraps=get_sentence_transformers_cross_encoder_config,
+    ) as load_config:
+        model_config = ModelConfig(str(tmp_path), dtype="float32")
+    load_config.assert_called_once_with(str(tmp_path), None, None)
+
+    assert model_config.runner_type == "pooling"
+    assert model_config.convert_type == "classify"
+    assert model_config.hf_config.num_labels == 1
+    assert model_config.sentence_transformers_config == cross_encoder_config
+    assert model_config.hf_config.sentence_transformers == {
+        "activation_fn": cross_encoder_config.activation_fn
+    }
+    assert not ModelConfig.__dataclass_fields__["sentence_transformers_config"].init
+    copied = deepcopy(model_config)
+    assert copied.sentence_transformers_config == cross_encoder_config
+    assert copied.compute_hash() == model_config.compute_hash()
+    assert model_config.pooler_config is not None
+    assert model_config.pooler_config.seq_pooling_type == "MEAN"
+    assert model_config.pooler_config.use_activation
+    assert model_config.max_model_len == 16
+
+    from vllm.model_executor.model_loader import get_model_cls
+    from vllm.model_executor.models.interfaces_base import get_score_type
+
+    model_cls = get_model_cls(model_config)
+    assert get_score_type(model_cls) == "cross-encoder"
+
+
+def test_cross_encoder_reload_metadata_compares_effective_semantics(tmp_path):
+    """Defaults and artifact locations do not change the instantiated scoring head."""
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    original = get_sentence_transformers_cross_encoder_config(str(tmp_path))
+    (tmp_path / "2_Dense").rename(tmp_path / "head")
+    modules_path = tmp_path / "modules.json"
+    modules = json.loads(modules_path.read_text())
+    modules[-1]["path"] = "head"
+    modules_path.write_text(json.dumps(modules))
+    dense_path = tmp_path / "head/config.json"
+    dense = json.loads(dense_path.read_text())
+    del dense["bias"]
+    dense_path.write_text(json.dumps(dense))
+    update_json(
+        tmp_path / "config_sentence_transformers.json",
+        __version__={"sentence_transformers": "future-version"},
+    )
+
+    reloaded = get_sentence_transformers_cross_encoder_config(str(tmp_path))
+    assert reloaded == original
+    assert reloaded is not None and reloaded.dense_config is not None
+    assert reloaded.dense_config.folder == "head"
+
+    dense["out_features"] = 2
+    dense_path.write_text(json.dumps(dense))
+    assert get_sentence_transformers_cross_encoder_config(str(tmp_path)) != original
+
+
+def test_cross_encoder_tokenizer_limit_forwards_authentication(tmp_path, monkeypatch):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    get_tokenizer_config = MagicMock(return_value={"model_max_length": 12})
+    monkeypatch.setattr(config_module, "get_tokenizer_config", get_tokenizer_config)
+
+    model_config = ModelConfig(str(tmp_path), dtype="float32", hf_token="secret")
+
+    assert model_config.max_model_len == 12
+    get_tokenizer_config.assert_called_once_with(
+        str(tmp_path), trust_remote_code=False, revision=None, token="secret"
+    )
+
+
+def _write_rotary_cross_encoder(path, rope_type):
+    _write_sentence_transformers_cross_encoder(path)
+    rope_parameters: dict[str, Any] = {"rope_type": rope_type, "factor": 2.0}
+    if rope_type == "longrope":
+        rope_parameters.update(short_factor=[1.0, 1.0], long_factor=[2.0, 2.0])
+    LlamaConfig(
+        architectures=["LlamaModel"],
+        hidden_size=8,
+        intermediate_size=16,
+        max_position_embeddings=64,
+        original_max_position_embeddings=32,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        rope_parameters=rope_parameters,
+        vocab_size=32,
+    ).save_pretrained(path)
+
+
+@pytest.mark.parametrize("rope_type", ["linear", "longrope"])
+@pytest.mark.parametrize("max_model_len", [None, -1, 8, 24])
+def test_cross_encoder_tokenizer_limit_is_not_rope_scaled(
+    tmp_path, rope_type, max_model_len
+):
+    _write_rotary_cross_encoder(tmp_path, rope_type)
+
+    if max_model_len == 24:
+        with pytest.raises(ValueError, match="greater.*derived max_model_len"):
+            ModelConfig(str(tmp_path), dtype="float32", max_model_len=max_model_len)
+    else:
+        config = ModelConfig(
+            str(tmp_path), dtype="float32", max_model_len=max_model_len
+        )
+        assert config.max_model_len == (8 if max_model_len == 8 else 16)
+
+
+@pytest.mark.parametrize("rope_type", ["linear", "longrope"])
+@pytest.mark.parametrize("max_model_len", [None, 64])
+def test_generation_ignores_cross_encoder_tokenizer_limit(
+    tmp_path, rope_type, max_model_len
+):
+    _write_rotary_cross_encoder(tmp_path, rope_type)
+
+    generation_config = ModelConfig(
+        str(tmp_path),
+        dtype="float32",
+        runner="generate",
+        convert="none",
+        max_model_len=max_model_len,
+        hf_overrides={"architectures": ["LlamaForCausalLM"]},
+    )
+    expected_max_len = max_model_len or (128 if rope_type == "linear" else 32)
+    assert generation_config.max_model_len == expected_max_len
+
+
+def test_absolute_position_pooling_preserves_tokenizer_limit(tmp_path):
+    BertConfig(
+        architectures=["BertModel"], position_embedding_type="absolute"
+    ).save_pretrained(tmp_path)
+    write_json(tmp_path / "tokenizer_config.json", {"model_max_length": 16})
+
+    config = ModelConfig(str(tmp_path), dtype="float32")
+
+    assert config.max_model_len == 16
+
+
+def test_tokenizer_limit_supplies_unknown_architecture_max_length(tmp_path):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    update_json(tmp_path / "tokenizer_config.json", model_max_length=4096)
+    config = ModelConfig(str(tmp_path), dtype="float32")
+    config.model_arch_config.derived_max_model_len_and_key = (float("inf"), None)
+
+    assert config.get_and_verify_max_len(-1) == 4096
+
+
+@pytest.mark.parametrize(
+    ("pooling_mode", "expected_pooling_type"),
+    [("cls", "CLS"), ("mean", "MEAN"), ("lasttoken", "LAST")],
+)
+def test_cross_encoder_supported_pooling_modes(
+    tmp_path,
+    pooling_mode,
+    expected_pooling_type,
+):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    update_json(tmp_path / "1_Pooling/config.json", pooling_mode=pooling_mode)
+
+    config = get_sentence_transformers_cross_encoder_config(
+        str(tmp_path), revision=None
+    )
+
+    assert config is not None
+    assert config.seq_pooling_type == expected_pooling_type
+
+
+def test_cross_encoder_rejects_left_padded_cls_pooling(tmp_path):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    update_json(tmp_path / "1_Pooling/config.json", pooling_mode="cls")
+    update_json(tmp_path / "tokenizer_config.json", padding_side="left")
+
+    with pytest.raises(ValueError, match="CLS pooling.*left-padded"):
+        get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
+
+
+@pytest.mark.parametrize("module_count", [None, 0, 1])
+def test_traditional_cross_encoder_topology_is_not_claimed(tmp_path, module_count):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+
+    update_json(
+        tmp_path / "sentence_bert_config.json",
+        transformer_task="sequence-classification",
+        module_output_name="scores",
+        modality_config={"text": {"method": "forward", "method_output_name": "logits"}},
+    )
+
+    modules_path = tmp_path / "modules.json"
+    if module_count is None:
+        modules_path.unlink()
+    else:
+        modules = json.loads(modules_path.read_text(encoding="utf-8"))[:module_count]
+        modules_path.write_text(json.dumps(modules), encoding="utf-8")
+
+    assert (
+        get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
+        is None
+    )
+
+
+def _write_logit_score_cross_encoder(path, *, false_id=5, task="text-generation"):
+    Qwen3Config(
+        architectures=["Qwen3ForCausalLM"],
+        hidden_size=128,
+        intermediate_size=256,
+        head_dim=32,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        vocab_size=32,
+        max_position_embeddings=64,
+    ).save_pretrained(path)
+    write_cross_encoder_metadata(path, head="logit")
+    update_json(path / "sentence_bert_config.json", transformer_task=task)
+    update_json(path / "1_LogitScore/config.json", false_token_id=false_id)
+
+
+@pytest.mark.parametrize("false_id", [None, 0, 5])
+@pytest.mark.parametrize("task", ["text-generation", "any-to-any"])
+def test_logit_score_automatically_resolves_to_last_token_classifier(
+    tmp_path, false_id, task
+):
+    _write_logit_score_cross_encoder(tmp_path, false_id=false_id, task=task)
+    config = ModelConfig(str(tmp_path), dtype="float32")
+    assert config.runner_type == "pooling"
+    assert config.convert_type == "classify"
+    assert config.pooler_config is not None
+    assert config.pooler_config.seq_pooling_type == "LAST"
+    assert config.hf_config.num_labels == 1
+    assert config.use_sep_token
+    assert config.hf_config.classifier_from_token == (
+        [7] if false_id is None else [false_id, 7]
+    )
+    assert config.hf_config.method == (
+        "no_post_processing" if false_id is None else "from_2_way_softmax"
+    )
+    assert config.max_model_len == 16
+
+
+@pytest.mark.parametrize("message_format", ["flat", "structured"])
+@pytest.mark.parametrize("config_source", ["dict", "callable", "saved", "convert"])
+def test_manual_token_classifier_uses_existing_hf_scoring_path(
+    tmp_path, message_format, config_source
+):
+    """Complete HF classifier contracts win regardless of configuration source."""
+    from vllm.model_executor.layers.pooler.activations import PoolerClassify, get_act_fn
+
+    _write_logit_score_cross_encoder(tmp_path)
+    path = tmp_path / "sentence_bert_config.json"
+    transformer_config = json.loads(path.read_text())
+    transformer_config["modality_config"]["message"] = {
+        "method": "forward",
+        "method_output_name": "logits",
+        "format": message_format,
+    }
+    path.write_text(json.dumps(transformer_config))
+    overrides = {
+        "architectures": ["Qwen3ForSequenceClassification"],
+        "classifier_from_token": ["no", "yes"],
+        "is_original_qwen3_reranker": True,
+    }
+    config_kwargs: dict[str, Any] = {"hf_overrides": overrides}
+    if config_source == "callable":
+
+        def apply_overrides(config: PreTrainedConfig) -> PreTrainedConfig:
+            config.update(overrides)
+            return config
+
+        config_kwargs["hf_overrides"] = apply_overrides
+    elif config_source == "saved":
+        update_json(tmp_path / "config.json", **overrides)
+        config_kwargs = {}
+    elif config_source == "convert":
+        del overrides["architectures"]
+        overrides["method"] = "from_2_way_softmax"
+        config_kwargs["convert"] = "classify"
+
+    config = ModelConfig(str(tmp_path), dtype="float32", **config_kwargs)
+
+    assert config.sentence_transformers_config is None
+    assert config.architectures == [
+        "Qwen3ForCausalLM"
+        if config_source == "convert"
+        else "Qwen3ForSequenceClassification"
+    ]
+    assert config.runner_type == "pooling"
+    assert config.convert_type == "classify"
+    assert config.hf_config.classifier_from_token == ["no", "yes"]
+    assert config.hf_text_config.method == "from_2_way_softmax"
+    assert not hasattr(config.hf_config, "sentence_transformers")
+    assert isinstance(get_act_fn(config.hf_config), PoolerClassify)
+
+
+@pytest.mark.parametrize(
+    "overrides,saved_classifier,convert",
+    [
+        ({}, False, "auto"),
+        ({"rope_theta": 20000}, False, "auto"),
+        ({"architectures": ["Qwen3ForSequenceClassification"]}, False, "auto"),
+        ({"classifier_from_token": None}, False, "auto"),
+        ({"classifier_from_token": ["no", "yes"]}, False, "auto"),
+        ({}, True, "auto"),
+        ({}, False, "classify"),
+    ],
+)
+def test_flat_logit_score_stays_strict_without_complete_classifier_contract(
+    tmp_path, overrides, saved_classifier, convert
+):
+    _write_logit_score_cross_encoder(tmp_path)
+    path = tmp_path / "sentence_bert_config.json"
+    transformer_config = json.loads(path.read_text())
+    transformer_config["modality_config"]["message"] = {
+        "method": "forward",
+        "method_output_name": "logits",
+        "format": "flat",
+    }
+    path.write_text(json.dumps(transformer_config))
+    if saved_classifier:
+        update_json(tmp_path / "config.json", classifier_from_token=["no", "yes"])
+
+    with pytest.raises(ValueError, match="only structured"):
+        ModelConfig(
+            str(tmp_path), dtype="float32", hf_overrides=overrides, convert=convert
+        )
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"text": {"max_length": 16}},
+        {"chat_template": {"add_generation_prompt": "true"}},
+        {"chat_template": {"continue_final_message": True}},
+    ],
+)
+def test_logit_score_rejects_unsupported_processing_settings(tmp_path, setting):
+    _write_logit_score_cross_encoder(tmp_path)
+    update_json(tmp_path / "sentence_bert_config.json", processing_kwargs=setting)
+    with pytest.raises(ValueError, match="LogitScore supports only"):
+        ModelConfig(str(tmp_path), dtype="float32")
+
+
+@pytest.mark.parametrize(
+    "field,value,match",
+    [
+        ("true_token_id", -1, "non-negative integers"),
+        ("true_token_id", True, "non-negative integers"),
+        ("true_token_id", 32, "outside the model vocabulary"),
+        ("false_token_id", "no", "non-negative integers"),
+        ("module_input_name", "hidden_states", "must read causal_logits"),
+    ],
+)
+def test_logit_score_rejects_invalid_contract(tmp_path, field, value, match):
+    _write_logit_score_cross_encoder(tmp_path)
+    update_json(tmp_path / "1_LogitScore/config.json", **{field: value})
+    with pytest.raises(ValueError, match=match):
+        ModelConfig(str(tmp_path), dtype="float32")
+
+
+@pytest.mark.parametrize("unknown_module", [False, True])
+def test_unsupported_modular_sentence_transformers_cross_encoder_fails_closed(
+    tmp_path,
+    unknown_module,
+):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    modules_path = tmp_path / "modules.json"
+    modules = json.loads(modules_path.read_text(encoding="utf-8"))
+    modules[-1]["type"] = (
+        "sentence_transformers.cross_encoder.modules.logit_score.LogitScore"
+    )
+    if unknown_module:
+        modules = modules[:1] + [{"type": "custom.Unsupported", "path": "head"}]
+    modules_path.write_text(json.dumps(modules), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Unsupported modular CrossEncoder"):
+        ModelConfig(str(tmp_path), dtype="float32")
+
+
+@pytest.mark.parametrize(
+    ("config_file", "field", "value", "match"),
+    [
+        (
+            "1_Pooling/config.json",
+            "pooling_mode",
+            ["cls", "mean"],
+            "exactly one pooling mode",
+        ),
+        (
+            "1_Pooling/config.json",
+            "pooling_mode",
+            "mean_sqrt_len_tokens",
+            "cls, mean, or lasttoken",
+        ),
+        (
+            "1_Pooling/config.json",
+            "include_prompt",
+            False,
+            "include_prompt=true",
+        ),
+        (
+            "2_Dense/config.json",
+            "use_residual",
+            True,
+            "residual Dense",
+        ),
+        (
+            "sentence_bert_config.json",
+            "module_output_name",
+            "sentence_embedding",
+            "token_embeddings",
+        ),
+        (
+            "2_Dense/config.json",
+            "module_output_name",
+            "sentence_embedding",
+            "must map sentence_embedding to scores",
+        ),
+    ],
+)
+def test_cross_encoder_rejects_unsupported_semantics(
+    tmp_path,
+    config_file,
+    field,
+    value,
+    match,
+):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    update_json(tmp_path / config_file, **{field: value})
+
+    with pytest.raises(ValueError, match=match):
+        get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
+
+
+@pytest.mark.parametrize(
+    ("config_file", "field", "match"),
+    [
+        (
+            "config_sentence_transformers.json",
+            "activation_fn",
+            "activation_fn",
+        ),
+        (
+            "2_Dense/config.json",
+            "activation_function",
+            "activation_function",
+        ),
+    ],
+)
+def test_cross_encoder_requires_saved_activations(
+    tmp_path,
+    config_file,
+    field,
+    match,
+):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    config_path = tmp_path / config_file
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    del config[field]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=match):
+        get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
+
+
+def test_cross_encoder_message_modality_requires_saved_template(tmp_path):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    transformer_config_path = tmp_path / "sentence_bert_config.json"
+    transformer_config = json.loads(transformer_config_path.read_text(encoding="utf-8"))
+    transformer_config["modality_config"]["message"] = {
+        "method": "forward",
+        "method_output_name": "last_hidden_state",
+        "format": "structured",
+    }
+    transformer_config_path.write_text(json.dumps(transformer_config), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="saved chat template"):
+        get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
+
+    (tmp_path / "chat_template.jinja").write_text(
+        "{{ messages | length }}", encoding="utf-8"
+    )
+    config = get_sentence_transformers_cross_encoder_config(
+        str(tmp_path), revision=None
+    )
+    assert config is not None
+    assert config.uses_message_format
