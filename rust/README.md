@@ -51,8 +51,9 @@ VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B \
   --host 127.0.0.1 --port 8000 --grpc-port 50051
 ```
 
-When HTTP uses TCP, its port and the gRPC port must differ unless requesting an
-automatically assigned port with `0`.
+The gRPC listener binds on `--host` like HTTP, or on `127.0.0.1` when HTTP uses
+`--uds`. When HTTP uses TCP, its port and the gRPC port must differ unless
+requesting an automatically assigned port with `0`.
 
 This also works with Python-supervised hybrid data parallelism. It requires a
 frontend process and cannot be combined with `--headless` or

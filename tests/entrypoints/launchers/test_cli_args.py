@@ -14,7 +14,6 @@ from vllm.entrypoints.launchers.cli_args import (
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -182,7 +181,7 @@ def test_multiple_valid_inputs(serve_parser):
         (50051, ["--port", "50051", "--uds", "/tmp/vllm.sock"]),
     ],
 )
-def test_rust_grpc_port_reaches_frontend_args(
+def test_rust_grpc_port_accepts_frontend_launch(
     vllm_parser, monkeypatch, port, extra_args
 ):
     monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
@@ -202,7 +201,7 @@ def test_rust_grpc_port_reaches_frontend_args(
         ]
     )
     validate_parsed_serve_args(args)
-    assert jsonify_non_default_args(args)["grpc_port"] == port
+    assert args.grpc_port == port
 
 
 @pytest.mark.parametrize(

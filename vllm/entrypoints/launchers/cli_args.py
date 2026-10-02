@@ -287,7 +287,8 @@ class FrontendArgs(BaseFrontendArgs):
     grpc_port: int | None = None
     """Enable the Rust frontend's additional gRPC Inference and Control services
     on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
-    `--port`. Cannot be combined with the Python gRPC server's `--grpc` flag."""
+    `--port`. Binds on `--host`, or 127.0.0.1 with `--uds`. Cannot be combined
+    with the Python gRPC server's `--grpc` flag."""
     data_parallel_supervisor_port: int = 9256
     """HTTP port for aggregated health endpoints in multi-port external LB
     mode."""
