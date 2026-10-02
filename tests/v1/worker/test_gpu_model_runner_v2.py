@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -297,3 +298,12 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     runner.capture_model(profile_only=True)
 
     assert lock_calls == []
+
+
+def test_async_copy_to_np_does_not_alias_reused_buffer():
+    buffer = torch.zeros(4, dtype=torch.int64)
+
+    snapshot = async_copy_to_np(buffer)
+    buffer.fill_(1)
+
+    assert snapshot.tolist() == [0, 0, 0, 0]
