@@ -108,16 +108,14 @@ LogicalScaleStrides resolve_weight_scale_strides(const at::Tensor& scale,
                          : LogicalScaleStrides{s1, s0};
 }
 
-__device__ __forceinline__ const uint8_t* bpreshuffle_ptr(const uint8_t* base,
-                                                          int logical_n,
-                                                          int logical_k,
-                                                          int64_t stride0,
-                                                          int64_t stride1) {
-  // The DeepSeek ROCm runtime captures the output of
-  // rocm_aiter_ops.shuffle_weight(..., layout=(16, 16)) directly into
-  // linear.weight. The resulting tensor keeps logical [N, K] shape with a
-  // physical in-memory permutation, so the kernel only needs to respect the
-  // tensor strides presented by PyTorch here.
+__device__ __forceinline__ const uint8_t* weight_ptr(const uint8_t* base,
+                                                     int logical_n,
+                                                     int logical_k,
+                                                     int64_t stride0,
+                                                     int64_t stride1) {
+  // Winner-only skinny path over the original logical [N, K] weight layout.
+  // The kernel consumes the exact tensor/strides presented by PyTorch and does
+  // not assume an in-place bpreshuffle transform.
   return base + logical_n * stride0 + logical_k * stride1;
 }
 
@@ -217,7 +215,7 @@ __launch_bounds__(kThreadsPerWG) void wvSplitKQBlockScaleBpreshuffleGfx1151Kerne
       for (int y = 0; y < kYTile; ++y) {
         active_y[y] = (out_n + y) < N;
         if (active_y[y]) {
-          const uint8_t* w_ptr = bpreshuffle_ptr(
+          const uint8_t* w_ptr = weight_ptr(
               weight, out_n + y, logical_k, weight_stride0, weight_stride1);
           weight_frag[y] =
               fp8x16_to_bf16(*reinterpret_cast<const uint4*>(w_ptr));
@@ -339,8 +337,9 @@ void wvSplitKQBlockScale(const at::Tensor& weight, const at::Tensor& activation,
 
   TORCH_CHECK(on_gfx1151(),
               "wvSplitKQBlockScale is currently supported on gfx1151 only");
-  TORCH_CHECK(bpreshuffle,
-              "wvSplitKQBlockScale first version supports bpreshuffle only");
+  TORCH_CHECK(!bpreshuffle,
+              "wvSplitKQBlockScale non-preshuffled path expects original "
+              "weight layout");
   TORCH_CHECK(weight.is_cuda() && activation.is_cuda() &&
                   activation_scale.is_cuda() && weight_scale.is_cuda() &&
                   out.is_cuda(),
@@ -388,10 +387,10 @@ void wvSplitKQBlockScale(const at::Tensor& weight, const at::Tensor& activation,
   const int64_t N = weight.size(0);
   const int64_t logical_K = weight.size(1);
   TORCH_CHECK(logical_K == K,
-              "bpreshuffle weight shape does not match activation K");
+              "weight shape does not match activation K");
   TORCH_CHECK(
       N == 4096 || N == 1536,
-      "first version supports bpreshuffle logical N in {4096, 1536}, got ", N);
+      "first version supports logical N in {4096, 1536}, got ", N);
   TORCH_CHECK(out.size(0) == tokens && out.size(1) == N,
               "out must be shaped [tokens, N], got ", out.sizes(),
               " for logical N=", N, " tokens=", tokens);

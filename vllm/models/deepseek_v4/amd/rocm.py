@@ -553,7 +553,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         vllm_config = args[0] if args else kwargs["vllm_config"]
         super().__init__(*args, **kwargs)
         self._has_kv_transfer = vllm_config.kv_transfer_config is not None
-        # Block scale for the preshuffled weight; None = not preshuffled.
+        # Block-scale metadata for the winner-only skinny fast path.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
         self._fused_compressor_weight: torch.Tensor | None
@@ -786,13 +786,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def prepare_attn_preshuffle(self) -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if not rocm_aiter_ops.is_enabled():
+        if not rocm_aiter_ops.is_rdna_linear_enabled():
             return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,
             get_fp8_block_weight_scale,
         )
-        from vllm.model_executor.utils import replace_parameter
 
         def _prep(linear) -> torch.Tensor | None:
             w = getattr(linear, "weight", None)
@@ -806,16 +805,30 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 return None
             if ws.dtype == torch.float8_e8m0fnu:
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
-            # Shuffle the weight in place (single weight, no unshuffled copy).
-            replace_parameter(
-                linear,
-                "weight",
-                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-            )
             return ws
 
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
         self._wo_b_scale = _prep(self.wo_b)
+
+    def _use_wvsplitk_blockscale_fast_path(
+        self,
+        weight: torch.Tensor,
+        x: torch.Tensor,
+        tag: str,
+    ) -> bool:
+        from vllm.platforms.rocm import on_gfx1151
+
+        return (
+            tag in ("wo_b", "wqa_wkv")
+            and on_gfx1151()
+            and x.dtype == torch.bfloat16
+            and x.dim() == 2
+            and weight.dim() == 2
+            and 1 <= x.shape[0] <= 8
+            and x.shape[1] == 4096
+            and weight.shape[0] in (4096, 1536)
+            and weight.shape[1] == 4096
+        )
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         if self._fused_compressor_weight is not None:
@@ -866,44 +879,33 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         tag: str,
     ) -> torch.Tensor:
         from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.platforms.rocm import on_gfx1151
 
+        assert self._use_wvsplitk_blockscale_fast_path(weight, x, tag)
         x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
-        use_wvsplitk_blockscale = (
-            tag in ("wo_b", "wqa_wkv")
-            and on_gfx1151()
-            and x.dtype == torch.bfloat16
-            and x_fp8.dim() == 2
-            and weight.dim() == 2
-            and 1 <= x_fp8.shape[0] <= 8
-            and x_fp8.shape[1] == 4096
-            and weight.shape[0] in (4096, 1536)
-            and weight.shape[1] == 4096
+        out = torch.empty(
+            (x_fp8.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device
         )
-        if use_wvsplitk_blockscale:
-            out = torch.empty(
-                (x_fp8.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device
-            )
-            cu_count = torch.cuda.get_device_properties(x.device).multi_processor_count
-            ops.wvSplitKQBlockScale(
-                weight,
-                x_fp8,
-                x_scale,
-                scale,
-                out,
-                cu_count,
-                True,
-            )
-        else:
-            out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
-                x_fp8, weight, x_scale, scale, output_dtype=x.dtype
-            )
+        cu_count = torch.cuda.get_device_properties(x.device).multi_processor_count
+        ops.wvSplitKQBlockScale(
+            weight,
+            x_fp8,
+            x_scale,
+            scale,
+            out,
+            cu_count,
+            False,
+        )
         if reduce_tp and get_tensor_model_parallel_world_size() > 1:
             out = tensor_model_parallel_all_reduce(out)
         return out
 
     def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self._wqa_wkv_scale is not None and hidden_states.dim() == 2:
+        if (
+            self._wqa_wkv_scale is not None
+            and self._use_wvsplitk_blockscale_fast_path(
+                self.fused_wqa_wkv.weight, hidden_states, "wqa_wkv"
+            )
+        ):
             return self._bpre_attn_gemm(
                 self.fused_wqa_wkv.weight,
                 self._wqa_wkv_scale,
@@ -1017,7 +1019,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.wo_a,
         )
         zf = z.flatten(1)
-        if self._wo_b_scale is not None and zf.dim() == 2:
+        if (
+            self._wo_b_scale is not None
+            and self._use_wvsplitk_blockscale_fast_path(self.wo_b.weight, zf, "wo_b")
+        ):
             return self._bpre_attn_gemm(
                 self.wo_b.weight, self._wo_b_scale, zf, True, "wo_b"
             )
