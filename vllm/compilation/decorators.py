@@ -272,24 +272,34 @@ def _kernel_selection_hash_key(model: torch.nn.Module) -> str:
     and the load-time traced-source check, and would silently load a stale
     AOT artifact baked for the previous kernel.
 
-    Layer names and counts are deliberately excluded: pipeline-parallel
-    ranks hold disjoint layer subsets and must keep producing the same hash
-    to share one cache directory.
+    Keep each layer's association with its kernel: a set of kernel types
+    cannot distinguish changes within a model that uses multiple kernels.
+    Pipeline-parallel ranks may produce different hashes; AOT artifacts
+    are already stored separately for each rank.
     """
-    signatures = set()
-    for module in model.modules():
+    sha256_hash = hashlib.sha256()
+    for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
         if quant_method is None:
             continue
-        qm_type = f"{type(quant_method).__module__}.{type(quant_method).__qualname__}"
-        attrs = tuple(
-            f"{attr}={type(value).__module__}.{type(value).__qualname__}"
-            for attr, value in sorted(vars(quant_method).items())
-        )
-        signatures.add((qm_type, attrs))
-    sha256_hash = hashlib.sha256()
-    for signature in sorted(signatures):
-        sha256_hash.update(str(signature).encode())
+        quant_scheme = getattr(quant_method, "scheme", None)
+        for path, method in (
+            ("quant_method", quant_method),
+            ("scheme", getattr(module, "scheme", None)),
+            ("quant_method.scheme", quant_scheme),
+            (
+                "quant_method.scheme.linear_method",
+                getattr(quant_scheme, "linear_method", None),
+            ),
+        ):
+            if method is None:
+                continue
+            method_type = f"{type(method).__module__}.{type(method).__qualname__}"
+            attrs = tuple(
+                f"{attr}={type(value).__module__}.{type(value).__qualname__}"
+                for attr, value in sorted(vars(method).items())
+            )
+            sha256_hash.update(str((name, path, method_type, attrs)).encode())
     return sha256_hash.hexdigest()
 
 
