@@ -79,6 +79,7 @@ class OnlineDerenderer:
             tool_strict_level=tool_strict_level,
             model_name=model_config.model,
             is_harmony=self.use_harmony,
+            tokenizer=renderer.tokenizer,
         )
 
         self.chat_template = chat_template
@@ -160,6 +161,8 @@ class OnlineDerenderer:
                     chat_template_kwargs=chat_template_kwargs,
                     model_config=self.model_config,
                 )
+                if generate_response.prompt_token_ids is not None:
+                    parser.set_prompt_token_ids(generate_response.prompt_token_ids)
                 reasoning, content, tool_calls = parser.parse(
                     decoded_text,
                     chat_request,
