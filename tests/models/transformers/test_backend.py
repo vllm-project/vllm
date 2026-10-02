@@ -185,17 +185,6 @@ def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None
 
 
 def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
-    import transformers
-    from packaging.version import Version
-
-    installed = Version(transformers.__version__)
-    required = Version("5.15.0.dev0")
-    if installed < required:
-        pytest.skip(
-            "MLA models with the Transformers modeling backend require "
-            f"transformers>={required}, but got {installed}"
-        )
-
     model = "hmellor/tiny-random-DeepseekV2ForCausalLM"
     args = (example_prompts, 32, 5)
     kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
