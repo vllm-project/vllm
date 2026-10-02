@@ -25,6 +25,10 @@ from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
 
+# VLLM_CUSTOM_ALL_GATHER_SMALL: the first routed all-gather is logged once per
+# process (engagement check).
+_custom_all_gather_small_logged = False
+
 
 class CudaCommunicator(DeviceCommunicatorBase):
     def __init__(
@@ -77,6 +81,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
         self.use_flashinfer_pcie_ipc_allreduce = use_flashinfer_pcie_ipc_allreduce
         self.use_aiter_allreduce = use_aiter_allreduce
+        # Route small all-gathers through the custom communicator's one-shot
+        # CUDA-IPC all-gather (bit-identical copy) instead of NCCL.
+        self.use_custom_all_gather_small = envs.VLLM_CUSTOM_ALL_GATHER_SMALL
+        self.custom_all_gather_small_max_bytes = (
+            envs.VLLM_CUSTOM_ALL_GATHER_SMALL_MAX_BYTES
+        )
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -429,6 +439,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if dim == 0 and should_nccl_symm_mem_ag_rs():
             return self._all_gather_symm_mem(input_.contiguous())
 
+        if self.use_custom_all_gather_small:
+            output = self._custom_all_gather_small(input_, dim)
+            if output is not None:
+                return output
+
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is None or pynccl_comm.disabled:
             return super().all_gather(input_, dim)
@@ -450,6 +465,50 @@ class CudaCommunicator(DeviceCommunicatorBase):
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         return output_tensor.reshape(
+            input_size[:dim]
+            + (self.world_size * input_size[dim],)
+            + input_size[dim + 1 :]
+        )
+
+    def _custom_all_gather_small(
+        self, input_: torch.Tensor, dim: int
+    ) -> torch.Tensor | None:
+        """One-shot CUDA-IPC all-gather for small inputs, else None.
+
+        Latency-bound gathers (e.g. the speculative drafter's per-step
+        gathers at small batch sizes) are faster through the custom
+        communicator's IPC all-gather than through an NCCL ring kernel. It
+        only copies bytes, so the output is bit-identical to the NCCL path.
+        Ordering: like the custom all-reduce, it shares this rank's staging
+        buffer and flag barrier with the other custom collectives, which are
+        all issued on the caller's stream in the same order on every rank.
+        """
+        ca_comm = self.ca_comm
+        if ca_comm is None or ca_comm.disabled:
+            return None
+        input_ = input_.contiguous()
+        if input_.nbytes > self.custom_all_gather_small_max_bytes:
+            return None
+        output = ca_comm.ipc_all_gather(input_)
+        if output is None:
+            return None
+        global _custom_all_gather_small_logged
+        if not _custom_all_gather_small_logged:
+            _custom_all_gather_small_logged = True
+            logger.info(
+                "Small all-gathers (<= %d bytes per rank) use the one-shot "
+                "CUDA-IPC all-gather (first: %s %s, dim=%d).",
+                self.custom_all_gather_small_max_bytes,
+                tuple(input_.shape),
+                input_.dtype,
+                dim,
+            )
+        # Same layout as the NCCL path below: gather along dim 0, then move
+        # the rank dimension next to `dim`.
+        input_size = input_.size()
+        output = output.reshape((self.world_size,) + input_size)
+        output = output.movedim(0, dim)
+        return output.reshape(
             input_size[:dim]
             + (self.world_size * input_size[dim],)
             + input_size[dim + 1 :]

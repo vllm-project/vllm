@@ -598,6 +598,55 @@ class CustomAllreduce:
             )
         return out
 
+    def should_ipc_all_gather(self, inp: torch.Tensor) -> bool:
+        """Whether `ipc_all_gather` can handle `inp`.
+
+        Unlike `should_custom_all_gather`, this only considers the plain
+        CUDA-IPC one-shot kernel on a fully connected single node, never the
+        MNNVL Lamport kernel.
+        """
+        if self.disabled or not current_platform.is_cuda():
+            return False
+        # The IPC all-gather kernel is instantiated for 2, 4, 6 and 8 GPUs.
+        if self.world_size > 8 or not self.fully_connected:
+            return False
+        if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            return False
+        inp_size = inp.nbytes
+        return (
+            0 < inp_size <= self.max_all_gather_size
+            and inp_size % 16 == 0
+            and is_weak_contiguous(inp)
+        )
+
+    def ipc_all_gather(self, inp: torch.Tensor) -> torch.Tensor | None:
+        """All-gather along dim 0 with the one-shot CUDA-IPC kernel.
+
+        The input is copied into this rank's registered IPC buffer, then every
+        rank reads all peers' buffers after the custom-AR flag barrier
+        (release/acquire), and the kernel's end barrier keeps the buffer from
+        being overwritten before all peers finished reading it. The kernel
+        only moves bytes, so every bit pattern (including -0.0 and NaN
+        payloads) is reproduced exactly, unlike the MNNVL Lamport variant
+        that `custom_all_gather` prefers when multicast is available.
+        CUDA-graph safe: the staging buffer is registered at init time.
+        """
+        if not self.should_ipc_all_gather(inp):
+            return None
+        out = torch.empty(
+            (inp.shape[0] * self.world_size,) + inp.shape[1:],
+            dtype=inp.dtype,
+            device=inp.device,
+        )
+        ops.custom_all_gather(
+            self._ptr,
+            inp,
+            out,
+            self.buffer_ptrs[self.rank],
+            self.max_all_gather_size,
+        )
+        return out
+
     def _select_reduce_scatter_backend(
         self, inp: torch.Tensor
     ) -> _ReduceScatterBackend | None:
