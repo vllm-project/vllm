@@ -157,6 +157,16 @@ class ForwardContext:
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE
     batch_descriptor: BatchDescriptor | None = None
 
+    # True only when *every* DP rank is running a single-token decode this
+    # step, reduced across ranks by the same all-reduce that agrees on token
+    # counts (see `coordinate_batch_across_dp`). `batch_descriptor.uniform`
+    # answers the same question for this rank alone, which is not the same
+    # thing under DP: a rank with no requests runs a dummy decode batch while
+    # its peers prefill. Anything that gates a collective on "is this a decode
+    # step" has to read this, not the descriptor, or the ranks that take the
+    # branch will wait in their collective for ranks that did not.
+    uniform_decode_across_dp: bool = False
+
     ubatch_slices: UBatchSlices | None = None
 
     # Boolean mask over the token axis: True for padding rows that are not real
@@ -238,6 +248,7 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    uniform_decode_across_dp: bool = False,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -256,6 +267,7 @@ def create_forward_context(
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
         is_padding=is_padding,
+        uniform_decode_across_dp=uniform_decode_across_dp,
     )
 
 
@@ -286,6 +298,7 @@ def set_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    uniform_decode_across_dp: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -314,7 +327,7 @@ def set_forward_context(
         ):
             assert ubatch_slices is None
             assert num_tokens is not None
-            _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
+            _, num_tokens_across_dp, _, _ = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,
@@ -355,6 +368,7 @@ def set_forward_context(
         additional_kwargs,
         skip_compiled,
         is_padding=is_padding,
+        uniform_decode_across_dp=uniform_decode_across_dp,
     )
 
     try:
