@@ -322,6 +322,7 @@ class LLMEngine:
                 outputs.outputs,
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
+                sampling_masks=outputs.sampling_masks,
             )
 
             mm_processor_cache = self.renderer.mm_processor_cache

@@ -17,6 +17,8 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.outputs import SamplingMaskLists
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 pytestmark = pytest.mark.cpu_test
@@ -216,6 +218,47 @@ def test_tensor_serialization():
     assert torch.allclose(tensor, decoded), (
         "Decoded tensor does not match the original tensor."
     )
+
+
+@pytest.mark.parametrize("num_ids_per_row", [2, 200], ids=["inline", "aux-frames"])
+def test_engine_core_outputs_sampling_masks_roundtrip(num_ids_per_row: int):
+    rows = [np.arange(i, i + num_ids_per_row, dtype=np.int32) for i in range(4)]
+    offsets = np.cumsum([0] + [len(row) for row in rows])
+    outputs = EngineCoreOutputs(
+        outputs=[
+            EngineCoreOutput("req-0", [1], sampling_mask_row=0),
+            EngineCoreOutput("req-1", []),
+            EngineCoreOutput("req-2", [2, 3], sampling_mask_row=1),
+            EngineCoreOutput(
+                "req-3",
+                [4],
+                new_sampling_mask=SamplingMaskLists(np.array([4], dtype=np.int32)),
+            ),
+            EngineCoreOutput("req-4", [5], sampling_mask_row=3),
+        ],
+        sampling_masks=SamplingMaskLists(np.concatenate(rows), offsets),
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    assert (len(encoded) > 1) == (num_ids_per_row > 2)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert [out.sampling_mask_row for out in decoded.outputs] == [0, None, 1, None, 3]
+    assert decoded.sampling_masks is not None
+    assert decoded.sampling_masks.to_nested_list() == [row.tolist() for row in rows]
+    assert decoded.outputs[3].new_sampling_mask.token_ids.tolist() == [4]
+    masks = [
+        decoded.sampling_masks.slice_request(
+            out.sampling_mask_row, len(out.new_token_ids)
+        )
+        for out in decoded.outputs
+        if out.sampling_mask_row is not None
+    ]
+    assert [mask.to_nested_list() for mask in masks] == [
+        [rows[0].tolist()],
+        [rows[1].tolist(), rows[2].tolist()],
+        [rows[3].tolist()],
+    ]
 
 
 def test_numpy_array_serialization():

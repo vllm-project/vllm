@@ -170,7 +170,6 @@ class SamplingMaskTensors(NamedTuple):
         """Convert fixed output rows to the scheduler's CSR representation."""
         counts = self.counts.cpu().numpy()
         token_ids = self.token_ids.cpu().numpy()
-        packed_mask = self.packed_mask.cpu().numpy()
         width = token_ids.shape[1]
 
         cu_num_generated_tokens = None
@@ -185,17 +184,28 @@ class SamplingMaskTensors(NamedTuple):
             cu_num_generated_tokens = np.cumsum(
                 np.concatenate(([0], num_sampled_tokens))
             ).tolist()
+            counts = counts[sampled_rows]
+            token_ids = token_ids[sampled_rows]
 
-        def support(row: int) -> np.ndarray:
-            if counts[row] <= width:
-                return token_ids[row, : counts[row]]
+        if (counts <= width).all():
+            # Common case: every support fits in its compact row.
+            offsets = np.zeros(len(counts) + 1, dtype=np.int64)
+            np.cumsum(counts, out=offsets[1:])
+            keep = np.arange(width)[None, :] < counts[:, None]
+            return SamplingMaskLists(token_ids[keep], offsets, cu_num_generated_tokens)
+
+        packed_mask = self.packed_mask.cpu().numpy()
+
+        def support(i: int) -> np.ndarray:
+            if counts[i] <= width:
+                return token_ids[i, : counts[i]]
             # Wider than the compact row (ties or a huge top_k): use the bitmask.
             bits = np.unpackbits(
-                packed_mask[row], count=self.vocab_size, bitorder="little"
+                packed_mask[sampled_rows[i]], count=self.vocab_size, bitorder="little"
             )
             return np.flatnonzero(bits).astype(np.int32, copy=False)
 
-        supports = [support(row) for row in sampled_rows]
+        supports = [support(i) for i in range(len(counts))]
         offsets = np.zeros(len(supports) + 1, dtype=np.int64)
         np.cumsum([len(s) for s in supports], out=offsets[1:])
         flat = np.concatenate([np.empty(0, dtype=np.int32), *supports])

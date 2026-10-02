@@ -21,11 +21,31 @@ pub struct SamplingMask {
 /// Python `SamplingMaskLists` tuple before ndarray raw views are resolved.
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct WireSamplingMask {
-    token_ids: WireNdArray,
+    pub(crate) token_ids: WireNdArray,
     #[serde(default)]
-    offsets: Option<WireNdArray>,
+    pub(crate) offsets: Option<WireNdArray>,
     #[serde(default)]
-    cu_num_generated_tokens: Option<Vec<usize>>,
+    pub(crate) cu_num_generated_tokens: Option<Vec<usize>>,
+}
+
+/// Sampling masks of all outputs in one engine step (Python
+/// `EngineCoreOutputs.sampling_masks`): CSR rows, one per generated position.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SamplingMaskBatch {
+    token_ids: Vec<u32>,
+    offsets: Vec<u32>,
+}
+
+impl SamplingMaskBatch {
+    /// Rows `start..start + num_rows`, or `None` if they are out of range.
+    pub(crate) fn rows(&self, start: usize, num_rows: usize) -> Option<SamplingMask> {
+        let offsets = self.offsets.get(start..=start.checked_add(num_rows)?)?;
+        let rows = offsets
+            .windows(2)
+            .map(|pair| self.token_ids[pair[0] as usize..pair[1] as usize].to_vec())
+            .collect();
+        Some(SamplingMask { rows })
+    }
 }
 
 /// Sampling-mask field while it transitions from Python wire data to rows.
@@ -104,17 +124,33 @@ impl WireSamplingMask {
     }
 
     fn resolve(self, frames: &[Bytes], field_prefix: &str) -> Result<SamplingMask> {
+        let batch = self.resolve_batch(frames, field_prefix)?;
+        let num_rows = batch.offsets.len() - 1;
+        Ok(batch.rows(0, num_rows).expect("offsets were validated"))
+    }
+
+    /// Decode and validate the CSR arrays. Without offsets the payload is a
+    /// single row.
+    pub(crate) fn resolve_batch(
+        self,
+        frames: &[Bytes],
+        field_prefix: &str,
+    ) -> Result<SamplingMaskBatch> {
         if let Some(indices) = self.cu_num_generated_tokens {
             bail_ext_value_decode!(
-                "{field_prefix}.cu_num_generated_tokens: expected None for per-request engine-core sampling-mask payload, got {indices:?}"
+                "{field_prefix}.cu_num_generated_tokens: expected None for engine-core sampling-mask payload, got {indices:?}"
             );
         }
 
         let token_ids =
             decode_array1_u32(self.token_ids, &format!("{field_prefix}.token_ids"), frames)?;
         let Some(offsets) = self.offsets else {
-            return Ok(SamplingMask {
-                rows: vec![token_ids],
+            let Ok(num_token_ids) = u32::try_from(token_ids.len()) else {
+                bail_ext_value_decode!("{field_prefix}.token_ids: too many token ids");
+            };
+            return Ok(SamplingMaskBatch {
+                token_ids,
+                offsets: vec![0, num_token_ids],
             });
         };
         let offsets = decode_array1_u32(offsets, &format!("{field_prefix}.offsets"), frames)?;
@@ -131,12 +167,7 @@ impl WireSamplingMask {
                 token_ids.len()
             );
         }
-
-        let rows = offsets
-            .windows(2)
-            .map(|pair| token_ids[pair[0] as usize..pair[1] as usize].to_vec())
-            .collect();
-        Ok(SamplingMask { rows })
+        Ok(SamplingMaskBatch { token_ids, offsets })
     }
 }
 

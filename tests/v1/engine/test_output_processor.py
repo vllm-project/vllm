@@ -94,6 +94,71 @@ def test_completion_output_preserves_each_sampling_mask_position() -> None:
     assert output.sampling_mask.token_ids == [[10, 11], [20], [30, 31, 32]]
 
 
+def test_process_outputs_slices_step_sampling_masks() -> None:
+    output_processor = OutputProcessor(None, log_stats=False)
+    for req_id in ["req-0", "req-1", "req-2"]:
+        output_processor.add_request(
+            EngineCoreRequest(
+                request_id=req_id,
+                external_req_id=req_id,
+                prompt_token_ids=[1, 2, 3],
+                mm_features=None,
+                arrival_time=0,
+                lora_request=None,
+                cache_salt=None,
+                data_parallel_rank=None,
+                sampling_params=SamplingParams(
+                    detokenize=False, output_kind=RequestOutputKind.FINAL_ONLY
+                ),
+                pooling_params=None,
+            ),
+            None,
+        )
+
+    # req-1 has two positions in the first step; req-2 uses the per-request
+    # form and has no mask in the second step.
+    output_processor.process_outputs(
+        [
+            EngineCoreOutput("req-0", [5], sampling_mask_row=0),
+            EngineCoreOutput("req-1", [7, 8], sampling_mask_row=1),
+            EngineCoreOutput(
+                "req-2",
+                [4],
+                new_sampling_mask=SamplingMaskLists(np.array([4, 40], dtype=np.int32)),
+            ),
+        ],
+        sampling_masks=SamplingMaskLists(
+            np.array([5, 6, 7, 8, 9], dtype=np.int32), np.array([0, 2, 3, 5])
+        ),
+    )
+    finished = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                "req-1", [12], finish_reason=FinishReason.LENGTH, sampling_mask_row=1
+            ),
+            EngineCoreOutput(
+                "req-0", [11], finish_reason=FinishReason.LENGTH, sampling_mask_row=0
+            ),
+            EngineCoreOutput("req-2", [], finish_reason=FinishReason.LENGTH),
+        ],
+        sampling_masks=SamplingMaskLists(
+            np.array([11, 12, 13], dtype=np.int32), np.array([0, 1, 3])
+        ),
+    ).request_outputs
+
+    masks = {}
+    for request_output in finished:
+        assert isinstance(request_output, RequestOutput)
+        sampling_mask = request_output.outputs[0].sampling_mask
+        assert sampling_mask is not None
+        masks[request_output.request_id] = sampling_mask.token_ids
+    assert masks == {
+        "req-0": [[5, 6], [11]],
+        "req-1": [[7], [8, 9], [12, 13]],
+        "req-2": [[4, 40]],
+    }
+
+
 def _ref_convert_id_to_token(
     tokenizer: TokenizerLike,
     token_id: int,

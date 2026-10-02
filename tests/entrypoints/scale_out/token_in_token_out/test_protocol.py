@@ -10,12 +10,20 @@ fail loudly if the validator semantics ever drift.
 import json
 
 import pytest
+from fastapi.responses import JSONResponse
 
+from vllm.entrypoints.scale_out.token_in_token_out.api_router import (
+    generate_response_to_json,
+)
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
+    GenerateResponse,
+    GenerateResponseChoice,
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.logprobs import Logprob
 from vllm.sampling_params import SamplingParams
 
 
@@ -110,3 +118,32 @@ def test_generate_request_rejects_placeholder_outside_prompt():
                 kwargs_data={"image": ["encoded"]},
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "sampling_masks",
+    [[None], [[[1, 2], [3]]], [[[5], [6, 7]], None]],
+    ids=["no-mask", "mask", "mixed-choices"],
+)
+def test_generate_response_json_matches_model_dump(sampling_masks):
+    choices = []
+    for index, sampling_mask in enumerate(sampling_masks):
+        choice = GenerateResponseChoice(
+            index=index, token_ids=[7, 8], finish_reason="length"
+        )
+        choice.sampling_mask = sampling_mask
+        choices.append(choice)
+    response = GenerateResponse(
+        request_id="req-0",
+        model="model",
+        created=1,
+        choices=choices,
+        usage=UsageInfo(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+        prompt_logprobs=[None, {5: Logprob(logprob=-0.25, rank=1, decoded_token="a")}],
+    )
+
+    body = json.loads(generate_response_to_json(response).body)
+
+    assert body == json.loads(JSONResponse(content=response.model_dump()).body)
+    for choice in body["choices"]:
+        assert list(choice) == list(GenerateResponseChoice.model_fields)

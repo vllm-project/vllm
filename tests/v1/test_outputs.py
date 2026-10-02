@@ -91,6 +91,50 @@ def test_sampling_mask_lists_slices_multiple_positions_by_request():
     assert multi.cu_num_generated_tokens is None
 
 
+def test_sampling_mask_lists_concat_to_nested_list():
+    chunks = [
+        SamplingMaskLists(np.array([10, 11, 20]), np.array([0, 2, 3])),
+        SamplingMaskLists(np.array([30, 31])),
+        SamplingMaskLists(np.array([], dtype=np.int64), np.array([0, 0])),
+        SamplingMaskLists(np.array([40, 50]), np.array([0, 1, 2])),
+    ]
+
+    nested = SamplingMaskLists.concat_to_nested_list(chunks)
+
+    assert nested == [p for chunk in chunks for p in chunk.to_nested_list()]
+    assert nested == [[10, 11], [20], [30, 31], [], [40], [50]]
+
+
+@pytest.mark.parametrize(
+    "counts,num_sampled_tokens,expected",
+    [
+        ([2, 0, 3], None, [[0, 1], [], [6, 7, 8]]),
+        ([2, 4, 1], None, [[0, 1], [1, 3, 5, 7], [6]]),
+        ([1, 2, 3, 1], np.array([1, 2]), [[0], [6, 7, 8], [9]]),
+        ([1, 2, 4, 1], np.array([1, 2]), [[0], [1, 3, 5, 7], [9]]),
+    ],
+    ids=["compact", "bitmask-fallback", "multi-row", "multi-row-fallback"],
+)
+def test_sampling_mask_tensors_tolists(counts, num_sampled_tokens, expected):
+    # Compact rows of width 3; a count above the width selects the bitmask,
+    # which marks the odd token ids of an 8-token vocabulary.
+    num_rows = len(counts)
+    tensors = SamplingMaskTensors(
+        token_ids=torch.arange(num_rows * 3, dtype=torch.int32).view(num_rows, 3),
+        packed_mask=torch.full((num_rows, 1), 0b10101010, dtype=torch.uint8),
+        counts=torch.tensor(counts, dtype=torch.int32),
+        vocab_size=8,
+        rows_per_request=1 if num_sampled_tokens is None else 2,
+    )
+
+    lists = tensors.tolists(num_sampled_tokens)
+
+    assert lists.to_nested_list() == expected
+    assert lists.token_ids.dtype == np.int32
+    if num_sampled_tokens is not None:
+        assert lists.cu_num_generated_tokens == [0, 1, 3]
+
+
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
 @pytest.mark.skipif(
     current_platform.is_xpu(),

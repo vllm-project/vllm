@@ -2812,12 +2812,19 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let decoded_sampling_mask_outputs =
         decode_engine_core_outputs(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
-    let sampling_mask_output =
-        &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
-    assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
+    let sampling_mask_outputs = &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs;
+    assert!(sampling_mask_outputs[0].mm_cache_miss_hashes.is_none());
+    assert!(sampling_mask_outputs.iter().all(|output| output.sampling_mask_row.is_none()));
     assert_eq!(
-        sampling_mask_output.new_sampling_mask.as_ref().unwrap().rows,
-        vec![vec![2, 12, 16, 17, 18]]
+        (sampling_mask_outputs.iter())
+            .map(|output| output.new_sampling_mask.as_ref().map(|mask| mask.rows.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(vec![vec![2, 12, 16]]),
+            None,
+            Some(vec![vec![17], vec![18]]),
+            Some(vec![vec![20, 21]]),
+        ]
     );
 
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
@@ -2858,6 +2865,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
                         prompt_token_id_logprobs: None,
+                        sampling_mask_row: None,
                     },
                 ],
                 scheduler_stats: None,
