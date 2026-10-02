@@ -25,6 +25,12 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
             )
 
             return XPressSpeculator(vllm_config, device)
+        if "LiLiCorrDraftModel" in architectures:
+            from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import (
+                LiLiCorrSpeculator,
+            )
+
+            return LiLiCorrSpeculator(vllm_config, device)
         if "DFlash2DraftModel" in architectures:
             from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import (
                 DFlash2Speculator,
@@ -64,5 +70,11 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
         )
 
         return EagleSpeculator(vllm_config, device)
+    elif speculative_config.uses_draft_model():
+        from vllm.v1.worker.gpu.spec_decode.draft_model.speculator import (
+            PlainDraftModelSpeculator,
+        )
+
+        return PlainDraftModelSpeculator(vllm_config, device)
     else:
         raise NotImplementedError(f"{speculative_config.method} is not supported yet.")
