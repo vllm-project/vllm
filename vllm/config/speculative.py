@@ -1929,14 +1929,13 @@ class SpeculativeConfig:
 
         XPress serves under method="dflash": it is a refiner on top of the same
         drafter, and the inheritance mirrors that (XPressSpeculator subclasses
-        DFlashSpeculator). The draft architecture is what names it, and this is the
-        only place that looks.
+        DFlashSpeculator).
         """
         return (
             self.method == "dflash"
             and self.draft_model_config is not None
             and any(
-                "Qwen3XPressModel" in arch
+                arch in ("Qwen3XPressModel", "DFlashQwen3XPressModel")
                 for arch in self.draft_model_config.architectures
             )
         )
