@@ -112,6 +112,11 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def _is_video_model(self) -> bool:
         if not hasattr(self.get_hf_processor(), "video_processor"):
             return False
+        try:
+            Base.check_version("5.18.0", "video inputs")
+        except ImportError as e:
+            logger.info_once("%s, so video inputs are disabled.", e)
+            return False
         num_frames = self._get_min_video_frames()
         side = _MIN_DUMMY_SIDE
         # TODO: Drop the except branch once every video processor can count, see
