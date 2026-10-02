@@ -24,6 +24,17 @@ _ENV_PREFIXES = (
 
 _MALLOC_FLAGS = {"default": 0x0, "finegrained": 0x1, "uncached": 0x3}
 
+_HANDLE_BYTES = 64
+_IPC_LAZY_ENABLE_PEER_ACCESS = 0x1
+
+
+class _HipIpcMemHandle(ctypes.Structure):
+    """c_ubyte, not c_char: ctypes converts a c_char array to bytes and
+    truncates it at the first NUL, which silently corrupts the handle."""
+
+    _fields_ = [("reserved", ctypes.c_ubyte * _HANDLE_BYTES)]
+
+
 _hip = None
 
 
@@ -32,6 +43,13 @@ def _lib():
     if _hip is None:
         _hip = ctypes.CDLL("libamdhip64.so")
         _hip.hipGetErrorString.restype = ctypes.c_char_p
+        # hipIpcOpenMemHandle takes the handle by value, not by pointer.
+        _hip.hipIpcOpenMemHandle.argtypes = [
+            ctypes.POINTER(ctypes.c_void_p),
+            _HipIpcMemHandle,
+            ctypes.c_uint,
+        ]
+        _hip.hipIpcCloseMemHandle.argtypes = [ctypes.c_void_p]
     return _hip
 
 
@@ -174,6 +192,62 @@ def _ipc_probe_foreign_device(size: int) -> str:
     return out
 
 
+def _ipc_mesh_probe(group, size: int, flags: int) -> str:
+    """Exports one buffer per rank and attaches every peer's. Handles travel
+    over the CPU group, so the device group under test stays untouched.
+
+    The attach side is the one that aborted in CI when
+    HSA_ENABLE_IPC_MODE_LEGACY was set, and nothing probed it until now.
+    """
+    hip = _lib()
+    ptr = ctypes.c_void_p()
+    rc = hip.hipExtMallocWithFlags(
+        ctypes.byref(ptr), ctypes.c_size_t(size), ctypes.c_uint(flags)
+    )
+    if rc != 0:
+        hip.hipGetLastError()
+        return f"malloc failed {_err(rc)}"
+
+    handle = _HipIpcMemHandle()
+    rc = hip.hipIpcGetMemHandle(ctypes.byref(handle), ptr)
+    hip.hipGetLastError()
+    mine = bytes(handle.reserved) if rc == 0 else None
+    export = "ok" if rc == 0 else f"failed {_err(rc)}"
+
+    peers: list = [None] * group.world_size
+    try:
+        torch.distributed.all_gather_object(peers, mine, group=group.cpu_group)
+    except Exception as e:
+        hip.hipFree(ptr)
+        hip.hipGetLastError()
+        return f"export {export}, exchange failed {type(e).__name__}: {e}"
+
+    problems = []
+    for peer, raw in enumerate(peers):
+        if peer == group.rank_in_group:
+            continue
+        if raw is None:
+            problems.append(f"rank{peer} exported nothing")
+            continue
+        opened = ctypes.c_void_p()
+        theirs = _HipIpcMemHandle()
+        ctypes.memmove(ctypes.byref(theirs), raw, _HANDLE_BYTES)
+        rc = hip.hipIpcOpenMemHandle(
+            ctypes.byref(opened), theirs, _IPC_LAZY_ENABLE_PEER_ACCESS
+        )
+        hip.hipGetLastError()
+        if rc != 0:
+            problems.append(f"rank{peer} {_err(rc)}")
+            continue
+        hip.hipIpcCloseMemHandle(opened)
+        hip.hipGetLastError()
+
+    hip.hipFree(ptr)
+    hip.hipGetLastError()
+    attach = "ok" if not problems else "; ".join(problems)
+    return f"export {export}, attach {attach}"
+
+
 def dump(tag: str, groups: dict | None = None, heavy: bool = False) -> None:
     """Heavy adds probes that perturb state, so they stay off at the points
     right before a collective we are trying to observe."""
@@ -251,6 +325,15 @@ def warm_each(groups: dict, tag: str) -> None:
                     torch.accelerator.current_device_index(),
                     getattr(group, "device", None),
                     stream.device,
+                )
+                # Sizes and flags taken from the two CI failures: 2 MiB with
+                # flags 3 aborted on attach, 6 MiB failed on export.
+                logger.warning(
+                    "[EEP-DEBUG] %s warm %s mesh 2MiB/uncached [%s] 6MiB/default [%s]",
+                    tag,
+                    name,
+                    _ipc_mesh_probe(group, 2 << 20, 0x3),
+                    _ipc_mesh_probe(group, 6 << 20, 0x0),
                 )
                 if os.getenv("VLLM_EEP_DEBUG_SET_DEVICE") == "1":
                     torch.accelerator.set_device_index(group.device.index)
