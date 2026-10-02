@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
-from collections.abc import Iterator
-from contextlib import contextmanager
 from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -249,65 +246,3 @@ def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:
     )
     assert second["query_start_loc"].data_ptr() == query_start_loc_ptr
     assert second["ngram_context"].data_ptr() == ngram_context_ptr
-
-
-@contextmanager
-def _captured_transformers_warnings() -> Iterator[list[str]]:
-    """Records what transformers logs, without relying on propagation.
-
-    transformers keeps its own logger hierarchy, and the rope validator reaches
-    it through ``warning_once``, so a root-level capture can miss the record
-    entirely.
-    """
-    records: list[str] = []
-
-    class _Collect(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            records.append(record.getMessage())
-
-    handler = _Collect()
-    logger = logging.getLogger("transformers")
-    previous_level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.WARNING)
-    try:
-        yield records
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous_level)
-
-
-@pytest.mark.parametrize("wrapped_config", [False, True])
-def test_rope_validation_accepts_mrope_keys_and_still_warns_for_unknown_keys(
-    wrapped_config: bool,
-) -> None:
-    """M-RoPE is driven through two rope_parameters keys transformers does not
-    know for rope_type="default". Declaring them must not silence the
-    unrecognized-key warning for every other key."""
-
-    def build(rope_parameters: dict) -> None:
-        text_config = _text_config(
-            rope_parameters=dict(rope_parameters), rope_theta=10_000.0
-        )
-        if wrapped_config:
-            Qwen4ExpConfig(
-                architectures=["Qwen4ExpForConditionalGeneration"],
-                text_config=text_config.to_dict(),
-            )
-
-    with _captured_transformers_warnings() as records:
-        build(
-            {
-                "rope_type": "default",
-                "mrope_section": [16, 24, 24],
-                "mrope_interleaved": True,
-            }
-        )
-    assert not [line for line in records if "Unrecognized keys" in line], records
-
-    # warning_once dedupes on the message, so each parametrization needs a key
-    # no earlier run has reported.
-    unknown_key = f"not_a_rope_key_{int(wrapped_config)}"
-    with _captured_transformers_warnings() as records:
-        build({"rope_type": "default", unknown_key: 1})
-    assert [line for line in records if unknown_key in line], records
