@@ -942,6 +942,7 @@ class CoreEngineActorManager:
         runtime_env = RuntimeEnv(
             env_vars=self.env_vars_dict | {"VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": "1"}
         )
+        new_actors = []
         for i, (pg, local_rank) in enumerate(zip(placement_groups, local_dp_ranks)):
             rank = cur_data_parallel_size + i
             dp_vllm_config = copy.deepcopy(cur_vllm_config)
@@ -985,6 +986,7 @@ class CoreEngineActorManager:
                     local_dp_rank=local_rank,
                 )
             )
+            new_actors.append(actor)
 
             if local_client:
                 self.local_engine_actors.append(actor)
@@ -993,14 +995,8 @@ class CoreEngineActorManager:
             self.created_placement_groups.append(pg)
             self.placement_group_is_local.append(local_client)
 
-        actors = (
-            self.local_engine_actors[-new_local_engines:]
-            if new_local_engines > 0
-            else []
-        ) + self.remote_engine_actors[-(len(placement_groups) - new_local_engines) :]
-
-        ray.get([actor.wait_for_init.remote() for actor in actors])
-        for actor in actors:
+        ray.get([actor.wait_for_init.remote() for actor in new_actors])
+        for actor in new_actors:
             ref = actor.run.remote()
             self.run_refs.append(ref)
             self.actor_run_ref_dict[actor] = ref
