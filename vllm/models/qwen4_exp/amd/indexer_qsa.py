@@ -18,6 +18,7 @@ from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
+from vllm.utils.math_utils import cdiv
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
@@ -262,10 +263,17 @@ class QSAIndexer(nn.Module):
         from .ops.qsa import qsa_select_paged_tokens
         from .ops.qsa_flydsl import flydsl_select_paged_tokens
 
+        block_table = metadata.block_table
+        if metadata.num_prefills:
+            # The table is max_model_len wide and K1 sizes its grid and score
+            # buffer from that width. Batches with prefills never replay a
+            # full graph, so size both to the longest live request instead.
+            tokens_per_page = metadata.storage_block_size * metadata.compress_ratio
+            block_table = block_table[:, : cdiv(metadata.max_seq_len, tokens_per_page)]
         selected = flydsl_select_paged_tokens(
             q,
             self.compressed_key_cache.kv_cache,
-            metadata.block_table,
+            block_table,
             metadata.token_to_req,
             metadata.logical_positions,
             metadata.seq_lens,
@@ -278,7 +286,7 @@ class QSAIndexer(nn.Module):
         return qsa_select_paged_tokens(
             q,
             self.compressed_key_cache.kv_cache,
-            metadata.block_table,
+            block_table,
             metadata.token_to_req,
             metadata.logical_positions,
             metadata.seq_lens,
