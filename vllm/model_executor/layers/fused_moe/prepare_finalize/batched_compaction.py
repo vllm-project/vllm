@@ -110,7 +110,9 @@ class BatchedExpertCompaction:
     ) -> tuple[torch.Tensor, Callable[[], None]]:
         shape = self._restore_shapes[ubatch_id]
         if shape is not None:
-            restored = output.new_zeros(shape)
+            # Combine only reads live token positions, which all lie in the
+            # compacted head, so the tail rows need no zero fill.
+            restored = output.new_empty(shape)
             restored[:, : output.shape[1]].copy_(output)
             output = restored
 

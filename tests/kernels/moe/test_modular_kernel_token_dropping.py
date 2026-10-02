@@ -507,7 +507,6 @@ def test_batched_compaction_handles_fp8_dispatch_scale_layout(
     restored, receiver = compaction.restore(compact_values, 0)
     assert restored.shape == values.shape
     assert torch.equal(restored[:, :4], compact_values)
-    assert torch.equal(restored[:, 4:], torch.zeros_like(restored[:, 4:]))
     receiver()
 
 
@@ -706,7 +705,6 @@ def test_batched_compaction_restores_combine_layout(
         restored = combine.call_args.args[0]
         assert restored.shape == received.shape
         torch.testing.assert_close(restored[:, :rows], compact_output)
-        assert torch.count_nonzero(restored[:, rows:]) == 0
         assert combine.call_args.args[3] == (slot,)
         if do_async:
             recv_hook, receiver = finalize_result
