@@ -254,6 +254,17 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             )
         return self.draft_tokens[:num_reqs]
 
+    # Each MTP module may carry its own LM head, selected by spec_step_idx.
+    def compute_draft_logits(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
+
+    def get_draft_top_tokens(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.get_top_tokens(hidden_states, spec_step_idx=spec_step_idx)
+
     @torch.inference_mode()
     def _run_model(
         self,
@@ -428,6 +439,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 self.seeds,
                 self.current_draft_step,
                 self.draft_logits,
+                spec_step_idx=step,
             )
 
             self.draft_tokens[:num_reqs, step] = draft_tokens
