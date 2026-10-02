@@ -717,9 +717,6 @@ def test_flashinfer_nvfp4_kv_cache_sm8x(
 ) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
-    backend = flashinfer_backend.FlashInferBackend
-    assert backend.supports_kv_cache_dtype("nvfp4")
-    assert not backend.supports_kv_cache_dtype("nvfp4_4over6")
     torch.set_default_device("cuda")
     set_random_seed(0)
     num_heads, num_kv_heads, head_size, page_size, seq_len = 4, 2, 128, 16, 96

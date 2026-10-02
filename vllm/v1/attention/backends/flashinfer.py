@@ -113,8 +113,7 @@ _KVPair = tuple[torch.Tensor, torch.Tensor]
 def _nvfp4_kv_views(
     kv_cache: torch.Tensor, num_kv_heads: int, head_size: int
 ) -> tuple[_KVPair, _KVPair, str]:
-    """Data and scale views of an NVFP4 cache whose pages FlashInfer's
-    slot-mapping writer fills as [K data | K scale | V data | V scale]."""
+    """Views of NVFP4 pages laid out as [K data | K scale | V data | V scale]."""
     num_blocks, num_slots, block_size, full_dim = kv_cache.shape
     hnd = kv_cache.stride()[1:] == (block_size * full_dim, full_dim, 1)
     if not hnd and kv_cache.stride()[1:] != (full_dim, num_slots * full_dim, 1):
@@ -529,8 +528,7 @@ class FlashInferBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is not None and kv_cache_dtype.startswith("nvfp4"):
             if current_platform.is_device_capability_family(80):
-                # SM8x writes through FlashInfer's slot-mapping kernel, which has
-                # no scale search, so variants such as nvfp4_4over6 stay SM100-only.
+                # The slot-mapping writer has no scale search.
                 return kv_cache_dtype == "nvfp4"
             return (
                 current_platform.is_device_capability_family(100)
@@ -811,8 +809,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # Cannot use self.kv_cache_spec.dtype here because kv_cache_spec
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.is_kvcache_nvfp4 = self.cache_dtype.startswith("nvfp4")
-            # SM8x reads NVFP4 through the native fa2 wrappers, planned with the
-            # uint8 storage dtype; SM100 keeps the trtllm-gen path.
+            # fa2 plans NVFP4 by its uint8 storage dtype.
             self.nvfp4_on_sm8x = (
                 self.is_kvcache_nvfp4
                 and current_platform.is_device_capability_family(80)
@@ -1950,8 +1947,6 @@ class FlashInferImpl(AttentionImpl):
         )
         self.cache_dtype = kv_cache_dtype
         self.is_kvcache_nvfp4 = kv_cache_dtype.startswith("nvfp4")
-        # SM8x writes NVFP4 with FlashInfer's slot-mapping kernel and reads it
-        # with fa2 using a model-dtype query and output.
         self.nvfp4_on_sm8x = (
             self.is_kvcache_nvfp4 and current_platform.is_device_capability_family(80)
         )
