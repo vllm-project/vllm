@@ -11,6 +11,7 @@ from torch import nn
 
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
     DeviceConfig,
     LoadConfig,
     VllmConfig,
@@ -122,7 +123,7 @@ def test_lilicorr_matches_exported_head(head_width, slots, dtype):
         set_current_vllm_config(
             VllmConfig(
                 device_config=DeviceConfig("cuda"),
-                compilation_config=CompilationConfig(mode=0),
+                compilation_config=CompilationConfig(mode=CompilationMode.NONE),
             )
         ),
     ):
@@ -183,7 +184,7 @@ def test_runtime_length_keeps_trained_checkpoint_geometry(monkeypatch):
     with set_current_vllm_config(
         VllmConfig(
             device_config=DeviceConfig("cpu"),
-            compilation_config=CompilationConfig(mode=0),
+            compilation_config=CompilationConfig(mode=CompilationMode.NONE),
         )
     ):
         for slots in (1, 3):
@@ -268,7 +269,11 @@ def test_candidates_use_global_partition_and_exclude_padding(monkeypatch, tp_siz
         )
         monkeypatch.setattr(logits_processor, "_topk", lambda x, k: x.topk(k, dim=-1))
         ids, values = logits_processor.LogitsProcessor.get_top_k_tokens(
-            fake, lm_head, torch.empty(2, 1), 2, return_log_probs=True
+            fake,
+            lm_head,
+            torch.empty(2, 1),
+            2,
+            return_log_probs=True,
         )
         expected = torch.cat(valid_shards, -1).log_softmax(-1).topk(2)
         torch.testing.assert_close(ids, expected.indices)
@@ -349,22 +354,35 @@ def test_candidate_generation_routes_scores_and_adaptive_inputs(monkeypatch, lil
         compute_candidates=lambda h: (candidates, log_probs),
         model=SimpleNamespace(lilicorr=score, candidate_selector=score),
     )
-    spec.target_embeddings = lambda ids: ids.float().unsqueeze(-1).expand(*ids.shape, 4)
     if lilicorr:
+        assert isinstance(spec, LiLiCorrSpeculator)
+        monkeypatch.setattr(
+            spec,
+            "target_embeddings",
+            lambda ids: ids.float().unsqueeze(-1).expand(*ids.shape, 4),
+            raising=False,
+        )
         spec.anchor_hidden.copy_(torch.arange(12).view(3, 4))
         spec.anchor_valid[:2] = True
-    spec.candidate_sampler.sample = sample
-    spec._maybe_predict_acceptance = lambda *args: adaptive_inputs.extend(args)
+    monkeypatch.setattr(spec.candidate_sampler, "sample", sample)
+    monkeypatch.setattr(
+        spec, "_maybe_predict_acceptance", lambda *args: adaptive_inputs.extend(args)
+    )
     spec._generate_draft(3, 9, None, None, None)
 
     expected_ids = candidates.view(3, 2, 4)
-    expected_first = spec.target_embeddings(expected_ids) if lilicorr else expected_ids
+    expected_first = (
+        spec.target_embeddings(expected_ids)
+        if isinstance(spec, LiLiCorrSpeculator)
+        else expected_ids
+    )
     torch.testing.assert_close(scoring_inputs[0], expected_first)
     torch.testing.assert_close(scoring_inputs[1], log_probs.view(3, 2, 4))
     torch.testing.assert_close(
         scoring_inputs[2], hidden[spec.sample_indices].view(3, 2, 4)
     )
     if lilicorr:
+        assert isinstance(spec, LiLiCorrSpeculator)
         torch.testing.assert_close(scoring_inputs[3], spec.anchor_hidden)
         torch.testing.assert_close(scoring_inputs[4], spec.anchor_valid)
     else:
@@ -472,7 +490,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
 ):
     from vllm.model_executor.models.lilicorr import LiLiCorr, LiLiCorrForCausalLM
 
-    wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)
+    wrapper = LiLiCorrForCausalLM.__new__(LiLiCorrForCausalLM)  # type: ignore[type-abstract]
     nn.Module.__init__(wrapper)
     wrapper.model = LiLiCorr.__new__(LiLiCorr)
     nn.Module.__init__(wrapper.model)
@@ -480,7 +498,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     with set_current_vllm_config(
         VllmConfig(
             device_config=DeviceConfig("cpu"),
-            compilation_config=CompilationConfig(mode=0),
+            compilation_config=CompilationConfig(mode=CompilationMode.NONE),
         )
     ):
         wrapper.model.lilicorr = LiLiCorrHead(
@@ -615,7 +633,7 @@ def owned_head_model(monkeypatch):
         with set_current_vllm_config(
             VllmConfig(
                 device_config=DeviceConfig("cpu"),
-                compilation_config=CompilationConfig(mode=0),
+                compilation_config=CompilationConfig(mode=CompilationMode.NONE),
             )
         ):
             model = LiLiCorrForCausalLM(vllm_config=vllm_config)
@@ -720,7 +738,7 @@ def test_quantized_head_calls_methods_without_reading_packed_weights(monkeypatch
     with set_current_vllm_config(
         VllmConfig(
             device_config=DeviceConfig("cpu"),
-            compilation_config=CompilationConfig(mode=0),
+            compilation_config=CompilationConfig(mode=CompilationMode.NONE),
         )
     ):
         head = LiLiCorrHead(

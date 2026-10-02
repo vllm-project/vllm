@@ -165,6 +165,7 @@ class OpenAIServingChat(GenerateBaseServing):
             tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            tokenizer=self.renderer.tokenizer,
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
@@ -198,6 +199,20 @@ class OpenAIServingChat(GenerateBaseServing):
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
+        )
+
+    def _make_parser(
+        self,
+        request: ChatCompletionRequest,
+        tokenizer: TokenizerLike,
+        chat_template_kwargs: dict[str, Any] | None,
+    ) -> Parser:
+        assert self.parser_cls is not None
+        return self.parser_cls(
+            tokenizer,
+            request.tools,
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
         )
 
     def _engine_chat_template_kwargs(
@@ -267,12 +282,7 @@ class OpenAIServingChat(GenerateBaseServing):
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
         parser: Parser | None = None
         if self.parser_cls is not None:
-            parser = self.parser_cls(
-                tokenizer,
-                request.tools,
-                chat_template_kwargs=chat_template_kwargs,
-                model_config=self.model_config,
-            )
+            parser = self._make_parser(request, tokenizer, chat_template_kwargs)
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
@@ -490,12 +500,7 @@ class OpenAIServingChat(GenerateBaseServing):
                         "Tokenizer not available when `skip_tokenizer_init=True`"
                     )
                 parsers: list[Parser | None] = [
-                    self.parser_cls(
-                        tokenizer,
-                        request.tools,
-                        chat_template_kwargs=chat_template_kwargs,
-                        model_config=self.model_config,
-                    )
+                    self._make_parser(request, tokenizer, chat_template_kwargs)
                     for _ in range(num_choices)
                 ]
             else:
@@ -961,10 +966,17 @@ class OpenAIServingChat(GenerateBaseServing):
         tool_parser_cls = (
             self.parser_cls.tool_parser_cls if self.parser_cls is not None else None
         )
-        for output in final_res.outputs:
+        for i, output in enumerate(final_res.outputs):
             # check for error finish reason and raise GenerationError
             # finish_reason='error' indicates a retryable request-level internal error
             self._raise_if_error(output.finish_reason, request_id)
+            if i > 0 and parser is not None:
+                # Parsers are stateful: like streaming, use one per choice.
+                parser = self._make_parser(
+                    request, tokenizer, self._effective_chat_template_kwargs(request)
+                )
+            if parser is not None and final_res.prompt_token_ids is not None:
+                parser.set_prompt_token_ids(final_res.prompt_token_ids)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 

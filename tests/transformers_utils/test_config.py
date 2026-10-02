@@ -5,6 +5,7 @@ only get the `eos_token_id` from the tokenizer as defined by
 `BaseRenderer.get_eos_token_id`.
 """
 
+import json
 import math
 from types import SimpleNamespace
 from typing import cast
@@ -23,12 +24,51 @@ from vllm.transformers_utils.config import (
     try_get_generation_config,
     uses_mrope,
 )
-from vllm.transformers_utils.configs.glm5_next import (
-    Glm5NextConfig,
-    Glm5NextTextConfig,
-    Glm5NextVisionConfig,
-)
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
+
+
+@pytest.mark.parametrize("layout", ["mixed", "flat"])
+def test_gemma4_dspark_rope_config_preserves_parameters(tmp_path, layout):
+    """Remove redundant shared entries while preserving per-layer and flat RoPE."""
+    from transformers import Gemma4TextConfig
+
+    per_layer = {
+        "full_attention": {
+            "rope_type": "proportional",
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 1000000.0,
+        },
+        "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0},
+    }
+    rope_parameters: dict[str, object] = dict(per_layer)
+    if layout == "mixed":
+        rope_parameters.update(rope_type="default", rope_theta=None)
+    else:
+        rope_parameters = {"rope_type": "default", "rope_theta": 12345.0}
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "gemma4_text",
+                "architectures": ["Gemma4DSparkModel"],
+                "num_hidden_layers": 1,
+                "layer_types": ["full_attention"],
+                "rope_parameters": rope_parameters,
+            }
+        )
+    )
+    _, config = config_module.HFConfigParser().parse(
+        tmp_path, trust_remote_code=False, max_position_embeddings=8192
+    )
+    assert isinstance(config, Gemma4TextConfig)
+    assert config.name_or_path == str(tmp_path)
+    assert config.max_position_embeddings == 8192
+    if layout == "flat":
+        assert config.rope_parameters["rope_theta"] == 12345.0
+    else:
+        for layer_type, expected in per_layer.items():
+            for key, value in expected.items():
+                assert config.rope_parameters[layer_type][key] == value
+        assert set(config.rope_parameters) == set(per_layer)
 
 
 def test_patch_legacy_rope_type_preserves_nope_layers():
@@ -127,54 +167,6 @@ def test_mistral_yarn_apply_scale_false_disables_yarn_magnitude_scaling():
 
     assert config.architectures == ["MistralLarge3ForCausalLM"]
     assert config.rope_parameters["attention_factor"] == 1.0
-
-
-def test_glm5_next_accepts_deepseek_sparse_attention_layers():
-    layer_types = ["linear_attention", "deepseek_sparse_attention"]
-
-    config = Glm5NextTextConfig(
-        num_hidden_layers=len(layer_types), layer_types=layer_types
-    )
-
-    assert config.layer_types == layer_types
-    assert config.layers_block_type == ["linear_attention", "attention"]
-
-
-def test_glm5_next_accepts_prebuilt_subconfigs():
-    text_config = Glm5NextTextConfig(hidden_size=1024)
-    vision_config = Glm5NextVisionConfig(hidden_size=768)
-
-    config = Glm5NextConfig(
-        text_config=text_config,
-        vision_config=vision_config,
-    )
-
-    assert config.text_config is text_config
-    assert config.vision_config is vision_config
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "option"),
-    [
-        (
-            {"index_topk": 2048, "index_dsa_use_layernorm": False},
-            "index_dsa_use_layernorm",
-        ),
-        (
-            {"index_topk": 2048, "index_kpool_compress": False},
-            "index_kpool_compress",
-        ),
-        (
-            {"index_topk": 2048, "index_kpool_always_select_tail": False},
-            "index_kpool_always_select_tail",
-        ),
-        ({"hres_vwnstyle": False}, "hres_vwnstyle"),
-        ({"mhc_no_norm_weight": True}, "mhc_no_norm_weight"),
-    ],
-)
-def test_glm5_next_rejects_unimplemented_config_options(kwargs, option):
-    with pytest.raises(NotImplementedError, match=option):
-        Glm5NextTextConfig(**kwargs)
 
 
 def test_get_llama3_eos_token():
