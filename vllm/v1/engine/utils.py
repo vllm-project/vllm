@@ -1077,6 +1077,9 @@ class CoreEngineActorManager:
         import ray
 
         self.manager_stopped.set()
+        # Ray cleanup would reconnect a driver whose owning job already ended.
+        if not ray.is_initialized():
+            return
         for actor in self.local_engine_actors + self.remote_engine_actors:
             ray.kill(actor)
         for pg in self.created_placement_groups:
