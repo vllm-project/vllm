@@ -293,6 +293,13 @@ class MoERunner(MoERunnerInterface):
         # Needed for string -> MoERunner layer lookup in custom ops.
         self.layer_name = layer_name
 
+        # Optional callback run first in `_forward_impl`, before any kernel
+        # that reads `router_logits` is enqueued. A model that produces the
+        # router logits on a side CUDA stream sets this to make the current
+        # stream wait on that stream (see NemotronHMoE with
+        # VLLM_NEMOTRON_H_MOE_ROUTER_OVERLAP).
+        self.router_logits_wait: Callable[[], None] | None = None
+
         self._forward_entry = self._select_forward()
 
         # For smuggling this layer into the fused moe custom op
@@ -886,6 +893,11 @@ class MoERunner(MoERunnerInterface):
         Returns routed output, optionally paired with shared-expert output. A
         fused consumer may request the routed output in deferred-finalize form.
         """
+        # Join a side-stream producer of router_logits (if any) before anything
+        # below can read them.
+        if self.router_logits_wait is not None:
+            self.router_logits_wait()
+
         # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
 

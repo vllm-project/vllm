@@ -24,6 +24,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -34,6 +35,7 @@ from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -86,8 +88,18 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    current_stream,
+    direct_register_custom_op,
+)
+
+logger = init_logger(__name__)
 
 
 class NemotronHMLP(nn.Module):
@@ -131,6 +143,123 @@ class NemotronHMLP(nn.Module):
         x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
         x, _ = self.down_proj(x)
         return x
+
+
+# Side stream for VLLM_NEMOTRON_H_MOE_ROUTER_OVERLAP, shared by all NemotronHMoE
+# layers. It is dedicated to the router gate: nothing else is enqueued on it,
+# which the buffer-lifetime argument in NemotronHRouterGateOverlap relies on.
+_router_gate_stream: torch.cuda.Stream | None = None
+
+# layer name -> NemotronHRouterGateOverlap, for the custom op below.
+_router_gate_overlaps: dict[str, "NemotronHRouterGateOverlap"] = {}
+
+
+def _get_router_gate_stream() -> torch.cuda.Stream:
+    global _router_gate_stream
+    if _router_gate_stream is None:
+        _router_gate_stream = torch.cuda.Stream()
+    return _router_gate_stream
+
+
+class NemotronHRouterGateOverlap:
+    """Runs the MoE router gate GEMM on a side CUDA stream.
+
+    In a latent MoE layer the router gate (`gate(x)`) and the routed input
+    transform (`fc1_latent_proj(x)`, applied by the MoE runner) both read only
+    the layer input, but they otherwise run back to back on one stream. Here
+    the gate is forked onto a side stream so the two GEMMs run concurrently:
+
+    * fork (`fork`): record `fork_event` on the current stream (after `x` has
+      been produced), make the side stream wait on it, run the unchanged
+      `gate` module on the side stream and record `done_event` there.
+    * join (`wait`): make the current stream wait on `done_event`. The MoE
+      runner calls this first thing in `_forward_impl` (the body of the opaque
+      MoE custom op, the only consumer of the router logits), i.e. before any
+      kernel that reads the logits is enqueued.
+
+    Ordering uses CUDA events only (record / wait), which CUDA graph capture
+    turns into graph edges; there is no polling and no timing assumption.
+    Tensor lifetimes across the two streams:
+
+    * The router logits are allocated on the side stream. Their block can
+      only be handed out again to a later allocation on the side stream, and
+      every later use of the side stream starts with a wait on a `fork_event`
+      recorded on the current stream after all consumers of these logits
+      were enqueued (the next MoE layer forks after this layer's MoE op).
+    * `x` is allocated on the current stream and is also an input of the MoE
+      op, so it is alive until the join has been enqueued; any later reuse of
+      its block on the current stream is ordered after the join, hence after
+      the gate GEMM finished reading it.
+
+    The same `gate` module runs on the same input, so the router logits are
+    bitwise identical to the sequential order. Batches with more than
+    `max_tokens` tokens run the gate inline on the current stream.
+    """
+
+    # Logs the first side-stream fork once per process (engagement check).
+    _fork_logged = False
+
+    def __init__(self, gate: nn.Module, num_experts: int, max_tokens: int):
+        self.gate = gate
+        self.num_experts = num_experts
+        self.max_tokens = max_tokens
+        self.fork_event = torch.cuda.Event()
+        self.done_event = torch.cuda.Event()
+        self._pending = False
+
+    def fork(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[0] > self.max_tokens:
+            self._pending = False
+            router_logits, _ = self.gate(x)
+            return router_logits
+        side = _get_router_gate_stream()
+        self.fork_event.record(current_stream())
+        side.wait_event(self.fork_event)
+        with torch.cuda.stream(side):
+            router_logits, _ = self.gate(x)
+            self.done_event.record(side)
+        self._pending = True
+        if not NemotronHRouterGateOverlap._fork_logged:
+            NemotronHRouterGateOverlap._fork_logged = True
+            logger.info(
+                "NemotronH MoE router gate runs on a side CUDA stream, "
+                "overlapped with fc1_latent_proj (batches up to %d tokens).",
+                self.max_tokens,
+            )
+        return router_logits
+
+    def wait(self) -> None:
+        if self._pending:
+            current_stream().wait_event(self.done_event)
+            self._pending = False
+
+
+def nemotron_h_moe_router_gate_fork(
+    hidden_states: torch.Tensor,
+    num_experts: int,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    overlap = _router_gate_overlaps[_resolve_layer_name(layer_name)]
+    return overlap.fork(hidden_states)
+
+
+def nemotron_h_moe_router_gate_fork_fake(
+    hidden_states: torch.Tensor,
+    num_experts: int,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    return hidden_states.new_empty(
+        (hidden_states.shape[0], num_experts), dtype=torch.float32
+    )
+
+
+# Opaque to torch.compile, so the stream switch and the runtime num_tokens
+# check happen when the op runs (eagerly or during CUDA graph capture).
+direct_register_custom_op(
+    op_name="nemotron_h_moe_router_gate_fork",
+    op_func=nemotron_h_moe_router_gate_fork,
+    fake_impl=nemotron_h_moe_router_gate_fork_fake,
+)
 
 
 class NemotronHMoE(nn.Module):
@@ -253,6 +382,27 @@ class NemotronHMoE(nn.Module):
             router_logits_dtype=self.gate.out_dtype,
         )
 
+        # Optionally run the router gate on a side stream, concurrently with
+        # fc1_latent_proj (see NemotronHRouterGateOverlap).
+        self.router_gate_overlap: NemotronHRouterGateOverlap | None = None
+        if (
+            envs.VLLM_NEMOTRON_H_MOE_ROUTER_OVERLAP
+            and current_platform.is_cuda()
+            and not self.is_sequence_parallel
+            and not parallel_config.enable_dbo
+        ):
+            assert self.gate.out_dtype == torch.float32
+            self.router_gate_overlap = NemotronHRouterGateOverlap(
+                self.gate,
+                num_experts=config.n_routed_experts,
+                max_tokens=envs.VLLM_NEMOTRON_H_MOE_ROUTER_OVERLAP_MAX_TOKENS,
+            )
+            self.router_gate_layer_name = f"{prefix}.gate"
+            _router_gate_overlaps[self.router_gate_layer_name] = (
+                self.router_gate_overlap
+            )
+            self.experts.router_logits_wait = self.router_gate_overlap.wait
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -261,7 +411,15 @@ class NemotronHMoE(nn.Module):
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        if self.router_gate_overlap is not None:
+            # Joined in self.experts before the logits are read.
+            router_logits = torch.ops.vllm.nemotron_h_moe_router_gate_fork(
+                hidden_states,
+                self.router_gate_overlap.num_experts,
+                _encode_layer_name(self.router_gate_layer_name),
+            )
+        else:
+            router_logits, _ = self.gate(hidden_states)
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
