@@ -60,9 +60,19 @@ class Sampler:
         self.use_fp64_gumbel = use_fp64_gumbel
 
         self.req_states = req_states
+        # Data-parallel engines share the engine seed, so the randomness of
+        # requests without a seed is drawn from per-rank streams: the default
+        # per-request seeds and the generator of the fused sampler.
+        seed_seq = np.random.SeedSequence(default_seed)
         self.sampling_states = SamplingStates(
-            max_num_reqs, vocab_size, np.random.default_rng(default_seed)
+            max_num_reqs, vocab_size, np.random.default_rng(seed_seq)
         )
+        self.generator: torch.Generator | None = None
+        if default_seed is not None and device.type == "cuda":
+            self.generator = torch.Generator(device=device)
+            self.generator.manual_seed(
+                int(seed_seq.spawn(1)[0].generate_state(1, np.uint64)[0] >> 1)
+            )
 
         lp_req_state = LogitsProcRequestState.from_request_state(req_states)
         self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
@@ -339,9 +349,9 @@ class Sampler:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if use_fused_sampler:
             if self.use_flashinfer:
-                sampled = flashinfer_sample(processed_logits, top_k, top_p).to(
-                    torch.int64
-                )
+                sampled = flashinfer_sample(
+                    processed_logits, top_k, top_p, generator=self.generator
+                ).to(torch.int64)
             else:  # Use XPU sampler
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:

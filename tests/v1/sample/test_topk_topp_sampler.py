@@ -1088,3 +1088,27 @@ class TestFlashInferDistributionMatch:
             f"{label}: distribution differs from theoretical: "
             f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
         )
+
+
+@pytest.mark.skipif(
+    not FLASHINFER_TOPK_TOPP_SUPPORTED,
+    reason="FlashInfer top-k/top-p sampler requires CUDA "
+    "and a GPU with FlashInfer support.",
+)
+@pytest.mark.parametrize("topk,topp", [(8, None), (None, 0.95), (8, 0.95)])
+def test_flashinfer_sample_draws_from_the_given_generator(topk, topp):
+    """A caller-owned generator decides the draw, not the global one."""
+    from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sample
+
+    logits = torch.zeros(64, 128, device="cuda")
+    k = None if topk is None else torch.full((64,), topk, device="cuda")
+    p = None if topp is None else torch.full((64,), topp, device="cuda")
+
+    def draw(seed):
+        generator = torch.Generator(device="cuda")
+        generator.manual_seed(seed)
+        _seed_default_generator(0)
+        return flashinfer_sample(logits.clone(), k, p, generator=generator)
+
+    assert torch.equal(draw(1), draw(1))
+    assert not torch.equal(draw(1), draw(2))

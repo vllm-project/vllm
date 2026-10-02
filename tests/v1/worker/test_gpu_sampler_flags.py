@@ -141,3 +141,14 @@ def test_unseeded_requests_get_distinct_seeds_per_data_parallel_rank():
     sampler = _make_sampler(default_seed=(42, 0))
     sampler.add_request(0, SamplingParams(temperature=1.0, seed=7))
     assert sampler.sampling_states.seeds.np[0] == 7
+
+
+def test_fused_sampler_generator_differs_per_data_parallel_rank():
+    """Unseeded top-k/top-p requests sample from the sampler's own generator;
+    it must differ across DP ranks and be reproducible for one rank."""
+
+    def initial_seed(default_seed):
+        return _make_sampler(default_seed=default_seed).generator.initial_seed()
+
+    assert initial_seed((42, 0)) == initial_seed((42, 0))
+    assert initial_seed((42, 0)) != initial_seed((42, 1))
