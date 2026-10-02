@@ -282,11 +282,6 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
         kv_cache_spec: KVCacheSpec,
     ) -> int | None:
         # Decode uses device request boundaries; prefill metadata is not graph-safe.
-        if (
-            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
-            != AttentionCGSupport.UNIFORM_BATCH
-        ):
-            return None
         return max_decode_query_len(vllm_config)
 
     def __init__(
