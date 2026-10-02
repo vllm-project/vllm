@@ -654,6 +654,46 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         #
+        # KV event publisher delivery
+        #
+
+        # The publisher reports cumulative counts while Prometheus counters
+        # take deltas, so remember the last value seen per engine.
+        self._last_kv_event_counts: dict[int, tuple[int, int]] = {}
+
+        counter_kv_event_batches_published = self._counter_cls(
+            name="vllm:kv_event_batches_published",
+            documentation="KV cache event batches handed to the publisher transport.",
+            labelnames=labelnames,
+        )
+        self.counter_kv_event_batches_published = create_metric_per_engine(
+            counter_kv_event_batches_published, per_engine_labelvalues
+        )
+
+        counter_kv_event_batches_errored = self._counter_cls(
+            name="vllm:kv_event_batches_errored",
+            documentation=(
+                "KV cache event batches discarded because the publisher "
+                "transport raised while sending. Subscribers tracking "
+                "sequence numbers will observe gaps."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_kv_event_batches_errored = create_metric_per_engine(
+            counter_kv_event_batches_errored, per_engine_labelvalues
+        )
+
+        gauge_kv_event_batches_queued = self._gauge_cls(
+            name="vllm:kv_event_batches_queued",
+            documentation="KV cache event batches waiting to be published.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_event_batches_queued = create_metric_per_engine(
+            gauge_kv_event_batches_queued, per_engine_labelvalues
+        )
+
+        #
         # External - KV connector prefix cache
         #
 
@@ -1133,6 +1173,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_prompt_tokens_cached_by_source.labels(
                 *labelvalues, CacheHitSource.DEVICE.value
             ).inc(scheduler_stats.prefix_cache_stats.hits)
+
+            if scheduler_stats.kv_event_publisher_stats is not None:
+                kv_event_stats = scheduler_stats.kv_event_publisher_stats
+                published = kv_event_stats.get("published", 0)
+                errored = kv_event_stats.get("errored", 0)
+                last_published, last_errored = self._last_kv_event_counts.get(
+                    engine_idx, (0, 0)
+                )
+                # A publisher restart resets its counts, so clamp the delta
+                # rather than feeding a negative value to the counter.
+                self.counter_kv_event_batches_published[engine_idx].inc(
+                    max(0, published - last_published)
+                )
+                self.counter_kv_event_batches_errored[engine_idx].inc(
+                    max(0, errored - last_errored)
+                )
+                self._last_kv_event_counts[engine_idx] = (published, errored)
+                self.gauge_kv_event_batches_queued[engine_idx].set(
+                    kv_event_stats.get("queued", 0)
+                )
 
             connector_stats = scheduler_stats.connector_prefix_cache_stats
             if connector_stats is not None:

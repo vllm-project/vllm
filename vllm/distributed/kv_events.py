@@ -7,7 +7,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import Counter, deque
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from itertools import count
 from queue import Queue
 from typing import Any
@@ -258,6 +258,25 @@ class KVConnectorKVEvents(ABC):
         return self
 
 
+@dataclass
+class KVEventPublisherStats:
+    """Delivery counters for a KV event publisher.
+
+    Counts are cumulative for the lifetime of the publisher. ``errored``
+    batches never reach subscribers, so a consumer that tracks sequence
+    numbers will observe gaps.
+    """
+
+    published: int = 0
+    """Batches successfully handed to the transport."""
+
+    errored: int = 0
+    """Batches discarded because the transport raised while sending."""
+
+    queued: int = 0
+    """Batches currently waiting to be sent."""
+
+
 class EventPublisher(ABC):
     """Lightweight publisher for EventBatch batches with data parallelism
     support.
@@ -290,6 +309,10 @@ class EventPublisher(ABC):
 
     def get_publisher_config(self) -> KVEventsConfig | None:
         """Return the publisher's resolved runtime configuration."""
+        return None
+
+    def get_stats(self) -> KVEventPublisherStats | None:
+        """Return cumulative delivery counters, or None if not tracked."""
         return None
 
 
@@ -372,6 +395,11 @@ class ZmqEventPublisher(EventPublisher):
 
         # Payload
         self._seq_gen = count()
+
+        # Delivery counters. Only the publisher thread mutates these, and
+        # readers tolerate a slightly stale view, so no lock is needed.
+        self._published_count = 0
+        self._errored_count = 0
         self._topic_bytes = topic.encode("utf-8")
 
         # Thread
@@ -385,6 +413,13 @@ class ZmqEventPublisher(EventPublisher):
 
     def get_publisher_config(self) -> KVEventsConfig:
         return self._publisher_config
+
+    def get_stats(self) -> KVEventPublisherStats:
+        return KVEventPublisherStats(
+            published=self._published_count,
+            errored=self._errored_count,
+            queued=self._event_queue.qsize(),
+        )
 
     def publish(self, events: EventBatch) -> None:
         if not self._running:
@@ -499,12 +534,19 @@ class ZmqEventPublisher(EventPublisher):
                 self._pub.send_multipart((self._topic_bytes, seq_bytes, payload))
 
                 self._buffer.append((seq, payload))
-                self._event_queue.task_done()
+                self._published_count += 1
 
             except Exception as e:
+                # The batch is discarded rather than retried, so a subscriber
+                # tracking sequence numbers will see a gap here.
+                self._errored_count += 1
                 # Publishing failed;  back-off a bit to avoid a tight error loop
                 logger.exception("Error in publisher thread: %s", e)
                 time.sleep(0.1)
+            finally:
+                # Always mark the item done, including on the error path, so
+                # that a join() on the queue cannot hang on a dropped batch.
+                self._event_queue.task_done()
 
     def _service_replay(self) -> None:
         """If a replay request is waiting, send buffered batches."""
