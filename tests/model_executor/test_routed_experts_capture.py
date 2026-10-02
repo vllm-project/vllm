@@ -1,13 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
-import importlib
-import inspect
-import pkgutil
 import types
-from collections.abc import Iterator
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -21,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEKernelMonolithicImpl,
+    FusedMoEKernel,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
     MoEPrepareAndFinalizeNoDPEPMonolithic,
@@ -292,82 +287,51 @@ def test_routed_experts_sink_holds_a_dispatched_batch(use_ep, dp_size, ep_size, 
     assert sink.buffer.shape == (rows, 2) and sink.buffer.dtype == torch.int16
 
 
+class _ToyQuantMethod(FusedMoEMethodBase):
+    """A quant method that, like every in-tree one, inherits apply_monolithic."""
+
+    def create_weights(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def get_fused_moe_quant_config(self, layer):
+        return None
+
+
 def test_monolithic_capture_survives_kernel_rebuilds():
-    """The bug in #59449: a weight reload rebuilds the kernel. Through the
-    production kernel path, the layer's sink captures what the current kernel
-    routed, before and after a rebuild, and a rebuilt kernel that cannot
-    capture is refused instead of leaving stale rows."""
+    """The bug in #59449: a weight reload rebuilds the kernel, not the layer.
+    Through the production path from the quant method down, the layer's sink
+    captures what the current kernel routed, before and after a rebuild, and a
+    rebuilt kernel that cannot capture is refused instead of leaving stale rows."""
     captured = []
-    sink = RoutedExpertsSink(_SINK_CONFIG, lambda ids: captured.append(ids.tolist()))
+    layer = SimpleNamespace(
+        w13_weight=None,
+        w2_weight=None,
+        activation=None,
+        global_num_experts=16,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+        num_expert_group=None,
+        topk_group=None,
+        e_score_correction_bias=None,
+        routed_scaling_factor=None,
+        routing_sink=RoutedExpertsSink(
+            _SINK_CONFIG, lambda ids: captured.append(ids.tolist())
+        ),
+    )
+    method = _ToyQuantMethod(_SINK_CONFIG)
 
     def forward(experts: _ToyMonolithicExperts) -> None:
-        kernel = FusedMoEKernelMonolithicImpl(
+        # What a weight reload does: a new kernel on the same layer.
+        method.moe_kernel = FusedMoEKernel(
             MoEPrepareAndFinalizeNoDPEPMonolithic(), experts
         )
-        kernel.apply(
-            torch.zeros(3, 8),
-            w1=None,
-            w2=None,
-            router_logits=torch.zeros(3, 16),
-            activation=None,
-            global_num_experts=16,
-            expert_map=None,
-            apply_router_weight_on_input=False,
-            routing_sink=sink,
-        )
+        method.apply_monolithic(layer, torch.zeros(3, 8), torch.zeros(3, 16))
 
     for offset in (0, 7):  # the kernel before and after a reload
         forward(_ToyMonolithicExperts(offset))
         assert captured[-1] == [[t + offset, t + offset + 1] for t in range(3)]
     with pytest.raises(ValueError, match="not supported"):
         forward(_ToyMonolithicExperts(supports_capture=False))
-
-
-def _monolithic_quant_methods() -> list[type[FusedMoEMethodBase]]:
-    """A concrete class for every vLLM MoE quant method that implements
-    ``apply_monolithic``, found by walking the quantization package."""
-    import vllm.model_executor.layers.quantization as quantization
-
-    importlib.import_module(
-        "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method"
-    )
-    for module in pkgutil.walk_packages(
-        quantization.__path__, f"{quantization.__name__}."
-    ):
-        with contextlib.suppress(ImportError):  # backends absent on this platform
-            importlib.import_module(module.name)
-
-    def subclasses(
-        cls: type[FusedMoEMethodBase],
-    ) -> Iterator[type[FusedMoEMethodBase]]:
-        for sub in cls.__subclasses__():
-            if sub.__module__.startswith("vllm."):  # not out-of-tree plugins
-                yield sub
-                yield from subclasses(sub)
-
-    return [
-        next(c for c in (owner, *subclasses(owner)) if not inspect.isabstract(c))
-        for owner in subclasses(FusedMoEMethodBase)
-        if "apply_monolithic" in vars(owner)
-    ]
-
-
-def test_every_monolithic_quant_method_passes_the_layer_sink():
-    """The kernel is rebuilt on reload and the layer is not, so each call must
-    take the sink from the layer. One method that forgets drops capture for
-    every model it quantizes."""
-    methods = _monolithic_quant_methods()
-    assert methods
-    missing = []
-    for cls in methods:
-        method = object.__new__(cls)  # only apply_monolithic is exercised
-        method.moe_kernel = MagicMock()
-        layer = MagicMock()
-        method.apply_monolithic(layer, x=MagicMock(), router_logits=MagicMock())
-        kwargs = method.moe_kernel.apply_monolithic.call_args.kwargs
-        if kwargs.get("routing_sink") is not layer.routing_sink:
-            missing.append(cls.__qualname__)
-    assert not missing, f"apply_monolithic without routing_sink: {missing}"
 
 
 def test_routed_experts_capturer_single_dp_no_metadata():

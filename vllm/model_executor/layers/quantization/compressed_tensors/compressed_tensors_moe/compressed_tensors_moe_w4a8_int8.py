@@ -265,30 +265,10 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
         return make_w4a8_int8_moe_quant_config(block_shape=block_shape)
 
-    def apply_monolithic(
-        self,
-        layer: RoutedExperts,
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-        input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        assert self.is_monolithic
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply_monolithic(
-            x,
-            layer.w13_weight_packed,
-            layer.w2_weight_packed,
-            router_logits,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            num_expert_group=layer.num_expert_group,
-            topk_group=layer.topk_group,
-            e_score_correction_bias=layer.e_score_correction_bias,
-            routed_scaling_factor=layer.routed_scaling_factor,
-            routing_sink=layer.routing_sink,
-        )
+    def monolithic_weights(
+        self, layer: RoutedExperts
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return layer.w13_weight_packed, layer.w2_weight_packed
 
     def apply(
         self,
