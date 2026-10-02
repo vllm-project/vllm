@@ -324,7 +324,7 @@ def test_monolithic_capture_survives_kernel_rebuilds():
 
 
 def _monolithic_quant_methods() -> list[type[FusedMoEMethodBase]]:
-    """A concrete class for every MoE quant method that implements
+    """A concrete class for every vLLM MoE quant method that implements
     ``apply_monolithic``, found by walking the quantization package."""
     import vllm.model_executor.layers.quantization as quantization
 
@@ -341,8 +341,9 @@ def _monolithic_quant_methods() -> list[type[FusedMoEMethodBase]]:
         cls: type[FusedMoEMethodBase],
     ) -> Iterator[type[FusedMoEMethodBase]]:
         for sub in cls.__subclasses__():
-            yield sub
-            yield from subclasses(sub)
+            if sub.__module__.startswith("vllm."):  # not out-of-tree plugins
+                yield sub
+                yield from subclasses(sub)
 
     return [
         next(c for c in (owner, *subclasses(owner)) if not inspect.isabstract(c))
