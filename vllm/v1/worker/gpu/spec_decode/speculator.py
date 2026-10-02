@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -459,6 +459,7 @@ class DraftModelSpeculator(BaseSpeculator):
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
         if draft_logits is not None:
             threshold = self._draft_support_threshold(logits, idx_mapping, temperature)
+            sampler: Callable[..., torch.Tensor]
             if self.draft_watermarker is None:
                 sampler = partial(gumbel_sample, logits_threshold=threshold)
                 sample_logits = logits

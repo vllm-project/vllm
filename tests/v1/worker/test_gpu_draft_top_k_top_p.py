@@ -40,7 +40,11 @@ def _speculator(top_k=None, top_p=None) -> SimpleNamespace:
         draft_watermarker=None,
         use_fp64_gumbel=False,
         acceptance_estimator=None,
+        use_local_argmax_reduction=False,
         model=SimpleNamespace(compute_logits=lambda hidden_states: hidden_states),
+    )
+    speculator.compute_draft_logits = partial(
+        DraftModelSpeculator.compute_draft_logits, speculator
     )
     speculator._maybe_predict_acceptance = partial(
         DraftModelSpeculator._maybe_predict_acceptance, speculator
@@ -467,9 +471,25 @@ class _Recorder:
     def __init__(self) -> None:
         self.logits: torch.Tensor | None = None
 
-    def sample(self, logits, sampled, idx_mapping, temperature):
+    def sample(
+        self,
+        logits,
+        idx_mapping,
+        temperature,
+        seed,
+        pos,
+        apply_temperature,
+        is_drafting,
+        logits_cache=None,
+        logits_cache_col=None,
+        use_fp64=False,
+    ):
+        # Like the draft watermarker, cache the logits it samples from.
         self.logits = logits.clone()
-        return sampled
+        logits_cache[idx_mapping.long(), logits_cache_col] = logits.to(
+            logits_cache.dtype
+        )
+        return logits.argmax(dim=-1)
 
     def predict(self, logits, *args):
         self.logits = logits.clone()
@@ -479,8 +499,8 @@ class _Recorder:
 def test_watermarker_gets_the_masked_logits_and_the_estimator_the_raw_ones(
     dtype: torch.dtype,
 ):
-    """The watermarker resamples from the logits it is handed, so they carry the
-    same support as the sampled and cached drafts. The acceptance estimator
+    """The watermarker samples from and caches the logits it is handed, so they
+    carry the top-k / top-p support. The acceptance estimator
     sees the logits before the mask, with or without a watermarker."""
     torch.manual_seed(11)
     vocab, num_reqs, k = 256, 16, 4
