@@ -14,13 +14,16 @@ from vllm.entrypoints.generate.structured_decisions.strategies import (
 )
 
 
-def model(architecture: str) -> Any:
-    return SimpleNamespace(architecture=architecture)
+def model(architecture: str, logprobs_mode: str = "raw_logprobs") -> Any:
+    return SimpleNamespace(architecture=architecture, logprobs_mode=logprobs_mode)
 
 
 def test_strategy_selection():
     assert select_read_strategy(model("Qwen3ForCausalLM")) is NextTokenStrategy
     assert select_read_strategy(model("LlamaForCausalLM")) is None
+    qwen = "Qwen3ForCausalLM"
+    assert select_read_strategy(model(qwen, "processed_logprobs")) is NextTokenStrategy
+    assert select_read_strategy(model(qwen, "raw_logits")) is None
 
 
 def test_route_needs_the_flag():

@@ -14,6 +14,7 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -22,6 +23,8 @@ from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from .protocol import ReadPromptRequest
 from .question_types import Question, StructuredDecisionError, label_softmax
 from .templates import DecisionTemplate
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -160,7 +163,19 @@ NEXT_TOKEN_ARCHITECTURES = frozenset(
 )
 
 
+# label_mass sums the labels' full-vocabulary probabilities. The logprobs modes
+# return those probabilities. The logits modes return raw logits instead.
+LOGPROBS_MODES = frozenset({"raw_logprobs", "processed_logprobs"})
+
+
 def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy] | None:
-    if model_config.architecture in NEXT_TOKEN_ARCHITECTURES:
-        return NextTokenStrategy
-    return None
+    if model_config.architecture not in NEXT_TOKEN_ARCHITECTURES:
+        return None
+    if model_config.logprobs_mode not in LOGPROBS_MODES:
+        logger.warning(
+            "Structured decisions need --logprobs-mode raw_logprobs or "
+            "processed_logprobs, not %s. /v1/systemone will return 501.",
+            model_config.logprobs_mode,
+        )
+        return None
+    return NextTokenStrategy

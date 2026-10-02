@@ -5,7 +5,9 @@ returns a probability for every allowed answer.
 
 The endpoint is off unless the server starts with
 `--enable-structured-decisions`. The endpoint only serves models that support
-structured decisions, and other models will return 501.
+structured decisions, and other models will return 501. It also returns 501
+when the server runs with `--logprobs-mode raw_logits` or `processed_logits`,
+since `label_mass` needs log probabilities.
 
 ## How it works
 
