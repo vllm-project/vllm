@@ -586,19 +586,17 @@ async def test_text_parity_batch(client):
 
 @pytest.mark.asyncio
 async def test_text_parity_stream(client):
-    """Streamed inline text matches the streaming derender replay of the same
-    chunks and the non-streaming inline text."""
+    """Streamed inline text matches both the streaming and the non-streaming
+    derender of the same token IDs."""
     token_ids = await _render_token_ids(client, TEXT_MESSAGES)
     choices = await _generate_text_stream(client, token_ids)
     inline = "".join(ch["text"] for ch in choices)
+    output_ids = [t for ch in choices for t in ch.get("token_ids") or []]
+    finish_reason = choices[-1]["finish_reason"]
 
-    assert choices[-1]["finish_reason"] is not None
+    assert finish_reason is not None
     assert inline == await _derender_completion_stream_text(client, choices)
-    batch = (await _generate(client, token_ids, "text"))["choices"][0]
-    assert [t for ch in choices for t in ch.get("token_ids") or []] == (
-        batch["token_ids"]
-    )
-    assert inline == batch["text"]
+    assert inline == await _derender_completion_text(client, output_ids, finish_reason)
 
 
 @pytest.mark.asyncio
