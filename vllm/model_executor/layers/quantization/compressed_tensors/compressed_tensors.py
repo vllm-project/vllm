@@ -449,6 +449,26 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_symmetric
         )
 
+    @classmethod
+    def _is_mxfp4_w4a8_fp8(
+        cls, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+    ) -> bool:
+        if not cls._is_mxfp4(weight_quant) or input_quant is None:
+            return False
+
+        is_float_type = input_quant.type == QuantizationType.FLOAT
+        is_8_bits = input_quant.num_bits == 8
+        is_static_weight = not weight_quant.dynamic
+        is_dynamic_input = bool(input_quant.dynamic)
+
+        return (
+            is_float_type
+            and is_8_bits
+            and is_static_weight
+            and is_dynamic_input
+            and input_quant.symmetric
+        )
+
     @staticmethod
     def _is_mxfp8(quant_args: QuantizationArgs) -> bool:
         if quant_args is None:
