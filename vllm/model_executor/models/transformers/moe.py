@@ -360,6 +360,8 @@ class MoEMixin(MixtureOfExperts, Base):
                         )
                         if router_dtype is not None:
                             kwargs["router_logits_dtype"] = router_dtype
+                        if fuser.renormalize is not None:
+                            kwargs["renormalize"] = fuser.renormalize
                         if use_grouped_topk:
                             kwargs |= grouped_topk_routing_kwargs
                         if routed_scaling_factor != 1.0:

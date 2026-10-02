@@ -147,12 +147,17 @@ class MoEBlockFuser:
     shared_name: str | None
     shared_gate_name: str | None
     router_dtype: torch.dtype | None = None
+    renormalize: bool | None = None
 
     @staticmethod
-    def _match_router(gate: nn.Module) -> tuple[str, torch.dtype | None] | None:
-        """Matches `topk(score(linear(x)))`, `score` being `softmax`/`sigmoid`.
+    def _match_router(
+        gate: nn.Module,
+    ) -> tuple[str, torch.dtype | None, bool | None] | None:
+        """Matches `topk(score(linear(x)))`, `score` being `softmax`/`sigmoid`, or
+        `softmax(topk(linear(x)))`, which is a renormalized softmax top-k.
 
-        Returns the scoring function and the dtype the router computes in."""
+        Returns the scoring function, the dtype the router computes in and whether
+        the router forces renormalization."""
         state = {name for name, _ in named_state(gate)}
         if "weight" not in state or state - {"weight", "e_score_correction_bias"}:
             return None
@@ -170,6 +175,10 @@ class MoEBlockFuser:
             for n in _reaches(topk, "all_input_nodes")
             if is_op(n, "softmax") or is_op(n, "sigmoid")
         ]
+        renormalize = None
+        if not scorers:
+            scorers = [n for n in _reaches(topk, "users") if is_op(n, "softmax")]
+            renormalize = True
         if len(scorers) != 1:
             return None
         scorer = scorers[0]
@@ -177,7 +186,7 @@ class MoEBlockFuser:
         if not any(is_op(n, "linear") for n in logits_cone):
             return None
         scoring_func = "softmax" if is_op(scorer, "softmax") else "sigmoid"
-        return scoring_func, _forced_dtype(logits_cone)
+        return scoring_func, _forced_dtype(logits_cone), renormalize
 
     @staticmethod
     def _match_shared_experts(
@@ -221,14 +230,14 @@ class MoEBlockFuser:
         if _returns_tuple(type(moe_block)):
             return None
         # Router: the child that scores + top-k selects.
-        gate_name = scoring_func = router_dtype = None
+        gate_name = scoring_func = router_dtype = renormalize = None
         for name, child in moe_block.named_children():
             if (
                 name != experts_name
                 and (router := cls._match_router(child)) is not None
             ):
                 gate_name = name
-                scoring_func, router_dtype = router
+                scoring_func, router_dtype, renormalize = router
                 break
         if gate_name is None or scoring_func is None:
             return None
@@ -256,7 +265,14 @@ class MoEBlockFuser:
         for name, child in moe_block.named_children():
             if name not in accounted and next(named_state(child), None) is not None:
                 return None
-        return cls(gate_name, scoring_func, shared_name, shared_gate_name, router_dtype)
+        return cls(
+            gate_name,
+            scoring_func,
+            shared_name,
+            shared_gate_name,
+            router_dtype,
+            renormalize,
+        )
 
     def gate(
         self, moe_block: nn.Module, prefix: str, out_dtype: torch.dtype | None = None

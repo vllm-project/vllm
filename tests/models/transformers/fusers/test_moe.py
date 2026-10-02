@@ -29,6 +29,15 @@ class TopKRouter(nn.Module):
         return logits, value, index
 
 
+class TopKSoftmaxRouter(TopKRouter):
+    """Softmax over the top-k logits (Aria): a renormalized softmax top-k."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        value, index = torch.topk(logits, self.top_k, dim=-1)
+        return logits, F.softmax(value, dim=-1), index
+
+
 class ScaledRouter(TopKRouter):
     """Greedy router scaling its top-k weights (DeepSeek `routed_scaling_factor`)."""
 
@@ -266,6 +275,18 @@ def test_moe_fuser_detects_router(sigmoid):
     assert fuser.gate_name == "gate"
     assert fuser.scoring_func == ("sigmoid" if sigmoid else "softmax")
     assert fuser.shared_name is None and fuser.shared_gate_name is None
+
+
+def test_moe_fuser_matches_softmax_after_topk():
+    """Softmax over the selected logits equals a renormalized softmax top-k, so it
+    fuses with renormalization forced on whatever the config says."""
+    with torch.device("meta"):
+        fuser = MoEBlockFuser.match(MoEBlock(TopKSoftmaxRouter), "experts")
+        default = MoEBlockFuser.match(MoEBlock(TopKRouter), "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.scoring_func == "softmax"
+    assert fuser.renormalize is True
+    assert default.renormalize is None
 
 
 def test_moe_fuser_matches_scaled_router():
