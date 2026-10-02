@@ -142,6 +142,116 @@ def _hc_collapse_triton_fake(x: Tensor, pre_mix: Tensor) -> Tensor:
 
 
 @triton.jit
+def _mhc_post_stream(post_mix_ptr, comb_mix_ptr, t, j, xt, f0, f1, f2, f3):
+    comb = comb_mix_ptr + t * 16 + j  # comb is [source h, destination j]
+    return (
+        tl.load(post_mix_ptr + t * 4 + j) * xt
+        + tl.load(comb) * f0
+        + tl.load(comb + 4) * f1
+        + tl.load(comb + 8) * f2
+        + tl.load(comb + 12) * f3
+    ).to(tl.bfloat16)
+
+
+@triton.jit
+def _mhc_post_collapse_rms_norm_kernel(
+    residual_ptr,
+    x_ptr,
+    post_mix_ptr,
+    comb_mix_ptr,
+    pre_mix_ptr,
+    weight_ptr,
+    residual_out_ptr,
+    out_ptr,
+    norm_eps,
+    H: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """One token per program. The post-mix and collapse keep the expression
+    order of aiter's ``_mhc_fused_post_pre_delayed_rmsnorm_main_kernel``, so the
+    new residual is bit-identical to it."""
+    t = tl.program_id(0).to(tl.int64)
+    cols = tl.arange(0, BLOCK_H)
+    mask = cols < H
+    res = residual_ptr + t * 4 * H + cols
+    f0 = tl.load(res, mask=mask, other=0.0).to(tl.float32)
+    f1 = tl.load(res + H, mask=mask, other=0.0).to(tl.float32)
+    f2 = tl.load(res + 2 * H, mask=mask, other=0.0).to(tl.float32)
+    f3 = tl.load(res + 3 * H, mask=mask, other=0.0).to(tl.float32)
+    xt = tl.load(x_ptr + t * H + cols, mask=mask, other=0.0).to(tl.float32)
+    g0 = _mhc_post_stream(post_mix_ptr, comb_mix_ptr, t, 0, xt, f0, f1, f2, f3)
+    g1 = _mhc_post_stream(post_mix_ptr, comb_mix_ptr, t, 1, xt, f0, f1, f2, f3)
+    g2 = _mhc_post_stream(post_mix_ptr, comb_mix_ptr, t, 2, xt, f0, f1, f2, f3)
+    g3 = _mhc_post_stream(post_mix_ptr, comb_mix_ptr, t, 3, xt, f0, f1, f2, f3)
+    out_res = residual_out_ptr + t * 4 * H + cols
+    tl.store(out_res, g0, mask=mask)
+    tl.store(out_res + H, g1, mask=mask)
+    tl.store(out_res + 2 * H, g2, mask=mask)
+    tl.store(out_res + 3 * H, g3, mask=mask)
+    pre = pre_mix_ptr + t * 4
+    x1 = (
+        tl.load(pre) * g0.to(tl.float32)
+        + tl.load(pre + 1) * g1.to(tl.float32)
+        + tl.load(pre + 2) * g2.to(tl.float32)
+        + tl.load(pre + 3) * g3.to(tl.float32)
+    ).to(tl.bfloat16)
+    x1f = x1.to(tl.float32)
+    rstd = tl.math.rsqrt(tl.sum(x1f * x1f, 0) * (1.0 / H) + norm_eps)
+    w = tl.load(weight_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    tl.store(out_ptr + t * H + cols, ((x1f * rstd) * w).to(tl.bfloat16), mask=mask)
+
+
+def mhc_post_collapse_rms_norm_triton(
+    residual: Tensor,
+    sublayer_out: Tensor,
+    post_layer_mix: Tensor,
+    comb_res_mix: Tensor,
+    pre_mix: Tensor,
+    norm_weight: Tensor,
+    norm_eps: float,
+) -> tuple[Tensor, Tensor]:
+    """The layer-input half of a delayed mHC seam, without the gate projection.
+
+    Applies the post block and returns the new residual and the RMSNorm of its
+    collapse with the carried ``pre_mix``, which is what
+    ``mhc_fused_post_pre_delayed_rms_norm_aiter`` returns besides the gates.
+
+    Args:
+        residual: [T, 4, H] bf16 residual streams entering the seam.
+        sublayer_out: [T, H] bf16 output of the sublayer before the seam.
+        post_layer_mix: [T, 4, 1] fp32 post gate of the previous seam.
+        comb_res_mix: [T, 4, 4] fp32 residual comb of the previous seam.
+        pre_mix: [T, 4] fp32 pre gate carried from the previous seam.
+        norm_weight: [H] RMSNorm weight.
+        norm_eps: RMSNorm epsilon.
+
+    Returns:
+        The [T, 4, H] bf16 new residual and the [T, H] bf16 layer input.
+
+    """
+    T, hc_mult, H = residual.shape
+    assert hc_mult == 4 and residual.dtype == torch.bfloat16
+    residual_out = torch.empty_like(residual)
+    out = torch.empty(T, H, dtype=residual.dtype, device=residual.device)
+    if T:
+        _mhc_post_collapse_rms_norm_kernel[(T,)](
+            residual.contiguous(),
+            sublayer_out.contiguous(),
+            post_layer_mix.contiguous(),
+            comb_res_mix.contiguous(),
+            pre_mix.contiguous(),
+            norm_weight,
+            residual_out,
+            out,
+            norm_eps,
+            H=H,
+            BLOCK_H=triton.next_power_of_2(H),
+            num_warps=16,
+        )
+    return residual_out, out
+
+
+@triton.jit
 def _mhc_pre_mix_kernel(
     gemm_ptr,
     sqrsum_ptr,
