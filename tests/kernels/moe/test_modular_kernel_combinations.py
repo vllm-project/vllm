@@ -693,9 +693,8 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
 
 # --- 4b: hidden_dim_unpadded/intermediate_size_per_partition_unpadded matrix -
 
-# K/N deliberately NOT aligned to AITER's 64/128 rounding granularity, unlike
-# the shared Ks=[2048]/Ns=[1024] defaults (mk_objects.py), so hidden_pad and
-# intermediate_pad below are actually forced, not incidental.
+# K/N intentionally unaligned to AITER's 64/128 granularity (unlike the
+# shared mk_objects.py defaults) so hidden_pad/intermediate_pad are forced.
 _PADDING_E = 8
 _PADDING_M = 16
 _PADDING_TOPK = 2
@@ -717,10 +716,8 @@ _PADDING_MODES: dict[str, tuple[bool, bool]] = {
     "both": (True, True),
 }
 
-# unquantized + the 4 fp8 (weight_key, activation_key) pairs
-# AiterExperts._supports_quant_scheme declares support for (excludes MXFP4,
-# which is stubbed separately pending MI350/gfx950 hardware, and excludes
-# MK_QUANT_CONFIGS[1] (channel/tensor), which AiterExperts doesn't support).
+# unquantized + the 4 fp8 configs AiterExperts supports (excludes MXFP4,
+# stubbed below pending MI350/gfx950, and MK_QUANT_CONFIGS[1], unsupported).
 _PADDING_QUANT_CONFIGS = [
     MK_QUANT_CONFIGS[0],  # unquantized
     MK_QUANT_CONFIGS[2],  # fp8 channel weights / per-token activations
@@ -739,8 +736,7 @@ _PADDING_QUANT_IDS = [
 
 def _slice_gate_up_rows(t: torch.Tensor, real_per_half: int) -> torch.Tensor:
     """Slice a (E, 2*padded_per_half, ...) tensor's dim=1 down to the real
-    gate/up halves of size `real_per_half` each, dropping the trailing
-    garbage AITER is expected to ignore in each half."""
+    gate/up halves of `real_per_half` size each."""
     padded_per_half = t.shape[1] // 2
     return torch.cat(
         [
@@ -757,10 +753,8 @@ def _slice_unpadded_weights(
     k_unpadded: int,
     n_unpadded: int,
 ) -> WeightTensors:
-    """Derive the "real" (unpadded) sub-block of a padded WeightTensors --
-    same underlying weight values, restricted to the region AiterExperts's
-    hidden_pad/intermediate_pad is expected to keep, dropping the trailing
-    garbage rows/columns."""
+    """Derive the "real" (unpadded) sub-block of a padded WeightTensors: same
+    weight values, restricted to the region hidden_pad/intermediate_pad keeps."""
     block_shape = quant_config.block_shape if quant_config is not None else None
     # WeightTensors.make() (common.py) builds weight scales with
     # per_out_ch_quant=config.is_per_act_token_quant -- i.e. the weight
@@ -844,10 +838,8 @@ def _aiter_padding_matrix_worker(
             f"{intermediate_pad_expected}."
         )
 
-    # AiterExperts.apply() never slices its own output: the modular kernel's
-    # output buffer is allocated at the raw (padded) hidden_dim, and it is up
-    # to the caller to read only the `hidden_dim_unpadded`-wide "output
-    # slice" -- verify that slice, not the raw buffer, against the reference.
+    # AiterExperts.apply() never slices its own output -- the buffer stays
+    # raw (padded) width; only the caller-sliced unpadded prefix is checked.
     assert mk_out.shape[-1] == padded_config.K, (
         f"AiterExperts output width {mk_out.shape[-1]} != raw hidden_dim "
         f"{padded_config.K}."
@@ -886,17 +878,11 @@ def _aiter_padding_matrix_worker(
 def test_aiter_moe_padding_matrix(mode: str, quant_config: TestMoEQuantConfig | None):
     """See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
 
-    Exercises AiterExperts's hidden_pad/intermediate_pad computation
-    (`experts/rocm_aiter_moe.py`) across {no padding, hidden-only,
-    intermediate-only, both} x {unquantized + the 4 fp8 quant schemes
-    AiterExperts supports}, with K/N sizes that force real divergence between
-    the padded allocation and the logical hidden_dim_unpadded/
-    intermediate_size_per_partition_unpadded sizes. Compares against an
-    unpadded reference computed from the same underlying weight/activation
-    values (restricted to the real sub-block AITER is expected to keep,
-    dropping the padding region's garbage), and verifies the actual
-    hidden_pad/intermediate_pad values AiterExperts.apply() forwards to
-    rocm_aiter_ops.fused_moe match what the configured unpadded sizes imply.
+    Exercises AiterExperts's hidden_pad/intermediate_pad (rocm_aiter_moe.py)
+    across {no padding, hidden-only, intermediate-only, both} x the
+    unquantized + 4 fp8 quant schemes it supports. Compares against an
+    unpadded reference and verifies the hidden_pad/intermediate_pad
+    AiterExperts.apply() forwards to rocm_aiter_ops.fused_moe.
     """
     from vllm.model_executor.layers.fused_moe.prepare_finalize import (
         MoEPrepareAndFinalizeNoDPEPModular,
