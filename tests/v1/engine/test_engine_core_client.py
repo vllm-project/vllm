@@ -310,7 +310,7 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
     client.current_wave = 0
     client.resources = SimpleNamespace(stats_update_task=None)
     client.stats_update_address = "inproc://scale-down-stats"
-    client.first_req_sock_addr = "inproc://scale-down-first-request"
+    client.scale_sock_addr = "inproc://scale-down-notify"
     pause_started = asyncio.Event()
 
     async def pause_scheduler(*args, **kwargs):
@@ -322,11 +322,11 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
     with (
         zmq.asyncio.Context() as ctx,
         ctx.socket(zmq.XPUB) as coordinator,
-        ctx.socket(zmq.PAIR) as first_req_socket,
+        ctx.socket(zmq.PAIR) as scale_socket,
     ):
         client.ctx = ctx
         coordinator.bind(client.stats_update_address)
-        first_req_socket.bind(client.first_req_sock_addr)
+        scale_socket.bind(client.scale_sock_addr)
         client._ensure_stats_update_task()
         scale_task = None
         try:

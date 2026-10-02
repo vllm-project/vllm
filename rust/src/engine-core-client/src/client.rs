@@ -639,12 +639,9 @@ impl EngineCoreClient {
         );
 
         let result: Result<()> = async {
+            // The engine that receives it wakes the other ranks if they are idle.
             if let Some(coordinator) = self.coordinator.as_ref() {
-                let snapshot = coordinator.snapshot();
-                req.current_wave = snapshot.current_wave;
-                if !snapshot.engines_running {
-                    coordinator.notify_first_request(engine_id.clone())?;
-                }
+                req.current_wave = coordinator.snapshot().current_wave;
             }
 
             debug!(

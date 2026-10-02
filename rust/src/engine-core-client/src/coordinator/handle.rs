@@ -4,105 +4,56 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
 use zeromq::prelude::Socket;
 use zeromq::{XPubSocket, XSubSocket};
 
 use crate::coordinator::external::ExternalCoordinatorService;
 use crate::coordinator::inproc::InProcCoordinatorRunner;
-use crate::error::{Error, Result, bail_control_closed};
-use crate::transport::EngineId;
+use crate::error::Result;
 
 /// Snapshot to the coordinator state for request routing and stamping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CoordinatorStateSnapshot {
     /// The current DP wave, which will be stamped on outgoing requests.
     pub current_wave: u32,
-    /// Whether the engines are currently running or paused, which determines if
-    /// the frontend must trigger a new wave on the next request.
+    /// Whether the engines are currently running or paused, as last reported
+    /// by the engines themselves.
     pub engines_running: bool,
-    /// A wake was sent for the current wave but no engine has confirmed it yet.
-    pub wake_pending: bool,
-}
-
-impl CoordinatorStateSnapshot {
-    /// Resume the engines for a `FirstRequest` and return the wave to broadcast
-    /// and the engine to exclude from the wakeup.
-    ///
-    /// The request may have been stamped with a `request_wave` older than
-    /// `current_wave` if a `WaveComplete` advanced it after the command was
-    /// enqueued. Such a request still needs serving, so the current wave is
-    /// broadcast to every engine (`exclude = None`); the wave is never rewound.
-    /// A non-stale request excludes the engine that already received it. Mirrors
-    /// the Python coordinator's front-end path: `engines_running` is only set
-    /// from the engines' own notifications, since a paused engine discards
-    /// `START_DP_WAVE`.
-    pub(crate) fn start_wave_for_first_request(
-        &mut self,
-        request_wave: u32,
-        target_engine_index: u32,
-    ) -> (u32, Option<u32>) {
-        let exclude = (request_wave >= self.current_wave).then_some(target_engine_index);
-        (self.current_wave, exclude)
-    }
 }
 
 /// Shared in-process coordinator state.
 pub(crate) type CoordinatorState = Mutex<CoordinatorStateSnapshot>;
 
-/// Commands sent from the frontend request path into the background runner.
-#[derive(Debug)]
-pub(crate) enum CoordinatorCommand {
-    /// The first request arrived while all engines were paused.
-    ///
-    /// The coordinator should broadcast `START_DP_WAVE` with the current wave
-    /// and the target engine index as the excluded engine.
-    FirstRequest {
-        target_engine_id: EngineId,
-        wave: u32,
-    },
-}
-
 /// Frontend-facing coordinator handle used by `EngineCoreClient::call()`.
 ///
-/// This side stays intentionally small: it can read the latest wave snapshot
-/// and enqueue a `FirstRequest` transition when the request path observes the
-/// system in the paused state.
+/// The frontend only reads the latest wave snapshot: waves are started by the
+/// engines, which notify the coordinator when an idle engine receives a request.
 #[derive(Clone)]
 pub(crate) struct CoordinatorHandle {
     state: Arc<CoordinatorState>,
-    command_tx: mpsc::UnboundedSender<CoordinatorCommand>,
 }
 
 impl CoordinatorHandle {
-    fn new_parts() -> (
-        Self,
-        Arc<CoordinatorState>,
-        mpsc::UnboundedReceiver<CoordinatorCommand>,
-    ) {
+    fn new_parts() -> (Self, Arc<CoordinatorState>) {
         let state = Arc::new(Mutex::new(CoordinatorStateSnapshot {
             current_wave: 0,
             engines_running: false,
-            wake_pending: false,
         }));
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
         (
             Self {
                 state: state.clone(),
-                command_tx,
             },
             state,
-            command_rx,
         )
     }
 
     /// Build the paired frontend handle and background runner around one
     /// engine-facing coordinator broadcast socket.
     pub(crate) fn new_inproc(coordinator_input: XPubSocket) -> (Self, InProcCoordinatorRunner) {
-        let (handle, state, command_rx) = Self::new_parts();
+        let (handle, state) = Self::new_parts();
         (
             handle,
-            InProcCoordinatorRunner::new(state, command_rx, coordinator_input),
+            InProcCoordinatorRunner::new(state, coordinator_input),
         )
     }
 
@@ -111,67 +62,15 @@ impl CoordinatorHandle {
     pub(crate) async fn connect_external(
         coordinator_address: &str,
     ) -> Result<(Self, ExternalCoordinatorService)> {
-        let (handle, state, command_rx) = Self::new_parts();
+        let (handle, state) = Self::new_parts();
         let mut socket = XSubSocket::new();
         socket.connect(coordinator_address).await?;
         socket.subscribe("").await?;
-        Ok((
-            handle,
-            ExternalCoordinatorService::new(state, command_rx, socket),
-        ))
+        Ok((handle, ExternalCoordinatorService::new(state, socket)))
     }
 
     /// Snapshot the coordinator state for request routing and stamping.
     pub(crate) fn snapshot(&self) -> CoordinatorStateSnapshot {
         *self.state.lock()
-    }
-
-    /// Notify the runner that a new request arrived while engines were paused.
-    ///
-    /// The handle sets `wake_pending` so concurrent request submissions coalesce
-    /// behind one `START_DP_WAVE` broadcast instead of all trying to trigger the
-    /// wave independently.
-    pub(crate) fn notify_first_request(&self, target_engine_id: EngineId) -> Result<()> {
-        let mut state = self.state.lock();
-        if state.engines_running || state.wake_pending {
-            return Ok(());
-        }
-
-        let command = CoordinatorCommand::FirstRequest {
-            target_engine_id,
-            wave: state.current_wave,
-        };
-        if self.command_tx.send(command).is_err() {
-            bail_control_closed!("in-process coordinator command channel already shut down");
-        }
-
-        state.wake_pending = true;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A wake coalesces concurrent first requests without claiming the engines
-    /// run, so an engine's own `StartWave` can still confirm the wave even if a
-    /// paused engine discarded the wake.
-    #[test]
-    fn first_request_marks_wake_pending_not_running() {
-        let (handle, state, mut command_rx) = CoordinatorHandle::new_parts();
-        let engine = EngineId::from_engine_index(1);
-
-        handle.notify_first_request(engine.clone()).unwrap();
-        handle.notify_first_request(engine).unwrap();
-
-        assert!(command_rx.try_recv().is_ok());
-        assert!(
-            command_rx.try_recv().is_err(),
-            "the second request coalesces"
-        );
-        let snapshot = *state.lock();
-        assert!(snapshot.wake_pending);
-        assert!(!snapshot.engines_running);
     }
 }

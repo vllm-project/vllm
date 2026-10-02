@@ -708,8 +708,8 @@ def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
 def test_idle_dp_rank_announces_wave_for_new_work(
     request_wave, engines_running, pause_state, announces
 ):
-    """An idle rank handed work announces the wave itself: the front-end's wake
-    may have been dropped by a peer that was still paused."""
+    """An idle rank handed work announces the wave itself, since only engines
+    start waves; a paused rank waits for resume."""
     core = object.__new__(DPEngineCoreProc)
     core.has_coordinator = True
     core.current_wave = 3
@@ -726,6 +726,21 @@ def test_idle_dp_rank_announces_wave_for_new_work(
         assert outputs.start_wave == max(request_wave, 3)
     else:
         core.output_queue.put_nowait.assert_not_called()
+
+
+@pytest.mark.parametrize("paused", [False, True])
+def test_paused_dp_rank_ignores_start_wave(paused):
+    """A START_DP_WAVE still in flight when the pause completes must not wake
+    the paused rank."""
+    core = object.__new__(DPEngineCoreProc)
+    core.ignore_start_dp_wave = paused
+    core.engine_index = 0
+    core.current_wave = 3
+    core.engines_running = False
+
+    core._handle_client_request(EngineCoreRequestType.START_DP_WAVE, (3, 1))
+
+    assert core.engines_running != paused
 
 
 def _pausable_engine_core_proc() -> EngineCoreProc:

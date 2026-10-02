@@ -2180,7 +2180,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 not self.engines_running
                 and self.scheduler.pause_state == PauseState.UNPAUSED
             ):
-                # Don't rely on the front-end's wake: a paused peer drops it.
+                # Engines alone start waves: have the coordinator wake the others.
                 self.engines_running = True
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
