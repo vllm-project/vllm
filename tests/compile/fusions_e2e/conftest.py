@@ -40,15 +40,17 @@ def run_model(
     if compilation_config.cudagraph_mode is None:
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-    # trust_remote_code/enable_chunked_prefill/kernel_config are pinned to
-    # LLM()'s own defaults since VllmRunner overrides them for other test
-    # needs (e.g. it disables JIT warmup by default).
+    # trust_remote_code/enable_chunked_prefill/block_size/kernel_config are
+    # pinned to LLM()'s own defaults since VllmRunner overrides them for
+    # other test needs (e.g. it forces block_size=16, which some attention
+    # backends like FLASHINFER_MLA reject, and disables JIT warmup).
     model_kwargs.setdefault("kernel_config", {"enable_jit_warmup": True})
     with vllm_runner(
         model,
         compilation_config=compilation_config,
         trust_remote_code=False,
         enable_chunked_prefill=None,
+        block_size=None,
         **model_kwargs,
     ) as vllm_model:
         llm = vllm_model.llm
