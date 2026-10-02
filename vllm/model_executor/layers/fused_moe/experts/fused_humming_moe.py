@@ -177,6 +177,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             "gemm_type": self.humming_gemm_type().value,
             "use_m_major_input_scale": self.supports_m_major_w4a8,
         }
+
         def tuning_config(sublayer_name: str, m_major: bool) -> dict | list:
             return get_heuristics_config(
                 layer_config=self.humming_configs[sublayer_name],
@@ -198,9 +199,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             self.row_major_w13_tuning_config_str = json.dumps(
                 tuning_config("w13", False)
             )
-            self.row_major_w2_tuning_config_str = json.dumps(
-                tuning_config("w2", False)
-            )
+            self.row_major_w2_tuning_config_str = json.dumps(tuning_config("w2", False))
 
     def process_input(
         self,
@@ -978,9 +977,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             and expert_tokens_meta.deepep_v2_do_expand
             and expert_tokens_meta.expert_num_tokens is not None
         )
-        use_row_major_fallback = (
-            self.supports_m_major_w4a8 and not use_m_major_w4a8
-        )
+        use_row_major_fallback = self.supports_m_major_w4a8 and not use_m_major_w4a8
         valid_shape_m = (
             topk_ids.numel()
             if use_m_major_w4a8
