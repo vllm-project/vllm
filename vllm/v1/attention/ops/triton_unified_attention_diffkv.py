@@ -124,9 +124,9 @@ def compute_3d_segments_diffkv(
     """Segment ``i`` covers tiles ``segm_tile_start + [i, i + 1) *
     tiles_per_segment`` and has work iff its first key is below ``seq_len``.
 
-    Far past a sliding window, splitting the whole sequence leaves the window
-    in one or two segments, so only the window is split. Near it the two splits
-    are equally long and re-splitting only shifts tile alignment, so it is done
+    Splitting the whole sequence leaves a sliding window in one or two
+    segments, so only the window is split. Near the window both splits are
+    equally long and re-splitting only shifts tile alignment, so it is done
     once it shortens the longest segment by 1.5x. Attention and reduce must
     agree, so both call this.
     """
@@ -286,8 +286,7 @@ def kernel_unified_attention_diffkv(
             alibi_slopes_ptr + query_offset_1, mask=query_mask_1, other=0.0
         )
 
-    # Window-pruned bounds; the 3D segment slice is applied below since it is
-    # offset by ``segm_tile_start``.
+    # The 3D slice is applied below; the helper does not know segm_tile_start.
     loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
         context_len,
         seq_len,
@@ -597,8 +596,7 @@ def unified_attention_diffkv(
     grid: tuple[Any, ...]
     if use_3d:
         grid = (total_num_q_blocks, num_kv_heads, num_segments)
-        # Fewer segments than allocated use a prefix of each buffer; both
-        # kernels index it with the same ``NUM_SEGMENTS_PER_SEQ``.
+        # Buffers hold max segments; both kernels index them with num_segments.
         segm_output_ptr = softmax_segm_output
         segm_max_ptr = softmax_segm_max
         segm_expsum_ptr = softmax_segm_expsum
