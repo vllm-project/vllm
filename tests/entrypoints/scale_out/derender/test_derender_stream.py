@@ -50,6 +50,8 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderCompletionRequest,
     DerenderCompletionStreamRequest,
     DerenderStreamState,
+    GenerateResponse,
+    GenerateResponseChoice,
     GenerateStreamResponse,
     GenerateTokensChoice,
     GenerateTokensResponse,
