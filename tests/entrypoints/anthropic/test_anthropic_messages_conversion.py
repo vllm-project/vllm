@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
 )
 from vllm.entrypoints.anthropic.serving import (
@@ -2032,3 +2033,87 @@ class TestProbeDisabledThinkingEffort:
     @pytest.mark.asyncio
     async def test_renderer_rejects_none(self):
         assert await self._probe(self._reject_none) == "low"
+
+
+class TestMidConversationToolChanges:
+    """``tool_addition``/``tool_removal`` blocks decide which tools the chat
+    template is given, since it has no other way to see them."""
+
+    @staticmethod
+    def _convert_tools(*changes: dict) -> dict[str, bool | None]:
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "Tools changed."}, *changes],
+                },
+            ],
+            tools=[
+                {"name": "bash", "input_schema": {}},
+                {"name": "search", "input_schema": {}, "defer_loading": True},
+                {"name": "fetch", "input_schema": {}, "defer_loading": True},
+            ],
+        )
+        result = _convert(request)
+        assert result.messages[-1] == {"role": "system", "content": "Tools changed."}
+        assert result.tools is not None
+        return {t.function.name: t.function.defer_loading for t in result.tools}
+
+    @staticmethod
+    def _change(block_type: str, name: str) -> dict:
+        return {"type": block_type, "tool": {"type": "tool_reference", "name": name}}
+
+    def test_addition_loads_deferred_tool(self):
+        tools = self._convert_tools(self._change("tool_addition", "search"))
+        assert tools == {"bash": None, "search": None, "fetch": True}
+
+    def test_removal_withdraws_tool_until_added_again(self):
+        removal = self._change("tool_removal", "bash")
+        assert "bash" not in self._convert_tools(removal)
+        readded = self._convert_tools(removal, self._change("tool_addition", "bash"))
+        assert list(readded) == ["bash", "search", "fetch"]
+
+    def test_addition_defines_tool_by_value(self):
+        definition = {"name": "db_query", "input_schema": {}}
+        tools = self._convert_tools(
+            {
+                "type": "tool_addition",
+                "tool": {"type": "tool_definition", "definition": definition},
+            }
+        )
+        assert list(tools) == ["bash", "search", "fetch", "db_query"]
+
+    def test_unknown_tool_reference_is_rejected(self):
+        with pytest.raises(ValueError, match="not declared in tools"):
+            self._convert_tools(self._change("tool_addition", "missing"))
+
+    def test_removal_by_value_is_rejected(self):
+        definition = {"name": "bash", "input_schema": {}}
+        with pytest.raises(ValidationError, match="only accepts a tool_reference"):
+            self._convert_tools(
+                {
+                    "type": "tool_removal",
+                    "tool": {"type": "tool_definition", "definition": definition},
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "request_cls", [AnthropicMessagesRequest, AnthropicCountTokensRequest]
+    )
+    @pytest.mark.parametrize("in_top_level_system", [False, True])
+    def test_tool_change_outside_system_message_is_rejected(
+        self, request_cls, in_top_level_system
+    ):
+        change = self._change("tool_addition", "search")
+        if in_top_level_system:
+            fields = {
+                "messages": [{"role": "user", "content": "Hi"}],
+                "system": [change],
+            }
+        else:
+            fields = {"messages": [{"role": "user", "content": [change]}]}
+        with pytest.raises(
+            ValidationError, match='only allowed in messages with role "system"'
+        ):
+            request_cls(model="test-model", max_tokens=128, **fields)
