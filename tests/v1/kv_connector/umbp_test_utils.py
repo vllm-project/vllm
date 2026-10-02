@@ -194,6 +194,9 @@ class _MemoryWorkerHandle(UMBPWorkerHandle):
             job.cancel("preempted")
         return job
 
+    def take_evicted_keys(self) -> Sequence[str]:
+        return ()
+
     def close(self) -> None:
         return
 

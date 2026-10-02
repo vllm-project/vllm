@@ -267,6 +267,7 @@ def test_mori_embedded_dram_eviction_and_restore(tmp_path, bulk_load):
     missing = {key for key, hit in zip(keys, hits, strict=True) if not hit}
     assert missing
     assert hits[-1]
+    assert missing <= set(worker.take_evicted_keys())
 
     destination.zero_()
     latest = keys[-1]
@@ -296,6 +297,7 @@ def test_mori_embedded_dram_eviction_and_restore(tmp_path, bulk_load):
         )
     loaded = worker.wait(job)
     assert loaded.status is TransferJobStatus.COMPLETED
+    assert loaded.completed_bytes == object_size
     torch.accelerator.synchronize()
     assert torch.all(destination == expected[latest])
     worker.close()

@@ -5,11 +5,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import cast
 
 import torch
 
+from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 
 from .data import (
     BlockIdentityCodec,
@@ -23,6 +26,7 @@ from .data import (
     UMBPConnectorWorkerMetadata,
 )
 from .runtime import UMBPWorkerHandle
+from .stats import UMBPStoreConnectorStats
 
 logger = init_logger(__name__)
 
@@ -43,14 +47,17 @@ class UMBPStoreConnectorWorker:
         *,
         codec: BlockIdentityCodec | None = None,
         report_failed_requests: bool = False,
+        enable_kv_cache_events: bool = False,
     ) -> None:
         self.runtime = runtime
         self.layout = layout
         self.codec = codec
+        self.enable_kv_cache_events = enable_kv_cache_events
         self._load_jobs: dict[str, dict[str | None, TransferJobState]] = {}
         self._store_jobs: dict[str, TransferJobState] = {}
         self._pending_stores: list[_StoreBatch] = []
         self._worker_meta = UMBPConnectorWorkerMetadata()
+        self._kv_events: list[KVCacheEvent] = []
         self._finished_recving: set[str] = set()
         # Core maps block-level load failures to requests only with one group.
         self._report_failed_requests = report_failed_requests
@@ -58,6 +65,7 @@ class UMBPStoreConnectorWorker:
         self._load_error_block_ids: set[int] = set()
         self._report_load_completions = False
         self._active_store_event = -1
+        self._stats = UMBPStoreConnectorStats()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.layout is not None and self.layout.regions:
@@ -126,6 +134,7 @@ class UMBPStoreConnectorWorker:
                 localized = [self._localize_plan(plan) for plan in plans]
             job = load_blocks(localized)
             if job is not None:
+                self._stats.record("load", submitted=len(plans))
                 self._load_jobs[request_id] = {None: job}
                 return
         materialized = self._materialize_plans(list(plans))
@@ -136,12 +145,19 @@ class UMBPStoreConnectorWorker:
             sum(len(plan.ranges) for plan in materialized),
             sum(item.length for plan in materialized for item in plan.ranges),
         )
+        self._stats.record("load", submitted=len(materialized))
         self._load_jobs[request_id] = {None: self.runtime.load(materialized)}
 
     def _finish_job(
         self, request_id: str, result: TransferJobState, *, is_load: bool
     ) -> bool:
         operation = "load" if is_load else "store"
+        self._stats.record(
+            operation,
+            completed=len(result.completed_keys),
+            failed=len(result.failed_keys),
+            num_bytes=result.completed_bytes,
+        )
         succeeded = result.status == TransferJobStatus.COMPLETED
         if not succeeded:
             logger.debug(
@@ -158,6 +174,33 @@ class UMBPStoreConnectorWorker:
                 self._failed_recving.add(request_id)
         elif succeeded:
             self.runtime.publish(result)
+            if self.enable_kv_cache_events:
+                for plan in result.plans:
+                    if plan.key not in result.completed_keys or plan.block_hash is None:
+                        continue
+                    self._kv_events.append(
+                        BlockStored(
+                            block_hashes=[
+                                maybe_convert_block_hash(
+                                    cast(BlockHash, plan.block_hash)
+                                )
+                            ],
+                            parent_block_hash=(
+                                maybe_convert_block_hash(
+                                    cast(BlockHash, plan.parent_block_hash)
+                                )
+                                if plan.parent_block_hash is not None
+                                else None
+                            ),
+                            token_ids=list(plan.token_ids),
+                            block_size=plan.block_size,
+                            lora_id=None,
+                            medium=plan.medium,
+                            lora_name=None,
+                            group_idx=plan.group_id,
+                            locality="LOCAL",
+                        )
+                    )
         return succeeded
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -201,9 +244,14 @@ class UMBPStoreConnectorWorker:
         if store_blocks is not None:
             job = store_blocks([self._localize_plan(plan) for plan in plans])
             if job is not None:
+                self._stats.record("store", submitted=len(plans))
                 self._store_jobs[request_id] = job
                 return
         materialized = self._materialize_plans(plans)
+        self._stats.record(
+            "store",
+            submitted=len(materialized),
+        )
         self._store_jobs[request_id] = self.runtime.store(materialized)
 
     def enqueue_stores(self, metadata: UMBPConnectorMetadata) -> None:
@@ -276,10 +324,50 @@ class UMBPStoreConnectorWorker:
         self._worker_meta = UMBPConnectorWorkerMetadata()
         return result
 
+    def get_kv_events(self) -> list[KVCacheEvent]:
+        take_evicted = getattr(self.runtime, "take_evicted_keys", None)
+        if callable(take_evicted):
+            for key in take_evicted():
+                if not self.enable_kv_cache_events:
+                    continue
+                parsed = self._parse_key(key)
+                if parsed is None:
+                    continue
+                group_id, block_hash = parsed
+                self._kv_events.append(
+                    BlockRemoved(
+                        block_hashes=[
+                            maybe_convert_block_hash(cast(BlockHash, block_hash))
+                        ],
+                        medium="CPU",
+                        group_idx=group_id,
+                        locality="LOCAL",
+                    )
+                )
+        events = self._kv_events
+        self._kv_events = []
+        return events
+
+    @staticmethod
+    def _parse_key(key: str) -> tuple[int, bytes] | None:
+        try:
+            group_part, hash_hex = key.rsplit(":", 1)
+            group_id = int(group_part.rsplit(":g", 1)[1])
+            return group_id, bytes.fromhex(hash_hex)
+        except (IndexError, ValueError):
+            return None
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         failed = self._load_error_block_ids
         self._load_error_block_ids = set()
         return failed
+
+    def get_kv_connector_stats(self) -> UMBPStoreConnectorStats | None:
+        if self._stats.is_empty():
+            return None
+        result = UMBPStoreConnectorStats(data=dict(self._stats.data))
+        self._stats.reset()
+        return result
 
     def close(self) -> None:
         self.wait_for_save()

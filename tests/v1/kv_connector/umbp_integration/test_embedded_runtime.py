@@ -320,6 +320,10 @@ def test_finished_hybrid_tail_roundtrip_restores_full_state(tmp_path, device):
         assert worker.get_failed_recving() == set()
         for index, (name, cache) in enumerate(caches.items(), 3):
             assert torch.equal(cache[index], expected[name])
+        counters = worker.get_kv_connector_stats().reduce()
+        page_bytes = sum(group.kv_cache_spec.page_size_bytes for group in groups)
+        assert counters["load_num_bytes"] == page_bytes
+        assert counters["store_num_bytes"] == page_bytes
     finally:
         worker.close()
         scheduler.close()

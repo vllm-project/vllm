@@ -281,6 +281,10 @@ def test_materialization_preserves_plan_metadata_after_reregistration():
         2,
         request_id="req",
         group_id=0,
+        block_hash=b"hash",
+        parent_block_hash=b"parent",
+        token_ids=(1, 2),
+        block_size=16,
     )
     previous = None
     for _ in range(2):
@@ -1147,7 +1151,10 @@ def test_load_cancellation_preserves_other_requests(async_load):
 
     assert len(handle.cancelled) == 1
     assert handle.cancelled[0].plans[0].request_id == "first"
+    assert worker.get_kv_connector_stats().reduce()["load_completed"] == 1
     assert finished == (None, {"second"} if async_load else None)
+    worker.wait_for_layer_load("")
+    assert worker.get_kv_connector_stats() is None
 
 
 def test_worker_reports_load_completion_and_store_event_without_deferring_request():
@@ -1192,6 +1199,7 @@ def test_worker_partial_store_failure_reports_unpublished_objects():
     metadata = worker.build_connector_worker_meta()
     assert metadata.store_events == {9: StoreEventResult(1)}
     assert not hasattr(worker.runtime, "published")
+    assert worker.get_kv_connector_stats().reduce()["store_failed"] == 1
 
 
 @pytest.mark.parametrize("forward", [False, True])
@@ -1234,6 +1242,10 @@ def test_connector_finalizes_each_store_once_when_forward_hook_is_skipped(
         assert next_step == ({} if forward else expected)
         assert plan.key in runtime.store
 
+    stats = connector.get_kv_connector_stats().reduce()
+    assert stats["store_submitted"] == 2
+    assert stats["store_completed"] == 2
+
 
 def test_worker_preserves_scheduler_supplied_ranges():
     handle = _WorkerHandle()
@@ -1274,7 +1286,8 @@ def test_worker_preserves_scheduler_supplied_ranges():
     assert handle.loaded_plans == [supplied]
 
 
-def test_embedded_connector_core_flow(monkeypatch):
+@pytest.mark.parametrize("enable_events", [False, True])
+def test_embedded_connector_core_flow(monkeypatch, enable_events):
     runtime = _EmbeddedRuntime()
     monkeypatch.setitem(
         UMBPRuntimeFactory._builders,
@@ -1283,6 +1296,8 @@ def test_embedded_connector_core_flow(monkeypatch):
     )
     config = _kv_cache_config()
     vllm_config = _vllm_config({"mode": "embedded", "load_async": False})
+    if enable_events:
+        vllm_config.kv_events_config = SimpleNamespace(enable_kv_cache_events=True)
     producer = SimpleNamespace(
         request_id="producer",
         req_id="producer",
@@ -1321,9 +1336,21 @@ def test_embedded_connector_core_flow(monkeypatch):
         0,
     )
     metadata = scheduler_connector.build_connector_meta(scheduler_output)
+    assert [plan.token_ids for plan in metadata.store_plans] == (
+        [tuple(range(16)), tuple(range(16, 32))] if enable_events else [(), ()]
+    )
+    assert [plan.parent_block_hash for plan in metadata.store_plans] == (
+        [None, b"a"] if enable_events else [None, None]
+    )
     worker_connector.bind_connector_metadata(metadata)
     worker_connector.wait_for_save()
     assert runtime.store
+    events = worker_connector.get_kv_connector_kv_cache_events()
+    if enable_events:
+        assert events is not None
+        assert len(events.get_all_events()) == 2
+    else:
+        assert events is None
 
     consumer = SimpleNamespace(
         request_id="consumer",
@@ -1681,6 +1708,7 @@ def test_worker_localizes_scheduler_plan_key_to_its_tp_rank(
         key=BlockIdentityCodec(UMBPNamespace("rank-local")).key(b"hash", 0),
         block_id=1,
         group_id=0,
+        block_hash=b"hash",
     )
     metadata = UMBPConnectorMetadata(store_plans=[plan], store_event=7)
 
@@ -1787,3 +1815,4 @@ def test_worker_submits_stores_once(grouped):
     assert worker.get_finished({"req"}) == (None, None)
     completed = worker.build_connector_worker_meta()
     assert completed.store_events == {19: StoreEventResult(1)}
+    assert worker.get_kv_connector_stats().reduce()["store_num_bytes"] == 32

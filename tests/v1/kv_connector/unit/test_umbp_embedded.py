@@ -196,6 +196,7 @@ def test_bulk_load_preserves_group_order_failures_and_new_buffers(
         assert result.plans is supplied if batched else result.plans == tuple(plans)
         assert result.failed_block_ids == {4}
         assert result.completed_keys == {"group0", "group1"}
+        assert result.completed_bytes == 112
     assert len(calls) == 2
     assert calls[0][2] != calls[1][2]
 
@@ -222,6 +223,7 @@ def test_bulk_store_matches_materialized_ranges(bulk_worker, monkeypatch):
     assert calls == [expected]
     assert result.plans == tuple(plans)
     assert result.completed_keys == {"group0", "group1"}
+    assert result.completed_bytes == 112
 
 
 @pytest.mark.parametrize("special", ["subblocks", "materialized", "batch-subblocks"])
@@ -699,6 +701,37 @@ def test_embedded_scheduler_clear_removes_published_objects():
     assert scheduler.lookup(["clear-key"]) == [False]
     worker.close()
     scheduler.close()
+
+
+def test_mori_worker_reports_published_key_eviction(tmp_path):
+    class _Client:
+        def flush(self):
+            return True
+
+        def batch_exists(self, keys):
+            return [False] * len(keys)
+
+        def close(self):
+            pass
+
+    handle = _MoriWorkerHandle(
+        _Client(),
+        "eviction",
+        RankTopology(),
+        str(tmp_path),
+        1,
+        1,
+    )
+    plan = BlockTransferPlan("evicted-key", 0)
+    job = TransferJobState((plan,))
+    job.start()
+    job.complete()
+    handle.publish(job)
+
+    assert handle.batch_exists(["evicted-key"]) == [False]
+    assert handle.take_evicted_keys() == ("evicted-key",)
+    assert handle.take_evicted_keys() == ()
+    handle.close()
 
 
 @pytest.mark.parametrize("operation", ["wait", "cancel"])

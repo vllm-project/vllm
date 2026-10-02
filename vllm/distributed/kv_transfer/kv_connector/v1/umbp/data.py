@@ -478,6 +478,11 @@ class BlockTransferPlan:
     ranges: tuple[KVRange, ...] = ()
     request_id: str | None = None
     group_id: int | None = None
+    block_hash: bytes | None = None
+    parent_block_hash: bytes | None = None
+    token_ids: tuple[int, ...] = ()
+    block_size: int = 0
+    medium: str = "CPU"
 
 
 @dataclass(frozen=True)
@@ -588,12 +593,28 @@ class TransferJobState:
     completed_keys: set[str] = field(default_factory=set)
     failed_keys: set[str] = field(default_factory=set)
     error: str | None = None
+    plan_bytes: tuple[int, ...] | None = None
 
     @property
     def keys(self) -> Sequence[str]:
         if isinstance(self.plans, BlockLoadBatch):
             return self.plans.keys
         return tuple(plan.key for plan in self.plans)
+
+    @property
+    def completed_bytes(self) -> int:
+        if self.plan_bytes is not None:
+            return sum(
+                size
+                for key, size in zip(self.keys, self.plan_bytes, strict=True)
+                if key in self.completed_keys
+            )
+        return sum(
+            item.length
+            for plan in self.plans
+            if plan.key in self.completed_keys
+            for item in plan.ranges
+        )
 
     def start(self) -> None:
         if self.status != TransferJobStatus.PENDING:

@@ -152,6 +152,10 @@ class UMBPStoreConnectorScheduler:
             and getattr(group.kv_cache_spec, "mamba_cache_mode", None) == "align"
         )
         self.runtime = runtime
+        self.enable_kv_cache_events = bool(
+            vllm_config.kv_events_config
+            and vllm_config.kv_events_config.enable_kv_cache_events
+        )
         self.codec = codec
         self.topology = topology or RankTopology()
         transfer_config = vllm_config.kv_transfer_config
@@ -705,6 +709,13 @@ class UMBPStoreConnectorScheduler:
                         block_id=block_id,
                         request_id=request_id,
                         group_id=group_id,
+                        block_hash=block_hash,
+                        parent_block_hash=(
+                            request.block_hashes[hash_index - 1]
+                            if self.enable_kv_cache_events and hash_index > 0
+                            else None
+                        ),
+                        block_size=self.group_block_sizes[group_id],
                     )
                 )
             logger.debug(
@@ -852,6 +863,24 @@ class UMBPStoreConnectorScheduler:
                         block_id=block_ids[index],
                         request_id=request_id,
                         group_id=group_id,
+                        block_hash=block_hash,
+                        parent_block_hash=(
+                            self._object_hash_at_token_end(
+                                request.block_hashes, token_end - group_block_size
+                            )
+                            if self.enable_kv_cache_events and index > 0
+                            else None
+                        ),
+                        token_ids=(
+                            tuple(
+                                request.prompt_token_ids[
+                                    index * group_block_size : token_end
+                                ]
+                            )
+                            if self.enable_kv_cache_events and request.prompt_token_ids
+                            else ()
+                        ),
+                        block_size=group_block_size,
                     )
                 )
         return plans
@@ -988,12 +1017,15 @@ class UMBPStoreConnectorScheduler:
                 return False
             if pool.blocks[block_id].is_null:
                 return False
+            group_block_size = self.group_block_sizes[group_id]
             plans.append(
                 BlockTransferPlan(
                     request_id=request.request_id,
                     block_id=block_id,
                     group_id=group_id,
                     key=self.codec.key(request.block_hashes[hash_index], group_id),
+                    block_hash=request.block_hashes[hash_index],
+                    block_size=group_block_size,
                 )
             )
         # A Mamba page is a state snapshot, not a token-addressable byte array.

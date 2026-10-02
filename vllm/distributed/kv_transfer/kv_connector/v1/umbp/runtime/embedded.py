@@ -324,6 +324,9 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         self._lookup_server: _MoriLookupServer | None = None
         self._registered_storages: set[int] = set()
         self._gpu_devices: set[int] = set()
+        self._published_keys: set[str] = set()
+        self._evicted_keys: set[str] = set()
+        self._key_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="umbp-embedded-transfer",
@@ -459,17 +462,29 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         prepared = self._bulk_load_args(plans)
         if prepared is None:
             return None
-        args, _ = prepared
+        args, plan_bytes = prepared
         return self._submit_load(
             plans if isinstance(plans, BlockLoadBatch) else tuple(plans),
             args,
+            plan_bytes,
         )
 
     def batch_exists(self, keys: Sequence[str]) -> Sequence[bool]:
-        return [bool(value) for value in self.client.batch_exists(keys)]
+        result = [bool(value) for value in self.client.batch_exists(keys)]
+        with self._key_lock:
+            for key, exists in zip(keys, result, strict=True):
+                if not exists and key in self._published_keys:
+                    self._published_keys.remove(key)
+                    self._evicted_keys.add(key)
+        return result
 
     def clear(self) -> bool:
-        return bool(self.client.clear())
+        success = bool(self.client.clear())
+        if success:
+            with self._key_lock:
+                self._published_keys.clear()
+                self._evicted_keys.clear()
+        return success
 
     @staticmethod
     def _range_args(plans: Sequence[BlockTransferPlan], *, for_store: bool = True):
@@ -500,8 +515,9 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         self,
         plans: tuple[BlockTransferPlan, ...] | BlockLoadBatch,
         range_args: _LoadArgs | None = None,
+        plan_bytes: tuple[int, ...] | None = None,
     ) -> TransferJobState:
-        job = TransferJobState(plans)
+        job = TransferJobState(plans, plan_bytes=plan_bytes)
         job.start()
         self._futures[id(job)] = self._executor.submit(
             self._load_sync, job, plans, range_args
@@ -560,6 +576,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         return self._submit_store(
             tuple(plans),
             (keys, list(plan_bytes), pointers, sizes, offsets),
+            plan_bytes,
         )
 
     def store(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
@@ -569,8 +586,9 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         self,
         plans: tuple[BlockTransferPlan, ...],
         range_args: _StoreArgs | None = None,
+        plan_bytes: tuple[int, ...] | None = None,
     ) -> TransferJobState:
-        job = TransferJobState(plans)
+        job = TransferJobState(plans, plan_bytes=plan_bytes)
         job.start()
         ready_events: list[torch.Event] = []
         for device in self._gpu_devices:
@@ -689,6 +707,8 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
     def publish(self, job: TransferJobState) -> None:
         if job.status.value != "completed":
             raise RuntimeError("cannot publish an incomplete MORI UMBP job")
+        with self._key_lock:
+            self._published_keys.update(job.completed_keys)
 
     def cancel(self, job: TransferJobState) -> TransferJobState:
         future = self._futures.get(id(job))
@@ -700,6 +720,12 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
             job.cancel("preempted")
             return job
         return self.wait(job)
+
+    def take_evicted_keys(self) -> Sequence[str]:
+        with self._key_lock:
+            result = tuple(self._evicted_keys)
+            self._evicted_keys.clear()
+        return result
 
     def close(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=True)
