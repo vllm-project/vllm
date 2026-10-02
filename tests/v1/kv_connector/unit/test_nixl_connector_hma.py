@@ -856,28 +856,6 @@ def test_apply_prefix_caching_mamba_hybrid(
             [[6, 7, 8, 9], [99]],
             id="fa_prefix_hit_and_ssm_trim",
         ),
-        # Multi-slot SSM ("all" mode): a local prefix hit leaves fewer local
-        # slots; the earlier remote slots are covered locally → remote tail.
-        pytest.param(
-            10,
-            10,
-            [list(range(10)), [5, 6]],
-            [list(range(10)), [1, 2, 3]],
-            [list(range(10)), [5, 6]],
-            [list(range(10)), [2, 3]],
-            id="ssm_multi_block_local_hit_tail",
-        ),
-        # Multi-slot SSM ("all" mode): the one trailing local position holds
-        # the token D recomputes itself → local head-clip.
-        pytest.param(
-            10,
-            10,
-            [list(range(10)), [4, 5, 6]],
-            [list(range(10)), [8, 9]],
-            [list(range(10)), [4, 5]],
-            [list(range(10)), [8, 9]],
-            id="ssm_multi_block_local_extra_head_clip",
-        ),
     ],
 )
 def test_apply_prefix_caching_ssm_prefix_cache_hit(
@@ -2034,13 +2012,12 @@ def test_logical_to_kernel_block_ids_with_remote_ratio(
 
 @pytest.mark.cpu_test
 def test_exchange_clipped_blocks_ssm_single_state():
-    """In single-state cache modes, SSM lists are reduced to the running
-    state slot: speculative scratch slots, null placeholders and the previous
-    step's state carry nothing. Attention groups pass through untouched."""
+    """SSM lists are reduced to the running state slot: speculative scratch
+    slots, null placeholders and the previous step's state carry nothing.
+    Attention groups pass through untouched."""
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     sched.blocks_per_sw = [0, 0]
     sched._ssm_spec_blocks = [None, 2]
-    sched._ssm_state_slots_are_positional = False
 
     # Align-mode list: null placeholders, state block, 2 speculative slots.
     clipped = sched.get_exchange_clipped_blocks(([1, 2, 3], [0, 0, 7, 8, 9]))
@@ -2067,19 +2044,6 @@ def test_exchange_clipped_blocks_ssm_single_state():
     # Non-mamba models pass through unchanged.
     fa_sched = make_nixl_scheduler(has_mamba=False)
     assert fa_sched.get_exchange_clipped_blocks(([1, 2],)) == ([1, 2],)
-
-
-@pytest.mark.cpu_test
-def test_exchange_clipped_blocks_ssm_positional_states():
-    """In "all" mode every position holds a state, so only the speculative
-    slots go; placeholders stay to keep the list position-indexed."""
-    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
-    sched.blocks_per_sw = [0, 0]
-    sched._ssm_spec_blocks = [None, 2]
-    sched._ssm_state_slots_are_positional = True
-
-    clipped = sched.get_exchange_clipped_blocks(([1, 2, 3], [0, 5, 6, 7, 8, 9]))
-    assert clipped == ([1, 2, 3], [0, 5, 6, 7])
 
 
 # ── Hybrid MLA+SSM (KimiLinear-shaped KDA+MLA) tests ─────────────────────
@@ -2396,3 +2360,50 @@ def test_push_write_hybrid_mla_replicates_attention():
         assert spec.remote_block_ids == [[7, 8], [3]]
         assert call.kwargs["local_xfer_side_handle"] == local_handle
         assert call.kwargs["remote_xfer_side_handle"] == remote_handle
+
+
+def _make_host_buffer_worker(copy_op):
+    """A worker stripped down to what the host-buffer copy paths touch."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.use_host_buffer = True
+    worker.copy_blocks = copy_op
+    return worker
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "group_block_ids,expected_ids",
+    [
+        # Single group (non-hybrid model): one copy, as before.
+        ([[1, 2, 3]], [1, 2, 3]),
+        # Hybrid model: three groups collapse into a single copy.
+        ([[1, 2], [3, 4], [5]], [1, 2, 3, 4, 5]),
+        # An empty group contributes no ids.
+        ([[1, 2], []], [1, 2]),
+    ],
+)
+def test_sync_recved_kv_issues_one_copy_per_request(group_block_ids, expected_ids):
+    """h2d copies are issued once per request, not once per KV cache group."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
+
+    calls = []
+    worker = _make_host_buffer_worker(
+        lambda src, dst, src_ids, dst_ids, direction: calls.append(
+            (src_ids, dst_ids, direction)
+        )
+    )
+    worker.host_xfer_buffers = {"layer": None}
+    worker.device_kv_caches = {"layer": None}
+
+    meta = ReqMeta(
+        local_block_ids=group_block_ids,
+        local_physical_block_ids=group_block_ids,
+        tp_size=1,
+    )
+    worker.sync_recved_kv_to_device("req", meta)
+
+    assert calls == [(expected_ids, expected_ids, "h2d")]
