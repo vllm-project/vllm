@@ -576,6 +576,10 @@ class RequestTracker:
         return complete_tokens
 
 
+# Error prefix of a transfer a runtime refused without touching the pool.
+TRANSFER_NOT_ATTEMPTED = "transfer not attempted"
+
+
 class TransferJobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
