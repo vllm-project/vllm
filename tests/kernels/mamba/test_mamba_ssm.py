@@ -441,68 +441,6 @@ def test_selective_state_update_stochastic_rounding(dim, dstate, has_z, philox_r
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize("philox_rounds", [0, 5])
-@pytest.mark.parametrize("tie_hdim", [False, True])
-@pytest.mark.skipif(
-    not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ),
-    reason="Triton stochastic rounding requires compute capability 10.0.",
-)
-def test_speculative_state_update_stochastic_rounding(philox_rounds, tie_hdim):
-    """Round speculative checkpoints while retaining the FP32 recurrence."""
-    set_random_seed(0)
-    heads, dim, dstate = 2, 64, 64
-    midpoint = 1.0 + 2**-11
-    state = torch.zeros(6, heads, dim, dstate, device=DEVICE, dtype=torch.float16)
-    state[NULL_BLOCK_ID].fill_(7)
-    x = torch.ones(4, heads, dim, device=DEVICE)
-    dt = torch.ones(4, heads, 1, device=DEVICE).expand_as(x)
-    dt_bias = torch.zeros(heads, 1, device=DEVICE).expand(heads, dim)
-    A = torch.zeros(heads, 1, 1, device=DEVICE).expand(heads, dim, dstate)
-    if not tie_hdim:
-        A, dt, dt_bias = A.contiguous(), dt.contiguous(), dt_bias.contiguous()
-    B = torch.zeros(4, 1, dstate, device=DEVICE)
-    B[0] = B[3] = midpoint
-    C = torch.ones_like(B)
-    indices = torch.tensor([[1, 0, 0], [0, 0, 2]], device=DEVICE, dtype=torch.int32)
-    destinations = torch.tensor(
-        [[3, 0, 4], [5, 0, 0]], device=DEVICE, dtype=torch.int32
-    )
-    accepted = torch.tensor([0, 3], device=DEVICE, dtype=torch.int32)
-    cu_seqlens = torch.tensor([0, 3, 4], device=DEVICE, dtype=torch.int32)
-
-    for enable_sr in (False, True):
-        actual = state.clone()
-        out = torch.empty_like(x)
-        selective_state_update(
-            actual,
-            x,
-            dt,
-            A,
-            B,
-            C,
-            D=torch.zeros(heads, dim, device=DEVICE),
-            dt_bias=dt_bias,
-            state_batch_indices=indices,
-            dst_state_batch_indices=destinations,
-            num_accepted_tokens=accepted,
-            cu_seqlens=cu_seqlens,
-            out=out,
-            enable_stochastic_rounding=enable_sr,
-            cache_philox_rounds=philox_rounds,
-        )
-        torch.testing.assert_close(out, torch.full_like(out, midpoint * dstate))
-        assert torch.equal(actual[:3], state[:3])
-        for checkpoint in actual[3:]:
-            if enable_sr:
-                assert checkpoint.min().item() == 1.0
-                assert checkpoint.max().item() == 1.0 + 2**-10
-                assert abs(checkpoint.float().mean().item() - midpoint) < 2**-14
-            else:
-                assert torch.equal(checkpoint, torch.ones_like(checkpoint))
-
-
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 64])

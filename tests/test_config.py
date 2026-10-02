@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from contextlib import nullcontext
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -46,7 +47,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
@@ -324,6 +325,39 @@ def test_lora_allowed_for_drafter_without_lora_support():
     lora_config = LoRAConfig()
     lora_config.verify_with_model_config(draft_config)
     assert lora_config.lora_dtype == torch.bfloat16
+
+
+@pytest.mark.parametrize(
+    ("backend", "enable_sr", "with_speculation", "reject"),
+    [
+        ("triton", True, True, True),
+        ("flashinfer", True, True, False),
+        ("triton", False, True, False),
+        ("triton", True, False, False),
+    ],
+)
+def test_mamba_stochastic_rounding_with_speculation(
+    monkeypatch, backend, enable_sr, with_speculation, reject
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_device_capability_family", lambda _: True)
+    with (
+        pytest.raises(ValueError, match="Use `--mamba-backend flashinfer`")
+        if reject
+        else nullcontext()
+    ):
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            cache_config=CacheConfig(mamba_ssm_cache_dtype="float16"),
+            mamba_config=MambaConfig(
+                backend=backend, enable_stochastic_rounding=enable_sr
+            ),
+            speculative_config=(
+                SpeculativeConfig(method="ngram", num_speculative_tokens=1)
+                if with_speculation
+                else None
+            ),
+        )
 
 
 def test_mamba_cache_mode_all_is_rejected():
