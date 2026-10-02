@@ -1710,6 +1710,9 @@ def get_kv_cache_config_from_groups(
         The generated KVCacheConfig
 
     """
+    enable_nan_fault_tolerance = (
+        vllm_config.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance
+    )
     if len(kv_cache_groups) == 0:
         # Attention free models do not have KV cache.
         # Return num_blocks=1 as BlockPool always needs a null_block.
@@ -1720,7 +1723,7 @@ def get_kv_cache_config_from_groups(
             prefix_cache_retention_interval=(
                 vllm_config.cache_config.prefix_cache_retention_interval
             ),
-            force_zeroing=vllm_config.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance,
+            _force_zeroing=enable_nan_fault_tolerance,
         )
 
     if vllm_config.attention_config.hisparse_config is not None:
@@ -1790,9 +1793,7 @@ def get_kv_cache_config_from_groups(
             prefix_cache_retention_interval=(
                 vllm_config.cache_config.prefix_cache_retention_interval
             ),
-            force_zeroing=(
-                vllm_config.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance
-            ),
+            _force_zeroing=enable_nan_fault_tolerance,
         )
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
@@ -1857,7 +1858,7 @@ def get_kv_cache_config_from_groups(
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
-        force_zeroing=vllm_config.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance,
+        _force_zeroing=enable_nan_fault_tolerance,
     )
 
 
