@@ -18,6 +18,7 @@ from vllm.config.quantization import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
@@ -359,9 +360,13 @@ def test_online_quantization(
     assert expert_map_manager.map_global_to_local(moe.n_routed_experts) == (
         moe.n_routed_experts
     )
-    assert routed_experts.w13_weight.dtype == torch.float4_e2m1fn_x2
+    expected_weight_dtype = {
+        Mxfp4MoeBackend.AITER_MXFP4_BF16: torch.float4_e2m1fn_x2,
+        Mxfp4MoeBackend.EMULATION: torch.uint8,
+    }[routed_experts.quant_method.mxfp4_backend]
+    assert routed_experts.w13_weight.dtype == expected_weight_dtype
     assert routed_experts.w13_weight_scale.dtype == torch.uint8
-    assert routed_experts.w2_weight.dtype == torch.float4_e2m1fn_x2
+    assert routed_experts.w2_weight.dtype == expected_weight_dtype
     assert routed_experts.w2_weight_scale.dtype == torch.uint8
     assert vllm_config.quant_config is not None
     assert vllm_config.quant_config.online_quantization_config is not None
