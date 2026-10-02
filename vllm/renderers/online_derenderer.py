@@ -43,8 +43,142 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async
+from vllm.v1.engine.detokenizer import check_stop_strings
 
 logger = init_logger(__name__)
+
+
+def normalize_stop_strings(stop: str | Sequence[str] | None) -> list[str]:
+    """Return the request stop strings, dropping empty values."""
+    if stop is None:
+        return []
+    if isinstance(stop, str):
+        return [stop] if stop else []
+    return [item for item in stop if item]
+
+
+def generation_eos_ids(model_config: Any) -> set[int]:
+    """EOS ids from the model's generation config, if that config is loaded."""
+    getter = getattr(model_config, "try_get_generation_config", None)
+    if getter is None:
+        return set()
+    config = getter() or {}
+    eos_ids = config.get("eos_token_id")
+    if eos_ids is None:
+        return set()
+    if isinstance(eos_ids, int):
+        return {eos_ids}
+    return {int(token_id) for token_id in eos_ids}
+
+
+def is_stop_token(
+    token_id: int,
+    stop_token_ids: Sequence[int] | None,
+    eos_token_id: int | None,
+    generation_eos: set[int],
+) -> bool:
+    """True when this id is one the engine would treat as a token stop."""
+    if stop_token_ids and token_id in stop_token_ids:
+        return True
+    if eos_token_id is not None and token_id == eos_token_id:
+        return True
+    return token_id in generation_eos
+
+
+def decode_with_stop(
+    tokenizer: TokenizerLike,
+    token_ids: Sequence[int],
+    *,
+    skip_special_tokens: bool,
+    finish_reason: str | None,
+    stop: str | Sequence[str] | None,
+    include_stop_str_in_output: bool,
+    stop_token_ids: Sequence[int] | None = None,
+    eos_token_id: int | None = None,
+    generation_eos: set[int] | None = None,
+) -> tuple[str, list[int], int | str | None]:
+    """Decode output text the way the engine's detokenizer does.
+
+    A token stop is checked first, and only when the last id is a known stop
+    token. The string check then runs on whatever text is left. A matched
+    stop string wins. The primary EOS leaves stop_reason empty.
+    """
+    ids = list(token_ids)
+    known_eos = generation_eos or set()
+    token_reason: int | None = None
+    if (
+        finish_reason == "stop"
+        and ids
+        and is_stop_token(ids[-1], stop_token_ids, eos_token_id, known_eos)
+    ):
+        stopped_token = ids[-1]
+        token_reason = None if stopped_token == eos_token_id else stopped_token
+        if not include_stop_str_in_output:
+            ids = ids[:-1]
+
+    text = tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
+    text, stopped_str = truncate_at_stop_string(text, stop, include_stop_str_in_output)
+    if stopped_str is not None:
+        return text, ids, stopped_str
+    return text, ids, token_reason
+
+
+def truncate_at_stop_string(
+    text: str,
+    stop: str | Sequence[str] | None,
+    include_in_output: bool,
+) -> tuple[str, str | None]:
+    """Cut decoded text at the earliest stop string.
+
+    Returns the text the client should see and the matched stop string.
+    """
+    strings = normalize_stop_strings(stop)
+    if not strings or not text:
+        return text, None
+    matched = check_stop_strings(
+        text,
+        len(text),
+        strings,
+        include_in_output,
+    )
+    if matched is None:
+        return text, None
+    stop_str, offset = matched
+    if offset >= 0:
+        text = text[:offset]
+    return text, stop_str
+
+
+def strip_finished_stop_token(
+    token_ids: Sequence[int],
+    *,
+    finish_reason: str | None,
+    include_in_output: bool,
+    stop_token_ids: Sequence[int] | None,
+    eos_token_id: int | None,
+    generation_eos: set[int],
+) -> tuple[list[int], int | None]:
+    """Drop a trailing stop id on a finished chunk, matching the engine.
+
+    Returns the ids to detokenize and the stop_reason for a non-primary
+    stop id. The primary EOS leaves the reason empty.
+    ``include_in_output`` keeps the id and still reports the reason.
+    This looks only at the current chunk, so streaming stores nothing for it.
+    """
+    ids = list(token_ids)
+    if (
+        finish_reason != "stop"
+        or not ids
+        or not is_stop_token(ids[-1], stop_token_ids, eos_token_id, generation_eos)
+    ):
+        return ids, None
+    token_id = ids[-1]
+    reason = (
+        None if eos_token_id is not None and token_id == eos_token_id else token_id
+    )
+    if include_in_output:
+        return ids, reason
+    return ids[:-1], reason
 
 
 class OnlineDerenderer:
@@ -129,6 +263,36 @@ class OnlineDerenderer:
             if not choice.token_ids:
                 raise ValueError(f"choice {choice.index} has empty or null token_ids")
 
+            include_stop = (
+                chat_request.include_stop_str_in_output
+                if chat_request is not None
+                else False
+            )
+            stop = chat_request.stop if chat_request is not None else None
+            use_parser = self.parser is not None and chat_request is not None
+            skip_special = (
+                False
+                if use_parser
+                else (
+                    chat_request.skip_special_tokens
+                    if chat_request is not None
+                    else True
+                )
+            )
+            decoded_text, token_ids, stop_reason = decode_with_stop(
+                tokenizer,
+                choice.token_ids,
+                skip_special_tokens=skip_special,
+                finish_reason=choice.finish_reason,
+                stop=stop,
+                include_stop_str_in_output=include_stop,
+                stop_token_ids=(
+                    chat_request.stop_token_ids if chat_request is not None else None
+                ),
+                eos_token_id=getattr(tokenizer, "eos_token_id", None),
+                generation_eos=generation_eos_ids(getattr(self, "model_config", None)),
+            )
+
             resolved_logprobs = (
                 _resolve_logprobs(choice.logprobs, tokenizer)
                 if choice.logprobs is not None
@@ -136,13 +300,8 @@ class OnlineDerenderer:
             )
 
             if self.parser is not None and chat_request is not None:
-                # Parser path: decode with special tokens preserved
-                # so the parser can see markers like </think>,
-                # <tool_call>, or Harmony channel tokens.
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=False
-                )
-
+                # Parser path keeps special-token markers so the parser can
+                # see </think>, <tool_call>, or Harmony channel tokens.
                 chat_template_kwargs: dict[str, Any] = {}
                 if not self.use_harmony:
                     chat_template_kwargs = (
@@ -164,7 +323,7 @@ class OnlineDerenderer:
                     decoded_text,
                     chat_request,
                     enable_auto_tools=self.enable_auto_tools,
-                    model_output_token_ids=choice.token_ids,
+                    model_output_token_ids=token_ids,
                 )
 
                 if not getattr(chat_request, "include_reasoning", True):
@@ -196,16 +355,6 @@ class OnlineDerenderer:
                     tool_calls=tc_items,
                 )
             else:
-                # No parser: plain detokenization honouring the request's
-                # skip_special_tokens (default True when no request was given).
-                skip_special = (
-                    chat_request.skip_special_tokens
-                    if chat_request is not None
-                    else True
-                )
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=skip_special
-                )
                 message = ChatMessage(role="assistant", content=decoded_text)
 
             choices.append(
@@ -214,6 +363,7 @@ class OnlineDerenderer:
                     message=message,
                     logprobs=resolved_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=stop_reason,
                 )
             )
 
@@ -360,13 +510,34 @@ class OnlineDerenderer:
         skip_special = (
             chat_request.skip_special_tokens if chat_request is not None else True
         )
+        include_stop = (
+            chat_request.include_stop_str_in_output
+            if chat_request is not None
+            else False
+        )
+        stop_token_ids = (
+            chat_request.stop_token_ids if chat_request is not None else None
+        )
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        generation_eos = generation_eos_ids(getattr(self, "model_config", None))
         stream_choices: list[ChatCompletionResponseStreamChoice] = []
         updated_state = state
 
         for choice in generate_chunk.choices:
-            delta_tids = choice.token_ids or []
+            raw_tids = list(choice.token_ids or [])
+            decode_tids, stop_reason = strip_finished_stop_token(
+                raw_tids,
+                finish_reason=choice.finish_reason,
+                include_in_output=include_stop,
+                stop_token_ids=stop_token_ids,
+                eos_token_id=eos_token_id,
+                generation_eos=generation_eos,
+            )
             new_text, updated_state = await self._detokenize_delta_async(
-                tokenizer, delta_tids, updated_state, skip_special_tokens=skip_special
+                tokenizer,
+                decode_tids,
+                updated_state,
+                skip_special_tokens=skip_special,
             )
 
             # NOTE: parser-configured servers dispatch to
@@ -389,7 +560,7 @@ class OnlineDerenderer:
                 update={
                     "role_sent": True,
                     "logprob_context_token_ids": _logprob_context_tail(
-                        state.logprob_context_token_ids, delta_tids
+                        state.logprob_context_token_ids, raw_tids
                     ),
                 }
             )
@@ -404,6 +575,7 @@ class OnlineDerenderer:
                     delta=delta,
                     logprobs=resolved_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=stop_reason,
                 )
             )
 
@@ -665,8 +837,30 @@ class OnlineDerenderer:
                         "has empty or null token_ids"
                     )
 
-                decoded_text = tokenizer.decode(
-                    choice.token_ids, skip_special_tokens=skip_special
+                include_stop = (
+                    completion_request.include_stop_str_in_output
+                    if completion_request is not None
+                    else False
+                )
+                stop = (
+                    completion_request.stop if completion_request is not None else None
+                )
+                decoded_text, _, stop_reason = decode_with_stop(
+                    tokenizer,
+                    choice.token_ids,
+                    skip_special_tokens=skip_special,
+                    finish_reason=choice.finish_reason,
+                    stop=stop,
+                    include_stop_str_in_output=include_stop,
+                    stop_token_ids=(
+                        completion_request.stop_token_ids
+                        if completion_request is not None
+                        else None
+                    ),
+                    eos_token_id=getattr(tokenizer, "eos_token_id", None),
+                    generation_eos=generation_eos_ids(
+                        getattr(self, "model_config", None)
+                    ),
                 )
                 completion_logprobs = None
                 if choice.logprobs is not None:
@@ -679,6 +873,7 @@ class OnlineDerenderer:
                         index=index,
                         text=decoded_text,
                         finish_reason=choice.finish_reason,
+                        stop_reason=stop_reason,
                         logprobs=completion_logprobs,
                     )
                 )
@@ -736,13 +931,36 @@ class OnlineDerenderer:
             if completion_request is not None
             else True
         )
+        include_stop = (
+            completion_request.include_stop_str_in_output
+            if completion_request is not None
+            else False
+        )
+        stop_token_ids = (
+            completion_request.stop_token_ids
+            if completion_request is not None
+            else None
+        )
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        generation_eos = generation_eos_ids(getattr(self, "model_config", None))
         stream_choices: list[CompletionResponseStreamChoice] = []
         updated_state = state
 
         for choice in generate_chunk.choices:
-            delta_tids = choice.token_ids or []
+            raw_tids = list(choice.token_ids or [])
+            decode_tids, stop_reason = strip_finished_stop_token(
+                raw_tids,
+                finish_reason=choice.finish_reason,
+                include_in_output=include_stop,
+                stop_token_ids=stop_token_ids,
+                eos_token_id=eos_token_id,
+                generation_eos=generation_eos,
+            )
             new_text, updated_state = await self._detokenize_delta_async(
-                tokenizer, delta_tids, updated_state, skip_special_tokens=skip_special
+                tokenizer,
+                decode_tids,
+                updated_state,
+                skip_special_tokens=skip_special,
             )
 
             completion_logprobs = None
@@ -759,7 +977,7 @@ class OnlineDerenderer:
             updated_state = updated_state.model_copy(
                 update={
                     "logprob_context_token_ids": _logprob_context_tail(
-                        state.logprob_context_token_ids, delta_tids
+                        state.logprob_context_token_ids, raw_tids
                     ),
                     "logprob_text_offset": state.logprob_text_offset + len(new_text),
                 }
@@ -771,6 +989,7 @@ class OnlineDerenderer:
                     text=new_text,
                     logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
+                    stop_reason=stop_reason,
                 )
             )
 

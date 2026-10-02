@@ -1346,6 +1346,69 @@ class TestServingDerenderStreamValidation:
         assert not isinstance(result, ErrorResponse)
 
     @pytest.mark.asyncio
+    async def test_plain_stream_rejects_stop_strings(self):
+        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+            DerenderChatStreamRequest,
+        )
+
+        serving = self._make_serving(parser_configured=False)
+        request = DerenderChatStreamRequest(
+            stream=True,
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([1, 2]),
+            chat_request=_chat_request(stop=["three"]),
+        )
+        result = await serving.derender_chat_stream_response(request)
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == 400
+        assert "stop strings" in result.error.message
+        assert "output_mode=text" in result.error.message
+        serving.online_derenderer.derender_chat_stream.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_completion_stream_rejects_stop_strings(self):
+        from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+            DerenderCompletionStreamRequest,
+        )
+
+        serving = self._make_serving(parser_configured=False)
+        request = DerenderCompletionStreamRequest(
+            stream=True,
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([1, 2]),
+            completion_request=CompletionRequest(
+                model=MODEL_NAME, prompt="hi", stop=["three"]
+            ),
+        )
+        result = await serving.derender_completion_stream_response(request)
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == 400
+        assert "stop strings" in result.error.message
+        assert "output_mode=text" in result.error.message
+        serving.online_derenderer.derender_completion_stream.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_parser_stream_rejects_stop_strings(self):
+        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+            DerenderChatStreamRequest,
+        )
+
+        serving = self._make_serving(parser_configured=True)
+        request = DerenderChatStreamRequest(
+            stream=True,
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([1, 2]),
+            chat_request=_chat_request(stop=["three"]),
+            prompt_token_ids=[1],
+        )
+        result = await serving.derender_chat_stream_response(request)
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == 400
+        assert "stop strings" in result.error.message
+        serving.online_derenderer.derender_chat_stream.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_missing_prompt_token_ids_with_parser_rejected(self):
         """A parser configured model must reject a missing prompt_token_ids
         the same way it rejects a missing chat_request. Without it,
