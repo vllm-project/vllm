@@ -14,6 +14,8 @@ from vllm.model_executor.layers.fused_moe.router import (
 )
 from vllm.platforms import current_platform
 
+pytestmark = pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+
 # (hidden_size, num_experts) for the models that ship fp32 router weights.
 #   (6144, 128) -> MiniMax-M3,  (3072, 256) -> MiniMax-M2/M2.5
 ROUTER_SHAPES = [(6144, 128), (3072, 256)]
@@ -116,7 +118,6 @@ _MAX_REL_L2 = 2e-6
 _FP32_FALLBACK_BEST = 5.7e-7
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 @pytest.mark.parametrize(("hidden_size", "num_experts"), ROUTER_SHAPES)
 @pytest.mark.parametrize("num_tokens", [2048, 8192, 16385])
 def test_matches_fp64_reference(hidden_size: int, num_experts: int, num_tokens: int):
@@ -130,7 +131,6 @@ def test_matches_fp64_reference(hidden_size: int, num_experts: int, num_tokens: 
     assert (out.double() - ref).norm() / ref.norm() < _MAX_REL_L2
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 @pytest.mark.parametrize("num_experts", [17, 384])
 def test_matches_fp64_for_non_power_of_two_experts(num_experts: int):
     """Exercises the reduction's N mask, which the model shapes never hit."""
@@ -143,7 +143,6 @@ def test_matches_fp64_for_non_power_of_two_experts(num_experts: int):
     assert (out.double() - ref).norm() / ref.norm() < _MAX_REL_L2
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 @pytest.mark.parametrize(("hidden_size", "num_experts"), ROUTER_SHAPES)
 def test_more_accurate_than_fp32_fallback(hidden_size: int, num_experts: int):
     """The claim is not just accuracy but beating the fp32 GEMM it replaces."""
@@ -154,7 +153,6 @@ def test_more_accurate_than_fp32_fallback(hidden_size: int, num_experts: int):
     assert (out.double() - ref).norm() / ref.norm() < _FP32_FALLBACK_BEST
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 @pytest.mark.parametrize(("hidden_size", "num_experts"), ROUTER_SHAPES)
 def test_expert_selection_matches_fp64(hidden_size: int, num_experts: int):
     """Relative L2 is a proxy; the expert set is what reaches the model.
@@ -172,7 +170,6 @@ def test_expert_selection_matches_fp64(hidden_size: int, num_experts: int):
     assert misrouted / num_tokens < 1e-4
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_writes_into_supplied_out():
     _requires_gfx950()
     x, w = _inputs(8192, 6144, 128)
@@ -184,7 +181,6 @@ def test_writes_into_supplied_out():
     assert torch.equal(out, rocm_bf16x3.bf16x3_router_gemm(x, split))
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_validates_layout_assumptions():
     """The reduction assumes a contiguous (TERMS, E, K) split and a contiguous
     out; nothing in the kernel enforces either."""
