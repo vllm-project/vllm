@@ -14,27 +14,27 @@ prefix from the packed cache and the current chunk's K/V unquantized.
 """
 
 import contextlib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
 
-from vllm.config import get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionImpl,
     AttentionLayer,
+    AttentionMetadataBuilder,
     AttentionType,
+    CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.triton_attn import (
-    TritonAttentionMetadata,
-    TritonAttentionMetadataBuilder,
-)
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops import rocm_splitq as sq
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 # Per-architecture kernel tiers (gcnArchName prefix -> (decode, prefill)).
@@ -83,7 +83,9 @@ class RocmSplitQAttentionBackend(AttentionBackend):
         return RocmSplitQMetadataBuilder
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(
+        kv_cache_spec: "KVCacheSpec | None" = None,
+    ) -> list[int | MultipleOf]:
         return [MultipleOf(16)]
 
     @classmethod
@@ -112,10 +114,84 @@ class RocmSplitQAttentionBackend(AttentionBackend):
         return replace(spec, state_content_bytes=fmt.slot_bytes)
 
 
-class RocmSplitQMetadataBuilder(TritonAttentionMetadataBuilder):
-    """Reuses the Triton builder: it fills the per-query request and causal
-    length maps (``q_to_req`` / ``q_to_klen``) the kernels index by, including
-    for spec-decode verification steps."""
+@dataclass
+class RocmSplitQMetadata:
+    num_actual_tokens: int
+    max_query_len: int
+    query_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor
+    # Decode requests (one query token) come first in the batch.
+    num_decodes: int
+    num_decode_tokens: int
+    # Per query token: its request and its causal K length (0 for padding).
+    q_to_req: torch.Tensor
+    q_to_klen: torch.Tensor
+
+
+class RocmSplitQMetadataBuilder(AttentionMetadataBuilder[RocmSplitQMetadata]):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    supports_draft_decode_metadata_update = True
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
+        # Persistent so captured graphs keep reading the current contents.
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self._q_to_req = torch.empty(max_tokens, dtype=torch.int32, device=device)
+        self._q_to_klen = torch.empty(max_tokens, dtype=torch.int32, device=device)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> RocmSplitQMetadata:
+        cm = common_attn_metadata
+        n = cm.num_actual_tokens
+        num_decodes, _, num_decode_tokens, _ = split_decodes_and_prefills(cm)
+        md = RocmSplitQMetadata(
+            num_actual_tokens=n,
+            max_query_len=cm.max_query_len,
+            query_start_loc=cm.query_start_loc,
+            seq_lens=cm.seq_lens,
+            block_table=cm.block_table_tensor,
+            slot_mapping=cm.slot_mapping,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            q_to_req=self._q_to_req[:n],
+            q_to_klen=self._q_to_klen[:n],
+        )
+        self._fill_query_maps(md)
+        return md
+
+    def update_draft_decode_metadata(self, metadata: RocmSplitQMetadata) -> None:
+        # Draft steps advance seq_lens in place; the K lengths follow it.
+        self._fill_query_maps(metadata)
+
+    @staticmethod
+    def _fill_query_maps(md: RocmSplitQMetadata) -> None:
+        """On the device, without host syncs (also inside graph capture).
+        Queries past the last request (cudagraph padding) get K length 0."""
+        n = md.num_actual_tokens
+        num_reqs = md.query_start_loc.shape[0] - 1
+        if n == 0 or num_reqs == 0:
+            return
+        idx = torch.arange(n, dtype=torch.int32, device=md.q_to_req.device)
+        qsl = md.query_start_loc.to(torch.int32)
+        req = torch.searchsorted(qsl[1:], idx, right=True).to(torch.int32)
+        r = req.clamp(max=num_reqs - 1).long()
+        q_lens = qsl[1:] - qsl[:-1]
+        klen = md.seq_lens.to(torch.int32)[r] - q_lens[r] + (idx - qsl[r]) + 1
+        md.q_to_req.copy_(req)
+        md.q_to_klen.copy_(torch.where(req < num_reqs, klen, 0))
 
 
 class RocmSplitQAttentionImpl(AttentionImpl):
@@ -249,7 +325,7 @@ class RocmSplitQAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: TritonAttentionMetadata,
+        attn_metadata: RocmSplitQMetadata,
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
@@ -265,7 +341,6 @@ class RocmSplitQAttentionImpl(AttentionImpl):
         q = query[:n].view(n, self.num_heads, self.head_size)
 
         if attn_metadata.max_query_len <= _DECODE_MAX_QUERY_LEN:
-            assert attn_metadata.q_to_req is not None
             self._decode(
                 out,
                 q,
@@ -279,7 +354,6 @@ class RocmSplitQAttentionImpl(AttentionImpl):
         num_dt = attn_metadata.num_decode_tokens
         if num_dt > 0:
             q_to_req, q_to_klen = attn_metadata.q_to_req, attn_metadata.q_to_klen
-            assert q_to_req is not None and q_to_klen is not None
             self._decode(
                 out[:num_dt],
                 q[:num_dt],
@@ -296,7 +370,7 @@ class RocmSplitQAttentionImpl(AttentionImpl):
         out: torch.Tensor,
         q: torch.Tensor,
         kv_cache: torch.Tensor,
-        md: TritonAttentionMetadata,
+        md: RocmSplitQMetadata,
         q_to_req: torch.Tensor,
         q_to_klen: torch.Tensor,
     ) -> None:
@@ -335,7 +409,7 @@ class RocmSplitQAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        md: TritonAttentionMetadata,
+        md: RocmSplitQMetadata,
     ) -> None:
         """Requests after the decodes, in the rotated space, without host
         syncs: one call covers them all, reading the cached prefixes straight

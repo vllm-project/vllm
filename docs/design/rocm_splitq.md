@@ -108,10 +108,11 @@ scores are those of the unrotated vectors.
 | Q/K/V chunk rotation for prefill | `splitq_rotate` | `splitq_attn.cu` |
 | Codebooks (`v_perm_b32` tables) and byte layout | — | `splitq_format.cuh` |
 
-The metadata builder is the Triton one: it provides the per-query request and
-causal-length maps the kernels index by, which is also what makes MTP
-verification batches (several query tokens per request, each with its own
-causal length) work without special cases.
+The metadata builder builds, on the device and without host syncs, the
+per-query request and causal-length maps the kernels index by. They are what
+makes MTP verification batches (several query tokens per request, each with
+its own causal length) work without special cases, and they give cudagraph
+padding queries a K length of 0.
 
 ## Architecture contract
 
