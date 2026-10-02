@@ -240,23 +240,30 @@ class DeepseekV41ModelState(DefaultModelState):
             )
             self._replay_attn_groups: list[list[AttentionGroup]] | None = None
         layers = self.decoder_replay_layers
-        self.replay_graphs: DecoderReplayCudaGraphManager | None = None
+        compilation_config = vllm_config.compilation_config
+        self.replay_cudagraphs: DecoderReplayCudaGraphManager | None = None
+        # PIECEWISE graphs of this many tokens or more break out to the replay batch.
+        self._trim_threshold: int | None = None
         if (
             layers is not None
-            and vllm_config.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+            and compilation_config.cudagraph_decoder_replay
+            and compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
             and is_breakable_cudagraph_enabled()
             and get_pp_group().is_first_rank
-            # Neither the trimmed rows' LoRA mapping nor optional input ids are
-            # captured.
+            # The graphs' fixed inputs hold no LoRA mapping and no None input ids.
             and vllm_config.lora_config is None
             and not vllm_config.model_config.enable_prompt_embeds
         ):
-            self.replay_graphs = DecoderReplayCudaGraphManager(
+            threshold = compilation_config.decoder_replay_trim_threshold
+            if threshold <= layers.window:
+                raise ValueError(
+                    "decoder_replay_trim_threshold must exceed the replay window "
+                    f"of {layers.window} tokens: smaller graphs have nothing to trim"
+                )
+            self.replay_cudagraphs = DecoderReplayCudaGraphManager(
                 vllm_config, device, layers
             )
-            layers.trim_threshold = (
-                vllm_config.compilation_config.decoder_replay_trim_threshold
-            )
+            self._trim_threshold = threshold
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -438,23 +445,19 @@ class DeepseekV41ModelState(DefaultModelState):
         replay_start: torch.Tensor,
         capture_desc: BatchExecutionDescriptor | None = None,
     ) -> None:
-        """Set the replay layers' batch for this forward, or none when nothing
-        trims. Eager steps trim, and so do PIECEWISE graph steps at the trim
-        threshold or above, whose graph breaks out to the replay layers; FULL
-        graphs and smaller PIECEWISE ones keep the layers on the whole batch.
-        Ranks share the graph mode and size; under data parallelism every rank
-        replays if any does."""
+        """Set the replay layers' batch for this forward, or none. Eager steps trim;
+        captures and PIECEWISE graphs at the trim threshold or above break out to a
+        replay batch, trimmed or not; FULL and smaller PIECEWISE graphs keep the
+        whole batch. Under DP every rank replays if any does."""
         layers = self.decoder_replay_layers
         assert layers is not None
         layers.replay_batch = None
-        # Captures and PIECEWISE graphs at the trim threshold or above (which break
-        # out to the replay layers) run them on a replay batch, trimmed or not.
-        replays = capture_desc is not None or (
+        force_replay_batch = capture_desc is not None or (
             cudagraph_mode == CUDAGraphMode.PIECEWISE
-            and layers.trim_threshold is not None
-            and input_batch.num_tokens_after_padding >= layers.trim_threshold
+            and self._trim_threshold is not None
+            and input_batch.num_tokens_after_padding >= self._trim_threshold
         )
-        if cudagraph_mode != CUDAGraphMode.NONE and not replays:
+        if cudagraph_mode != CUDAGraphMode.NONE and not force_replay_batch:
             return
 
         num_reqs = input_batch.num_reqs
@@ -466,31 +469,34 @@ class DeepseekV41ModelState(DefaultModelState):
         )
         # Dummy batches (captures, an idle DP rank's) are not prefills: they
         # keep their rows unless a rank trims.
-        trims = replays or bool(
+        needs_replay_batch = force_replay_batch or bool(
             (kept_lens < query_lens)[input_batch.is_prefilling_np[:num_reqs]].any()
         )
         num_tokens = int(kept_lens.sum())
-        dp_metadata = None
+        dp_tokens = None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            trims, dp_metadata = self._agree_across_dp(trims, num_tokens)
-        if not trims:
+            needs_replay_batch, dp_tokens = self._agree_across_dp(
+                needs_replay_batch, num_tokens
+            )
+        if not needs_replay_batch:
             return
 
-        graphs, run_graph = self.replay_graphs, None
+        cudagraphs, run_graph = self.replay_cudagraphs, None
         num_padded, cg_mode = num_tokens, CUDAGraphMode.NONE
-        dp_tokens = dp_metadata.num_tokens_across_dp_cpu if dp_metadata else None
-        if graphs is not None:
+        if cudagraphs is not None:
             # Every rank runs the graph that fits the largest rank's batch.
-            max_tokens = num_tokens if dp_tokens is None else int(dp_tokens.max())
-            desc = capture_desc or graphs.dispatch(num_reqs, max_tokens, None, 0)
+            dp_max_tokens = num_tokens if dp_tokens is None else int(dp_tokens.max())
+            desc = capture_desc or cudagraphs.dispatch(num_reqs, dp_max_tokens, None, 0)
             if desc.cg_mode == CUDAGraphMode.PIECEWISE:
                 num_padded, cg_mode = desc.num_tokens, desc.cg_mode
-                run_graph = graphs.run
+                run_graph = cudagraphs.run
                 if dp_tokens is not None:
                     dp_tokens.fill_(num_padded)
-                    dp_metadata = DPMetadata.make(
-                        self.vllm_config.parallel_config, num_padded, dp_tokens
-                    )
+        dp_metadata = None
+        if dp_tokens is not None:
+            dp_metadata = DPMetadata.make(
+                self.vllm_config.parallel_config, num_padded, dp_tokens
+            )
         kept_batch, kept_slot_mappings = self._kept_input_batch(
             input_batch, slot_mappings, replay_start, kept_lens, num_padded
         )
@@ -528,8 +534,8 @@ class DeepseekV41ModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
     ) -> None:
         def prepare(desc: BatchExecutionDescriptor) -> None:
-            # The runtime path on a dummy batch: the graph reads the buffers a
-            # real step's replay batch fills.
+            # Capture reuses the runtime path on a dummy batch, so the graph reads
+            # the buffers a real step fills.
             num_reqs = min(desc.num_tokens, self.max_num_reqs)
             self._prepare_replay_batch(
                 InputBatch.make_dummy(num_reqs, desc.num_tokens, input_buffers),
@@ -542,10 +548,10 @@ class DeepseekV41ModelState(DefaultModelState):
                 capture_desc=desc,
             )
 
-        if self.replay_graphs is not None:
-            # Profiling captures run on throwaway groups: build their own builders.
+        if self.replay_cudagraphs is not None:
+            # profile_only captures use pre-KV-cache groups: drop the cache.
             self._replay_attn_groups = None
-            self.replay_graphs.capture_replay_graphs(prepare)
+            self.replay_cudagraphs.capture_replay_graphs(prepare)
 
     def _kept_input_batch(
         self,
@@ -607,20 +613,19 @@ class DeepseekV41ModelState(DefaultModelState):
         return kept_batch, kept_slot_mappings
 
     def _agree_across_dp(
-        self, trims: bool, num_tokens: int
-    ) -> tuple[bool, DPMetadata | None]:
-        """Whether any rank trims and, then, the replay layers' DP metadata from
-        every rank's replay token count."""
+        self, needs_replay_batch: bool, num_tokens: int
+    ) -> tuple[bool, torch.Tensor | None]:
+        """Whether any rank needs a replay batch and, if so, each rank's token count."""
         parallel_config = self.vllm_config.parallel_config
         agreed = torch.zeros(2, parallel_config.data_parallel_size, dtype=torch.int32)
         agreed[:, parallel_config.data_parallel_rank] = torch.tensor(
-            [trims, num_tokens]
+            [needs_replay_batch, num_tokens]
         )
         if not should_skip_dp_coordination():
             dist.all_reduce(agreed, group=get_dp_group().cpu_group)
         if not agreed[0].any():
             return False, None
-        return True, DPMetadata.make(parallel_config, num_tokens, agreed[1])
+        return True, agreed[1]
 
     def _replay_groups(
         self, attn_groups: list[list[AttentionGroup]]

@@ -570,6 +570,12 @@ class CompilationConfig:
     If we limit the video count per prompt to `0`, it will also be set to `0`
     (i.e., fall back to image-only mode)."""
 
+    cudagraph_decoder_replay: bool = True
+    """Run the decoder replay layers of YOCO models (e.g. DeepSeek-V4.1) in CUDA
+    graphs of their own, and trim them in PIECEWISE graph steps. Requires
+    breakable PIECEWISE graphs; off under LoRA, prompt embeddings and non-first
+    PP ranks."""
+
     decoder_replay_cudagraph_capture_sizes: list[int] = field(default_factory=list)
     """Decoder replay CUDA graph sizes for YOCO models (e.g. DeepSeek-V4.1).
     If empty, capture 8 sizes per power-of-two interval (e.g. step 128 in
@@ -580,8 +586,9 @@ class CompilationConfig:
 
     decoder_replay_trim_threshold: int = Field(default=768, ge=0)
     """For YOCO models (e.g. DeepSeek-V4.1), PIECEWISE graphs with at least this
-    many padded tokens trim the decoder replay batch. Set to 0 to trim at every size.
-    Independent of the replay graph capture sizes; eager steps still trim."""
+    many padded tokens trim the decoder replay batch; must exceed the replay
+    window (128), below which nothing trims. Independent of the replay graph
+    capture sizes; eager steps still trim."""
 
     # Inductor capture
     compile_sizes: list[int | str] | None = None

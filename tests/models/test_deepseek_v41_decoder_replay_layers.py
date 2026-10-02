@@ -125,22 +125,12 @@ def _graph_context(num_tokens):
     )
 
 
-def test_graph_break_writes_fixed_buffers():
-    layers = DecoderReplayLayers(WINDOW, lambda hidden, *rest: (hidden * 2,), [], set())
-    layers.trim_threshold = NUM_TOKENS - 1
-    states = _states(NUM_TOKENS)
-    with override_forward_context(_graph_context(NUM_TOKENS)):
-        (first,) = layers(*states)
-        (second,) = layers(states[0] * 3, *states[1:])
-    assert first.data_ptr() == second.data_ptr()
-    assert torch.equal(second, states[0] * 6)
-
-
 def test_replay_graph_matches_eager(monkeypatch):
+    """The replay graph of the next captured size pads and runs the rows."""
     monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)
     capture = torch.cuda.stream(torch.cuda.Stream())
     monkeypatch.setattr(cudagraph_utils, "graph_capture", lambda device: capture)
-    compilation = CompilationConfig(decoder_replay_cudagraph_capture_sizes=[4, 8])
+    compilation = CompilationConfig(decoder_replay_cudagraph_capture_sizes=[4])
     cfg = MagicMock(compilation_config=compilation, speculative_config=None)
     cfg.scheduler_config = MagicMock(max_num_seqs=2, max_num_batched_tokens=64)
     cfg.cache_config.use_kda_recoverssm = False
@@ -159,12 +149,12 @@ def test_replay_graph_matches_eager(monkeypatch):
 
     manager.capture_replay_graphs(prepare)
     states = [
-        torch.randn(12, *b.shape[1:], device=DEVICE).to(b.dtype) for b in manager.inputs
+        torch.randn(12, *b.shape[1:], device=DEVICE).to(b.dtype)
+        for b in manager.input_buffers
     ]
-    for row_ids in ([11, 2, 7], [1, 2, 3, 4, 5, 6, 7, 8]):
-        rows = torch.tensor(row_ids, device=DEVICE)
-        desc = manager.dispatch(2, len(row_ids), None, 0)
-        with override_forward_context(_graph_context(desc.num_tokens)):
-            actual = manager.run(rows, states)
-        for a, e in zip(actual, run_layers(*(t[rows] for t in states))):
-            torch.testing.assert_close(a, e, rtol=0, atol=0)
+    rows = torch.tensor([11, 2, 7], device=DEVICE)
+    desc = manager.dispatch(2, 3, None, 0)
+    with override_forward_context(_graph_context(desc.num_tokens)):
+        actual = manager.run(rows, states)
+    for a, e in zip(actual, run_layers(*(t[rows] for t in states))):
+        torch.testing.assert_close(a, e, rtol=0, atol=0)

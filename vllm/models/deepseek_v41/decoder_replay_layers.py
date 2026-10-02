@@ -7,9 +7,10 @@ in eager prefill steps they run on each request's last ``window`` rows only.
 ``DeepseekV41ModelState`` prepares those rows as a sub-batch with attention
 metadata and a forward context of its own, like a microbatch;
 ``DecoderReplayLayers`` gathers the layer inputs by its rows, runs the layers
-under that context and scatters the outputs back to batch rows. Steps that run
-in a CUDA graph keep the layers on the whole batch, inside the graph; an eager
-step's replay batch may run in a graph of its own (decoder_replay_cudagraph.py).
+under that context and scatters the outputs back to batch rows. FULL graphs and
+small PIECEWISE ones keep the layers on the whole batch; larger PIECEWISE graphs
+break out to the replay batch, which may run in a graph of its own
+(decoder_replay_cudagraph.py).
 """
 
 from collections.abc import Callable
@@ -20,7 +21,6 @@ import torch
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import (
     ForwardContext,
-    get_forward_context,
     in_piecewise_cudagraph,
     override_forward_context,
 )
@@ -29,8 +29,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 
 @dataclass
 class ReplayBatch:
-    """The replay layers' batch of one forward: its rows of the batch, its
-    forward context and, when it runs in a CUDA graph, the graph's runner."""
+    """One forward's replay batch; ``run_graph`` is set when it runs in a graph."""
 
     rows: torch.Tensor
     forward_context: ForwardContext
@@ -60,34 +59,27 @@ class DecoderReplayLayers:
         self.metadata_prefixes = metadata_prefixes
         # Set by the model state every step; None runs the layers on the batch.
         self.replay_batch: ReplayBatch | None = None
-        # PIECEWISE model graphs of at least this many tokens break out to run the
-        # layers on the replay batch; set with the replay graphs.
-        self.trim_threshold: int | None = None
-        self._graph_outputs: list[torch.Tensor] | None = None
+        self._break_outputs: list[torch.Tensor] | None = None
 
     def __call__(
         self, hidden_states: torch.Tensor | MoEOutput, *states: torch.Tensor | None
     ) -> tuple[torch.Tensor, ...]:
-        if self.trim_threshold is not None and in_piecewise_cudagraph():
-            batch_descriptor = get_forward_context().batch_descriptor
-            assert batch_descriptor is not None
-            if batch_descriptor.num_tokens >= self.trim_threshold:
-                return self._run_in_graph_break(hidden_states, *states)
+        if self.replay_batch is not None and in_piecewise_cudagraph():
+            return self._run_in_graph_break(hidden_states, *states)
         return self._run(hidden_states, *states)
 
     @eager_break_during_capture
     def _run_in_graph_break(
         self, hidden_states: torch.Tensor | MoEOutput, *states: torch.Tensor | None
     ) -> tuple[torch.Tensor, ...]:
-        """An eager break of the model's graph: the outputs land in fixed buffers,
-        which the graph's next segment reads."""
+        """A graph break: the outputs land in fixed buffers the next segment reads."""
         outputs = self._run(hidden_states, *states)
-        if self._graph_outputs is None:
-            # The largest model graph is captured first.
-            self._graph_outputs = [torch.empty_like(out) for out in outputs]
+        if self._break_outputs is None:
+            # Sized by the first call: the largest model graph is captured first.
+            self._break_outputs = [torch.empty_like(out) for out in outputs]
         return tuple(
             buf[: out.shape[0]].copy_(out)
-            for buf, out in zip(self._graph_outputs, outputs)
+            for buf, out in zip(self._break_outputs, outputs)
         )
 
     def _run(
@@ -96,8 +88,7 @@ class DecoderReplayLayers:
         replay_batch = self.replay_batch
         if replay_batch is None:
             return self.run_layers(hidden_states, *states)
-        # A trimming step holds a prefill longer than the window, more tokens
-        # than any step whose MoE leaves its finalize to the next layer.
+        # Replay batch steps hold more than `window` tokens: no deferred MoE finalize.
         assert isinstance(hidden_states, torch.Tensor)
         rows = replay_batch.rows
         num_rows = rows.shape[0]
