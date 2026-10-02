@@ -21,6 +21,10 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.model_executor.warmup.triton_autotune import (
+    atomic_write_json,
+    get_autotune_cache_dir,
+)
 
 if current_platform.is_xpu():
     from vllm._xpu_ops import xpu_ops
@@ -87,6 +91,10 @@ def get_ssm_configs(
             os.path.join(user_defined_config_folder, json_file_name)
         )
 
+    # Configs tuned at startup by --kernel-config.enable_triton_autotune
+    config_file_paths.append(
+        get_ssm_autotune_config_file_path(headdim, dstate, cache_dtype)
+    )
     # Bundled default
     config_file_paths.append(os.path.join(_CONFIGS_DIR, json_file_name))
 
@@ -189,6 +197,40 @@ def try_get_optimal_ssm_config(
     return _try_get_optimal_ssm_config_cached(
         headdim, dstate, batch, nheads, cache_dtype, is_blackwell
     )
+
+def get_ssm_autotune_config_file_path(
+    headdim: int, dstate: int, cache_dtype: str
+) -> str:
+    cache_dtype = _canonical_cache_dtype(cache_dtype)
+    return os.path.join(
+        get_autotune_cache_dir("mamba_ssu"),
+        get_ssm_config_file_name(headdim, dstate, cache_dtype, get_ssm_device_name()),
+    )
+
+def load_ssm_autotune_configs(
+    headdim: int, dstate: int, cache_dtype: str
+) -> dict[int, dict[str, int]]:
+    path = get_ssm_autotune_config_file_path(headdim, dstate, cache_dtype)
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        raw = json.load(f)
+    return {int(k): v for k, v in raw.items() if k.isdigit()}
+
+def save_ssm_configs(
+    headdim: int, dstate: int, cache_dtype: str, configs: dict[int, dict[str, int]]
+) -> str:
+    path = get_ssm_autotune_config_file_path(headdim, dstate, cache_dtype)
+    atomic_write_json(
+        path,
+        {
+            "triton_version": getattr(triton, "__version__", "unknown"),
+            **{str(k): v for k, v in sorted(configs.items())},
+        },
+    )
+    get_ssm_configs.cache_clear()
+    _try_get_optimal_ssm_config_cached.cache_clear()
+    return path
 
 
 if TRITON3:

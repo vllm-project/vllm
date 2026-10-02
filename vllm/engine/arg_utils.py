@@ -749,6 +749,7 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    enable_triton_autotune: bool = get_field(KernelConfig, "enable_triton_autotune")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -1774,6 +1775,10 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
+        kernel_group.add_argument(
+            "--enable-triton-autotune",
+            **kernel_kwargs["enable_triton_autotune"],
+        )
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
@@ -2691,6 +2696,14 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.enable_triton_autotune is not None:
+            if kernel_config.enable_triton_autotune is not None:
+                raise ValueError(
+                    "enable_triton_autotune and "
+                    "kernel_config.enable_triton_autotune "
+                    "are mutually exclusive"
+                )
+            kernel_config.enable_triton_autotune = self.enable_triton_autotune
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":

@@ -479,6 +479,29 @@ def test_compilation_config():
         and args.compilation_config.backend == "inductor"
     )
 
+def test_enable_triton_autotune():
+    from vllm.config.kernel import KernelConfig
+
+    assert KernelConfig().enable_triton_autotune is None
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # Dotted form
+    args = parser.parse_args(["--kernel-config.enable_triton_autotune", "true"])
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.kernel_config.enable_triton_autotune is True
+
+    # Shorthand form
+    args = parser.parse_args(["--enable-triton-autotune"])
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.enable_triton_autotune is True
+    assert engine_args.create_engine_config().kernel_config.enable_triton_autotune
+
+    # Setting both the shorthand and the config field is an error.
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        EngineArgs(
+            enable_triton_autotune=True,
+            kernel_config=KernelConfig(enable_triton_autotune=True),
+        ).create_engine_config()
 
 def test_trust_request_mm_kwargs_cli():
     from vllm.entrypoints.launchers.cli_args import FrontendArgs
