@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial, wraps
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
@@ -15,7 +14,6 @@ import huggingface_hub
 import torch
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
-from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
@@ -68,12 +66,6 @@ _DENSE_MODULE_TYPES = {
     "sentence_transformers.base.modules.dense.Dense",
     "pylate.models.Dense.Dense",
 }
-
-if Version(version("transformers")) < Version("5.0.0"):
-    raise ImportError(
-        "Support for Transformers v4 is deprecated and was removed in vLLM v0.24.0. "
-        "Please upgrade to Transformers v5: pip install --upgrade transformers"
-    )
 
 
 class LazyConfigDict(dict):
