@@ -135,6 +135,7 @@ Batch invariance has been tested and verified on the following models:
 - **Granite 3.1 (Dense)**: `ibm-granite/granite-3.1-2b-instruct`, `ibm-granite/granite-3.1-8b-instruct`
 - **EXAONE 4.0 series**: `LGAI-EXAONE/EXAONE-4.0-1.2B`, `LGAI-EXAONE/EXAONE-4.0.1-32B`, `LGAI-EXAONE/EXAONE-4.0-32B`
 - **OLMo 2**: `allenai/OLMo-2-0425-1B-Instruct`
+- **ERNIE 4.5**: `baidu/ERNIE-4.5-0.3B-PT`
 - **SmolLM2**: `HuggingFaceTB/SmolLM2-1.7B-Instruct`
 - **PLaMo3**: `pfnet/plamo-3-nict-2b-base`
 
