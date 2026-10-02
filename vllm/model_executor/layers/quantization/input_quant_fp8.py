@@ -201,7 +201,7 @@ class QuantFP8(CustomOp):
 
         if scale is None:
             if self.group_shape == GroupShape.PER_TOKEN:
-                x_max, _ = x.abs().max(dim=-1)
+                x_max = x.abs().amax(dim=-1)
                 x_max = x_max.unsqueeze(-1).to(torch.float32)
                 if scale_ub is not None:
                     x_max = x_max.clamp(max=scale_ub)
