@@ -132,8 +132,9 @@ def test_prefix_cache_retention_interval_hybrid_eagle_uses_block_size(monkeypatc
     )
 
 
-def test_prefix_cache_retention_interval_hybrid_eagle_skips_one_block(monkeypatch):
-    """k=1 is dense in reachable_block_mask; leave the unset interval as 0."""
+def test_prefix_cache_retention_interval_hybrid_eagle_clamps_to_two_blocks(
+    monkeypatch, caplog_vllm
+):
     import vllm.config.cache as cache_mod
     from vllm.config.cache import (
         CacheConfig,
@@ -147,8 +148,8 @@ def test_prefix_cache_retention_interval_hybrid_eagle_skips_one_block(monkeypatc
         cache_config, is_hybrid=True, use_eagle=True
     )
     interval = cache_config.prefix_cache_retention_interval
-    assert interval == 0
-    assert not (interval is not None and 0 < interval <= cache_config.block_size)
+    assert interval == 2 * cache_config.block_size
+    assert "clamping to 2 blocks" in caplog_vllm.text
     assert cache_config._prefix_cache_retention_interval_unset
 
 

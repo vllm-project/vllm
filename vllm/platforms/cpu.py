@@ -568,9 +568,7 @@ class CpuPlatform(Platform):
         if model_config.is_hybrid:
             pre_block_size = cache_config.block_size
             cls._align_hybrid_block_size(vllm_config, backend_classes[0])
-            cls._check_aligned_block_size(
-                vllm_config, backend_classes, pre_block_size
-            )
+            cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
 
         maybe_apply_hybrid_eagle_retention_default(
             vllm_config.cache_config,
