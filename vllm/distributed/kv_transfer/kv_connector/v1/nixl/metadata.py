@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -264,6 +265,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
+        # Distinct priorities added to reqs_to_recv / reqs_to_save, so workers
+        # can skip sorting when they all match (the default).
+        self._recv_priorities: set[int] = set()
+        self._save_priorities: set[int] = set()
         self.reqs_to_send: dict[ReqId, float] = {}
         # The scheduler process's time.perf_counter() when this metadata was
         # built. reqs_to_send deadlines are stamped with the scheduler's
@@ -313,6 +318,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save[request_id] = self._add_new_req(
             local_block_ids, kv_transfer_params, priority=priority
         )
+        self._save_priorities.add(priority)
 
     def add_new_req_to_recv(
         self,
@@ -340,10 +346,22 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
         )
         self.reqs_to_recv[request_id] = req
+        self._recv_priorities.add(priority)
+
+    def reqs_to_recv_by_priority(self) -> Iterable[tuple[ReqId, ReqMeta]]:
+        """``reqs_to_recv`` ordered by ``Request.priority`` (lower first)."""
+        return self._order_by_priority(self.reqs_to_recv, self._recv_priorities)
+
+    def reqs_to_save_by_priority(self) -> Iterable[tuple[ReqId, ReqMeta]]:
+        """``reqs_to_save`` ordered by ``Request.priority`` (lower first)."""
+        return self._order_by_priority(self.reqs_to_save, self._save_priorities)
 
     @staticmethod
-    def iter_reqs_by_priority(
+    def _order_by_priority(
         reqs: dict[ReqId, ReqMeta],
-    ) -> list[tuple[ReqId, ReqMeta]]:
-        """Order requests by ``Request.priority`` (lower number first)."""
+        priorities: set[int],
+    ) -> Iterable[tuple[ReqId, ReqMeta]]:
+        # With a single distinct priority, insertion order is already correct.
+        if len(priorities) <= 1:
+            return reqs.items()
         return sorted(reqs.items(), key=lambda item: item[1].priority)

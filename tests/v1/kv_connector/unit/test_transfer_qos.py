@@ -68,9 +68,7 @@ def test_req_meta_priority_is_copied_and_orders_save_queue():
     metadata.add_new_req_to_save("high", ([2],), {}, priority=0)
     metadata.add_new_req_to_save("mid", ([3],), {}, priority=2)
 
-    ordered = [
-        req_id for req_id, _ in metadata.iter_reqs_by_priority(metadata.reqs_to_save)
-    ]
+    ordered = [req_id for req_id, _ in metadata.reqs_to_save_by_priority()]
     assert ordered == ["high", "mid", "low"]
     assert metadata.reqs_to_save["low"].priority == 5
 
@@ -80,10 +78,39 @@ def test_req_meta_priority_orders_recv_queue():
     metadata.add_new_req_to_recv("low", ([],), _recv_params(), priority=7)
     metadata.add_new_req_to_recv("high", ([],), _recv_params(), priority=1)
 
-    ordered = [
-        req_id for req_id, _ in metadata.iter_reqs_by_priority(metadata.reqs_to_recv)
-    ]
+    ordered = [req_id for req_id, _ in metadata.reqs_to_recv_by_priority()]
     assert ordered == ["high", "low"]
+
+
+def test_equal_priorities_skip_sorting():
+    metadata = NixlConnectorMetadata()
+    for req_id in ("c", "a", "b"):
+        metadata.add_new_req_to_save(req_id, ([],), {}, priority=3)
+        metadata.add_new_req_to_recv(req_id, ([],), _recv_params(), priority=3)
+
+    saves = metadata.reqs_to_save_by_priority()
+    recvs = metadata.reqs_to_recv_by_priority()
+
+    # The dict view itself, not a sorted copy.
+    assert isinstance(saves, type({}.items()))
+    assert isinstance(recvs, type({}.items()))
+    assert [req_id for req_id, _ in saves] == ["c", "a", "b"]
+    assert [req_id for req_id, _ in recvs] == ["c", "a", "b"]
+
+    empty = NixlConnectorMetadata()
+    assert list(empty.reqs_to_save_by_priority()) == []
+    assert list(empty.reqs_to_recv_by_priority()) == []
+
+
+def test_save_and_recv_priorities_tracked_separately():
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_save("s1", ([],), {}, priority=0)
+    metadata.add_new_req_to_save("s2", ([],), {}, priority=0)
+    metadata.add_new_req_to_recv("low", ([],), _recv_params(), priority=4)
+    metadata.add_new_req_to_recv("high", ([],), _recv_params(), priority=1)
+
+    assert isinstance(metadata.reqs_to_save_by_priority(), type({}.items()))
+    assert [r for r, _ in metadata.reqs_to_recv_by_priority()] == ["high", "low"]
 
 
 def test_parse_transfer_priority_aliases():
