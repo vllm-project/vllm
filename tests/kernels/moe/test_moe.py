@@ -1552,15 +1552,15 @@ def test_humming_m_major_selection_matches_w4a8_config(
     assert experts.compute_config["use_m_major_input_scale"] is expected
     assert get_config.call_count == (4 if expected else 2)
     assert [
-        call.kwargs["use_m_major_input_scale"]
-        for call in get_config.call_args_list
+        call.kwargs["use_m_major_input_scale"] for call in get_config.call_args_list
     ] == [expected, expected] + ([False, False] if expected else [])
     if expected:
         import json
 
-        assert json.loads(experts.row_major_compute_config_str)[
-            "use_m_major_input_scale"
-        ] is False
+        assert (
+            json.loads(experts.row_major_compute_config_str)["use_m_major_input_scale"]
+            is False
+        )
         assert json.loads(experts.row_major_w13_tuning_config_str) == []
         assert json.loads(experts.row_major_w2_tuning_config_str) == []
 
@@ -1774,9 +1774,9 @@ def test_humming_prequantized_scales_select_transpose(
         supports_m_major_w4a8=True,
     )
     inputs = torch.empty((rows, 256), device="cuda")
-    scales = torch.arange(
-        rows * groups, dtype=torch.float32, device="cuda"
-    ).reshape(rows, groups)
+    scales = torch.arange(rows * groups, dtype=torch.float32, device="cuda").reshape(
+        rows, groups
+    )
 
     _, result_scales, _ = HummingExpertsBase.process_input(
         experts, "w13", inputs, None, input_scale=scales
@@ -1800,9 +1800,7 @@ def test_humming_prequantized_scales_select_transpose(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("rows,groups", [(4096, 48), (16383, 48), (16383, 16)])
-def test_humming_prequantized_scales_match_old_transpose(
-    rows: int, groups: int
-):
+def test_humming_prequantized_scales_match_old_transpose(rows: int, groups: int):
     from types import SimpleNamespace
 
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
