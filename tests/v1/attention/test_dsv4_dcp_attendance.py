@@ -270,7 +270,8 @@ def test_c128a_owned_enumeration(world):
     device = torch.device("cuda")
     compress_ratio = 128
     block_size = 2  # compressed slots per block
-    max_compressed = 16
+    # build_c128a_topk_metadata requires _C128A_TOPK_ALIGNMENT (128) multiples.
+    max_compressed = 128
     positions = torch.tensor([1023, 2047, 127], dtype=torch.int64, device=device)
     num_tokens = positions.shape[0]
     block_table = torch.arange(
