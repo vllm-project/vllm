@@ -431,6 +431,39 @@ def test_executor_agrees_committable_blocks_across_workers():
     ]
 
 
+@pytest.mark.parametrize("requested", [None, True])
+def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
+    """Elastic EP scale-up skips warmup and reuses the profiled KV cache size,
+    so nothing would measure an extensible cache: it stays off by default and an
+    explicit request is an error."""
+    from types import SimpleNamespace
+
+    import vllm.platforms
+    from vllm.config.vllm import VllmConfig
+
+    monkeypatch.setattr(
+        vllm.platforms, "current_platform", SimpleNamespace(is_cuda_alike=lambda: True)
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            _extensible_kv_cache_resolved=False,
+            enable_extensible_kv_cache=requested,
+            kv_cache_memory_bytes=None,
+            num_gpu_blocks_override=None,
+        ),
+        use_v2_model_runner=True,
+        attention_config=SimpleNamespace(hisparse_config=None),
+        parallel_config=SimpleNamespace(enable_elastic_ep=True),
+        kv_transfer_config=None,
+    )
+    if requested:
+        with pytest.raises(ValueError, match="elastic EP"):
+            VllmConfig._resolve_extensible_kv_cache(config)
+    else:
+        VllmConfig._resolve_extensible_kv_cache(config)
+        assert config.cache_config.enable_extensible_kv_cache is False
+
+
 @requires_cuda
 @pytest.mark.parametrize("multi", [False, True])
 def test_extensible_kv_cache_rejects_connector_memory_pool(multi):
