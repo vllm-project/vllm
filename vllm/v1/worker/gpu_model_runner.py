@@ -553,6 +553,13 @@ def _temporarily_detach_target_owned_draft_modules(
     for name, module in draft_model.named_modules(remove_duplicate=False):
         if not name or id(module) not in target_module_ids:
             continue
+        # A parameterless shared module (e.g. a rotary embedding returned by
+        # get_rope's instance cache to both target and draft) receives no
+        # checkpoint tensors, so there is nothing to discard -- and the
+        # draft's load_weights may still need it (DFlash/DSpark read
+        # rotary_emb.head_size while rebuilding fused KV buffers).
+        if next(module.parameters(), None) is None:
+            continue
         parent_name, sep, attr = name.rpartition(".")
         parent = draft_model if not sep else draft_model.get_submodule(parent_name)
         if id(parent) in target_module_ids:
