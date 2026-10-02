@@ -207,6 +207,22 @@ QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
 }
 
 
+# DGX Spark (GB10) plans for the TP=1 LM head.
+QWEN4_EXP_SM121_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
+    (248320, 2560): {
+        1: SkinnyGemmConfig(1, 128, 1, k_unroll=2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 1, k_unroll=2, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 32, 1, vector_width=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 64, 1, k_unroll=2, vector_width=4, static_k=2560),
+        16: SkinnyGemmConfig(16, 128, 1, k_unroll=2, vector_width=4, static_k=2560),
+    },
+}
+
+
+def _is_sm121() -> bool:
+    return current_platform.is_device_capability((12, 1))
+
+
 def _is_sm100() -> bool:
     return current_platform.is_device_capability((10, 0))
 
@@ -226,6 +242,8 @@ def _gemm_plans() -> dict[tuple[int, int], dict[int, SkinnyGemmConfig]]:
         return QWEN4_EXP_SM100_GEMM_PLANS
     if _is_sm90():
         return QWEN4_EXP_SM90_GEMM_PLANS
+    if _is_sm121():
+        return QWEN4_EXP_SM121_GEMM_PLANS
     return {}
 
 
