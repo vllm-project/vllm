@@ -111,7 +111,7 @@ def _make_dsv4_dspark_hf_config() -> DeepseekV4Config:
 
 
 @pytest.fixture
-def dspark_vllm_config(dist_init):
+def dspark_vllm_config():
     hf_config = _make_dsv4_dspark_hf_config()
     model_config = SimpleNamespace(
         dtype=torch.bfloat16, hf_config=hf_config, model="dspark"
@@ -155,22 +155,18 @@ def _make_moe_topology(
 
 
 def test_eplb_state_accepts_matching_dsv4_draft_and_target():
-    state = SimpleNamespace(model_states={})
     draft = _make_moe_topology()
     target = _make_moe_topology()
-    state.model_states["draft"] = SimpleNamespace(model=draft)
 
-    EplbState.validate_ep_configuration(state, target)
+    EplbState.assert_confs_equal(draft, target)
 
 
 def test_eplb_state_rejects_mismatched_dsv4_draft_redundant_experts():
-    state = SimpleNamespace(model_states={})
     draft = _make_moe_topology(num_redundant_experts=0)
     target = _make_moe_topology(num_redundant_experts=4)
-    state.model_states["draft"] = SimpleNamespace(model=draft)
 
     with pytest.raises(RuntimeError, match="mismatch"):
-        EplbState.validate_ep_configuration(state, target)
+        EplbState.assert_confs_equal(draft, target)
 
 
 def test_dspark_draft_supports_eplb_only_for_dsv4(dspark_vllm_config):
@@ -209,10 +205,22 @@ def test_draft_model_supports_eplb_rejects_dsv41_dspark(dspark_vllm_config):
     )
 
 
-def test_eplb_registers_dspark_draft_model(
-    dspark_vllm_config, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "model_type,load_dummy_weights,expected_registered",
+    [
+        ("deepseek_v4", False, True),
+        ("deepseek_v4", True, False),
+        ("deepseek_v41", False, False),
+    ],
+)
+def test_eplb_dspark_draft_registration(
+    dspark_vllm_config,
+    monkeypatch: pytest.MonkeyPatch,
+    model_type,
+    load_dummy_weights: bool,
+    expected_registered: bool,
 ):
-    """DSpark MoE drafts register with EPLB like MTP/Eagle drafters."""
+    """Register V4 drafts; skip incompatible V4.1 drafts and dummy weights."""
     FakeEplbState.instances.clear()
     monkeypatch.setattr(
         "vllm.v1.worker.gpu.eplb_utils.EplbState",
@@ -223,6 +231,8 @@ def test_eplb_registers_dspark_draft_model(
         lambda model: model,
     )
 
+    draft_model_config = dspark_vllm_config.speculative_config.draft_model_config
+    draft_model_config.hf_config.model_type = model_type
     draft = SimpleNamespace()
     controller = EPLBController(dspark_vllm_config.parallel_config, torch.device("cpu"))
     controller.prepare_load()
@@ -236,87 +246,19 @@ def test_eplb_registers_dspark_draft_model(
     registered = controller.maybe_register_speculator(
         speculator,
         dspark_vllm_config.speculative_config,
-        load_dummy_weights=False,
+        load_dummy_weights=load_dummy_weights,
     )
 
-    assert registered is True
+    assert registered is expected_registered
     assert controller.state is not None
-    assert controller.state.add_model_calls == [
-        (
-            draft,
-            dspark_vllm_config.speculative_config.draft_model_config,
-            "dspark (draft)",
-        )
-    ]
-    assert speculator.eplb_state is controller.state
-
-
-def test_eplb_skips_dsv41_dspark_registration(
-    dspark_vllm_config, monkeypatch: pytest.MonkeyPatch
-):
-    """V4.1 DSpark drafts use a different expert topology and are not registered."""
-    FakeEplbState.instances.clear()
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.eplb_utils.EplbState",
-        FakeEplbState,
-    )
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model",
-        lambda model: model,
-    )
-
-    dspark_vllm_config.speculative_config.draft_model_config.hf_config.model_type = (
-        "deepseek_v41"
-    )
-    draft = SimpleNamespace()
-    controller = EPLBController(dspark_vllm_config.parallel_config, torch.device("cpu"))
-    controller.prepare_load()
-    speculator = SimpleNamespace(model=draft, eplb_state=None)
-    speculator.set_eplb_state = lambda state: setattr(speculator, "eplb_state", state)
-
-    registered = controller.maybe_register_speculator(
-        speculator,
-        dspark_vllm_config.speculative_config,
-        load_dummy_weights=False,
-    )
-
-    assert registered is False
-    assert controller.state is not None
-    assert controller.state.add_model_calls == []
-
-
-def test_eplb_skips_dspark_registration_with_dummy_weights(
-    dspark_vllm_config, monkeypatch: pytest.MonkeyPatch
-):
-    FakeEplbState.instances.clear()
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.eplb_utils.EplbState",
-        FakeEplbState,
-    )
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model",
-        lambda model: model,
-    )
-
-    draft = SimpleNamespace()
-    controller = EPLBController(dspark_vllm_config.parallel_config, torch.device("cpu"))
-    controller.prepare_load()
-    speculator = SimpleNamespace(model=draft, eplb_state=None)
-
-    def set_eplb_state(state) -> None:
-        speculator.eplb_state = state
-
-    speculator.set_eplb_state = set_eplb_state
-
-    registered = controller.maybe_register_speculator(
-        speculator,
-        dspark_vllm_config.speculative_config,
-        load_dummy_weights=True,
-    )
-
-    assert registered is False
-    assert controller.state is not None
-    assert controller.state.add_model_calls == []
+    if expected_registered:
+        assert controller.state.add_model_calls == [
+            (draft, draft_model_config, "dspark (draft)")
+        ]
+        assert speculator.eplb_state is controller.state
+    else:
+        assert controller.state.add_model_calls == []
+        assert speculator.eplb_state is None
 
 
 @pytest.mark.parametrize(

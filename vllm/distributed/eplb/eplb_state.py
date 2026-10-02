@@ -323,34 +323,41 @@ class EplbState:
         """
         if len(self.model_states) > 0:
             model = next(iter(self.model_states.values())).model
-            if (
-                model.num_routed_experts != new_model.num_routed_experts
-                or model.num_redundant_experts != new_model.num_redundant_experts
-                or model.num_physical_experts != new_model.num_physical_experts
-                or model.num_logical_experts != new_model.num_logical_experts
-                or model.num_expert_groups != new_model.num_expert_groups
-            ):
-                raise RuntimeError(
-                    "Model: {} "
-                    "with config {} "
-                    "{} {} {} {} "
-                    "mismatch with new model {} "
-                    "with config {} "
-                    "{} {} {} {}".format(
-                        type(model),
-                        model.num_routed_experts,
-                        model.num_redundant_experts,
-                        model.num_physical_experts,
-                        model.num_logical_experts,
-                        model.num_expert_groups,
-                        type(new_model),
-                        new_model.num_routed_experts,
-                        new_model.num_redundant_experts,
-                        new_model.num_physical_experts,
-                        new_model.num_logical_experts,
-                        new_model.num_expert_groups,
-                    )
+            self.assert_confs_equal(model, new_model)
+
+    @staticmethod
+    def assert_confs_equal(
+        model: MixtureOfExperts, new_model: MixtureOfExperts
+    ) -> None:
+        """Raise if the models have different expert parallel configurations."""
+        if (
+            model.num_routed_experts != new_model.num_routed_experts
+            or model.num_redundant_experts != new_model.num_redundant_experts
+            or model.num_physical_experts != new_model.num_physical_experts
+            or model.num_logical_experts != new_model.num_logical_experts
+            or model.num_expert_groups != new_model.num_expert_groups
+        ):
+            raise RuntimeError(
+                "Model: {} "
+                "with config {} "
+                "{} {} {} {} "
+                "mismatch with new model {} "
+                "with config {} "
+                "{} {} {} {}".format(
+                    type(model),
+                    model.num_routed_experts,
+                    model.num_redundant_experts,
+                    model.num_physical_experts,
+                    model.num_logical_experts,
+                    model.num_expert_groups,
+                    type(new_model),
+                    new_model.num_routed_experts,
+                    new_model.num_redundant_experts,
+                    new_model.num_physical_experts,
+                    new_model.num_logical_experts,
+                    new_model.num_expert_groups,
                 )
+            )
 
     def add_model(
         self,
