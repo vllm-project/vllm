@@ -50,9 +50,9 @@ steps:
   - pytest -v -s basic_correctness/memory/sleep_mode
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Basic Correctness Sleep Mode"
+      label: ":amd: (MI300) Basic Correctness Sleep Mode"
       dind: false
-      device: mi355_dpx
+      device: mi300_1
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd

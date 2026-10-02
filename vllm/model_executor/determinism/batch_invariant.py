@@ -16,6 +16,7 @@ from vllm.model_executor.determinism.batch_invariant_configs import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
+from vllm.utils.nccl import pin_nccl_env
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -1139,25 +1140,33 @@ def enable_batch_invariant_mode():
 
 def override_envs_for_invariance():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
+    # Only the 1-stage kernel has a size- and rank-independent reduction order.
+    os.environ["VLLM_CUSTOM_ALLREDUCE_ALGO"] = "1stage"
 
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-    # NCCL determinism settings
+    # NCCL determinism settings. NCCL keeps the launch mode process-wide, so,
+    # unlike the pins below, it also applies to communicators shared with other
+    # processes.
     os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
-    os.environ["NCCL_COLLNET_ENABLE"] = "0"
-    os.environ["NCCL_NVLS_ENABLE"] = "0"
-    os.environ["NCCL_P2P_NET_DISABLE"] = "1"
-    os.environ["NCCL_MIN_NCHANNELS"] = "1"
-    os.environ["NCCL_MAX_NCHANNELS"] = "1"
-    os.environ["NCCL_PROTO"] = "Simple"
-    # NCCL >= 2.31 zero-fills the algorithm table of every collective when
-    # NCCL_ALGO is set and re-enables only the named ones; together with the
-    # NCCL_PROTO above, collectives not named here end up with no algorithm
-    # and fail with ncclInvalidUsage. Re-enable Ring and Tree for all
-    # collectives, then pin AllReduce to Tree for determinism.
-    os.environ["NCCL_ALGO"] = "ring,tree;allreduce:tree"
-    os.environ["NCCL_NTHREADS"] = "1"
-    os.environ["NCCL_SOCKET_NTHREADS"] = "1"
+    pin_nccl_env(
+        {
+            "NCCL_COLLNET_ENABLE": "0",
+            "NCCL_NVLS_ENABLE": "0",
+            "NCCL_P2P_NET_DISABLE": "1",
+            "NCCL_MIN_NCHANNELS": "1",
+            "NCCL_MAX_NCHANNELS": "1",
+            "NCCL_PROTO": "Simple",
+            # NCCL >= 2.31 zero-fills the algorithm table of every collective
+            # when NCCL_ALGO is set and re-enables only the named ones; together
+            # with the NCCL_PROTO above, collectives not named here end up with
+            # no algorithm and fail with ncclInvalidUsage. Re-enable Ring and
+            # Tree for all collectives, then pin AllReduce to Tree.
+            "NCCL_ALGO": "ring,tree;allreduce:tree",
+            "NCCL_NTHREADS": "1",
+            "NCCL_SOCKET_NTHREADS": "1",
+        }
+    )
 
     # torch.compile settings
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
