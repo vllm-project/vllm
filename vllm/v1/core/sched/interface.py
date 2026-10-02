@@ -247,6 +247,14 @@ class SchedulerInterface(ABC):
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return 0.0
 
+    def make_timeout_diagnostic_state(self) -> dict[str, int | float]:
+        """Return a non-blocking, O(1) snapshot for timeout diagnostics."""
+        num_running_reqs, num_waiting_reqs = self.get_request_counts()
+        return {
+            "num_running_reqs": num_running_reqs,
+            "num_waiting_reqs": num_waiting_reqs,
+        }
+
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":
         """Make a SchedulerStats object for logging.
