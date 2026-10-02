@@ -89,6 +89,7 @@ def _attach_prometheus_logger(
     vllm_config = MagicMock()
     vllm_config.observability_config.show_hidden_metrics = False
     vllm_config.observability_config.kv_cache_metrics = False
+    vllm_config.observability_config.custom_histogram_buckets = None
     vllm_config.model_config.served_model_name = _ADMISSION_METRIC_MODEL
     vllm_config.model_config.max_model_len = 2048
     vllm_config.model_config.is_diffusion = False
