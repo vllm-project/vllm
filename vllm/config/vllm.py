@@ -1955,6 +1955,19 @@ class VllmConfig:
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+            # KVPP acquires, prefetches and releases caches eagerly per layer,
+            # which FULL graph replay would skip.
+            if (
+                self.cache_config.enable_kvpp
+                and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            ):
+                logger.warning_once(
+                    "KVPP requires PIECEWISE CUDA graph mode. "
+                    "Overriding cudagraph_mode from %s to PIECEWISE.",
+                    self.compilation_config.cudagraph_mode.name,
+                )
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
                 logger.info_once("Cudagraph is disabled under eager mode")

@@ -365,7 +365,8 @@ class DeepseekV32Attention(MLAAttention):
             kv_c_out = torch.empty_like(kv_c)
             k_pe_out = torch.empty_like(k_pe)
         # This fused path writes both caches without the generic MLA update op.
-        acquire_kv_cache(self.layer_name)
+        if self._vllm_config.cache_config.enable_kvpp:
+            self._acquire_kv_cache()
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -448,11 +449,19 @@ class DeepseekV32Attention(MLAAttention):
             mqa_q,
             output,
         )
-        release_kv_cache(self.layer_name)
         return self.o_proj(output)[0]
 
     @eager_break_during_capture
-    def _sparse_indexer_and_attn(
+    def _acquire_kv_cache(self) -> None:
+        # Runs eagerly on replay so KVPP can order broadcasts per forward.
+        acquire_kv_cache(self.layer_name)
+
+    @eager_break_during_capture
+    def _sparse_indexer_and_attn(self, *args: torch.Tensor | None) -> None:
+        self._sparse_indexer_and_attn_impl(*args)
+        release_kv_cache(self.layer_name)
+
+    def _sparse_indexer_and_attn_impl(
         self,
         positions: torch.Tensor,
         q_c: torch.Tensor,

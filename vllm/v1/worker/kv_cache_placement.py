@@ -26,7 +26,17 @@ def get_kv_cache_placement(
         raise ValueError("KVPP requires replicated KV; DCP is not supported.")
     if parallel.enable_dbo:
         raise ValueError("KVPP does not yet support overlapping microbatches.")
-    if not vllm_config.model_config.enforce_eager:
+    from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
+
+    if (
+        is_breakable_cudagraph_enabled()
+        and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+    ):
+        raise ValueError("KVPP requires PIECEWISE breakable CUDA graphs.")
+    if (
+        not vllm_config.model_config.enforce_eager
+        and not is_breakable_cudagraph_enabled()
+    ):
         compilation = vllm_config.compilation_config
         # Cache acquisition and release must run eagerly on every replay.
         if not (
@@ -58,7 +68,7 @@ def get_kv_cache_placement(
             )
 
     specs = model_runner.get_kv_cache_spec()
-    modules = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    modules = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)  # type: ignore[type-abstract]
     if any(
         getattr(module, "kv_sharing_target_layer_name", None) is not None
         for module in modules.values()
