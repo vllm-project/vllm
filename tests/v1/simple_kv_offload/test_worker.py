@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 from contextlib import nullcontext
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -575,6 +576,9 @@ def test_layer_sharded_offload_roundtrip_excludes_scratch(rank):
     caches = allocate_kv_cache(config, torch.device("cuda"), KVCacheLayout.LBNHC)
     worker = SimpleCPUOffloadWorker(None, config, cpu_capacity_bytes=7 * block_bytes)
     worker.register_kv_caches(caches)
+    backend = worker._backend
+    assert backend is not None and config.storage_plan is not None
+    assert worker.gpu_kv_caches is not None and worker.cpu_kv_caches is not None
     try:
         assert worker.num_cpu_blocks == 7
         assert set(worker.gpu_kv_caches) == set(config.storage_plan.persistent_layers)
@@ -583,8 +587,8 @@ def test_layer_sharded_offload_roundtrip_excludes_scratch(rank):
             region.fill_(i + 11)
         ready = torch.cuda.Event()
         ready.record()
-        events = []
-        worker._backend.launch_copy([1], [3], True, 0, events, ready)
+        events: list[Any] = []
+        backend.launch_copy([1], [3], True, 0, events, ready)
         deadline = time.monotonic() + 10
         while not events and time.monotonic() < deadline:
             time.sleep(0.001)
@@ -594,7 +598,7 @@ def test_layer_sharded_offload_roundtrip_excludes_scratch(rank):
             region.zero_()
         ready.record()
         events = []
-        worker._backend.launch_copy([3], [2], False, 1, events, ready)
+        backend.launch_copy([3], [2], False, 1, events, ready)
         deadline = time.monotonic() + 10
         while not events and time.monotonic() < deadline:
             time.sleep(0.001)
@@ -604,7 +608,7 @@ def test_layer_sharded_offload_roundtrip_excludes_scratch(rank):
             assert torch.all(region[2] == i + 11)
             assert torch.all(region[1] == 0)
     finally:
-        worker._backend.shutdown()
+        backend.shutdown()
         for tensor in worker.cpu_kv_caches.values():
             torch.cuda.cudart().cudaHostUnregister(tensor.data_ptr())
 

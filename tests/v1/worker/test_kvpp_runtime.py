@@ -104,7 +104,7 @@ def test_placement_requires_replay_time_cache_hooks(
 
 def _runtime_worker(rank: int, port: int, tp_size: int, pcp_size: int, pp_size: int):
     replica_size = pcp_size * tp_size
-    torch.cuda.set_device(rank)
+    torch.accelerator.set_device_index(rank)
     init_distributed_environment(
         world_size=replica_size * pp_size,
         rank=rank,
@@ -199,7 +199,7 @@ def _runtime_worker(rank: int, port: int, tp_size: int, pcp_size: int, pp_size: 
                     release_kv_cache(bundle.layers[0])
             # Do not synchronize between steps: next-step broadcasts must also
             # wait for the previous owner's writes and receiver scratch use.
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         for observed, expected in observations:
             assert torch.all(observed == expected), (rank, expected)
         assert torch.all(caches["draft"] == 111 + rank)
@@ -241,7 +241,7 @@ def test_materialization_preserves_owner_and_scratch_lifetimes(
     tp_size, pcp_size, pp_size
 ):
     world_size = tp_size * pcp_size * pp_size
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Requires {world_size} CUDA GPUs")
     mp.spawn(
         _runtime_worker,

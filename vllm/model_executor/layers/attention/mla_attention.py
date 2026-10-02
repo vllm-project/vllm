@@ -449,7 +449,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def get_kv_cache_bundle(self) -> tuple[AttentionLayerBase, ...]:
         if self.indexer is None:
             return (self,)
-        return (self, self.indexer.k_cache)
+        return (self, cast(Any, self.indexer).k_cache)
 
     def __init__(
         self,

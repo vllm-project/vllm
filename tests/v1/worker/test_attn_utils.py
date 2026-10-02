@@ -55,8 +55,12 @@ def test_disabled_kvpp_does_not_access_batch_state():
     [([0], 4, False), ([1], 0, True), (None, 0, False), (None, 4, True)],
 )
 def test_kvpp_uses_scheduled_history_or_dummy_context(indices, local_history, expected):
-    prepared = []
-    runtime = SimpleNamespace(prepare_forward=prepared.append)
+    prepared: list[bool] = []
+
+    def prepare_forward(has_history: bool, block_ids: Any = None) -> None:
+        prepared.append(has_history)
+
+    runtime = SimpleNamespace(prepare_forward=prepare_forward)
     req_states = SimpleNamespace(num_computed_tokens_np=np.array([0, 7]))
     if indices is not None:
         batch_req_state = SimpleNamespace(idx_mapping_np=np.array(indices))
