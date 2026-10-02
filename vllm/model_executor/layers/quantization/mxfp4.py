@@ -475,6 +475,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
 
@@ -1001,7 +1002,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 routing_tables=layer._expert_routing_tables(),
             )
 
-    def process_weights_after_loading(self, layer):
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
             return
 
@@ -1123,4 +1124,5 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
