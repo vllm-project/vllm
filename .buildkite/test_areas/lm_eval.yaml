@@ -782,6 +782,7 @@ steps:
 
 - label: ":nvidia: (B200) MoE Refactor DP Integration TEMPORARY"
   key: moe-refactor-integration-test-b200-dp-temporary
+  automatic_shard: true
   device: b200-k8s
   optional: true
   num_devices: 2
