@@ -294,7 +294,9 @@ class ElasticEPScalingExecutor:
         if current_platform.is_rocm():
             rocm_debug.dump_static()
             rocm_debug.dump(
-                "prepare", {"dp": get_standby_dp_group(), "ep": standby_ep_group}
+                "prepare",
+                {"dp": get_standby_dp_group(), "ep": standby_ep_group},
+                heavy=True,
             )
         all2all_manager = get_ep_all2all_manager(standby_ep_group)
         all2all_manager.stage_ep_size()
