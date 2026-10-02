@@ -602,14 +602,6 @@ def _requires_qwen38_tep8_emulation(
     return on_gfx950()
 
 
-def select_gpt_oss_mxfp4_moe_backend(
-    config: FusedMoEConfig,
-    activation_key: QuantKey | None = None,
-) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """Deprecated: use ``select_mxfp4_moe_backend(..., use_gpt_oss_priority=True)``."""
-    return select_mxfp4_moe_backend(config, activation_key, use_gpt_oss_priority=True)
-
-
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
