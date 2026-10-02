@@ -158,7 +158,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.enable_sp:
                 self.passes += [SequenceParallelismPass(config)]
-                if self.pass_config.fuse_gemm_comms:
+                if (
+                    self.pass_config.fuse_gemm_comms
+                    and AsyncTPPass.is_topology_supported()
+                ):
                     self.passes += [AsyncTPPass(config)]
 
             if enable_transformers_norm_canonicalization:

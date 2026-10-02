@@ -10,10 +10,12 @@ steps:
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed
+  - vllm/v1/attention/ops/cp_common.py
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_comm_ops.py
+  - pytest -v -s distributed/test_nvlink_fabric.py
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
