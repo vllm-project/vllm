@@ -823,40 +823,6 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     return hidden_size, intermediate_size
 
 
-def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
-    mxfp4_backend: Mxfp4MoeBackend,
-    layer: torch.nn.Module,
-    w13_weight: torch.Tensor,
-    w2_weight: torch.Tensor,
-    w13_weight_scale: torch.Tensor,
-    w2_weight_scale: torch.Tensor,
-    w13_bias: torch.Tensor | None = None,
-    w2_bias: torch.Tensor | None = None,
-    _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    Union[torch.Tensor, "PrecisionConfig"],
-    Union[torch.Tensor, "PrecisionConfig"],
-    torch.Tensor | None,
-    torch.Tensor | None,
-]:
-    """Deprecated: use ``convert_weight_to_mxfp4_moe_kernel_format(...,
-    is_w13_interleaved=True)``."""
-    return convert_weight_to_mxfp4_moe_kernel_format(
-        mxfp4_backend=mxfp4_backend,
-        layer=layer,
-        w13_weight=w13_weight,
-        w2_weight=w2_weight,
-        w13_weight_scale=w13_weight_scale,
-        w2_weight_scale=w2_weight_scale,
-        w13_bias=w13_bias,
-        w2_bias=w2_bias,
-        _cache_permute_indices=_cache_permute_indices,
-        is_w13_interleaved=True,
-    )
-
-
 def convert_weight_to_mxfp4_moe_kernel_format(
     mxfp4_backend: Mxfp4MoeBackend,
     layer: torch.nn.Module,

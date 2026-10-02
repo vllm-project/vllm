@@ -331,7 +331,7 @@ def _make_aiter_mxfp4_moe_case(
     from tests.kernels.moe.utils import make_dummy_moe_config
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
-        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+        convert_weight_to_mxfp4_moe_kernel_format,
         make_mxfp4_moe_quant_config,
     )
 
@@ -368,7 +368,7 @@ def _make_aiter_mxfp4_moe_case(
         w2_scale_kernel,
         _,
         _,
-    ) = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+    ) = convert_weight_to_mxfp4_moe_kernel_format(
         mxfp4_backend=Mxfp4MoeBackend.AITER,
         layer=torch.nn.Module(),
         # w13 rows must be gpt-oss-interleaved; the converter de-interleaves them
@@ -378,6 +378,7 @@ def _make_aiter_mxfp4_moe_case(
         w2_weight=w2_q.clone(),
         w13_weight_scale=_interleave_gate_up_rows(w1_scale),
         w2_weight_scale=w2_scale.clone(),
+        is_w13_interleaved=True,
     )
 
     moe_config = make_dummy_moe_config(

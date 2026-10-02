@@ -197,11 +197,10 @@ def test_replace_parameter_attributes_from_the_layers_own_parameter(
     """Several callers hand back the parameter they were given, after mutating
     its `.data` in place: the HUMMING branch of
     `convert_to_fp8_moe_kernel_format` (`w13 = layer.w13_weight`), the
-    `AITER_MXFP4_BF16` branch of
-    `convert_gpt_oss_weight_to_mxfp4_moe_kernel_format`, the no-transpose
-    branch of `XPUFP8ScaledMM` (`layer_weight = w`), and `auto_awq`/`auto_gptq`,
-    which pass whatever is currently registered -- possibly still a
-    `BasevLLMParameter` subclass rather than a plain `Parameter`.
+    no-transpose branch of `XPUFP8ScaledMM` (`layer_weight = w`), and
+    `auto_awq`/`auto_gptq`, which pass whatever is currently registered --
+    possibly still a `BasevLLMParameter` subclass rather than a plain
+    `Parameter`.
 
     `new_data is old_param` there, so every attribute of the replacement is by
     definition an attribute of the old parameter; pin exactly which survive.
