@@ -19,10 +19,13 @@ from vllm.compilation.breakable_cudagraph import (
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
+from vllm.compilation.cudagraph_pool import (
+    plain_cudagraph_capture,
+    use_cudagraph_pool,
+)
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.device_allocator import plain_cudagraph_capture, use_cudagraph_pool
 from vllm.distributed.parallel_state import (
     get_pp_group,
     graph_capture,

@@ -34,9 +34,9 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 import vllm.envs as envs
+from vllm.compilation.cudagraph_pool import use_cudagraph_pool
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.device_allocator import use_cudagraph_pool
 from vllm.forward_context import (
     BatchDescriptor,
     get_forward_context,

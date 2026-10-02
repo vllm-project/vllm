@@ -204,6 +204,42 @@ def _custom_ar_and_cumem_graph_pool(worker) -> tuple[bool, bool]:
     return ca_comm is not None and not ca_comm.disabled, "cudagraph" in tags
 
 
+def _cudagraph_tag_bytes(worker) -> int:
+    from vllm.device_allocator.cumem import CuMemAllocator
+
+    data = CuMemAllocator.get_instance().pointer_to_data.values()
+    return sum(d.handle[1] for d in data if d.tag == "cudagraph")
+
+
+@pytest.mark.parametrize(
+    ("mode", "breakable"),
+    [("FULL", False), ("PIECEWISE", False), ("PIECEWISE", True)],
+    ids=["full", "piecewise", "breakable"],
+)
+@create_new_process_for_each_test()
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
+def test_sleep_cudagraph_pool_capture_sites(monkeypatch, mode, breakable):
+    """Each Model Runner V2 capture site (FULL CudaGraphManager, compiled
+    PIECEWISE CUDAGraphWrapper, BreakableCUDAGraphWrapper) captures into the
+    cuMem graph pool, which survives sleep."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1" if breakable else "0")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    llm = LLM(
+        "hmellor/tiny-random-LlamaForCausalLM",
+        enable_sleep_mode=True,
+        compilation_config={"cudagraph_mode": mode},
+    )
+    (graph_bytes,) = llm.collective_rpc(_cudagraph_tag_bytes)
+    assert graph_bytes > 0
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    expected = llm.generate(prompt, sampling_params)[0].outputs[0].text
+    llm.sleep(level=1)
+    llm.wake_up()
+    assert llm.generate(prompt, sampling_params)[0].outputs[0].text == expected
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
 def test_sleep_cudagraph_custom_allreduce_tp2(monkeypatch):
@@ -224,9 +260,9 @@ def test_sleep_cudagraph_custom_allreduce_tp2(monkeypatch):
         compilation_config={"pass_config": {"fuse_allreduce_rms": False}},
     )
     states = llm.collective_rpc(_custom_ar_and_cumem_graph_pool)
+    assert all(graph_pool for _, graph_pool in states)
     if not all(custom_ar for custom_ar, _ in states):
         pytest.skip("Custom allreduce is unavailable on these GPUs")
-    assert all(graph_pool for _, graph_pool in states)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     expected = llm.generate(prompt, sampling_params)[0].outputs[0].text

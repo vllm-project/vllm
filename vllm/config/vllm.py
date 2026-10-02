@@ -21,7 +21,6 @@ import torch
 from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
-from vllm.device_allocator import cumem_cudagraph_pool_enabled
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
@@ -699,6 +698,22 @@ class VllmConfig:
         return 1 + self.num_speculative_tokens
 
     @property
+    def use_cumem_cudagraph_pool(self) -> bool:
+        """Whether CUDA graphs are captured into the cuMem pool that sleep
+        mode offloads: Model Runner V2 graphs with the cumem sleep backend on
+        CUDA."""
+        from vllm.platforms import current_platform
+
+        return (
+            self.model_config is not None
+            and self.model_config.enable_sleep_mode
+            and self.model_config.sleep_mode_backend == "cumem"
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and current_platform.is_cuda()
+            and self.use_v2_model_runner
+        )
+
+    @property
     def use_v2_model_runner(self) -> bool:
         if self.attention_config.hisparse_config is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
@@ -1264,7 +1279,7 @@ class VllmConfig:
         """Keep NCCL buffer registration off the offloaded cuMem graph pool: it
         would pin the pool through sleep and keep stale registrations after
         wake remaps it, causing hangs or wrong results."""
-        if not cumem_cudagraph_pool_enabled(self):
+        if not self.use_cumem_cudagraph_pool:
             return
         # Workers inherit it (Ray copies NCCL_*) before any communicator init.
         graph_register = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")

@@ -485,25 +485,34 @@ def test_cudagraph_pool_survives_sleep(level, monkeypatch):
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
-def test_plain_cudagraph_capture_bypasses_cumem(monkeypatch):
-    """Captures route to the one cuMem graph pool, except under
-    plain_cudagraph_capture() (memory profiling); NCCL follows either pool."""
-    import vllm.device_allocator as device_allocator
-    import vllm.distributed.device_communicators.pynccl_allocator as nccl_alloc
+@pytest.mark.parametrize(
+    ("enabled", "plain", "routed"),
+    [(True, False, True), (True, True, False), (False, False, False)],
+    ids=["routed", "profiling", "disabled"],
+)
+def test_use_cudagraph_pool_routing(enabled, plain, routed):
+    """A capture goes to the one cuMem graph pool when the config enables it,
+    except under plain_cudagraph_capture() (memory profiling); NCCL's graph
+    allocator follows whichever pool is used."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
 
-    monkeypatch.setattr(
-        device_allocator, "cumem_cudagraph_pool_enabled", lambda _: True
+    import vllm.distributed.device_communicators.pynccl_allocator as nccl_alloc
+    from vllm.compilation.cudagraph_pool import (
+        plain_cudagraph_capture,
+        use_cudagraph_pool,
     )
+
     allocator = get_mem_allocator_instance()
     pool = current_platform.graph_pool_handle()
-    with device_allocator.use_cudagraph_pool(pool, None) as routed:
-        assert allocator.current_tag == "cudagraph"
-        assert nccl_alloc._graph_pool_id == routed
-    assert routed == allocator.allocator_and_pools["cudagraph"][0][0].id
+    cfg = SimpleNamespace(use_cumem_cudagraph_pool=enabled)
     with (
-        device_allocator.plain_cudagraph_capture(),
-        device_allocator.use_cudagraph_pool(pool, None) as plain,
+        plain_cudagraph_capture() if plain else nullcontext(),
+        use_cudagraph_pool(pool, cfg) as used,
     ):
-        assert allocator.current_tag == allocator.default_tag
-        assert nccl_alloc._graph_pool_id == pool
-    assert plain == pool
+        assert (allocator.current_tag == "cudagraph") is routed
+        assert nccl_alloc._graph_pool_id == used
+    if routed:
+        assert used == allocator.allocator_and_pools["cudagraph"][0][0].id
+    else:
+        assert used == pool
