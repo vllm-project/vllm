@@ -253,12 +253,15 @@ class HiSparseCoordinator:
         self._pending_step_writes[step_id] = [0, 0]
         return step_id
 
-    def hold_freed_host_blocks(self, blocks: list[KVCacheBlock]) -> list[KVCacheBlock]:
-        """Keep freed host blocks until the latest step's deferred writes land."""
-        if not blocks or self._latest_step_id is None:
-            return blocks
-        self._held_host_blocks.append((self._latest_step_id, blocks))
-        return []
+    def _hold_host_blocks(self, request_id: str) -> None:
+        """Keep a freed request's host blocks until the latest step's deferred
+        writes land; the host manager then has none left to free."""
+        if self._latest_step_id is None:
+            return
+        assert self.host_manager is not None
+        blocks = self.host_manager.req_to_blocks.pop(request_id, None)
+        if blocks:
+            self._held_host_blocks.append((self._latest_step_id, blocks))
 
     def _update_step_writes(
         self,
@@ -877,6 +880,7 @@ class HiSparseCoordinator:
         self._pending_imports.pop(request_id, None)
         state = self.request_states.pop(request_id, None)
         if state is None:
+            self._hold_host_blocks(request_id)
             return
         publication = state.publication
         if (
@@ -919,6 +923,7 @@ class HiSparseCoordinator:
                 else:
                     continue
                 blocks[page_idx] = manager._null_block
+        self._hold_host_blocks(request_id)
 
 
 def get_hisparse_coordinator(
