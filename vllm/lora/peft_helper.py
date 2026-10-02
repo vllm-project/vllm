@@ -6,6 +6,7 @@
 import json
 import math
 import os
+import re
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Literal
 
@@ -41,6 +42,9 @@ class PEFTHelper:
     layer_replication: list[list[int]] | None = field(default=None)
     use_bdlora: dict | None = field(default=None)
     use_qalora: bool = field(default=False)
+    # Per-module overrides of `r` and `lora_alpha`, keyed by module name pattern
+    rank_pattern: dict[str, int] = field(default_factory=dict)
+    alpha_pattern: dict[str, float] = field(default_factory=dict)
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: int | None = field(default=False)
@@ -97,11 +101,47 @@ class PEFTHelper:
     def __post_init__(self):
         if self.r <= 0:
             raise ValueError(f"LoRA rank `r` must be a positive integer, got {self.r}.")
+        self.rank_pattern = self.rank_pattern or {}
+        self.alpha_pattern = self.alpha_pattern or {}
         if self.use_rslora:
             logger.info_once("Loading LoRA weights trained with rsLoRA.")
-            self.vllm_lora_scaling_factor = self.lora_alpha / math.sqrt(self.r)
-        else:
-            self.vllm_lora_scaling_factor = self.lora_alpha / self.r
+        self.vllm_lora_scaling_factor = self._scaling(self.r, self.lora_alpha)
+
+    def _scaling(self, rank: int, alpha: float) -> float:
+        if self.use_rslora:
+            return alpha / math.sqrt(rank)
+        return alpha / rank
+
+    @staticmethod
+    def _match_pattern(pattern: dict, name: str):
+        # Same rule as PEFT's `get_pattern_key`: a key matches if it is a suffix
+        # of the module name starting at a "." boundary; the first match wins.
+        for key, value in pattern.items():
+            if re.match(rf"(.*\.)?({key})$", name):
+                return value
+        return None
+
+    def get_rank_and_scaling(self, module_name: str) -> tuple[int, float]:
+        """Return the rank and scaling PEFT uses for `module_name`, taking
+        `rank_pattern` and `alpha_pattern` into account.
+
+        `module_name` is the name in the adapter checkpoint, without the
+        `base_model.model.` prefix and before any weights mapping.
+        """
+        if not self.rank_pattern and not self.alpha_pattern:
+            return self.r, self.vllm_lora_scaling_factor
+        # PEFT stores fused MoE expert LoRAs (`target_parameters`) as
+        # `experts.base_layer` (gate_up_proj) and `experts` (down_proj), but
+        # matches the patterns against the parameter names.
+        if module_name.endswith(".experts.base_layer"):
+            module_name = module_name.removesuffix(".base_layer") + ".gate_up_proj"
+        elif module_name.endswith(".experts"):
+            module_name += ".down_proj"
+        rank = self._match_pattern(self.rank_pattern, module_name) or self.r
+        alpha = self._match_pattern(self.alpha_pattern, module_name)
+        if alpha is None:
+            alpha = self.lora_alpha
+        return rank, self._scaling(rank, alpha)
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PEFTHelper":
@@ -141,9 +181,10 @@ class PEFTHelper:
         constraints and requirements.
         """
         error_msg = self._validate_features()
-        if self.r > lora_config.max_lora_rank:
+        max_rank = max([self.r, *self.rank_pattern.values()])
+        if max_rank > lora_config.max_lora_rank:
             error_msg.append(
-                f"LoRA rank {self.r} is greater than max_lora_rank"
+                f"LoRA rank {max_rank} is greater than max_lora_rank"
                 f" {lora_config.max_lora_rank}."
             )
         if self.bias != "none":
