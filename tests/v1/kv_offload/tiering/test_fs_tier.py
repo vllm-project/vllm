@@ -764,6 +764,22 @@ def test_crc32c_matches_standard_check_value():
     assert crc32c(b"123456789") == 0xE3069283
 
 
+@pytest.mark.parametrize("size", range(1, 13))
+def test_c_crc32c_matches_python(tmp_path, size):
+    """Sizes 1-12 cover the C path's 8-byte words and its byte tail."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    if not io_mod.probe_xattr(str(tmp_path)):
+        pytest.skip("tmp_path does not support user extended attributes")
+    data = b"123456789abc"[:size]
+    path = str(tmp_path / "block")
+    io_mod.batch_store_block([path], memoryview(data), [0], size, False, True)
+    recorded = os.getxattr(path, io_mod._CHECKSUM_XATTR)
+    assert int.from_bytes(recorded, "big") == io_mod.crc32c(data)
+
+
 @pytest.mark.parametrize("use_c_ext", [True, False])
 def test_checksum_is_recorded_and_verified(
     fs_tier_with_checksums, monkeypatch, use_c_ext
@@ -789,7 +805,7 @@ def test_checksum_is_recorded_and_verified(
     assert torch.equal(tensor[1], expected)
 
 
-@pytest.mark.parametrize("bad_record", [False, True])
+@pytest.mark.parametrize("bad_record", [None, "short", "long", "wrong"])
 @pytest.mark.parametrize("use_c_ext", [True, False])
 def test_checksum_mismatch_fails_load_and_removes_block(
     fs_tier_with_checksums, monkeypatch, use_c_ext, bad_record
@@ -806,8 +822,13 @@ def test_checksum_mismatch_fails_load_and_removes_block(
     tier.submit_store(make_job(1, keys, [0, 1]))
     assert all(r.success for r in drain(tier))
     bad_path = tier.file_mapper.get_file_name(key(2))
-    if bad_record:
+    if bad_record == "short":
         os.setxattr(bad_path, io_mod._CHECKSUM_XATTR, b"\x00\x01\x02")
+    elif bad_record == "long":
+        os.setxattr(bad_path, io_mod._CHECKSUM_XATTR, b"\x00\x01\x02\x03\x04")
+    elif bad_record == "wrong":
+        crc = os.getxattr(bad_path, io_mod._CHECKSUM_XATTR)
+        os.setxattr(bad_path, io_mod._CHECKSUM_XATTR, bytes(b ^ 0xFF for b in crc))
     else:
         # Same size, so the short-read check cannot catch it.
         with open(bad_path, "r+b") as f:
