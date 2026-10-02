@@ -60,7 +60,10 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skip_tokenizer_init = False
+    skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     vocab_size = 151936
 
     def get_diff_sampling_param(self):

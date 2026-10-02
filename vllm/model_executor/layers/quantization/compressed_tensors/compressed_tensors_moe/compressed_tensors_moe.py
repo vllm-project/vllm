@@ -88,14 +88,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f"and bits: {weight_quant.num_bits}"
                 )
 
-            # Native ROCm HIP kernels (RDNA3, etc.)
             if current_platform.is_rocm():
-                from . import rocm_moe_rdna
-
-                if rocm_moe_rdna.is_supported(weight_quant):
-                    return rocm_moe_rdna.make_method(
-                        weight_quant, input_quant, layer.moe_config
-                    )
                 from vllm.platforms.rocm import on_gfx950
 
                 vllm_config = get_current_vllm_config()
@@ -171,7 +164,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             return CompressedTensorsW8A8Int8MoEMethod(
                 weight_quant, input_quant, layer.moe_config
             )
-        elif quant_config._is_fp8_w4a8_sm90(weight_quant, input_quant):
+        elif quant_config._is_fp8_w4a8(weight_quant, input_quant):
             from .compressed_tensors_moe_w4a8_fp8 import (
                 CompressedTensorsW4A8Fp8MoEMethod,
             )
