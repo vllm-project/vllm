@@ -571,7 +571,7 @@ pull_request_rules:
     - base = main
     - label=ready
     - "#approved-reviews-by >= 1"
-    - "#commits-behind >= 50"
+    - "#commits-behind >= 100"
     - "#check-failure = 0"
     - -closed
     - -draft
