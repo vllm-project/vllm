@@ -353,6 +353,16 @@ class Scheduler(SchedulerInterface):
         )
         # A full interval back, so the first step is never gated.
         self.last_prefill_step = -self.local_prefill_interval
+        # Steps that actually scheduled tokens. `current_step` counts every
+        # schedule() call, including ones that return an empty batch -- with
+        # async scheduling, step_with_batch_queue() calls schedule() again
+        # whenever the batch queue has room and has_requests() is true, and an
+        # async KV connector leaves requests parked in lookup or
+        # WAITING_FOR_REMOTE_KVS so those empty calls are common. Timing the
+        # cadence on current_step would expire the hold after far fewer
+        # executed steps than the interval asks for. `current_step` keeps its
+        # own meaning: it drives next_decode_eligible_step for PP + async.
+        self.num_executed_steps = 0
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -646,7 +656,14 @@ class Scheduler(SchedulerInterface):
         if (
             not defer_prefills
             and self.local_prefill_interval > 1
-            and self.current_step - self.last_prefill_step < self.local_prefill_interval
+            # This call becomes executed step num_executed_steps + 1 if it
+            # schedules anything, and last_prefill_step is stamped on that same
+            # convention below. The old code got this for free because
+            # current_step was incremented at the top of schedule(); the
+            # executed-step counter can only be advanced once the step is known
+            # to be non-empty, which is after the gate.
+            and (self.num_executed_steps + 1) - self.last_prefill_step
+            < self.local_prefill_interval
             and any(not r.is_prefill_chunk for r in self.running)
         ):
             defer_prefills = True
@@ -1384,14 +1401,20 @@ class Scheduler(SchedulerInterface):
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
 
-        # Restart the cadence interval from any step that carried prefill,
-        # whether a new admission or a running chunk.
-        if self.local_prefill_interval > 1 and (prefill_scheduled or prefill_admitted):
-            self.last_prefill_step = self.current_step
-
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
+        # Count this step before stamping the cadence below, so that
+        # last_prefill_step includes the step that carried the prefill --
+        # the same convention as the old current_step, which was incremented
+        # at the top of schedule().
+        if total_num_scheduled_tokens > 0:
+            self.num_executed_steps += 1
+
+        # Restart the cadence interval from any step that carried prefill,
+        # whether a new admission or a running chunk.
+        if self.local_prefill_interval > 1 and (prefill_scheduled or prefill_admitted):
+            self.last_prefill_step = self.num_executed_steps
 
         assert token_budget >= 0
         assert input_budget >= 0

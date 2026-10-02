@@ -522,7 +522,7 @@ def test_local_prefill_interval_holds_prefill_between_bursts(interval: int):
     scheduler = create_scheduler(prefill_schedule_interval=interval)
     # This prefill starts the interval.
     _start_decoding(scheduler)
-    assert scheduler.last_prefill_step == scheduler.current_step
+    assert scheduler.last_prefill_step == scheduler.num_executed_steps
 
     (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
     scheduler.add_request(new_req)
@@ -538,7 +538,88 @@ def test_local_prefill_interval_holds_prefill_between_bursts(interval: int):
     # The interval has now elapsed, so prefill is admitted again.
     output = scheduler.schedule()
     assert "new0" in output.num_scheduled_tokens
-    assert scheduler.last_prefill_step == scheduler.current_step
+    assert scheduler.last_prefill_step == scheduler.num_executed_steps
+
+
+def test_empty_schedule_does_not_advance_the_prefill_cadence():
+    """An empty schedule() must not consume interval budget.
+
+    `current_step` counts every schedule() call. With async scheduling,
+    step_with_batch_queue() calls schedule() again whenever the batch queue has
+    room and has_requests() is true -- so a call lands while the previous batch
+    is still in flight and nothing new can be scheduled. An async KV connector
+    makes this common, since requests sit in lookup or WAITING_FOR_REMOTE_KVS.
+    Timing the cadence on current_step lets those empty calls expire the hold
+    early. Reported on #54627 against the LMCache MP connector.
+    """
+    scheduler = create_scheduler(prefill_schedule_interval=4)
+    _start_decoding(scheduler)
+
+    # One real decode step, left in flight (no update_from_output yet).
+    output = scheduler.schedule()
+    assert output.total_num_scheduled_tokens > 0
+    executed_before = scheduler.num_executed_steps
+    step_before = scheduler.current_step
+
+    # Re-entering schedule() while that batch is still unaccounted for
+    # schedules nothing -- this is the async-scheduling shape.
+    for _ in range(3):
+        empty = scheduler.schedule()
+        assert empty.total_num_scheduled_tokens == 0
+
+    assert scheduler.current_step == step_before + 3, "current_step should advance"
+    assert scheduler.num_executed_steps == executed_before, (
+        "an empty schedule() must not count as an executed step"
+    )
+
+
+def test_prefill_cadence_counts_executed_steps_not_schedule_calls():
+    """The hold spans `interval` EXECUTED steps, however many empty schedule()
+    calls are interleaved.
+
+    Counting schedule() calls instead lets each empty call eat interval budget,
+    so with an async KV connector prefill lands on nearly every step and the
+    feature stops doing anything.
+    """
+    interval = 4
+    scheduler = create_scheduler(prefill_schedule_interval=interval)
+    _start_decoding(scheduler)
+    prefill_at = scheduler.num_executed_steps
+
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+
+    empty_calls = 0
+    admitted_at = None
+    for _ in range(50):
+        output = scheduler.schedule()
+        if "new0" in output.num_scheduled_tokens:
+            admitted_at = scheduler.num_executed_steps
+            break
+        if output.total_num_scheduled_tokens == 0:
+            empty_calls += 1
+            continue
+        # A real decode step. Leave it in flight and re-enter schedule() twice,
+        # as async scheduling does while the batch queue has room.
+        for _ in range(2):
+            extra = scheduler.schedule()
+            if "new0" in extra.num_scheduled_tokens:
+                admitted_at = scheduler.num_executed_steps
+                break
+            empty_calls += 1
+        if admitted_at is not None:
+            break
+        _decode_one(scheduler, output, ["run0"])
+
+    assert admitted_at is not None, "prefill was never admitted"
+    assert empty_calls > 0, "test never exercised an empty schedule() call"
+    # The hold is measured in executed steps. Counting schedule() calls would
+    # admit after far fewer, because the empty re-entries above would count.
+    assert admitted_at - prefill_at == interval, (
+        f"hold lasted {admitted_at - prefill_at} executed steps, expected "
+        f"{interval}; empty schedule() calls were counted against the cadence"
+    )
+    assert scheduler.current_step > scheduler.num_executed_steps
 
 
 def test_local_prefill_interval_defaults_to_no_gating():
