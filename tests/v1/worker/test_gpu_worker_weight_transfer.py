@@ -7,8 +7,6 @@ delegates to the configured weight transfer engine and tracks whether an update
 session is active. These tests verify that delegation and the session guard.
 """
 
-from typing import Any, cast
-
 import pytest
 import torch
 import torch.nn as nn
@@ -67,10 +65,10 @@ class _RecordingModelRunner:
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker = object.__new__(Worker)
     worker.vllm_config = VllmConfig()
-    worker.weight_transfer_engine = cast(Any, engine)
+    worker.weight_transfer_engine = engine
     worker._weight_update_active = False
     worker._weight_update_is_draft = False
-    worker.model_runner = cast(Any, _RecordingModelRunner())
+    worker.model_runner = _RecordingModelRunner()
     return worker
 
 
@@ -175,12 +173,13 @@ def test_finish_draft_session_keeps_lora_state():
     engine.supports_draft_weight_update = True
     worker = _make_worker(engine)
     # Stub the bound method on a hand-built worker: retargeting needs a real model.
-    worker._set_draft_weight_update_target = lambda: None  # type: ignore[method-assign]
+    worker._set_draft_weight_update_target = lambda: None  # type: ignore[method-assign]  # stub
 
     Worker.start_draft_weight_update(worker)
     Worker.finish_weight_update(worker)
 
-    assert cast(_RecordingModelRunner, worker.model_runner).reset_lora_calls == 0
+    assert isinstance(worker.model_runner, _RecordingModelRunner)
+    assert worker.model_runner.reset_lora_calls == 0
 
 
 def test_double_start_raises():

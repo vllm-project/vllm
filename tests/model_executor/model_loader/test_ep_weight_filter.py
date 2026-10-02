@@ -105,7 +105,6 @@ class TestComputeLocalExpertIds:
         # Kimi-K2.5 config: 384 experts, EP=8
         for rank in range(8):
             ids = compute_local_expert_ids(384, ep_size=8, ep_rank=rank)
-            assert ids is not None
             assert len(ids) == 48
 
         # All experts covered
@@ -119,14 +118,12 @@ class TestComputeLocalExpertIds:
     def test_384_experts_ep16(self):
         for rank in range(16):
             ids = compute_local_expert_ids(384, ep_size=16, ep_rank=rank)
-            assert ids is not None
             assert len(ids) == 24
 
     def test_384_experts_ep24(self):
         # 384 / 24 = 16 exactly
         for rank in range(24):
             ids = compute_local_expert_ids(384, ep_size=24, ep_rank=rank)
-            assert ids is not None
             assert len(ids) == 16
 
     # round_robin placement tests

@@ -61,6 +61,13 @@ def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
     return [make_offload_key(str(i).encode(), 0) for i in int_ids]
 
 
+def _ema_detector(tier: SecondaryTierManager) -> EMABackpressureDetector:
+    """Return the tier's detector, which TestBackpressure sets to an EMA one."""
+    bp = tier.bp_detector
+    assert isinstance(bp, EMABackpressureDetector)
+    return bp
+
+
 class DelayedSecondaryTierManager(SecondaryTierManager):
     """Secondary tier that holds completed store jobs until released.
 
@@ -122,26 +129,31 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
 class TestDefaultConfig:
     def test_fs_gets_local_watermarks(self):
         cfg = EMABackpressureDetector.default_config("fs")
+        assert cfg is not None
         assert cfg["high_water_s"] == EMABackpressureDetector.LOCAL_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.LOCAL_LOW_WATER_S
 
     def test_obj_gets_network_watermarks(self):
         cfg = EMABackpressureDetector.default_config("obj")
+        assert cfg is not None
         assert cfg["high_water_s"] == EMABackpressureDetector.NETWORK_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.NETWORK_LOW_WATER_S
 
     def test_p2p_gets_local_watermarks(self):
         cfg = EMABackpressureDetector.default_config("p2p")
+        assert cfg is not None
         assert cfg["high_water_s"] == EMABackpressureDetector.LOCAL_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.LOCAL_LOW_WATER_S
 
     def test_fs_with_remote_locality_gets_network_watermarks(self):
         cfg = EMABackpressureDetector.default_config("fs", locality="REMOTE")
+        assert cfg is not None
         assert cfg["high_water_s"] == EMABackpressureDetector.NETWORK_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.NETWORK_LOW_WATER_S
 
     def test_fs_with_local_locality_gets_local_watermarks(self):
         cfg = EMABackpressureDetector.default_config("fs", locality="LOCAL")
+        assert cfg is not None
         assert cfg["high_water_s"] == EMABackpressureDetector.LOCAL_HIGH_WATER_S
         assert cfg["low_water_s"] == EMABackpressureDetector.LOCAL_LOW_WATER_S
 
@@ -265,7 +277,7 @@ class TestBackpressure:
                 tj.submit_time = now - age_s
 
     def test_ema_updates_on_store_completion(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         fast_latency = 0.01
         # EMA is in s/MiB; with 16-byte blocks, scale = MiB / block_bytes.
         scale = EMABackpressureDetector._MIB / self.tier.block_size_bytes
@@ -300,7 +312,7 @@ class TestBackpressure:
         assert bp.store_latency_ema == pytest.approx(expected, rel=0.1)
 
     def test_pressure_activates_above_high_water(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
 
         # Warm up the detector with fast completions first.
         for i in range(_BP_WARMUP):
@@ -323,7 +335,7 @@ class TestBackpressure:
         assert bp.is_under_pressure() is True
 
     def test_pressure_clears_below_low_water(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp.store_latency_ema = _BP_HIGH_WATER_S * 2
         bp._under_pressure = True
         bp._completions = _BP_WARMUP
@@ -349,7 +361,7 @@ class TestBackpressure:
         assert bp.is_under_pressure() is False
 
     def test_hysteresis_prevents_oscillation(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._completions = _BP_WARMUP
         block_bytes = self.tier.block_size_bytes
 
@@ -387,7 +399,7 @@ class TestBackpressure:
         assert bp.is_under_pressure() is True
 
     def test_stores_skipped_under_pressure(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._under_pressure = True
         bp.store_latency_ema = _BP_HIGH_WATER_S * 4
         initial_blocks = self.tier.get_num_blocks()
@@ -401,7 +413,7 @@ class TestBackpressure:
         assert self.tier.get_num_blocks() == initial_blocks
 
     def test_stores_resume_after_pressure_clears(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
 
         # Start under pressure — stores skipped.
         bp._under_pressure = True
@@ -417,10 +429,12 @@ class TestBackpressure:
         assert all(k in self.tier.blocks for k in keys2)
 
     def test_dropped_store_count_tracked(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._under_pressure = True
         bp.store_latency_ema = _BP_HIGH_WATER_S * 4
         policy = bp.policy
+        # the detector's default ThrottledDropPolicy keeps the drop counters
+        assert isinstance(policy, DropAccountingPolicy)
         assert policy.pop_stores_dropped() == (0, 0)
 
         self._store_blocks(to_keys([80]))
@@ -432,10 +446,11 @@ class TestBackpressure:
         assert policy._blocks_dropped == 3
 
     def test_metrics_reported_via_get_stats(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._under_pressure = True
         bp.store_latency_ema = 2.5
         policy = bp.policy
+        assert isinstance(policy, DropAccountingPolicy)
         policy._stores_dropped = 5
         policy._blocks_dropped = 12
 
@@ -455,7 +470,7 @@ class TestBackpressure:
         assert policy._blocks_dropped == 0
 
     def test_reset_cache_clears_backpressure(self, setup):
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp.store_latency_ema = 5.0
         bp._under_pressure = True
 
@@ -479,7 +494,7 @@ class TestBackpressure:
         self.manager.on_new_request(ctx)
 
         # Activate pressure.
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._under_pressure = True
         bp.store_latency_ema = _BP_HIGH_WATER_S * 4
         initial_blocks = self.tier.get_num_blocks()
@@ -500,7 +515,7 @@ class TestBackpressure:
         for b in blocks:
             self.tier.blocks[b] = True
 
-        bp = self.tier.bp_detector
+        bp = _ema_detector(self.tier)
         bp._under_pressure = True
         bp.store_latency_ema = _BP_HIGH_WATER_S * 4
 

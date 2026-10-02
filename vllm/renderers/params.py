@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
 
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -523,6 +523,20 @@ class TokenizeParams:
             tokens = validator(tokenizer, tokens)
 
         return tokens
+
+    @overload
+    def apply_post_tokenization(
+        self,
+        tokenizer: TokenizerLike | None,
+        prompt: TokensPrompt,
+    ) -> TokensPrompt: ...
+
+    @overload
+    def apply_post_tokenization(
+        self,
+        tokenizer: TokenizerLike | None,
+        prompt: EmbedsPrompt,
+    ) -> EmbedsPrompt: ...
 
     def apply_post_tokenization(
         self,

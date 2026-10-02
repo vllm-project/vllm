@@ -142,7 +142,7 @@ def test_match_qwen3vl_mrope_evs_on(
             {
                 "video_grid_thw": MultiModalFieldElem(
                     data=torch.tensor(grid_thw),
-                    field=None,  # type: ignore[arg-type]  # HACK.
+                    field=None,  # HACK.
                 ),
             }
         ),
@@ -162,7 +162,7 @@ def test_match_qwen3vl_mrope_evs_on(
             {
                 "video_grid_thw": MultiModalFieldElem(
                     data=torch.tensor(grid_thw),
-                    field=None,  # type: ignore[arg-type]  # HACK.
+                    field=None,  # HACK.
                 ),
             }
         ),

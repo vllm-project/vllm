@@ -742,11 +742,11 @@ class TestThinkingDisabled:
         assert content == "The answer is 42."
         assert reasoning == ""
 
-    def test_thinking_disabled_non_streaming(self, mock_tokenizer, mock_request):
+    def test_thinking_disabled_non_streaming(self, mock_tokenizer):
         p = Qwen3Parser(
             mock_tokenizer,
             chat_template_kwargs={"enable_thinking": False},
         )
-        reasoning, content = p.extract_reasoning("The answer is 42.", mock_request)
+        reasoning, content = p.extract_reasoning("The answer is 42.", None)
         assert reasoning is None
         assert content == "The answer is 42."

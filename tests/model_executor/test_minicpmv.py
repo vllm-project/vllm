@@ -12,14 +12,14 @@ pytestmark = pytest.mark.skip_global_cleanup
 
 
 def make_model() -> MiniCPMV2_6:
-    return object.__new__(MiniCPMV2_6)  # type: ignore[type-abstract]
+    return object.__new__(MiniCPMV2_6)  # type: ignore[type-abstract]  # protocol attrs unset
 
 
 def make_model_4_6() -> MiniCPMV4_6ForConditionalGeneration:
     model = object.__new__(
-        MiniCPMV4_6ForConditionalGeneration  # type: ignore[type-abstract]
+        MiniCPMV4_6ForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
     )
-    model._process_vision_input = lambda vision_input, use_vit_merger=None: [  # type: ignore[method-assign]
+    model._process_vision_input = lambda vision_input, use_vit_merger=None: [  # type: ignore[method-assign]  # stub
         vision_input["image_embeds"]
     ]
     return model

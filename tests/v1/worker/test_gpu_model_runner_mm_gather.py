@@ -13,13 +13,11 @@ lightweight stub for `self` instead of a full (CUDA-only) runner.
 """
 
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 pytestmark = pytest.mark.cpu_test
@@ -57,9 +55,7 @@ def _gather(features, cached, *, num_scheduled, shift, num_computed=0):
         num_scheduled_tokens={"req0": num_scheduled},
     )
     return GPUModelRunner._gather_mm_embeddings(
-        cast(GPUModelRunner, runner),
-        cast(SchedulerOutput, scheduler_output),
-        shift_computed_tokens=shift,
+        runner, scheduler_output, shift_computed_tokens=shift
     )
 
 

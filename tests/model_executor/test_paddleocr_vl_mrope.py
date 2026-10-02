@@ -43,7 +43,7 @@ class DummyConfig:
 
 def make_model(config: DummyConfig) -> PaddleOCRVLForConditionalGeneration:
     model = object.__new__(
-        PaddleOCRVLForConditionalGeneration  # type: ignore[type-abstract]
+        PaddleOCRVLForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
     )
     model.config = config
     return model
@@ -60,7 +60,7 @@ def make_mm_feature(
             {
                 "image_grid_thw": MultiModalFieldElem(
                     data=torch.tensor(image_grid_thw),
-                    field=None,  # type: ignore[arg-type]  # HACK.
+                    field=None,
                 ),
             }
         ),

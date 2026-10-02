@@ -4,14 +4,12 @@
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
-from vllm.config import VllmConfig
-from vllm.inputs import TokensPrompt
 from vllm.renderers import ChatParams
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -67,10 +65,7 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
     mock_tokenizer = Mock(spec=MistralTokenizer)
     mock_tokenizer.apply_chat_template = mocked_apply_chat_template
     mock_renderer = MistralRenderer(
-        cast(
-            VllmConfig,
-            MockVllmConfig(mock_model_config, parallel_config=MockParallelConfig()),
-        ),
+        MockVllmConfig(mock_model_config, parallel_config=MockParallelConfig()),
         tokenizer=mock_tokenizer,
     )
 
@@ -91,9 +86,9 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
 
     # Ensure task completes
     _, prompt = await task
-    # The Mistral renderer always produces a TokensPrompt.
-    token_prompt = cast(TokensPrompt, prompt)
-    assert token_prompt["prompt_token_ids"] == expected_tokens, (
+    # ``.get`` because ``prompt`` is typed as any ``DictPrompt``, and only the
+    # token-prompt members of that union declare ``prompt_token_ids``.
+    assert prompt.get("prompt_token_ids") == expected_tokens, (
         "Mocked blocking tokenizer was not called"
     )
     assert blocked_count == 0, "Event loop blocked during tokenization"

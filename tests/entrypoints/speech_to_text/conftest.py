@@ -34,9 +34,6 @@ def winning_call():
 @pytest.fixture
 def foscolo():
     # Test translation it->en
-    # NOTE: "azacinto_foscolo" is served from the same asset bucket and is used
-    # by examples/ as well, but it is missing from the ``AudioAssetName``
-    # literal in vllm/assets/audio.py, so the call does not type check.
-    path = AudioAsset("azacinto_foscolo").get_local_path()  # type: ignore[arg-type]
+    path = AudioAsset("azacinto_foscolo").get_local_path()
     with open(str(path), "rb") as f:
         yield f

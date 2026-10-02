@@ -21,7 +21,7 @@ class _TestCuTeDSLKernel(VllmCuTeDSLJitKernel["_TestCuTeDSLKernel.CompileKey"]):
     def kernel(compile_key: CompileKey) -> tuple[str, int]:
         return "entry", compile_key.variant
 
-    def dispatch(self, *, variant: int) -> CompileKey:  # type: ignore[override]
+    def dispatch(self, *, variant: int) -> CompileKey:  # type: ignore[override]  # narrows base **kwargs
         return self.CompileKey(variant=variant)
 
     def get_warmup_keys(self) -> list[CompileKey]:

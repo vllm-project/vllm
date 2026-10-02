@@ -96,7 +96,7 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
         ) % logits.shape[1]
         return logits.float() + 1, sampled, num_sampled
 
-    rejection_sampler._verify = MethodType(fake_verify, rejection_sampler)
+    rejection_sampler._verify = MethodType(fake_verify, rejection_sampler)  # type: ignore[method-assign]  # stub
     logits = torch.arange(170, dtype=torch.float32, device=device).view(10, 17)
 
     sampled, num_sampled, chunked_logprobs, sampling_mask_tensors = (
@@ -178,7 +178,11 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     pos = torch.arange(12, dtype=torch.int32, device=device)
 
     pack_calls: list[tuple[list[int], int, int]] = []
-    pack = SamplingMaskTensors.from_logits.__func__
+    # A classmethod looked up on its class is a bound method; keep the plain
+    # function so the patched classmethod can forward its own `cls`.
+    bound_from_logits = SamplingMaskTensors.from_logits
+    assert isinstance(bound_from_logits, MethodType)
+    pack = bound_from_logits.__func__
 
     def track_pack(
         cls,

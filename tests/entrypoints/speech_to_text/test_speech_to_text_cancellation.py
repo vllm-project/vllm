@@ -3,21 +3,12 @@
 
 import asyncio
 from types import SimpleNamespace
-from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from vllm.config import ModelConfig
-from vllm.config.speech_to_text import SpeechToTextConfig
-from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.speech_to_text.base.serving import SpeechToTextBaseServing
-from vllm.entrypoints.speech_to_text.transcription.protocol import (
-    TranscriptionRequest,
-    TranscriptionResponse,
-)
-from vllm.model_executor.models import SupportsTranscription
+from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionResponse
 
 
 async def _never_finishes():
@@ -54,18 +45,15 @@ async def test_non_streaming_cancel_aborts_engine_requests(
     )
 
     server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
-    server.engine_client = cast(EngineClient, engine_client)
+    server.engine_client = engine_client
     # task_type is Final on the real class; this instance is built with __new__.
     server.task_type = "transcribe"  # type: ignore[misc]
-    server.models = cast(
-        OpenAIServingModels, SimpleNamespace(model_name=lambda: "audio")
-    )
-    server.model_config = cast(ModelConfig, SimpleNamespace(max_model_len=1024))
-    server.model_cls = cast(
-        type[SupportsTranscription], SimpleNamespace(no_space_languages=set())
-    )
+    server.models = SimpleNamespace(model_name=lambda: "audio")
+    server.model_config = SimpleNamespace(max_model_len=1024)
+    server.model_cls = SimpleNamespace(no_space_languages=set())
     server.default_sampling_params = {}
-    server.asr_config = cast(SpeechToTextConfig, SimpleNamespace(max_audio_clip_s=30))
+    server.asr_config = SimpleNamespace(max_audio_clip_s=30)
+    # Stub out the instance's collaborators (mypy rejects assigning to methods).
     server._check_model = AsyncMock(return_value=None)  # type: ignore[method-assign]
     server._maybe_get_adapters = Mock(return_value=None)  # type: ignore[method-assign]
     server._preprocess_speech_to_text = AsyncMock(  # type: ignore[method-assign]
@@ -95,7 +83,7 @@ async def test_non_streaming_cancel_aborts_engine_requests(
     task = asyncio.create_task(
         server._create_speech_to_text(
             audio_data=b"audio",
-            request=cast(TranscriptionRequest, request),
+            request=request,
             raw_request=raw_request,
             response_class=TranscriptionResponse,
             stream_generator_method=Mock(),
@@ -135,18 +123,15 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
         {"prompt": "chunk-2"},
     ]
     server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
-    server.engine_client = cast(EngineClient, engine_client)
+    server.engine_client = engine_client
     # task_type is Final on the real class; this instance is built with __new__.
     server.task_type = "transcribe"  # type: ignore[misc]
-    server.models = cast(
-        OpenAIServingModels, SimpleNamespace(model_name=lambda: "audio")
-    )
-    server.model_config = cast(ModelConfig, SimpleNamespace(max_model_len=1024))
-    server.model_cls = cast(
-        type[SupportsTranscription], SimpleNamespace(no_space_languages=set())
-    )
+    server.models = SimpleNamespace(model_name=lambda: "audio")
+    server.model_config = SimpleNamespace(max_model_len=1024)
+    server.model_cls = SimpleNamespace(no_space_languages=set())
     server.default_sampling_params = {}
-    server.asr_config = cast(SpeechToTextConfig, SimpleNamespace(max_audio_clip_s=30))
+    server.asr_config = SimpleNamespace(max_audio_clip_s=30)
+    # Stub out the instance's collaborators (mypy rejects assigning to methods).
     server._check_model = AsyncMock(return_value=None)  # type: ignore[method-assign]
     server._maybe_get_adapters = Mock(return_value=None)  # type: ignore[method-assign]
     server._preprocess_speech_to_text = AsyncMock(  # type: ignore[method-assign]
@@ -172,7 +157,7 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
     task = asyncio.create_task(
         server._create_speech_to_text(
             audio_data=b"audio",
-            request=cast(TranscriptionRequest, request),
+            request=request,
             raw_request=raw_request,
             response_class=TranscriptionResponse,
             stream_generator_method=Mock(),
@@ -200,16 +185,13 @@ async def test_language_detection_cancel_aborts_engine_request():
     )
 
     server = SpeechToTextBaseServing.__new__(SpeechToTextBaseServing)
-    server.engine_client = cast(EngineClient, engine_client)
-    server.asr_config = cast(SpeechToTextConfig, SimpleNamespace())
+    server.engine_client = engine_client
+    server.asr_config = SimpleNamespace()
     server.tokenizer = Mock()
-    server.model_cls = cast(
-        type[SupportsTranscription],
-        SimpleNamespace(
-            get_language_detection_prompt=Mock(return_value={"prompt": "detect"}),
-            get_language_token_ids=Mock(return_value=[1]),
-            parse_language_detection_output=Mock(),
-        ),
+    server.model_cls = SimpleNamespace(
+        get_language_detection_prompt=Mock(return_value={"prompt": "detect"}),
+        get_language_token_ids=Mock(return_value=[1]),
+        parse_language_detection_output=Mock(),
     )
 
     request_id = "transcribe-outer-request-lang_detect"

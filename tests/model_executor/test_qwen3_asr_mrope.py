@@ -18,11 +18,8 @@ def test_mrope_positions_with_stripped_audio_data() -> None:
         mm_position=PlaceholderRange(offset=2, length=3),
     )
 
-    # The method body never touches self, so it can be called unbound.
     positions, delta = Qwen3ASRForConditionalGeneration.get_mrope_input_positions(
-        None,  # type: ignore[arg-type]
-        input_tokens,
-        [feature],
+        None, input_tokens, [feature]
     )
 
     expected = torch.arange(len(input_tokens), dtype=torch.long).expand(3, -1)
