@@ -16,6 +16,7 @@ from contextlib import nullcontext
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
@@ -573,8 +574,6 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        import vllm._custom_ops as ops
-
         c = self.config
 
         w_q_raw = getattr(layer, self.w_q_name)
