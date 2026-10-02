@@ -371,6 +371,12 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_EXT_SRC
     "csrc/torch_bindings.cpp"
     "csrc/custom_quickreduce.cu")
+  # Octave KV cache (store, decode, rotation, prefill)
+  list(APPEND VLLM_EXT_SRC
+    "csrc/attention/octave_attn.cu"
+    "csrc/attention/octave_decode_wmma_rdna3.cu"
+    "csrc/attention/octave_prefill_rdna3.cu"
+  )
 
   message(STATUS "Enabling C extension.")
   define_extension_target(

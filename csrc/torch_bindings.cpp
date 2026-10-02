@@ -17,6 +17,31 @@
 // https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit#heading=h.ptttacy8y1u9
 // https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
 
+// ROCm-only kernels on the legacy _C extension (they use the full torch API,
+// not the stable ABI).
+TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
+  // Octave KV cache (ROCm): store, split-KV decode, rotation, prefill.
+  ops.def(
+      "octave_cache_store(Tensor key, Tensor value, Tensor! cache, "
+      "Tensor slot_mapping, Tensor k_signs, Tensor v_signs, int fmt) -> ()");
+  ops.impl("octave_cache_store", torch::kCUDA, &octave_cache_store);
+  ops.def(
+      "octave_decode(Tensor! out, Tensor query, Tensor cache, "
+      "Tensor block_table, Tensor q_to_req, Tensor q_to_klen, "
+      "Tensor! mid_o, Tensor k_signs, Tensor v_signs, float sm_scale, "
+      "int num_kv_splits, int fmt, int query_group, bool use_wmma) -> ()");
+  ops.impl("octave_decode", torch::kCUDA, &octave_decode);
+  ops.def(
+      "octave_rotate(Tensor! x, Tensor signs, bool k_layout, bool inverse) "
+      "-> ()");
+  ops.impl("octave_rotate", torch::kCUDA, &octave_rotate);
+  ops.def(
+      "octave_prefill(Tensor! out, Tensor q, Tensor k, Tensor v, Tensor cache, "
+      "Tensor block_table, Tensor cu_seqlens_q, Tensor seq_lens, "
+      "int max_query_len, float sm_scale, int fmt) -> ()");
+  ops.impl("octave_prefill", torch::kCUDA, &octave_prefill);
+}
+
 #ifdef USE_ROCM
 TORCH_LIBRARY_FRAGMENT(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Quick Reduce all-reduce kernels (ROCm-only; stays on legacy _C).
