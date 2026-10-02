@@ -94,7 +94,7 @@ impl ToolParserFactory {
             .register_pattern("qwen3.5", names::QWEN3_CODER)
             .register_pattern("qwq", names::HERMES)
             .register_pattern("qwen2.5", names::HERMES)
-            .register_pattern("qwen3", names::QWEN3_XML)
+            .register_pattern("qwen3", names::HERMES)
             .register_pattern("hermes", names::HERMES)
             // Narrow to `internlm2` substring so it matches `internlm2-chat-7b`
             // and `internlm2_5-7b-chat` but NOT `internlm-chat-7b` (InternLM v1,

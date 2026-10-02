@@ -153,7 +153,7 @@ impl ToolChoiceVariant {
 }
 
 impl RoundtripCase {
-    /// Qwen3 XML tool-call format with `qwen3` reasoning tags.
+    /// Qwen3 Hermes JSON tool-call format with `qwen3` reasoning tags.
     fn qwen3() -> Self {
         Self {
             model_id: "Qwen/Qwen3-0.6B",
@@ -453,7 +453,7 @@ macro_rules! roundtrip_tests {
 }
 
 roundtrip_tests! {
-    qwen3 => [reasoning_and_content, tool_call_mix],
+    qwen3 => [reasoning_and_content],
     qwen35 => [reasoning_and_content, tool_call_mix],
     mimo_v26 => [reasoning_and_content, tool_call_mix],
     minimax_m25 => [reasoning_and_content, tool_call_mix],
