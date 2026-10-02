@@ -376,7 +376,6 @@ def test_flashinfer_standalone_workspace_size(
         "_resolve_fi_ar_backend",
         Mock(return_value=("mnnvl", False)),
     )
-    monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda _: 2)
     monkeypatch.setattr(
         flashinfer_all_reduce,
         "_get_tuned_standalone_max_size",
@@ -430,7 +429,6 @@ def test_flashinfer_workspace_failure_is_not_retried(
         "_resolve_fi_ar_backend",
         Mock(return_value=("mnnvl", True)),
     )
-    monkeypatch.setattr(flashinfer_all_reduce, "get_node_count", lambda: 1)
     monkeypatch.setattr(
         flashinfer_all_reduce, "_get_tuned_standalone_max_size", Mock(return_value=None)
     )

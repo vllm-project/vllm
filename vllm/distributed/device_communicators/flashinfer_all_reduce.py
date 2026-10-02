@@ -199,7 +199,7 @@ def get_fi_ar_workspace(
     if backend is None:
         return None
 
-    if _node_count(group) > 1 and backend == "trtllm":
+    if backend == "trtllm" and _node_count(group) > 1:
         raise ValueError(
             "Flashinfer allreduce is not supported for multi-node allreduce with "
             "'trtllm' backend. Please use 'mnnvl' backend instead."
@@ -268,7 +268,7 @@ def get_fi_ar_quant_workspace(
     if backend is None:
         return None
 
-    if _node_count(group) > 1 and backend == "trtllm":
+    if backend == "trtllm" and _node_count(group) > 1:
         raise ValueError(
             "Flashinfer allreduce quantization fusion is not supported for "
             "multi-node allreduce with 'trtllm' backend. Please use 'mnnvl' "
