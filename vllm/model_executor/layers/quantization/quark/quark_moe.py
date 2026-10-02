@@ -1958,26 +1958,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             shared_experts_input=shared_experts_input,
         )
 
-    def apply_monolithic(
-        self,
-        layer: RoutedExperts,
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-        input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor | UnfinalizedMoEOutput:
-        assert self.is_monolithic
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply_monolithic(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            router_logits=router_logits,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-        )
-
 
 class QuarkNvfp4MoEMethod(QuarkMoEMethod):
     supported_activation_quant_keys = [kNvfp4Dynamic]
