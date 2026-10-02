@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
+
 import pytest
 import torch
 
@@ -231,6 +233,98 @@ def test_discard_tags():
     allocator.sleep(offload_tags="weights")
     allocator.wake_up()
     assert torch.allclose(weights, torch.ones_like(weights))
+
+
+@pytest.mark.parametrize("tag", ["workspace", None], ids=["workspace", "default"])
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_selective_wake_restores_internal_tags(tag):
+    """A selective wake defers only weights/kv_cache; other tags always wake."""
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool(tag):
+        internal = torch.empty(16 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
+    with allocator.use_memory_pool("kv_cache"):
+        kv = torch.empty(32 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
+
+    allocator.sleep(offload_tags=())
+    assert mapped_usage(allocator) == 0
+
+    allocator.wake_up(tags=["weights"])
+    assert mapped_usage(allocator) == internal.nbytes
+    allocator.wake_up(tags=["kv_cache"])
+    assert mapped_usage(allocator) == internal.nbytes + kv.nbytes
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_workspace_scratch_discarded_on_sleep():
+    """Workspace scratch lives in the sleep-mode pool: sleep discards it, any
+    (selective) wake remaps it at the same address so captured graphs replay,
+    and a buffer outgrown by a resize stays usable until it is released."""
+    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+    from vllm.v1.worker.workspace import WorkspaceManager
+
+    allocator = get_mem_allocator_instance()
+    manager = WorkspaceManager(
+        torch.device(DEVICE_TYPE),
+        alloc_context=lambda: allocator.use_memory_pool("workspace"),
+    )
+    (small,) = manager.get_simultaneous(((32 << 20,), torch.uint8))
+    # Resize while a view of the old buffer is alive: the tag is re-entered.
+    (scratch,) = manager.get_simultaneous(((64 << 20,), torch.uint8))
+    assert len(allocator.allocator_and_pools["workspace"]) == 2
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        scratch.add_(1)
+
+    backend = CuMemBackend()
+    backend.suspend(level=1)
+    assert mapped_usage(allocator) == 0
+    # Discarded, not copied.
+    assert all(
+        d.tag == "workspace" and d.cpu_backup_tensor is None
+        for d in allocator.pointer_to_data.values()
+    )
+
+    backend.resume(tags=["kv_cache"])
+    assert mapped_usage(allocator) == small.nbytes + scratch.nbytes
+    scratch.zero_()
+    graph.replay()
+    assert int(scratch.sum()) == scratch.numel()
+    small.fill_(1)
+
+    # The next resize releases the outgrown buffer; wake does not remap it.
+    del small
+    (big,) = manager.get_simultaneous(((128 << 20,), torch.uint8))
+    assert mapped_usage(allocator) == scratch.nbytes + big.nbytes
+    backend.suspend(level=1)
+    backend.resume(tags=["weights"])
+    assert mapped_usage(allocator) == scratch.nbytes + big.nbytes
+
+
+@pytest.mark.parametrize("free_x_early", [True, False], ids=["x-freed", "x-alive"])
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
+def test_reentered_tag(free_x_early):
+    """Enter a tag twice (two workspace ubatches): freeing X returns its memory
+    by the next entry, without touching Y or breaking sleep/wake."""
+    allocator = get_mem_allocator_instance()
+    nbytes = 64 << 20
+    with allocator.use_memory_pool("t"):
+        xs = [torch.empty(nbytes, dtype=torch.uint8, device=DEVICE_TYPE)]
+        if free_x_early:
+            xs.clear()
+    with allocator.use_memory_pool("t"):
+        y = torch.empty(nbytes, dtype=torch.uint8, device=DEVICE_TYPE)
+    xs.clear()
+    gc.collect()
+    with allocator.use_memory_pool("t"):
+        pass
+    assert mapped_usage(allocator) == nbytes
+    y.fill_(1)
+    allocator.sleep(offload_tags="t")
+    allocator.wake_up()
+    assert int(y.sum()) == y.numel()
+    allocator.release_pools()
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
