@@ -17,8 +17,9 @@ Usage:
 Options (kv_connector_extra_config):
     - min_tokens: prompts with fewer uncached tokens take the normal path
       (default: two chunks).
-    - chunk_tokens: lane chunk size (default: the largest multiple of the
-      block size within max_num_batched_tokens).
+    - chunk_tokens: where the lane caches Mamba state, a multiple of the block
+      size (default: the largest one within max_num_batched_tokens, or one
+      block). Longer segments run in pieces of at most max_num_batched_tokens.
     - compute_units: compute units the lane's stream may use, counted from
       the top; 0 means all (default: 0).
     - always: use the lane even when no other request is running (default:
