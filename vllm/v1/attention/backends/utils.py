@@ -21,7 +21,12 @@ from vllm.config.cache import _layout_from_name
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
-from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    KVCacheSpec,
+    MambaSpec,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -286,9 +291,13 @@ def resolve_kv_cache_layout(
     # specs can re-interpret HNC with different sizes as long as the total number of
     # bytes is the same. If not block-compact, each spec must agree on HNC to alias
     # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
+    # Specs without per-layer views lay out their own raw backing tensor.
+    kv_cache_specs = tuple(
+        spec for spec in kv_cache_specs or () if spec.has_layer_views
+    )
     hnc_shapes = {
         (spec.num_heads, spec.num_states, spec.page_size_bytes)
-        for spec in kv_cache_specs or ()
+        for spec in kv_cache_specs
     }
     if len(hnc_shapes) > 1:
         candidates = [m for m in candidates if m.is_block_compact]
@@ -296,6 +305,20 @@ def resolve_kv_cache_layout(
             raise ValueError(
                 "Specs with mixed HNC shapes need a block-compact layout, but "
                 f"none is in every supported set: {supported_layouts}."
+            )
+
+    dcp_sharding = {
+        spec.dcp_sharded for spec in kv_cache_specs if isinstance(spec, AttentionSpec)
+    }
+    page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
+    if len(dcp_sharding) > 1 and len(page_sizes) > 1:
+        # Sharded target and replicated draft caches need independent groups.
+        # Block-outer layouts can pack those groups without equalizing pages.
+        candidates = [layout for layout in candidates if layout.is_block_outermost]
+        if not candidates:
+            raise ValueError(
+                "DCP with a replicated draft and mixed KV page sizes requires "
+                f"a block-outer KV cache layout; supported sets: {supported_layouts}."
             )
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
@@ -1142,11 +1165,6 @@ def mamba_get_block_table_tensor(
     """Get the block table tensor for mamba kernels from the input
     common_attn_metadata.block_table_tensor given different mamba cache modes.
 
-    - "all":   input  (#requests, cdiv(max_model_len, block_size)
-                        + num_speculative_blocks);
-               output (#requests, cdiv(max_model_len, block_size)
-                        + num_speculative_blocks).
-
     - "none":  input  (#requests, 1 + num_speculative_blocks);
                output (#requests, 1 + num_speculative_blocks).
 
@@ -1154,7 +1172,7 @@ def mamba_get_block_table_tensor(
                output (#requests, 1 + num_speculative_blocks), which are the last
                1 + num_speculative_blocks of each request.
     """
-    if mamba_cache_mode in ("all", "none"):
+    if mamba_cache_mode == "none":
         return block_table
     else:
         assert isinstance(kv_cache_spec, MambaSpec)
