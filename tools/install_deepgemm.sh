@@ -7,8 +7,11 @@ set -e
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
 DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
-# Includes vllm-project/DeepGEMM#23 (SM107 JIT target workaround),
-# plus SM120 page_kv=32 support and NVFP4 Mega MoE updates.
+# NOTE: This targets the vLLM fork's dev branch, which carries the sm120
+# and sm90 paged-MQA ports plus the SwiGLU alpha/beta and SiTU Mega MoE
+# activations, plus the CUDA 12.x layout header fix from vllm-project/DeepGEMM#12,
+# SM120 page_kv=32 support, NVFP4 Mega MoE updates, and the temporary SM107
+# JIT target workaround from vllm-project/DeepGEMM#23 (see deepseek-ai/DeepGEMM#461).
 DEEPGEMM_GIT_REF="550036ad85e8c9af43d6da983af0a68e0d417888"
 WHEEL_DIR=""
 
