@@ -176,6 +176,43 @@ def test_k2_falls_back(fake_qsa, case):
     assert fake.k2_calls == []
 
 
+@pytest.mark.parametrize(
+    ("num_prefills", "max_seq_len", "width"),
+    [(1, 3000, 2), (1, 1568, 1), (0, 3000, 168)],
+)
+def test_select_trims_the_table_on_prefill_batches(
+    monkeypatch, num_prefills, max_seq_len, width
+):
+    from types import SimpleNamespace
+
+    from vllm.models.qwen4_exp.amd.indexer_qsa import QSAIndexer
+
+    widths = []
+
+    def select(q, k_cache, page_table, *args):
+        widths.append(page_table.shape[1])
+        return page_table
+
+    monkeypatch.setattr(qsa_flydsl, "flydsl_select_paged_tokens", select)
+    indexer = SimpleNamespace(
+        compressed_key_cache=SimpleNamespace(kv_cache=None),
+        token_topk=TOKEN_TOPK,
+        compress_ratio=COMPRESS_RATIO,
+    )
+    metadata = SimpleNamespace(
+        block_table=torch.zeros(2, 168, dtype=torch.int32),
+        token_to_req=None,
+        logical_positions=None,
+        seq_lens=None,
+        num_prefills=num_prefills,
+        max_seq_len=max_seq_len,
+        storage_block_size=392,
+        compress_ratio=COMPRESS_RATIO,
+    )
+    QSAIndexer._select(indexer, None, metadata, None)
+    assert widths == [width]
+
+
 def test_missing_aiter_raises(monkeypatch):
     import builtins
 
