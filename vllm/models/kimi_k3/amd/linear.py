@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    KimiK3MergedQKVGateLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -350,7 +351,20 @@ class KimiMLAAttention(nn.Module):
         self.use_nope = use_nope
         assert self.use_nope is True
         assert num_heads % tp_size == 0
-        if self.q_lora_rank is not None:
+        self.use_output_gate = config.mla_use_output_gate
+        if self.q_lora_rank is not None and self.use_output_gate:
+            self.fused_qkv_a_proj = KimiK3MergedQKVGateLinear(
+                hidden_size=self.hidden_size,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                total_num_heads=num_heads,
+                v_head_dim=self.v_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.fused_qkv_a_proj",
+            )
+        elif self.q_lora_rank is not None:
             self.fused_qkv_a_proj = MergedColumnParallelLinear(
                 self.hidden_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -406,8 +420,7 @@ class KimiMLAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.use_output_gate = config.mla_use_output_gate
-        if self.use_output_gate:
+        if self.use_output_gate and self.q_lora_rank is None:
             projection_size = self.num_heads * self.v_head_dim
             self.g_proj = ColumnParallelLinear(
                 self.hidden_size,
@@ -888,6 +901,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 (".fused_qkv_a_proj", ".q_a_proj", 0),
                 (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
             ]
+            if getattr(self.config, "mla_use_output_gate", False):
+                stacked_params_mapping.append((".fused_qkv_a_proj", ".g_proj", 2))
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
