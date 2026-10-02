@@ -4,7 +4,6 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.platform_utils import num_compute_units
 
 
 @triton.jit
@@ -23,11 +22,9 @@ def moe_fused_mul_sum_kernel(
     hidden_size: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    # A CTA owns one token's output row, or the hidden tiles pid_k,
-    # pid_k + num_programs(1), ... of it when the grid also splits hidden. Resolve
-    # which slots to sum once per CTA (the decision is invariant over hidden
-    # tiles); the `if take` branch is block-uniform, so padding slots are skipped
-    # rather than masked-and-loaded.
+    # One CTA owns one token's output row. Resolve which slots to sum once per
+    # row (the decision is invariant over hidden tiles); the `if take` branch is
+    # block-uniform, so padding slots are skipped rather than masked-and-loaded.
     pid_m = tl.program_id(0)
     # Bound to the real recv rows [0, num_recv). Under cudagraph decode the grid
     # is the static padded token count, and padding rows past num_recv carry
@@ -64,7 +61,7 @@ def moe_fused_mul_sum_kernel(
     a_row = inputs_ptr + pid_m.to(tl.int64) * stride_m
     out_row = outputs_ptr + pid_m * hidden_size
 
-    for t in tl.range(tl.program_id(1), n_tiles, tl.num_programs(1)):
+    for t in tl.range(0, n_tiles):
         offs_k = t * BLOCK_K + tl.arange(0, BLOCK_K)
         kmask = offs_k < hidden_size
         acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
@@ -153,13 +150,7 @@ def moe_fused_mul_sum(
             hidden_size,
             inputs.element_size(),
         )
-        # One CTA per token leaves most SMs idle for decode-sized batches, so
-        # also split hidden until there are enough CTAs; the per-element sums
-        # are unchanged, and so is the output.
-        num_hidden_splits = 1
-        if num_tokens < 4 * num_compute_units(inputs.device.index or 0):
-            num_hidden_splits = triton.cdiv(hidden_size, BLOCK_K)
-        grid = (num_tokens, num_hidden_splits)
+        grid = (num_tokens,)
         moe_fused_mul_sum_kernel[grid](
             inputs,
             topk_weights,

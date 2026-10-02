@@ -214,8 +214,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if scatter_idx is not None:
             layout = "scatter"
 
-        # Without anything to apply, humming would only copy the input into
-        # `quanted_input`; the GEMM can read the input itself.
         hadamard_block_size = getattr(quant_config, f"{prefix}_hadamard_block_size")
         has_input_processing = (
             mode.should_quantize
