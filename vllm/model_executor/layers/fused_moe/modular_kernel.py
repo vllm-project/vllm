@@ -23,6 +23,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsSink,
+)
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
@@ -979,9 +982,6 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     def is_monolithic() -> bool:
         return True
 
-    routing_replay_capture_fn: Callable[[torch.Tensor], None] | None = None
-    _routing_replay_buffer: torch.Tensor | None = None
-
     def supports_routing_replay_capture(self) -> bool:
         """Whether this expert supports routing replay capture.
 
@@ -989,53 +989,6 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         (e.g. FlashInfer's ``routing_replay_out``) should override.
         """
         return False
-
-    def set_capture_fn(
-        self,
-        capture_fn: Callable[[torch.Tensor], None] | None,
-    ) -> None:
-        self.routing_replay_capture_fn = capture_fn
-        if capture_fn is None:
-            self._routing_replay_buffer = None
-            return
-        # Allocate for per-rank batches gathered across the DP or EP group.
-        dispatch_group_size = (
-            self.moe_config.ep_size
-            if self.moe_config.use_ep
-            else self.moe_config.dp_size
-        )
-        max_num_replay_tokens = self.moe_config.max_num_tokens * dispatch_group_size
-        self._routing_replay_buffer = torch.empty(
-            (max_num_replay_tokens, self.moe_config.experts_per_token),
-            dtype=torch.int16,
-            device=self.moe_config.device,
-        )
-
-    def _maybe_make_routing_replay_buffer(
-        self,
-        num_tokens: int,
-        device: torch.device,
-    ) -> torch.Tensor | None:
-        if self.routing_replay_capture_fn is None:
-            return None
-        buf = self._routing_replay_buffer
-        assert buf is not None
-        if buf.shape[0] < num_tokens or buf.device != device:
-            raise ValueError(
-                "Routing replay buffer was initialized for "
-                f"{buf.shape[0]} tokens on {buf.device}, but the kernel "
-                f"received {num_tokens} tokens on {device}."
-            )
-        return buf
-
-    def _maybe_dispatch_routing_replay(
-        self,
-        routing_replay_out: torch.Tensor | None,
-        num_tokens: int,
-    ) -> None:
-        if routing_replay_out is None or self.routing_replay_capture_fn is None:
-            return
-        self.routing_replay_capture_fn(routing_replay_out[:num_tokens])
 
     def apply(
         self,
@@ -1053,10 +1006,14 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as ``FusedMoEExperts.apply``, except uses router_logits as opposed
         to the topk_ids and topk_weights. This is useful for kernels
         with fused router and fused_experts (e.g. FLASHINFER_TRTLLM).
+
+        Kernels that ``supports_routing_replay_capture`` write each token's
+        routed expert ids into the leading rows of ``routing_replay_out``.
         """
         raise NotImplementedError
 
@@ -1563,6 +1520,8 @@ class FusedMoEKernelMonolithicImpl:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        *,
+        routing_sink: RoutedExpertsSink | None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
@@ -1575,6 +1534,15 @@ class FusedMoEKernelMonolithicImpl:
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
         )
 
+        routing_replay_out = None
+        if routing_sink is not None:
+            # Checked per call: a weight reload may rebuild a different kernel.
+            if not self.fused_experts.supports_routing_replay_capture():
+                raise ValueError(
+                    "Routed-experts capture is not supported with monolithic MoE "
+                    f"kernel {type(self.fused_experts).__name__}."
+                )
+            routing_replay_out = routing_sink.buffer[: len(a1q)]
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
@@ -1590,7 +1558,10 @@ class FusedMoEKernelMonolithicImpl:
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            routing_replay_out=routing_replay_out,
         )
+        if routing_sink is not None:
+            routing_sink.capture_fn(routing_replay_out)
 
         if isinstance(fused_out, UnfinalizedMoEOutput):
             if not self.prepare_finalize.supports_deferred_moe_finalize():
@@ -1698,6 +1669,8 @@ class FusedMoEKernel:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        *,
+        routing_sink: RoutedExpertsSink | None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1713,6 +1686,7 @@ class FusedMoEKernel:
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            routing_sink=routing_sink,
         )
 
     def apply(
