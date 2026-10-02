@@ -32,6 +32,7 @@ from torch import nn
 from transformers import AutoModel, PreTrainedConfig
 from transformers.conversion_mapping import (
     WeightRenaming,
+    get_checkpoint_conversion_mapping,
     get_model_conversion_mapping,
 )
 
@@ -311,7 +312,14 @@ class Base(
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
 
-        for mapping in get_model_conversion_mapping(self.model):
+        mappings = get_model_conversion_mapping(self.model)
+        # Ensure layers that are part of the model, but not AutoModel, get their mapping
+        instantiated = {type(m).__name__ for m in self.model.modules()}
+        for arch in self.config.architectures or []:
+            if arch not in instantiated:
+                mappings.extend(get_checkpoint_conversion_mapping(arch) or [])
+
+        for mapping in mappings:
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
@@ -691,10 +699,8 @@ class Base(
         # vLLM does not support encoder-decoder models, so if any encoder layer is
         # found in a text only model, we assume the whole model is an encoder model
         if has_encoder(self.model) and not is_multimodal(self.config):
-            self.check_version("5.0.0", "encoder models support")
             return EncoderOnlyAttention
         if self.model_config.use_mla:
-            self.check_version("5.15.0.dev0", "optimized MLA support")
             if any(
                 isinstance(fuser, MLAFuser)
                 for fusers in self.fusers.values()
@@ -820,7 +826,6 @@ class Base(
             )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.check_version("5.2.0", "Eagle3 support")
         from transformers.utils.output_capturing import (
             OutputRecorder,
             maybe_install_capturing_hooks,
