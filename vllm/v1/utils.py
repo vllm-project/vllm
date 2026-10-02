@@ -224,30 +224,28 @@ class APIServerProcessManager:
                 SharedAdmissionStats.num_counters(num_servers),
             )
 
-        # Shutdown only the API server processes on garbage collection
-        # The extra processes are managed by their owners
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
-        try:
-            for i, in_addr, out_addr in zip(
-                range(num_servers), input_addresses, output_addresses
-            ):
-                client_config: dict[str, Any] = {
-                    "input_address": in_addr,
-                    "output_address": out_addr,
-                    "client_count": num_servers,
-                    "client_index": i,
-                }
-                if admission_counters is not None:
-                    client_config["mp_admission_counters"] = admission_counters
-                if stats_update_address is not None:
-                    client_config["stats_update_address"] = stats_update_address
-                if tensor_queue is not None:
-                    client_config["tensor_queue"] = tensor_queue
+        for i, in_addr, out_addr in zip(
+            range(num_servers), input_addresses, output_addresses
+        ):
+            client_config: dict[str, Any] = {
+                "input_address": in_addr,
+                "output_address": out_addr,
+                "client_count": num_servers,
+                "client_index": i,
+            }
+            if admission_counters is not None:
+                client_config["mp_admission_counters"] = admission_counters
+            if stats_update_address is not None:
+                client_config["stats_update_address"] = stats_update_address
+            if tensor_queue is not None:
+                client_config["tensor_queue"] = tensor_queue
 
-                parent_recv, child_send = spawn_context.Pipe(duplex=False)
-                self._address_pipes.append(parent_recv)
-                client_config["actual_address_pipe"] = child_send
+            parent_recv, child_send = spawn_context.Pipe(duplex=False)
+            self._address_pipes.append(parent_recv)
+            client_config["actual_address_pipe"] = child_send
 
+            try:
                 with (
                     child_send,
                     socket_factory()
@@ -261,9 +259,9 @@ class APIServerProcessManager:
                     )
                     self.processes.append(proc)
                     proc.start()
-        except BaseException:
-            self.shutdown()
-            raise
+            except BaseException:
+                self.shutdown()
+                raise
 
         logger.info("Started %d API server processes", len(self.processes))
 

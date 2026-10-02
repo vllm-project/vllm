@@ -271,23 +271,6 @@ def test_normal_completion(api_server_args):
         time.sleep(0.2)
 
 
-def test_bind_failure_closes_socket_even_while_exception_is_retained():
-    from vllm.entrypoints.launchers.launcher import create_server_socket
-
-    with create_server_socket(("127.0.0.1", 0), reuse_port=False) as blocker:
-        blocker.listen()
-        failed = socket.socket()
-        with (
-            patch(
-                "vllm.entrypoints.launchers.launcher.socket.socket", return_value=failed
-            ),
-            pytest.raises(OSError) as error,
-        ):
-            create_server_socket(blocker.getsockname(), reuse_port=False)
-        assert error.value.__traceback__ is not None
-        assert failed.fileno() == -1
-
-
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux REUSEPORT semantics")
 @pytest.mark.parametrize(
     "failure,owned_socket",

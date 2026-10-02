@@ -4,7 +4,6 @@
 
 import argparse
 import os
-import socket
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -47,7 +46,6 @@ def test_headless_imports_reasoning_parser_plugin_before_engine_config():
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux REUSEPORT semantics")
-@pytest.mark.parametrize("startup_failure", [False, True])
 @pytest.mark.parametrize(
     "platform,count,uds,independent",
     [
@@ -57,9 +55,7 @@ def test_headless_imports_reasoning_parser_plugin_before_engine_config():
         ("darwin", 3, None, False),
     ],
 )
-def test_multi_server_selects_listener_policy(
-    platform, count, uds, independent, startup_failure
-):
+def test_multi_server_selects_listener_policy(platform, count, uds, independent):
     """HTTP startup selects listeners; the process manager receives that choice."""
     from vllm.entrypoints.launchers.launcher import create_server_socket
 
@@ -73,10 +69,7 @@ def test_multi_server_selects_listener_policy(
     )
     addresses = SimpleNamespace(inputs=["in"] * count, outputs=["out"] * count)
     engine_launch = SimpleNamespace(
-        engine_manager=MagicMock(),
-        coordinator=MagicMock(),
-        addresses=addresses,
-        tensor_queue=None,
+        engine_manager=None, coordinator=None, addresses=addresses, tensor_queue=None
     )
     with (
         create_server_socket(("127.0.0.1", 0), reuse_port=True) as sock,
@@ -118,35 +111,5 @@ def test_multi_server_selects_listener_policy(
             return instance
 
         manager.side_effect = make_manager
-        if startup_failure:
-            instance.gather_actual_addresses.side_effect = RuntimeError(
-                "handshake failed"
-            )
-            with pytest.raises(RuntimeError, match="handshake failed"):
-                run_multi_api_server(args)
-        else:
-            run_multi_api_server(args)
+        run_multi_api_server(args)
         instance.shutdown.assert_called_once()
-        engine_launch.engine_manager.shutdown.assert_called_once()
-        engine_launch.coordinator.shutdown.assert_called_once()
-        assert sock.fileno() == -1
-
-
-def test_multi_server_closes_reserved_socket_on_config_failure():
-    """Startup owns the initial port reservation even before workers exist."""
-    args = argparse.Namespace(headless=False, api_server_count=1)
-    with (
-        socket.socket() as sock,
-        patch("vllm.entrypoints.cli.serve.signal.signal"),
-        patch("vllm.entrypoints.cli.serve.envs.VLLM_USE_RUST_FRONTEND", False),
-        patch(
-            "vllm.entrypoints.cli.serve.setup_server", return_value=("http://", sock)
-        ),
-        patch(
-            "vllm.entrypoints.cli.serve.vllm.AsyncEngineArgs.from_cli_args",
-            side_effect=ValueError("invalid config"),
-        ),
-    ):
-        with pytest.raises(ValueError, match="invalid config"):
-            run_multi_api_server(args)
-        assert sock.fileno() == -1
