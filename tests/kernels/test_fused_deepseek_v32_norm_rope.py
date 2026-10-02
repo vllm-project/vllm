@@ -1014,7 +1014,7 @@ def test_fused_q_bf16_query(
             cfg.index_head_dim**-0.5,
             cfg.index_heads**-0.5,
             has_indexer=has_indexer,
-            index_rope_interleave=False,
+            index_rope_interleave=index_interleave,
             quantize_mqa=False,
             q_nope=q_nope,
             w_uk_t=w_uk_t,
