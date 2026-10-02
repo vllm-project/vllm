@@ -3,6 +3,7 @@
 
 
 import torch
+from compressed_tensors.quantization import QuantizationArgs, QuantizationType
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -28,8 +29,10 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     B12X_BACKENDS,
     Mxfp4MoeBackend,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
+    select_deepseek_v4_mxfp4_moe_backend,
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
@@ -38,23 +41,46 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe):
+    def __init__(
+        self,
+        moe,
+        weight_quant: QuantizationArgs | None = None,
+        input_quant: QuantizationArgs | None = None,
+    ):
         super().__init__(moe)
         self.group_size = 32
         self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
+        self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+
         # Backend selection must match the weight preparation below: CUTLASS
-        # swizzles scales, b12x and XPU consume checkpoint packing, and Marlin
-        # repacks weights and scales.
-        self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
+        # swizzles scales, b12x and XPU consume checkpoint packing, the FP8
+        # (W4A8) backends convert to the flashinfer layout, and Marlin repacks
+        # weights and scales.
+        self.use_fp8_activations = (
+            input_quant is not None
+            and input_quant.type == QuantizationType.FLOAT
+            and input_quant.num_bits == 8
+        )
+        self.use_cutlass_mxfp4 = (
+            not self.use_fp8_activations
+            and CutlassExpertsMxfp4._supports_current_device()
+        )
         self.experts_cls: type[mk.FusedMoEExperts]
-        if moe.moe_backend == "b12x":
+        if self.use_fp8_activations:
+            # W4A8: pick the best available FP8-activation MXFP4 backend for
+            # this device (TRTLLM MXFP8 on Blackwell), falling back to other
+            # high-precision paths otherwise.
+            self.mxfp4_backend, experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
+            assert experts_cls is not None
+            self.experts_cls = experts_cls
+        elif moe.moe_backend == "b12x":
             self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
             assert experts_cls is not None
             self.experts_cls = experts_cls
@@ -148,11 +174,13 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 w2_scale=layer.w2_weight_scale,
             )
         else:
-            # b12x selects W4A8 or W4A16; XPU uses W4A4; Marlin uses W4A16.
+            # b12x selects W4A8 or W4A16; XPU uses W4A4; Marlin uses W4A16;
+            # DeepSeek-V4 uses TRTLLM W4A8 (MXFP8 activations).
             return make_mxfp4_moe_quant_config(
                 mxfp4_backend=self.mxfp4_backend,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                swiglu_limit=getattr(layer, "swiglu_limit", None),
                 layer=layer,
             )
 
@@ -200,6 +228,26 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         elif self.mxfp4_backend in B12X_BACKENDS or current_platform.is_xpu():
             pass
+        elif self.use_fp8_activations:
+            # Convert the flat checkpoint weights/scales into the layout the
+            # selected W4A8 backend expects (TRTLLM flashinfer interleave, or
+            # Marlin repack when flashinfer is unavailable).
+            w13, w2, w13_scale, w2_scale, _, _ = (
+                convert_weight_to_mxfp4_moe_kernel_format(
+                    mxfp4_backend=self.mxfp4_backend,
+                    layer=layer,
+                    w13_weight=layer.w13_weight,
+                    w2_weight=layer.w2_weight,
+                    w13_weight_scale=layer.w13_weight_scale,
+                    w2_weight_scale=layer.w2_weight_scale,
+                    _cache_permute_indices=self._cache_permute_indices,
+                    activation=self.moe.activation,
+                )
+            )
+            replace_parameter(layer, "w13_weight", w13)
+            replace_parameter(layer, "w2_weight", w2)
+            replace_parameter(layer, "w13_weight_scale", w13_scale)
+            replace_parameter(layer, "w2_weight_scale", w2_scale)
         else:
             logger.warning_once(
                 "Your GPU does not have native support for FP4 computation "
