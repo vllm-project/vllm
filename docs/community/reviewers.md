@@ -20,7 +20,7 @@ Sorted alphabetically by GitHub handle:
 - [@GirasoleY](https://github.com/GirasoleY): Kernels and performance
 - [@itayalroy](https://github.com/itayalroy): MoE serving (kernels, EP, All2All, EPLB, elasticity/fault tolerance); KV connectors and NIXL integrations
 - [@JartX](https://github.com/JartX): ROCm / HIP on Radeon (RDNA3), quantization (W4A16/GPTQ, MXFP4), KV cache quantization
-- [@kliuae](https://github.com/kliuae)
+- [@kliuae](https://github.com/kliuae): ROCm feature enablement, model performance, fused kernels
 - [@lengrongfu](https://github.com/lengrongfu)
 - [@linitra24](https://github.com/linitra24)
 - [@LopezCastroRoberto](https://github.com/LopezCastroRoberto): Kernels and quantization
