@@ -9,7 +9,7 @@ vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available fo
 | ------------ | -------------- | ------------ | ----------------- | ------------------ |
 | `rocm700` | 3.12 | 7.0 | >= 2.35 | `0.14.0` to `0.18.0` |
 | `rocm721` | 3.12 | 7.2.1 | >= 2.35 | Nightly releases after commit `171775f306a333a9cf105bfd533bf3e113d401d9` |
-| `rocm72` | 3.12 | 7.2 | >= 2.35 | Nightly releases on the legacy ROCm 7.2 stack |
+| `rocm72` | 3.12 | 7.2 | >= 2.39 | Nightly releases on the legacy ROCm 7.2 stack |
 | `rocm100` | 3.12 | 10.0 | >= 2.35 | Nightly releases (default) |
 
 --8<-- [end:installation]
