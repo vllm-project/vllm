@@ -1059,7 +1059,7 @@ class SpeculativeConfig:
             )
         if hf_config.model_type == "glm5_next":
             hf_config.model_type = "glm5_next_mtp"
-            n_predict = hf_config.num_nextn_predict_layers
+            n_predict = hf_config.get_text_config().num_nextn_predict_layers
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Glm5NextMTPModel"]}
             )

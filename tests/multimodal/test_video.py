@@ -1591,10 +1591,6 @@ def test_glm5next_backend_indices_match_sampler(
 ):
     """The loader must select exactly the frames the processor's sampler
     would, with target.fps mapping onto the raw-fps override."""
-    from vllm.transformers_utils.processors.glm5next import (
-        glm_sample_frame_indices,
-    )
-
     source = VideoSourceMetadata(
         total_frames_num=total_frames, original_fps=original_fps, duration=duration
     )
@@ -1604,7 +1600,7 @@ def test_glm5next_backend_indices_match_sampler(
         source, target, max_frames=max_frames
     )
 
-    assert indices == glm_sample_frame_indices(
+    assert indices == Glm5NextVideoBackend._sample_frame_indices(
         total_frames,
         original_fps,
         duration,
@@ -1692,10 +1688,6 @@ def test_glm5next_backend_codec_parity(tmp_path, backend):
     if backend == "torchcodec":
         pytest.importorskip("torchcodec")
 
-    from vllm.transformers_utils.processors.glm5next import (
-        glm_sample_frame_indices,
-    )
-
     total_frames, fps = 120, 10
     path = _write_gray_video(tmp_path, total_frames, fps)
     # Dense default sampling (gap 5) and a sparse max_frames cap (gap 20).
@@ -1703,7 +1695,7 @@ def test_glm5next_backend_codec_parity(tmp_path, backend):
         kwargs: dict[str, Any] = (
             {} if max_frames is None else {"max_frames": max_frames}
         )
-        expected = glm_sample_frame_indices(
+        expected = Glm5NextVideoBackend._sample_frame_indices(
             total_frames, float(fps), 12.0, max_frame_count=max_frames
         )
 
@@ -1726,11 +1718,7 @@ def test_glm5next_backend_decodes_only_sampled_frames(tmp_path):
     total_frames, fps = 60, 10
     path = _write_gray_video(tmp_path, total_frames, fps)
 
-    from vllm.transformers_utils.processors.glm5next import (
-        glm_sample_frame_indices,
-    )
-
-    expected = glm_sample_frame_indices(total_frames, float(fps), 6.0)
+    expected = Glm5NextVideoBackend._sample_frame_indices(total_frames, float(fps), 6.0)
 
     frames, metadata = Glm5NextVideoBackend.load_bytes(path.read_bytes())
 

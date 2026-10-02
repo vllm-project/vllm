@@ -18,6 +18,7 @@ from collections.abc import Iterable
 import regex as re
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, replace, set_current_vllm_config
@@ -45,9 +46,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
@@ -222,7 +220,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             self.layers = nn.ModuleList(
                 Qwen4ExpDecoderLayer(
                     draft_vllm_config,
-                    layer_type="full_attention",
+                    layer_type="qwen_sparse_attention",
                     prefix=f"{prefix}.layers.{self.mtp_start_layer_idx + idx}",
                 )
                 for idx in range(self.num_mtp_layers)
