@@ -151,7 +151,11 @@ def get_next_client(app, service_type: str):
 
 
 async def send_request_to_service(
-    client_info: dict, endpoint: str, req_data: dict, request_id: str
+    client_info: dict,
+    endpoint: str,
+    req_data: dict,
+    request_id: str,
+    transfer_id: str,
 ):
     """Send a request to a service using a client from the pool."""
     req_data = req_data.copy()
@@ -162,6 +166,7 @@ async def send_request_to_service(
         "remote_block_ids": None,
         "remote_host": None,
         "remote_port": None,
+        "transfer_id": transfer_id,
     }
     req_data["stream"] = False
     req_data["max_tokens"] = 1
@@ -214,13 +219,15 @@ async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
         request_id = str(uuid.uuid4())
+        # Pairs P and D in NIXL push mode; pull mode ignores it.
+        transfer_id = f"xfer-{uuid.uuid4()}"
 
         # Get the next prefill client in round-robin fashion
         prefill_client_info = get_next_client(request.app, "prefill")
 
         # Send request to prefill service
         response = await send_request_to_service(
-            prefill_client_info, api, req_data, request_id
+            prefill_client_info, api, req_data, request_id, transfer_id
         )
 
         # Extract the needed fields
@@ -228,6 +235,7 @@ async def _handle_completions(api: str, request: Request):
         await response.aclose()  # CRITICAL: Release connection back to pool
         kv_transfer_params = response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
+            kv_transfer_params["transfer_id"] = transfer_id
             req_data["kv_transfer_params"] = kv_transfer_params
 
         # Get the next decode client in round-robin fashion
