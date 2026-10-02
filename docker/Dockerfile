@@ -618,10 +618,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ] || \
         [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         python3 tools/use_existing_torch.py --prefix; \
-    fi \
-    && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        sed -Ei '/^[[:space:]]*nvidia-cutlass-dsl\[cu13\][[:space:]]*==/Id' \
-            requirements/cuda.txt; \
     fi
 
 # Build the vLLM wheel
