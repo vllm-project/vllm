@@ -7,7 +7,7 @@ import queue
 import secrets
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -75,6 +75,9 @@ from vllm.v1.worker.utils import select_common_block_size
 logger = init_logger(__name__)
 
 _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
+# Decode restarts mint new layout ids, so stale peer layouts pile up. Evicting
+# one only costs that peer a LAYOUT_MISS and one layout resend.
+_MAX_PEER_LAYOUTS: Final[int] = 1024
 
 try:
     from mooncake.engine import TransferEngine
@@ -1242,11 +1245,11 @@ class MooncakeConnectorWorker:
             tuple,
             tuple[list[TransferRegion], list[TransferRegion], str | None],
         ] = {}
-        # (host, port, tp_rank, pp_size, tp_size, layout_id) -> regions.
-        # Filled only after a pull that actually carried the layout.
-        self._layout_by_peer: dict[
+        # (host, port, tp_rank, pp_size, tp_size, layout_id) -> regions, in LRU
+        # order. Filled only after a pull that actually carried the layout.
+        self._layout_by_peer: OrderedDict[
             tuple, tuple[list[TransferRegion], list[TransferRegion]]
-        ] = {}
+        ] = OrderedDict()
         self._kv_layout_id = 0
         # Decode side: worker addresses that echoed the current layout_id.
         self._acked_layout_peers: set[str] = set()
@@ -1538,7 +1541,7 @@ class MooncakeConnectorWorker:
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
         if meta.layout_id and not _metadata_includes_layout(meta):
-            stored = self._layout_by_peer.get(self._peer_layout_key(meta))
+            stored = self._lookup_peer_layout(meta)
             if stored is None:
                 response = MooncakeXferResponse(
                     status=MooncakeXferResponseStatus.LAYOUT_MISS,
@@ -2749,11 +2752,22 @@ class MooncakeConnectorWorker:
         prepared: tuple[list[TransferRegion], list[TransferRegion], str | None],
     ) -> None:
         local_regions, remote_regions, err = prepared
-        if err is None and meta.layout_id:
-            self._layout_by_peer[self._peer_layout_key(meta)] = (
-                local_regions,
-                remote_regions,
-            )
+        if err is not None or not meta.layout_id:
+            return
+        key = self._peer_layout_key(meta)
+        self._layout_by_peer[key] = (local_regions, remote_regions)
+        self._layout_by_peer.move_to_end(key)
+        while len(self._layout_by_peer) > _MAX_PEER_LAYOUTS:
+            self._layout_by_peer.popitem(last=False)
+
+    def _lookup_peer_layout(
+        self, meta: MooncakeXferMetadata
+    ) -> tuple[list[TransferRegion], list[TransferRegion]] | None:
+        key = self._peer_layout_key(meta)
+        stored = self._layout_by_peer.get(key)
+        if stored is not None:
+            self._layout_by_peer.move_to_end(key)
+        return stored
 
     def _build_pull_metadata(
         self,

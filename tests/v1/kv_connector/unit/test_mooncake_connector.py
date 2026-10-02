@@ -2280,6 +2280,39 @@ async def test_steady_pull_omits_layout_and_unknown_id_asks_for_resend():
     assert calls == 2
 
 
+@pytest.mark.asyncio
+async def test_peer_layouts_evict_least_recently_used(monkeypatch):
+    """Stale layout ids are bounded, and an evicted peer is asked to resend."""
+    monkeypatch.setattr(mooncake_connector, "_MAX_PEER_LAYOUTS", 2)
+    worker, _, regions, _ = _register_sliced_packed_mla([0])
+    req_blocks = {"d": ("xfer", [[1]])}
+
+    def handshake(layout_id: int) -> MooncakeXferMetadata:
+        return _xfer_meta(
+            regions,
+            req_blocks,
+            remote_hostname="peer",
+            remote_port=9,
+            remote_tp_size=worker.tp_size,
+            remote_pp_size=worker.pp_size,
+            layout_id=layout_id,
+        )
+
+    worker._prepare_transfer_regions(handshake(1))
+    worker._prepare_transfer_regions(handshake(3))
+    assert worker._lookup_peer_layout(_short_xfer_meta(worker, 1, req_blocks))
+    worker._prepare_transfer_regions(handshake(5))
+
+    assert worker._lookup_peer_layout(_short_xfer_meta(worker, 1, req_blocks))
+    assert worker._lookup_peer_layout(_short_xfer_meta(worker, 5, req_blocks))
+    sock = MagicMock()
+    sock.send_multipart = AsyncMock()
+    await worker.send_kv_to_decode(b"d", sock, _short_xfer_meta(worker, 3, req_blocks))
+    _, payload = sock.send_multipart.call_args[0][0]
+    response = worker._xfer_resp_decoder.decode(payload)
+    assert response.status == MooncakeXferResponseStatus.LAYOUT_MISS
+
+
 class _ScriptedSock:
     def __init__(self, responses: list[bytes], sent: list[bytes]):
         self._responses = responses

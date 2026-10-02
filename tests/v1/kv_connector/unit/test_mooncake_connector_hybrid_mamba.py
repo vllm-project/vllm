@@ -8,6 +8,7 @@ validated by this test module.
 """
 
 import asyncio
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -244,7 +245,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     worker.shutdown = noop_shutdown
     # __new__ skips __init__, where these caches are created.
     worker._prepared_transfer_regions = {}
-    worker._layout_by_peer = {}
+    worker._layout_by_peer = OrderedDict()
     worker._acked_layout_peers = set()
     worker._logged_xfer_sizes = set()
     worker.use_mla = False
