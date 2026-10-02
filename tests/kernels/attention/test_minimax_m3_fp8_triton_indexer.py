@@ -32,16 +32,17 @@ PLANTED = (7, 40, 88)
 
 
 def _make_inputs(device: str) -> tuple[torch.Tensor, torch.Tensor]:
+    # CPU RNG: CUDA randn output depends on the GPU's SM count.
     torch.manual_seed(3)
-    keys = torch.randn(NUM_PAGES * PAGE, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    keys = torch.randn(NUM_PAGES * PAGE, HEAD_DIM, dtype=torch.bfloat16)
     # RMS-normalize like the real (post index_k_norm) keys.
     keys = keys * keys.float().pow(2).mean(-1, keepdim=True).add(1e-6).rsqrt().to(
         torch.bfloat16
     )
-    q = torch.randn(1, HEADS, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    q = torch.randn(1, HEADS, HEAD_DIM, dtype=torch.bfloat16)
     for b in PLANTED:
         keys[b * PAGE + 5] = (q[0, 0] * 3).to(torch.bfloat16)
-    return q, keys
+    return q.to(device), keys.to(device)
 
 
 def _check_selection(top_bf16: set[int], top_fp8: set[int]) -> None:
