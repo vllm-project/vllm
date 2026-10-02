@@ -826,7 +826,7 @@ def test_models_fse_init(
         model_type, quantization_config
     )
     vllm_config = VllmConfig()
-    vllm_config.model_config = SimpleNamespace(  # type: ignore[assignment]
+    vllm_config.model_config = SimpleNamespace(
         hf_config=config,
         hf_text_config=config,
         dtype=torch.bfloat16,
@@ -895,7 +895,7 @@ def test_models_fse_init(
                     DeepSeekV4MTP,
                 )
 
-                vllm_config.speculative_config = SimpleNamespace(  # type: ignore[assignment]
+                vllm_config.speculative_config = SimpleNamespace(
                     draft_model_config=SimpleNamespace(hf_config=config),
                     method="mtp",
                     parallel_drafting=False,

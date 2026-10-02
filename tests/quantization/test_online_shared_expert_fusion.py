@@ -362,6 +362,7 @@ def test_online_quantization(
     assert routed_experts.w13_weight_scale.dtype == torch.uint8
     assert routed_experts.w2_weight.dtype == torch.float4_e2m1fn_x2
     assert routed_experts.w2_weight_scale.dtype == torch.uint8
+    assert vllm_config.quant_config is not None
     assert vllm_config.quant_config.online_quantization_config is not None
     assert not any(
         "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "

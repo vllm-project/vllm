@@ -6,17 +6,33 @@ from typing import Any
 
 import regex as re
 import torch
+from pydantic import TypeAdapter
 
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
     ModelConfig,
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.config.quantization import resolve_quantization_config
+from vllm.config.quantization import (
+    QuantizationConfigArgs,
+    QuantSpec,
+    resolve_quantization_config,
+)
 from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
+
+
+def quant_spec(**kwargs: Any) -> QuantSpec:
+    """Build a `QuantSpec` from user-facing names such as `"mxfp8"`."""
+    return TypeAdapter(QuantSpec).validate_python(kwargs)
+
+
+def quant_config_args(**kwargs: Any) -> QuantizationConfigArgs:
+    """Build `QuantizationConfigArgs` from user-facing shorthand values."""
+    return TypeAdapter(QuantizationConfigArgs).validate_python(kwargs)
 
 
 def _limit_num_hidden_layers(
@@ -70,7 +86,9 @@ def load_model_without_vllm_runner(
         model_config.quantization, model_config.quantization_config
     )
     vllm_config_args = dict(vllm_config_kwargs or {})
-    vllm_config_args.setdefault("compilation_config", CompilationConfig(mode=0))
+    vllm_config_args.setdefault(
+        "compilation_config", CompilationConfig(mode=CompilationMode.NONE)
+    )
     vllm_config = VllmConfig(model_config=model_config, **vllm_config_args)
     hf_overrides = (model_config_kwargs or {}).get("hf_overrides") or {}
     text_config_overrides = hf_overrides.get("text_config") or {}
