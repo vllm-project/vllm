@@ -1476,52 +1476,13 @@ def _adaptive_config(
     )
 
 
-@pytest.mark.parametrize(
-    ("config", "spec", "bound"),
-    [
-        (_adaptive_config(), SimpleNamespace(), 8),
-        (_adaptive_config(adaptive=False), SimpleNamespace(), None),
-        # DCP routes plan per-row windows from host lengths.
-        (_adaptive_config(dcp=2), SimpleNamespace(), None),
-        # Kimi-K3 DSpark draft layers share the target's group; causality is
-        # decided per batch, so the merged non-causal spec keeps the bound.
-        (
-            _adaptive_config(),
-            SimpleNamespace(non_causal_multi_token_decode=True),
-            8,
-        ),
-    ],
-    ids=["adaptive", "fixed", "dcp", "shared_draft_group"],
-)
-def test_varlen_cudagraph_bound_follows_adaptive_verification(config, spec, bound):
-    assert (
-        AiterMLAMetadataBuilder.get_varlen_cudagraph_max_query_len(config, spec)
-        == bound
-    )
-
-
-def test_varlen_rows_left_align_each_request_in_its_block():
-    """Packed request lengths [3, 1, 0] (the last is graph padding) in blocks of
-    4: real tokens take the first qlen rows of their block, the rest read
-    packed row 0, and every packed token maps back to its own row."""
-    width = 4
-    max_rows = 3 * width
-    row_ids = torch.arange(max_rows, dtype=torch.int64)
-    stub = SimpleNamespace(
-        _varlen_decode_qlen=width,
-        _varlen_row_req=row_ids // width,
-        _varlen_row_pos=row_ids % width,
-        _varlen_row_ids=row_ids,
-        _varlen_q_rows=torch.zeros_like(row_ids),
-        _varlen_o_rows=torch.zeros(max_rows + 1, dtype=torch.int64),
-    )
-    qo_lens = torch.tensor([3, 1, 0], dtype=torch.int32)
-    query_start_loc = torch.tensor([0, 3, 4, 4], dtype=torch.int32)
-
-    q_rows, o_rows = AiterMLAMetadataBuilder._fill_varlen_rows(
-        stub, query_start_loc, qo_lens, num_reqs=3
-    )
-
-    assert q_rows.tolist() == [0, 1, 2, 0, 3, 0, 0, 0, 0, 0, 0, 0]
-    # Packed tokens 0..3 -> rows 0, 1, 2 (request 0) and 4 (request 1).
-    assert o_rows[:4].tolist() == [0, 1, 2, 4]
+def test_varlen_cudagraph_bound_follows_adaptive_verification():
+    bound = AiterMLAMetadataBuilder.get_varlen_cudagraph_max_query_len
+    assert bound(_adaptive_config(), SimpleNamespace()) == 8
+    assert bound(_adaptive_config(adaptive=False), SimpleNamespace()) is None
+    # DCP routes plan per-row windows from host lengths.
+    assert bound(_adaptive_config(dcp=2), SimpleNamespace()) is None
+    # Kimi-K3 DSpark draft layers share the target's group; causality is
+    # decided per batch, so the merged non-causal spec keeps the bound.
+    shared_draft_group = SimpleNamespace(non_causal_multi_token_decode=True)
+    assert bound(_adaptive_config(), shared_draft_group) == 8

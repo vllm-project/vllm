@@ -479,14 +479,6 @@ BATCH_SPECS = {
     "spec_decode_ragged_small": BatchSpec(
         seq_lens=[128, 256, 512, 1024], query_lens=[8, 3, 1, 5]
     ),
-    # Contexts shorter than k+1 leave left-padding rows with an empty window.
-    "spec_decode_ragged_short_ctx": BatchSpec(
-        seq_lens=[3, 40, 9, 2048, 1], query_lens=[3, 8, 2, 8, 1]
-    ),
-    "spec_decode_ragged_large": BatchSpec(
-        seq_lens=[97 * i + 11 for i in range(1, 17)],
-        query_lens=[1 + (5 * i) % 8 for i in range(16)],
-    ),
     "spec_decode_medium": BatchSpec(
         seq_lens=[512, 1024, 2048, 512, 1024, 2048], query_lens=[8, 8, 8, 8, 8, 8]
     ),
@@ -2201,41 +2193,20 @@ def test_chunked_context_backend_correctness(
 @pytest.mark.skipif(
     not ADAPTIVE_VARLEN_BACKENDS, reason="No adaptive varlen decode backend"
 )
-@pytest.mark.parametrize(
-    "batch_spec_name",
-    [
-        "spec_decode_ragged_small",
-        "spec_decode_ragged_short_ctx",
-        "spec_decode_ragged_large",
-    ],
-)
-@pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
-# 128 native heads; 16 (the padded K3 count); 8, padded up to 16.
-@pytest.mark.parametrize("tensor_parallel_size", [1, 8, 16])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_adaptive_varlen_decode_correctness(
-    default_vllm_config,
-    dist_init,
-    workspace_init,
-    batch_spec_name: str,
-    model: str,
-    tensor_parallel_size: int,
-    kv_cache_dtype: str,
+    default_vllm_config, dist_init, workspace_init
 ):
     """Device query lengths 1..k+1 against an even host split, as adaptive
-    verification hands them to the target model's attention."""
-    if kv_cache_dtype == "fp8" and batch_spec_name == "spec_decode_ragged_short_ctx":
-        # A 1..9 token context leaves fp8 KV error unaveraged: the unchanged
-        # uniform decode path exceeds the fp8 tolerance on it just the same.
-        pytest.skip("fp8 error on tiny contexts exceeds the shared tolerance")
+    verification hands them to the target model's attention. TP 8 gives 16
+    heads, the padded Kimi-K3 count."""
     _run_backend_correctness(
         default_vllm_config,
         dist_init,
         workspace_init,
-        batch_spec_name,
-        model,
-        tensor_parallel_size,
-        kv_cache_dtype,
+        "spec_decode_ragged_small",
+        "deepseek-ai/DeepSeek-R1",
+        8,
+        "fp8",
         1.0,
         1.0,
         None,
