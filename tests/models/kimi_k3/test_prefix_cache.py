@@ -152,20 +152,11 @@ DEPLOYMENTS = {
         prefill=Instance(kv_config=NIXL_OFFLOAD),
         offload=True,
     ),
-    "pd-dcp2": Deployment(
-        Instance(tp=2, dcp=2, kv_config=NIXL),
-        prefill=Instance(tp=2, dcp=2, kv_config=NIXL),
-    ),
 }
 
 
 def _known_failure(name: str, mode: Mode) -> str | None:
     deployment = DEPLOYMENTS[name]
-    if deployment.prefill is not None and deployment.decode.dcp > 1:
-        return (
-            "NIXL sets cp_kv_cache_interleave_size to the block size, "
-            "but FlashInfer MLA DCP requires 1"
-        )
     if mode.spec and deployment.decode.dcp > 1:
         return "FlashInfer MLA DCP decode breaks on ragged spec batches (#59392)"
     return None
