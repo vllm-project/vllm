@@ -35,6 +35,10 @@ _MODULE_CALL = nn.Module.__call__
 """The unpatched `nn.Module.__call__`. During tracing fx patches it to record
 `call_module` nodes; meta execution must call modules for real."""
 
+_MODULE_GETATTR = nn.Module.__getattr__
+"""The unpatched `nn.Module.__getattr__`. During tracing fx patches it to record
+`get_attr` nodes; meta execution must read attributes for real."""
+
 
 def is_leaf_call(node: object) -> TypeIs[fx.Node]:
     """Is node a call recorded by `_as_leaf_call` (e.g. an attention interface)."""
@@ -132,7 +136,8 @@ class _AllLeafTracer(fx.Tracer):
                 )
             return _UNKNOWN
         if kind == "get_attr":
-            value = operator.attrgetter(str(target))(self.root)
+            with mock.patch.object(nn.Module, "__getattr__", _MODULE_GETATTR):
+                value = operator.attrgetter(str(target))(self.root)
             if isinstance(value, torch.Tensor):
                 value = torch.empty_like(value, device="meta")
             return value
