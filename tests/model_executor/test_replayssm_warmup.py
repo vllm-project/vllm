@@ -53,7 +53,9 @@ def _autotune_runner(
         uniform_decode_query_len=query_len,
         decode_query_len=query_len,
         max_num_tokens=max_num_tokens,
-        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=max_num_seqs, max_num_batched_tokens=max_num_tokens
+        ),
         kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
     )
 
