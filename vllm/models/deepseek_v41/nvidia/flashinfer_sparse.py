@@ -25,6 +25,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
     DeepseekV41SparseSWAMetadataBuilder,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 from vllm.v1.attention.backend import (
@@ -112,6 +113,14 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
         "fp8_e4m3",
         "fp8_ds_mla",
     ]
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        # FlashInfer's SM120 sparse MLA reads the NVFP4 compressed cache
+        # (fp8_dsv41_fp4_ca); its SM100 TRTLLM-gen kernels do not.
+        if kv_cache_dtype == "nvfp4_ds_mla":
+            return current_platform.is_device_capability_family(120)
+        return super().supports_kv_cache_dtype(kv_cache_dtype)
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
@@ -587,14 +596,17 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             )
 
 
-def _sm120_kv_cache_format(kv_cache_dtype: str, kv_mxfp8: bool) -> str:
-    """FlashInfer's SM120 sparse MLA format for the records this layer writes.
+def _sm120_kv_cache_format(
+    kv_cache_dtype: str, kv_mxfp8: bool, has_compressed_cache: bool
+) -> str:
+    """FlashInfer's SM120 sparse MLA format for the caches one call reads.
 
     The V4.1 MXFP8 record is ``fp8_dsv41``; ``nvfp4_ds_mla`` keeps that record
-    for the sliding window and stores the compressed cache as V4.1 NVFP4
-    (``fp8_dsv41_fp4_ca``). Anything else is the V4 record (``fp8``).
+    for the sliding window and stores the compressed cache as V4.1 NVFP4, so a
+    call that also reads the compressed cache is ``fp8_dsv41_fp4_ca``. Anything
+    else is the V4 record (``fp8``).
     """
-    if kv_cache_dtype == "nvfp4_ds_mla":
+    if kv_cache_dtype == "nvfp4_ds_mla" and has_compressed_cache:
         return "fp8_dsv41_fp4_ca"
     if kv_mxfp8:
         return "fp8_dsv41"
@@ -630,10 +642,6 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120_config
-
-        self._kv_cache_format = _sm120_kv_cache_format(
-            self.kv_cache_dtype, self.kv_mxfp8
-        )
 
         required_topk = _required_sm120_sparse_topk(vllm_config, self.window_size)
         if not has_flashinfer_sparse_mla_sm120_config(self.padded_heads, required_topk):
@@ -843,7 +851,9 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             swa_topk_lens=swa_lens,
             extra_sparse_indices=extra_sparse_indices,
             extra_sparse_topk_lens=extra_sparse_lengths,
-            kv_cache_format=self._kv_cache_format,
+            kv_cache_format=_sm120_kv_cache_format(
+                self.kv_cache_dtype, self.kv_mxfp8, extra_cache is not None
+            ),
         )
 
     def _forward_prefill(
@@ -959,5 +969,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                 swa_topk_lens=swa_lens_chunk,
                 extra_sparse_indices=extra_sparse_indices_chunk,
                 extra_sparse_topk_lens=extra_sparse_lengths_chunk,
-                kv_cache_format=self._kv_cache_format,
+                kv_cache_format=_sm120_kv_cache_format(
+                    self.kv_cache_dtype, self.kv_mxfp8, extra_kv_paged is not None
+                ),
             )
