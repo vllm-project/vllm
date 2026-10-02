@@ -362,6 +362,7 @@ def test_online_quantization(
     )
     expected_weight_dtype = {
         Mxfp4MoeBackend.AITER_MXFP4_BF16: torch.float4_e2m1fn_x2,
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP4: torch.float4_e2m1fn_x2,
         Mxfp4MoeBackend.EMULATION: torch.uint8,
     }[routed_experts.quant_method.mxfp4_backend]
     assert routed_experts.w13_weight.dtype == expected_weight_dtype
