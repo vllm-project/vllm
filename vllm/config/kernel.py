@@ -281,9 +281,9 @@ class KernelConfig:
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
     """Backend for the DSA sparse indexer decode top-k kernel. Available options:
 
-    - "auto": The pre-existing chain (cooperative -> persistent -> per_row);
-      the other backends are opt-in
-    - "deep_select": Use DeepSelect kernels (SM100a/SM103a only)
+    - "auto": Use DeepSelect for compatible sparse-indexer decode top-k on
+      Hopper; otherwise use cooperative -> persistent -> per_row
+    - "deep_select": Use DeepSelect kernels (SM90 fp32, SM100a/SM103a)
     - "cooperative": Use vLLM's cooperative_topk kernel
     - "persistent": Use vLLM's persistent_topk kernel
     - "per_row": Use vLLM's top_k_per_row_decode kernel
