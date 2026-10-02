@@ -1637,7 +1637,7 @@ class KimiLinearForCausalLM(
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
-        if vllm_config.cache_config.use_kda_recoverssm:
+        if vllm_config.cache_config.use_recoverssm:
             dtypes = MambaStateDtypeCalculator.append_kda_recoverssm_record(
                 dtypes, vllm_config.model_config.dtype
             )
@@ -1662,7 +1662,7 @@ class KimiLinearForCausalLM(
             conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
             num_spec=num_spec,
         )
-        if vllm_config.cache_config.use_kda_recoverssm:
+        if vllm_config.cache_config.use_recoverssm:
             return MambaStateShapeCalculator.append_kda_recoverssm_record(
                 shapes,
                 hf_config.linear_attn_config["num_heads"],

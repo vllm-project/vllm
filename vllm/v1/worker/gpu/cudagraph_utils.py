@@ -341,7 +341,7 @@ class CudaGraphManager:
 
             # recoverSSM cannot capture a dummy query wider than its workspace.
             if mixed_mode and (
-                not self.vllm_config.cache_config.use_kda_recoverssm
+                not self.vllm_config.cache_config.use_recoverssm
                 or num_tokens <= max_decode_tokens
             ):
                 # for PIECEWISE graphs there is no limit on requests when replaying
@@ -1016,6 +1016,11 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None
+    # A PIECEWISE profiling capture records its RecoverSSM step (only FULL
+    # captures skip it), and that step's commit contexts reference the
+    # profiling KV cache.
+    if (recoverssm := getattr(runner.model_state, "recoverssm", None)) is not None:
+        recoverssm.reset()
     # Invalidate the align-mode Mamba group metadata cached from the
     # profiling KVCacheConfig: the real (e.g. PP-projected) config may
     # place Mamba layers into a different group layout, so it must be

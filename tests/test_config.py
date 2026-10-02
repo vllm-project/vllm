@@ -242,7 +242,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             use_replayssm=True,
-            use_kda_recoverssm=False,
+            use_recoverssm=False,
             mamba_cache_mode="none",
             replayssm_buffer_len=16,
         ),
@@ -262,7 +262,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
 
     VllmConfig.validate_mamba_cached_kernel(config)
     assert config.cache_config.use_replayssm
-    assert config.cache_config.use_kda_recoverssm
+    assert config.cache_config.use_recoverssm
 
     config.cache_config.mamba_cache_mode = "align"
     VllmConfig.validate_mamba_cached_kernel(config)
@@ -275,7 +275,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.model_config.architecture = "NemotronHForCausalLM"
     config.mamba_config.backend = MambaBackendEnum.FLASHINFER
     VllmConfig.validate_mamba_cached_kernel(config)
-    assert not config.cache_config.use_kda_recoverssm
+    assert not config.cache_config.use_recoverssm
 
     config.model_config.architecture = "KimiLinearForCausalLM"
     config.parallel_config.pipeline_parallel_size = 2
