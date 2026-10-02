@@ -1359,10 +1359,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
             # blob, so the size is not derivable from head_size.
-            # See flashmla_sparse.py.
-            state_content_bytes={"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(
-                self.kv_cache_dtype
-            ),
+            # See flashmla_sparse.py. mxfp4_mla packs a rope-free latent as
+            # head_size/2 E2M1 bytes + head_size/32 E8M0 scales (272 for 512).
+            state_content_bytes={
+                "fp8_ds_mla": 656,
+                "nvfp4_ds_mla": 352,
+                "mxfp4_mla": self.head_size // 2 + self.head_size // 32,
+            }.get(self.kv_cache_dtype),
         )
         if self.sliding_window is not None:
             return SlidingWindowMLASpec(

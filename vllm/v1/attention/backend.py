@@ -1123,6 +1123,26 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             return
         from vllm import _custom_ops as ops
 
+        if kv_cache_dtype == "mxfp4_mla":
+            # concat_and_cache_mla cannot serve this layout: its `scale` is a
+            # const float* dereferenced as *scale, so one per-tensor scale is
+            # all it can express, while MXFP4 needs an E8M0 byte per group of
+            # 32. k_pe is
+            # empty on the NoPE models this dtype targets, so there is nothing
+            # to concatenate.
+            from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
+
+            assert k_pe.numel() == 0, (
+                "mxfp4_mla expects a rope-free latent, got "
+                f"k_pe with {k_pe.numel()} elements"
+            )
+            store_mxfp4_mla(
+                kv_c_normed,
+                slot_mapping.flatten(),
+                kv_cache,
+            )
+            return
+
         ops.concat_and_cache_mla(
             kv_c_normed,
             k_pe.squeeze(1),

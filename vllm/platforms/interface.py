@@ -874,6 +874,14 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                # Must match MLAAttention.get_kv_cache_spec, else the mamba
+                # state no longer fits the real (smaller) MLA page.
+                state_content_bytes=(
+                    model_config.get_head_size() // 2
+                    + model_config.get_head_size() // 32
+                    if cache_config.cache_dtype == "mxfp4_mla"
+                    else None
+                ),
             ).page_size_bytes
         elif cache_config.cache_dtype.startswith("turboquant_"):
             # TQ has a packed K|V layout; the standard FullAttentionSpec
