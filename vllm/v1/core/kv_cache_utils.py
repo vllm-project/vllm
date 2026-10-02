@@ -733,6 +733,45 @@ def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCache
     return replace(spec, block_size=block_size)
 
 
+def partial_hash_hits_enabled(
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
+    hash_block_size: int,
+    dcp_world_size: int = 1,
+) -> bool:
+    """Whether aligned Mamba states support sub-block prefix-cache hits."""
+    return any(
+        isinstance(spec, MambaSpec)
+        and spec.mamba_cache_mode == "align"
+        and (
+            (dcp_world_size == 1 and spec.block_size > hash_block_size)
+            or (dcp_world_size > 1 and spec.block_size >= hash_block_size)
+        )
+        for group in kv_cache_groups
+        for spec in iter_layer_specs(group.kv_cache_spec)
+    )
+
+
+def initialize_prefix_cache_block_sizes(
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+) -> None:
+    """Resolve checkpoint sizes before normal or profiling cache initialization."""
+    scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    )
+    cache_config = vllm_config.cache_config
+    cache_config.hash_block_size = hash_block_size
+    cache_config.mamba_ckpt_block_size = (
+        hash_block_size
+        if partial_hash_hits_enabled(
+            kv_cache_config.kv_cache_groups,
+            hash_block_size,
+            vllm_config.parallel_config.decode_context_parallel_size,
+        )
+        else scheduler_block_size
+    )
+
+
 def resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -825,18 +864,10 @@ def resolve_kv_cache_block_sizes(
         and isinstance(spec.tokens_per_state, int)
         and spec.tokens_per_state > 1
     }
-    has_partial_mamba_group = any(
-        isinstance(spec, MambaSpec)
-        and spec.mamba_cache_mode == "align"
-        and (
-            (dcp == 1 and block_size > hash_block_size)
-            or (dcp > 1 and block_size >= hash_block_size)
-        )
-        for group, block_size in zip(groups, group_block_sizes)
-        for spec in iter_layer_specs(group.kv_cache_spec)
-    )
     cache_hit_alignment = (
-        hash_block_size if has_partial_mamba_group else scheduler_block_size
+        hash_block_size
+        if partial_hash_hits_enabled(groups, hash_block_size, dcp)
+        else scheduler_block_size
     )
     if any(cache_hit_alignment % alignment for alignment in prefix_alignments):
         raise ValueError(

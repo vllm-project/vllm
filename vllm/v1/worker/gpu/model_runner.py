@@ -591,6 +591,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profiling: bool = False,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
+        from vllm.v1.core.kv_cache_utils import initialize_prefix_cache_block_sizes
+
+        initialize_prefix_cache_block_sizes(kv_cache_config, self.vllm_config)
         # GPUWorker finalizes the PD interleave before KV cache initialization.
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         kv_cache_config = deepcopy(kv_cache_config)
