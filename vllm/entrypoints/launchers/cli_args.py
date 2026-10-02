@@ -22,6 +22,7 @@ from vllm.entrypoints.chat_utils import (
     validate_chat_template,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -30,6 +31,8 @@ from .utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
+
+logger = init_logger(__name__)
 
 
 class LoRAParserAction(argparse.Action):
@@ -281,6 +284,11 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    grpc_port: int | None = None
+    """Enable the Rust frontend's additional gRPC Inference and Control services
+    on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
+    `--port`. Binds on `--host`, or 127.0.0.1 with `--uds`. Cannot be combined
+    with the Python gRPC server's `--grpc` flag."""
     data_parallel_supervisor_port: int = 9256
     """HTTP port for aggregated health endpoints in multi-port external LB
     mode."""
@@ -448,13 +456,47 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--grpc",
         action="store_true",
         default=False,
-        help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
-        "server. Requires: pip install vllm[grpc].",
+        help="Launch the Python gRPC (SMG VllmEngine) server on --port instead "
+        "of the HTTP OpenAI-compatible server. Requires: pip install vllm[grpc]. "
+        "Cannot be combined with --grpc-port, which enables the Rust "
+        "frontend's gRPC services.",
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     return parser
+
+
+def validate_grpc_port_arg(args: argparse.Namespace) -> None:
+    """Validate the Rust frontend's optional gRPC listener."""
+    if getattr(args, "grpc_port", None) is None:
+        return
+
+    if args.grpc:
+        raise ValueError(
+            "--grpc and --grpc-port are mutually exclusive. Use --grpc "
+            "--port for the Python gRPC server, or VLLM_USE_RUST_FRONTEND=1 "
+            "with --grpc-port for the Rust frontend."
+        )
+    if not envs.VLLM_USE_RUST_FRONTEND or getattr(args, "subparser", None) != "serve":
+        raise ValueError("--grpc-port requires VLLM_USE_RUST_FRONTEND=1 vllm serve")
+    if args.headless or (
+        args.api_server_count is not None and args.api_server_count <= 0
+    ):
+        raise ValueError(
+            "--grpc-port requires a Rust frontend; remove --headless "
+            "and non-positive --api-server-count"
+        )
+    if args.data_parallel_multi_port_external_lb:
+        raise ValueError(
+            "--grpc-port is incompatible with "
+            "--data-parallel-multi-port-external-lb: "
+            "its frontends would share the same gRPC port"
+        )
+    if not 0 <= args.grpc_port <= 65535:
+        raise ValueError("--grpc-port must be between 0 and 65535")
+    if args.grpc_port != 0 and args.grpc_port == args.port and not args.uds:
+        raise ValueError("--grpc-port must differ from --port when HTTP uses TCP")
 
 
 def validate_parsed_serve_args(args: argparse.Namespace):
@@ -466,6 +508,16 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
+    if args.chat_template is not None and "hf" in (
+        args.tool_call_parser,
+        getattr(args, "reasoning_parser", None),
+    ):
+        logger.warning(
+            "--chat-template is set; the hf parser still expects "
+            "the checkpoint's output format."
+        )
+
+    validate_grpc_port_arg(args)
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
