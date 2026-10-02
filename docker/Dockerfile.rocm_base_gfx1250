@@ -12,7 +12,7 @@ ARG FA_BRANCH="jpvillam/gfx1250_wip"
 ARG FA_REPO="https://github.com/jpvillam-amd/flash-attention.git"
 ARG AITER_BRANCH="f85b24b"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
-ARG MORI_BRANCH="v1.1.0"
+ARG MORI_BRANCH="5c88676c"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
 # Sccache configuration (only used in release pipeline)
@@ -70,7 +70,7 @@ RUN python${PYTHON_VERSION} -m venv "${VIRTUAL_ENV}" && \
 ENV PATH=${VIRTUAL_ENV}/bin:$PATH
 
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
-RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libgrpc++-dev protobuf-compiler-grpc libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
 ARG USE_SCCACHE
