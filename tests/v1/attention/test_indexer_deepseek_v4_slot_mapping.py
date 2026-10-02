@@ -7,11 +7,15 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonMetadataBuilder,
+)
 from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.mla import indexer as indexer_module
 from vllm.v1.attention.backends.mla.compressor_utils import (
     CompressedSlotMappingKernel,
     get_compressed_slot_mapping,
@@ -21,6 +25,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV4IndexerBackend,
     DeepseekV32IndexerMetadataBuilder,
     DeepseekV41IndexerBackend,
+    get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     ConvertReqIndexToGlobalIndexKernel,
@@ -95,8 +100,11 @@ def test_fused_indexer_decode_metadata(query_lens, padding):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("query_lens", [[1], [0, 257, 1, 0, 3], [6] * 64, [2, 6, 4, 0]])
-def test_device_token_request_mapping(query_lens):
+@pytest.mark.parametrize(
+    "query_lens", [[1], [0, 257, 1, 0, 3], [6] * 64, [2, 6, 4, 0], [0, 0, 0]]
+)
+@pytest.mark.parametrize("use_sparse_mla_builder", [False, True])
+def test_device_token_request_mapping(query_lens, use_sparse_mla_builder):
     """Graph replay follows device boundaries even when CPU lengths are stale."""
     lengths = torch.tensor(query_lens, device="cuda", dtype=torch.int32)
     qsl = torch.cat(
@@ -117,7 +125,16 @@ def test_device_token_request_mapping(query_lens):
         ),
         slot_mapping=torch.full((n + 7,), -1, device="cuda", dtype=torch.int64),
     )
-    result = common.token_to_req_indices(output)
+
+    def build_mapping():
+        if use_sparse_mla_builder:
+            builder = SimpleNamespace(req_id_per_token_buffer=output)
+            return SparseMLACommonMetadataBuilder._build_req_id_per_token(
+                builder, common
+            )
+        return common.token_to_req_indices(output)
+
+    result = build_mapping()
     assert result.data_ptr() == output.data_ptr()
     expected = torch.repeat_interleave(
         torch.arange(len(query_lens), device="cuda", dtype=torch.int32), lengths
@@ -127,7 +144,7 @@ def test_device_token_request_mapping(query_lens):
     graph = torch.cuda.CUDAGraph()
     common._token_to_req_indices_cache = None
     with torch.cuda.graph(graph):
-        common.token_to_req_indices(output)
+        build_mapping()
     reversed_lens = lengths.flip(0)
     qsl[1:].copy_(reversed_lens.cumsum(0))
     graph.replay()
@@ -279,6 +296,78 @@ def test_index_conversion_warmup_uses_physical_block_stride():
     assert {key.block_stride_rows for key in keys} == {4096}
 
 
+def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypatch):
+    builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+    builder.compress_ratio = 4
+    builder.use_pcp = True
+    builder.pcp_world_size = 4
+    builder.pcp_rank = 0
+    builder.kernel_block_size = None
+    builder.kv_cache_spec = SimpleNamespace(block_size=64, num_states=64)
+    builder.compressed_slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)
+
+    def fake_get_compressed_slot_mapping(
+        num_tokens,
+        slot_mapping,
+        query_start_loc,
+        seq_lens,
+        block_table,
+        block_size,
+        compress_ratio,
+        out,
+    ):
+        assert num_tokens == 0
+        assert block_size == 64
+        assert compress_ratio == 4
+        out.fill_(-1)
+        return out[:num_tokens]
+
+    gathered_slot_mapping = torch.tensor([123, -1, -1, -1], dtype=torch.int64)
+
+    class FakePCPGroup:
+        def __init__(self):
+            self.calls = 0
+
+        def all_gather(self, tensor, dim=0):
+            self.calls += 1
+            assert dim == 0
+            torch.testing.assert_close(tensor, torch.tensor([-1]))
+            return gathered_slot_mapping
+
+    fake_pcp_group = FakePCPGroup()
+    monkeypatch.setattr(
+        indexer_module,
+        "get_compressed_slot_mapping",
+        fake_get_compressed_slot_mapping,
+    )
+    monkeypatch.setattr(indexer_module, "get_pcp_group", lambda: fake_pcp_group)
+
+    query_start_loc = torch.tensor([0, 0], dtype=torch.int32)
+    seq_lens = torch.tensor([16], dtype=torch.int32)
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
+        num_reqs=1,
+        num_actual_tokens=0,
+        max_query_len=0,
+        max_seq_len=16,
+        block_table_tensor=torch.tensor([[0]], dtype=torch.int32),
+        slot_mapping=torch.tensor([11, 22, 33, 44], dtype=torch.int64),
+        causal=True,
+    )
+
+    metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+    assert fake_pcp_group.calls == 1
+    assert metadata.num_decodes == 0
+    assert metadata.num_decode_tokens == 0
+    assert metadata.num_prefills == 0
+    assert metadata.num_prefill_tokens == 0
+    torch.testing.assert_close(metadata.slot_mapping, gathered_slot_mapping)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
     """Regression test: DeepseekV4 compression path must compute slot_mapping from
@@ -362,3 +451,43 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
         device=device,
     )
     torch.testing.assert_close(valid_slots, expected)
+
+
+@pytest.mark.parametrize("compress_ratio", [1, 4])
+def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
+    """The chunker budget is in compressed rows, like the K-gather workspace."""
+    max_model_len = 1024
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=compress_ratio,
+    )
+    vllm_config = create_vllm_config(max_model_len=max_model_len)
+    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
+    block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["dummy"],
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        block_table_width=block_table_width,
+    )
+
+    workspace_rows = get_max_prefill_buffer_size(vllm_config) // compress_ratio
+    assert builder.max_prefill_buffer_size == workspace_rows
+
+    # Overflows the workspace unless the chunker splits.
+    num_reqs = 3 * (workspace_rows // (max_model_len // compress_ratio)) + 1
+    compressed_seq_lens = torch.full((num_reqs,), max_model_len // compress_ratio)
+    query_lens = torch.ones(num_reqs, dtype=torch.int64)
+    chunks = builder._split_indexer_prefill_chunks(
+        compressed_seq_lens,
+        query_lens,
+        builder.max_prefill_buffer_size,
+        max_logits_bytes=10**15,
+    )
+    assert len(chunks) > 1
+    for req_slice, _ in chunks:
+        assert int(compressed_seq_lens[req_slice].sum()) <= workspace_rows

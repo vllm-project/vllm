@@ -51,7 +51,7 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 # The DSA indexer K cache is always quantized; "auto" means fp8 (V3.2 layout)
-# and mxfp4 is the opt-in Blackwell path.
+# and mxfp4 is the opt-in Blackwell and gfx950 path.
 DSA_INDEXER_KV_DTYPES = ("fp8", "mxfp4")
 
 
@@ -64,6 +64,28 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
             f"sparse indexer (expected one of {DSA_INDEXER_KV_DTYPES})."
         )
     use_fp4 = kv_dtype == "mxfp4"
+    if use_fp4 and current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.platforms.rocm import get_cdna_version
+
+        # Only DeepSeek-V4.1 is wired to the ROCm MXFP4 cache; other DSA models
+        # would silently keep their FP8 one.
+        model_config = vllm_config.model_config
+        if model_config is None or model_config.hf_config.model_type != "deepseek_v41":
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm is only supported for "
+                "DeepSeek-V4.1-Flash."
+            )
+        if get_cdna_version() != 4:
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm requires CDNA4 (MI350X/MI355X)."
+            )
+        if not rocm_aiter_ops.is_enabled():
+            raise ValueError(
+                "indexer_kv_dtype='mxfp4' on ROCm runs on aiter's kernels; enable "
+                "aiter with VLLM_ROCM_USE_AITER=1."
+            )
+        return True
     if use_fp4 and not current_platform.is_device_capability_family(100):
         raise ValueError(
             "indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs "
@@ -200,7 +222,7 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return "DEEPSEEK_V32_INDEXER"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [1, MultipleOf(16)] if current_platform.is_rocm() else [64]
 
     @classmethod
@@ -228,7 +250,7 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
         return []
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
     @staticmethod
@@ -257,7 +279,7 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
         return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # Block sizes count uncompressed tokens: C4 indexer pages hold 64 rows.
         return [256]
 
@@ -274,7 +296,7 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
         return "DEEPSEEK_V41_INDEXER"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64 if current_platform.is_device_capability_family(90) else 128]
 
 
@@ -879,8 +901,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.use_pcp = self.pcp_world_size > 1
         self.pcp_rank = get_pcp_group().rank_in_group if self.use_pcp else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        # KV compression (DeepseekV4). Default to 1 for no compression.
+        self.compress_ratio = 1
+        if isinstance(self.kv_cache_spec, MLAAttentionSpec):
+            assert isinstance(self.kv_cache_spec.tokens_per_state, int)
+            self.compress_ratio = self.kv_cache_spec.tokens_per_state
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
-        self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
+        # Counted in compressed rows, like the chunker's seq_lens and the
+        # workspace.
+        self.max_prefill_buffer_size = (
+            get_max_prefill_buffer_size(self.vllm_config) // self.compress_ratio
+        )
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config
@@ -962,14 +993,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
 
-        # KV compression. Default to 1 for no compression.
-        self.compress_ratio = 1
-        # Get compress_ratio for DeepseekV4 support
-        if isinstance(self.kv_cache_spec, MLAAttentionSpec):
-            # MLA compression is a whole number of tokens per state (fractions
-            # are whisper block pooling and never reach MLA).
-            assert isinstance(self.kv_cache_spec.tokens_per_state, int)
-            self.compress_ratio = self.kv_cache_spec.tokens_per_state
         if self.dcp_world_size > 1 and self.compress_ratio > 1:
             raise NotImplementedError(
                 "DCP is not supported with sparse indexer KV compression "
@@ -1275,17 +1298,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         slot_mapping = common_attn_metadata.slot_mapping
         block_table = common_attn_metadata.block_table_tensor
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.decode_threshold,
-                require_uniform=not (self.use_flattening or self.supports_varlen),
-                treat_short_extends_as_decodes=not self.use_pcp,
-            )
-        )
-
-        assert num_decodes + num_prefills == num_reqs
-        assert num_decode_tokens + num_prefill_tokens == num_tokens
 
         compressed_slot_mapping = slot_mapping
         indexer_block_table = block_table
@@ -1323,6 +1335,34 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.compressed_slot_mapping_buffer[:padded_num_tokens],
                     dim=0,
                 )
+
+        # PCP decode sharding keeps a zero-token placeholder on ranks that own
+        # no request in a step so collectives retain a uniform rank shape. Do
+        # not turn that placeholder into a zero-length indexer decode request.
+        if num_tokens == 0:
+            return DeepseekV32IndexerMetadata(
+                seq_lens=seq_lens,
+                max_seq_len=common_attn_metadata.max_seq_len,
+                slot_mapping=compressed_slot_mapping,
+                num_decodes=0,
+                num_decode_tokens=0,
+                num_prefills=0,
+                num_prefill_tokens=0,
+                prefill=None,
+                decode=None,
+            )
+
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.decode_threshold,
+                require_uniform=not (self.use_flattening or self.supports_varlen),
+                treat_short_extends_as_decodes=not self.use_pcp,
+            )
+        )
+
+        assert num_decodes + num_prefills == num_reqs
+        assert num_decode_tokens + num_prefill_tokens == num_tokens
 
         prefill_metadata = None
         if num_prefills > 0:

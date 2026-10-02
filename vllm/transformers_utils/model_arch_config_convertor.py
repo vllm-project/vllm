@@ -5,7 +5,7 @@ from typing import final
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm import envs
 from vllm.config.model_arch import (
@@ -26,8 +26,8 @@ logger = init_logger(__name__)
 class ModelArchConfigConvertorBase:
     def __init__(
         self,
-        hf_config: PretrainedConfig,
-        hf_text_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
+        hf_text_config: PreTrainedConfig,
         revision: str | None = None,
     ):
         self.hf_config = hf_config
@@ -36,7 +36,7 @@ class ModelArchConfigConvertorBase:
 
     def get_per_layer_hf_configs(
         self,
-    ) -> list[tuple[PretrainedConfig, PretrainedConfig]] | None:
+    ) -> list[tuple[PreTrainedConfig, PreTrainedConfig]] | None:
         """`(hf_config, hf_text_config)` per layer, or `None` if homogeneous.
 
         This is the only place that decides whether a checkpoint is heterogeneous
@@ -219,7 +219,7 @@ class ModelArchConfigConvertorBase:
     @classmethod
     def get_torch_dtype(
         cls,
-        hf_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
         model_id: str,
         revision: str | None,
         config_format: str | ConfigFormat,
@@ -257,7 +257,7 @@ class ModelArchConfigConvertorBase:
 
         return config_dtype
 
-    def _normalize_quantization_config(self, config: PretrainedConfig):
+    def _normalize_quantization_config(self, config: PreTrainedConfig):
         quant_cfg = getattr(config, "quantization_config", None)
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
@@ -585,8 +585,8 @@ class DeepSeekMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 class DeepseekV4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(
         self,
-        hf_config: PretrainedConfig,
-        hf_text_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
+        hf_text_config: PreTrainedConfig,
         revision: str | None = None,
     ):
         # DeepSeek-V4-Flash-Vision-Exp ships the same architectures/model_type
@@ -622,7 +622,7 @@ class MimoMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 
 def _strip_mimo_v2_attention_chunk_size(
-    hf_config: PretrainedConfig, hf_text_config: PretrainedConfig
+    hf_config: PreTrainedConfig, hf_text_config: PreTrainedConfig
 ) -> None:
     # MiMo-V2-Flash's config.json sets `attention_chunk_size=128` but the
     # architecture does not actually use chunked local attention. Leaving it
@@ -635,8 +635,8 @@ def _strip_mimo_v2_attention_chunk_size(
 class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(
         self,
-        hf_config: PretrainedConfig,
-        hf_text_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
+        hf_text_config: PreTrainedConfig,
         revision: str | None = None,
     ):
         if getattr(hf_config, "vision_config", None):
@@ -648,8 +648,8 @@ class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
 class MimoV2MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(
         self,
-        hf_config: PretrainedConfig,
-        hf_text_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
+        hf_text_config: PreTrainedConfig,
         revision: str | None = None,
     ):
         super().__init__(hf_config, hf_text_config, revision)
@@ -742,7 +742,7 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
     def get_per_layer_hf_configs(
         self,
-    ) -> list[tuple[PretrainedConfig, PretrainedConfig]] | None:
+    ) -> list[tuple[PreTrainedConfig, PreTrainedConfig]] | None:
         # Gemma4 uses a larger head dimension, and sometimes more KV heads, on its
         # full attention layers than on its sliding ones. Transformers >= 5.15.0
         # says so in the config; before that the values are flat attributes picked
@@ -763,7 +763,7 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 
 class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def _language_config(self) -> PretrainedConfig:
+    def _language_config(self) -> PreTrainedConfig:
         return self.hf_config.language_config
 
     def get_num_hidden_layers(self) -> int:
