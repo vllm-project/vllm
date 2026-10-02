@@ -90,6 +90,7 @@ class CudaCheckpointer:
 
         Raises:
             RuntimeError: If already suspended or a CUDA API fails.
+
         """
         if self._is_suspended:
             raise RuntimeError(
@@ -150,6 +151,7 @@ class CudaCheckpointer:
 
         Raises:
             RuntimeError: If not suspended or a CUDA API fails.
+
         """
         if not self._is_suspended:
             raise RuntimeError(
@@ -191,6 +193,7 @@ class CudaCheckpointer:
         Returns:
             Integer CUprocessState value from the CUDA driver (see the
             ``PROCESS_STATE_*`` constants in this module).
+
         """
         if handle is None:
             handle = self._checkpoint_pid
