@@ -24,7 +24,6 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
     backend_to_kernel_cls,
-    convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
@@ -342,7 +341,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
 
         # Convert weights to kernel format
         w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+            convert_weight_to_mxfp4_moe_kernel_format(
                 mxfp4_backend=self.mxfp4_backend,
                 layer=layer,
                 w13_weight=w13,
@@ -352,6 +351,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
                 _cache_permute_indices=self._cache_permute_indices,
+                is_w13_interleaved=True,
             )
         )
 
