@@ -2382,6 +2382,9 @@ __global__ void gemm_q4_wmma_kernel_128x128(const T*, const uint32_t*,
 //   c += s * acc - s * (1024 + zero) * sum_k(a)
 // With two row tiles the kernel is WMMA-bound, so the zero is subtracted from
 // the magic halves instead (exact in fp16) and the sum_k(a) WMMA goes away.
+// Three and four row tiles do not fit the registers of a per-group fold, so
+// the scale goes into B too: one fp16 rounding of (q - zero) * s per weight,
+// as any fp16 dequant, and acc accumulates the whole K part.
 // The 8 waves of a block split K in 8 contiguous parts and meet in LDS.
 // ===========================================================================
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -2404,10 +2407,11 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
     const int groups, const int zero_offset) {
-  // 16-K steps in flight: two fit the fold every 2 steps of group-32 weights,
-  // and two tiles at 3 or 4 spill to scratch.
-  constexpr int PF = 2;
-  constexpr bool ZERO_IN_B = MT == 2;
+  // 16-K steps in flight: two fit the fold every 2 steps of group-32 weights;
+  // four row tiles only have the registers for one.
+  constexpr int PF = MT >= 4 ? 1 : 2;
+  constexpr bool SCALE_IN_B = MT >= 3;
+  constexpr bool ZERO_IN_B = MT >= 2;
   const int tid = threadIdx.x, lane = tid & 31;
   const int wave = __builtin_amdgcn_readfirstlane(tid >> 5);
   const int lane_lo = lane & 15, lane_hi = lane >> 4;
@@ -2443,7 +2447,7 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
   // Group data: scales of the 4 columns (8 bytes) and their zero nibbles.
   const uint32_t* zp = b_qzeros + n0 / 8;
   const int zsh = (n0 & 7) * 4;
-  d16_h2 zb[4];
+  d16_h2 zb[4], sb[4];
   auto group_sz = [&](int g, float (&s)[4], float (&zz)[4]) {
     const uint2 sv = *(const uint2*)(b_scales + (long)g * size_n + n0);
     const uint32_t zw = zp[(long)g * (size_n / 8)] >> zsh;
@@ -2455,6 +2459,7 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
       s[t] = (float)sh[t];
       zz[t] = -s[t] * z;
       zb[t] = d16_h2{(_Float16)z, (_Float16)z};
+      sb[t] = d16_h2{(_Float16)s[t], (_Float16)s[t]};
     }
   };
 
@@ -2499,6 +2504,7 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
               d16_h2 x;
               __builtin_memcpy(&x, &h[i], 4);
               x -= zb[t];
+              if constexpr (SCALE_IN_B) x *= sb[t];
               __builtin_memcpy(&h[i], &x, 4);
             }
           }
@@ -2514,7 +2520,10 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
             sa[mt] = wmma_mma(af[mt], ones, sa[mt]);
         // End of a group: fold it with its scale and zero.
         const int k_next = k0 + 16 * (st + 1);
-        if ((k_next % gs) == 0 || st + 1 == nst) {
+        if constexpr (SCALE_IN_B) {
+          if ((k_next % gs) == 0 && st + 1 < nst)
+            group_sz(k_next / gs, gs_s, gs_z);
+        } else if ((k_next % gs) == 0 || st + 1 == nst) {
   #pragma unroll
           for (int mt = 0; mt < MT; ++mt) {
   #pragma unroll
@@ -2542,7 +2551,8 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
   #pragma unroll
     for (int t = 0; t < 4; ++t)
   #pragma unroll
-      for (int i = 0; i < 8; ++i) sRed[wave][lane][8 * t + i] = cacc[mt][t][i];
+      for (int i = 0; i < 8; ++i)
+        sRed[wave][lane][8 * t + i] = SCALE_IN_B ? acc[mt][t][i] : cacc[mt][t][i];
     __syncthreads();
     if (wave < 4) {
       const int t = wave;
@@ -2565,15 +2575,16 @@ __global__ void gemm_q4_wmma_kernel_dec16(const T*, const uint32_t*,
                                           const int, const int) {}
 #endif
 
-// Shapes the dec16 kernel covers: up to two 16-row tiles, 64-column blocks,
-// K split in 8 parts that start on group boundaries.
+// Shapes the dec16 kernel covers: up to four 16-row tiles per launch (M up to
+// 128 in two launches), 64-column blocks, K split in 8 parts that start on
+// group boundaries.
 inline bool dec16_fits(int size_m, int size_n, int size_k, int groups) {
   const int gs = size_k / groups;
-  return size_m <= 32 && size_n % 64 == 0 && size_k % 256 == 0 &&
+  return size_m <= 128 && size_n % 64 == 0 && size_k % 256 == 0 &&
          gs % 32 == 0 && (size_k / 8) % gs == 0;
 }
 
-// fp16 decode with M <= 32 on the dec16 kernel; false if the shape does not
+// fp16 decode with M <= 128 on the dec16 kernel; false if the shape does not
 // fit it (caller falls back).
 template <typename T>
 bool launch_gemm_q4_wmma_dec16(const T* a, const uint32_t* b_q_weight,
@@ -2585,13 +2596,28 @@ bool launch_gemm_q4_wmma_dec16(const T* a, const uint32_t* b_q_weight,
     return false;
   } else {
     if (!dec16_fits(size_m, size_n, size_k, groups)) return false;
+    if (size_m > 64) {
+      launch_gemm_q4_wmma_dec16<T>(a, b_q_weight, b_qzeros, b_scales, c, 64,
+                                   size_n, size_k, groups, zero_offset, stream);
+      return launch_gemm_q4_wmma_dec16<T>(
+          a + 64L * size_k, b_q_weight, b_qzeros, b_scales, c + 64L * size_n,
+          size_m - 64, size_n, size_k, groups, zero_offset, stream);
+    }
     const dim3 grid(size_n / 64), block(256);
     if (size_m <= 16)
       gemm_q4_wmma_kernel_dec16<T, 1><<<grid, block, 0, stream>>>(
           a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
           zero_offset);
-    else
+    else if (size_m <= 32)
       gemm_q4_wmma_kernel_dec16<T, 2><<<grid, block, 0, stream>>>(
+          a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+          zero_offset);
+    else if (size_m <= 48)
+      gemm_q4_wmma_kernel_dec16<T, 3><<<grid, block, 0, stream>>>(
+          a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+          zero_offset);
+    else
+      gemm_q4_wmma_kernel_dec16<T, 4><<<grid, block, 0, stream>>>(
           a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
           zero_offset);
     return true;
