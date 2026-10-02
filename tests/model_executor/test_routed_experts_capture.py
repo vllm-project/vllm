@@ -12,11 +12,8 @@ from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.experts.cpu_int4_moe import CPUExpertsInt4
-from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-    FusedMoEMethodBase,
-)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEKernel,
+    FusedMoEKernelMonolithicImpl,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
     MoEPrepareAndFinalizeNoDPEPMonolithic,
@@ -287,45 +284,29 @@ def test_routed_experts_sink_holds_a_dispatched_batch(use_ep, dp_size, ep_size, 
     assert sink.buffer.shape == (rows, 2) and sink.buffer.dtype == torch.int16
 
 
-class _ToyQuantMethod(FusedMoEMethodBase):
-    """A quant method that, like every in-tree one, inherits apply_monolithic."""
-
-    def create_weights(self, *args, **kwargs):
-        raise NotImplementedError
-
-    def get_fused_moe_quant_config(self, layer):
-        return None
-
-
 def test_monolithic_capture_survives_kernel_rebuilds():
-    """The bug in #59449: a weight reload rebuilds the kernel, not the layer.
-    Through the production path from the quant method down, the layer's sink
-    captures what the current kernel routed, before and after a rebuild, and a
-    rebuilt kernel that cannot capture is refused instead of leaving stale rows."""
+    """The bug in #59449: a weight reload rebuilds the kernel. Through the
+    production kernel path, the layer's sink captures what the current kernel
+    routed, before and after a rebuild, and a rebuilt kernel that cannot
+    capture is refused instead of leaving stale rows."""
     captured = []
-    layer = SimpleNamespace(
-        w13_weight=None,
-        w2_weight=None,
-        activation=None,
-        global_num_experts=16,
-        expert_map=None,
-        apply_router_weight_on_input=False,
-        num_expert_group=None,
-        topk_group=None,
-        e_score_correction_bias=None,
-        routed_scaling_factor=None,
-        routing_sink=RoutedExpertsSink(
-            _SINK_CONFIG, lambda ids: captured.append(ids.tolist())
-        ),
-    )
-    method = _ToyQuantMethod(_SINK_CONFIG)
+    sink = RoutedExpertsSink(_SINK_CONFIG, lambda ids: captured.append(ids.tolist()))
 
     def forward(experts: _ToyMonolithicExperts) -> None:
-        # What a weight reload does: a new kernel on the same layer.
-        method.moe_kernel = FusedMoEKernel(
+        kernel = FusedMoEKernelMonolithicImpl(
             MoEPrepareAndFinalizeNoDPEPMonolithic(), experts
         )
-        method.apply_monolithic(layer, torch.zeros(3, 8), torch.zeros(3, 16))
+        kernel.apply(
+            torch.zeros(3, 8),
+            w1=None,
+            w2=None,
+            router_logits=torch.zeros(3, 16),
+            activation=None,
+            global_num_experts=16,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+            routing_sink=sink,
+        )
 
     for offset in (0, 7):  # the kernel before and after a reload
         forward(_ToyMonolithicExperts(offset))

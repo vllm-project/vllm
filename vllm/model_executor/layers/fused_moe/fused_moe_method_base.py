@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, final
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -165,7 +165,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         """
         raise NotImplementedError
 
-    @final
     def apply_monolithic(
         self,
         layer: "RoutedExperts",
@@ -174,10 +173,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Apply the MoE operation using monolithic kernels.
-
-        The one place a quant method calls a monolithic kernel, so every method
-        hands it the same layer state; methods differ only in
-        ``monolithic_weights``.
 
         Args:
             layer: RoutedExperts instance containing weight parameters
@@ -189,27 +184,4 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             Finalized routed states or a deferred-finalize output.
 
         """
-        assert self.is_monolithic
-        assert self.moe_kernel is not None
-        w13, w2 = self.monolithic_weights(layer)
-        return self.moe_kernel.apply_monolithic(
-            x,
-            w13,
-            w2,
-            router_logits,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            num_expert_group=layer.num_expert_group,
-            topk_group=layer.topk_group,
-            e_score_correction_bias=layer.e_score_correction_bias,
-            routed_scaling_factor=layer.routed_scaling_factor,
-            routing_sink=layer.routing_sink,
-        )
-
-    def monolithic_weights(
-        self, layer: "RoutedExperts"
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """The w13 and w2 weights a monolithic kernel consumes."""
-        return layer.w13_weight, layer.w2_weight
+        raise NotImplementedError
