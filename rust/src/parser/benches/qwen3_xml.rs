@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use tool_parser::parsers::QwenParser as ExternalQwenParser;
+use tool_parser::parsers::QwenCoderParser as ExternalQwenCoderParser;
 use vllm_parser::tool::test_utils::{split_by_chars, test_tools};
 use vllm_parser::tool::{Qwen3XmlToolParser, Tool, ToolParser};
 
@@ -13,22 +13,45 @@ use utils::{feed_external_parser, feed_parser, openai_tools};
 
 const CHUNK_CHARS: usize = 7;
 const LONG_NORMAL_TEXT_REPEATS: usize = 2048;
-
-fn tool_call(function_name: &str, arguments: &str) -> String {
-    format!("<tool_call>\n{{\"name\":\"{function_name}\",\"arguments\":{arguments}}}\n</tool_call>")
-}
+const LONG_TOOL_BODY_REPEATS: usize = 8192;
 
 fn mixed_fixture() -> String {
-    format!(
-        "I will check two cities before answering.\n{}{}",
-        tool_call("get_weather", r#"{"location":"Hangzhou","days":3}"#),
-        tool_call("get_weather", r#"{"location":"San Francisco","days":2}"#),
+    concat!(
+        "I will check two cities before answering.\n",
+        "<tool_call>\n",
+        "<function=get_weather>\n",
+        "<parameter=location>Hangzhou</parameter>\n",
+        "<parameter=date>2026-04-29</parameter>\n",
+        "<parameter=unit>celsius</parameter>\n",
+        "<parameter=days>3</parameter>\n",
+        "</function>\n",
+        "</tool_call>\n",
+        "<tool_call>\n",
+        "<function=get_weather>\n",
+        "<parameter=location>San Francisco</parameter>\n",
+        "<parameter=date>2026-04-29</parameter>\n",
+        "<parameter=unit>fahrenheit</parameter>\n",
+        "<parameter=days>2</parameter>\n",
+        "</function>\n",
+        "</tool_call>",
     )
+    .to_string()
 }
 
 fn long_normal_text_fixture() -> String {
     let line = "This is ordinary assistant text with no Qwen XML tool markers at all.\n";
     line.repeat(LONG_NORMAL_TEXT_REPEATS)
+}
+
+fn long_tool_call_fixture() -> String {
+    let location = "x".repeat(LONG_TOOL_BODY_REPEATS);
+    format!(
+        "<tool_call>\n\
+         <function=get_weather>\n\
+         <parameter=location>{location}</parameter>\n\
+         </function>\n\
+         </tool_call>"
+    )
 }
 
 fn native_parser(tools: &[Tool]) -> Box<dyn ToolParser> {
@@ -77,18 +100,20 @@ fn run_stream_group(
     });
 
     group.bench_function("external_reuse_parser", |b| {
-        let mut parser = ExternalQwenParser::new();
+        let mut parser = ExternalQwenCoderParser::new();
         b.iter(|| {
             let result = feed_external_parser(&mut parser, &openai_tools, black_box(&chunks));
+            debug_assert_eq!(result.0, expected_normal_text);
             black_box(result);
         })
     });
 
     group.bench_function("external_create_parser", |b| {
         b.iter_batched(
-            ExternalQwenParser::new,
+            ExternalQwenCoderParser::new,
             |mut parser| {
                 let result = feed_external_parser(&mut parser, &openai_tools, black_box(&chunks));
+                debug_assert_eq!(result.0, expected_normal_text);
                 black_box(result);
             },
             BatchSize::SmallInput,
@@ -102,6 +127,7 @@ fn bench_qwen3_xml(c: &mut Criterion) {
     let tools = test_tools();
     let mixed_text = mixed_fixture();
     let long_normal_text = long_normal_text_fixture();
+    let long_tool_call = long_tool_call_fixture();
 
     run_stream_group(
         c,
@@ -121,6 +147,16 @@ fn bench_qwen3_xml(c: &mut Criterion) {
         CHUNK_CHARS,
         &long_normal_text,
         0,
+    );
+
+    run_stream_group(
+        c,
+        "qwen3_xml/long_tool_call_body",
+        &tools,
+        &long_tool_call,
+        CHUNK_CHARS,
+        "",
+        1,
     );
 }
 

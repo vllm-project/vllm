@@ -86,7 +86,7 @@ fn factory_distinguishes_qwen_tool_formats() {
 
     for (model, expected) in [
         ("Qwen/Qwen3.5-0.8B", Some(names::QWEN3_CODER)),
-        ("Qwen/Qwen3-0.6B", Some(names::QWEN3_XML)),
+        ("Qwen/Qwen3-0.6B", Some(names::HERMES)),
         ("Qwen/Qwen3-Coder-30B", Some(names::QWEN3_CODER)),
         ("Qwen/QwQ-32B", Some(names::HERMES)),
         ("Qwen/Qwen2.5-0.5B-Instruct", Some(names::HERMES)),

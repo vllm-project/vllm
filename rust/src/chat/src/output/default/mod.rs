@@ -441,7 +441,7 @@ mod tests {
             Err(error) => error,
         };
 
-        expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=qwen3_xml, reasoning=gemma4"]
+        expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=hermes, reasoning=gemma4"]
             .assert_eq(&format!("{error}"));
     }
 

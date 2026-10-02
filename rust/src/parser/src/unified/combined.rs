@@ -457,24 +457,19 @@ mod tests {
         let output = collect(
             &mut parser,
             &[r#"<tool_call>
-{"name":"get_weather","arguments":{"location":"Paris"}}
+<function=get_weather>
+<parameter=location>Paris</parameter>
+</function>
 </tool_call>"#],
         );
 
         assert_eq!(
             output.events,
-            vec![
-                UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
-                    tool_index: 0,
-                    name: Some("get_weather".to_string()),
-                    arguments: String::new(),
-                }),
-                UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
-                    tool_index: 0,
-                    name: None,
-                    arguments: r#"{"location":"Paris"}"#.to_string(),
-                }),
-            ]
+            vec![UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
+                tool_index: 0,
+                name: Some("get_weather".to_string()),
+                arguments: r#"{"location":"Paris"}"#.to_string(),
+            })]
         );
     }
 
