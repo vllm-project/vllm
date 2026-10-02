@@ -294,7 +294,7 @@ def test_packed_mla_rejects_unequal_block_sizes_before_peer_registration(
     metadata.engine_id = "remote"
     metadata.block_size = remote_block_size
     with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
-        producer.add_remote_agent(metadata)
+        producer._validate_remote_parallel_config(metadata)
     assert len(producer.nixl_wrapper.dlists) == 1  # Only the local list exists.
     assert producer.tp_mappings == {}
     assert "remote" not in producer.dst_num_blocks
