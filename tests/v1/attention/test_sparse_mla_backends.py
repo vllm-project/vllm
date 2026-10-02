@@ -2499,6 +2499,7 @@ def test_hisparse_kv_update_writes_resident_and_staging_caches():
     layer = SimpleNamespace(
         hisparse_cache=cache_handle,
         use_pcp=False,
+        pcp_shard_decode_requests=False,
         impl=impl,
     )
     mla_attention.MLAAttention.update_kv_cache(

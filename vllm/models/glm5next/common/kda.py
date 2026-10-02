@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import torch
 from torch import nn
+from transformers import Glm5NextTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -44,7 +45,6 @@ from vllm.model_executor.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
-from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -201,7 +201,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
     def __init__(
         self,
-        config: Glm5NextConfig,
+        config: Glm5NextTextConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
