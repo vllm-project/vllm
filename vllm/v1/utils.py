@@ -222,7 +222,6 @@ class APIServerProcessManager:
                 SharedAdmissionStats.num_counters(num_servers),
             )
 
-        self._finalizer = weakref.finalize(self, shutdown, self.processes)
         for i, in_addr, out_addr in zip(
             range(num_servers), input_addresses, output_addresses
         ):
@@ -243,25 +242,25 @@ class APIServerProcessManager:
             self._address_pipes.append(parent_recv)
             client_config["actual_address_pipe"] = child_send
 
-            try:
-                with (
-                    child_send,
-                    socket_factory()
-                    if socket_factory is not None
-                    else contextlib.nullcontext(sock) as worker_sock,
-                ):
-                    proc = spawn_context.Process(
-                        target=target_server_fn or run_api_server_worker_proc,
-                        name=f"ApiServer_{i}",
-                        args=(listen_address, worker_sock, args, client_config),
-                    )
-                    self.processes.append(proc)
-                    proc.start()
-            except BaseException:
-                self.shutdown()
-                raise
+            with (
+                child_send,
+                socket_factory()
+                if socket_factory is not None
+                else contextlib.nullcontext(sock) as worker_sock,
+            ):
+                proc = spawn_context.Process(
+                    target=target_server_fn or run_api_server_worker_proc,
+                    name=f"ApiServer_{i}",
+                    args=(listen_address, worker_sock, args, client_config),
+                )
+                self.processes.append(proc)
+                proc.start()
 
         logger.info("Started %d API server processes", len(self.processes))
+
+        # Shutdown only the API server processes on garbage collection
+        # The extra processes are managed by their owners
+        self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
     def gather_actual_addresses(
         self,

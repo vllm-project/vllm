@@ -8,8 +8,6 @@ import sys
 import threading
 import time
 from functools import partial
-from multiprocessing import connection
-from multiprocessing.process import BaseProcess
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -269,83 +267,6 @@ def test_normal_completion(api_server_args):
         # Clean up just in case
         manager.shutdown()
         time.sleep(0.2)
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux REUSEPORT semantics")
-@pytest.mark.parametrize(
-    "failure,owned_socket",
-    [
-        ("bind", True),
-        ("process", True),
-        ("start", True),
-        ("interrupt", True),
-        ("process", False),
-        ("start", False),
-        ("interrupt", False),
-    ],
-)
-def test_startup_failure_reclaims_workers_and_owned_handles(failure, owned_socket):
-    """Partial startup must close owned handles without closing the caller's."""
-    from vllm.entrypoints.launchers.launcher import create_server_socket
-    from vllm.v1.utils import shutdown
-
-    ctx = multiprocessing.get_context("spawn")
-    make_pipe, make_process, start_process = ctx.Pipe, ctx.Process, BaseProcess.start
-    pipes: list[connection.Connection] = []
-    listeners: list[socket.socket] = []
-    processes: list[BaseProcess] = []
-
-    def pipe_factory(*args, **kwargs):
-        pair = make_pipe(*args, **kwargs)
-        pipes.extend(pair)
-        return pair
-
-    def socket_factory():
-        if failure == "bind" and listeners:
-            raise OSError("bind failed")
-        listener = create_server_socket(sock.getsockname(), reuse_port=True)
-        listeners.append(listener)
-        return listener
-
-    def process_factory(*args, **kwargs):
-        if failure == "process" and processes:
-            raise OSError("process failed")
-        proc = make_process(*args, **kwargs)
-        processes.append(proc)
-        return proc
-
-    def start(proc):
-        if len(processes) == 2 and failure in ("start", "interrupt"):
-            error = KeyboardInterrupt if failure == "interrupt" else OSError
-            raise error("start failed")
-        start_process(proc)
-
-    with (
-        create_server_socket(("127.0.0.1", 0), reuse_port=True) as sock,
-        patch("vllm.v1.utils.multiprocessing.get_context", return_value=ctx),
-        patch.object(ctx, "Pipe", side_effect=pipe_factory),
-        patch.object(ctx, "Process", side_effect=process_factory),
-        patch.object(BaseProcess, "start", start),
-        patch("vllm.v1.utils.shutdown", wraps=shutdown) as cleanup,
-    ):
-        error = KeyboardInterrupt if failure == "interrupt" else OSError
-        with pytest.raises(error, match="failed"):
-            APIServerProcessManager(
-                "http://localhost",
-                sock,
-                None,
-                2,
-                ["in"] * 2,
-                ["out"] * 2,
-                target_server_fn=exit_before_report_worker,
-                socket_factory=socket_factory if owned_socket else None,
-            )
-        cleanup.assert_called_once()
-        assert sum(p.pid is not None for p in processes) == 1
-        assert all(not p.is_alive() for p in processes)
-        assert all(pipe.closed for pipe in pipes)
-        assert all(listener.fileno() == -1 for listener in listeners)
-        assert sock.fileno() != -1
 
 
 @pytest.mark.timeout(30)
