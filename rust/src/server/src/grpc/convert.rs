@@ -137,8 +137,20 @@ pub fn to_text_request(
         data_parallel_rank: None,
         session_id,
         kv_hints,
-        reasoning_parser_kwargs: Default::default(),
-        reasoning_ended: None,
+        reasoning_parser_kwargs: req
+            .reasoning_parser_kwargs
+            .as_ref()
+            .map(|kwargs| {
+                serde_json::from_value(proto_struct_to_json(kwargs)).map_err(|error| {
+                    Status::invalid_argument(format!(
+                        "invalid reasoning_parser_kwargs: {}",
+                        error.to_report_string()
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        reasoning_ended: req.reasoning_ended,
         lora_request: None,
         arrival_time: None,
     })
@@ -218,6 +230,7 @@ fn build_sampling_params(
             params.stop_token_ids = Some(s.stop_token_ids.clone());
         }
         params.ignore_eos = s.ignore_eos;
+        params.thinking_token_budget = s.thinking_token_budget;
     }
 
     // ResponseOptions → logprobs
@@ -577,6 +590,61 @@ mod tests {
             model: "test-model".to_string(),
             prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn grpc_reasoning_controls_reach_engine_request_with_presence_intact() {
+        let kwargs = serde_json::json!({
+            "chat_template_kwargs": {"enable_thinking": false, "reasoning_effort": "high"}
+        });
+        for (reasoning_ended, budget) in [
+            (None, None),
+            (Some(false), Some(0)),
+            (Some(true), Some(128)),
+            (None, Some(-1)),
+        ] {
+            let request = pb::GenerateRequest {
+                reasoning_parser_kwargs: json_to_proto_struct(&kwargs),
+                reasoning_ended,
+                stopping: Some(pb::StoppingCriteria {
+                    thinking_token_budget: budget,
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let encoded = request.encode_to_vec();
+            for stream in [false, true] {
+                let request = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+                let text = to_text_request(request, stream, &["test-model".to_string()])
+                    .expect("reasoning controls accepted");
+                let engine = vllm_text::lower_text_request(
+                    text,
+                    vec![1],
+                    SamplingHints::default(),
+                    SamplingLimits {
+                        max_model_len: 256,
+                        max_logprobs: 20,
+                        model_vocab_size: 512,
+                        tokenizer_vocab_size: 512,
+                    },
+                    &TestTokenizer::new(),
+                )
+                .expect("reasoning controls lower to engine")
+                .generate_request;
+                assert_eq!(
+                    (
+                        serde_json::to_value(engine.reasoning_parser_kwargs).unwrap(),
+                        engine.reasoning_ended,
+                        engine.sampling_params.thinking_token_budget,
+                    ),
+                    (
+                        kwargs.clone(),
+                        reasoning_ended,
+                        budget.filter(|v| *v >= 0).map(|v| v as u64),
+                    ),
+                );
+            }
         }
     }
 
