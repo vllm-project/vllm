@@ -56,16 +56,24 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
             rope_position_offset=0,
         ),
         compressed_key_cache=SimpleNamespace(kv_cache=torch.empty(0)),
-        use_fused_pre_indexer=True,
         rotary_emb=SimpleNamespace(cos_sin_cache=torch.empty(0)),
         q_layernorm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
         k_layernorm=SimpleNamespace(weight=torch.ones(1)),
         compress_ratio=2,
     )
+    attn = SimpleNamespace(
+        use_fused_qsa_prepare=True,
+        kv_cache=torch.empty(0, 1, 1, 2),
+        kv_cache_dtype="auto",
+        q_norm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
+        k_norm=SimpleNamespace(weight=torch.ones(1)),
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
+    )
 
     monkeypatch.setattr(
         indexer_qsa,
-        "qsa_pre_indexer",
+        "qsa_prepare",
         lambda *args, **kwargs: updates.append((args, kwargs)),
     )
     monkeypatch.setattr(
@@ -79,11 +87,14 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         lambda *args, **kwargs: selections.append((args, kwargs)),
     )
 
-    actual = indexer_qsa.QSAIndexer.forward(
+    actual, _ = indexer_qsa.QSAIndexer.forward(
         indexer,
         torch.zeros(2, 2),
         torch.tensor([7, 8]),
         rows,
+        attn=attn,
+        qkv=torch.zeros(2, 4),
+        slot_mapping=torch.arange(2),
     )
 
     assert actual is rows
@@ -240,11 +251,12 @@ def test_qsa_fp8_loaded_scales_reach_writer_and_attention(
     tmp_path, dist_init, workspace_init
 ) -> None:
     """Checkpoint K/V scales must govern both stored bytes and attention."""
+    from transformers import Qwen4ExpTextConfig
+
     from vllm.config import set_current_vllm_config
     from vllm.engine.arg_utils import EngineArgs
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.model_executor.models.utils import AutoWeightsLoader
-    from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
@@ -258,7 +270,8 @@ def test_qsa_fp8_loaded_scales_reach_writer_and_attention(
         num_attention_heads=24,
         num_key_value_heads=2,
         head_dim=64,
-        num_experts=0,
+        num_experts=4,
+        num_experts_per_tok=2,
         ple_layer_ids=[],
         indexer_n_heads=8,
         indexer_kv_heads=1,
@@ -648,7 +661,6 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         _metadata=lambda: (raw_metadata, compressed_metadata),
         skip_topk=True,
         index_kv_heads=1,
-        use_fused_pre_indexer=False,
         index_n_heads=1,
         index_head_dim=64,
         indexer_dtype=torch.bfloat16,
@@ -671,6 +683,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         torch.cat((torch.ones_like(padded_keys), padded_keys), dim=-1),
         torch.zeros(8, dtype=torch.long, device=device),
         torch.full((5, 5), -1, dtype=torch.int32, device=device),
+        attn=SimpleNamespace(use_fused_qsa_prepare=False),
     )
     torch.testing.assert_close(raw_cache[0, :, 0], keys[[4, 1, 2, 3]])
     expected_compressed = torch.zeros_like(compressed_cache)
@@ -1402,11 +1415,12 @@ def _run_qsa_hisparse_prefill_case(
 ) -> None:
     from dataclasses import replace
 
+    from transformers import Qwen4ExpTextConfig
+
     from vllm.config import AttentionConfig, HiSparseConfig, set_current_vllm_config
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.models.utils import AutoWeightsLoader
-    from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -1426,7 +1440,9 @@ def _run_qsa_hisparse_prefill_case(
         num_attention_heads=24,
         num_key_value_heads=heads,
         head_dim=dim,
-        num_experts=0,
+        partial_rotary_factor=1.0,
+        num_experts=4,
+        num_experts_per_tok=2,
         ple_layer_ids=[],
         indexer_n_heads=8,
         indexer_kv_heads=1,
@@ -1473,6 +1489,11 @@ def _run_qsa_hisparse_prefill_case(
             ]
         )
         owner.process_weights_after_loading(torch.bfloat16)
+    # Even when fusion is supported, main KV writes must use the HiSparse
+    # resident/mirror targets exercised below instead of the ordinary cache.
+    assert owner.use_fused_qk_norm_rope_gate
+    assert owner.indexer.use_fused_pre_indexer
+    assert not owner.use_fused_qsa_prepare
     row_width = heads * 2 * dim
     original = torch.randn(
         num_blocks,
@@ -1622,7 +1643,9 @@ def _run_qsa_hisparse_prefill_case(
     monkeypatch.setattr(owner.impl, "do_kv_cache_update", capture_writer)
 
     def save_selection(module, inputs, output):
-        selected_before_attention.append(output.clone())
+        selected, main_outputs = output
+        assert main_outputs is None
+        selected_before_attention.append(selected.clone())
 
     selection_hook = owner.indexer.register_forward_hook(save_selection)
     host, registered = allocate_pinned_host_pool(original.nbytes)
@@ -1806,6 +1829,8 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
     import json
     from dataclasses import replace
 
+    from transformers import Qwen4ExpTextConfig
+
     from vllm.config import AttentionConfig, HiSparseConfig, set_current_vllm_config
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
         HiSparseConnectorMetadata,
@@ -1816,7 +1841,6 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.models.utils import AutoWeightsLoader
-    from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -1848,7 +1872,8 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         num_attention_heads=24,
         num_key_value_heads=heads,
         head_dim=dim,
-        num_experts=0,
+        num_experts=4,
+        num_experts_per_tok=2,
         ple_layer_ids=[],
         indexer_n_heads=8,
         indexer_kv_heads=1,
@@ -2390,6 +2415,8 @@ def _run_qsa_hisparse_worker_case(
     import json
     from dataclasses import replace
 
+    from transformers import Qwen4ExpTextConfig
+
     from vllm.config import AttentionConfig, HiSparseConfig, set_current_vllm_config
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
         HiSparseConnectorMetadata,
@@ -2399,7 +2426,6 @@ def _run_qsa_hisparse_worker_case(
     )
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
-    from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
     from vllm.models.qwen4_exp.nvidia.mtp import Qwen4ExpMultiTokenPredictor
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
     from vllm.utils.torch_utils import set_default_torch_dtype
@@ -2426,7 +2452,8 @@ def _run_qsa_hisparse_worker_case(
         num_attention_heads=24,
         num_key_value_heads=heads,
         head_dim=dim,
-        num_experts=0,
+        num_experts=4,
+        num_experts_per_tok=2,
         ple_layer_ids=[],
         indexer_n_heads=8,
         indexer_kv_heads=1,
@@ -2558,7 +2585,9 @@ def _run_qsa_hisparse_worker_case(
                 )
             )
 
-        def save_selection(module, inputs, selected, *, layer=layer):
+        def save_selection(module, inputs, output, *, layer=layer):
+            selected, main_outputs = output
+            assert main_outputs is None
             selected_before_attention[layer].copy_(selected)
 
         selection_hooks.append(owner.indexer.register_forward_hook(save_selection))
@@ -3157,6 +3186,9 @@ def _run_qsa_hisparse_worker_case(
                             source_table,
                             priming,
                             block_size=block_size,
+                            num_valid_rows=metadata[owner.layer_name].query_start_loc[
+                                -1:
+                            ],
                         )
                         handle.runtime.begin_forward()
                 before = [

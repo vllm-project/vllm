@@ -115,7 +115,12 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
     config = SimpleNamespace(
-        attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig() if enabled else None
+        ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=128)),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
     )
     if expected is None:
         with pytest.raises(ValueError, match="supported by every sparse"):
@@ -131,6 +136,25 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         assert resolved["main"].total_num_kv_heads == 4
     assert resolved["dense"] is specs["dense"]
     assert all(spec.block_size == block_size for spec in specs.values())
+    if enabled:
+        resident = resolved["main.hisparse_resident"]
+        hot = resolved["main.hisparse_hot"]
+        assert isinstance(resident, HiSparseResidentSpec)
+        assert isinstance(hot, HiSparseHotSpec)
+        assert resident.block_size == hot.block_size == expected
+        assert (
+            resident.page_size_bytes
+            == hot.page_size_bytes
+            == (resolved["main"].page_size_bytes)
+        )
+        assert len(resolved) == len(specs) + 2
+        groups = attn_utils_module.get_hisparse_kv_cache_groups(config, resolved)
+        assert groups is not None
+        grouped_names = [name for group in groups for name in group.layer_names]
+        assert len(grouped_names) == len(set(grouped_names)) == len(resolved)
+        assert set(grouped_names) == set(resolved)
+    else:
+        assert resolved == specs
 
 
 class _FakeMetadataBuilder:
@@ -168,7 +192,7 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
         _TargetBackend,
         ["target"],
         spec,
-        0,  # type: ignore[arg-type]
+        0,
     )
     target_group.metadata_builders = [
         _FakeMetadataBuilder(AttentionCGSupport.ALWAYS)  # type: ignore[list-item]
@@ -177,7 +201,7 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
         _DraftBackend,
         ["draft"],
         spec,
-        0,  # type: ignore[arg-type]
+        0,
     )
     draft_group.metadata_builders = [
         _FakeMetadataBuilder(AttentionCGSupport.UNIFORM_BATCH)  # type: ignore[list-item]
@@ -185,14 +209,14 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
     groups = [[target_group, draft_group]]
 
     # The runner-wide execution mode must still honor the drafter's limit.
-    unfiltered = get_attn_cg_support(groups, None)  # type: ignore[arg-type]
+    unfiltered = get_attn_cg_support(groups, None)
     assert unfiltered.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
     assert unfiltered.min_cg_attn_backend == "_DraftBackend"
 
     # Adaptive verification validates only the target's varlen graphs.
     target_only = get_attn_cg_support(
         groups,
-        None,  # type: ignore[arg-type]
+        None,
         checked_layer_names={"target"},
     )
     assert target_only.min_cg_support == AttentionCGSupport.ALWAYS
@@ -209,7 +233,7 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
     draft_group.layer_names.append("target")
     target_with_shared_group = get_attn_cg_support(
         groups,
-        None,  # type: ignore[arg-type]
+        None,
         checked_layer_names={"target"},
     )
     assert target_with_shared_group.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
@@ -698,14 +722,21 @@ def test_hisparse_full_kv_resolves_contiguous_token_rows(
         dtype=torch.bfloat16,
         top_k=32,
     )
+    specs = [
+        spec,
+        HiSparseResidentSpec(block_size=16, page_size=spec.page_size_bytes),
+        HiSparseHotSpec(
+            block_size=16, page_size=spec.page_size_bytes, blocks_per_request=4
+        ),
+    ]
 
     if expected_error is not None:
         with pytest.raises(ValueError, match=expected_error):
-            resolve_kv_cache_layout(config, [supported], iter([spec]))
+            resolve_kv_cache_layout(config, [supported], iter(specs))
         assert config.cache_config.kv_cache_layout is None
         return
 
-    layout = resolve_kv_cache_layout(config, [supported], iter([spec]))
+    layout = resolve_kv_cache_layout(config, [supported], iter(specs))
 
     assert layout is KVCacheLayout.BLNHC
     assert config.cache_config.get_resolved_kv_cache_layout() is layout
@@ -890,7 +921,8 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
         runtime.row_width = 8
         runtime.kv_dtype = torch.bfloat16
         forward_context[name] = SimpleNamespace(
-            hisparse_cache=HiSparseCacheHandle(runtime)
+            hisparse_cache=HiSparseCacheHandle(runtime),
+            is_draft_layer=index == 1,
         )
     block_tables = SimpleNamespace(
         input_block_tables=[torch.tensor([[1, 2]], dtype=torch.int32)] * 3,
@@ -907,6 +939,7 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
 
     assert len(handles) == 2
     for index, (name, handle) in enumerate(zip(names, handles)):
+        assert handle.draft_layer == (index == 1)
         assert caches[name].shape == (3, 2, 2, 4)
         assert handle.runtime.host_cache.shape == (6, 8)
         assert handle.runtime.host_cache.data_ptr() == caches[name].data_ptr()

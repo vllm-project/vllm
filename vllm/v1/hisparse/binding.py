@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
+    get_hisparse_kv_cache_groups,
 )
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -38,21 +39,21 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
-def resolve_hisparse_block_size(
+def resolve_hisparse_specs(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
     attn_layers: Mapping[str, "AttentionLayerBase"],
-) -> None:
-    """Resolve one logical block size for sparse sources and their indexers."""
+) -> dict[str, KVCacheSpec]:
+    """Resolve sparse source/indexer block sizes and add resident/hot specs."""
     if vllm_config.attention_config.hisparse_config is None:
-        return
+        return kv_cache_spec
     sparse_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
         if isinstance(spec, (MLAAttentionSpec, SparseFullAttentionSpec))
     }
     if not sparse_specs:
-        return
+        return kv_cache_spec
     block_sizes = {spec.block_size for spec in sparse_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
@@ -64,10 +65,18 @@ def resolve_hisparse_block_size(
             "HiSparse requires a GPU block size supported by every sparse "
             f"attention and indexer backend: {error}"
         ) from error
-    kv_cache_spec.update(
-        (name, spec.copy_with_new_block_size(block_size))
+    kv_cache_spec = kv_cache_spec | {
+        name: spec.copy_with_new_block_size(block_size)
         for name, spec in sparse_specs.items()
-    )
+    }
+    groups = get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec)
+    assert groups is not None
+    return kv_cache_spec | {
+        layer_name: group.kv_cache_spec
+        for group in groups
+        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        for layer_name in group.layer_names
+    }
 
 
 def allocate_hisparse_kv_caches(
@@ -317,6 +326,7 @@ def bind_hisparse_kv_caches(
                 source_cache = token_rows.view(
                     token_rows.shape[0], token_rows.shape[1], -1
                 )
+            cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
             cache_handle.runtime.shared_host_region = host_pool.shared_region
             cache_handle.runtime.bind_source_cache(
                 source_cache,
