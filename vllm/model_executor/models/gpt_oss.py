@@ -50,6 +50,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
@@ -86,6 +87,45 @@ def _get_weight_loader(param: torch.Tensor) -> Callable[..., object]:
     if not callable(weight_loader):
         raise TypeError("weight_loader must be callable")
     return weight_loader
+
+
+def _gpt_oss_rmsnorm_pad_add(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    pad_to: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.normalization.fused_add_rmsnorm_pad import (
+        fused_add_rmsnorm_pad,
+    )
+
+    out, res_out = fused_add_rmsnorm_pad(x, weight, eps, residual, pad_to)
+
+    return out, res_out
+
+
+def _gpt_oss_rmsnorm_pad_add_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    pad_to: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    n_out = ((N + pad_to - 1) // pad_to) * pad_to if pad_to > 0 else N
+    return (
+        torch.empty((M, n_out), dtype=x.dtype, device=x.device),
+        torch.empty_like(residual),
+    )
+
+
+direct_register_custom_op(
+    op_name="gpt_oss_rmsnorm_pad_add",
+    op_func=_gpt_oss_rmsnorm_pad_add,
+    mutates_args=[],
+    fake_impl=_gpt_oss_rmsnorm_pad_add_fake,
+)
 
 
 class OAIAttention(nn.Module):
@@ -449,6 +489,15 @@ class TransformerBlock(torch.nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
 
+        self.use_fused_rmsnorm_pad_add = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            self.use_fused_rmsnorm_pad_add = (
+                on_gfx1250()
+                and self.mlp.experts.moe_config.hidden_dim > config.hidden_size
+            )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -464,7 +513,18 @@ class TransformerBlock(torch.nn.Module):
         hidden_states = self.attn(hidden_states, positions)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        if self.use_fused_rmsnorm_pad_add and residual is not None:
+            hidden_states, residual = torch.ops.vllm.gpt_oss_rmsnorm_pad_add(
+                hidden_states,
+                residual,
+                self.post_attention_layernorm.weight,
+                self.post_attention_layernorm.variance_epsilon,
+                self.mlp.experts.moe_config.hidden_dim,
+            )
+        else:
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
         output = self.mlp(hidden_states)
         return output, residual
 

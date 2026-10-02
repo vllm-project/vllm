@@ -1117,6 +1117,11 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
 ) -> torch.Tensor:
+    if candidate_blocks is not None:
+        raise NotImplementedError(
+            "The ROCm AITER sparse attention indexer does not implement "
+            "candidate-block selection (DeepSeek-V4.1)."
+        )
     from vllm._aiter_ops import rocm_aiter_ops
 
     # careful! this will be None in dummy run

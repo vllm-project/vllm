@@ -103,6 +103,7 @@ class RoutedExperts(PluggableLayer):
         swiglu_beta: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
+        hash_indices_table: torch.Tensor | None = None,
     ):
         super().__init__()
         self.layer_name = layer_name
@@ -139,6 +140,7 @@ class RoutedExperts(PluggableLayer):
         self.swiglu_beta = swiglu_beta
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
+        self.hash_indices_table = hash_indices_table
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
 
