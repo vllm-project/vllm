@@ -133,7 +133,10 @@ duplicate mapping.
 Speculative decoding resolves all verification rows of a request in one pass:
 one block resolves the union of the rows' top-k against the request's hot-cache
 state, so rows that select the same host row share its hot row and no row
-evicts a hot row another row of the step still reads.
+evicts a hot row another row of the step still reads. Draft layers write their
+rows after the target forward, so their host mirror runs at the start of the
+next step, after the drafter, and the step's page transfers are submitted
+behind it.
 
 ## P/D import target
 

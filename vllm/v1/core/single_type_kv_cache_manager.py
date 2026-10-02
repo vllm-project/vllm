@@ -112,7 +112,7 @@ class SingleTypeKVCacheManager(ABC):
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
-        self._max_admission_blocks_per_request = max_admission_blocks_per_request
+        self.max_admission_blocks_per_request = max_admission_blocks_per_request
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
         self._record_new_block_ids = (
@@ -202,7 +202,7 @@ class SingleTypeKVCacheManager(ABC):
                 model in spec decode). w/o spec decode, it is num_tokens;
                 with spec decode, it is num_tokens - num_lookahead_tokens.
             apply_admission_cap: If True, clamp by `num_required_blocks` by
-                `_max_admission_blocks_per_request`for recycling-aware specs
+                `max_admission_blocks_per_request`for recycling-aware specs
                 (SWA, chunked-local).
             prefill_end: The token index the request's prefill ends at, the
                 same value the scheduler splits chunks against. Mamba reserves
@@ -214,7 +214,7 @@ class SingleTypeKVCacheManager(ABC):
 
         """
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        if apply_admission_cap and self._max_admission_blocks_per_request is not None:
+        if apply_admission_cap and self.max_admission_blocks_per_request is not None:
             # Recycling-aware specs (SWA, chunked-local) cap the per-request
             # reservation here so admission matches the startup pool sizer
             # (`SlidingWindowSpec.max_admission_blocks_per_request` / its
@@ -225,7 +225,7 @@ class SingleTypeKVCacheManager(ABC):
             # Drift between the two would re-introduce the deadlock from
             # issue #39734 or, worse, mid-prefill OOM.
             num_required_blocks = min(
-                num_required_blocks, self._max_admission_blocks_per_request
+                num_required_blocks, self.max_admission_blocks_per_request
             )
         num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
 
@@ -2366,12 +2366,6 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
 
     coordinator: "HiSparseCoordinator | None" = None
 
-    def __init__(self, kv_cache_spec: KVCacheSpec, **kwargs) -> None:
-        # Never prefix-cached, but the per-step ``cache_blocks`` hook is where
-        # residency work runs, so stay opted in regardless of prefix caching.
-        kwargs["enable_caching"] = True
-        super().__init__(kv_cache_spec, **kwargs)
-
     def cache_blocks(
         self,
         request: Request,
@@ -2488,6 +2482,8 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     """Track GPU-resident pages for otherwise host-backed KV."""
 
+    max_admission_blocks_per_request: int
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -2514,8 +2510,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         host_pages = cdiv(num_local_computed_tokens, self.block_size)
         required = cdiv(num_tokens, self.block_size)
         if apply_admission_cap:
-            assert self._max_admission_blocks_per_request is not None
-            required = min(required, self._max_admission_blocks_per_request)
+            required = min(required, self.max_admission_blocks_per_request)
         return max(required - max(existing, host_pages), 0)
 
     def allocate_external_computed_blocks(
@@ -2549,18 +2544,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         self.num_cached_block[request_id] = 0
         assert self.coordinator is not None
         self.coordinator.commit_computed_blocks(request_id, num_host_pages)
-
-    def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        retention_interval: int | None = None,
-        *,
-        replay_boundaries: Sequence[int],
-    ) -> None:
-        assert self.coordinator is not None
-        self.coordinator.plan_prefix_materialization(request.request_id, num_tokens)
-        self.coordinator.update_residency(request.request_id)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
