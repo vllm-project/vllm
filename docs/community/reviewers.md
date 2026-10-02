@@ -33,7 +33,7 @@ Sorted alphabetically by GitHub handle:
 - [@TheEpicDolphin](https://github.com/TheEpicDolphin)
 - [@varun-sundar-rabindranath](https://github.com/varun-sundar-rabindranath): KV cache offloading, LoRA
 - [@vllmellm](https://github.com/vllmellm)
-- [@wangxiyuan](https://github.com/wangxiyuan)
+- [@wangxiyuan](https://github.com/wangxiyuan): Platform, KV cache, Mooncake
 
 ## The Reviewer Role
 
