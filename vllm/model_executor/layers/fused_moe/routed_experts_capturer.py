@@ -203,18 +203,6 @@ class RoutedExpertsSink:
         )
         self.capture_fn = capture_fn
 
-    def out(self, num_tokens: int) -> torch.Tensor:
-        """The ``routing_replay_out`` tensor for a batch of ``num_tokens``."""
-        if num_tokens > self.buffer.shape[0]:
-            raise ValueError(
-                f"Routing replay buffer holds {self.buffer.shape[0]} tokens, "
-                f"but the kernel received {num_tokens}."
-            )
-        return self.buffer
-
-    def capture(self, num_tokens: int) -> None:
-        self.capture_fn(self.buffer[:num_tokens])
-
 
 def bind_routed_experts_capturer(
     model: torch.nn.Module,

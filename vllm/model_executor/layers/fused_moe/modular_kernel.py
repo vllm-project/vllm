@@ -1533,7 +1533,6 @@ class FusedMoEKernelMonolithicImpl:
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
         )
 
-        num_tokens = a1q.shape[0]
         routing_replay_out = None
         if routing_sink is not None:
             # Checked per call: a weight reload may rebuild a different kernel.
@@ -1542,7 +1541,7 @@ class FusedMoEKernelMonolithicImpl:
                     "Routed-experts capture is not supported with monolithic MoE "
                     f"kernel {type(self.fused_experts).__name__}."
                 )
-            routing_replay_out = routing_sink.out(num_tokens)
+            routing_replay_out = routing_sink.buffer[: len(a1q)]
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
@@ -1561,7 +1560,7 @@ class FusedMoEKernelMonolithicImpl:
             routing_replay_out=routing_replay_out,
         )
         if routing_sink is not None:
-            routing_sink.capture(num_tokens)
+            routing_sink.capture_fn(routing_replay_out)
 
         if isinstance(fused_out, UnfinalizedMoEOutput):
             if not self.prepare_finalize.supports_deferred_moe_finalize():

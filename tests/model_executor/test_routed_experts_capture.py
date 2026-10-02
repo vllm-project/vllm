@@ -277,8 +277,8 @@ def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
     ids=["single-rank", "dp", "ep"],
 )
 def test_routed_experts_sink_holds_a_dispatched_batch(use_ep, dp_size, ep_size, rows):
-    """One int16 buffer at a fixed address, large enough for the batch the
-    kernel sees after a DP or EP gather."""
+    """One int16 buffer, allocated once, large enough for the batch the kernel
+    sees after a DP or EP gather."""
     config = SimpleNamespace(
         **{
             **vars(_SINK_CONFIG),
@@ -290,9 +290,6 @@ def test_routed_experts_sink_holds_a_dispatched_batch(use_ep, dp_size, ep_size, 
     sink = RoutedExpertsSink(config, Mock())
 
     assert sink.buffer.shape == (rows, 2) and sink.buffer.dtype == torch.int16
-    assert sink.out(rows).data_ptr() == sink.buffer.data_ptr()
-    with pytest.raises(ValueError, match="holds"):
-        sink.out(rows + 1)
 
 
 def test_monolithic_capture_survives_kernel_rebuilds():
