@@ -477,10 +477,7 @@ def validate_grpc_port_arg(args: argparse.Namespace) -> None:
             "--port for the Python gRPC server, or VLLM_USE_RUST_FRONTEND=1 "
             "with --grpc-port for the Rust frontend."
         )
-    if (
-        not envs.VLLM_USE_RUST_FRONTEND
-        or getattr(args, "subparser", "serve") != "serve"
-    ):
+    if not envs.VLLM_USE_RUST_FRONTEND or getattr(args, "subparser", None) != "serve":
         raise ValueError("--grpc-port requires VLLM_USE_RUST_FRONTEND=1 vllm serve")
     if args.headless or (
         args.api_server_count is not None and args.api_server_count <= 0
@@ -497,6 +494,8 @@ def validate_grpc_port_arg(args: argparse.Namespace) -> None:
         )
     if not 0 <= args.grpc_port <= 65535:
         raise ValueError("--grpc-port must be between 0 and 65535")
+    if args.grpc_port != 0 and args.grpc_port == args.port and not args.uds:
+        raise ValueError("--grpc-port must differ from --port when HTTP uses TCP")
 
 
 def validate_parsed_serve_args(args: argparse.Namespace):

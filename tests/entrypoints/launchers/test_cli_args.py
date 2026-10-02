@@ -29,7 +29,7 @@ assert CHATML_JINJA_PATH.exists()
 
 def _build_vllm_parsers():
     vllm_parser = FlexibleArgumentParser()
-    subparsers = vllm_parser.add_subparsers()
+    subparsers = vllm_parser.add_subparsers(dest="subparser")
     serve_parser = subparsers.add_parser("serve")
     make_arg_parser(serve_parser)
     return {"vllm": vllm_parser, "vllm serve": serve_parser}
@@ -174,12 +174,23 @@ def test_multiple_valid_inputs(serve_parser):
 
 
 ### Tests for serve argument validation that run prior to loading
-def test_rust_grpc_port_reaches_frontend_args(serve_parser, monkeypatch):
+@pytest.mark.parametrize(
+    "port, extra_args",
+    [
+        (50051, []),
+        (0, ["--port", "0"]),
+        (50051, ["--port", "50051", "--uds", "/tmp/vllm.sock"]),
+    ],
+)
+def test_rust_grpc_port_reaches_frontend_args(
+    vllm_parser, monkeypatch, port, extra_args
+):
     monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
-    args = serve_parser.parse_args(
+    args = vllm_parser.parse_args(
         [
+            "serve",
             "--grpc-port",
-            "50051",
+            str(port),
             "--data-parallel-size",
             "8",
             "--data-parallel-size-local",
@@ -187,10 +198,11 @@ def test_rust_grpc_port_reaches_frontend_args(serve_parser, monkeypatch):
             "--data-parallel-start-rank",
             "4",
             "--data-parallel-hybrid-lb",
+            *extra_args,
         ]
     )
     validate_parsed_serve_args(args)
-    assert jsonify_non_default_args(args)["grpc_port"] == 50051
+    assert jsonify_non_default_args(args)["grpc_port"] == port
 
 
 @pytest.mark.parametrize(
@@ -203,21 +215,31 @@ def test_rust_grpc_port_reaches_frontend_args(serve_parser, monkeypatch):
         (True, ["--api-server-count", "0"], 50051),
         (True, ["--api-server-count", "-1"], 50051),
         (True, ["--data-parallel-multi-port-external-lb"], 50051),
+        (True, ["--port", "50051"], 50051),
         (True, [], -1),
         (True, [], 65536),
     ],
 )
 def test_rust_grpc_port_rejects_incompatible_launch(
-    serve_parser, monkeypatch, rust_enabled, extra_args, port
+    vllm_parser, monkeypatch, rust_enabled, extra_args, port
 ):
     monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1" if rust_enabled else "0")
-    args = serve_parser.parse_args(["--grpc-port", str(port), *extra_args])
+    args = vllm_parser.parse_args(["serve", "--grpc-port", str(port), *extra_args])
     error = (
         "--grpc and --grpc-port are mutually exclusive"
         if "--grpc" in extra_args
         else "--grpc-port"
     )
     with pytest.raises(ValueError, match=error):
+        validate_parsed_serve_args(args)
+
+
+def test_rust_grpc_port_requires_serve_subcommand(monkeypatch):
+    """Direct Python render/API entrypoints must reject a Rust-only listener."""
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    parser = make_arg_parser(FlexibleArgumentParser())
+    args = parser.parse_args(["--grpc-port", "50051"])
+    with pytest.raises(ValueError, match="--grpc-port requires"):
         validate_parsed_serve_args(args)
 
 
