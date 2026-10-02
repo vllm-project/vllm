@@ -50,12 +50,11 @@ def _can_render_directly(response: CompletionResponse) -> bool:
         if choice.prompt_logprobs is not None:
             return False
         if (logprobs := choice.logprobs) is not None:
-            if not all(map(isfinite, filter(None, logprobs.token_logprobs))):
-                return False
-            values = chain.from_iterable(
+            sampled = filter(None, logprobs.token_logprobs)
+            top = chain.from_iterable(
                 map(dict.values, filter(None, logprobs.top_logprobs))
             )
-            if not all(map(isfinite, values)):
+            if not all(map(isfinite, chain(sampled, top))):
                 return False
     return not any(model.model_extra for model in models if model is not None)
 
