@@ -161,7 +161,7 @@ def test_flashinfer_trtllm_sparse_mla_decode_without_rope(dtype, mode, monkeypat
     impl.index_group = (
         object.__new__(HiSparseMLAIndexGroup) if mode == "hisparse" else None
     )
-    impl._workspace_buffer = workspace
+    monkeypatch.setattr(backend, "_get_workspace_buffer", lambda: workspace)
     impl.bmm1_scale = QK_NOPE_HEAD_DIM**-0.5
     impl.bmm2_scale = 1.0
     impl.is_nope_mla = True
@@ -339,7 +339,7 @@ def test_flashinfer_sm90_fp8_mla_decode_without_rope():
 
 
 @requires_sm10x
-def test_flashinfer_mla_decode_workspace_supports_autotune():
+def test_flashinfer_mla_decode_workspace_supports_autotune(monkeypatch):
     """VLLM's FlashInfer MLA decode workspace must be int8 for autotuning.
 
     Model Runner V2's warmup autotunes ``trtllm_batch_decode_mla``, which makes
@@ -353,10 +353,14 @@ def test_flashinfer_mla_decode_workspace_supports_autotune():
     from flashinfer.autotuner import autotune
 
     from vllm.v1.attention.backends.mla.flashinfer_mla import _get_workspace_buffer
+    from vllm.v1.worker import workspace
 
     torch.set_default_device("cuda")
     torch.manual_seed(0)
 
+    monkeypatch.setattr(
+        workspace, "_manager", workspace.WorkspaceManager(torch.device("cuda"))
+    )
     workspace_buffer = _get_workspace_buffer(return_lse=False)
     assert workspace_buffer.dtype == torch.int8
 
