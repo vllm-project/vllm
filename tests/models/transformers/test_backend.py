@@ -185,17 +185,6 @@ def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None
 
 
 def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
-    import transformers
-    from packaging.version import Version
-
-    installed = Version(transformers.__version__)
-    required = Version("5.15.0.dev0")
-    if installed < required:
-        pytest.skip(
-            "MLA models with the Transformers modeling backend require "
-            f"transformers>={required}, but got {installed}"
-        )
-
     model = "hmellor/tiny-random-DeepseekV2ForCausalLM"
     args = (example_prompts, 32, 5)
     kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
@@ -260,7 +249,7 @@ def test_quantization(
         model,
         model_impl="auto",
         enforce_eager=True,
-        **quantization_kwargs,  # type: ignore[arg-type]
+        **quantization_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
@@ -270,7 +259,7 @@ def test_quantization(
         model,
         model_impl="transformers",
         enforce_eager=True,
-        **quantization_kwargs,  # type: ignore[arg-type]
+        **quantization_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()

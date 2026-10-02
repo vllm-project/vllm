@@ -4,17 +4,9 @@ import numpy as np
 import pytest
 from transformers import Qwen3VLVideoProcessor
 
-from vllm.model_executor.models.transformers.multimodal import (
-    OffsetsMultiModalProcessor,
-)
-
-from .transformers_backend import (
-    create_cached_processor,
-    create_processor,
-    offsets_only,
-)
-
-pytestmark = offsets_only
+from vllm.config import ModelConfig
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 
 VIDEO_MODEL_SETTINGS = {
     "Qwen/Qwen3-VL-2B-Instruct": {
@@ -75,7 +67,9 @@ def _hf_video_kwargs(*videos):
 
 @pytest.mark.parametrize("model_id", list(VIDEO_MODEL_SETTINGS))
 def test_video_multimodal_processor(model_id):
-    mm_processor = create_processor(model_id, OffsetsMultiModalProcessor)
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
+    )
     hf_processor = mm_processor.info.get_hf_processor()
 
     video = _video()
@@ -115,7 +109,9 @@ def test_video_multimodal_processor(model_id):
 def test_video_multiple_inputs(model_id):
     """Multiple videos per prompt are each detected as a separate placeholder
     and multi-modal item by the Transformers modelling backend."""
-    mm_processor = create_processor(model_id, OffsetsMultiModalProcessor)
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
+    )
     hf_processor = mm_processor.info.get_hf_processor()
 
     messages = [
@@ -150,7 +146,9 @@ def test_video_fields_not_claimed_by_image():
     """A prompt holding an image and a video keeps the fields of each on its own
     modality, so the image branch does not claim the video processor's outputs."""
     model_id = "Qwen/Qwen3-VL-2B-Instruct"
-    mm_processor = create_processor(model_id, OffsetsMultiModalProcessor)
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
+    )
 
     result = mm_processor(
         prompt=(
@@ -173,9 +171,12 @@ def test_video_fields_not_claimed_by_image():
 
 def test_repeated_video_hits_the_processor_cache():
     """Check that mm caching is actually working."""
-    mm_processor, cache = create_cached_processor(
-        "Qwen/Qwen3-VL-2B-Instruct", OffsetsMultiModalProcessor
+    model_config = ModelConfig(
+        model="Qwen/Qwen3-VL-2B-Instruct", model_impl="transformers"
     )
+    model_config.multimodal_config.mm_processor_cache_gb = 4
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    cache = MultiModalProcessorOnlyCache(model_config)
     video = _video()
 
     def process():
@@ -196,8 +197,8 @@ def test_repeated_video_hits_the_processor_cache():
 def test_video_unsupported_when_processor_cannot_count_tokens(monkeypatch):
     """A processor that cannot count video tokens is served as image-only."""
     monkeypatch.delattr(Qwen3VLVideoProcessor, "get_num_of_video_patches")
-    mm_processor = create_processor(
-        "Qwen/Qwen3-VL-2B-Instruct", OffsetsMultiModalProcessor
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model="Qwen/Qwen3-VL-2B-Instruct", model_impl="transformers")
     )
 
     assert "video" not in mm_processor.info.get_supported_mm_limits()
@@ -205,8 +206,8 @@ def test_video_unsupported_when_processor_cannot_count_tokens(monkeypatch):
 
 def test_merged_token_fields_split_per_video():
     """VideoLLaMA3's compression mask has one row per merged token, not per patch."""
-    mm_processor = create_processor(
-        "lkhl/VideoLLaMA3-2B-Image-HF", OffsetsMultiModalProcessor
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model="lkhl/VideoLLaMA3-2B-Image-HF", model_impl="transformers")
     )
 
     result = mm_processor(
