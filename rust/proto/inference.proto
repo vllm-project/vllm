@@ -58,6 +58,13 @@ message GenerateRequest {
   optional bool watermarking = 16;
 
   KVHintsEnvelope kv_hints = 17;
+
+  // Per-request kwargs for the engine's configured reasoning parser.
+  // Includes chat_template_kwargs used to render the prompt.
+  google.protobuf.Struct reasoning_parser_kwargs = 18;
+  // Preserve presence: false means generation starts inside reasoning;
+  // omission lets the engine infer the initial reasoning state.
+  optional bool reasoning_ended = 19;
 }
 
 message KVHintsEnvelope {
@@ -118,6 +125,9 @@ message StoppingCriteria {
   bool include_stop_strings = 5;
 
   bool ignore_eos = 6;
+
+  // Omitted or -1 disables the budget; zero immediately closes reasoning.
+  optional int64 thinking_token_budget = 7;
 }
 
 message ResponseOptions {
