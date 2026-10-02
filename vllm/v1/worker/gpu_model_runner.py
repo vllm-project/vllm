@@ -7355,6 +7355,9 @@ class GPUModelRunner(
                 inside, e.g. to place the KV cache in a specific memory pool.
 
         """
+        from vllm.v1.core.kv_cache_utils import initialize_prefix_cache_block_sizes
+
+        initialize_prefix_cache_block_sizes(kv_cache_config, self.vllm_config)
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self._mamba_bufs = None

@@ -11,6 +11,7 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    partial_hash_hits_enabled,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -695,19 +696,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # managers in every group. TP needs hashing finer than the Mamba block;
         # DCP accepts equality because it scales the effective full-attention
         # block instead.
-        has_partial_mamba_group = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and (
-                (dcp_world_size == 1 and g.kv_cache_spec.block_size > hash_block_size)
-                or (
-                    dcp_world_size > 1 and g.kv_cache_spec.block_size >= hash_block_size
-                )
-            )
-            for g in kv_cache_config.kv_cache_groups
-        )
         self.enable_partial_hash_hits = (
-            allow_partial_hash_hits and has_partial_mamba_group
+            allow_partial_hash_hits
+            and partial_hash_hits_enabled(
+                kv_cache_config.kv_cache_groups, hash_block_size, dcp_world_size
+            )
         )
         if self.enable_partial_hash_hits:
             unsupported_partial_hit_managers = {
@@ -907,7 +900,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         else group_block_size
                     )
                     _max_length = min(
-                        curr_hit_length + eagle_margin, max_cache_hit_length
+                        curr_hit_length + eagle_margin,
+                        len(block_hashes) * self.hash_block_size,
                     )
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,
@@ -983,9 +977,22 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
             manager = self.single_type_managers[group_ids[0]]
+            lookup_length = max_cache_hit_length
+            if use_eagle and not isinstance(spec, MambaSpec):
+                eagle_margin = (
+                    self.hash_block_size
+                    if self.enable_partial_hash_hits
+                    and manager_cls.supports_fine_grained_hash_lookup
+                    and manager.block_size > self.hash_block_size
+                    else manager.block_size
+                )
+                lookup_length = min(
+                    max_cache_hit_length + eagle_margin,
+                    len(block_hashes) * self.hash_block_size,
+                )
             blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
-                max_length=max_cache_hit_length,
+                max_length=lookup_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=manager.block_pool,
                 kv_cache_spec=spec,

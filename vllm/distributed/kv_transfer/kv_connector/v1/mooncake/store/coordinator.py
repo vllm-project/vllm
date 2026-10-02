@@ -6,13 +6,17 @@ from collections.abc import Sequence
 from typing import NamedTuple, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    ReqMeta,
     chunk_hashes_for_block_size,
+    partial_tail_block_indices,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    partial_hash_hits_enabled,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
@@ -23,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
@@ -118,6 +123,61 @@ class MooncakeStoreCoordinator:
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
 
+    def tail_attention_block_ids(self, req_meta: ReqMeta) -> list[int]:
+        """Return full-attention block IDs needed to complete a Mamba tail hit.
+
+        Include KV beyond normal LCM-aligned saves and any EAGLE proof margin.
+        For example, with LCM 16, attention blocks of 4 tokens, and a Mamba
+        checkpoint at 44, select the blocks covering [32, 44).
+
+        Mamba state IDs are handled separately.
+        """
+        if not self.enable_partial_hash_hits or not req_meta.block_hashes:
+            return []
+        mamba_tails = [
+            boundary
+            for group_id, _, boundary in req_meta.boundary_state_offloads or []
+            if boundary % self.kv_cache_groups[group_id].kv_cache_spec.block_size
+        ]
+        completed = req_meta.completed_token_len
+        prompt_tokens = req_meta.num_prompt_tokens
+        if prompt_tokens is None:
+            assert not mamba_tails, "Mamba tail offloads require the prompt length"
+            return []
+        boundary = get_mamba_prefill_checkpoint_position(
+            prompt_tokens,
+            self.hash_block_size,
+            bool(self.eagle_proof_margin_by_group),
+        )
+        assert all(position == boundary for position in mamba_tails), (
+            "Mamba tail offloads must match the prompt checkpoint boundary"
+        )
+        if not mamba_tails and (completed is None or prompt_tokens > completed):
+            return []
+        if boundary <= 0 or boundary // self.hash_block_size > len(
+            req_meta.block_hashes
+        ):
+            return []
+        block_ids: list[int] = []
+        for group_id in range(len(self.kv_cache_groups)):
+            if group_id in self.mamba_group_ids:
+                continue
+            proof_end = boundary + self.eagle_proof_margin_by_group.get(group_id, 0)
+            if proof_end > (boundary if completed is None else completed):
+                continue
+            if proof_end // self.hash_block_size > len(req_meta.block_hashes):
+                continue
+            group_blocks = req_meta.block_ids[group_id]
+            block_size = self.kv_cache_groups[group_id].kv_cache_spec.block_size
+            block_ids.extend(
+                group_blocks[idx]
+                for idx in partial_tail_block_indices(
+                    boundary, proof_end, block_size, self.lcm_block_size
+                )
+                if idx < len(group_blocks) and group_blocks[idx] != NULL_BLOCK_ID
+            )
+        return block_ids
+
     def align_lookup_length(self, length: int) -> int:
         alignment = (
             self.hash_block_size
@@ -166,6 +226,18 @@ class MooncakeStoreCoordinator:
         # group sharing the spec.
         self.eagle_group_ids = {
             gid for g in attention_groups if g.use_eagle for gid in g.group_ids
+        }
+        self.eagle_proof_margin_by_group = {
+            gid: (
+                self.hash_block_size
+                if self.enable_partial_hash_hits
+                and group.manager_cls.supports_fine_grained_hash_lookup
+                and group.spec.block_size > self.hash_block_size
+                else group.spec.block_size
+            )
+            for group in attention_groups
+            if group.use_eagle and not isinstance(group.spec, MambaSpec)
+            for gid in group.group_ids
         }
 
     def find_longest_cache_hit(
@@ -401,7 +473,10 @@ class MooncakeStoreCoordinator:
                         and spec.block_size > self.hash_block_size
                         else spec.block_size
                     )
-                    _max_length = min(curr_hit_length + eagle_margin, max_length)
+                    _max_length = min(
+                        curr_hit_length + eagle_margin,
+                        len(block_hashes) * self.hash_block_size,
+                    )
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,  # type: ignore[arg-type]
                     max_length=_max_length,
@@ -449,20 +524,3 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
-
-
-def partial_hash_hits_enabled(
-    kv_cache_groups: Sequence[KVCacheGroupSpec],
-    hash_block_size: int,
-    dcp_world_size: int = 1,
-) -> bool:
-    """Match core's DCP-aware Mamba partial-hit condition."""
-    return any(
-        isinstance(spec := _unwrap_spec(g.kv_cache_spec), MambaSpec)
-        and spec.mamba_cache_mode == "align"
-        and (
-            (dcp_world_size == 1 and spec.block_size > hash_block_size)
-            or (dcp_world_size > 1 and spec.block_size >= hash_block_size)
-        )
-        for g in kv_cache_groups
-    )

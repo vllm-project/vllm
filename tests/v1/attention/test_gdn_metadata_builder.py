@@ -398,6 +398,8 @@ def _create_checkpoint_builder_and_batch(
         )
     vllm_config.cache_config.mamba_cache_mode = "align"
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
+    vllm_config.cache_config.hash_block_size = prefix_match_unit
+    vllm_config.cache_config.mamba_ckpt_block_size = prefix_match_unit
     mamba_spec = MambaSpec(
         block_size=64,
         shapes=((16, 64),),
