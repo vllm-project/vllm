@@ -2334,7 +2334,9 @@ def _combine_topk_swa_indices_torch(
 
     Kept verbatim so the reference cannot drift toward the kernel.
     """
-    from vllm.models.deepseek_v41.amd.rocm import _SPARSE_PREFILL_TOPK_ALIGNMENT
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        _SPARSE_PREFILL_TOPK_ALIGNMENT,
+    )
 
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
@@ -2420,16 +2422,23 @@ def _v41_combine_case(case, window):
         qsl = torch.tensor([0, 4, 8], dtype=torch.int32, device=dev)
         sl = torch.tensor([4, 4], dtype=torch.int32, device=dev)
         rows, ratio, topk = 8, 0, 0
+    elif case == "nonzero_base":
+        # Prefill rows of a mixed batch: query_start_loc starts past the decodes.
+        qsl = torch.tensor([32, 64, 128], dtype=torch.int32, device=dev)
+        sl = torch.tensor([48, 80], dtype=torch.int32, device=dev)
+        rows = 96
     else:
         qsl = torch.tensor([0, 32, 96], dtype=torch.int32, device=dev)
         sl = torch.tensor([48, 80], dtype=torch.int32, device=dev)
         rows = 96
-    gl = torch.minimum(sl, torch.full_like(sl, window))
+    # What the SWA builder gathers: the query plus up to window - 1 rows before it.
+    gl = torch.minimum(sl, qsl[1:] - qsl[:-1] + window - 1)
     gen = torch.Generator(device="cpu").manual_seed(0)
-    ti = torch.randint(
-        0, 4096, (rows, max(topk, 1)), generator=gen, dtype=torch.int32
-    ).to(dev)
-    return ti, qsl, sl, gl, window, ratio, topk, 100000, 4096
+    ti = torch.randint(0, 4096, (rows, max(topk, 1)), generator=gen, dtype=torch.int32)
+    if case == "invalid_topk":
+        # Failed candidates stay -1 instead of pointing into another request.
+        ti[:, ::7] = -1
+    return ti.to(dev), qsl, sl, gl, window, ratio, topk, 100000, 4096
 
 
 @requires_rocm_cdna3_or_newer
@@ -2439,6 +2448,8 @@ def _v41_combine_case(case, window):
         ("seq_len_below_query_len", 128),
         ("seq_len_zero", 128),
         ("compress_ratio_zero", 128),
+        ("nonzero_base", 128),
+        ("invalid_topk", 128),
         ("plain", 64),
         ("plain", 128),
         ("plain", 256),
@@ -2454,3 +2465,11 @@ def test_v41_combine_topk_swa_indices_matches_torch(case, window) -> None:
         f"lens differ: ref={ref_lens.tolist()} got={got_lens.tolist()}"
     )
     assert torch.equal(got_indices, ref_indices)
+
+
+def test_v41_rocm_combine_uses_shared_kernel() -> None:
+    """ROCm prefill takes the shared combine, so it inherits the replay bound."""
+    from vllm.models.deepseek_v41.amd import rocm
+    from vllm.models.deepseek_v41.common.ops import cache_utils
+
+    assert rocm.combine_topk_swa_indices is cache_utils.combine_topk_swa_indices
