@@ -157,6 +157,8 @@ class MoEMixin(MixtureOfExperts, Base):
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         self.check_version("5.0.0", "MoE models support")
+        if vllm_config.model_config.hf_config.model_type == "aria":
+            self.check_version("5.18.0", "Aria")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -309,6 +311,9 @@ class MoEMixin(MixtureOfExperts, Base):
                         enable_eplb=enable_eplb,
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
+                        is_fused_checkpoint_transposed=getattr(
+                            experts, "is_transposed", False
+                        ),
                         routed_experts_cls=TransformersRoutedExperts,
                     )
                     fuser = MoEBlockFuser.match(moe_block, experts_name)
@@ -355,6 +360,8 @@ class MoEMixin(MixtureOfExperts, Base):
                         )
                         if router_dtype is not None:
                             kwargs["router_logits_dtype"] = router_dtype
+                        if fuser.renormalize is not None:
+                            kwargs["renormalize"] = fuser.renormalize
                         if use_grouped_topk:
                             kwargs |= grouped_topk_routing_kwargs
                         if routed_scaling_factor != 1.0:

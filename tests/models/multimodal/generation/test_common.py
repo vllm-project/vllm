@@ -15,6 +15,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
+    AutoProcessor,
 )
 from transformers import __version__ as TRANSFORMERS_VERSION
 
@@ -292,6 +293,9 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
+        # The checkpoint's stale `auto_map` points at remote code that no longer exists
+        vllm_runner_kwargs={"trust_remote_code": False},
+        hf_processor=AutoProcessor.from_pretrained,
         single_image_prompts=IMAGE_ASSETS.prompts(
             {
                 "stop_sign": "<vlm_image>Please describe the image shortly.",
@@ -302,15 +306,7 @@ VLM_TEST_SETTINGS = {
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
-        marks=[
-            pytest.mark.skip(
-                reason="Aria needs to update for latest transformers, "
-                "must have a vision_processor.py."
-                "An issue has been filed:"
-                "https://huggingface.co/rhymes-ai/Aria/discussions/23"
-            ),
-            large_gpu_mark(min_gb=64),
-        ],
+        marks=[large_gpu_mark(min_gb=64)],
     ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
