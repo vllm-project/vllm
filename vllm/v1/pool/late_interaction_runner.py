@@ -4,6 +4,7 @@ from collections.abc import Iterable
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.late_interaction import (
@@ -12,17 +13,29 @@ from vllm.v1.pool.late_interaction import (
     compute_maxsim_score_batched,
 )
 
+logger = init_logger(__name__)
+
 
 class LateInteractionRunner:
     """Worker-side state and postprocessing for late-interaction scoring."""
 
-    def __init__(self) -> None:
+    def __init__(self, enable_flash: bool = True) -> None:
         # query_key -> token embeddings for late-interaction scoring.
         self._query_cache: dict[str, torch.Tensor] = {}
         # query_key -> remaining number of docs that should use this query.
         self._query_uses: dict[str, int] = {}
         # doc request id -> query key.
         self._doc_query_keys: dict[str, str] = {}
+        # Fused Triton scoring (PoolerConfig.enable_flash_late_interaction
+        # gates it; a runtime kernel failure disables it for the process).
+        if enable_flash:
+            try:
+                from vllm.v1.pool.flash_maxsim import (  # noqa: F401
+                    flash_maxsim_rerank_direct,
+                )
+            except ImportError:
+                enable_flash = False
+        self._flash_enabled = enable_flash
 
     def clear(self) -> None:
         self._query_cache.clear()
@@ -116,7 +129,7 @@ class LateInteractionRunner:
             raise ValueError(f"Unsupported late-interaction mode: {mode!r}")
 
         if score_indices:
-            score_values = compute_maxsim_score_batched(score_queries, score_docs)
+            score_values = self._score(score_queries, score_docs)
             for i, req_id, query_key, score in zip(
                 score_indices, score_req_ids, score_query_keys, score_values
             ):
@@ -125,6 +138,58 @@ class LateInteractionRunner:
                 self._release_query_use(query_key)
 
         return outputs
+
+    def _score(
+        self,
+        queries: list[torch.Tensor],
+        docs: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        """Score (query_i, doc_i) pairs: the fused Triton kernel handles the
+        common rerank pattern (one shared query, CUDA inputs); multiple
+        distinct queries, CPU tensors, or a kernel failure fall back to the
+        reference scorer."""
+        if self._flash_enabled and docs and queries[0].is_cuda:
+            first = queries[0]
+            if all(q is first for q in queries):
+                try:
+                    return self._score_flash_shared_query(first, docs)
+                except Exception as exc:
+                    # A persistent compile/launch failure must not take down
+                    # requests: serve through the reference scorer and stop
+                    # trying the kernel for the rest of the process.
+                    self._flash_enabled = False
+                    logger.warning(
+                        "flash-maxsim scoring failed (%s); falling back to "
+                        "the reference MaxSim path for this process.",
+                        exc,
+                    )
+        return compute_maxsim_score_batched(queries, docs)
+
+    @staticmethod
+    def _score_flash_shared_query(
+        query: torch.Tensor,
+        docs: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        """One kernel launch for all docs against a single shared query:
+        docs pack into one [total_tokens, d] tensor (single cat, no padding)
+        and the kernel reads each by (offset, length) — the [B, Lq, Ld]
+        similarity tensor is never materialised."""
+        from vllm.v1.pool.flash_maxsim import flash_maxsim_rerank_direct
+
+        device = docs[0].device
+        lengths = [int(d.shape[0]) for d in docs]
+        offsets = [0] * len(lengths)
+        for i in range(1, len(lengths)):
+            offsets[i] = offsets[i - 1] + lengths[i - 1]
+        packed = docs[0] if len(docs) == 1 else torch.cat(docs, dim=0)
+        scores = flash_maxsim_rerank_direct(
+            query,
+            packed,
+            torch.tensor(offsets, device=device, dtype=torch.int32),
+            torch.tensor(lengths, device=device, dtype=torch.int32),
+            max(lengths),
+        )
+        return list(scores.unbind(0))
 
     def _release_query_use(self, query_key: str) -> None:
         remaining = self._query_uses.get(query_key, 1) - 1
