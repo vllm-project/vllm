@@ -183,6 +183,7 @@ class OnlineRenderer:
             tool_strict_level=tool_strict_level,
             model_name=model_config.model,
             is_harmony=self.use_harmony,
+            tokenizer=renderer.tokenizer,
         )
 
         self.chat_template = chat_template
@@ -825,7 +826,8 @@ class OnlineRenderer:
                 and tokenizer.supports_grammar
             )
             should_adjust_request = (
-                parser.reasoning_parser_cls is not None
+                parser.always_adjust_request
+                or parser.reasoning_parser_cls is not None
                 or tool_choice != "none"
                 or is_mistral_grammar_eligible
             )

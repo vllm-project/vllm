@@ -86,6 +86,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hermes_tool_parser",
         "Hermes2ProToolParser",
     ),
+    "hf": (
+        "response_template_tool_parser",
+        "ResponseTemplateToolParser",
+    ),
     "poolside_v1": (
         "poolside_v1_tool_parser",
         "PoolsideV1ToolParser",
