@@ -520,17 +520,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     raise ValueError(
                         f"VLLM_GDN_DECODE_KERNEL=cuda is not supported: {reason}"
                     )
-                logger.info_once(
-                    "Falling back to the Triton GDN decode path: %s", reason
-                )
+                if self.speculative_config is not None:
+                    logger.info_once(
+                        "Falling back to the Triton GDN spec decode path: %s",
+                        reason,
+                    )
                 self.gdn_decode_kernel = "triton"
         elif current_platform.is_cpu():
             self.gdn_decode_kernel = "CPU"
         elif current_platform.is_xpu():
             self.gdn_decode_kernel = "XPU"
 
-        self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
-        logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
+        self.enable_fused_gdn_spec_decode = (
+            self.gdn_decode_kernel == "cuda" and self.speculative_config is not None
+        )
+        if self.speculative_config is not None:
+            logger.info_once("GDN spec decode kernel: %s", self.gdn_decode_kernel)
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -908,12 +913,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
         ba, _ = self.in_proj_ba(hidden_states)
 
-        use_fused_gdn_decode = (
-            self.enable_fused_gdn_decode
+        use_fused_gdn_spec_decode = (
+            self.enable_fused_gdn_spec_decode
             and hidden_states.dtype == torch.bfloat16
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
-        if use_fused_gdn_decode:
+        if use_fused_gdn_spec_decode:
             core_attn_out = torch.zeros(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,
