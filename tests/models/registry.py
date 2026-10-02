@@ -1260,19 +1260,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_transformers_version="4.57",
         transformers_version_reason={
-            "vllm": "Custom processor code is not compatible with Transformers v5."
+            "hf": "HF remote code reads `is_parallelizable`, which was removed "
+            "in Transformers v5."
         },
     ),
     "Ovis2_6ForCausalLM": _HfExamplesInfo(
         "AIDC-AI/Ovis2.6-2B", is_available_online=False, trust_remote_code=True
     ),
     "Ovis2_6_MoeForCausalLM": _HfExamplesInfo(
-        "AIDC-AI/Ovis2.6-30B-A3B",
-        trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": "Custom processor code is not compatible with Transformers v5."
-        },
+        "AIDC-AI/Ovis2.6-30B-A3B", trust_remote_code=True
     ),
     "PaddleOCRVLForConditionalGeneration": _HfExamplesInfo(
         "PaddlePaddle/PaddleOCR-VL",
