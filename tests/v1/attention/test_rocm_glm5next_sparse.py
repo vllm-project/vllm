@@ -198,11 +198,14 @@ def test_rocm_sparse_triton_route_preserves_padded_sinks(monkeypatch, num_heads)
     assert lse is None
 
 
-@pytest.mark.parametrize(("num_splits", "expected"), [(4, "decode"), (1, "prefill")])
+@pytest.mark.parametrize(
+    ("num_splits", "num_decode_tokens", "expected"),
+    [(4, 2, "decode"), (1, 2, "prefill"), (4, 1, "prefill")],
+)
 def test_rocm_sparse_triton_decode_routes_on_num_splits(
-    monkeypatch, num_splits, expected
+    monkeypatch, num_splits, num_decode_tokens, expected
 ):
-    """Pure-decode batches only take split-K when the heuristic asks for splits."""
+    """Split-K needs both a pure-decode batch and a heuristic asking for splits."""
     called = []
 
     def fake_decode(**kwargs):
@@ -229,9 +232,9 @@ def test_rocm_sparse_triton_decode_routes_on_num_splits(
     kv = torch.zeros(4, 1, 512, dtype=torch.bfloat16)
     metadata = SimpleNamespace(
         attn_out_dtype=torch.bfloat16,
-        num_prefills=0,
-        num_decodes=2,
-        num_decode_tokens=2,
+        num_prefills=2 - num_decode_tokens,
+        num_decodes=num_decode_tokens,
+        num_decode_tokens=num_decode_tokens,
         max_query_len=1,
         max_seq_len=4096,
         topk_tokens=2048,

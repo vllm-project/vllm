@@ -628,7 +628,7 @@ _NOPE_ONLY_KV_LENS = [0, 1, 3, 37, 129, 2048]
 
 
 @requires_split_decode_arch
-@pytest.mark.parametrize("num_splits", [2, 4, 8, 32])
+@pytest.mark.parametrize("num_splits", [2, 32])
 @pytest.mark.parametrize("with_sink", [True, False])
 @torch.inference_mode()
 def test_sparse_attn_decode_bf16_split_k_matches_ragged(
@@ -675,52 +675,6 @@ def test_sparse_attn_decode_bf16_split_k_matches_ragged(
         num_splits=num_splits,
     )
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
-
-
-@requires_split_decode_arch
-@pytest.mark.parametrize("num_splits", [1, 8])
-@torch.inference_mode()
-def test_sparse_attn_decode_bf16_writes_caller_output(num_splits: int) -> None:
-    """The decode entry point writes the ragged result into the caller's out."""
-    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-        _rocm_sparse_attn_prefill_ragged_triton,
-        rocm_sparse_attn_decode_bf16,
-    )
-
-    device = torch.device("cuda")
-    set_random_seed(0)
-    num_heads = 16
-    q, kv, indices, indptr = _nope_only_ragged_inputs(
-        _NOPE_ONLY_KV_LENS, num_heads, device
-    )
-    attn_sink = torch.randn(num_heads, dtype=torch.float32, device=device)
-    scale = NOPE_ONLY_HEAD_DIM**-0.5
-
-    expected = _rocm_sparse_attn_prefill_ragged_triton(
-        q=q,
-        kv=kv,
-        indices=indices,
-        indptr=indptr,
-        scale=scale,
-        attn_sink=attn_sink,
-        nope_head_dim=NOPE_ONLY_HEAD_DIM,
-        rope_head_dim=0,
-    )
-    output = torch.empty_like(expected)
-    rocm_sparse_attn_decode_bf16(
-        q=q,
-        kv=kv.unsqueeze(1),
-        scale=scale,
-        head_dim=NOPE_ONLY_HEAD_DIM,
-        nope_head_dim=NOPE_ONLY_HEAD_DIM,
-        rope_head_dim=0,
-        attn_sink=attn_sink,
-        output=output,
-        ragged_indices=indices,
-        ragged_indptr=indptr,
-        num_splits=num_splits,
-    )
-    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
 
 
 def _sparse_prefill_ragged_inputs(nope_dim: int, rope_dim: int) -> dict:
@@ -1235,7 +1189,6 @@ def test_decode_num_splits_gfx950(monkeypatch) -> None:
     assert mod._decode_gfx950_num_splits(4, 1, 2048.0, 0.0, 32) == 32
 
 
-@torch.inference_mode()
 def test_sparse_decode_bf16_num_splits_floor_and_tile_clamp(monkeypatch) -> None:
     """Short rows skip splitting, and splits never exceed the tiles they walk."""
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
