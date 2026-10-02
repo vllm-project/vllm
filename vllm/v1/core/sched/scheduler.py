@@ -62,6 +62,10 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
+    KV_FETCH_COMPLETED_WAITING,
+    KV_FETCH_IN_PROGRESS,
+    KV_FETCH_STAGES,
+    KV_FETCH_WAITING_TO_START,
     PrefixCacheStats,
     RequestSpecDecodeMetrics,
     SchedulerStats,
@@ -411,6 +415,13 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+
+        # Requests with an async KV load, by stage (KV_FETCH_STAGES).
+        # None when not tracked (stats disabled or no KV connector).
+        self._kv_fetch_stages: dict[Request, str] | None = (
+            {} if self.log_stats and self.connector is not None else None
+        )
+        self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
 
     def _mamba_block_aligned_split(
         self,
@@ -1039,6 +1050,9 @@ class Scheduler(SchedulerInterface):
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
                         )
+                    self._set_kv_fetch_stage(
+                        request, KV_FETCH_WAITING_TO_START if load_kv_async else None
+                    )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed. A streaming-input
@@ -1276,6 +1290,7 @@ class Scheduler(SchedulerInterface):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
+                    self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)
                     if self.needs_kv_cache_zeroing:
                         # Skip zeroing of the blocks the async load will
                         # overwrite; the zeroing could race the write.
@@ -1316,6 +1331,7 @@ class Scheduler(SchedulerInterface):
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                self._set_kv_fetch_stage(request, None)
                 if pad_spec_decode:
                     assert num_new_tokens == 1 + self.num_spec_tokens
                     scheduled_spec_decode_tokens[request_id] = [
@@ -2588,6 +2604,11 @@ class Scheduler(SchedulerInterface):
                 )
             if self.connector is not None:
                 self.connector.on_new_request(request)
+                kv_transfer_params = request.kv_transfer_params
+                if kv_transfer_params and kv_transfer_params.get("do_remote_prefill"):
+                    # Count P/D requests on arrival: connector matching is
+                    # skipped while all run slots are taken.
+                    self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -2664,6 +2685,7 @@ class Scheduler(SchedulerInterface):
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
         self._inflight_prefills.discard(request)
+        self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
         # EC Connector: mirror the KV hook. The contract requires firing
@@ -2889,6 +2911,7 @@ class Scheduler(SchedulerInterface):
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
+            num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
@@ -3028,6 +3051,16 @@ class Scheduler(SchedulerInterface):
             1 + self.num_spec_tokens + self.num_lookahead_tokens, self.block_size
         )
 
+    def _set_kv_fetch_stage(self, request: Request, stage: str | None) -> None:
+        kv_fetch_stages = self._kv_fetch_stages
+        if kv_fetch_stages is not None:
+            prev_stage = kv_fetch_stages.pop(request, None)
+            if prev_stage is not None:
+                self._kv_fetch_counts[prev_stage] -= 1
+            if stage is not None:
+                kv_fetch_stages[request] = stage
+                self._kv_fetch_counts[stage] += 1
+
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
         return sum(
@@ -3148,6 +3181,7 @@ class Scheduler(SchedulerInterface):
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
+                self._set_kv_fetch_stage(req, KV_FETCH_COMPLETED_WAITING)
             else:
                 assert RequestStatus.is_finished(req.status)
                 self._free_blocks(self.requests[req_id])
