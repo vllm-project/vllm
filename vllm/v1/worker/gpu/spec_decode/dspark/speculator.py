@@ -23,6 +23,7 @@ CUDA graphs (FULL, mirroring DFlash) cover the whole draft step: the parallel
 backbone forward AND the sequential Markov sampling.
 """
 
+from collections.abc import Callable
 from functools import partial
 from typing import Any
 
@@ -136,6 +137,7 @@ class DSparkSpeculator(DFlashSpeculator):
             logits = buf
 
         threshold = self._draft_support_threshold(logits, idx_map, self.temperature)
+        sampler: Callable[..., torch.Tensor]
         if self.draft_watermarker is None:
             sampler = partial(gumbel_sample, logits_threshold=threshold)
         else:
