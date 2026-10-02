@@ -411,6 +411,11 @@ steps:
       - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - vllm/config/vllm.py
+      - CMakeLists.txt
+      - csrc/libtorch_stable/ops.h
+      - csrc/libtorch_stable/torch_bindings.cpp
+      - vllm/v1/worker/worker_base.py
+      - vllm/model_executor/models/deepseek_mtp.py
       - csrc/libtorch_stable/hisparse_kernels.cu
       - csrc/cuda_compat.h
       - vllm/v1/hisparse/
