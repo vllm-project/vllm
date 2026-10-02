@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K3 dense MLA draft model for DSpark speculative decoding."""
+"""Platform-neutral Kimi-K3 DSpark MLA draft.
+
+Attention construction and the MLP class are supplied by the platform module.
+This module must not import ``vllm.models.kimi_k3.amd`` or
+``vllm.models.kimi_k3.nvidia``.
+"""
 
 from collections.abc import Iterable
+from typing import Any, Protocol
 
 import torch
 import torch.nn as nn
@@ -26,14 +32,26 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
-from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
-from vllm.models.kimi_k3.nvidia.model import KimiMLP
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
 
 _GROUPED_KV_CACHE_DTYPES = frozenset(
     {"auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2"}
 )
+
+
+class _KVCacheLayer(Protocol):
+    """Attention module that owns the draft KV cache.
+
+    NVIDIA ``MultiHeadLatentAttention`` is this object. On AMD the wrapper is
+    not; ``kv_cache_layer`` returns the inner ``MLAAttention``.
+    """
+
+    kv_cache: torch.Tensor
+    kv_cache_dtype: str
+    _k_scale: torch.Tensor
+    impl: Any
+    layer_name: str
 
 
 def _duplicate_context_kv_weights(
@@ -70,38 +88,39 @@ class K3DSparkDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         quant_config = get_draft_quant_config(vllm_config)
-        self.self_attn = MultiHeadLatentAttention(
+        self.self_attn = self.build_self_attn(
+            vllm_config=vllm_config,
             config=config,
-            hidden_size=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank,
-            kv_lora_rank=config.kv_lora_rank,
-            cache_config=vllm_config.cache_config,
             quant_config=quant_config,
             prefix=maybe_prefix(
                 prefix, f"layers.{start_layer_id + layer_idx}.self_attn"
             ),
-            use_rope=True,
-            non_causal_multi_token_decode=True,
         )
         # Both row-parallel outputs stay un-reduced; their all-reduces are fused
         # into the RMSNorm that follows via fused_allreduce_rms_norm.
         self.self_attn.o_proj.reduce_results = False
-        self.mlp = KimiMLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
+        self.mlp = self.build_mlp(
+            config=config,
             quant_config=quant_config,
-            reduce_results=False,
             prefix=maybe_prefix(prefix, f"layers.{start_layer_id + layer_idx}.mlp"),
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+
+    def build_self_attn(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        config,
+        quant_config,
+        prefix: str,
+    ) -> nn.Module:
+        raise NotImplementedError
+
+    def build_mlp(self, *, config, quant_config, prefix: str) -> nn.Module:
+        raise NotImplementedError
 
     def forward(
         self,
@@ -132,6 +151,17 @@ class K3DSparkDecoderLayer(nn.Module):
 
 
 class K3DSparkModel(nn.Module):
+    decoder_layer_cls: type[K3DSparkDecoderLayer]
+
+    def kv_cache_layer(self, attn: nn.Module) -> nn.Module:
+        """Return the module that owns this layer's KV cache.
+
+        The default is ``attn`` itself, which is NVIDIA
+        ``MultiHeadLatentAttention``. AMD overrides this to return the inner
+        ``MLAAttention``. All cache reads go through this method.
+        """
+        return attn
+
     def __init__(
         self,
         *,
@@ -161,7 +191,7 @@ class K3DSparkModel(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                K3DSparkDecoderLayer(
+                self.decoder_layer_cls(
                     vllm_config=vllm_config,
                     config=self.config,
                     layer_idx=layer_idx,
@@ -253,11 +283,12 @@ class K3DSparkModel(nn.Module):
         self._context_rope_dim = attn0.qk_rope_head_dim
         self._context_rms_norm_eps = attn0.kv_a_layernorm.variance_epsilon
         self._context_kv_scales: torch.Tensor | None = None
-        if attn0.kv_cache_dtype in _GROUPED_KV_CACHE_DTYPES and is_quantized_kv_cache(
-            attn0.kv_cache_dtype
+        cache0 = self.kv_cache_layer(attn0)
+        if cache0.kv_cache_dtype in _GROUPED_KV_CACHE_DTYPES and is_quantized_kv_cache(
+            cache0.kv_cache_dtype
         ):
             self._context_kv_scales = torch.stack(
-                [attn._k_scale.reshape(()) for attn in attentions]
+                [self.kv_cache_layer(attn)._k_scale.reshape(()) for attn in attentions]
             )
 
     def _precompute_fused_context_kv(
@@ -311,7 +342,7 @@ class K3DSparkModel(nn.Module):
         if context_slot_mapping is None:
             return
 
-        cache_layers = [layer.self_attn for layer in self.layers]
+        cache_layers = [self.kv_cache_layer(layer.self_attn) for layer in self.layers]
         cache_dtype = cache_layers[0].kv_cache_dtype
         if (
             cache_dtype in _GROUPED_KV_CACHE_DTYPES
@@ -354,7 +385,7 @@ class K3DSparkModel(nn.Module):
             )
             return
 
-        for layer_idx, layer in enumerate(self.layers):
+        for layer_idx, attn in enumerate(cache_layers):
             slot_mapping = (
                 context_slot_mapping[layer_idx]
                 if isinstance(context_slot_mapping, (list, tuple))
@@ -362,7 +393,6 @@ class K3DSparkModel(nn.Module):
             )
             if slot_mapping is None:
                 continue
-            attn = layer.self_attn
             attn.impl.do_kv_cache_update(
                 all_kv_c_normed[layer_idx],
                 all_k_pe[layer_idx],
@@ -374,7 +404,7 @@ class K3DSparkModel(nn.Module):
 
     def _has_uniform_block_layout(
         self,
-        cache_layers: list[MultiHeadLatentAttention],
+        cache_layers: list[_KVCacheLayer],
     ) -> bool:
         key = tuple(cl.kv_cache.data_ptr() for cl in cache_layers)
         if getattr(self, "_kv_cache_ptrs_key", None) != key:
@@ -393,7 +423,7 @@ class K3DSparkModel(nn.Module):
 
     def _get_context_kv_cache_ptrs(
         self,
-        cache_layers: list[MultiHeadLatentAttention],
+        cache_layers: list[_KVCacheLayer],
     ) -> torch.Tensor:
         # The per-layer KV cache base pointers are stable after allocation, so
         # build the pointer array once and return it on every call.
@@ -431,6 +461,7 @@ class K3DSparkModel(nn.Module):
 
 
 class K3DSparkForCausalLM(nn.Module):
+    model_cls: type[K3DSparkModel]
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None
@@ -463,7 +494,7 @@ class K3DSparkForCausalLM(nn.Module):
                 orig_to_new_substr={"confidence_head": "confidence_head"}
             )
         target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
-        self.model = K3DSparkModel(
+        self.model = self.model_cls(
             vllm_config=vllm_config,
             start_layer_id=target_layer_num,
             prefix=maybe_prefix(prefix, "model"),
@@ -484,7 +515,10 @@ class K3DSparkForCausalLM(nn.Module):
         return self.model.combine_hidden_states(hidden_states)
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:
-        return [layer.self_attn.layer_name for layer in self.model.layers]
+        return [
+            self.model.kv_cache_layer(layer.self_attn).layer_name
+            for layer in self.model.layers
+        ]
 
     def precompute_and_store_context_kv(
         self,

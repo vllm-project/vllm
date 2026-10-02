@@ -12,8 +12,20 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.models.deepseek_v4.nvidia import dspark as dsv4_dspark
+from vllm.models.kimi_k3.common import dspark_mla as common_dspark_mla
 from vllm.models.kimi_k3.nvidia import dspark_mla
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
+
+
+def test_kv_cache_layer_defaults_to_the_attention_module():
+    attn = SimpleNamespace(layer_name="model.layers.0.self_attn", mla_attn=object())
+    assert K3DSparkModel.kv_cache_layer(SimpleNamespace(), attn) is attn
+
+    class NestedCacheOwner(K3DSparkModel):
+        def kv_cache_layer(self, attn):
+            return attn.mla_attn
+
+    assert NestedCacheOwner.kv_cache_layer(SimpleNamespace(), attn) is attn.mla_attn
 
 
 def test_dspark_mla_uses_compile_free_model_entrypoint():
@@ -121,12 +133,14 @@ def test_k3_dspark_uses_replicated_markov_head(monkeypatch: pytest.MonkeyPatch):
         context_kv_proj_calls.append((args, kwargs))
         return DummyModule()
 
-    monkeypatch.setattr(dspark_mla, "get_draft_quant_config", lambda _: None)
-    monkeypatch.setattr(dspark_mla, "ReplicatedLinear", DummyModule)
-    monkeypatch.setattr(dspark_mla, "MergedColumnParallelLinear", make_context_kv_proj)
-    monkeypatch.setattr(dspark_mla, "RMSNorm", DummyModule)
-    monkeypatch.setattr(dspark_mla, "K3DSparkDecoderLayer", DummyModule)
-    monkeypatch.setattr(dspark_mla, "DSparkMarkovHead", make_markov_head)
+    monkeypatch.setattr(common_dspark_mla, "get_draft_quant_config", lambda _: None)
+    monkeypatch.setattr(common_dspark_mla, "ReplicatedLinear", DummyModule)
+    monkeypatch.setattr(
+        common_dspark_mla, "MergedColumnParallelLinear", make_context_kv_proj
+    )
+    monkeypatch.setattr(common_dspark_mla, "RMSNorm", DummyModule)
+    monkeypatch.setattr(K3DSparkModel, "decoder_layer_cls", DummyModule)
+    monkeypatch.setattr(common_dspark_mla, "DSparkMarkovHead", make_markov_head)
 
     config = SimpleNamespace(
         target_hidden_size=16,
