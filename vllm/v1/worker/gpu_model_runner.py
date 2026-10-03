@@ -993,6 +993,9 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         self.late_interaction_runner.clear()
 
+    def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
+        self.late_interaction_runner.release_queries(query_keys)
+
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
@@ -6531,6 +6534,9 @@ class GPUModelRunner(
         if hasattr(self, "kv_cache_config"):
             delattr(self, "kv_cache_config")
         self.cache_config.num_gpu_blocks = None
+        # Profiling may have rebuilt the InputBatch outside the worker's
+        # "runtime" pool; the real initialize_kv_cache rebuilds it.
+        self._init_block_sizes = []
 
         for layer in self.compilation_config.static_forward_context.values():
             if hasattr(layer, "kv_cache"):
