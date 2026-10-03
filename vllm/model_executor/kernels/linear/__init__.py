@@ -129,6 +129,9 @@ from vllm.model_executor.kernels.linear.mxfp8.marlin import (
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
     RocmDotScaledMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.triton import (
+    TritonMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.xpu import (
     XPUMxFp8LinearKernel,
 )
@@ -304,6 +307,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         MarlinMxFp4LinearKernel,
     },
     "triton": {
+        TritonMxfp8LinearKernel,
         TritonInt8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
         TritonW4A16LinearKernel,
@@ -535,6 +539,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         EmulationMxfp8LinearKernel,
         HummingMxfp8LinearKernel,
         FlashInferTrtllmMxfp8LinearKernel,
+        TritonMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
@@ -1301,6 +1306,7 @@ __all__ = [
     "FlashInferCutlassMxfp8LinearKernel",
     "FlashInferTrtllmMxfp8LinearKernel",
     "MarlinMxfp8LinearKernel",
+    "TritonMxfp8LinearKernel",
     "XPUMxFp8LinearKernel",
     "EmulationMxfp8LinearKernel",
     "CutlassNvFp4LinearKernel",
