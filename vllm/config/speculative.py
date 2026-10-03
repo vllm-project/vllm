@@ -553,6 +553,16 @@ class SpeculativeConfig:
     """Whether to adaptively size the draft-verification budget from per-request
     confidence. Currently only supported for method="dspark"."""
 
+    draft_confidence_threshold: float | None = Field(default=None, gt=0.0, le=1.0)
+    """Stop autoregressive drafting early on drafter confidence, treating
+    num_speculative_tokens as the maximum depth. A request's chain ends before
+    the first draft whose drafter top-1 probability is below this threshold
+    (its first draft is always kept), and the batch stops drafting once no
+    request's chain continues. Every request then verifies the drafts produced
+    up to that point, so the verified length is uniform across the batch.
+    Deciding to stop reads one value per draft step back to the CPU. Requires
+    method 'mtp', 'eagle' or 'eagle3' and Model Runner V2."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -1857,9 +1867,37 @@ class SpeculativeConfig:
                 "omit it."
             )
 
+        if self.draft_confidence_threshold is not None:
+            self._verify_draft_confidence_threshold()
+
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
         return self
+
+    def _verify_draft_confidence_threshold(self) -> None:
+        if self.method not in ("mtp", "eagle", "eagle3"):
+            raise ValueError(
+                "draft_confidence_threshold requires method 'mtp', 'eagle' or "
+                f"'eagle3', got {self.method!r}."
+            )
+        if self.num_speculative_tokens is None or self.num_speculative_tokens < 2:
+            raise ValueError(
+                "draft_confidence_threshold needs num_speculative_tokens >= 2 "
+                "to have a draft step to skip."
+            )
+        conflicts = {
+            "enable_adaptive_verification": self.enable_adaptive_verification,
+            "num_speculative_tokens_per_batch_size": (
+                self.uses_dynamic_speculative_decoding()
+            ),
+            "use_local_argmax_reduction": self.use_local_argmax_reduction,
+            "parallel_drafting": self.parallel_drafting,
+        }
+        for name, enabled in conflicts.items():
+            if enabled:
+                raise ValueError(
+                    f"draft_confidence_threshold is not compatible with {name}."
+                )
 
     def verify_equal_vocab_size_if_draft_model(self):
         if (

@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
+from vllm.v1.worker.gpu.spec_decode.confidence_stop import DraftConfidenceStop
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
@@ -27,6 +28,8 @@ logger = init_logger(__name__)
 
 
 class AutoRegressiveSpeculator(DraftModelSpeculator):
+    supports_draft_confidence_stop = True
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
@@ -95,7 +98,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self._configure_fused_multi_step_decode()
 
     def _configure_fused_multi_step_decode(self) -> None:
-        if self.num_speculative_steps == 1:
+        # The confidence stop decides between steps, so each needs its own graph.
+        if self.num_speculative_steps == 1 or self.confidence_stop is not None:
             self.use_fused_multi_step_decode = False
             return
 
@@ -327,6 +331,16 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             )
         self.on_prefill_end(num_reqs)
 
+        confidence_stop = None
+        if self.confidence_stop is not None and not (dummy_run or is_profile):
+            if input_batch.has_structured_output_reqs:
+                # Grammar masks cover every scheduled draft, so draft them all.
+                self.confidence_stop.full_round(input_batch.idx_mapping_np)
+            else:
+                confidence_stop = self.confidence_stop
+                confidence_stop.begin_round(input_batch.idx_mapping_np)
+                confidence_stop.step_launched()
+
         if num_speculative_tokens <= 1:
             if num_speculative_tokens == 0:
                 self.draft_tokens[:num_reqs].fill_(-1)
@@ -383,14 +397,25 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             if self.use_fused_multi_step_decode
             else self._multi_step_decode
         )
-        decode_fn(
-            num_reqs,
-            dummy_run and skip_attn_for_dummy_run,
-            decode_batch_desc,
-            num_tokens_across_dp,
-            input_batch.seq_lens_cpu_upper_bound,
-            num_speculative_tokens,
-        )
+        if confidence_stop is not None:
+            self._multi_step_decode(
+                num_reqs,
+                False,
+                decode_batch_desc,
+                num_tokens_across_dp,
+                input_batch.seq_lens_cpu_upper_bound,
+                num_speculative_tokens,
+                confidence_stop,
+            )
+        else:
+            decode_fn(
+                num_reqs,
+                dummy_run and skip_attn_for_dummy_run,
+                decode_batch_desc,
+                num_tokens_across_dp,
+                input_batch.seq_lens_cpu_upper_bound,
+                num_speculative_tokens,
+            )
         self.on_multi_step_decode_end(num_reqs)
 
         return self.draft_tokens[:num_reqs]
@@ -517,6 +542,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
         num_speculative_steps: int,
+        confidence_stop: DraftConfidenceStop | None = None,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -545,6 +571,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     step=step,
                 )
 
+            # Wait for the previous step only now, so that the metadata above
+            # was built while it ran.
+            if confidence_stop is not None and not confidence_stop.should_continue():
+                return
+
             self.current_draft_step.fill_(step)
 
             if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -560,6 +591,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     cudagraph_runtime_mode=batch_desc.cg_mode,
                     num_speculative_steps=num_speculative_steps,
                 )
+            if confidence_stop is not None:
+                confidence_stop.step_launched()
+
+        if confidence_stop is not None:
+            confidence_stop.end_round()
 
     def _fused_multi_step_decode(
         self,

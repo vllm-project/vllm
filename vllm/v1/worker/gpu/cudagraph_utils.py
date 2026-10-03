@@ -291,6 +291,16 @@ class CudaGraphManager:
                     for num_spec in dense_schedule[1:]
                 }
             )
+        elif (
+            speculative_config
+            and speculative_config.draft_confidence_threshold is not None
+            and self.decode_query_len > self.vllm_config.num_speculative_tokens
+        ):
+            # A confidence stop verifies 1..num_speculative_tokens drafts.
+            num_spec = self.vllm_config.num_speculative_tokens
+            decode_query_lens = list(
+                range(self.decode_query_len - num_spec + 1, self.decode_query_len + 1)
+            )
         else:
             decode_query_lens = [self.decode_query_len]
 

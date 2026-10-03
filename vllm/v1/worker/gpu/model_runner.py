@@ -1300,6 +1300,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_draft_tokens_np = np.fromiter(
                 num_drafts_iter, dtype=np.int32, count=num_reqs
             )
+            confidence_stop = getattr(self.speculator, "confidence_stop", None)
+            if (
+                confidence_stop is not None
+                and not scheduler_output.has_structured_output_requests
+            ):
+                # Verify only the drafts of the last round, which may have
+                # stopped short of the scheduled placeholders. The scheduler
+                # counts the trimmed drafts as rejected. Grammar masks follow
+                # the scheduled layout, so such batches draft and verify all.
+                num_verifiable = np.minimum(
+                    num_draft_tokens_np,
+                    confidence_stop.num_verifiable_drafts(idx_mapping_np),
+                )
+                num_scheduled_tokens -= num_draft_tokens_np - num_verifiable
+                num_draft_tokens_np = num_verifiable
+                num_toks = int(num_scheduled_tokens.sum())
+                max_query_len = int(num_scheduled_tokens.max())
             if self.adaptive_verification is not None:
                 num_toks = self.adaptive_verification.get_num_tokens(
                     num_tokens_per_req, draft_tokens
@@ -1742,6 +1759,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
+            max_query_len = int(batch_req_state.num_scheduled_tokens.max())
             if batch_req_state.has_prefill:
                 # Varlen decode graphs replay decodes only, and their bound
                 # alone would admit a short prefill.
