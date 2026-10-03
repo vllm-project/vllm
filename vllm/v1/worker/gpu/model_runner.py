@@ -682,7 +682,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
-            kernel_block_sizes=self.kernel_block_sizes,
             slot_mapping_enabled=slot_mapping_enabled,
             dcp_sharded=dcp_sharded,
             cp_size=self.dcp_size,
@@ -768,6 +767,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
                 block_tables=self.block_tables,
+                # Draft groups build their own metadata, so they map the views too.
+                attn_groups=(
+                    g
+                    for groups in self.attn_groups
+                    + getattr(self.speculator, "attn_groups", [])
+                    for g in groups
+                ),
             )
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
