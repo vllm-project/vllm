@@ -7,7 +7,7 @@ import torch
 
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.async_utils import make_async
-from vllm.utils.sparse_utils import load_torch_payload
+from vllm.utils.sparse_utils import TensorDecodeBudget, load_torch_payload
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 def safe_load_prompt_embeds(
     model_config: "ModelConfig",
     embed: bytes | str,
+    budget: TensorDecodeBudget | None = None,
 ) -> torch.Tensor:
     if not model_config.enable_prompt_embeds:
         raise VLLMValidationError(
@@ -26,7 +27,9 @@ def safe_load_prompt_embeds(
     # Decode before loading so a body which is not base64 keeps raising
     # binascii.Error, which is a ValueError and already answered 400.
     payload: Final = pybase64.b64decode(embed, validate=True)
-    tensor = load_torch_payload(payload, parameter="prompt_embeds")
+    tensor = load_torch_payload(
+        payload, parameter="prompt_embeds", budget=budget
+    )
 
     if tensor.dim() > 2:
         tensor = tensor.squeeze(0)
