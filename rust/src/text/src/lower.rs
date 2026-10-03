@@ -151,13 +151,6 @@ pub fn lower_sampling_params(
         sampling_limits.max_model_len,
         prompt_len,
     )?;
-    // After the prompt-length check, which bounds the padded table's rows.
-    let prompt_logprob_token_ids = lower_prompt_logprob_token_ids(
-        prompt_logprob_token_ids,
-        prompt_logprob_start,
-        prompt_len,
-        sampling_limits.model_vocab_size,
-    )?;
     let min_tokens = min_tokens.unwrap_or(0);
     if min_tokens > max_tokens {
         return Err(Error::MinTokensExceedsMaxTokens {
@@ -191,7 +184,12 @@ pub fn lower_sampling_params(
         thinking_token_budget,
         logprobs,
         prompt_logprobs,
-        prompt_logprob_token_ids,
+        prompt_logprob_token_ids: lower_prompt_logprob_token_ids(
+            prompt_logprob_token_ids,
+            prompt_logprob_start,
+            prompt_len,
+            sampling_limits.model_vocab_size,
+        )?,
         prompt_logprob_start,
         min_p,
         frequency_penalty,
