@@ -1542,7 +1542,7 @@ class ModelMetrics:
         # Build a single batch context
         ctx = ExecutionContext()
 
-        # Process new requests (these are in prefill phase)
+        # Process requests newly sent to workers.
         for new_req in scheduler_output.scheduled_new_reqs:
             req_id = new_req.req_id
             num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
@@ -1552,7 +1552,11 @@ class ModelMetrics:
             # For new requests, context_len = num_computed_tokens + num_tokens
             # num_computed_tokens represents previously computed tokens in the sequence
             context_len = new_req.num_computed_tokens + num_tokens
-            ctx.add(num_tokens, context_len, is_prefill=True)
+            num_spec_tokens = len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, ())
+            )
+            is_prefill = num_spec_tokens == 0 or num_tokens - num_spec_tokens > 1
+            ctx.add(num_tokens, context_len, is_prefill)
 
         # Process cached requests (continuing requests)
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -1565,9 +1569,10 @@ class ModelMetrics:
             num_computed_tokens = cached_reqs.num_computed_tokens[i]
             context_len = num_computed_tokens + num_tokens
 
-            # Cached requests are typically in decode phase (num_tokens == 1)
-            # unless they're doing chunked prefill (num_tokens > 1)
-            is_prefill = num_tokens > 1
+            num_spec_tokens = len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, ())
+            )
+            is_prefill = num_tokens - num_spec_tokens > 1
             ctx.add(num_tokens, context_len, is_prefill)
 
         num_flops_breakdown = self.get_num_flops_breakdown(ctx, True)
