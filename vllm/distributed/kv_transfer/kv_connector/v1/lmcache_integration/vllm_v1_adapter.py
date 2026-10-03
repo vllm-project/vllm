@@ -1089,10 +1089,17 @@ class LMCacheConnectorV1Impl:
 
             skip_leading_tokens = save_spec.skip_leading_tokens
             if self.kv_role == "kv_producer":
-                assert request.disagg_spec is not None
-                skip_leading_tokens = min(
-                    skip_leading_tokens, request.disagg_spec.num_transferred_tokens
-                )
+                # Missing handoff state is a per-request condition. Only a
+                # request that carries a disagg spec is a transfer; otherwise
+                # honor can_save instead of killing the engine.
+                if request.disagg_spec is None:
+                    if not save_spec.can_save:
+                        continue
+                else:
+                    skip_leading_tokens = min(
+                        skip_leading_tokens,
+                        request.disagg_spec.num_transferred_tokens,
+                    )
 
             if skip_leading_tokens == len(token_ids):
                 continue  # skip this request
