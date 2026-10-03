@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import mmap
+import threading
 from collections.abc import Collection, Iterable, Mapping
 from types import SimpleNamespace
 from typing import Any
@@ -39,10 +40,17 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
-from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+from vllm.v1.kv_offload.tiering.base import JobResult, ParentContext, TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.kvcr import manager as kvcr_manager
 from vllm.v1.kv_offload.tiering.kvcr.manager import KVCRSecondaryTierManager
+from vllm.v1.kv_offload.tiering.manager import (
+    TieringTransferJob,
+)
+
+
+def _parent_ctx(view):
+    return ParentContext(threading.Lock(), view)
 
 
 def _op_entries(
@@ -167,12 +175,30 @@ def _job(
     key: OffloadKey | None = None,
     chunk_id: int = 0,
 ) -> TransferJob:
-    return TransferJob(
+    chunk_ids = np.array([chunk_id], dtype=np.int64)
+    return TieringTransferJob(
         job_id=job_id,
         keys=[key if key is not None else OffloadKey(b"k0")],
-        chunk_ids=np.array([chunk_id], dtype=np.int64),
         is_promotion=True,
         req_context=req_context,
+        alloc_fn=lambda keys, ctx: (list(keys), chunk_ids),
+    )
+
+
+def _store_job(
+    job_id: int,
+    req_context: ReqContext,
+    key: OffloadKey | None = None,
+    chunk_id: int = 0,
+) -> TransferJob:
+    keys = [key if key is not None else OffloadKey(b"k0")]
+    chunk_ids = np.array([chunk_id], dtype=np.int64)
+    return TieringTransferJob(
+        job_id=job_id,
+        req_context=req_context,
+        keys=keys,
+        is_promotion=False,
+        chunk_ids=chunk_ids,
     )
 
 
@@ -241,7 +267,7 @@ def _make_tier(
                 self_describing_kv_events=self_describing_kv_events,
             ),
         ),
-        primary_kv_view=(
+        parent_ctx=_parent_ctx(
             primary_kv_view
             if primary_kv_view is not None
             else memoryview(np.zeros((4, 16), dtype=np.int8))
@@ -446,9 +472,9 @@ def test_kvcr_tier_batches_consecutive_completions(monkeypatch):
         ctx.set_offload_key_position(key, end_token)
     other = ReqContext(req_id="other")
     other.set_offload_key_position(head, 16)
-    tier.submit_store(_job(7, ctx, key=tail))
+    tier.submit_store(_store_job(7, ctx, key=tail))
     tier.submit_load(_job(8, ctx, key=middle))
-    tier.submit_store(_job(9, other, key=head))
+    tier.submit_store(_store_job(9, other, key=head))
     tier.submit_load(_job(10, ctx, key=middle))
 
     assert [job.job_id for job in tier.get_finished_jobs()] == [7, 8, 9, 10]
@@ -482,10 +508,9 @@ def test_kvcr_tier_maps_query_status(monkeypatch, status, expected):
     [
         (None, [1, 3], True),
         ((b"k2", b"k0"), [3, 1], True),
-        (None, [1], False),
         ((b"k0", b"other"), [1, 3], False),
     ],
-    ids=["original-keys", "reordered-keys", "short-chunks", "unexpected-key"],
+    ids=["original-keys", "reordered-keys", "unexpected-key"],
 )
 def test_kvcr_tier_serves_primary_pin_request(
     monkeypatch, job_keys, chunk_ids, success
@@ -506,12 +531,12 @@ def test_kvcr_tier_serves_primary_pin_request(
             return LookupResult.HIT if key in hit_keys else LookupResult.MISS
 
         def create_store_job(self, requested_keys, req_context):
-            return TransferJob(
-                job_id=11,
-                keys=requested_keys if job_keys is None else job_keys,
+            return TieringTransferJob(
+                11,
+                req_context,
+                list(requested_keys if job_keys is None else job_keys),
+                is_promotion=False,
                 chunk_ids=np.array(chunk_ids, dtype=np.int32),
-                is_promotion=True,
-                req_context=req_context,
             )
 
         def on_request_finished(self, req_context):
@@ -634,7 +659,7 @@ def test_kvcr_tier_stores_and_emits_inventory(monkeypatch):
     ]
 
     key = OffloadKey(b"k0")
-    tier.submit_store(_job(11, ReqContext(req_id="req"), key=key, chunk_id=2))
+    tier.submit_store(_store_job(11, ReqContext(req_id="req"), key, chunk_id=2))
 
     _, blocks = kvcr.deposit_calls[0]
     assert blocks[key] == [
@@ -685,12 +710,15 @@ def test_kvcr_tier_accumulates_block_results(monkeypatch, successes, expected):
     tier = _make_tier(monkeypatch, kvcr)
     keys = [OffloadKey(b"k0"), OffloadKey(b"k1")]
     tier.submit_load(
-        TransferJob(
+        TieringTransferJob(
             job_id=13,
             keys=keys,
-            chunk_ids=np.array([0, 1], dtype=np.int64),
             is_promotion=True,
             req_context=ReqContext(req_id="req"),
+            alloc_fn=lambda keys, ctx: (
+                list(keys),
+                np.array([0, 1], dtype=np.int64),
+            ),
         )
     )
 

@@ -7,6 +7,7 @@ until explicitly released, allowing precise control over when the manager
 observes store completions and their apparent latency.
 """
 
+import threading
 import time
 from collections.abc import Iterable
 from unittest.mock import MagicMock, patch
@@ -31,6 +32,7 @@ from vllm.v1.kv_offload.tiering.backpressure import (
 )
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    ParentContext,
     SecondaryTierManager,
     TieringOffloadingMetrics,
     TransferJob,
@@ -49,6 +51,10 @@ _BP_FAILURE_THRESHOLD = EMABackpressureDetector.DEFAULT_FAILURE_THRESHOLD
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
+
+
+def _parent_ctx(view, lock=None):
+    return ParentContext(lock or threading.Lock(), view)
 
 
 def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
@@ -79,11 +85,11 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
     """
 
     def __init__(
-        self, offloading_spec, primary_kv_view, tier_type, backpressure_detector=None
+        self, offloading_spec, parent_ctx, tier_type, backpressure_detector=None
     ):
         super().__init__(
             offloading_spec,
-            primary_kv_view,
+            parent_ctx,
             tier_type,
             backpressure_detector=backpressure_detector,
         )
@@ -248,7 +254,7 @@ class TestIdleDecay:
 
 class TestBackpressure:
     @pytest.fixture
-    def setup(self):
+    def setup(self, manager_lock):
         mock_region = _mock_mmap_region(20)
         self.primary = CPUPrimaryTierOffloadingManager(
             num_chunks=20, mmap_region=mock_region
@@ -256,7 +262,7 @@ class TestBackpressure:
         mock_view = mock_region.create_kv_memoryview()
         self.tier = DelayedSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_view,
+            parent_ctx=_parent_ctx(mock_view, manager_lock),
             tier_type="delayed",
             backpressure_detector=EMABackpressureDetector(
                 high_water_s=_BP_HIGH_WATER_S,
@@ -265,6 +271,7 @@ class TestBackpressure:
             ),
         )
         self.manager = TieringOffloadingManager(
+            lock=manager_lock,
             primary_tier=self.primary,
             secondary_tiers=[self.tier],
         )
@@ -574,6 +581,7 @@ class TestBackpressure:
         bp.store_latency_ema = _BP_HIGH_WATER_S * 4
 
         # Lookups should still initiate promotion.
+        self.manager.on_new_request(_CTX)
         for b in blocks:
             result = self.manager.lookup(b, _CTX)
             assert result is LookupResult.HIT_PENDING

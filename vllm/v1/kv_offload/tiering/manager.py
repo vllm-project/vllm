@@ -19,9 +19,10 @@ Key Design Principles:
    protecting chunks from eviction until complete_read() is called
 """
 
+import functools
 import threading
 import time
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -92,7 +93,6 @@ class PendingPromotion:
 
     req_context: ReqContext
     keys: list[OffloadKey] = field(default_factory=list)
-    chunk_ids: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -102,10 +102,118 @@ class RequestState:
     is_finished: bool = False
     request_level_tiers: set[int] | None = None
     pending_cascade_keys: list[OffloadKey] = field(default_factory=list)
+    promotion_job_ids: set[JobId] = field(default_factory=set)
+
+    # Remaining promotion demand budget for the current scheduler step;
+    # None until the request's first initiate_promotion of the step.
+    _promotion_budget: int | None = None
+    _evictable_primary_hits: set[OffloadKey] = field(default_factory=set)
+
+    def on_evictable_primary_hit(self, key: OffloadKey):
+        self._evictable_primary_hits.add(key)
+
+    def on_initiate_promotion(self, primary_tier: CPUOffloadingManager) -> bool:
+        """Return true if promotion initiation doesn't exceed budget."""
+        if self._promotion_budget is None:
+            self._promotion_budget = primary_tier.get_num_available_chunks()
+        self._promotion_budget -= 1
+        # primary_tier.get_num_available_chunks() also counts the number of
+        # evictable chunks. Factor this requests keys in the evictable list
+        # so we don't double count the budget.
+        return self._promotion_budget - len(self._evictable_primary_hits) >= 0
+
+    def reset_promotion_budget(self):
+        self._promotion_budget = None
+        self._evictable_primary_hits.clear()
+
+
+PrimaryAllocFn = Callable[
+    [Collection[OffloadKey], ReqContext], tuple[list[OffloadKey], np.ndarray] | None
+]
+
+
+class TieringTransferJob(TransferJob):
+    """TransferJob whose keys/chunk_ids are memoized in ``_keys_chunks``.
+
+    A promotion job passes ``alloc_fn`` and materializes lazily, on the
+    tier's first access, by claiming primary slots through it. A cascade
+    job passes ``chunk_ids`` instead and is materialized at construction.
+    ``_keys_chunks is None`` means the claim has not been materialized yet.
+    """
+
+    def __init__(
+        self,
+        job_id: JobId,
+        req_context: ReqContext,
+        keys: Collection[OffloadKey],
+        is_promotion: bool,
+        alloc_fn: PrimaryAllocFn | None = None,
+        chunk_ids: np.ndarray | None = None,
+    ):
+        super().__init__(job_id, req_context, is_promotion=is_promotion)
+        self.requested_keys = keys
+        self._alloc_fn = alloc_fn
+        self._is_alloc_failed = False
+        self._is_cancelled = False
+        self._keys_chunks: tuple[Collection[OffloadKey], np.ndarray] | None = None
+
+        if is_promotion:
+            assert alloc_fn is not None and chunk_ids is None, (
+                "Promotion jobs materialize lazily"
+            )
+        else:
+            # Materialized at construction
+            assert chunk_ids is not None and alloc_fn is None, (
+                "Cascade jobs must materialize at construction"
+            )
+            assert len(chunk_ids) == len(keys), "Mismatch between chunk IDs and keys"
+            self._keys_chunks = (keys, chunk_ids)
+
+    def is_materialized(self) -> bool:
+        return self._keys_chunks is not None
+
+    def cancel(self) -> None:
+        """Refuse later materialization: the request is finished.
+
+        Checked under the manager lock, so it cannot race a tier worker's
+        materialize() call.
+        """
+        self._is_cancelled = True
+
+    def materialize(self) -> bool:
+        if not self.is_promotion:
+            # Cascade jobs materialize at construction
+            return True
+
+        if self._is_cancelled:
+            return False
+
+        assert self._keys_chunks is None and not self._is_alloc_failed, (
+            f"TransferJob {self.job_id} materialized more than once"
+        )
+        assert self._alloc_fn is not None
+        alloc = self._alloc_fn(self.requested_keys, self.req_context)
+        if alloc is None:
+            self._is_alloc_failed = True
+            return False
+        self._keys_chunks = alloc
+        return True
+
+    @property
+    def keys(self) -> Collection[OffloadKey]:
+        if self._keys_chunks is None:
+            raise ValueError("TransferJob not materialized; call materialize() first")
+        return self._keys_chunks[0]
+
+    @property
+    def chunk_ids(self) -> np.ndarray:
+        if self._keys_chunks is None:
+            raise ValueError("TransferJob not materialized; call materialize() first")
+        return self._keys_chunks[1]
 
 
 class JobMetadata(NamedTuple):
-    transfer_job: TransferJob
+    transfer_job: TieringTransferJob
     tier_idx: int
 
 
@@ -277,6 +385,7 @@ class TieringOffloadingManager(OffloadingManager):
 
     def __init__(
         self,
+        lock: threading.Lock,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
         tier_poll_interval_s: float = DEFAULT_TIER_POLL_INTERVAL_S,
@@ -284,6 +393,8 @@ class TieringOffloadingManager(OffloadingManager):
         """Initialize the TieringOffloadingManager.
 
         Args:
+            lock: Manager lock, to be held when calling into this Manager's
+                functions (for example by the secondary tiers).
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
@@ -296,7 +407,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Guards this manager and every tier it composes, the primary tier
         # included. A real lock because the tier-poll thread enters the
         # manager too; the primary tier has none of its own.
-        self._lock = threading.Lock()
+        self._lock = lock
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
 
@@ -358,6 +469,12 @@ class TieringOffloadingManager(OffloadingManager):
         self._tier_poll_stop = threading.Event()
         self._tier_poll_thread: threading.Thread | None = None
         self._start_tier_poll_thread()
+
+        # set of keys being promoted
+        self._inflight_promotion_keys: set[OffloadKey] = set()
+        # Requests whose promotion failed to allocate primary slots
+        # atleast once. Request discarded in _maybe_finalize_request.
+        self._promotion_failed_requests: set[str] = set()
 
     @property
     @override
@@ -516,13 +633,21 @@ class TieringOffloadingManager(OffloadingManager):
         self._job_id_counter += 1
         return job_id
 
-    def _register_job(self, transfer_job: TransferJob, tier_idx: int) -> None:
+    def _register_job(self, transfer_job: TieringTransferJob, tier_idx: int) -> None:
         job_metadata = JobMetadata(transfer_job, tier_idx)
         self._jobs[transfer_job.job_id] = job_metadata
+        if transfer_job.is_promotion:
+            state = self._req_state[transfer_job.req_context.req_id]
+            state.promotion_job_ids.add(transfer_job.job_id)
         self._metrics.on_job_registered(job_metadata)
 
     def _pop_job(self, job_id: JobId) -> JobMetadata | None:
-        return self._jobs.pop(job_id, None)
+        job_metadata = self._jobs.pop(job_id, None)
+        if job_metadata is not None and job_metadata.transfer_job.is_promotion:
+            state = self._req_state.get(job_metadata.transfer_job.req_context.req_id)
+            if state is not None:
+                state.promotion_job_ids.discard(job_id)
+        return job_metadata
 
     def _maybe_process_finished_jobs(self):
         """Poll secondary tiers for completed jobs (at most once per step).
@@ -540,29 +665,43 @@ class TieringOffloadingManager(OffloadingManager):
         self, job_metadata: JobMetadata, completed_job: JobResult
     ) -> None:
         transfer_job = job_metadata.transfer_job
-        successful_keys = completed_job.successful_keys
-        failed_keys: Collection[OffloadKey]
+
+        def _maybe_update_load_sources(failed_keys: set[OffloadKey]):
+            load_sources = self._request_load_sources.get(
+                transfer_job.req_context.req_id
+            )
+            if load_sources is not None:
+                source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
+                for key in failed_keys:
+                    if load_sources.get(key) == source:
+                        del load_sources[key]
+
+        # Clear in-flight promotion keys book-keeping.
+        self._inflight_promotion_keys.difference_update(transfer_job.requested_keys)
+
+        if not transfer_job.is_materialized():
+            ## Promotion failed. lets not doom the request into a retry loop.
+            req_id = transfer_job.req_context.req_id
+            if req_id in self._req_state:
+                self._promotion_failed_requests.add(req_id)
+            _maybe_update_load_sources(set(transfer_job.requested_keys))
+            return
+
         if completed_job.success:
             successful_keys = transfer_job.keys
-            failed_keys = ()
-        elif successful_keys:
-            failed_keys_set = set(transfer_job.keys)
-            assert failed_keys_set.issuperset(successful_keys), (
+        else:
+            successful_keys = completed_job.successful_keys or ()
+            assert set(transfer_job.keys).issuperset(successful_keys), (
                 f"Finished promotion job_id {completed_job.job_id} "
                 "reported unknown successful keys"
             )
-            failed_keys_set.difference_update(successful_keys)
-            failed_keys = failed_keys_set
-        else:
-            successful_keys = ()
-            failed_keys = transfer_job.keys
+        failed_keys = set(transfer_job.keys) - set(successful_keys)
 
-        load_sources = self._request_load_sources.get(transfer_job.req_context.req_id)
-        if load_sources is not None:
-            source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
-            for key in failed_keys:
-                if load_sources.get(key) == source:
-                    del load_sources[key]
+        # Keys the promotion skipped because they were already in the
+        # primary and were not fetched from the tier for this request; drop
+        # their entries so they are reported as host hits.
+        already_in_primary = set(transfer_job.requested_keys) - set(transfer_job.keys)
+        _maybe_update_load_sources(failed_keys | already_in_primary)
 
         if successful_keys:
             self.primary_tier.complete_write(
@@ -743,6 +882,8 @@ class TieringOffloadingManager(OffloadingManager):
             lookup_duration,
         )
         if primary_hit is LookupResult.HIT:
+            if self.primary_tier.is_evictable(key):
+                self._req_state[req_context.req_id].on_evictable_primary_hit(key)
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
@@ -792,6 +933,28 @@ class TieringOffloadingManager(OffloadingManager):
             return load_sources[key]
         return self.primary_tier.get_load_source(key, req_context)
 
+    def _promotion_allocation(
+        self,
+        tier_idx: int,
+        offload_keys: Collection[OffloadKey],
+        req_context: ReqContext,
+    ) -> tuple[list[OffloadKey], np.ndarray] | None:
+        """Allocate primary tier slots for promotion"""
+        primary_write_result = self.primary_tier.prepare_write(
+            offload_keys, req_context
+        )
+
+        if primary_write_result is None:
+            # Primary tier is full
+            self._metrics.on_promotion_allocation_failure()
+            return None
+
+        store_spec = primary_write_result.store_spec
+        assert isinstance(store_spec, CPULoadStoreSpec)
+
+        self._metrics.on_promotion_allocated(tier_idx, len(store_spec.chunk_ids))
+        return primary_write_result.keys_to_store, store_spec.chunk_ids
+
     def _initiate_promotion(
         self,
         tier_idx: int,
@@ -800,50 +963,53 @@ class TieringOffloadingManager(OffloadingManager):
     ) -> bool:
         """Queue a chunk for promotion from a secondary tier to the primary tier.
 
-        Allocates space in the primary tier immediately (sets ref_cnt=-1 so
-        subsequent lookups within the same step see the slot as in-flight),
-        then defers the actual submit_load() call to _flush_pending_promotions()
-        so all chunks queued during one engine step are submitted as a single
-        batched job.
+        No primary slots are allocated here. The chunk is recorded in
+        _inflight_promotion_keys (so subsequent lookups within the same step
+        see it as in-flight), and _flush_pending_promotions() later submits
+        one batched job per (tier, request). Primary slots are allocated
+        lazily by TieringTransferJob.materialize(), when the tier first
+        needs them.
 
         Args:
             tier_idx: The secondary tier index to promote from
             key: Chunk to promote
-            req_context: Per-request context forwarded to primary.prepare_write().
+            req_context: Per-request context forwarded to the promotion job.
 
         Returns:
-            True if promotion was initiated, False if primary tier is full.
+            True if promotion was scheduled or already in flight.
+            False,
+             - if the request's promotion demand this step exceeds primary tier
+               availability. or,
+             - if the request failed promotion once already.
 
         """
-        # Allocate space in primary tier for promoted chunk.
-        # Must happen immediately so primary.lookup() returns None (in-flight)
-        # for this key on any subsequent lookup() call within the same step,
-        # preventing duplicate promotion attempts.
-        primary_write_result = self.primary_tier.prepare_write([key], req_context)
+        if key in self._inflight_promotion_keys:
+            return True
 
-        if primary_write_result is None:
-            # Primary tier is full; caller should treat the chunk as unavailable
-            # rather than retrying indefinitely.
-            self._metrics.on_promotion_allocation_failure()
+        if req_context.req_id in self._promotion_failed_requests:
             return False
 
-        store_spec = primary_write_result.store_spec
-        assert isinstance(store_spec, CPULoadStoreSpec)
+        # Verify if the promotion would exceed budget.
+        state = self._req_state[req_context.req_id]
+        if not state.on_initiate_promotion(self.primary_tier):
+            return False
+
+        # Record load_sources
         load_sources = self._request_load_sources.setdefault(req_context.req_id, {})
-        source = self.secondary_tiers[tier_idx].cache_hit_source
-        for promoted_key in primary_write_result.keys_to_store:
-            load_sources[promoted_key] = source
+        load_sources[key] = self.secondary_tiers[tier_idx].cache_hit_source
+
         # Defer submit_load to on_schedule_end(). Group by (tier, request) so
         # each request's chunks are submitted as one batched job per tier.
         tier_pending = self._pending_load_submissions.setdefault(tier_idx, {})
         ctx_id = req_context.req_id
         if ctx_id not in tier_pending:
             tier_pending[ctx_id] = PendingPromotion(
-                keys=[], chunk_ids=[], req_context=req_context
+                keys=[],
+                req_context=req_context,
             )
         entry = tier_pending[ctx_id]
-        entry.keys.extend(primary_write_result.keys_to_store)
-        entry.chunk_ids.extend(store_spec.chunk_ids)
+        entry.keys.append(key)
+        self._inflight_promotion_keys.add(key)
         return True
 
     def _flush_pending_promotions(self) -> None:
@@ -857,14 +1023,15 @@ class TieringOffloadingManager(OffloadingManager):
 
         for tier_idx, pending_by_ctx in self._pending_load_submissions.items():
             tier = self.secondary_tiers[tier_idx]
+            alloc_fn = functools.partial(self._promotion_allocation, tier_idx)
             for entry in pending_by_ctx.values():
                 job_id = self._next_job_id()
-                job_metadata = TransferJob(
-                    job_id=job_id,
-                    keys=entry.keys,
-                    chunk_ids=np.array(entry.chunk_ids, dtype=np.int32),
+                job_metadata = TieringTransferJob(
                     is_promotion=True,
+                    job_id=job_id,
                     req_context=entry.req_context,
+                    keys=entry.keys,
+                    alloc_fn=alloc_fn,
                 )
                 self._register_job(job_metadata, tier_idx)
                 tier.submit_load(job_metadata)
@@ -1096,12 +1263,12 @@ class TieringOffloadingManager(OffloadingManager):
         primary_chunks_spec = self.primary_tier.prepare_read(keys, req_context)
         assert isinstance(primary_chunks_spec, CPULoadStoreSpec)
         job_id = self._next_job_id()
-        job_metadata = TransferJob(
+        job_metadata = TieringTransferJob(
+            is_promotion=False,
             job_id=job_id,
+            req_context=req_context,
             keys=keys,
             chunk_ids=primary_chunks_spec.chunk_ids,
-            is_promotion=False,
-            req_context=req_context,
         )
         self._register_job(job_metadata, tier_idx)
         return job_metadata
@@ -1147,7 +1314,24 @@ class TieringOffloadingManager(OffloadingManager):
         self.primary_tier.on_request_finished(req_context)
         state = self._req_state[req_context.req_id]
         state.is_finished = True
+        self._cancel_request_promotions(req_context.req_id)
         self._maybe_finalize_request(req_context.req_id, exclude_tier_idx)
+
+    def _cancel_request_promotions(self, req_id: str) -> None:
+        """Stop a finished request's promotions before they materialize.
+
+        Drops queued (not yet submitted) promotions and cancels in-flight
+        promotion jobs.
+        """
+        for tier_idx, pending_by_ctx in list(self._pending_load_submissions.items()):
+            entry = pending_by_ctx.pop(req_id, None)
+            if entry is not None:
+                self._inflight_promotion_keys.difference_update(entry.keys)
+            if not pending_by_ctx:
+                del self._pending_load_submissions[tier_idx]
+        state = self._req_state[req_id]
+        for job_id in state.promotion_job_ids:
+            self._jobs[job_id].transfer_job.cancel()
 
     def _maybe_finalize_request(
         self,
@@ -1174,6 +1358,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._metrics.on_request_finished(state.req_context)
         self._request_load_sources.pop(req_id, None)
         del self._req_state[req_id]
+        self._promotion_failed_requests.discard(req_id)
 
     @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
@@ -1196,6 +1381,11 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = False
 
         self._flush_pending_promotions()
+        # The demand budget is per step: a request's next lookup walk starts
+        # from the primary tier's availability at that time.
+        for req_state in self._req_state.values():
+            req_state.reset_promotion_budget()
+
         # Keys parked by this step's prepare_store cannot have completed yet, so
         # they are simply re-parked here and retried on the next step. That is
         # safe: _maybe_finalize_request() holds off while pending_cascade_keys is
@@ -1277,11 +1467,21 @@ class TieringOffloadingManager(OffloadingManager):
             "drain_jobs() returned with deferred releases still pending"
         )
 
+        # _inflight_promotion_keys are updated as soon as promotions are initiated.
+        # Work in _pending_load_submissions are never submitted (cleared below).
+        for tier_idx, pending_by_ctx in self._pending_load_submissions.items():
+            for entry in pending_by_ctx.values():
+                self._inflight_promotion_keys.difference_update(entry.keys)
+        assert not self._inflight_promotion_keys, (
+            "inflight promotion keys survived drain + pending-submission removal"
+        )
+
         # Deferred promotion submissions reserve primary slots that the
         # reset below invalidates; their submit_load() has not yet been
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
         self._request_load_sources.clear()
+        self._promotion_failed_requests.clear()
         self._metrics.assert_idle()
 
         finished_req_ids = []

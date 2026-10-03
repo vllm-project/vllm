@@ -30,6 +30,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    ParentContext,
     ParentManager,
     SecondaryTierManager,
     TransferJob,
@@ -105,17 +106,23 @@ class _QuietTier(_FakeTier):
     tolerates_off_thread_polling: ClassVar[bool] = False
 
 
-def _make_manager(tier_cls=_FakeTier, num_chunks: int = 8, **kwargs):
+def _parent_ctx(view, lock=None):
+    return ParentContext(lock or threading.Lock(), view)
+
+
+def _make_manager(tier_cls=_FakeTier, num_chunks: int = 8, lock=None, **kwargs):
     primary = CPUPrimaryTierOffloadingManager(
         num_chunks=num_chunks,
         mmap_region=_mock_mmap_region(num_chunks),
     )
+    parent_ctx = _parent_ctx(primary.get_kv_memoryview(), lock)
     tier = tier_cls(
         offloading_spec=MagicMock(),
-        primary_kv_view=primary.get_kv_memoryview(),
+        parent_ctx=parent_ctx,
         tier_type="fake",
     )
     manager = TieringOffloadingManager(
+        lock=parent_ctx.lock,
         primary_tier=primary,
         secondary_tiers=[tier],
         **kwargs,
@@ -124,9 +131,9 @@ def _make_manager(tier_cls=_FakeTier, num_chunks: int = 8, **kwargs):
 
 
 @pytest.fixture
-def manager_and_tier(request):
+def manager_and_tier(request, manager_lock):
     kwargs = getattr(request, "param", {})
-    manager, tier = _make_manager(**kwargs)
+    manager, tier = _make_manager(lock=manager_lock, **kwargs)
     try:
         yield manager, tier
     finally:
@@ -220,16 +227,16 @@ def test_zero_interval_disables_the_thread(manager_and_tier):
     assert tier.serves == 1
 
 
-def test_no_thread_when_no_tier_asks_for_one():
+def test_no_thread_when_no_tier_asks_for_one(manager_lock):
     """A tier that does not opt in must not cost a thread."""
-    manager, tier = _make_manager(tier_cls=_QuietTier)
+    manager, tier = _make_manager(tier_cls=_QuietTier, lock=manager_lock)
     try:
         assert not _live_control_threads()
     finally:
         manager.shutdown()
 
 
-def test_tier_that_did_not_opt_in_is_not_serviced_off_thread():
+def test_tier_that_did_not_opt_in_is_not_serviced_off_thread(manager_lock):
     """Only opted-in tiers are polled and served by the control thread.
 
     A tier that expects the scheduler thread must not be dragged onto another
@@ -242,13 +249,15 @@ def test_tier_that_did_not_opt_in_is_not_serviced_off_thread():
         num_chunks=num_chunks,
         mmap_region=_mock_mmap_region(num_chunks),
     )
+    parent_ctx = _parent_ctx(primary.get_kv_memoryview(), manager_lock)
     common = {
         "offloading_spec": MagicMock(),
-        "primary_kv_view": primary.get_kv_memoryview(),
+        "parent_ctx": parent_ctx,
     }
     opted_in = _FakeTier(tier_type="fake", **common)
     quiet = _QuietTier(tier_type="quiet", **common)
     manager = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=primary,
         secondary_tiers=[opted_in, quiet],
     )
@@ -308,7 +317,7 @@ class _LookingUpTier(_FakeTier):
         return super().get_finished_jobs()
 
 
-def test_parent_lookup_while_serving_keeps_the_round_contained():
+def test_parent_lookup_while_serving_keeps_the_round_contained(manager_lock):
     """A lookup issued while serving must not escape the control round.
 
     Before the fix it ran the step's once-per-step poll from the control
@@ -321,13 +330,15 @@ def test_parent_lookup_while_serving_keeps_the_round_contained():
         num_chunks=num_chunks,
         mmap_region=_mock_mmap_region(num_chunks),
     )
+    parent_ctx = _parent_ctx(primary.get_kv_memoryview(), manager_lock)
     common = {
         "offloading_spec": MagicMock(),
-        "primary_kv_view": primary.get_kv_memoryview(),
+        "parent_ctx": parent_ctx,
     }
     opted_in = _LookingUpTier(tier_type="fake", **common)
     quiet = _QuietTier(tier_type="quiet", **common)
     manager = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=primary,
         secondary_tiers=[opted_in, quiet],
     )
@@ -373,16 +384,22 @@ class _PromotingTier(_FakeTier):
         self.promoted = threading.Event()
 
     def _promote(self, parent: ParentManager) -> None:
-        parent.lookup(OffloadKey(b"\x07" * 8), ReqContext(req_id="peer"))
+        # Mirror the p2p server role: open per-request bookkeeping before the
+        # first lookup (server.py's _resolve_lookup does the same).
+        ctx = ReqContext(req_id="peer")
+        parent.on_new_request(ctx)
+        parent.lookup(OffloadKey(b"\x07" * 8), ctx)
         self.promoted.set()
 
 
-def _multi_tier_manager(primary, tier_cls, second_cls, **kwargs):
+def _multi_tier_manager(primary, tier_cls, second_cls, manager_lock, **kwargs):
+    parent_ctx = _parent_ctx(primary.get_kv_memoryview(), manager_lock)
     common = {
         "offloading_spec": MagicMock(),
-        "primary_kv_view": primary.get_kv_memoryview(),
+        "parent_ctx": parent_ctx,
     }
     return TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=primary,
         secondary_tiers=[
             tier_cls(tier_type="first", **common),
@@ -392,7 +409,7 @@ def _multi_tier_manager(primary, tier_cls, second_cls, **kwargs):
     )
 
 
-def test_multi_tier_manager_keeps_the_engine_stepping_while_idle():
+def test_multi_tier_manager_keeps_the_engine_stepping_while_idle(manager_lock):
     """With more than one secondary tier, a polled tier must keep the engine
     stepping even when idle.
 
@@ -407,7 +424,7 @@ def test_multi_tier_manager_keeps_the_engine_stepping_while_idle():
         num_chunks=num_chunks,
         mmap_region=_mock_mmap_region(num_chunks),
     )
-    manager = _multi_tier_manager(primary, _FakeTier, _HitTier)
+    manager = _multi_tier_manager(primary, _FakeTier, _HitTier, manager_lock)
     try:
         assert manager._tier_poll_thread is not None
         assert manager.has_pending_work() is True
@@ -415,7 +432,7 @@ def test_multi_tier_manager_keeps_the_engine_stepping_while_idle():
         manager.shutdown()
 
 
-def test_two_polled_tiers_keep_the_engine_stepping_while_idle():
+def test_two_polled_tiers_keep_the_engine_stepping_while_idle(manager_lock):
     """Two polled tiers strand the same way as one polled plus one unpolled.
 
     A serve on the first can promote out of the second, and poll_tiers() never
@@ -427,7 +444,7 @@ def test_two_polled_tiers_keep_the_engine_stepping_while_idle():
         num_chunks=num_chunks,
         mmap_region=_mock_mmap_region(num_chunks),
     )
-    manager = _multi_tier_manager(primary, _FakeTier, _FakeTier)
+    manager = _multi_tier_manager(primary, _FakeTier, _FakeTier, manager_lock)
     try:
         assert manager._tier_poll_thread is not None
         assert manager.has_pending_work() is True
@@ -435,7 +452,7 @@ def test_two_polled_tiers_keep_the_engine_stepping_while_idle():
         manager.shutdown()
 
 
-def test_off_thread_promotion_is_flushed_by_the_next_step():
+def test_off_thread_promotion_is_flushed_by_the_next_step(manager_lock):
     """An off-thread serve queues a promotion that only a step submits.
 
     Shows the queue actually fills from the control thread, which is why a
@@ -447,7 +464,7 @@ def test_off_thread_promotion_is_flushed_by_the_next_step():
         num_chunks=num_chunks,
         mmap_region=_mock_mmap_region(num_chunks),
     )
-    manager = _multi_tier_manager(primary, _PromotingTier, _HitTier)
+    manager = _multi_tier_manager(primary, _PromotingTier, _HitTier, manager_lock)
     tier = manager.secondary_tiers[0]
     try:
         assert tier.promoted.wait(_SETTLE_S), "control thread never served"
@@ -566,14 +583,14 @@ def test_failure_burst_does_not_stop_the_thread(manager_and_tier):
     assert _live_control_threads()
 
 
-def test_sustained_failure_backs_off_but_keeps_serving(monkeypatch):
+def test_sustained_failure_backs_off_but_keeps_serving(monkeypatch, manager_lock):
     """The backoff path is non-terminal: an idle engine parks, so a thread that
     exited after sustained failure would leave peers unserved with nothing to
     wake the engine. It must back off and keep retrying, then resume the normal
     interval once a round succeeds."""
     monkeypatch.setattr(tiering_manager, "_TIER_POLL_BACK_OFF_AFTER_S", 0.2)
     monkeypatch.setattr(tiering_manager, "_TIER_POLL_BACKOFF_S", 0.05)
-    manager, tier = _make_manager()
+    manager, tier = _make_manager(lock=manager_lock)
     try:
         assert tier.served.wait(_SETTLE_S)
 
@@ -632,13 +649,13 @@ def _run_failing_rounds(manager, rounds: int, monkeypatch, **constants):
     return stop.waits
 
 
-def test_backoff_waits_at_least_the_configured_interval(monkeypatch):
+def test_backoff_waits_at_least_the_configured_interval(monkeypatch, manager_lock):
     """Backing off must never poll faster than tier_poll_interval_s.
 
     The wait is max(tier_poll_interval_s, 1 s), so a user who set a slow
     interval does not get a faster loop after a fault.
     """
-    manager, _ = _make_manager(tier_poll_interval_s=3.0)
+    manager, _ = _make_manager(lock=manager_lock, tier_poll_interval_s=3.0)
     try:
         waits = _run_failing_rounds(
             manager, 4, monkeypatch, _TIER_POLL_BACK_OFF_AFTER_S=0.0
@@ -648,9 +665,9 @@ def test_backoff_waits_at_least_the_configured_interval(monkeypatch):
     assert waits == [3.0, 3.0, 3.0, 3.0]
 
 
-def test_backoff_floors_at_one_second_for_a_fast_interval(monkeypatch):
+def test_backoff_floors_at_one_second_for_a_fast_interval(monkeypatch, manager_lock):
     """A sub-second interval still backs off to the 1 s floor."""
-    manager, _ = _make_manager(tier_poll_interval_s=0.001)
+    manager, _ = _make_manager(lock=manager_lock, tier_poll_interval_s=0.001)
     try:
         waits = _run_failing_rounds(
             manager, 3, monkeypatch, _TIER_POLL_BACK_OFF_AFTER_S=0.0
@@ -660,13 +677,13 @@ def test_backoff_floors_at_one_second_for_a_fast_interval(monkeypatch):
     assert waits == [1.0, 1.0, 1.0]
 
 
-def test_sustained_failure_logs_one_traceback_then_summaries(monkeypatch):
+def test_sustained_failure_logs_one_traceback_then_summaries(monkeypatch, manager_lock):
     """A permanent fault must not emit a full traceback every round.
 
     The first failure of a run logs a traceback; later ones are one-line
     summaries, so an idle rank with a broken peer cannot flood the log.
     """
-    manager, _ = _make_manager()
+    manager, _ = _make_manager(lock=manager_lock)
     fake_logger = MagicMock()
     monkeypatch.setattr(tiering_manager, "logger", fake_logger)
     try:
@@ -683,14 +700,14 @@ def test_sustained_failure_logs_one_traceback_then_summaries(monkeypatch):
     assert fake_logger.warning.call_count == 3
 
 
-def test_alternating_failure_logs_at_most_one_traceback(monkeypatch):
+def test_alternating_failure_logs_at_most_one_traceback(monkeypatch, manager_lock):
     """A fault that alternates with successes must not log a traceback per
     failure.
 
     The failure run restarts on every success, so keying the traceback off the
     run's first round would emit one per failing round at the default interval.
     """
-    manager, tier = _make_manager()
+    manager, tier = _make_manager(lock=manager_lock)
     fake_logger = MagicMock()
     monkeypatch.setattr(tiering_manager, "logger", fake_logger)
     manager._stop_tier_poll_thread()

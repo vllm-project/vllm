@@ -30,6 +30,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    ParentContext,
     SecondaryTierManager,
     TransferJob,
 )
@@ -242,7 +243,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def __init__(
         self,
         offloading_spec: OffloadingSpec,
-        primary_kv_view: memoryview,
+        parent_ctx: ParentContext,
         tier_type: str = "p2p",
         host: str | None = None,
         port: int | None = None,
@@ -253,17 +254,17 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     ) -> None:
         """Initialize the P2P secondary tier manager.
 
-        All keyword arguments after `primary_kv_view` come from the
-        `secondary_tiers` entry in `kv_connector_extra_config`. See
-        `docs/features/kv_offloading_usage.md` for the user-facing
+        All keyword arguments after ``parent_ctx`` come from the
+        ``secondary_tiers`` entry in ``kv_connector_extra_config``. See
+        ``docs/features/kv_offloading_usage.md`` for the user-facing
         configuration reference.
 
         Args:
             offloading_spec: Owning `OffloadingSpec` (provides normalized
                 model, parallel, and cache layout configuration).
-            primary_kv_view: Memoryview over the CPU primary tier; the
-                NIXL agent registers this region for RDMA transfers.
-            tier_type: Tier identifier (defaults to `"p2p"`).
+            parent_ctx: Handles into the composing tiering manager; the NIXL
+                agent registers the primary tier's KV buffer for RDMA.
+            tier_type: Tier identifier (defaults to ``"p2p"``).
             host: Address the ZMQ control socket binds to, used verbatim
                 as both the bind address and the identity peers dial back
                 (mirrors the NIXL connector's `VLLM_NIXL_SIDE_CHANNEL_HOST`;
@@ -314,7 +315,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             )
         super().__init__(
             offloading_spec,
-            primary_kv_view,
+            parent_ctx,
             tier_type,
         )
         try:
@@ -366,7 +367,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         ).get_run_config()
         self._data: DataTransport = NixlTransport(
             self._nixl_agent_name,
-            primary_kv_view,
+            parent_ctx.kv_view,
             config_fields=config_fields,
             backends=backends,
             num_threads=int(num_threads),
@@ -608,6 +609,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
+        if not job_metadata.materialize():
+            # Allocation / Materialization failed.
+            self._finished_jobs.append(JobResult(job_id=job_id, success=True))
+            return
         keys = list(job_metadata.keys)
         block_ids = job_metadata.chunk_ids
 
