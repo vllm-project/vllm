@@ -1,7 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
+from torch import nn
+
+import vllm.models.deepseek_v4.nvidia.flashmla as flashmla_module
+from vllm.models.deepseek_v4.common.ops.cache_utils import (
+    combine_topk_swa_indices,
+    fill_c128_topk,
+    zero_invalid_lens,
+)
+from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
+from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize("sm120", [False, True])
@@ -225,6 +237,52 @@ def test_sparse_flashmla_prefill_smoke(h_q: int):
     assert actual[0].shape == (s_q, h_q, d_v)
 
 
+@pytest.mark.parametrize("batch_size", [1, 4, 32])
+def test_sparse_flashmla_packed_request_offsets_are_bitwise(batch_size: int):
+    import vllm.v1.attention.ops.flashmla as fm
+
+    ok, reason = fm.is_flashmla_sparse_supported()
+    if not ok:
+        pytest.skip(reason)
+
+    device = torch.device("cuda")
+    torch.manual_seed(17)
+    h_q, d_qk, d_v, width = 64, 576, 512, 128
+    lengths = [8 if index % 2 == 0 else 12 for index in range(batch_size)]
+    offsets = [0]
+    for length in lengths:
+        offsets.append(offsets[-1] + length)
+    q = torch.randn((batch_size, h_q, d_qk), dtype=torch.bfloat16, device=device)
+    kv = torch.randn((offsets[-1], 1, d_qk), dtype=torch.bfloat16, device=device)
+    local_indices = torch.full(
+        (batch_size, 1, width), -1, dtype=torch.int32, device=device
+    )
+    local_indices[:, 0, :4] = torch.tensor([0, 1, 3, 7], device=device)
+    packed_indices = local_indices.clone()
+    packed_indices[:, :, :4] += torch.tensor(
+        offsets[:-1], dtype=torch.int32, device=device
+    ).view(-1, 1, 1)
+    topk_length = torch.full((batch_size,), 4, dtype=torch.int32, device=device)
+
+    packed = fm.flash_mla_sparse_fwd(
+        q, kv, packed_indices, 1.0, d_v, topk_length=topk_length
+    )[0]
+    references = []
+    for index in range(batch_size):
+        references.append(
+            fm.flash_mla_sparse_fwd(
+                q[index : index + 1],
+                kv[offsets[index] : offsets[index + 1]],
+                local_indices[index : index + 1],
+                1.0,
+                d_v,
+                topk_length=topk_length[index : index + 1],
+            )[0]
+        )
+    reference = torch.cat(references)
+    torch.testing.assert_close(packed, reference, rtol=0, atol=0)
+
+
 def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
@@ -244,6 +302,64 @@ def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():
 
     # the adaptive plan keeps all 5 in one chunk
     assert chunk_plan == [(0, 5, 36, 103)]
+
+
+@pytest.mark.parametrize(
+    "compress_ratio,expected",
+    [
+        (1, [(0, 1, 0, 80), (1, 2, 0, 96), (2, 3, 0, 112)]),
+        (4, [(0, 1, 20, 100), (1, 2, 24, 120), (2, 3, 28, 140)]),
+    ],
+)
+def test_deepseek_v4_batch_invariant_prefill_chunks_are_request_local(
+    compress_ratio, expected
+):
+    from vllm.models.deepseek_v4.nvidia.flashmla import (
+        _batch_invariant_prefill_chunk_plan,
+    )
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.empty(0, dtype=torch.int32),
+        slot_mapping=torch.empty(0, dtype=torch.int32),
+        block_size=64,
+        num_prefills=3,
+        prefill_seq_lens_cpu=torch.tensor([80, 96, 112], dtype=torch.int32),
+        prefill_query_lens_cpu=torch.tensor([80, 96, 112], dtype=torch.int32),
+        prefill_window_size=128,
+    )
+
+    assert (
+        _batch_invariant_prefill_chunk_plan(metadata, compress_ratio, 128) == expected
+    )
+
+
+@pytest.mark.parametrize("batch_size", [1, 4, 32])
+@pytest.mark.parametrize("seq_len", [2048, 6144])
+def test_deepseek_v4_batch_invariant_identical_shapes_stay_request_local(
+    batch_size: int, seq_len: int
+):
+    from vllm.models.deepseek_v4.nvidia.flashmla import (
+        _batch_invariant_prefill_chunk_plan,
+    )
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    query_len = 2
+    seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32)
+
+    metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.empty(0, dtype=torch.int32),
+        slot_mapping=torch.empty(0, dtype=torch.int32),
+        block_size=64,
+        num_prefills=batch_size,
+        prefill_seq_lens_cpu=seq_lens,
+        prefill_query_lens_cpu=torch.full((batch_size,), query_len, dtype=torch.int32),
+        prefill_window_size=128,
+    )
+    assert _batch_invariant_prefill_chunk_plan(metadata, 4, 128) == [
+        (request_index, request_index + 1, seq_len // 4, seq_len // 4 + 129)
+        for request_index in range(batch_size)
+    ]
 
 
 def test_flashinfer_sparse_indices_cache(monkeypatch):
@@ -840,3 +956,327 @@ def test_flashinfer_dspark_noncausal_block_sees_future_tokens(context_len):
             attention[token].float(), weights @ keys, atol=0.05, rtol=0.05
         )
     _assert_projects_alike(z_unfused, z_fused)
+
+
+class _WorkspaceManager:
+    def get_simultaneous(self, *specs):
+        return tuple(torch.empty(shape, dtype=dtype) for shape, dtype in specs)
+
+
+def _attention(compress_ratio: int) -> DeepseekV4FlashMLAAttention:
+    attention = DeepseekV4FlashMLAAttention.__new__(DeepseekV4FlashMLAAttention)
+    nn.Module.__init__(attention)
+    attention.compress_ratio = compress_ratio
+    attention.window_size = 4
+    attention.scale = 0.125
+    attention.attn_sink = torch.zeros(2, dtype=torch.float32)
+    attention.topk_indices_buffer = torch.tensor(
+        [[0, 1, 2, 3, -1, -1, -1, -1]] * 8,
+        dtype=torch.int32,
+    )
+    attention.swa_cache_layer = SimpleNamespace(
+        kv_cache=torch.empty((2, 256, 584), dtype=torch.uint8)
+    )
+    return attention
+
+
+def _swa_metadata():
+    return SimpleNamespace(
+        num_decodes=2,
+        num_decode_tokens=2,
+        seq_lens=torch.tensor([3, 5], dtype=torch.int32),
+        seq_lens_cpu=torch.tensor([3, 5], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
+        is_valid_token=torch.tensor([True, True]),
+        decode_swa_indices=torch.zeros((2, 1, 4), dtype=torch.int32),
+        decode_swa_lens=torch.tensor([3, 4], dtype=torch.int32),
+        block_table=torch.zeros((2, 2), dtype=torch.int32),
+        block_size=256,
+    )
+
+
+@pytest.mark.parametrize("compress_ratio", [1, 4, 128])
+def test_decode_sparse_reuses_prefill_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+    compress_ratio: int,
+):
+    attention = _attention(compress_ratio)
+    swa_metadata = _swa_metadata()
+    q = torch.zeros((2, 2, 8), dtype=torch.bfloat16)
+    output = torch.empty_like(q)
+    compressed_cache = (
+        None
+        if compress_ratio == 1
+        else torch.empty((2, 256 // compress_ratio, 584), dtype=torch.uint8)
+    )
+    attn_metadata = (
+        None
+        if compress_ratio == 1
+        else SimpleNamespace(
+            block_table=torch.zeros((2, 2), dtype=torch.int32),
+            block_size=256,
+            c128a_global_decode_topk_indices=(
+                torch.zeros((2, 1, 128), dtype=torch.int32)
+                if compress_ratio == 128
+                else None
+            ),
+            c128a_decode_topk_lens=(
+                torch.tensor([2, 2], dtype=torch.int32)
+                if compress_ratio == 128
+                else None
+            ),
+        )
+    )
+    gathered = []
+    captured = {}
+
+    def fake_gather(out, cache, **kwargs):
+        out.zero_()
+        gathered.append((cache, kwargs))
+
+    def fake_combine(local_topk, *args, out, **kwargs):
+        captured["local_topk"] = local_topk.clone()
+        indices, lengths = out
+        indices.fill_(-1)
+        lengths.fill_(1)
+        return indices, lengths
+
+    def fake_fill_c128(out, lengths):
+        indices = torch.arange(out.shape[1], dtype=out.dtype)
+        out.copy_(torch.where(indices < lengths[:, None], indices, -1))
+
+    def fake_sparse_fwd(**kwargs):
+        captured["sparse"] = kwargs
+        kwargs["out"].zero_()
+
+    monkeypatch.setattr(
+        flashmla_module.envs, "VLLM_DS4_DECODE_KERNEL", "sparse", raising=False
+    )
+    monkeypatch.setattr(
+        flashmla_module, "current_workspace_manager", lambda: _WorkspaceManager()
+    )
+    monkeypatch.setattr(flashmla_module, "dequantize_and_gather_k_cache", fake_gather)
+    monkeypatch.setattr(flashmla_module, "combine_topk_swa_indices", fake_combine)
+    monkeypatch.setattr(flashmla_module, "fill_c128_topk", fake_fill_c128)
+    monkeypatch.setattr(flashmla_module, "flash_mla_sparse_fwd", fake_sparse_fwd)
+    monkeypatch.setattr(
+        flashmla_module,
+        "flash_mla_with_kvcache",
+        lambda **kwargs: pytest.fail("paged decode kernel must not run"),
+    )
+
+    attention._forward_decode(
+        q=q,
+        kv_cache=compressed_cache,
+        swa_metadata=swa_metadata,
+        attn_metadata=attn_metadata,
+        swa_only=compress_ratio == 1,
+        output=output,
+    )
+
+    assert len(gathered) == (1 if compress_ratio == 1 else 2)
+    assert captured["sparse"]["q"] is q
+    assert captured["sparse"]["out"] is output
+    if compress_ratio == 128:
+        expected = torch.full((128,), -1, dtype=torch.int32)
+        expected[:2] = torch.arange(2, dtype=torch.int32)
+        torch.testing.assert_close(captured["local_topk"][0], expected, rtol=0, atol=0)
+    elif compress_ratio == 4:
+        assert attention.topk_indices_buffer is not None
+        torch.testing.assert_close(
+            captured["local_topk"],
+            attention.topk_indices_buffer[:2],
+            rtol=0,
+            atol=0,
+        )
+
+
+def test_decode_paged_remains_default(monkeypatch: pytest.MonkeyPatch):
+    attention = _attention(1)
+    swa_metadata = _swa_metadata()
+    swa_metadata.tile_sched_swaonly = object()
+    q = torch.zeros((2, 2, 8), dtype=torch.bfloat16)
+    output = torch.empty_like(q)
+    captured = {}
+
+    def fake_paged(**kwargs):
+        captured.update(kwargs)
+        return kwargs["out"], None
+
+    monkeypatch.setattr(
+        flashmla_module.envs, "VLLM_DS4_DECODE_KERNEL", "paged", raising=False
+    )
+    monkeypatch.setattr(flashmla_module, "flash_mla_with_kvcache", fake_paged)
+    monkeypatch.setattr(
+        flashmla_module,
+        "flash_mla_sparse_fwd",
+        lambda **kwargs: pytest.fail("sparse decode kernel must not run"),
+    )
+
+    attention._forward_decode(
+        q=q,
+        kv_cache=None,
+        swa_metadata=swa_metadata,
+        attn_metadata=None,
+        swa_only=True,
+        output=output,
+    )
+
+    assert captured["tile_scheduler_metadata"] is swa_metadata.tile_sched_swaonly
+    assert captured["out"].shape == (2, 1, 2, 8)
+
+
+def test_decode_sparse_fails_closed_without_scheduler_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    attention = _attention(1)
+    swa_metadata = _swa_metadata()
+    swa_metadata.seq_lens_cpu = None
+    monkeypatch.setattr(
+        flashmla_module.envs, "VLLM_DS4_DECODE_KERNEL", "sparse", raising=False
+    )
+
+    with pytest.raises(RuntimeError, match="finalized scheduler metadata"):
+        attention._forward_decode(
+            q=torch.zeros((2, 2, 8), dtype=torch.bfloat16),
+            kv_cache=None,
+            swa_metadata=swa_metadata,
+            attn_metadata=None,
+            swa_only=True,
+            output=torch.empty((2, 2, 8), dtype=torch.bfloat16),
+        )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("top_k", [0, 128, 129, 512])
+@pytest.mark.usefixtures("batch_invariant_kernel")
+@torch.inference_mode()
+def test_fused_c4_decode_indices_match_existing_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    top_k: int,
+) -> None:
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+
+    rows = 32
+    window_size = 128
+    compress_ratio = 4
+    compressed_width = 4096
+    row_stride = compressed_width + window_size
+    output_width = ((top_k + window_size + 127) // 128) * 128
+    boundary_lens = torch.tensor(
+        [0, 1, 3, 4, 127, 128, 511, 512, 2047, 2048, 2049, 16048],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    seq_lens = boundary_lens.repeat(3)[:rows]
+    query_start_loc = torch.arange(rows + 1, dtype=torch.int32, device="cuda")
+    gather_lens = seq_lens.clamp_max(window_size)
+    topk_indices = torch.full((rows, top_k), -1, dtype=torch.int32, device="cuda")
+    for row, seq_len in enumerate(seq_lens.cpu().tolist()):
+        length = min(seq_len // compress_ratio, top_k)
+        if length:
+            topk_indices[row, :length] = torch.randperm(
+                length, dtype=torch.int32, device="cuda"
+            )
+    is_valid = torch.arange(rows, device="cuda") % 7 != 0
+
+    expected_indices = torch.empty(
+        (rows, output_width), dtype=torch.int32, device="cuda"
+    )
+    expected_lens = torch.empty(rows, dtype=torch.int32, device="cuda")
+    combine_topk_swa_indices(
+        topk_indices.clone(),
+        query_start_loc,
+        seq_lens,
+        gather_lens,
+        window_size,
+        compress_ratio,
+        top_k,
+        row_stride,
+        compressed_width,
+        out=(expected_indices, expected_lens),
+    )
+    zero_invalid_lens(expected_lens, is_valid)
+
+    actual_indices = torch.empty_like(expected_indices)
+    actual_lens = torch.empty_like(expected_lens)
+    torch.ops.vllm_batch_invariant.combine_topk_swa_decode(
+        actual_indices,
+        actual_lens,
+        topk_indices,
+        seq_lens,
+        is_valid,
+        row_stride,
+        compressed_width,
+        top_k,
+        compress_ratio,
+        window_size,
+    )
+    torch.testing.assert_close(actual_indices, expected_indices, rtol=0, atol=0)
+    torch.testing.assert_close(actual_lens, expected_lens, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.usefixtures("batch_invariant_kernel")
+@torch.inference_mode()
+def test_fused_c128_decode_indices_match_existing_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+
+    rows = 32
+    top_k = 128
+    window_size = 128
+    compress_ratio = 128
+    compressed_width = 126
+    row_stride = compressed_width + window_size
+    output_width = 256
+    boundary_lens = torch.tensor(
+        [0, 1, 127, 128, 129, 255, 256, 2047, 2048, 2049, 16047, 16048],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    seq_lens = boundary_lens.repeat(3)[:rows]
+    compressed_lens = torch.div(
+        seq_lens, compress_ratio, rounding_mode="floor"
+    ).clamp_max(top_k)
+    query_start_loc = torch.arange(rows + 1, dtype=torch.int32, device="cuda")
+    gather_lens = seq_lens.clamp_max(window_size)
+    is_valid = torch.arange(rows, device="cuda") % 7 != 0
+
+    local_topk = torch.empty((rows, top_k), dtype=torch.int32, device="cuda")
+    fill_c128_topk(local_topk, compressed_lens)
+    expected_indices = torch.empty(
+        (rows, output_width), dtype=torch.int32, device="cuda"
+    )
+    expected_lens = torch.empty(rows, dtype=torch.int32, device="cuda")
+    combine_topk_swa_indices(
+        local_topk,
+        query_start_loc,
+        seq_lens,
+        gather_lens,
+        window_size,
+        compress_ratio,
+        top_k,
+        row_stride,
+        compressed_width,
+        out=(expected_indices, expected_lens),
+    )
+    zero_invalid_lens(expected_lens, is_valid)
+
+    actual_indices = torch.empty_like(expected_indices)
+    actual_lens = torch.empty_like(expected_lens)
+    torch.ops.vllm_batch_invariant.combine_c128_swa_decode(
+        actual_indices,
+        actual_lens,
+        seq_lens,
+        is_valid,
+        row_stride,
+        compressed_width,
+        top_k,
+        compress_ratio,
+        window_size,
+    )
+    torch.testing.assert_close(actual_indices, expected_indices, rtol=0, atol=0)
+    torch.testing.assert_close(actual_lens, expected_lens, rtol=0, atol=0)
