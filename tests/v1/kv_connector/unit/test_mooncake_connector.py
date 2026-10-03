@@ -1961,11 +1961,6 @@ def test_register_kv_caches_pages_kpool_indexer_and_folds_its_tail():
     assert worker.registered_layer_names == ["model.layers.0.indexer"]
     assert worker.registered_group_indices == [_SHARED_REGION_GROUP_ID]
     assert worker.region_shared_groups == [(0, 1)]
-    assert _block_ids_for_region([[1, 2], [5]], _SHARED_REGION_GROUP_ID, (0, 1)) == [
-        1,
-        2,
-        5,
-    ]
 
 
 def test_block_ids_for_region_flattens_shared_groups():
