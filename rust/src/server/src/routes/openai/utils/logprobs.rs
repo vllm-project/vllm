@@ -274,6 +274,10 @@ fn position_to_chat_logprobs_content(
     })
 }
 
+/// The first `top_logprobs` distinct candidates, as Python's `_get_top_logprobs`
+/// takes them from the engine's per-position dict. The engine row starts with
+/// the sampled token and then lists ranks 1..k, so a sampled token that is also
+/// in the top k appears twice; only its first entry counts.
 fn chat_top_logprob_entries(
     position: &DecodedPositionLogprobs,
     top_logprobs: i32,
@@ -284,7 +288,15 @@ fn chat_top_logprob_entries(
         usize::try_from(top_logprobs).unwrap_or(0)
     };
 
-    position.entries.iter().take(limit)
+    position
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(i, entry)| {
+            !position.entries[..*i].iter().any(|earlier| earlier.token_id == entry.token_id)
+        })
+        .map(|(_, entry)| entry)
+        .take(limit)
 }
 
 fn token_bytes(token: &str) -> Vec<u8> {
@@ -361,6 +373,32 @@ mod tests {
             decoded_logprobs_to_openai_chat(&sample_logprobs(), top_logprobs, false)
                 .expect("chat logprobs");
         chat_logprobs.content.expect("content")[0].top_logprobs.len()
+    }
+
+    #[test]
+    fn chat_top_logprobs_skip_the_repeated_sampled_token() {
+        // Engine row for a sampled token that is also top-1: [A, A, B].
+        let entry = |token_id: u32, token: &str, logprob: f32, rank: u32| DecodedTokenLogprob {
+            token_id,
+            token: token.to_string(),
+            logprob,
+            rank,
+        };
+        let logprobs = DecodedLogprobs {
+            positions: vec![DecodedPositionLogprobs {
+                entries: vec![
+                    entry(1, "A", -0.1, 1),
+                    entry(1, "A", -0.1, 1),
+                    entry(2, "B", -1.0, 2),
+                ],
+            }],
+        };
+        let content = decoded_logprobs_to_openai_chat(&logprobs, 2, false)
+            .expect("chat logprobs")
+            .content
+            .expect("content");
+        let tokens: Vec<_> = content[0].top_logprobs.iter().map(|t| t.token.as_str()).collect();
+        assert_eq!(tokens, ["A", "B"]);
     }
 
     #[test]

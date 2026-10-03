@@ -79,6 +79,60 @@ for the existing authentication boundaries.
 
 For the post processing counterpart that turns generated token IDs back into OpenAI compatible responses, see the [Derenderer APIs](derenderer.md).
 
+## Generate Output Logprobs
+
+`/inference/v1/generate` is a token in / token out API, so its output logprobs
+identify tokens by integer ID rather than by the OpenAI string token. With
+`sampling_params.logprobs` set, each choice carries a `GenerateLogProbs`:
+
+```json
+{
+  "logprobs": {
+    "content": [
+      {
+        "token_id": 262,
+        "logprob": -0.10,
+        "rank": 1,
+        "top_logprobs": [
+          {"token_id": 262, "logprob": -0.10, "rank": 1},
+          {"token_id": 257, "logprob": -1.20, "rank": 2}
+        ]
+      }
+    ]
+  }
+}
+```
+
+- `content` has one entry per generated token, in generation order.
+- `top_logprobs` is a list, not a dict: JSON turns dict keys into strings and
+  the ordering would be implicit. It follows the engine's order: the sampled
+  token first, then the remaining candidates in rank order. It holds every
+  candidate the engine returned and is not cut to `logprobs`: k entries when
+  the sampled token is in the top k, k + 1 when non-greedy sampling picked a
+  token outside it (for example ranks `[5, 1, 2]` at `logprobs=2`). The OpenAI
+  endpoints cut this differently (`/v1/chat/completions` keeps the first k,
+  `/v1/completions` the first k + 1), so [derender](derenderer.md) applies the
+  cut of the endpoint it renders for.
+- `rank` is the token's rank in the vocabulary distribution (1 = most likely)
+  on every entry, the sampled one included; a top-k candidate's rank is its
+  top-k position. The list is not sorted by it, so sort by `rank` if you need
+  rank order.
+- There is no `token` or `bytes` field. The generate server has no tokenizer;
+  [derender](derenderer.md) fills those in when it converts the response to the
+  OpenAI shapes.
+- `prompt_logprobs` on the same response is unchanged
+  (`list[dict[int, Logprob] | None]`).
+
+!!! warning "Changed in this release"
+    Output logprobs used to be `ChatCompletionLogProbs` with every token written
+    as a `"token_id:N"` placeholder string, and `bytes` set to the UTF-8 bytes of
+    that placeholder by the Rust frontend but left unset by the Python one.
+    Clients that read only `content[i].logprob` are unaffected. Clients that
+    parsed the placeholder should read `content[i].token_id` instead.
+    `return_tokens_as_token_ids` on `/v1/chat/completions` and `/v1/completions`
+    is unchanged: it is a user-facing OpenAI option and still uses the
+    `token_id:N` format.
+
 ## Multimodal Render Features
 
 Multimodal render responses include a `features` object with per-modality

@@ -31,16 +31,17 @@ use vllm_llm::{
 
 use self::convert::{ResponseOptions, prepare_generate_request};
 use self::types::{
-    GenerateLogprob, GenerateResponse, GenerateResponseChoice, GenerateResponseStreamChoice,
-    GenerateStreamResponse, MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo,
-    SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
+    GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob, GenerateResponse,
+    GenerateResponseChoice, GenerateResponseStreamChoice, GenerateStreamResponse,
+    MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo, SpeculativeDecodingMetrics,
+    StreamingSpeculativeDecodingMetrics,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
 use crate::routes::openai::utils::logprobs::clamp_logprob;
-use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb, Usage};
+use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, sse_response};
@@ -218,7 +219,7 @@ async fn generate_chunk_stream(
                             "raw generate stream requested logprobs but generation returned none"
                         )
                     })?;
-                    Some(raw_logprobs_to_openai_chat(logprobs)?)
+                    Some(raw_logprobs_to_generate(logprobs)?)
                 } else {
                     None
                 };
@@ -294,7 +295,7 @@ fn collect_generate(
                 "raw generate response requested logprobs but generation returned none".to_string(),
             )
         })?;
-        Some(raw_logprobs_to_openai_chat(logprobs)?)
+        Some(raw_logprobs_to_generate(logprobs)?)
     } else {
         None
     };
@@ -371,14 +372,14 @@ fn extract_mm_placeholders(features: Option<&[MmFeatureSpec]>) -> Option<MultiMo
     Some(placeholders)
 }
 
-fn raw_logprobs_to_openai_chat(logprobs: &Logprobs) -> Result<ChatLogProbs, ApiError> {
+fn raw_logprobs_to_generate(logprobs: &Logprobs) -> Result<GenerateLogProbs, ApiError> {
     let content = logprobs
         .positions
         .iter()
-        .map(position_to_chat_logprobs_content)
+        .map(position_to_generate_logprobs_content)
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(ChatLogProbs {
+    Ok(GenerateLogProbs {
         content: Some(content),
     })
 }
@@ -396,30 +397,34 @@ fn raw_prompt_logprobs_to_maps(
         .collect()
 }
 
-fn position_to_chat_logprobs_content(
+/// `top_logprobs` matches the Python generate server: every candidate the
+/// engine returned (the sampled token first, then ranks 1..k) with the repeated
+/// sampled entry dropped, and no cut. Derender applies each OpenAI endpoint's
+/// cut.
+fn position_to_generate_logprobs_content(
     position: &PositionLogprobs,
-) -> Result<ChatLogProbsContent, ApiError> {
+) -> Result<GenerateLogProbsContent, ApiError> {
     let chosen = position.entries.first().ok_or_else(|| {
         ApiError::server_error(
             "raw generate logprobs position unexpectedly had no token candidates".to_string(),
         )
     })?;
-    let token = format_token_id(chosen.token_id);
 
-    Ok(ChatLogProbsContent {
-        token: token.clone(),
+    Ok(GenerateLogProbsContent {
+        token_id: chosen.token_id,
         logprob: clamp_logprob(chosen.logprob),
-        bytes: Some(token.as_bytes().to_vec()),
+        rank: Some(chosen.rank),
         top_logprobs: position
             .entries
             .iter()
-            .map(|entry| {
-                let token = format_token_id(entry.token_id);
-                TopLogProb {
-                    token: token.clone(),
-                    logprob: clamp_logprob(entry.logprob),
-                    bytes: Some(token.into_bytes()),
-                }
+            .enumerate()
+            .filter(|(i, entry)| {
+                !position.entries[..*i].iter().any(|earlier| earlier.token_id == entry.token_id)
+            })
+            .map(|(_, entry)| GenerateLogProb {
+                token_id: entry.token_id,
+                logprob: clamp_logprob(entry.logprob),
+                rank: Some(entry.rank),
             })
             .collect(),
     })
@@ -522,6 +527,45 @@ mod tests {
     use vllm_llm::GeneratePromptInfo;
 
     use super::*;
+
+    fn position(entries: &[(u32, f32, u32)]) -> PositionLogprobs {
+        PositionLogprobs {
+            entries: entries
+                .iter()
+                .map(|&(token_id, logprob, rank)| {
+                    vllm_engine_core_client::protocol::logprobs::TokenLogprob {
+                        token_id,
+                        logprob,
+                        rank,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn top(position: &PositionLogprobs) -> Vec<(u32, Option<u32>)> {
+        position_to_generate_logprobs_content(position)
+            .unwrap()
+            .top_logprobs
+            .iter()
+            .map(|entry| (entry.token_id, entry.rank))
+            .collect()
+    }
+
+    #[test]
+    fn generate_top_logprobs_drop_the_repeated_sampled_token() {
+        // Sampled token 7 is also top-1: the engine row is [7, 7, 8].
+        let pos = position(&[(7, -0.1, 1), (7, -0.1, 1), (8, -2.0, 2)]);
+        assert_eq!(top(&pos), vec![(7, Some(1)), (8, Some(2))]);
+    }
+
+    #[test]
+    fn generate_top_logprobs_keep_every_candidate_when_sampled_is_outside_top_k() {
+        // Sampled token 50 has vocab rank 5 at logprobs=2: sampled first, then
+        // ranks 1 and 2, all kept (derender cuts per endpoint).
+        let pos = position(&[(50, -3.0, 5), (10, -0.2, 1), (20, -1.0, 2)]);
+        assert_eq!(top(&pos), vec![(50, Some(5)), (10, Some(1)), (20, Some(2))]);
+    }
 
     #[tokio::test]
     async fn generate_chunk_stream_captures_late_prompt_info() {

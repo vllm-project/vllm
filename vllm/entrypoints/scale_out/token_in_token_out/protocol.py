@@ -18,7 +18,6 @@ from vllm.entrypoints.generate.base.protocol import (
     validate_cache_salt,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionLogProbs,
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
 )
@@ -317,9 +316,42 @@ class GenerateRequest(BaseModel):
         )
 
 
+class GenerateLogProb(BaseModel):
+    """A single (token, logprob) candidate on the generate wire protocol.
+
+    Unlike the OpenAI logprob shapes this carries the integer token id: the
+    generate server has no tokenizer, so decoding to a string belongs in
+    derender (or the coupled chat/completions path), not here.
+    """
+
+    token_id: int
+    logprob: float
+    rank: int | None = None
+
+
+class GenerateLogProbsContent(GenerateLogProb):
+    """The sampled token at one position, plus its top-k candidates.
+
+    ``top_logprobs`` is a list, not a dict: JSON turns dict keys into strings
+    and the order would be implicit. It is in the engine's order: the sampled
+    token first, then the remaining candidates in rank order.
+    """
+
+    top_logprobs: list[GenerateLogProb] = []
+
+
+class GenerateLogProbs(BaseModel):
+    """Output logprobs for one choice.
+
+    ``content`` holds one entry per generated token.
+    """
+
+    content: list[GenerateLogProbsContent] | None = None
+
+
 class GenerateResponseChoice(BaseModel):
     index: int
-    logprobs: ChatCompletionLogProbs | None = None
+    logprobs: GenerateLogProbs | None = None
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
     token_ids: list[int] | None = None
@@ -345,7 +377,7 @@ class GenerateResponseChoice(BaseModel):
 
 class GenerateResponseStreamChoice(BaseModel):
     index: int
-    logprobs: ChatCompletionLogProbs | None = None
+    logprobs: GenerateLogProbs | None = None
     finish_reason: str | None = None
     token_ids: list[int] | None = None
     routed_experts: str | None = None
