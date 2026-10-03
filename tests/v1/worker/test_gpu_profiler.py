@@ -566,6 +566,58 @@ def test_profiler_entered_during_capture():
     mock_profiler.__exit__.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    "device_type,accelerator_activity",
+    [
+        ("cuda", torch.profiler.ProfilerActivity.CUDA),
+        ("xpu", torch.profiler.ProfilerActivity.XPU),
+    ],
+)
+@pytest.mark.parametrize("capture_torch_profiler", [False, True])
+def test_capture_model_profiles_runner_device(
+    device_type, accelerator_activity, capture_torch_profiler
+):
+    runner = MagicMock()
+    runner.device = torch.device(device_type)
+    runner.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+    runner.vllm_config.profiler_config = SimpleNamespace(
+        capture_torch_profiler=capture_torch_profiler,
+        torch_profiler_dir="/tmp/mock",
+    )
+    runner.cudagraph_dispatcher.get_capture_descs.return_value = []
+    runner.encoder_cudagraph_manager = None
+    runner._freeze_gc.return_value = nullcontext()
+
+    with (
+        patch(
+            "vllm.distributed.parallel_state.get_world_group",
+            return_value=SimpleNamespace(local_rank=0),
+        ),
+        patch(
+            "vllm.v1.worker.gpu_model_runner.graph_capture", return_value=nullcontext()
+        ),
+        patch(
+            "vllm.v1.worker.gpu_model_runner.compilation_counter."
+            "num_gpu_runner_capture_triggers",
+            0,
+        ),
+        patch("vllm.v1.worker.gpu_model_runner.lock_workspace"),
+        patch("vllm.v1.worker.gpu_model_runner.set_cudagraph_capturing_enabled"),
+        patch("torch.accelerator.synchronize"),
+        patch("torch.accelerator.empty_cache"),
+        patch("torch.accelerator.get_memory_info", side_effect=[(100, 0), (90, 0)]),
+        patch("torch.profiler.tensorboard_trace_handler"),
+        patch("torch.profiler.profile") as mock_profile,
+    ):
+        GPUModelRunner.capture_model(runner)
+
+    if capture_torch_profiler:
+        activities = mock_profile.call_args.kwargs["activities"]
+        assert activities == [torch.profiler.ProfilerActivity.CPU, accelerator_activity]
+    else:
+        mock_profile.assert_not_called()
+
+
 def make_proton(session_id: int | None = 7):
     data = SimpleNamespace(
         advance_phase=Mock(side_effect=range(1, 100)),
