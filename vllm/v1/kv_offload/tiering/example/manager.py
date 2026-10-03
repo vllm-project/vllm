@@ -155,6 +155,12 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
                           spec for writing chunks into the primary tier.
 
         """
+        if not job_metadata.materialize():
+            # Materialization / Allocation failed.
+            self.completed_jobs.append(
+                JobResult(job_id=job_metadata.job_id, success=True)
+            )
+            return
         keys = job_metadata.keys
         chunk_ids = job_metadata.chunk_ids
 

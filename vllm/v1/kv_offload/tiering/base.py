@@ -6,7 +6,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
@@ -71,16 +71,43 @@ class TieringOffloadingMetrics:
     DEFERRED_RELEASE_HOLD = "vllm:kv_offload_tiering_deferred_release_hold_seconds"
 
 
-@dataclass
-class TransferJob:
-    """Metadata for an in-flight async transfer job."""
+class TransferJob(ABC):
+    """Handle to an async transfer between the primary tier and a secondary
+    tier.
+    """
 
-    job_id: JobId
-    keys: Collection[OffloadKey]
-    chunk_ids: np.ndarray
-    is_promotion: bool
-    req_context: ReqContext
-    submit_time: float = field(default_factory=time.monotonic)
+    def __init__(self, job_id: JobId, req_context: ReqContext, is_promotion: bool):
+        self.job_id = job_id
+        self.req_context = req_context
+        self.is_promotion = is_promotion
+        self.submit_time = time.monotonic()
+
+    @abstractmethod
+    def materialize(self) -> bool:
+        """Materialize transfer keys and chunk-ids for this TransferJob.
+
+        materialize() may only be called once and only by the tiers, when
+        they wish to access the keys and chunk_ids for this TransferJob.
+
+        Returns:
+            True if the job is materialized after the call (acquisition
+            succeeded, or the job was materialized at construction); False
+            if acquisition failed, in which case keys/chunk_ids stay
+            unavailable (they raise ValueError).
+
+        """
+
+    @property
+    @abstractmethod
+    def keys(self) -> Collection[OffloadKey]:
+        """Transfer keys. Raise ValueError if not materialized."""
+        pass
+
+    @property
+    @abstractmethod
+    def chunk_ids(self) -> np.ndarray:
+        """Transfer chunk_ids. Raise ValueError if not materialized."""
+        pass
 
 
 @dataclass
@@ -243,8 +270,9 @@ class SecondaryTierManager(ABC):
         calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are valid primary-tier slots, pinned
-            (ref-counted) for the duration of the transfer.
+          - the job's chunk_ids (see ``TransferJob.materialize()``) are valid
+            primary-tier slots, pinned (ref-counted) for the duration of the
+            transfer.
 
         The implementation is responsible for:
           1. Filtering out chunks already present in this tier
@@ -271,8 +299,11 @@ class SecondaryTierManager(ABC):
         on the calling thread.
 
         Preconditions (guaranteed by the framework):
-          - ``job_metadata.chunk_ids`` are allocated primary-tier slots
-            ready to receive data.
+          - The job's chunk_ids are not allocated by the caller.
+            Implementations must call job_metadata.materialize() to
+            materialize the keys and chunk_ids. materialize() may fail
+            (primary allocation failure), in which case no transfer happens
+            and the tier must report success.
 
         The implementation must copy data from this tier into the
         primary-tier slots identified by ``chunk_ids``.

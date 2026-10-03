@@ -489,6 +489,12 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
+        if not job_metadata.materialize():
+            # Materialization / Allocation failed.
+            self._finished_jobs.append(
+                JobResult(job_id=job_metadata.job_id, success=True)
+            )
+            return
         blocks = {
             self._key_adapter.encode(key): [self._make_descriptor(chunk_id)]
             for key, chunk_id in zip(

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -59,6 +60,11 @@ class TieringMetricsTracker:
         self._tier_states = [_TierState() for _ in tier_types]
         self._stats = OffloadingConnectorStats()
 
+        # Async counter updates that need to be thread-safe. Updated via
+        # safe_counter_update() method
+        self._pending_lock = threading.Lock()
+        self._pending_counters: dict[tuple[int, str], int] = {}
+
     @functools.cache  # noqa: B019
     def tier_label(self, tier_idx: int) -> TierLabel:
         return (f"{tier_idx + 1}:{self._tier_types[tier_idx]}",)
@@ -110,24 +116,77 @@ class TieringMetricsTracker:
             observed = state.observed_lookups.setdefault(tier_label, {})
             observed.setdefault(key, time.monotonic() - lookup_duration)
 
-    def on_job_registered(self, job_metadata: _JobMetadataLike) -> None:
+    def on_job_registered(
+        self, job_metadata: _JobMetadataLike, *, is_job_materialized: bool
+    ) -> None:
+        """Record stats for a newly registered job.
+
+        Args:
+            job_metadata: The registered job.
+            is_job_materialized: Whether the job's transfer claim is already
+                materialized; unmaterialized jobs have no chunk stats yet.
+
+        """
         transfer_job = job_metadata.transfer_job
         state = self._tier_states[job_metadata.tier_idx]
-        chunk_count = len(transfer_job.chunk_ids)
         if transfer_job.is_promotion:
             state.active_promotion_count += 1
-            state.primary_write_chunk_count += chunk_count
+            assert not is_job_materialized, (
+                "Promotions jobs must be materialized lazily"
+            )
         else:
             state.active_cascade_count += 1
-            state.primary_read_chunk_count += chunk_count
+            assert is_job_materialized, (
+                "Cascade jobs must be materialized at construction"
+            )
+            state.primary_read_chunk_count += len(transfer_job.chunk_ids)
 
     def on_job_finished(
-        self, job_metadata: _JobMetadataLike, result: JobResult
+        self,
+        job_metadata: _JobMetadataLike,
+        result: JobResult,
+        *,
+        is_job_materialized: bool,
     ) -> None:
+        """Record stats for a finished job.
+
+        Args:
+            job_metadata: The finished job.
+            result: The tier-reported result.
+            is_job_materialized: Whether the job's transfer claim was
+                successfully materialized; unmaterialized jobs have no chunk
+                stats.
+
+        """
+        transfer_job = job_metadata.transfer_job
+        state = self._tier_states[job_metadata.tier_idx]
+        # Update tier job counts
+        if transfer_job.is_promotion:
+            assert state.active_promotion_count > 0
+            state.active_promotion_count -= 1
+        else:
+            assert state.active_cascade_count > 0
+            state.active_cascade_count -= 1
+
+        if not is_job_materialized:
+            # Job not materialized. No further stats to update
+            return
+
+        # Drain first so increments recorded by the tier worker (deferred
+        # allocation) are visible before the decrement; the worker records
+        # them before reporting the job finished.
+        self.drain_pending_updates()
+        chunk_count = len(transfer_job.chunk_ids)
+        if transfer_job.is_promotion:
+            state.primary_write_chunk_count -= chunk_count
+            assert state.primary_write_chunk_count >= 0
+        else:
+            state.primary_read_chunk_count -= chunk_count
+            assert state.primary_read_chunk_count >= 0
+
         self._observe_finished_job_stats(job_metadata, result)
         if job_metadata.transfer_job.is_promotion:
             self._observe_promotion_latency(job_metadata, result)
-        self._decrement_tier_state(job_metadata)
 
     def on_release_deferred(self, tier_idx: int, chunk_count: int) -> None:
         self._tier_states[tier_idx].deferred_release_chunk_count += chunk_count
@@ -148,6 +207,33 @@ class TieringMetricsTracker:
         self._stats.increase_counter(
             TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES
         )
+
+    def safe_counter_update(self, tier_idx: int, metric: str, count: int) -> None:
+        """Thread-safe updates to metrics that TieringMetricsTracker drains when
+        needed.
+
+        Args:
+            tier_idx: Secondary tier the update is attributed to.
+            metric: One of PRIMARY_WRITE_USAGE_PERC (primary write chunk
+                count) or PROMOTION_ALLOCATION_FAILURES.
+            count: Delta to accumulate (may be negative).
+
+        """
+        with self._pending_lock:
+            key = (tier_idx, metric)
+            self._pending_counters[key] = self._pending_counters.get(key, 0) + count
+
+    def drain_pending_updates(self) -> None:
+        """Apply updates buffered by safe_counter_update()."""
+        with self._pending_lock:
+            pending, self._pending_counters = self._pending_counters, {}
+        for (tier_idx, metric), count in pending.items():
+            if metric is TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES:
+                self._stats.increase_counter(metric, count)
+            elif metric is TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC:
+                self._tier_states[tier_idx].primary_write_chunk_count += count
+            else:
+                raise ValueError(f"Unknown buffered metric: {metric}")
 
     def record_backpressure(
         self,
@@ -180,6 +266,7 @@ class TieringMetricsTracker:
                 )
 
     def take_stats(self) -> OffloadingConnectorStats | None:
+        self.drain_pending_updates()
         active_transfer_stats = OffloadingConnectorStats()
         self._observe_active_transfer_stats(active_transfer_stats)
 
@@ -195,6 +282,7 @@ class TieringMetricsTracker:
         return stats
 
     def assert_idle(self) -> None:
+        self.drain_pending_updates()
         assert all(
             state.active_promotion_count == 0
             and state.active_cascade_count == 0
@@ -203,21 +291,6 @@ class TieringMetricsTracker:
             and state.deferred_release_chunk_count == 0
             for state in self._tier_states
         )
-
-    def _decrement_tier_state(self, job_metadata: _JobMetadataLike) -> None:
-        transfer_job = job_metadata.transfer_job
-        state = self._tier_states[job_metadata.tier_idx]
-        chunk_count = len(transfer_job.chunk_ids)
-        if transfer_job.is_promotion:
-            assert state.active_promotion_count > 0
-            state.active_promotion_count -= 1
-            state.primary_write_chunk_count -= chunk_count
-            assert state.primary_write_chunk_count >= 0
-        else:
-            assert state.active_cascade_count > 0
-            state.active_cascade_count -= 1
-            state.primary_read_chunk_count -= chunk_count
-            assert state.primary_read_chunk_count >= 0
 
     def _observe_finished_job_stats(
         self,
