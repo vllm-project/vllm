@@ -248,7 +248,8 @@ async def test_renderer_only_chat_request_skips_mm_cache():
 
 
 @pytest.mark.asyncio
-async def test_chat_error_stream():
+@pytest.mark.parametrize("has_previous_tokens", [False, True])
+async def test_chat_error_stream(has_previous_tokens):
     """Test finish_reason='error' returns 500 InternalServerError (streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
@@ -260,8 +261,8 @@ async def test_chat_error_stream():
 
     completion_output_1 = CompletionOutput(
         index=0,
-        text="Hello",
-        token_ids=[100],
+        text="Hello" if has_previous_tokens else "",
+        token_ids=[100] if has_previous_tokens else [],
         cumulative_logprob=None,
         logprobs=None,
         finish_reason=None,
@@ -282,8 +283,8 @@ async def test_chat_error_stream():
 
     completion_output_2 = CompletionOutput(
         index=0,
-        text="Hello",
-        token_ids=[100],
+        text="Hello" if has_previous_tokens else "",
+        token_ids=[100] if has_previous_tokens else [],
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="error",
