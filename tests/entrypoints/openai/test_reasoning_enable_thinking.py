@@ -68,6 +68,28 @@ class TestChatCompletionReasoningEffort:
         assert params.chat_template_kwargs["reasoning_effort"] == "high"
 
 
+class TestChatCompletionThinkingTokenBudget:
+    """Chat Completions: thinking_token_budget -> chat_template_kwargs."""
+
+    def test_budget_forwarded_to_chat_template_kwargs(self):
+        request = _build_chat_request(thinking_token_budget=256)
+        params = request.build_chat_params(None, "auto")
+        assert params.chat_template_kwargs["thinking_token_budget"] == 256
+
+    def test_no_budget_does_not_inject(self):
+        request = _build_chat_request()
+        params = request.build_chat_params(None, "auto")
+        assert "thinking_token_budget" not in params.chat_template_kwargs
+
+    def test_explicit_user_kwarg_not_overridden(self):
+        request = _build_chat_request(
+            thinking_token_budget=256,
+            chat_template_kwargs={"thinking_token_budget": 100},
+        )
+        params = request.build_chat_params(None, "auto")
+        assert params.chat_template_kwargs["thinking_token_budget"] == 100
+
+
 class TestResponsesReasoningEffort:
     """Responses API: reasoning.effort -> enable_thinking."""
 
