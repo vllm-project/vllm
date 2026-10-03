@@ -9,10 +9,10 @@ This example shows how to use MCP tools with different allowed_tools configurati
 
 Set up this example by starting a vLLM OpenAI-compatible server with MCP tools enabled.
 For example:
-vllm serve openai/gpt-oss-20b --enforce-eager --tool-server demo
+vllm serve openai/gpt-oss-20b --enforce-eager --tool-server demo \\
+    --enable-responses-store
 
 Environment variables:
-- VLLM_ENABLE_RESPONSES_API_STORE=1
 - VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=code_interpreter,container
 - VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS=1
 """

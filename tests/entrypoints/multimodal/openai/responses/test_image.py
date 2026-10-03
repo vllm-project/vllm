@@ -33,8 +33,7 @@ def default_image_server_args():
 def image_server(default_image_server_args):
     with RemoteOpenAIServer(
         MODEL_NAME,
-        default_image_server_args,
-        env_dict={"VLLM_ENABLE_RESPONSES_API_STORE": "1"},
+        [*default_image_server_args, "--enable-responses-store"],
     ) as remote_server:
         yield remote_server
 

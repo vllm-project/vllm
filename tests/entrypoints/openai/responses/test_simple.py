@@ -16,10 +16,15 @@ MODEL_NAME = "Qwen/Qwen3-8B"
 def server():
     from .conftest import BASE_TEST_ENV
 
-    args = ["--reasoning-parser", "qwen3", "--max_model_len", "5000"]
+    args = [
+        "--reasoning-parser",
+        "qwen3",
+        "--max_model_len",
+        "5000",
+        "--enable-responses-store",
+    ]
     env_dict = {
         **BASE_TEST_ENV,
-        "VLLM_ENABLE_RESPONSES_API_STORE": "1",
         # uncomment for tool calling
         # PYTHON_EXECUTION_BACKEND: "dangerously_use_uv",
     }
