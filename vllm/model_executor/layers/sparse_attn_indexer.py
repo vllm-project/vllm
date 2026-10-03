@@ -27,6 +27,7 @@ from vllm.model_executor.layers.indexer_topk import (
 from vllm.model_executor.layers.litetopk_decode import (
     get_litetopk_workspace,
     has_litetopk_decode,
+    litetopk_bf16_scores,
     litetopk_select,
     supports_litetopk_decode,
 )
@@ -754,6 +755,18 @@ def sparse_attn_indexer(
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
                 max_model_len,
+            )
+        elif lite_histogram is not None and use_fp4_cache:
+            logits = litetopk_bf16_scores(
+                (padded_q_quant_cast, padded_q_scale),
+                kv_cache,
+                weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
+                decode_metadata.indices,
+                max_model_len,
+                decode_metadata.write_max_decode_len or next_n,
+                lite_histogram,
             )
         else:
             logits = fp8_fp4_paged_mqa_logits(

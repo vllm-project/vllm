@@ -46,4 +46,19 @@ __device__ __forceinline__ float coarse_lower_edge(uint32_t t) {
   return -__uint_as_float(__float_as_uint(mid) - 1);
 }
 
+// Bin of a live, non-NaN score: DeepGEMM's coarse_histogram_bin, whose lower
+// edges coarse_lower_edge returns
+__device__ __forceinline__ uint32_t coarse_bin(float score) {
+  const uint32_t bits = __float_as_uint(score);
+  uint32_t magnitude = bits & 0x7fffffffu;
+  const bool negative = (bits >> 31) && magnitude != 0;
+  int code = (__half_as_ushort(__float2half_rn(score)) & 0x7fffu) >> 6;
+  if (code >= 304) {
+    magnitude -= negative;  // lower-inclusive negative unit bins
+    const float bounded = __uint_as_float(min(magnitude, 0x435f0000u));
+    code = max(304, __float2int_rd(bounded) + 288);
+  }
+  return negative ? 512 + code : 511 - code;
+}
+
 }  // namespace litetopk

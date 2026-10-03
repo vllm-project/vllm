@@ -2058,12 +2058,16 @@ def _litetopk_histogram(scores: torch.Tensor, lengths: torch.Tensor) -> torch.Te
 @requires_sm100
 @pytest.mark.parametrize("rows", [1, 17, 65, 149, 300])
 @pytest.mark.parametrize("mode", ["random", "ties", "stale_histogram"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
-def test_litetopk_logical_indices_and_reusable_graph(rows: int, mode: str) -> None:
+def test_litetopk_logical_indices_and_reusable_graph(
+    rows: int, mode: str, dtype: torch.dtype
+) -> None:
     """Cover CTA regimes, overflow fallback and changing live rows without resets."""
-    width, k, capacity = 16384, 2048, 8192
+    width, capacity = 16384, 8192
+    k = 2048 if dtype == torch.float32 else 512
     torch.manual_seed(rows)
-    scores = torch.randn((rows, width), device="cuda")
+    scores = torch.randn((rows, width), device="cuda", dtype=dtype)
     if mode == "ties":
         scores.zero_()  # Crossing bin exceeds capacity: exact whole-row fallback.
     lengths = torch.full((rows,), width, device="cuda", dtype=torch.int32)

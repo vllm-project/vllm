@@ -28,3 +28,22 @@ candidate region. The selector resets counts/candidates and balances state
 counters for the next layer or CUDA graph replay.
 
 Correctness tests: `.venv/bin/python -m pytest tests/kernels/test_top_k_per_row.py -k litetopk`.
+
+The MXFP4 route adds H32/D128, page128, BF16 top512 and 1..6 query tokens per
+request. It requires `get_paged_mqa_logits_bf16_metadata` and
+`fp4_paged_mqa_logits_bf16` from the companion DeepGEMM patch. Decode head
+weights are converted to BF16; scores and ties are selected exactly in that
+dtype. BF16 rounding can change both selected tokens and published candidate
+blocks relative to the default FP32 path. Prefill retains its current dtype.
+
+The CPU metadata hint `write_max_decode_len` selects Q4/three TMEM stages for
+1..4 tokens or Q6/two TMEM stages for 5/6. Flattened Q has a size-one token
+axis and cannot supply that hint. Each BF16 call builds its own split384
+schedule from live causal lengths and request IDs, including during CUDA graph
+replay. This adds schedule and cast overhead per eligible layer, included in
+any complete-chain measurement; it never consumes generic split256 metadata.
+Candidate mask consumers use the existing path because masking would invalidate
+the producer's histogram. Candidate sources publish from the same BF16 scores
+consumed by LiteTopK.
+
+Serving route tests: `.venv/bin/python -m pytest tests/v1/attention/test_litetopk_decode.py`.

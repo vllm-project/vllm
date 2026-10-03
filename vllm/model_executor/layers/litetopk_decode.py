@@ -53,7 +53,7 @@ def get_litetopk_workspace(max_rows: int) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def supports_litetopk_decode(q, q_scale, weights, page_size, topk, next_n) -> bool:
-    return (
+    fp32 = (
         q.dtype == torch.float8_e4m3fn
         and q_scale is None
         and q.shape[1] <= 4
@@ -62,7 +62,59 @@ def supports_litetopk_decode(q, q_scale, weights, page_size, topk, next_n) -> bo
         and page_size == 64
         and topk == 2048
         and 1 <= next_n <= 4
-        and has_litetopk_decode()
+    )
+    bf16 = (
+        q.dtype == torch.int8
+        and q_scale is not None
+        and q_scale.dtype == torch.int32
+        and q.shape[1:] == (1, 32, 64)
+        and q_scale.shape == q.shape[:3]
+        and weights.dtype in (torch.float32, torch.bfloat16)
+        and page_size == 128
+        and topk == 512
+        and 1 <= next_n <= 6
+    )
+    if not (fp32 or bf16) or not has_litetopk_decode():
+        return False
+    return fp32 or has_litetopk_bf16()
+
+
+@functools.cache
+def has_litetopk_bf16() -> bool:
+    dg = _import_deep_gemm()
+    return all(
+        callable(getattr(dg, name, None))
+        for name in (
+            "get_paged_mqa_logits_bf16_metadata",
+            "fp4_paged_mqa_logits_bf16",
+        )
+    )
+
+
+def litetopk_bf16_scores(
+    q, kv_cache, weights, lengths, table, indices, max_model_len, next_n, histogram
+):
+    dg = _import_deep_gemm()
+    # Rebuild from live lengths/IDs in captured execution: split384/Q4 or Q6
+    # metadata cannot reuse the generic split256 schedule.
+    schedule = dg.get_paged_mqa_logits_bf16_metadata(
+        lengths,
+        128,
+        dg.get_num_sms(),
+        indices=indices,
+        tokens_per_request=next_n,
+    )
+    return dg.fp4_paged_mqa_logits_bf16(
+        q,
+        kv_cache,
+        weights.to(torch.bfloat16),
+        lengths,
+        table,
+        schedule,
+        max_model_len,
+        indices=indices,
+        histogram=histogram,
+        tokens_per_request=next_n,
     )
 
 
