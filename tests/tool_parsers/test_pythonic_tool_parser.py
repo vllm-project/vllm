@@ -5,6 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.tool_parsers.common_tests import (
+    ToolParserTestConfig,
+    ToolParserTests,
+    pythonic_style_test_config,
+)
 from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
@@ -229,3 +234,22 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+class TestPythonicToolParser(ToolParserTests):
+    """Common parity suite for the `[fn(arg=...)]` wire format."""
+
+    @pytest.fixture
+    def test_config(self) -> ToolParserTestConfig:
+        return pythonic_style_test_config(
+            "pythonic",
+            lambda calls: f"[{', '.join(calls)}]",
+            # The parser requires the whole output to be a single call list, so
+            # prose around it is returned verbatim as content. Both modes agree.
+            xfail_streaming={
+                "test_surrounding_text": "pythonic format has no content/call delimiter"
+            },
+            xfail_nonstreaming={
+                "test_surrounding_text": "pythonic format has no content/call delimiter"
+            },
+        )
