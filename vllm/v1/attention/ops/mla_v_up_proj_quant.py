@@ -148,11 +148,12 @@ def _v_up_proj_fp8_static_quant_fused(
 
     Returns:
         The ``[B, N, V]`` FP8 tensor (``out`` if given).
+
     """
     assert x.ndim == 3 and w.ndim == 3
     N, B, L = x.shape
     Nw, Lw, V = w.shape
-    assert N == Nw and L == Lw, f"shape mismatch: x={x.shape} w={w.shape}"
+    assert Nw == N and Lw == L, f"shape mismatch: x={x.shape} w={w.shape}"
     assert output_scale.numel() == 1
 
     if out is None:
@@ -206,7 +207,7 @@ def _v_up_proj_fp8_static_quant_portable(
     assert x.ndim == 3 and w.ndim == 3
     N, B, L = x.shape
     Nw, Lw, V = w.shape
-    assert N == Nw and L == Lw, f"shape mismatch: x={x.shape} w={w.shape}"
+    assert Nw == N and Lw == L, f"shape mismatch: x={x.shape} w={w.shape}"
     assert output_scale.numel() == 1
 
     # [N, B, L] @ [N, L, V] -> [N, B, V] -> [B, N, V] -> [B, N*V] for the
