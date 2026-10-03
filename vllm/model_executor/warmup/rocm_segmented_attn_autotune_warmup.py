@@ -16,15 +16,17 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from filelock import FileLock
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
-
-from .segmented_attention import (
+from vllm.v1.attention.ops import segmented_attention
+from vllm.v1.attention.ops.segmented_attention import (
     MAX_QUERY_LEN,
     _segmented_attention_reduce,
     _segmented_attention_stage,
@@ -34,6 +36,9 @@ from .segmented_attention import (
     segmented_workspace_shapes,
     select_segmented_config,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
@@ -227,7 +232,7 @@ def _identity(
     from triton._C.libtriton import get_cache_invalidating_env_vars
 
     source = Path(__file__)
-    kernel = source.with_name("segmented_attention.py")
+    kernel = Path(segmented_attention.__file__)
     return {
         "schema": 5,
         "gpu": properties.name,
@@ -877,7 +882,7 @@ def _valid_record(record, heads, kv_heads, dim, fp8):
 
 @contextmanager
 def _temporary_tuning_kernels(device):
-    """Release tuning-only HIP modules before profiling the KV-cache budget."""
+    """Release tuning-only HIP modules without invalidating existing graphs."""
     device_index = torch.device(device).index
     if device_index is None:
         device_index = torch.accelerator.current_device_index()
@@ -921,7 +926,7 @@ def warmup_segmented_attention(
     has_sinks=False,
     physical_max_len=None,
 ):
-    """Tune reachable segmented buckets before KV-cache allocation."""
+    """Tune reachable segmented buckets before graph capture."""
     if (
         dtype not in (torch.bfloat16, torch.float16)
         or kv_dtype
@@ -1234,45 +1239,97 @@ def get_segmented_config(
     return dict(winner["best"])
 
 
-def warmup_rocm_segmented_attention(config, device, *, impl_to_tune=None):
-    """Tune the selected backend before KV-cache memory profiling."""
-    if not config.kernel_config.enable_rocm_segmented_attn_autotune:
+def _warmup_segmented_attention(layer, device, **limits) -> None:
+    impl = layer.impl
+    config = impl._segmented_attention_config
+    assert config is not None
+    spec = layer.get_kv_cache_spec(config)
+    assert spec is not None
+    sliding_window = impl.sliding_window[0]
+    query_limit = getattr(layer, "segmented_query_limit", None)
+    if not isinstance(query_limit, int):
+        query_limit = MAX_QUERY_LEN
+    causal = getattr(layer, "segmented_causal", True)
+    if not isinstance(causal, bool):
+        causal = True
+    tuning_max_len = config.model_config.max_model_len
+    if sliding_window >= 0:
+        tuning_max_len = min(tuning_max_len, sliding_window + query_limit)
+    warmup_segmented_attention(
+        device,
+        config.model_config.dtype,
+        impl.num_heads,
+        impl.num_kv_heads,
+        impl.head_size,
+        spec.block_size,
+        impl.scale,
+        config.scheduler_config.max_num_batched_tokens,
+        tuning_max_len,
+        config.scheduler_config.max_num_seqs,
+        kv_dtype=spec.dtype if spec.dtype != torch.uint8 else impl.fp8_dtype,
+        sliding_window=sliding_window,
+        causal=causal,
+        has_sinks=impl.sinks is not None,
+        physical_max_len=config.model_config.max_model_len,
+        max_query_len=query_limit,
+        **limits,
+    )
+    impl._segmented_attention_warmed_up = True
+
+
+def rocm_segmented_attn_autotune_warmup(worker: Worker) -> None:
+    """Autotune RDNA segmented attention after KV allocation and before capture."""
+    if (
+        not current_platform.is_rocm()
+        or not worker.vllm_config.kernel_config.enable_rocm_segmented_attn_autotune
+    ):
         return
 
+    from vllm.platforms.rocm import on_gfx1x
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionImpl,
     )
     from vllm.v1.kv_cache_interface import FullAttentionSpec
-    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
 
-    layers = [
-        layer
-        for layer in config.compilation_config.static_forward_context.values()
-        if isinstance(getattr(layer, "impl", None), RocmSegmentedAttentionImpl)
-        and (impl_to_tune is None or layer.impl is impl_to_tune)
-        and not layer.impl._segmented_attention_warmed_up
-    ]
+    if not on_gfx1x():
+        return
+    layers = []
+    for layer in worker.vllm_config.compilation_config.static_forward_context.values():
+        impl = getattr(layer, "impl", None)
+        if not isinstance(impl, RocmSegmentedAttentionImpl):
+            continue
+        config = impl._segmented_attention_config
+        if (
+            config is not None
+            and config.kernel_config.enable_rocm_segmented_attn_autotune
+            and not impl._segmented_attention_warmed_up
+            and impl.alibi_slopes is None
+            and not impl.logits_soft_cap
+        ):
+            layers.append(layer)
     if not layers:
         return
 
-    specs = get_kv_cache_spec(config)
+    specs = worker.get_kv_cache_spec()
     layouts = tuple(
         (
             (spec.block_size, spec.page_size_bytes)
             if isinstance(spec, FullAttentionSpec)
-            else (0, spec.max_memory_usage_bytes(config))
+            else (0, spec.max_memory_usage_bytes(worker.vllm_config))
         )
         for spec in specs.values()
     )
-    budget = _memory_budget(device)
+    cache_budget = sum(
+        tensor.size
+        for tensor in worker.model_runner.kv_cache_config.kv_cache_tensors
+        if not tensor.host_resident
+    )
+    budget = _memory_budget(worker.device)
     for layer in layers:
-        impl = layer.impl
-        impl._segmented_attention_config = config
-        impl._warmup_segmented_attention(
+        _warmup_segmented_attention(
             layer,
-            device,
-            config.model_config.dtype,
+            worker.device,
             memory_budget_bytes=budget,
             cache_layouts=layouts,
-            cache_budget_bytes=budget,
+            cache_budget_bytes=cache_budget,
         )

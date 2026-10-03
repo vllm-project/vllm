@@ -924,7 +924,9 @@ def _launch_segmented_attention(
 
 def get_segmented_config(*args, **kwargs):
     """Load the tuner on demand to avoid a kernel/tuner import cycle."""
-    from .segmented_attention_tuning import get_segmented_config as tuned_config
+    from vllm.model_executor.warmup.rocm_segmented_attn_autotune_warmup import (
+        get_segmented_config as tuned_config,
+    )
 
     return tuned_config(*args, **kwargs)
 

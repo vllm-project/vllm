@@ -204,8 +204,10 @@ def _run_segmented_case(case, output, max_query_len, *, force_splits=None, **kwa
 
 def test_segmented_tuning_candidates_preserve_workspace_bound():
     """D128/D256 candidates retain their existing split scratch bound."""
+    from vllm.model_executor.warmup import (
+        rocm_segmented_attn_autotune_warmup as tuning,
+    )
     from vllm.v1.attention.ops import segmented_attention as segmented
-    from vllm.v1.attention.ops import segmented_attention_tuning as tuning
 
     for batch, query_len, seq_len, heads, kv_heads, dim, fp8 in (
         (1, 1, 128, 8, 8, 128, True),
@@ -401,7 +403,9 @@ def test_segmented_fp8_long_extend_matches_dense_reference(
 
 def test_segmented_tuning_protects_static_incumbent():
     """Noise-sized gains must not replace the static configuration."""
-    from vllm.v1.attention.ops import segmented_attention_tuning as tuning
+    from vllm.model_executor.warmup import (
+        rocm_segmented_attn_autotune_warmup as tuning,
+    )
 
     incumbent = {"bm": 16}
     challenger = {"bm": 32}
@@ -418,7 +422,9 @@ def test_segmented_tuning_protects_static_incumbent():
 
 def test_segmented_tuning_promotes_verified_challenger():
     """A finalist with a stable material gain should replace the incumbent."""
-    from vllm.v1.attention.ops import segmented_attention_tuning as tuning
+    from vllm.model_executor.warmup import (
+        rocm_segmented_attn_autotune_warmup as tuning,
+    )
 
     incumbent = {"bm": 16}
     challenger = {"bm": 32}
@@ -433,7 +439,9 @@ def test_segmented_tuning_promotes_verified_challenger():
 
 def test_segmented_tuning_balances_tp_workloads_without_overlap():
     """Every missing bucket belongs to exactly one reasonably balanced rank."""
-    from vllm.v1.attention.ops import segmented_attention_tuning as tuning
+    from vllm.model_executor.warmup import (
+        rocm_segmented_attn_autotune_warmup as tuning,
+    )
 
     workloads = list(tuning._workloads(8192, 262144, 32))
     shards = tuning._shard_workloads(
@@ -477,7 +485,9 @@ def test_segmented_tuning_balances_tp_workloads_without_overlap():
 
 def test_segmented_tuning_prunes_scheduler_and_kv_limits():
     """Generated buckets must be reachable under scheduler and cache limits."""
-    from vllm.v1.attention.ops import segmented_attention_tuning as tuning
+    from vllm.model_executor.warmup import (
+        rocm_segmented_attn_autotune_warmup as tuning,
+    )
 
     limits = (8192, 262144, 32)
     raw = set(
@@ -533,8 +543,10 @@ def segmented_tuner(tmp_path, monkeypatch):
     """Exercise real cache files and lookup while replacing GPU timing only."""
     from types import SimpleNamespace
 
+    from vllm.model_executor.warmup import (
+        rocm_segmented_attn_autotune_warmup as tuning,
+    )
     from vllm.v1.attention.ops import segmented_attention as segmented
-    from vllm.v1.attention.ops import segmented_attention_tuning as tuning
 
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
     monkeypatch.setattr(
@@ -581,7 +593,9 @@ def test_segmented_tuning_releases_only_new_kernel_modules(monkeypatch, fail, de
     import weakref
     from types import SimpleNamespace
 
-    from vllm.v1.attention.ops import segmented_attention_tuning as tuning
+    from vllm.model_executor.warmup import (
+        rocm_segmented_attn_autotune_warmup as tuning,
+    )
 
     class Module:
         pass
@@ -623,7 +637,9 @@ def test_segmented_tuning_cleanup_preserves_graphs_and_reloads_kernels():
     """Existing graphs survive cleanup, and released variants still run correctly."""
     import weakref
 
-    from vllm.v1.attention.ops import segmented_attention_tuning as tuning
+    from vllm.model_executor.warmup import (
+        rocm_segmented_attn_autotune_warmup as tuning,
+    )
 
     case = _make_paged_attention_case(
         [3],

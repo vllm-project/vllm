@@ -24,7 +24,6 @@ from vllm.v1.attention.backends.rocm_attn import (
 )
 from vllm.v1.attention.backends.utils import get_num_attention_heads_from_layers
 from vllm.v1.attention.ops.segmented_attention import (
-    MAX_QUERY_LEN,
     get_segmented_attention_workspace,
     segmented_attention,
     segmented_attention_workspace_size,
@@ -216,14 +215,6 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         super().process_weights_after_loading(act_dtype)
         config = get_current_vllm_config()
         self._segmented_attention_config = config
-        if config.kernel_config.enable_rocm_segmented_attn_autotune:
-            from vllm.v1.attention.ops.segmented_attention_tuning import (
-                warmup_rocm_segmented_attention,
-            )
-
-            warmup_rocm_segmented_attention(
-                config, config.device_config.device, impl_to_tune=self
-            )
 
     def _autotune_enabled(self) -> bool:
         config = self._segmented_attention_config
@@ -246,52 +237,6 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             autotune=self._autotune_enabled(),
         )
         return get_segmented_attention_workspace(device, sizes)
-
-    def _warmup_segmented_attention(self, layer, device, dtype, **limits) -> None:
-        if (
-            self._autotune_enabled()
-            and not self._segmented_attention_warmed_up
-            and self.alibi_slopes is None
-            and not self.logits_soft_cap
-        ):
-            from vllm.v1.attention.ops.segmented_attention_tuning import (
-                warmup_segmented_attention,
-            )
-
-            config = self._segmented_attention_config
-            assert config is not None
-            spec = layer.get_kv_cache_spec(config)
-            assert spec is not None
-            sliding_window = self.sliding_window[0]
-            query_limit = getattr(layer, "segmented_query_limit", None)
-            if not isinstance(query_limit, int):
-                query_limit = MAX_QUERY_LEN
-            causal = getattr(layer, "segmented_causal", True)
-            if not isinstance(causal, bool):
-                causal = True
-            tuning_max_len = config.model_config.max_model_len
-            if sliding_window >= 0:
-                tuning_max_len = min(tuning_max_len, sliding_window + query_limit)
-            warmup_segmented_attention(
-                device,
-                dtype,
-                self.num_heads,
-                self.num_kv_heads,
-                self.head_size,
-                spec.block_size,
-                self.scale,
-                config.scheduler_config.max_num_batched_tokens,
-                tuning_max_len,
-                config.scheduler_config.max_num_seqs,
-                kv_dtype=spec.dtype if spec.dtype != torch.uint8 else self.fp8_dtype,
-                sliding_window=sliding_window,
-                causal=causal,
-                has_sinks=self.sinks is not None,
-                physical_max_len=config.model_config.max_model_len,
-                max_query_len=query_limit,
-                **limits,
-            )
-            self._segmented_attention_warmed_up = True
 
     def _split_kv_cache(
         self,
