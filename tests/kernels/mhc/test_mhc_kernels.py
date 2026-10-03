@@ -1390,6 +1390,67 @@ def test_mhc_pre_delayed_rocm_aiter_fused_rms_norm(num_tokens, seam):
 
 
 @pytest.mark.skipif(
+    not (current_platform.is_rocm() and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM),
+    reason="AITER fused delayed-seam kernel required (gfx950)",
+)
+@pytest.mark.parametrize("num_tokens", [1, 2, 7, 16, 64, 128])
+def test_deepseek_v41_rocm_mhc_overlap_matches_fused_seam(num_tokens):
+    """Moving the gate projection to a side stream keeps the residual and gates
+    bit-exact and the layer input within one bf16 ulp, and the layer input is
+    usable before the join; also across graph replays."""
+    from vllm.models.deepseek_v41.amd.mhc import mhc_seam_overlap
+
+    set_random_seed(0)
+    hc_mult, hidden_size = 4, 5120
+    residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs(
+        num_tokens=num_tokens, hidden_size=hidden_size, hc_mult=hc_mult
+    )
+    sublayer_out = torch.randn(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    post_layer_mix = 2 * torch.rand(num_tokens, hc_mult, 1, device=DEVICE)
+    comb_res_mix = torch.softmax(
+        torch.randn(num_tokens, hc_mult, hc_mult, device=DEVICE), dim=-1
+    )
+    pre_mix = torch.rand(num_tokens, hc_mult, device=DEVICE) + 0.5
+    args = (residual, fn, hc_scale, hc_base, 1e-6, 1e-6, 1e-6, 2.0, 20)
+    kwargs = dict(
+        pre_mix=pre_mix,
+        sublayer_out=sublayer_out,
+        post_layer_mix=post_layer_mix,
+        comb_res_mix=comb_res_mix,
+        norm_weight=norm_weight,
+        norm_eps=1e-6,
+    )
+    side = torch.cuda.Stream()
+
+    def run():
+        outputs = mhc_seam_overlap(*args, **kwargs, stream=side)
+        consumed_input = outputs[3].clone()
+        torch.cuda.current_stream().wait_stream(side)
+        return (*outputs, consumed_input)
+
+    def check(actual):
+        expected = object.__new__(MHCPreDelayedOp).forward_hip(*args, **kwargs)
+        for i in (0, 1, 2, 4):
+            torch.testing.assert_close(actual[i], expected[i], atol=0, rtol=0)
+        # The RMSNorm row sum is reduced in another order than AITER's split-K.
+        for layer_input in (actual[3], actual[5]):
+            torch.testing.assert_close(layer_input, expected[3], atol=0, rtol=2**-7)
+
+    check(run())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run()
+    for _ in range(3):
+        for tensor in (residual, sublayer_out):
+            tensor.normal_()
+        pre_mix.uniform_(0.5, 1.5)
+        graph.replay()
+        check(captured)
+
+
+@pytest.mark.skipif(
     not (current_platform.is_rocm() and HAS_AITER_MHC),
     reason="AITER mHC required",
 )

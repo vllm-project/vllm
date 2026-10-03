@@ -15,7 +15,11 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.forward_context import (
+    get_forward_context,
+    in_piecewise_cudagraph,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -57,6 +61,11 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
+)
+from vllm.models.deepseek_v41.amd.mhc import (
+    MHC_OVERLAP_MAX_TOKENS,
+    mhc_seam_overlap,
+    supports_mhc_overlap,
 )
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -163,10 +172,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         aux_stream_list: list[torch.cuda.Stream] | None = None,
         candidate_block_buffer: torch.Tensor | None = None,
         engram_layout: EngramLayout | None = None,
+        mhc_stream: torch.cuda.Stream | None = None,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
+        self.mhc_stream = mhc_stream
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.engram: Engram | None = None
@@ -278,6 +289,15 @@ class DeepseekV4DecoderLayer(nn.Module):
         # The fused kernel only takes the latter, so that seam keeps the
         # separate attn_norm.
         fuse_attn_norm = self.fuse_seam_norm and not (residual is None and x.dim() == 2)
+        mhc_stream = self.mhc_stream
+        if mhc_stream is not None and (
+            in_piecewise_cudagraph()
+            or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+            or not torch.cuda.is_current_stream_capturing()
+        ):
+            # Fork only inside FULL graph capture, where the joins become graph
+            # edges; HIP event waits at runtime are unreliable here.
+            mhc_stream = None
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
@@ -345,6 +365,18 @@ class DeepseekV4DecoderLayer(nn.Module):
                     norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
                     norm_eps=self.attn_norm.variance_epsilon,
                 )
+            elif mhc_stream is not None and pre_mix is not None:
+                residual, post_mix, res_mix, x, attn_pre = mhc_seam_overlap(
+                    residual,
+                    *pre_args,
+                    pre_mix=pre_mix,
+                    sublayer_out=x,
+                    post_layer_mix=post_mix,
+                    comb_res_mix=res_mix,
+                    norm_weight=self.attn_norm.weight,
+                    norm_eps=self.attn_norm.variance_epsilon,
+                    stream=mhc_stream,
+                )
             else:
                 (
                     residual,
@@ -372,7 +404,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
+        ffn_args = (
             residual,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
@@ -382,16 +414,34 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_eps,
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
-            pre_mix=attn_pre,
-            sublayer_out=x,
-            post_layer_mix=post_mix,
-            comb_res_mix=res_mix,
-            norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
-            norm_eps=self.ffn_norm.variance_epsilon,
         )
-        if not self.fuse_seam_norm:
-            x = self.ffn_norm(x)
+        if mhc_stream is not None:
+            torch.cuda.current_stream().wait_stream(mhc_stream)
+            residual, post_mix, res_mix, x, ffn_pre = mhc_seam_overlap(
+                *ffn_args,
+                pre_mix=attn_pre,
+                sublayer_out=x,
+                post_layer_mix=post_mix,
+                comb_res_mix=res_mix,
+                norm_weight=self.ffn_norm.weight,
+                norm_eps=self.ffn_norm.variance_epsilon,
+                stream=mhc_stream,
+            )
+        else:
+            residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
+                *ffn_args,
+                pre_mix=attn_pre,
+                sublayer_out=x,
+                post_layer_mix=post_mix,
+                comb_res_mix=res_mix,
+                norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
+                norm_eps=self.ffn_norm.variance_epsilon,
+            )
+            if not self.fuse_seam_norm:
+                x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
+        if mhc_stream is not None:
+            torch.cuda.current_stream().wait_stream(mhc_stream)
         return x, residual, post_mix, res_mix, ffn_pre
 
 
@@ -423,6 +473,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (compressor kv_score, indexer.weights_proj). fused_wqa_wkv stays on
         # the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
+        # Keep mHC independent of the streams used inside attention.
+        mhc_stream = torch.cuda.Stream() if supports_mhc_overlap(vllm_config) else None
 
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
@@ -467,6 +519,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_stream_list=aux_stream_list,
                 candidate_block_buffer=self.candidate_block_buffer,
                 engram_layout=self.engram_layout,
+                mhc_stream=mhc_stream,
             ),
             prefix=f"{prefix}.layers",
         )
