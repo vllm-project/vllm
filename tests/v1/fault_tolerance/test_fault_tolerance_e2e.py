@@ -102,7 +102,9 @@ def _install_fault_injection(monkeypatch, tmp_path, rank: int, step: int) -> Non
     monkeypatch.setenv("VLLM_FT_TEST_INJECT_FAULT", f"rank={rank},step={step}")
 
 
-def _ft_server_args() -> list[str]:
+def _ft_server_args(
+    ft_config: str = '{"engine_recovery_timeout_sec": 120}',
+) -> list[str]:
     return [
         "--enforce-eager",
         "--dtype",
@@ -118,11 +120,11 @@ def _ft_server_args() -> list[str]:
         "--cpu-distributed-timeout-seconds",
         str(CPU_DISTRIBUTED_TIMEOUT_S),
         "--fault-tolerance-config",
-        '{"engine_recovery_timeout_sec": 120}',
+        ft_config,
     ]
 
 
-def _ft_manager():
+def _ft_manager(base_server_args: list[str] | None = None):
     """Build the shared DP+EP fault-tolerant server topology (one engine/server)."""
     from tests.v1.distributed.test_external_lb_dp import ExternalLBServerManager
 
@@ -130,7 +132,7 @@ def _ft_manager():
         MODEL_NAME,
         DP_SIZE,
         api_server_count=1,  # FT requires a single API server per engine
-        base_server_args=_ft_server_args(),
+        base_server_args=base_server_args or _ft_server_args(),
         tp_size=1,
     )
 
@@ -268,10 +270,12 @@ def _wait_for_ft_apply_outcome(server, request_id: str, deadline_s: int) -> str 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=2)
 def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
-    """An exception injected into the inference path drives full retry recovery.
+    """An exception injected into the inference path drives full retry recovery,
+    with the in-flight request resumed (not aborted) afterwards.
 
     Injecting an exception into ``sync_cudagraph_and_dp_padding`` at a chosen
-    step on rank 1.
+    step on rank 1, while a long streaming completion runs on rank 0 with
+    ``resume_requests_after_recovery`` enabled.
 
     - Rank 1 raises inside the busy loop and goes UNHEALTHY.
     - Rank 0 detects the now-absent peer via the communication timeout and also
@@ -281,9 +285,13 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     into the DP-sync fn from the test (via a generated ``sitecustomize``).
     """
     fault_step = int(os.getenv("FT_FAULT_STEP", "50"))
+    max_tokens = fault_step + 50  # the stream must still be running at the fault
     _install_fault_injection(monkeypatch, tmp_path, rank=1, step=fault_step)
 
-    with _ft_manager() as servers:
+    resume_args = _ft_server_args(
+        '{"engine_recovery_timeout_sec": 120, "resume_requests_after_recovery": true}'
+    )
+    with _ft_manager(resume_args) as servers:
         assert len(servers) == DP_SIZE
         rank0 = _server_for_rank(servers, 0)
         rank1 = _server_for_rank(servers, 1)
@@ -291,9 +299,32 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         # 1. Both engines healthy and serving.
         _assert_serving_and_healthy((rank0, rank1))
 
-        # 2. Drive both ranks so rank 1 accumulates execute_model steps and trips
-        #    the injected fault; rank 0 then times out on the DP allreduce.
-        with _driving(rank0, rank1):
+        # 2. Start the long stream on rank 0; rank 1 is driven by background
+        #    traffic so it accumulates steps and trips the injected fault.
+        client = rank0.get_client()
+        stream = client.completions.create(
+            model=MODEL_NAME,
+            prompt="Hello, my name is",
+            max_tokens=max_tokens,
+            temperature=0.0,
+            stream=True,
+            timeout=600.0,
+        )
+        chunks = []
+        stream_error = None
+
+        def _consume():
+            nonlocal stream_error
+            try:
+                for chunk in stream:
+                    chunks.append(chunk)
+            except Exception as e:
+                stream_error = e
+
+        consumer = threading.Thread(target=_consume, daemon=True)
+        consumer.start()
+
+        with _driving(rank1):
             faulted = _wait_for_engines(
                 [rank0, rank1], match_key="status", match_values={"unhealthy"}
             )
@@ -307,12 +338,32 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         assert faulted[1] is not None
         assert faulted[1].get("fault_info"), faulted[1]
 
+        # Mid-stream the request must be stalled, not terminated.
+        assert stream_error is None, stream_error
+        assert consumer.is_alive(), "stream ended instead of stalling at fault"
+
         # 3. retry both engines.
         for server in (rank0, rank1):
             _apply_ft(server, "retry")
 
         # 4. Recovery completes: both engines return to healthy and serve again.
         _assert_serving_and_healthy((rank0, rank1))
+
+        # 5. The stalled stream resumes and finishes without loss/duplication.
+        consumer.join(timeout=120)
+        assert not consumer.is_alive(), "stream did not complete after recovery"
+        assert stream_error is None, stream_error
+
+        content = [c for c in chunks if c.choices and c.choices[0].text]
+        assert len(content) == max_tokens, (
+            f"expected {max_tokens} streamed tokens, got {len(content)}"
+        )
+        finish_reasons = [
+            c.choices[0].finish_reason
+            for c in chunks
+            if c.choices and c.choices[0].finish_reason
+        ]
+        assert finish_reasons == ["length"], finish_reasons
 
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
