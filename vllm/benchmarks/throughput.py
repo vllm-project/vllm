@@ -639,7 +639,11 @@ def validate_args(args):
         raise ValueError("--prequeue-requests is not supported with --async-engine")
 
     # === Dataset Configuration ===
-    if not args.dataset_path and args.dataset_name != "prefix_repetition":
+    if not args.dataset_path and args.dataset_name not in {
+        "random-mm",
+        "random-rerank",
+        "prefix_repetition",
+    }:
         print("When dataset path is not set, it will default to random dataset")
         args.dataset_name = "random"
         random_input_len = getattr(args, "random_input_len", None)
