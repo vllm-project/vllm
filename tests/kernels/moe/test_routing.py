@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -8,6 +9,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
@@ -24,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
+from vllm.model_executor.layers.fused_moe.runner import moe_runner
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
 
@@ -44,6 +47,61 @@ def _is_aiter_capable() -> bool:
 MK_S = [(32, 256), (64, 512)]
 TOP_KS = [2, 4, 6]
 NUM_EXPERTS = [8, 16, 64]
+
+
+@pytest.mark.parametrize(
+    "pcp_size,use_all2all,uses_input_ids",
+    [(1, False, False), (2, False, False), (2, False, True), (2, True, True)],
+)
+def test_pcp_dispatch_gathers_routing_inputs_once_when_used(
+    pcp_size, use_all2all, uses_input_ids, monkeypatch
+):
+    """Hash routing must see the token IDs belonging to each gathered hidden row."""
+    runner = SimpleNamespace(
+        do_naive_dispatch_combine=False,
+        router=SimpleNamespace(bias_vl=None),
+        moe_config=SimpleNamespace(
+            pcp_size=pcp_size,
+            has_hash_routing=uses_input_ids,
+            moe_parallel_config=SimpleNamespace(use_all2all_kernels=use_all2all),
+        ),
+    )
+    input_id_gathers = 0
+
+    def all_gather(tensor, dim):
+        nonlocal input_id_gathers
+        if tensor.dtype == torch.int64:
+            input_id_gathers += 1
+        remote = 1 - tensor if tensor.dtype == torch.uint8 else tensor + 100
+        return torch.cat((tensor, remote), dim=dim)
+
+    monkeypatch.setattr(
+        moe_runner, "get_pcp_group", lambda: SimpleNamespace(all_gather=all_gather)
+    )
+    token_ids = torch.tensor([3, 7])
+    hidden = token_ids.float().unsqueeze(1)
+    padding = torch.tensor([False, True])
+    context = ForwardContext({}, {}, {}, is_padding=padding)
+    with override_forward_context(context):
+        with moe_runner.MoERunner._sequence_parallel_context(runner):
+            states, logits, ids = moe_runner.MoERunner._maybe_dispatch(
+                runner, hidden, hidden + 4, token_ids
+            )
+            dispatched = pcp_size > 1 and not use_all2all
+            expected = [3, 7, 103, 107] if dispatched else [3, 7]
+            if dispatched and not uses_input_ids:
+                assert ids is None
+            else:
+                assert ids is not None
+                assert ids.tolist() == expected
+            torch.testing.assert_close(states[:, 0], torch.tensor(expected).float())
+            torch.testing.assert_close(logits[:, 0], torch.tensor(expected).float() + 4)
+            assert context.is_padding.tolist() == (
+                [False, True, True, False] if len(expected) == 4 else [False, True]
+            )
+            moe_runner.MoERunner._maybe_dispatch(runner, hidden, hidden + 4, token_ids)
+            assert input_id_gathers == int(dispatched and uses_input_ids)
+        assert context.is_padding is padding
 
 
 def test_degenerate_grouped_config_uses_standard_topk() -> None:

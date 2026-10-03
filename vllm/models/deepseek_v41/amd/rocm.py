@@ -456,12 +456,16 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
         latent: torch.Tensor | None,
         positions: torch.Tensor,
         rotary_emb: torch.nn.Module,
+        slot_mapping_indices: torch.Tensor | None = None,
     ) -> None:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict) or latent is None:
             return
         assert self.owns_k
         indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
+        slot_mapping = indexer_metadata.slot_mapping
+        if slot_mapping_indices is not None:
+            slot_mapping = slot_mapping[slot_mapping_indices]
         k_pre, _ = self.wk(latent)
         rocm_mxfp4_indexer_k_store(
             k_pre,
@@ -470,7 +474,7 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
             self.k_norm.weight,
             self.k_norm.variance_epsilon,
             self.k_cache.kv_cache,
-            indexer_metadata.slot_mapping,
+            slot_mapping,
             self.compress_ratio,
             self.use_fp4_kv,
             num_heads=self.n_head,
