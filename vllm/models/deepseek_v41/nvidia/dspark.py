@@ -18,6 +18,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -50,12 +51,15 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 
+from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from .model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
     _linear_scale_param_name,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
+    maybe_init_gemm_rs,
+    prepare_mega_gate_routing_metadata,
 )
 
 logger = init_logger(__name__)
@@ -77,6 +81,9 @@ class DSparkDeepseekV4Model(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
         self.num_hidden_layers = config.num_hidden_layers
         self.target_layer_ids = tuple(config.dspark_target_layer_ids)
+        self.use_native_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.num_dspark_layers = (
@@ -109,12 +116,18 @@ class DSparkDeepseekV4Model(nn.Module):
         )
 
         current_vllm_config = get_current_vllm_config()
+        # The target model already holds the GEMM-RS workspace (same hidden
+        # size, same TP group); this only re-checks and binds the draft layers.
+        run_gemm_rs = maybe_init_gemm_rs(
+            current_vllm_config, self.use_sequence_parallel
+        )
         self.layers = nn.ModuleList(
             [
                 DeepseekV4DecoderLayer(
                     current_vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{self.num_hidden_layers + i}"),
                     topk_indices_buffer=self.topk_indices_buffer,
+                    run_gemm_rs=run_gemm_rs,
                 )
                 for i in range(self.num_dspark_layers)
             ]
@@ -202,6 +215,15 @@ class DSparkDeepseekV4Model(nn.Module):
                 )
             inputs_embeds = sp_shard(inputs_embeds)
             input_ids = sp_shard(input_ids)
+        mega_gate_metadata = None
+        if self.use_native_mega_moe:
+            mega_gate_metadata = prepare_mega_gate_routing_metadata(
+                input_ids,
+                has_hash_routing=False,
+                image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID
+                if getattr(self.config, "vision_n_layers", 0) > 0
+                else None,
+            )
         # Expand to hc_mult copies for hyper-connections ([T, H] -> [T, hc, H]).
         hidden_states = inputs_embeds.unsqueeze(-2).repeat(1, self.hc_mult, 1)
 
@@ -215,6 +237,7 @@ class DSparkDeepseekV4Model(nn.Module):
                 post_mix,
                 res_mix,
                 residual,
+                mega_gate_metadata=mega_gate_metadata,
             )
         hidden_states = mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
         # Collapse the hc copies with the pre-mix from the last layer's FFN
@@ -350,7 +373,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
         """
         first_layer = self.model.layers[0]
-        use_mega_moe = first_layer.ffn.use_mega_moe
+        use_native_mega_moe = first_layer.ffn.use_native_mega_moe
         # Draft MoE layers use the dspark_* expert counts, not the
         # backbone's (see DeepseekV4MoE and the reference
         # ModelArgs.get_moe_config).
@@ -358,7 +381,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             getattr(self.config, "dspark_n_routed_experts", 0)
             or self.config.n_routed_experts
         )
-        if use_mega_moe:
+        if use_native_mega_moe:
             expert_mapping = make_deepseek_v4_expert_params_mapping(n_draft_experts)
         else:
             expert_mapping = fused_moe_make_expert_params_mapping(
