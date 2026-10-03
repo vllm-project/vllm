@@ -21,11 +21,77 @@ import torch
 from tests.utils import create_new_process_for_each_test
 from vllm.compilation.counter import compilation_counter
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+)
+from vllm.v1.worker import gpu_model_runner as mrv1
 from vllm.v1.worker.gpu import cudagraph_utils as cgu
 from vllm.v1.worker.gpu import model_runner as mrv2
 
 GLOBAL_POOL = "global-pool"
 THROWAWAY_POOL = "throwaway-pool"
+
+
+@pytest.mark.parametrize("runner_module", [mrv1, mrv2], ids=["v1", "v2"])
+@pytest.mark.parametrize("is_profiling", [False, True])
+@pytest.mark.parametrize("prefix_match_unit", [None, 128])
+def test_cache_initialization_resolves_checkpoint_sizes(
+    monkeypatch, runner_module, is_profiling, prefix_match_unit
+):
+    runner = runner_module.GPUModelRunner.__new__(runner_module.GPUModelRunner)
+    runner.parallel_config = SimpleNamespace(
+        decode_context_parallel_size=8, cp_kv_cache_interleave_size=1
+    )
+    cache_config = SimpleNamespace(
+        block_size=896,
+        prefix_match_unit=prefix_match_unit,
+        enable_prefix_caching=True,
+        hash_block_size=None,
+        mamba_ckpt_block_size=None,
+    )
+    runner.vllm_config = SimpleNamespace(
+        cache_config=cache_config,
+        parallel_config=runner.parallel_config,
+        kv_transfer_config=None,
+    )
+    config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention"],
+                FullAttentionSpec(
+                    block_size=896, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=896,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+
+    class CacheSizesChecked(Exception):
+        pass
+
+    def check_before_gpu_allocation(_config):
+        # Profiling bypasses GPUWorker.initialize_from_config, so the runner
+        # must resolve these fields before creating checkpoint metadata.
+        assert cache_config.hash_block_size == (prefix_match_unit or 896)
+        assert cache_config.mamba_ckpt_block_size == (prefix_match_unit or 896)
+        raise CacheSizesChecked
+
+    monkeypatch.setattr(runner_module, "deepcopy", check_before_gpu_allocation)
+    with pytest.raises(CacheSizesChecked):
+        runner.initialize_kv_cache(config, is_profiling=is_profiling)
 
 
 class _FakeCudaGraphManager:

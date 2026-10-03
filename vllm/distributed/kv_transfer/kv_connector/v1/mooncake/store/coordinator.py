@@ -6,13 +6,17 @@ from collections.abc import Sequence
 from typing import NamedTuple, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    ReqMeta,
     chunk_hashes_for_block_size,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    eagle_proof_margin,
+    partial_hash_hits_enabled,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
@@ -23,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
@@ -118,6 +123,31 @@ class MooncakeStoreCoordinator:
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
 
+    def tail_attention_block_ids(self, req_meta: ReqMeta) -> list[int]:
+        """Return full-attention block IDs needed to complete a Mamba tail hit.
+
+        Mamba state IDs are handled separately.
+        """
+        partial_tail = partial_tail_block_ranges(
+            self,
+            req_meta,
+            [group.kv_cache_spec.block_size for group in self.kv_cache_groups],
+        )
+        if partial_tail is None:
+            return []
+        block_ids: list[int] = []
+        _, tail_blocks_by_group = partial_tail
+        for group_id, (_, block_indices) in tail_blocks_by_group.items():
+            if group_id in self.mamba_group_ids:
+                continue
+            group_blocks = req_meta.block_ids[group_id]
+            block_ids.extend(
+                group_blocks[idx]
+                for idx in block_indices
+                if idx < len(group_blocks) and group_blocks[idx] != NULL_BLOCK_ID
+            )
+        return block_ids
+
     def align_lookup_length(self, length: int) -> int:
         alignment = (
             self.hash_block_size
@@ -166,6 +196,17 @@ class MooncakeStoreCoordinator:
         # group sharing the spec.
         self.eagle_group_ids = {
             gid for g in attention_groups if g.use_eagle for gid in g.group_ids
+        }
+        self.eagle_proof_margin_by_group = {
+            gid: eagle_proof_margin(
+                group.spec.block_size,
+                self.hash_block_size,
+                self.enable_partial_hash_hits
+                and group.manager_cls.supports_fine_grained_hash_lookup,
+            )
+            for group in attention_groups
+            if group.use_eagle and not isinstance(group.spec, MambaSpec)
+            for gid in group.group_ids
         }
 
     def find_longest_cache_hit(
@@ -394,14 +435,16 @@ class MooncakeStoreCoordinator:
                 # never drops a block, so a widened bound would match past the
                 # attention-verified hit and resume from speculative state (#43559).
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
-                    eagle_margin = (
-                        self.hash_block_size
-                        if self.enable_partial_hash_hits
-                        and manager_cls.supports_fine_grained_hash_lookup
-                        and spec.block_size > self.hash_block_size
-                        else spec.block_size
+                    eagle_margin = eagle_proof_margin(
+                        spec.block_size,
+                        self.hash_block_size,
+                        self.enable_partial_hash_hits
+                        and manager_cls.supports_fine_grained_hash_lookup,
                     )
-                    _max_length = min(curr_hit_length + eagle_margin, max_length)
+                    _max_length = min(
+                        curr_hit_length + eagle_margin,
+                        len(block_hashes) * self.hash_block_size,
+                    )
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,  # type: ignore[arg-type]
                     max_length=_max_length,
@@ -451,18 +494,60 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     return spec
 
 
-def partial_hash_hits_enabled(
-    kv_cache_groups: Sequence[KVCacheGroupSpec],
-    hash_block_size: int,
-    dcp_world_size: int = 1,
-) -> bool:
-    """Match core's DCP-aware Mamba partial-hit condition."""
-    return any(
-        isinstance(spec := _unwrap_spec(g.kv_cache_spec), MambaSpec)
-        and spec.mamba_cache_mode == "align"
-        and (
-            (dcp_world_size == 1 and spec.block_size > hash_block_size)
-            or (dcp_world_size > 1 and spec.block_size >= hash_block_size)
-        )
-        for g in kv_cache_groups
+def partial_tail_block_ranges(
+    coord: MooncakeStoreCoordinator,
+    req_meta: ReqMeta,
+    block_sizes: Sequence[int],
+) -> tuple[int, dict[int, tuple[int, range]]] | None:
+    """Locate the blocks a partial-tail save publishes for this request.
+
+    A later request resumes at the prompt's Mamba checkpoint (``boundary``) only
+    if both pieces of KV are stored:
+
+    - Mamba groups: the state at ``boundary``, i.e. the last block of the range.
+    - Full-attention groups: the KV from the last LCM-aligned normal save up to
+      ``boundary`` plus the group's EAGLE proof margin (``proof_end``).
+
+    Returns ``(boundary, {group_id: (proof_end, block_indices)})``, or None when
+    there is no tail to publish. Groups whose proof is not computed yet are
+    omitted. For example, with LCM 16, blocks of 4 tokens, and a checkpoint at
+    44, the full-attention blocks are 8-10, covering [32, 44).
+
+    ``block_sizes`` are the per-group block sizes, indexed like
+    ``req_meta.block_ids``.
+    """
+    mamba_tails = [
+        position
+        for group_id, _, position in req_meta.boundary_state_offloads or []
+        if position % block_sizes[group_id]
+    ]
+    prompt_tokens = req_meta.num_prompt_tokens or 0
+    completed = req_meta.completed_token_len
+    # The tail is due once the prompt is computed, or when Mamba hands it off.
+    if not mamba_tails and (completed is None or not 0 < prompt_tokens <= completed):
+        return None
+    if not coord.enable_partial_hash_hits or not req_meta.block_hashes:
+        return None
+    hash_block_size = coord.hash_block_size
+    boundary = get_mamba_prefill_checkpoint_position(
+        prompt_tokens, hash_block_size, bool(coord.eagle_proof_margin_by_group)
     )
+    assert all(position == boundary for position in mamba_tails), (
+        "Mamba tail offloads must match the prompt checkpoint boundary"
+    )
+    num_hashes = len(req_meta.block_hashes)
+    if boundary == 0 or boundary // hash_block_size > num_hashes:
+        return None
+    if completed is None:
+        completed = boundary
+    start = boundary // coord.lcm_block_size * coord.lcm_block_size
+    tail_blocks_by_group: dict[int, tuple[int, range]] = {}
+    for group_id, block_size in enumerate(block_sizes):
+        proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
+        if proof_end > completed or proof_end // hash_block_size > num_hashes:
+            continue
+        tail_blocks_by_group[group_id] = (
+            proof_end,
+            range(start // block_size, cdiv(proof_end, block_size)),
+        )
+    return boundary, tail_blocks_by_group
