@@ -459,6 +459,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     if _load_preloaded_autotune_table(
         daemon_cache, artifact_key, tune_group, is_leader
     ):
+        # Besides tuning, this raises the KDA projection-overlap limit on the
+        # model, which the table does not carry.
+        with torch.inference_mode():
+            _autotune_kimi_k3_kda_qkvg(runner.get_model())
         # Stages hit or miss independently, so match the world barrier that
         # stages still tuning wait on below.
         if world.world_size > 1:

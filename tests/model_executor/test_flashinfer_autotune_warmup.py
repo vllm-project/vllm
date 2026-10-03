@@ -318,12 +318,8 @@ def test_pp1_retains_world_synchronization_and_existing_cache_name(autotune_run)
     assert all(groups == [(0, 1, 2, 3)] for groups in run.profile_groups.values())
 
 
-def test_pp_stages_adopt_daemon_tables_independently(autotune_run, monkeypatch):
-    """A stage adopting its table from the weight cache daemon while another
-    stage tunes must still meet it at the world barrier, and each stage must
-    only ever see the table tuned for it."""
-    run = autotune_run()
-    daemon = {1: json.dumps({"shared_gemm": 1}).encode()}
+def _serve_from_daemon(run, monkeypatch, daemon):
+    """Back flashinfer_autotune's daemon cache with ``daemon``, keyed by PP rank."""
 
     def put(key, table):
         daemon[key] = table
@@ -350,11 +346,35 @@ def test_pp_stages_adopt_daemon_tables_independently(autotune_run, monkeypatch):
         lambda: json.dumps(run.tuners[run.rank].cache).encode(),
     )
 
+
+def test_pp_stages_adopt_daemon_tables_independently(autotune_run, monkeypatch):
+    """A stage adopting its table from the weight cache daemon while another
+    stage tunes must still meet it at the world barrier, and each stage must
+    only ever see the table tuned for it."""
+    run = autotune_run()
+    daemon = {1: json.dumps({"shared_gemm": 1}).encode()}
+    _serve_from_daemon(run, monkeypatch, daemon)
+
     run.execute()
     run.assert_collectives_match()
     assert set(run.profile_groups) == {0, 1, 2, 3}
     assert all(run.tuners[rank].cache == {"shared_gemm": 1} for rank in range(4, 8))
     assert json.loads(daemon[0]) == {"shared_gemm": 0, "pp0_extra_gemm": 0}
+
+
+def test_daemon_hit_still_enables_kimi_k3_projection_overlap(autotune_run, monkeypatch):
+    """Kimi K3's QKVG warmup also raises a limit on the model that the tuned
+    table does not carry, so adopting the table must not skip it."""
+    run = autotune_run(pp=1)
+    _serve_from_daemon(run, monkeypatch, {0: json.dumps({"shared_gemm": 0}).encode()})
+    warmed = []
+    monkeypatch.setattr(
+        warmup, "_autotune_kimi_k3_kda_qkvg", lambda model: warmed.append(run.rank)
+    )
+
+    run.execute()
+    assert not run.profile_groups
+    assert warmed == [0, 1, 2, 3]
 
 
 def _autotune_key(skip_ops=None, *, config_hash="cfg", workspace="ws"):
