@@ -15,15 +15,26 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     placeholder_ranges_from_engine_input,
 )
+from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+    encode_mm_kwargs_item,
+)
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     GenerateResponse,
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import GenerationError
 from vllm.logprobs import Logprob
-from vllm.multimodal.inputs import PlaceholderRange
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
+from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
 from vllm.renderers import renderer_from_config
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
@@ -283,6 +294,46 @@ async def test_non_stream_error():
 
     with pytest.raises(GenerationError):
         await serving.serve_tokens(request)
+
+
+@pytest.mark.asyncio
+async def test_serve_tokens_rejects_invalid_shm_handle_before_engine_handoff():
+    engine = _mock_engine()
+    engine.generate = MagicMock()
+    serving = _build_serving_tokens(engine)
+    cache = MagicMock()
+    cache.validate_input_item.side_effect = ValueError(
+        "Invalid SHM handle signature for cache key."
+    )
+    serving.online_renderer.renderer._mm_processor_cache = cache
+    forged_item = MultiModalKwargsItem(
+        {
+            "address": MultiModalFieldElem(data=224, field=MultiModalBatchedField()),
+            "monotonic_id": MultiModalFieldElem(
+                data=4242,
+                field=MultiModalBatchedField(),
+            ),
+        }
+    )
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        features=MultiModalFeatures(
+            mm_hashes={"image": ["image_A"]},
+            mm_placeholders={"image": [PlaceholderRangeInfo(offset=0, length=1)]},
+            kwargs_data={"image": [encode_mm_kwargs_item(forged_item)]},
+        ),
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, ErrorResponse)
+    cache.validate_input_item.assert_called_once()
+    validated_item, validated_hash = cache.validate_input_item.call_args.args
+    assert validated_hash == "image_A"
+    assert validated_item["address"].data == 224
+    engine.generate.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1103,3 +1154,44 @@ async def test_stream_prompt_tokens_details_zero_cached():
     # Zero cached tokens must be present, not omitted
     assert usage_chunk["usage"]["prompt_tokens_details"] is not None
     assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_mask", [False, True])
+async def test_stream_sampling_mask_matches_each_token_chunk(with_mask):
+    engine = _mock_engine()
+
+    async def generate(*args, **kwargs):
+        for position, tokens in enumerate(([10], [20, 30])):
+            result = _make_request_output(
+                "req-mask",
+                token_ids=list(tokens),
+                finish_reason="length" if position else None,
+                finished=bool(position),
+            )
+            if with_mask:
+                result.outputs[0].sampling_mask = SamplingMask(
+                    [[token, token + 1] for token in tokens]
+                )
+            yield result
+
+    engine.generate = MagicMock(side_effect=generate)
+    serving = _build_serving_tokens(engine)
+    response = await serving.serve_tokens(
+        GenerateRequest(
+            model=MODEL_NAME, token_ids=[1, 2, 3], sampling_params={}, stream=True
+        )
+    )
+    chunks = _parse_sse_chunks([chunk async for chunk in response])
+    choices = [
+        choice
+        for chunk in chunks
+        if isinstance(chunk, dict)
+        for choice in chunk.get("choices", [])
+    ]
+    assert [choice["token_ids"] for choice in choices] == [[10], [20, 30]]
+    for choice in choices:
+        expected = (
+            [[token, token + 1] for token in choice["token_ids"]] if with_mask else None
+        )
+        assert choice["sampling_mask"] == expected
