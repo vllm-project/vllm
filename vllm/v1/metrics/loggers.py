@@ -15,7 +15,6 @@ from vllm.distributed.ec_transfer.ec_connector.metrics import (
     ECConnectorLogging,
     ECConnectorProm,
 )
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,
     KVConnectorProm,
@@ -24,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.buckets import histogram_buckets
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
@@ -1144,7 +1144,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 )
                 for source, num_tokens in connector_stats.hits_by_source.items():
                     self.counter_prompt_tokens_cached_by_source.labels(
-                        *labelvalues, source
+                        *labelvalues, source.value
                     ).inc(num_tokens)
 
             if scheduler_stats.spec_decoding_stats is not None:

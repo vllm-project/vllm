@@ -21,7 +21,8 @@ pub struct BaseCacheStats {
     pub hits: u64,
 }
 
-/// Cache-hit tokens per source tier, matching Python's `CachedTokensBySource`.
+/// Cache-hit tokens per source tier. Python sends a sparse
+/// `dict[CacheHitSource, int]`, so absent tiers default to zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CachedTokensBySource {

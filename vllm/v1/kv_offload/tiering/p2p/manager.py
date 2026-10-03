@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from typing_extensions import override
 
 import vllm.envs as envs
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import get_none_hash_seed
 from vllm.v1.kv_offload.base import (
@@ -36,6 +35,7 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
 from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec

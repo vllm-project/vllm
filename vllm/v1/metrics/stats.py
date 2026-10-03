@@ -8,11 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
-    CachedTokensBySource,
-    CacheHitSource,
-)
 from vllm.logger import init_logger
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -135,7 +132,7 @@ class PrefixCacheStats(BaseCacheStats):
 
     preempted_hits: int = 0
     """The `hits` number for preempted requests."""
-    hits_by_source: CachedTokensBySource = field(default_factory=CachedTokensBySource)
+    hits_by_source: dict[CacheHitSource, int] = field(default_factory=dict)
     """`hits` split by the cache tier that supplied them (connector stats only)."""
 
     def record(
@@ -143,7 +140,7 @@ class PrefixCacheStats(BaseCacheStats):
         num_tokens: int,
         num_hits: int,
         preempted: bool,
-        hits_by_source: CachedTokensBySource | None = None,
+        hits_by_source: dict[CacheHitSource, int] | None = None,
     ) -> None:
         """Aggregate request information into the stats."""
         if preempted:
@@ -158,19 +155,19 @@ class PrefixCacheStats(BaseCacheStats):
         self.hits += num_hits
         if hits_by_source is None:
             return
-        if (
-            not isinstance(hits_by_source, CachedTokensBySource)
-            or hits_by_source.total != num_hits
-        ):
+        if sum(hits_by_source.values()) != num_hits:
             logger.warning_once(
                 "Connector attributed %s for %d cached tokens; reporting them as %s.",
                 str(hits_by_source),
                 num_hits,
                 CacheHitSource.EXTERNAL_UNSPECIFIED.value,
             )
-            self.hits_by_source.add(CacheHitSource.EXTERNAL_UNSPECIFIED, num_hits)
-            return
-        self.hits_by_source.merge(hits_by_source)
+            hits_by_source = {CacheHitSource.EXTERNAL_UNSPECIFIED: num_hits}
+        for source, num_source_hits in hits_by_source.items():
+            if num_source_hits:
+                self.hits_by_source[source] = (
+                    self.hits_by_source.get(source, 0) + num_source_hits
+                )
 
 
 @dataclass

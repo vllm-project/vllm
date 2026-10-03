@@ -14,10 +14,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -19,10 +19,6 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.config import KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
-    CachedTokensBySource,
-    CacheHitSource,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -81,6 +77,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
@@ -587,9 +584,9 @@ def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
 @pytest.mark.parametrize(
     ("recurrent_source", "expected"),
     [
-        ("host", CachedTokensBySource(p2p=16, host=12)),
-        ("p2p", CachedTokensBySource(p2p=28)),
-        (None, CachedTokensBySource(p2p=16, host=12)),
+        ("host", {CacheHitSource.P2P: 16, CacheHitSource.HOST: 12}),
+        ("p2p", {CacheHitSource.P2P: 28}),
+        (None, {CacheHitSource.P2P: 16, CacheHitSource.HOST: 12}),
     ],
 )
 def test_external_cache_hit_sources_preserve_partial_tail_origin(
@@ -635,8 +632,8 @@ def test_external_cache_hit_sources_preserve_partial_tail_origin(
 @pytest.mark.parametrize(
     ("second_source", "expected"),
     [
-        ("host", CachedTokensBySource(host=4, disk=4)),
-        ("p2p", CachedTokensBySource(p2p=4, disk=4)),
+        ("host", {CacheHitSource.HOST: 4, CacheHitSource.DISK: 4}),
+        ("p2p", {CacheHitSource.P2P: 4, CacheHitSource.DISK: 4}),
     ],
 )
 def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
@@ -697,17 +694,17 @@ def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
     [
         pytest.param(
             [(8, 12, "host"), (0, 8, "host"), (4, 10, "host")],
-            CachedTokensBySource(host=8, external_unspecified=4),
+            {CacheHitSource.HOST: 8, CacheHitSource.EXTERNAL_UNSPECIFIED: 4},
             id="overlapping-same-source-and-adjacent-endpoints",
         ),
         pytest.param(
             [(10, 20, "p2p"), (6, 10, "disk"), (0, 8, "host"), (4, 12, "host")],
-            CachedTokensBySource(host=2, disk=4, p2p=6),
+            {CacheHitSource.HOST: 2, CacheHitSource.DISK: 4, CacheHitSource.P2P: 6},
             id="nested-tiers-and-clipped-ranges",
         ),
         pytest.param(
             [(0, 4, "disk"), (16, 20, "disk"), (8, 8, "disk")],
-            CachedTokensBySource(external_unspecified=12),
+            {CacheHitSource.EXTERNAL_UNSPECIFIED: 12},
             id="no-covering-ranges",
         ),
     ],
@@ -726,7 +723,7 @@ def test_external_cache_hit_sources_range_boundaries(ranges, expected):
 
     result = scheduler.get_external_cache_hit_sources(request, 12)
     assert result == expected
-    assert result.total == 12
+    assert sum(result.values()) == 12
 
 
 @pytest.mark.parametrize("source", ["host", "disk", "p2p", "external_unspecified"])
@@ -754,9 +751,9 @@ def test_external_cache_hit_sources_recurrent_only_state(source):
         ),
         48,
     )
-    expected = CachedTokensBySource()
-    expected.add(source, 48)
-    assert scheduler.get_external_cache_hit_sources(request, 48) == expected
+    assert scheduler.get_external_cache_hit_sources(request, 48) == {
+        CacheHitSource(source): 48
+    }
     scheduler.manager.get_load_source.assert_called_once()
 
 
@@ -840,8 +837,12 @@ def test_external_cache_hit_sources_use_loaded_attention_ranges(
     scheduler.update_state_after_alloc(
         request, KVCacheBlocks(tuple(block_groups)), count
     )
-    expected = CachedTokensBySource()
-    expected.add(
+    expected: dict[CacheHitSource, int] = {}
+
+    def expect(source: CacheHitSource, num_tokens: int) -> None:
+        expected[source] = expected.get(source, 0) + num_tokens
+
+    expect(
         CacheHitSource.HOST if full_attention else CacheHitSource.EXTERNAL_UNSPECIFIED,
         2 * chunk_size - local_tokens,
     )
@@ -851,13 +852,11 @@ def test_external_cache_hit_sources_use_loaded_attention_ranges(
             if sparse_source == "mixed"
             else sparse_source
         )
-        expected.add(CacheHitSource(source), chunk_size)
+        expect(CacheHitSource(source), chunk_size)
     result = scheduler.get_external_cache_hit_sources(request, count)
     assert result == expected
-    assert result.total == count
-    assert scheduler.get_external_cache_hit_sources(request, 0) == (
-        CachedTokensBySource()
-    )
+    assert sum(result.values()) == count
+    assert scheduler.get_external_cache_hit_sources(request, 0) == {}
 
 
 def test_partial_lookup_requires_every_cache_group():

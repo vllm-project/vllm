@@ -21,10 +21,6 @@ from vllm.config import (
 )
 from vllm.config.cache import MambaCacheMode
 from vllm.config.kv_events import KVEventsConfig
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
-    CachedTokensBySource,
-    CacheHitSource,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
@@ -56,6 +52,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
@@ -243,10 +240,8 @@ def test_connector_reports_configured_cache_source(
         kv_cache_config,
     )
 
-    expected = CachedTokensBySource()
-    expected.add(source, 32)
-    assert connector.get_external_cache_hit_sources(None, 32) == expected  # type: ignore[arg-type]
-    assert connector.get_external_cache_hit_sources(None, 0) == CachedTokensBySource()  # type: ignore[arg-type]
+    assert connector.get_external_cache_hit_sources(None, 32) == {source: 32}  # type: ignore[arg-type]
+    assert connector.get_external_cache_hit_sources(None, 0) == {}  # type: ignore[arg-type]
 
 
 def make_scheduler(

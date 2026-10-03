@@ -10,9 +10,6 @@ import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
-    CachedTokensBySource,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
@@ -41,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import create_vllm_config
@@ -231,7 +229,7 @@ def test_scheduler_reports_mooncake_cache_source():
     assert connector.get_external_cache_hit_sources(
         None,  # type: ignore[arg-type]
         32,
-    ) == CachedTokensBySource(external_unspecified=32)
+    ) == {CacheHitSource.EXTERNAL_UNSPECIFIED: 32}
 
 
 def test_worker_methods_delegate_to_store_worker():

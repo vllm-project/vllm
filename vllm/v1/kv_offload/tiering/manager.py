@@ -27,7 +27,6 @@ from typing import NamedTuple
 import numpy as np
 from typing_extensions import override
 
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -55,6 +54,7 @@ from vllm.v1.kv_offload.tiering.base import (
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 logger = init_logger(__name__)
 

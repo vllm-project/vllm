@@ -48,13 +48,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
-    CachedTokensBySource,
-    CacheHitSource,
-)
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -539,18 +536,19 @@ class KVConnectorBase_V1(ABC):
         self,
         request: "Request",
         num_external_tokens: int,
-    ) -> CachedTokensBySource:
+    ) -> dict[CacheHitSource, int]:
         """Split ``num_external_tokens`` by the cache tier that supplied them.
 
         Called after :meth:`update_state_after_alloc`, so the load plan is
         known. Counts must sum to ``num_external_tokens``; a mismatch is
-        reported as ``external_unspecified``.
+        reported as ``external_unspecified``. Only non-zero counts are
+        included.
 
         Default: all tokens under ``_cache_hit_source``.
         """
-        sources = CachedTokensBySource()
-        sources.add(self._cache_hit_source, num_external_tokens)
-        return sources
+        if num_external_tokens == 0:
+            return {}
+        return {self._cache_hit_source: num_external_tokens}
 
     @abstractmethod
     def update_state_after_alloc(

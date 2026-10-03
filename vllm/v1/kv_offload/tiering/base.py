@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -25,6 +24,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.tiering.backpressure import (
     BackpressureDetector,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (

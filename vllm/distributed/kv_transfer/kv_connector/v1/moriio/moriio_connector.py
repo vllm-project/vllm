@@ -17,7 +17,6 @@ import torch
 import zmq
 
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     clip_ssm_state_blocks,
@@ -100,6 +99,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     is_full_attention_spec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 

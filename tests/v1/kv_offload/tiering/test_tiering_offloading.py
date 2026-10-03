@@ -17,7 +17,6 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import CacheHitSource
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -54,6 +53,7 @@ from vllm.v1.kv_offload.tiering.manager import (
     TieringOffloadingManager,
 )
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()

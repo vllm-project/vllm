@@ -9,10 +9,6 @@ from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
-    CachedTokensBySource,
-    CacheHitSource,
-)
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
@@ -61,6 +57,7 @@ from vllm.v1.kv_offload.base import (
     TierMatcher,
     make_offload_key,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -1103,7 +1100,7 @@ class OffloadingConnectorScheduler:
         self,
         request: Request,
         num_external_tokens: int,
-    ) -> CachedTokensBySource:
+    ) -> dict[CacheHitSource, int]:
         """Split the accepted external hit by the tier each loaded key came from.
 
         Attention keys cover only their loaded token ranges; recurrent state
@@ -1111,7 +1108,7 @@ class OffloadingConnectorScheduler:
         Uncovered tokens, including omitted sliding-window history, are
         ``external_unspecified``.
         """
-        sources = CachedTokensBySource()
+        sources: dict[CacheHitSource, int] = {}
         if num_external_tokens == 0:
             return sources
         req_status = self._req_status[request.request_id]
@@ -1136,12 +1133,12 @@ class OffloadingConnectorScheduler:
         for boundary, delta, source in sorted(events):
             if boundary > position:
                 tiers = [tier for tier, count in active.items() if count > 0]
-                sources.add(
+                tier = (
                     CacheHitSource.outermost(tiers)
                     if tiers
-                    else CacheHitSource.EXTERNAL_UNSPECIFIED,
-                    boundary - position,
+                    else CacheHitSource.EXTERNAL_UNSPECIFIED
                 )
+                sources[tier] = sources.get(tier, 0) + boundary - position
             active[source] += delta
             position = boundary
         return sources

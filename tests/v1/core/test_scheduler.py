@@ -24,9 +24,6 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
-from vllm.distributed.kv_transfer.kv_connector.cache_hit_source import (
-    CachedTokensBySource,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -63,6 +60,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -2608,7 +2606,7 @@ def test_kv_connector_records_external_cache_hit_sources(monkeypatch, is_async):
     )[0]
     assert scheduler.connector is not None
     get_sources = Mock(
-        return_value=CachedTokensBySource(p2p=block_size, host=block_size)
+        return_value={CacheHitSource.P2P: block_size, CacheHitSource.HOST: block_size}
     )
     update_state = Mock(wraps=scheduler.connector.update_state_after_alloc)
     calls = Mock()
@@ -2633,9 +2631,10 @@ def test_kv_connector_records_external_cache_hit_sources(monkeypatch, is_async):
     connector_stats = scheduler.connector_prefix_cache_stats
     assert connector_stats is not None
     assert connector_stats.hits == num_matched_tokens
-    assert connector_stats.hits_by_source == CachedTokensBySource(
-        p2p=block_size, host=block_size
-    )
+    assert connector_stats.hits_by_source == {
+        CacheHitSource.P2P: block_size,
+        CacheHitSource.HOST: block_size,
+    }
 
     if is_async:
         # Re-admission after the async load completes is not a new hit.
@@ -2644,7 +2643,7 @@ def test_kv_connector_records_external_cache_hit_sources(monkeypatch, is_async):
         get_sources.assert_called_once()
         connector_stats = scheduler.connector_prefix_cache_stats
         assert connector_stats is not None
-        assert connector_stats.hits_by_source == CachedTokensBySource()
+        assert connector_stats.hits_by_source == {}
 
 
 @pytest.mark.parametrize("is_async", [False, True])
