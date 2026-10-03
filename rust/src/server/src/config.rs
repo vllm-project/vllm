@@ -219,6 +219,12 @@ pub struct Config {
     pub model: String,
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     pub revision: Option<String>,
+    /// Hugging Face tokenizer identifier or local directory. Defaults to `model`.
+    pub tokenizer: Option<String>,
+    /// Tokenizer revision on the Hugging Face Hub. Defaults to `revision`.
+    pub tokenizer_revision: Option<String>,
+    /// Hugging Face config identifier or local directory. Defaults to `model`.
+    pub hf_config_path: Option<String>,
     /// JSON Merge Patch applied to the model config before backend initialization.
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
