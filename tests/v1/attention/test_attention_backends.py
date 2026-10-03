@@ -1531,6 +1531,74 @@ def test_flashinfer_varlen_decode_graph_replays_changed_layout(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+@pytest.mark.parametrize("head_size,dcp_size", [(256, 1), (512, 1), (256, 2)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_flashinfer_nvfp4_decode_dtype_after_fallback(
+    monkeypatch, head_size, dcp_size, dtype
+):
+    """Only a resolved XQA route uses model-dtype NVFP4 queries."""
+    from vllm.config import (
+        AttentionConfig,
+        CacheConfig,
+        CompilationConfig,
+        CUDAGraphMode,
+    )
+    from vllm.v1.attention.backends import flashinfer as fi
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+    from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=dtype, max_model_len=64, get_num_attention_heads=lambda _: 24
+        ),
+        cache_config=CacheConfig(cache_dtype="nvfp4"),
+        attention_config=AttentionConfig(),
+        compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=2),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp_size,
+            cp_kv_cache_interleave_size=1,
+            dcp_comm_backend="ag_rs",
+        ),
+        speculative_config=None,
+        num_speculative_tokens=0,
+        use_v2_model_runner=False,
+    )
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=head_size,
+        dtype=dtype,
+        kv_quant_mode=get_kv_quant_mode("nvfp4"),
+    )
+    monkeypatch.setattr(fi, "force_use_trtllm_attention", lambda: None)
+    monkeypatch.setattr(fi, "get_num_attention_heads_from_layers", lambda *_: 24)
+    monkeypatch.setattr(fi.current_platform, "is_device_capability", lambda _: False)
+    monkeypatch.setattr(
+        fi.current_platform, "is_device_capability_family", lambda cap: cap == 120
+    )
+    # Exercise route/dtype selection independently of the native NVFP4
+    # prefill capability gate, which is a prerequisite for SM12x serving.
+    monkeypatch.setattr(fi, "supports_trtllm_attention", lambda **_: True)
+    monkeypatch.setattr(fi, "can_use_trtllm_attention", lambda *_, **__: True)
+    monkeypatch.setattr(fi, "get_dcp_world_size_and_rank", lambda _: (dcp_size, 0))
+    monkeypatch.setattr(
+        fi,
+        "get_per_layer_parameters",
+        lambda *_: {"layer": PerLayerParameters(-1, 0.0, head_size**-0.5)},
+    )
+    builder = fi.FlashInferMetadataBuilder(spec, ["layer"], config, torch.device("cpu"))
+    use_xqa = head_size <= 256 and dcp_size == 1
+    assert builder.use_xqa == use_xqa
+    assert builder.use_trtllm_decode_attention == use_xqa
+    assert builder.q_data_type_decode == (dtype if use_xqa else fi.FP8_DTYPE)
+    assert builder.q_data_type_prefill == fi.FP8_DTYPE
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
