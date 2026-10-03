@@ -139,7 +139,7 @@ class FlashMLASparseBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64]
 
     @staticmethod
@@ -156,8 +156,8 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        # DeepSeek V3.2 layout: 512 NoPE + 64 RoPE = 576.
-        return [576]
+        # DeepSeek V3.2: 512 NoPE + 64 RoPE = 576; GLM5Next NoPE: 512.
+        return [576, 512]
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -184,6 +184,37 @@ class FlashMLASparseBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if head_size == 512:
+            # GLM5Next NoPE (qk_rope_head_dim == 0, kv_lora_rank == 512) has
+            # head_size 512 and is served here by the direct 512-wide bf16
+            # cache on SM90. Quantized DS-MLA caches need the zero-padded
+            # 576/656B envelope, which is wired up separately; plain fp8,
+            # SM100 bf16, and rope-carrying 512 models must fall through to
+            # FlashInfer/TRITON.
+            if (
+                kv_cache_dtype in (None, "auto", "bfloat16", "float16")
+                and device_capability.major == 9
+            ):
+                # Direct bf16 NoPE-512 is only correct for rope-free models.
+                # Precedent for reading hf_text_config in supports_combination:
+                # flashinfer_mla_sparse.py.
+                from vllm.config import get_current_vllm_config
+
+                vllm_config = get_current_vllm_config()
+                if vllm_config.model_config is not None:
+                    hf_text_config = vllm_config.model_config.hf_text_config
+                    if getattr(hf_text_config, "qk_rope_head_dim", 64) != 0:
+                        return (
+                            "FLASHMLA_SPARSE supports head_size 512 only for "
+                            "rope-free (NoPE) models"
+                        )
+            else:
+                return (
+                    "FLASHMLA_SPARSE supports head_size 512 only with bf16 "
+                    "kv-cache on SM90 (NoPE), got "
+                    f"kv_cache_dtype={kv_cache_dtype}, "
+                    f"capability={device_capability}"
+                )
         if kv_cache_dtype == "nvfp4_ds_mla" and device_capability.major != 10:
             return (
                 f"FLASHMLA_SPARSE only supports the {kv_cache_dtype} kv-cache "
@@ -286,7 +317,6 @@ class FlashMLASparseMetadataBuilder(
 ):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     require_uniform_decodes: ClassVar[bool] = True
-    hisparse_supports_multi_token_decode: ClassVar[bool] = True
     metadata_cls = FlashMLASparseMetadata
 
     def __init__(
@@ -459,6 +489,14 @@ class FlashMLASparseMetadataBuilder(
             num_tokens - metadata.num_decode_tokens,
         )
 
+        FP8Meta = FlashMLASparseMetadata.FP8SeparatePrefillDecode
+        # PCP decode sharding can leave a rank with only its collective-padding
+        # row when the global decode batch is smaller than the PCP world size.
+        # The row has no actual query tokens and must not be interpreted as a
+        # zero-length decode request by the sparse FP8 metadata builder.
+        if num_tokens == 0:
+            return FP8Meta()
+
         decode_query_len = 0
         active_num_decodes = num_decodes
         if num_decodes > 0:
@@ -468,7 +506,6 @@ class FlashMLASparseMetadataBuilder(
             active_num_decodes = num_decode_tokens // decode_query_len
             assert active_num_decodes * decode_query_len == num_decode_tokens
 
-        FP8Meta = FlashMLASparseMetadata.FP8SeparatePrefillDecode
         fp8_metadata = FP8Meta(
             num_decodes=active_num_decodes,
             num_prefills=num_prefills,
@@ -787,10 +824,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             num_decode_tokens = attn_metadata.num_decode_tokens
             if num_decode_tokens > 0:
                 decode_topk, decode_lengths = (
-                    index_group.convert_decode_logical_to_physical_topk(
+                    index_group.convert_logical_to_physical_topk(
                         self.index_group_index,
                         topk_indices[:num_decode_tokens],
                         attn_metadata,
+                        block_stride_rows=None,
                         return_valid_counts=True,
                     )
                 )
@@ -996,7 +1034,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     attn_metadata,
                     fp8_metadata.decode.kernel_metadata,
                     num_decodes,
-                    fp8_metadata.decode.decode_query_len,
                 )
             # Reshape q: (num_decode_tokens, num_heads, head_dim)
             #         -> (num_decodes, seq_len, num_heads, head_dim)
@@ -1236,16 +1273,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         attn_metadata: FlashMLASparseMetadata,
         kernel_metadata: FlashMLASparseMetadata.FP8KernelMetadata,
         num_decodes: int,
-        decode_query_len: int,
     ) -> torch.Tensor:
         assert isinstance(self.index_group, HiSparseMLAIndexGroup)
-        physical_topk = self.index_group.convert_decode_logical_to_physical_topk(
+        physical_topk = self.index_group.convert_logical_to_physical_topk(
             self.index_group_index,
             topk_indices,
             attn_metadata,
+            block_stride_rows=None,
             return_valid_counts=False,
-            num_decodes=num_decodes,
-            decode_query_len=decode_query_len,
         )
         assert isinstance(physical_topk, torch.Tensor)
         q = reshape_query_for_spec_decode(q, num_decodes)
@@ -1332,7 +1367,12 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 *self.workspace_specs
             )
             q = q_concat_buffer[: ql_nope.shape[0]]
-            ops.concat_mla_q(ql_nope, q_pe, q)
+            if q_pe.size(-1) == 0:
+                # NoPE (GLM5Next): concat_mla_q requires rope_dim == 64,
+                # copy directly into the head-padded buffer instead.
+                q[:, : ql_nope.shape[1]].copy_(ql_nope)
+            else:
+                ops.concat_mla_q(ql_nope, q_pe, q)
         else:
             actual_num_heads = q.shape[1]
 

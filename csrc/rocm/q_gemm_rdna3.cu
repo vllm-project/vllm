@@ -115,61 +115,6 @@ __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
   return result;
 }
 
-__forceinline__ __device__ float dot22_8_f(bf162_t (&dq)[4],
-                                           const bf16_t* a_ptr) {
-  // RDNA3 (gfx1100) lacks a packed bf16 FMA: there is no v_pk_fma_bf16 in
-  // the gfx11 ISA (it only landed on CDNA3+ / gfx94x and later). hipcc
-  // therefore lowers __hfma2(bf162_t, bf162_t, bf162_t) to a serialised
-  // fallback (single-element FMAs or fp32 round-trips), which empirically
-  // runs ~2× the cycle count of v_pk_fma_f16 on the same VALU. The bf16
-  // decode path was paying that tax in full, scaling linearly with M (the
-  // fp16 path scales sub-linearly because its v_pk_fma_f16 is full rate
-  // and the kernel becomes memory-bound).
-  //
-  // Fix: widen bf16 → fp32 explicitly (a left-shift by 16, free in VGPRs)
-  // and accumulate with v_fma_f32, which IS full rate on RDNA3. Same FMA
-  // count, but each FMA is fast. Bonus: the accumulator is now fp32
-  // throughout instead of bf16, which is also numerically more accurate
-  // (no compounding bf16-rounding inside the dot loop).
-  float result = 0.0f;
-  #pragma unroll
-  for (int i = 0; i < 4; i++) {
-    uint32_t aw, dw;
-    __builtin_memcpy(&aw, a_ptr + 2 * i, sizeof(uint32_t));
-    __builtin_memcpy(&dw, &dq[i], sizeof(uint32_t));
-    // bf16 in low 16 bits  → fp32 by left-shifting into the upper half.
-    // bf16 in high 16 bits → already aligned with fp32's upper half.
-    float a_x = __uint_as_float((aw & 0xFFFFu) << 16);
-    float a_y = __uint_as_float(aw & 0xFFFF0000u);
-    float d_x = __uint_as_float((dw & 0xFFFFu) << 16);
-    float d_y = __uint_as_float(dw & 0xFFFF0000u);
-    result = __fmaf_rn(d_x, a_x, result);
-    result = __fmaf_rn(d_y, a_y, result);
-  }
-  return result;
-}
-
-// fp32-input dot product: paired with dequant_4bit_8_bf16_f32 which already
-// produces fp32 dq[8]. Saves the bf16→fp32 widening that the bf162_t
-// overload above does for dq (still need to widen A from bf16). Wins more
-// at high N: the bf162_t version's per-call widening cost scales with the
-// number of dequants × M_COUNT × 4 dot calls; the fp32 version pays only
-// for A widening (M_COUNT × 4 × 4 widens, half as many).
-__forceinline__ __device__ float dot22_8_f(float (&dq)[8],
-                                           const bf16_t* a_ptr) {
-  float result = 0.0f;
-  #pragma unroll
-  for (int i = 0; i < 4; i++) {
-    uint32_t aw;
-    __builtin_memcpy(&aw, a_ptr + 2 * i, sizeof(uint32_t));
-    float a_x = __uint_as_float((aw & 0xFFFFu) << 16);
-    float a_y = __uint_as_float(aw & 0xFFFF0000u);
-    result = __fmaf_rn(dq[2 * i + 0], a_x, result);
-    result = __fmaf_rn(dq[2 * i + 1], a_y, result);
-  }
-  return result;
-}
-
 // ---------------------------------------------------------------------------
 // Packed atomic-add via CAS-loop on a 64-bit word (4 fp16/bf16 lanes per CAS).
 // RDNA3 (gfx11) does NOT have native v_global_atomic_pk_add_f16 / _bf16 (those
@@ -327,9 +272,8 @@ __global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
 
   // Per-column dequant constants. We hold one set of (z, y) pairs per column.
   // fp16 uses the exllama (z1z16, y1y16) double-pair to enable the upper-
-  // nibble-*16 trick. bf16 uses fp32 scalars (z, y) because the dequant
-  // produces fp32 directly — see prep_zero_scale_bf16_f32 / the FMA
-  // bypass for the missing v_pk_fma_bf16 on gfx11.
+  // nibble-*16 trick. bf16 uses fp32 scalars (z, y) for the inline v_dot2
+  // bias correction.
   half2 z1z16_h[4][2], y1y16_h[4][2];
   float z_b_f[4], y_b_f[4];
 

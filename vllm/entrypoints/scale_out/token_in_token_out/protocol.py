@@ -5,13 +5,18 @@ from typing import Annotated, Any, Literal, TypeAlias
 from pydantic import (
     BaseModel,
     Field,
+    NonNegativeInt,
     PrivateAttr,
     field_validator,
     model_validator,
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.generate.base.protocol import StreamOptions, validate_cache_salt
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    StreamOptions,
+    validate_cache_salt,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
@@ -358,8 +363,9 @@ class GenerateStreamResponse(BaseModel):
     )
     choices: list[GenerateResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
-    prompt_token_ids: list[int] | None = None
+    prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -376,8 +382,10 @@ class GenerateResponse(BaseModel):
     choices: list[GenerateResponseChoice]
     usage: UsageInfo | None = Field(default=None)
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
-    prompt_token_ids: list[int] | None = None
+    prompt_token_id_logprobs: str | None = None
+    prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
@@ -414,6 +422,15 @@ class DerenderChatRequest(BaseModel):
     len(GenerateRequest.token_ids) from the render step.
     """
 
+    prompt_token_ids: list[NonNegativeInt] | None = None
+    """Prompt token IDs (`GenerateRequest.token_ids` from /render). Seeds
+    detokenization from the prompt tail so the first output token keeps its
+    leading space on SentencePiece tokenizers. Falls back to
+    `generate_response.prompt_token_ids`, then to unseeded decoding.
+
+    Only the last few IDs are read, so a suffix of the prompt is enough.
+    """
+
     chat_request: ChatCompletionRequest | None = None
     """The original (post-adjust_request) ChatCompletionRequest from /render.
 
@@ -448,6 +465,14 @@ class DerenderCompletionRequest(BaseModel):
     If provided, len(prompt_tokens) must equal len(generate_responses).
     """
 
+    prompt_token_ids: list[list[NonNegativeInt] | None] | None = None
+    """One prompt token ID list per response, used to seed detokenization.
+    See `DerenderChatRequest.prompt_token_ids`.
+
+    If provided, len(prompt_token_ids) must equal len(generate_responses).
+    A `None` entry falls back to `generate_responses[i].prompt_token_ids`.
+    """
+
     completion_request: CompletionRequest | None = None
     """The original (post-adjust_request) CompletionRequest from /render.
 
@@ -464,6 +489,13 @@ class DerenderCompletionRequest(BaseModel):
             raise ValueError(
                 f"prompt_tokens length ({len(self.prompt_tokens)}) must equal "
                 f"generate_responses length ({len(self.generate_responses)})"
+            )
+        if self.prompt_token_ids is not None and len(self.prompt_token_ids) != len(
+            self.generate_responses
+        ):
+            raise ValueError(
+                f"prompt_token_ids length ({len(self.prompt_token_ids)}) must "
+                f"equal generate_responses length ({len(self.generate_responses)})"
             )
         return self
 
@@ -539,6 +571,17 @@ class DerenderStreamState(BaseModel):
     window is transiently empty (e.g. usage only final chunk).
     """
 
+    logprob_context_token_ids: list[int] = Field(default_factory=list, max_length=4)
+    """Trailing sampled token IDs carried across chunks so byte-fallback
+    (U+FFFD) correction during logprob placeholder resolution has context
+    at chunk boundaries. Bounded to the 4-token window that
+    ``_correct_decoded_token`` reads."""
+
+    logprob_text_offset: int = Field(default=0, ge=0)
+    """Cumulative emitted text length. Seeds ``text_offset`` for completion
+    streaming logprobs so offsets stay absolute across chunks, mirroring
+    ``initial_text_offset`` in the generate streaming path."""
+
     output_token_ids: list[int] = Field(default_factory=list)
     """All output tokens seen so far. Parser path only.
 
@@ -596,6 +639,7 @@ class DerenderChatStreamRequest(BaseModel):
     the client carried ``stream_state``.
     """
 
+    # --8<-- [start:derender-chat-stream-request]
     stream: Literal[True]
 
     model: str | None = None
@@ -608,7 +652,7 @@ class DerenderChatStreamRequest(BaseModel):
     prompt_tokens: int | None = None
     """Prompt token count for usage. Forwarded from the render step."""
 
-    prompt_token_ids: list[int] | None = None
+    prompt_token_ids: list[NonNegativeInt] | None = None
     """Prompt token IDs. Required by the parser path's `parse_delta` to
     settle its initial reasoning state (e.g. chat templates that pre-open
     ``<think>``). `prompt_tokens` is a usage count and cannot serve this
@@ -617,12 +661,20 @@ class DerenderChatStreamRequest(BaseModel):
     Rejected with a 400 (by `ServingDerender`) when a tool or reasoning
     parser is configured and this is omitted. Without it, `parse_delta`
     cannot tell whether the prompt left reasoning open and would silently
-    misclassify reasoning content as plain content. Unused on the plain
-    detokenization path.
+    misclassify reasoning content as plain content. On all paths it also
+    seeds detokenization on the first chunk, falling back to
+    `generate_chunk.prompt_token_ids` when omitted (see
+    `DerenderChatRequest.prompt_token_ids`).
+
+    With a parser configured, send the full list. Parsers look back to the
+    last reasoning marker which can be anywhere in the prompt, so a suffix
+    can flip the initial reasoning state. Without a parser, a suffix is
+    enough.
     """
 
     chat_request: ChatCompletionRequest | None = None
     """The original (post adjust_request) ChatCompletionRequest from /render."""
+    # --8<-- [end:derender-chat-stream-request]
 
 
 class DerenderCompletionStreamRequest(BaseModel):
@@ -633,6 +685,7 @@ class DerenderCompletionStreamRequest(BaseModel):
     returns the derendered chunk plus updated state.
     """
 
+    # --8<-- [start:derender-completion-stream-request]
     stream: Literal[True]
 
     model: str | None = None
@@ -645,8 +698,15 @@ class DerenderCompletionStreamRequest(BaseModel):
     prompt_tokens: int | None = None
     """Prompt token count for usage."""
 
+    prompt_token_ids: list[NonNegativeInt] | None = None
+    """Prompt token IDs, used on the first chunk to seed detokenization.
+    Falls back to `generate_chunk.prompt_token_ids`. See
+    `DerenderChatRequest.prompt_token_ids`.
+    """
+
     completion_request: CompletionRequest | None = None
     """The original (post adjust_request) CompletionRequest from /render."""
+    # --8<-- [end:derender-completion-stream-request]
 
 
 class DerenderChatStreamResponse(BaseModel):
