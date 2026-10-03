@@ -49,6 +49,7 @@ from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
+from vllm.utils.sparse_utils import TensorDecodeBudget
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
@@ -508,9 +509,15 @@ class BaseRenderer(ABC, Generic[_T]):
     def render_prompt(
         self,
         prompt: DictPrompt | bytes,
+        *,
+        prompt_embeds_budget: TensorDecodeBudget | None = None,
     ) -> DictPrompt:
         if isinstance(prompt, bytes):
-            embeds = safe_load_prompt_embeds(self.model_config, prompt)
+            embeds = safe_load_prompt_embeds(
+                self.model_config,
+                prompt,
+                budget=prompt_embeds_budget,
+            )
             prompt = EmbedsPrompt(prompt_embeds=embeds)
 
         return prompt
@@ -522,15 +529,23 @@ class BaseRenderer(ABC, Generic[_T]):
         if len(prompts) == 0:
             raise ValueError("You must pass at least one prompt")
 
-        return [self.render_prompt(prompt) for prompt in prompts]
+        budget = TensorDecodeBudget()
+        return [
+            self.render_prompt(prompt, prompt_embeds_budget=budget)
+            for prompt in prompts
+        ]
 
     async def _render_prompt_async(
         self,
         prompt: DictPrompt | bytes,
+        *,
+        prompt_embeds_budget: TensorDecodeBudget | None = None,
     ) -> DictPrompt:
         if isinstance(prompt, bytes):
             embeds = await self._safe_load_prompt_embeds_async(
-                self.model_config, prompt
+                self.model_config,
+                prompt,
+                budget=prompt_embeds_budget,
             )
             return EmbedsPrompt(prompt_embeds=embeds)
 
@@ -543,8 +558,12 @@ class BaseRenderer(ABC, Generic[_T]):
         if len(prompts) == 0:
             raise ValueError("You must pass at least one prompt")
 
+        budget = TensorDecodeBudget()
         return await asyncio.gather(
-            *(self._render_prompt_async(prompt) for prompt in prompts)
+            *(
+                self._render_prompt_async(prompt, prompt_embeds_budget=budget)
+                for prompt in prompts
+            )
         )
 
     @abstractmethod

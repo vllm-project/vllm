@@ -9,6 +9,7 @@ import torch
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.async_utils import make_async
 from vllm.utils.sparse_utils import (
+    TensorDecodeBudget,
     check_sparse_tensor_invariants_threadsafe,
     safe_to_dense,
 )
@@ -41,6 +42,7 @@ def _truncated_reason(exc: Exception) -> str:
 def safe_load_prompt_embeds(
     model_config: "ModelConfig",
     embed: bytes,
+    budget: TensorDecodeBudget | None = None,
 ) -> torch.Tensor:
     if not model_config.enable_prompt_embeds:
         raise VLLMValidationError(
@@ -80,7 +82,11 @@ def safe_load_prompt_embeds(
                 f"{_truncated_reason(exc)}",
                 parameter="prompt_embeds",
             ) from exc
-        tensor = safe_to_dense(tensor, parameter="prompt_embeds")
+        tensor = safe_to_dense(
+            tensor,
+            parameter="prompt_embeds",
+            budget=budget,
+        )
 
     if tensor.dim() > 2:
         tensor = tensor.squeeze(0)
