@@ -11,6 +11,7 @@ import torch.nn as nn
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.forward_context import DPMetadata, create_forward_context
+from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadataBuilder
@@ -20,7 +21,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.input_batch import InputBatch, PCPBatchMetadata
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -32,7 +33,8 @@ from vllm.v1.worker.utils import AttentionGroup
 def _gather_lookback_kernel(
     lookback_ptr,
     idx_mapping_ptr,
-    num_computed_tokens_ptr,
+    query_start_loc_ptr,
+    positions_ptr,
     all_token_ids_ptr,
     all_token_ids_stride,
     num_reqs,
@@ -43,13 +45,16 @@ def _gather_lookback_kernel(
     batch_idx = tl.program_id(0)
     in_batch = batch_idx < num_reqs
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx, mask=in_batch, other=0)
-    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+    begin = tl.load(query_start_loc_ptr + batch_idx, mask=in_batch, other=0)
+    end = tl.load(query_start_loc_ptr + batch_idx + 1, mask=in_batch, other=0)
+    in_batch = in_batch & (end > begin)
+    num_computed = tl.load(positions_ptr + begin, mask=in_batch, other=0)
 
     offs = tl.arange(0, BLOCK_DEPTH)
     pos = num_computed - 1 - offs
     valid = in_batch & (offs < DEPTH) & (pos >= 0)
     ids = tl.load(
-        all_token_ids_ptr + req_state_idx * all_token_ids_stride + pos,
+        all_token_ids_ptr + req_state_idx.to(tl.int64) * all_token_ids_stride + pos,
         mask=valid,
         other=-1,
     )
@@ -144,15 +149,24 @@ def _gather_replay_batch_kernel(
 
 
 class ReplayAttnMetadata(ModelSpecificAttnMetadata):
-    """Hands the batch's replay starts to the sliding-window builders."""
+    """Supplies replay bounds and PCP compressor metadata to their builders."""
 
-    def __init__(self, replay_start: torch.Tensor) -> None:
+    def __init__(
+        self,
+        replay_start: torch.Tensor | None,
+        pcp_metadata: PCPBatchMetadata | None = None,
+    ) -> None:
         self.replay_start = replay_start
+        self.pcp_metadata = pcp_metadata
 
     def get_extra_attn_kwargs(
         self, attn_metadata_builder: Any, num_reqs: int
     ) -> dict[str, Any]:
-        if isinstance(attn_metadata_builder, DeepseekSparseSWAMetadataBuilder):
+        if isinstance(attn_metadata_builder, CompressorMetadataBuilder):
+            return {"pcp_metadata": self.pcp_metadata}
+        if self.replay_start is not None and isinstance(
+            attn_metadata_builder, DeepseekSparseSWAMetadataBuilder
+        ):
             return {"replay_start": self.replay_start[:num_reqs]}
         return {}
 
@@ -191,8 +205,11 @@ class DeepseekV41ModelState(DefaultModelState):
         self.lookback_token_ids: torch.Tensor | None = None
         if depth > 0:
             # Persistent so a captured graph can read it on replay.
+            max_num_reqs = self.max_num_reqs
+            if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+                max_num_reqs *= 2
             self.lookback_token_ids = torch.full(
-                (self.max_num_reqs, depth), -1, dtype=torch.int32, device=device
+                (max_num_reqs, depth), -1, dtype=torch.int32, device=device
             )
 
         # Per request state index; batches gather from it (see prepare_attn).
@@ -252,7 +269,8 @@ class DeepseekV41ModelState(DefaultModelState):
         _gather_lookback_kernel[(window.shape[0],)](
             window,
             input_batch.idx_mapping,
-            req_states.num_computed_tokens.gpu,
+            input_batch.query_start_loc,
+            input_batch.positions,
             all_token_ids,
             all_token_ids.stride(0),
             input_batch.idx_mapping.shape[0],
@@ -331,6 +349,10 @@ class DeepseekV41ModelState(DefaultModelState):
                 )
             assert model_specific_attn_metadata is None
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
+        if input_batch.pcp_metadata is not None:
+            model_specific_attn_metadata = ReplayAttnMetadata(
+                replay_start, input_batch.pcp_metadata
+            )
         attn_metadata = super().prepare_attn(
             input_batch,
             cudagraph_mode,
