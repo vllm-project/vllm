@@ -14,6 +14,8 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
     clip_ssm_state_blocks,
+    get_prefill_stop,
+    truncate_prompt_for_prefill,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -386,14 +388,11 @@ class NixlBaseConnectorScheduler:
         """
         return max(1, self.vllm_config.num_prefill_lookahead_tokens - 1)
 
-    def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
+    def _get_remote_prefill_token_count(self, request: "Request") -> int:
         """D-side only. The number of prompt tokens to load from the prefiller.
         Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
         will recompute locally."""
-        backoff = self._prefill_backoff()
-        if num_prompt_tokens > backoff:
-            return num_prompt_tokens - backoff
-        return num_prompt_tokens
+        return get_prefill_stop(request, self._prefill_backoff())
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
         """P-side only: drop the trailing ``_prefill_backoff()`` prompt tokens
@@ -403,24 +402,15 @@ class NixlBaseConnectorScheduler:
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
-        backoff = self._prefill_backoff()
+        stop = get_prefill_stop(request, self._prefill_backoff())
         params = request.kv_transfer_params
         if (
             params is not None
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > backoff
+            and stop < request.num_prompt_tokens
         ):
-            # A mixed-mode prompt carries token ids, embeddings and a mask.
-            if request.prompt_token_ids is not None:
-                del request.prompt_token_ids[-backoff:]
-            if request.prompt_embeds is not None:
-                request.prompt_embeds = request.prompt_embeds[:-backoff]
-            if request.prompt_is_token_ids is not None:
-                del request.prompt_is_token_ids[-backoff:]
-
-            del request._all_token_ids[-backoff:]
-            request.num_prompt_tokens -= backoff
+            truncate_prompt_for_prefill(request, stop)
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 
