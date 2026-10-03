@@ -40,6 +40,10 @@ class Transition:
     next_state: ParserState
     events: tuple[EventType, ...] = field(default_factory=tuple)
     skip_in_token_id_mode: bool = False
+    # Keep the terminal's own text in the emitted content instead of consuming
+    # it as structure. For tolerance transitions such as minimax's
+    # (CONTENT, </think>), where the marker is legal literal text in that state.
+    emit_terminal: bool = False
 
 
 @dataclass(frozen=True)

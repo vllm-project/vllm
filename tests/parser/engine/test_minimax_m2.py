@@ -7,6 +7,7 @@ import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
+    collect_content,
     collect_function_name,
     collect_tool_arguments,
     simulate_tool_streaming,
@@ -215,6 +216,24 @@ class TestStreaming:
         assert json.loads(collect_tool_arguments(results)) == {
             "city": "Seattle",
         }
+
+    def test_streaming_closing_think_end_in_content_is_preserved(
+        self, parser, mock_request
+    ):
+        results = simulate_tool_streaming(
+            parser,
+            mock_request,
+            [
+                "<think>thoughts</think>",
+                "answer</think>",
+                "<minimax:tool_call>",
+                '<invoke name="add">',
+                '<parameter name="a">3</parameter>',
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+        assert collect_function_name(results) == "add"
+        assert collect_content(results) == "answer</think>"
 
     def test_streaming_invalid_tool_name_is_rejected(
         self, mock_tokenizer, mock_request
