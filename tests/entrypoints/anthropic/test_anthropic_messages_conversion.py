@@ -1814,6 +1814,46 @@ class TestClientErrorResponses:
         assert response.status_code == HTTPStatus.BAD_REQUEST
         assert response.json()["error"]["type"] == "BadRequestError"
 
+    @pytest.mark.parametrize(
+        ("input_length", "expected_type", "expected_message"),
+        [
+            (150, "invalid_request_error", "prompt is too long: 150 tokens > 100"),
+            # Fits the context window on its own (e.g. only with max_tokens added).
+            (80, "BadRequestError", "Input length (80)"),
+        ],
+    )
+    def test_prompt_too_long_uses_anthropic_error(
+        self, input_length, expected_type, expected_message
+    ):
+        """A prompt longer than the context window gets Anthropic's error, which
+        Claude Code matches to compact the conversation."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages = AnthropicServingMessages.create_messages.__get__(
+            handler
+        )
+        handler._prompt_too_long_error = (
+            AnthropicServingMessages._prompt_too_long_error.__get__(handler)
+        )
+        handler.model_config = SimpleNamespace(max_model_len=100)
+        handler._merge_inline_system = False
+        handler.create_chat_completion = AsyncMock(
+            side_effect=VLLMValidationError(
+                f"Input length ({input_length}) exceeds model's maximum "
+                "context length (100).",
+                parameter="input_tokens",
+                value=input_length,
+            )
+        )
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/v1/messages", json=self._request_body())
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        error = response.json()["error"]
+        assert error["type"] == expected_type
+        assert expected_message in error["message"]
+
     def test_generic_error_still_returns_internal_server_error(self):
         """Non-client errors keep the existing 500 behaviour."""
         handler = MagicMock(spec=AnthropicServingMessages)
