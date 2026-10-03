@@ -105,7 +105,8 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
 
     resolved = attn_utils.get_kv_cache_spec(config)
     assert resolved["main"].block_size == resolved["indexer"].block_size == expected
-    assert resolved["dense"] is specs["dense"]
+    dense_backend = layers["dense"].get_attn_backend()
+    assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())
 
 
