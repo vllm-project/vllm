@@ -1985,9 +1985,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
-            self.kv_connector.pre_forward(
-                **connector_kwargs, attn_metadata=attn_metadata
-            )
+            with set_forward_context(
+                None, self.vllm_config, cudagraph_runtime_mode=CUDAGraphMode.FULL
+            ):
+                self.kv_connector.pre_forward(
+                    **connector_kwargs, attn_metadata=attn_metadata
+                )
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
@@ -2262,6 +2265,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
+
+        if (
+            self.speculator is not None
+            and self.kv_connector.requires_full_step_completion
+        ):
+            # Keep early D2H copies, but publish output only after draft KV
+            # writes finish, before a READ can export or reuse these blocks.
+            self.output_copy_stream.wait_stream(self.main_stream)
+            async_output.copy_event.record(self.output_copy_stream)
 
         return async_output
 

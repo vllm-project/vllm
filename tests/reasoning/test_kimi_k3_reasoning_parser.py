@@ -13,6 +13,7 @@ from vllm.parser.kimi_k3 import KimiK3Parser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -48,6 +49,10 @@ def _dummy_tokenizer() -> TokenizerLike:
 
 class ReasoningOnlyParser(KimiK3Parser):
     reasoning_parser_cls = KimiK3ReasoningParser
+
+
+class ReasoningAndToolParser(ReasoningOnlyParser):
+    tool_parser_cls = KimiK3ToolParser
 
 
 def test_parser_manager_selects_kimi_k3_parser_for_reasoning_only():
@@ -299,6 +304,142 @@ def test_delegating_parser_thinking_false_streams_response_content():
     assert first.reasoning is None
     assert partial_close is None
     assert closed is None
+
+
+@pytest.mark.parametrize("suffix", ["<", OPEN, f"{CLOSE}think"])
+@pytest.mark.parametrize("prefix", ["", "value "])
+@pytest.mark.parametrize("empty_final", [False, True])
+@pytest.mark.parametrize("parser_cls", [ReasoningOnlyParser, ReasoningAndToolParser])
+def test_streaming_eof_preserves_unfinished_reasoning_marker(
+    suffix, prefix, empty_final, parser_cls
+):
+    parser = parser_cls(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    text = prefix + suffix
+    chunks = [text, ""] if empty_final else [text]
+    deltas = [
+        parser.parse_delta(
+            chunk,
+            parser.model_tokenizer.encode(chunk),
+            request,
+            prompt_token_ids=OPEN_IDS,
+            finished=index == len(chunks) - 1,
+        )
+        for index, chunk in enumerate(chunks)
+    ]
+
+    assert "".join(delta.reasoning or "" for delta in deltas if delta) == text
+    assert not any(delta.content or delta.tool_calls for delta in deltas if delta)
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("suffix", ["<", f"{CLOSE}response"])
+@pytest.mark.parametrize("prefix", ["", "value "])
+@pytest.mark.parametrize("empty_final", [False, True])
+@pytest.mark.parametrize("parser_cls", [ReasoningOnlyParser, ReasoningAndToolParser])
+def test_streaming_eof_preserves_unfinished_content_marker(
+    thinking, suffix, prefix, empty_final, parser_cls
+):
+    parser = parser_cls(_dummy_tokenizer(), chat_template_kwargs={"thinking": thinking})
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    chunks = ["step", THINK_CLOSE] if thinking else []
+    chunks += [RESPONSE_OPEN, prefix + suffix]
+    if empty_final:
+        chunks.append("")
+    deltas = [
+        parser.parse_delta(
+            chunk,
+            parser.model_tokenizer.encode(chunk),
+            request,
+            prompt_token_ids=OPEN_IDS,
+            finished=index == len(chunks) - 1,
+        )
+        for index, chunk in enumerate(chunks)
+    ]
+
+    assert "".join(delta.content or "" for delta in deltas if delta) == prefix + suffix
+    assert "".join(delta.reasoning or "" for delta in deltas if delta) == (
+        "step" if thinking else ""
+    )
+    assert not any(delta.tool_calls for delta in deltas if delta)
+
+
+@pytest.mark.parametrize("parser_cls", [ReasoningOnlyParser, ReasoningAndToolParser])
+def test_streaming_eof_does_not_expose_suppressed_reasoning(parser_cls):
+    parser = parser_cls(_dummy_tokenizer())
+    request = ChatCompletionRequest(
+        model="test-model", messages=[], include_reasoning=False
+    )
+
+    assert (
+        parser.parse_delta(
+            "value <", [9], request, prompt_token_ids=OPEN_IDS, finished=True
+        )
+        is None
+    )
+
+
+def test_streaming_eof_does_not_expose_other_parser_reasoning():
+    class Tokenizer(DummyTokenizer):
+        def get_vocab(self):
+            return {"<think>": 1000, "</think>": 1001}
+
+        def encode(self, text, add_special_tokens=False):
+            if text in self.get_vocab():
+                return [self.get_vocab()[text]]
+            return super().encode(text, add_special_tokens=add_special_tokens)
+
+    parser_cls = ParserManager.get_parser(
+        reasoning_parser_name="deepseek_r1",
+        tool_parser_name="kimi_k3",
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    parser = parser_cls(cast(TokenizerLike, Tokenizer()))
+    request = ChatCompletionRequest(
+        model="test-model", messages=[], include_reasoning=False
+    )
+
+    assert (
+        parser.parse_delta(
+            "internal thought <", [9], request, prompt_token_ids=[1000], finished=True
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("parser_cls", [ReasoningOnlyParser, ReasoningAndToolParser])
+@pytest.mark.parametrize("empty_final", [False, True])
+def test_streaming_eof_strips_complete_markers_after_reasoning(parser_cls, empty_final):
+    parser = parser_cls(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    # A speculative step can close reasoning and complete the response together.
+    chunks = [
+        (THINK_OPEN + "step", [*OPEN_IDS, 9]),
+        (
+            THINK_CLOSE
+            + RESPONSE_OPEN
+            + "answer"
+            + f"{CLOSE}response{SEP}{CLOSE}message{SEP}",
+            [*CLOSE_IDS, 10],
+        ),
+    ]
+    if empty_final:
+        chunks.append(("", []))
+    deltas = [
+        parser.parse_delta(
+            chunk,
+            token_ids,
+            request,
+            prompt_token_ids=OPEN_IDS,
+            finished=index == len(chunks) - 1,
+        )
+        for index, (chunk, token_ids) in enumerate(chunks)
+    ]
+
+    assert "".join(delta.reasoning or "" for delta in deltas if delta) == "step"
+    assert "".join(delta.content or "" for delta in deltas if delta) == "answer"
+    assert not any(delta.tool_calls for delta in deltas if delta)
 
 
 def test_adjust_request_keeps_xtml_markers_contiguous():

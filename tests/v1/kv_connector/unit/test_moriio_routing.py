@@ -14,6 +14,10 @@ stand-in rather than constructing a full scheduler.
 
 from types import SimpleNamespace
 
+import pytest
+
+from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_common
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnectorScheduler,
 )
@@ -21,6 +25,35 @@ from vllm.v1.request import RequestStatus
 
 _request_finished = MoRIIOConnectorScheduler.request_finished
 _clip_blocks = MoRIIOConnectorScheduler.get_exchange_clipped_blocks
+
+
+@pytest.mark.parametrize("backend, expected_port", [("rdma", 0), ("xgmi", 12345)])
+def test_rdma_listener_reserves_port_during_bind(monkeypatch, backend, expected_port):
+    monkeypatch.setattr(moriio_common, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        moriio_common, "get_tensor_model_parallel_world_size", lambda: 8
+    )
+    monkeypatch.setattr(moriio_common, "get_open_port", lambda: 12345)
+    monkeypatch.setattr(moriio_common, "resolve_host_ip", lambda _: "127.0.0.1")
+    config = SimpleNamespace(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MoRIIOConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={
+                "backend": backend,
+                "http_port": 8000,
+                "handshake_port": 6300,
+                "notify_port": 7300,
+            },
+        ),
+        parallel_config=SimpleNamespace(
+            data_parallel_rank=0, data_parallel_size=1, data_parallel_size_local=1
+        ),
+    )
+    assert (
+        moriio_common.MoRIIOConfig.from_vllm_config(config).local_kv_port
+        == expected_port
+    )
 
 
 def _producer(global_dp_rank: int, dp_size: int, dp_size_local: int):
