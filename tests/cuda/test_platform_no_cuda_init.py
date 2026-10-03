@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test that platform imports do not prematurely initialize CUDA.
+"""Test that platform imports do not prematurely initialize CUDA.
 
 This is critical for Ray-based multi-GPU setups where workers need to
 set CUDA_VISIBLE_DEVICES after importing vLLM but before CUDA is initialized.

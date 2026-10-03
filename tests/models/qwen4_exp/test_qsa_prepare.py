@@ -1,0 +1,403 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Correctness tests for the fused QSA prepare kernel."""
+
+import pytest
+import torch
+
+from vllm.models.qwen4_exp.common.qsa_cache import (
+    canonical_qsa_rope_positions,
+    circular_qsa_slot_mapping,
+    compressed_qsa_slot_mapping,
+)
+from vllm.models.qwen4_exp.nvidia.indexer_qsa import apply_qsa_rope
+from vllm.models.qwen4_exp.nvidia.ops.qsa import (
+    qsa_compress_groups_with_ratio,
+    qsa_store_cache_rows,
+)
+from vllm.models.qwen4_exp.nvidia.ops.qsa_prepare import qsa_prepare
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
+
+requires_qsa_kernels = pytest.mark.skipif(
+    not current_platform.is_cuda() or not HAS_TRITON,
+    reason="QSA kernels require CUDA and Triton",
+)
+
+HQ, D = 4, 128
+CR = 4
+MROPE_SECTION = (11, 11, 10)
+EPS = 1e-6
+BLOCK_SIZE = 16
+COMP_PAGE = BLOCK_SIZE // CR
+ROPE_POS_OFFSET = D
+RTOL = 1.6e-2
+ATOL = 1e-2
+MIXED_BATCH = ([260, 259, 138], [1, 1, 37], [8, 8, 8])
+MAIN_HQ, MAIN_HK, MAIN_D, MAIN_PAGE = 6, 2, 256, 16
+
+
+def _make_block_table(block_counts):
+    num_blocks = sum(block_counts)
+    table = torch.full((len(block_counts), max(block_counts)), -1, dtype=torch.int32)
+    physical_blocks = torch.randperm(num_blocks)
+    offset = 0
+    for request, count in enumerate(block_counts):
+        table[request, :count] = physical_blocks[offset : offset + count]
+        offset += count
+    return table, num_blocks
+
+
+def assert_fp8_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    # e4m3 is sign-magnitude, so within a sign the uint8 code order matches the
+    # value order and one ulp is one code step. The two paths' intermediates
+    # differ in the pooling accumulation order, which at denormal magnitudes
+    # (absolute grid step 2^-9) shows up as up to 2 code steps.
+    code_diff = (
+        actual.view(torch.uint8).int() - expected.view(torch.uint8).int()
+    ).abs()
+    abs_diff = (actual.float() - expected.float()).abs()
+    assert bool(((code_diff <= 1) | (abs_diff <= 2**-8)).all())
+
+
+def _make_main_inputs(num_tokens: int, fp8_cache: bool) -> dict:
+    """Random main-attention arguments with a paged cache in vLLM's layout."""
+    num_blocks = num_tokens // MAIN_PAGE + 2
+    cache = torch.zeros(
+        num_blocks,
+        MAIN_HK,
+        MAIN_PAGE,
+        2 * MAIN_D,
+        dtype=torch.uint8 if fp8_cache else torch.bfloat16,
+        device="cuda",
+    ).transpose(1, 2)
+    slots = torch.randperm(num_blocks * MAIN_PAGE, device="cuda")[:num_tokens]
+    slots[-1] = -1
+    norm_weights = torch.randn(2, MAIN_D, dtype=torch.bfloat16, device="cuda") * 0.2
+    return dict(
+        main_qkv=torch.randn(
+            num_tokens,
+            2 * (MAIN_HQ + MAIN_HK) * MAIN_D,
+            dtype=torch.bfloat16,
+            device="cuda",
+        ),
+        main_q_norm_weight=norm_weights[0],
+        main_k_norm_weight=norm_weights[1],
+        main_eps=EPS,
+        main_kv_cache=cache.view(torch.float8_e4m3fn) if fp8_cache else cache,
+        main_slot_mapping=slots,
+        main_k_scale=0.5,
+        main_v_scale=2.0,
+    )
+
+
+def _check_main_outputs(main: dict, q_out, gate_out, rope, positions) -> None:
+    """Compare with fused_qk_rmsnorm_rope_gate + reshape_and_cache_flash."""
+    from vllm._custom_ops import reshape_and_cache_flash
+    from vllm.model_executor.layers.fused_qk_norm_rope import (
+        fused_qk_rmsnorm_rope_gate,
+    )
+
+    q_gate, k, v = main["main_qkv"].split(
+        [2 * MAIN_HQ * MAIN_D, MAIN_HK * MAIN_D, MAIN_HK * MAIN_D], dim=-1
+    )
+    q, k, gate = fused_qk_rmsnorm_rope_gate(
+        q_gate,
+        k,
+        main["main_q_norm_weight"],
+        main["main_k_norm_weight"],
+        rope.cos_sin_cache,
+        positions,
+        EPS,
+        MAIN_HQ,
+        MAIN_HK,
+        MAIN_D,
+        rope.rotary_dim,
+        mrope_section=MROPE_SECTION if positions.ndim == 2 else None,
+        norm_beta=1.0,
+    )
+    kv_cache = main["main_kv_cache"]
+    fp8_cache = kv_cache.dtype == torch.float8_e4m3fn
+    cache = torch.zeros_like(kv_cache.view(torch.uint8) if fp8_cache else kv_cache)
+    key_cache, value_cache = cache.split(MAIN_D, dim=-1)
+    reshape_and_cache_flash(
+        k.view(-1, MAIN_HK, MAIN_D),
+        v.view(-1, MAIN_HK, MAIN_D),
+        key_cache,
+        value_cache,
+        main["main_slot_mapping"],
+        "fp8" if fp8_cache else "auto",
+        torch.tensor(main["main_k_scale"], device="cuda"),
+        torch.tensor(main["main_v_scale"], device="cuda"),
+    )
+    torch.testing.assert_close(q_out.flatten(1), q, rtol=RTOL, atol=ATOL)
+    assert torch.equal(gate_out.flatten(1), gate)
+    if fp8_cache:
+        assert_fp8_within_one_ulp(kv_cache, cache.view(torch.float8_e4m3fn))
+    else:
+        torch.testing.assert_close(kv_cache, cache, rtol=RTOL, atol=ATOL)
+
+
+@requires_qsa_kernels
+@pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize(
+    "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
+    [
+        pytest.param(True, True, True, 4, *MIXED_BATCH, id="mrope"),
+        pytest.param(False, False, False, 4, *MIXED_BATCH, id="text"),
+        pytest.param(True, False, True, 8, *MIXED_BATCH, id="mrope-model-1d"),
+        pytest.param(True, True, False, 4, *MIXED_BATCH, id="mrope-no-position-cache"),
+        pytest.param(
+            True,
+            False,
+            False,
+            8,
+            *MIXED_BATCH,
+            id="mrope-model-1d-no-position-cache",
+        ),
+        pytest.param(
+            False, False, True, 4, *MIXED_BATCH, id="text-with-position-cache"
+        ),
+        pytest.param(True, True, True, 4, [37], [37], [0], id="fresh"),
+        pytest.param(True, True, True, 4, [4097], [4097], [0], id="tiled"),
+    ],
+)
+def test_qsa_fused_prepare_matches_unfused(
+    indexer_dtype,
+    mrope,
+    is_2d_positions,
+    cache_rope_positions,
+    state_size,
+    seq_lens,
+    query_lens,
+    history_lens,
+) -> None:
+    from flashinfer.norm import gemma_rmsnorm
+
+    from vllm.model_executor.layers.rotary_embedding import get_rope
+
+    device = "cuda"
+    rope_params = {
+        "partial_rotary_factor": 0.25,
+        "rope_theta": 10000000,
+        "rope_type": "default",
+    }
+    if mrope:
+        rope_params["mrope_interleaved"] = True
+        rope_params["mrope_section"] = list(MROPE_SECTION)
+    with torch.device(device):
+        rope = get_rope(
+            head_size=256,
+            max_position=32768,
+            rope_parameters=rope_params,
+            dtype=torch.bfloat16,
+        )
+
+    token_to_req = torch.cat(
+        [
+            torch.full((length,), request, dtype=torch.int32)
+            for request, length in enumerate(query_lens)
+        ]
+    ).to(device)
+    logical_positions = torch.cat(
+        [
+            torch.arange(seq_len - query_len, seq_len, dtype=torch.int64)
+            for seq_len, query_len in zip(seq_lens, query_lens)
+        ]
+    ).to(device)
+    num_tokens = logical_positions.numel()
+    query_start_loc = torch.tensor(
+        [0, *torch.tensor(query_lens).cumsum(0).tolist()], dtype=torch.int32
+    ).to(device)
+    positions = (
+        torch.stack(
+            [
+                logical_positions,
+                logical_positions // 7 + 3,
+                logical_positions // 13 + 11,
+            ]
+        )
+        if is_2d_positions
+        else logical_positions
+    )
+    position_rows = (
+        canonical_qsa_rope_positions(positions)
+        if cache_rope_positions
+        else logical_positions.view(-1, 1, 1).expand(-1, 1, 3)
+    )
+
+    compressed_block_counts = [
+        (seq_len // CR + COMP_PAGE - 1) // COMP_PAGE for seq_len in seq_lens
+    ]
+    raw_block_table, num_raw_blocks = _make_block_table([1] * len(seq_lens))
+    compressed_block_table, num_compressed_blocks = _make_block_table(
+        compressed_block_counts
+    )
+    raw_block_table = raw_block_table.to(device)
+    raw_slots = circular_qsa_slot_mapping(
+        raw_block_table,
+        token_to_req,
+        logical_positions,
+        state_size,
+        query_start_loc,
+    )
+    compressed_slots = compressed_qsa_slot_mapping(
+        compressed_block_table.to(device),
+        token_to_req,
+        logical_positions,
+        COMP_PAGE,
+        CR,
+    )
+    group_counts = torch.tensor(
+        [
+            seq_len // CR - (seq_len - query_len) // CR
+            for seq_len, query_len in zip(seq_lens, query_lens)
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    k_work_counts = torch.maximum(group_counts, torch.ones_like(group_counts))
+    k_start_loc = torch.cat([k_work_counts.new_zeros(1), k_work_counts.cumsum(0)])
+    work_requests = torch.repeat_interleave(
+        torch.arange(len(query_lens), dtype=torch.int32, device=device),
+        k_work_counts,
+    )
+    local_work = torch.arange(
+        int(k_start_loc[-1]), dtype=torch.int32, device=device
+    ) - torch.repeat_interleave(k_start_loc[:-1], k_work_counts)
+    max_k_work = (num_tokens + (CR - 1) * len(query_lens)) // CR
+    k_work_metadata = torch.full((max_k_work, 2), -1, dtype=torch.int32, device=device)
+    k_work_metadata[: work_requests.numel()] = torch.stack(
+        (work_requests, local_work), dim=1
+    )
+
+    raw_width = D + 12 if cache_rope_positions else D
+    # Match vLLM's padded-page cache layout: rows are contiguous, while physical
+    # blocks have a larger stride than their logical contents.
+    raw_page_elements = state_size * raw_width
+    fused_raw_storage = torch.zeros(
+        num_raw_blocks,
+        raw_page_elements + 16,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    fused_raw = torch.as_strided(
+        fused_raw_storage,
+        (num_raw_blocks, state_size, 1, raw_width),
+        (raw_page_elements + 16, raw_width, raw_width, 1),
+    )
+    for request, history_len in enumerate(history_lens):
+        history_end = seq_lens[request] - query_lens[request]
+        for position in range(history_end - history_len, history_end):
+            block = int(raw_block_table[request, 0])
+            row = fused_raw[block, position % state_size, 0]
+            row[:D] = torch.randn(D, dtype=torch.bfloat16, device=device)
+            if cache_rope_positions:
+                row[ROPE_POS_OFFSET:].view(torch.int64).copy_(
+                    torch.tensor(
+                        [position, position // 7 + 3, position // 13 + 11],
+                        dtype=torch.int64,
+                        device=device,
+                    )
+                )
+    unfused_raw = fused_raw.clone()
+    compressed_page_elements = COMP_PAGE * D
+    fused_compressed_storage = torch.zeros(
+        num_compressed_blocks,
+        compressed_page_elements + 16,
+        dtype=indexer_dtype,
+        device=device,
+    )
+    fused_compressed = torch.as_strided(
+        fused_compressed_storage,
+        (num_compressed_blocks, COMP_PAGE, 1, D),
+        (compressed_page_elements + 16, D, D, 1),
+    )
+    unfused_compressed = fused_compressed.clone()
+
+    projected_qk = torch.randn(
+        num_tokens, (HQ + 1) * D, dtype=torch.bfloat16, device=device
+    )
+    q_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
+    k_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
+
+    fused_query = torch.empty(num_tokens, HQ, D, dtype=indexer_dtype, device=device)
+    # The main-attention cache follows the recipe's pairing with the indexer.
+    main = _make_main_inputs(num_tokens, indexer_dtype == torch.float8_e4m3fn)
+    main_q_out, main_gate_out = qsa_prepare(
+        projected_qk[:, : HQ * D],
+        projected_qk[:, HQ * D :],
+        positions,
+        rope.cos_sin_cache,
+        q_weight,
+        k_weight,
+        EPS,
+        fused_query,
+        fused_raw,
+        raw_slots,
+        raw_block_table,
+        query_start_loc,
+        logical_positions,
+        fused_compressed,
+        compressed_slots,
+        k_work_metadata,
+        compress_ratio=CR,
+        mrope_section=MROPE_SECTION if mrope else None,
+        rope_pos_offset=ROPE_POS_OFFSET if cache_rope_positions else None,
+        **main,
+    )
+    _check_main_outputs(main, main_q_out, main_gate_out, rope, positions)
+
+    unfused_query = projected_qk[:, : HQ * D].reshape(num_tokens, HQ, D)
+    unfused_query = gemma_rmsnorm(
+        unfused_query.reshape(-1, D), q_weight, EPS
+    ).reshape_as(unfused_query)
+    unfused_query = apply_qsa_rope(rope, positions, unfused_query)
+
+    raw_keys = unfused_raw[..., :D]
+    rope_positions = (
+        unfused_raw[..., ROPE_POS_OFFSET:].view(torch.int64)
+        if cache_rope_positions
+        else None
+    )
+    pooled, first_positions = qsa_compress_groups_with_ratio(
+        projected_qk[:, HQ * D :].reshape(-1, 1, D),
+        position_rows,
+        raw_keys,
+        raw_block_table,
+        token_to_req,
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        CR,
+        rope_positions,
+    )
+    compressed_rows = gemma_rmsnorm(pooled.reshape(-1, D), k_weight, EPS).reshape(
+        -1, 1, D
+    )
+    group_positions = (
+        first_positions.transpose(0, 1) if mrope else first_positions[:, 0]
+    )
+    compressed_rows = apply_qsa_rope(rope, group_positions, compressed_rows)
+    qsa_store_cache_rows(unfused_compressed, compressed_slots, compressed_rows)
+    qsa_store_cache_rows(raw_keys, raw_slots, projected_qk[:, HQ * D :])
+    if rope_positions is not None:
+        qsa_store_cache_rows(rope_positions, raw_slots, position_rows)
+
+    if indexer_dtype == torch.float8_e4m3fn:
+        # Both paths round the same ~bf16 intermediates to e4m3. Bitwise
+        # equality (the dsv4 indexer test's bar) does not hold here: the 1D
+        # reference rope (forward_cuda) differs from _norm_rope by up to 1
+        # bf16 ulp, and even the MRoPE pair flips a code occasionally.
+        unfused_query = unfused_query.to(indexer_dtype)
+        assert_fp8_within_one_ulp(fused_query, unfused_query)
+    else:
+        torch.testing.assert_close(fused_query, unfused_query, rtol=RTOL, atol=ATOL)
+    assert torch.equal(fused_raw.view(torch.int16), unfused_raw.view(torch.int16))
+    if indexer_dtype == torch.float8_e4m3fn:
+        assert_fp8_within_one_ulp(fused_compressed, unfused_compressed)
+    else:
+        torch.testing.assert_close(
+            fused_compressed, unfused_compressed, rtol=RTOL, atol=ATOL
+        )

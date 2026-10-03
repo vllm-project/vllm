@@ -4,13 +4,47 @@ import importlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from vllm.logger import init_logger
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
 
 if TYPE_CHECKING:
+    from vllm.v1.kv_offload.backpressure import BackpressureDetector
     from vllm.v1.kv_offload.base import OffloadingSpec
+
+logger = init_logger(__name__)
+
+
+_DEFAULT_PACKAGE = "vllm.v1.kv_offload.tiering.backpressure"
+
+
+def _import_class(name: str) -> type:
+    """Import a class by name.
+
+    If ``name`` contains a dot it is treated as a fully qualified path
+    (e.g. ``'my_package.MyDetector'``).  Otherwise it is looked up in
+    the default backpressure module
+    (``vllm.v1.kv_offload.tiering.backpressure``), so short names like
+    ``'DropStorePolicy'`` or ``'EMABackpressureDetector'`` work out of
+    the box.
+    """
+    if "." in name:
+        module_path, _, class_name = name.rpartition(".")
+    else:
+        module_path, class_name = _DEFAULT_PACKAGE, name
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
 
 
 class SecondaryTierFactory:
+    """Registry for SecondaryTierManager implementations, resolved by type.
+
+    Mirrors OffloadingSpecFactory (vllm/v1/kv_offload/factory.py): built-in
+    tiers are pre-registered below. External tiers can either
+    register_tier() a friendly short name up front, or skip registration
+    entirely and pass a module_path at lookup time (out-of-tree, no vLLM
+    fork/patch required) -- see get_tier_class.
+    """
+
     _registry: dict[str, Callable[[], type[SecondaryTierManager]]] = {}
 
     @classmethod
@@ -31,25 +65,82 @@ class SecondaryTierFactory:
         primary_kv_view: memoryview,
         offloading_spec: "OffloadingSpec",
     ) -> SecondaryTierManager:
+        tier_cls = cls.get_tier_class(tier_config)
         config = tier_config.copy()
-
-        tier_type = config.pop("type", None)
-        if not tier_type:
-            raise ValueError("Secondary tier configuration must include 'type'")
-
-        if tier_type not in cls._registry:
-            raise ValueError(
-                f"Unknown secondary tier type: {tier_type!r}. "
-                f"Supported types: {list(cls._registry)}"
-            )
-
-        tier_cls = cls._registry[tier_type]()
+        tier_type = config.pop("type")
+        config.pop("module_path", None)
+        locality = config.get("locality")
+        bp_config = config.pop("backpressure", None)
+        bp_detector = None
+        if bp_config is not None:
+            bp_config = bp_config.copy()
+            bp_cls_name = bp_config.pop("backpressure_cls", None)
+            if bp_cls_name is None:
+                raise ValueError(
+                    "backpressure config must include 'backpressure_cls' "
+                    "(e.g. 'EMABackpressureDetector')"
+                )
+            policy_cls_name = bp_config.pop("policy_cls", None)
+            policy = _import_class(policy_cls_name)() if policy_cls_name else None
+            detector_cls: type[BackpressureDetector] = _import_class(bp_cls_name)
+            defaults = detector_cls.default_config(tier_type, locality=locality)
+            if defaults:
+                for k, v in defaults.items():
+                    bp_config.setdefault(k, v)
+            bp_detector = detector_cls(policy=policy, **bp_config)
         return tier_cls(
             offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,
             tier_type=tier_type,
+            backpressure_detector=bp_detector,
             **config,
         )
+
+    @classmethod
+    def get_tier_class(cls, tier_config: dict) -> type[SecondaryTierManager]:
+        """Get a secondary tier class by type.
+
+        Args:
+            tier_config: Tier configuration dict. Must contain 'type' (the
+                tier name or out-of-tree class name). If 'type' is not a
+                registered tier and 'module_path' is given, the class is
+                imported from there -- an out-of-tree tier needs no
+                register_tier() call, just this module path in the config.
+
+        Returns:
+            The secondary tier manager class.
+
+        Raises:
+            ValueError: If 'type' is missing, or is neither registered nor
+                resolvable via module_path.
+
+        """
+        tier_type = tier_config.get("type")
+        if not tier_type:
+            raise ValueError("Secondary tier configuration must include 'type'")
+        if tier_type in cls._registry:
+            return cls._registry[tier_type]()
+        module_path = tier_config.get("module_path")
+        if module_path is None:
+            raise ValueError(
+                f"Unknown secondary tier type: {tier_type!r}. "
+                f"Supported types: {list(cls._registry)}. "
+                "For an out-of-tree tier, also set 'module_path'."
+            )
+        logger.warning_once(
+            "Loading out-of-tree secondary tier. This API is "
+            "experimental and subject to change in the future "
+            "as we iterate the design."
+        )
+        logger.info(
+            "Loading out-of-tree secondary tier '%s' from '%s'.",
+            tier_type,
+            module_path,
+        )
+        module = importlib.import_module(module_path)
+        tier_cls = getattr(module, tier_type)
+        assert issubclass(tier_cls, SecondaryTierManager)
+        return tier_cls
 
 
 SecondaryTierFactory.register_tier(
@@ -65,7 +156,19 @@ SecondaryTierFactory.register_tier(
 )
 
 SecondaryTierFactory.register_tier(
+    "p2p",
+    "vllm.v1.kv_offload.tiering.p2p.manager",
+    "P2PSecondaryTierManager",
+)
+
+SecondaryTierFactory.register_tier(
     "obj",
     "vllm.v1.kv_offload.tiering.obj.manager",
     "ObjectStoreSecondaryTierManager",
+)
+
+SecondaryTierFactory.register_tier(
+    "kvcr",
+    "vllm.v1.kv_offload.tiering.kvcr.manager",
+    "KVCRSecondaryTierManager",
 )

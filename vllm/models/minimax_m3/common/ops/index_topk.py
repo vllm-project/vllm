@@ -101,6 +101,7 @@ def _index_block_score_kernel(
     stride_bt_b,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    USE_SPLIT_K: tl.constexpr,
 ):
     pid_q = tl.program_id(0)
     pid_bh = tl.program_id(1)
@@ -123,6 +124,12 @@ def _index_block_score_kernel(
         order=(1, 0),
     )
     q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero")
+    # A matched fp8 pair (e.g. e4m3 x e4m3) lowers to a native FP8 MMA, so
+    # upcast only when the operands differ: there is no mixed-dtype fp8 MMA,
+    # including across fp8 flavours (fp8e4nv vs fp8e4b8). bf16 and fp32 loads
+    # always stay in their stored dtype.
+    if q.dtype.is_fp8() and q.dtype != ik_cache_ptr.dtype.element_ty:
+        q = q.to(tl.bfloat16)
     q_start = prefix_len + pid_q * BLOCK_SIZE_Q
 
     off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q + prefix_len
@@ -132,8 +139,19 @@ def _index_block_score_kernel(
     bt_row = block_table_ptr + pid_b * stride_bt_b
     # Causal window: only blocks up to the last query token's position.
     hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
-    for i in tl.range(0, hi, BLOCK_SIZE_K):
-        blk = i // BLOCK_SIZE_K
+    num_blocks = tl.cdiv(hi, BLOCK_SIZE_K)
+    if USE_SPLIT_K:
+        pid_k = tl.program_id(2)
+        blocks_per_split = tl.cdiv(num_blocks, tl.num_programs(2))
+        block_start = pid_k * blocks_per_split
+        block_end = tl.minimum(block_start + blocks_per_split, num_blocks)
+        if block_start >= block_end:
+            return
+    else:
+        block_start = 0
+        block_end = num_blocks
+    for blk in tl.range(block_start, block_end):
+        i = blk * BLOCK_SIZE_K
         page = tl.load(bt_row + blk).to(tl.int64)
         pos = i + off_k
         # index-K for this page: [BLOCK_SIZE_D, BLOCK_SIZE_K] (transposed)
@@ -146,7 +164,9 @@ def _index_block_score_kernel(
             + off_k[None, :] * stride_ik_pos
             + off_d[:, None] * stride_ik_d,
         )
-        qk = tl.dot(q, k)
+        if k.dtype.is_fp8() and k.dtype != q.dtype:
+            k = k.to(tl.bfloat16)
+        qk = tl.dot(q, k, out_dtype=tl.float32)
         # apply causal mask as needed
         if q_start < i + BLOCK_SIZE_K:
             qk = tl.where(off_q[:, None] >= pos[None, :], qk, float("-inf"))
@@ -360,6 +380,8 @@ def _decode_index_score_kernel(
         mask=q_mask[None, :],
         other=0.0,
     )  # [D,HQ]
+    if q.dtype.is_fp8() and q.dtype != ik_cache_ptr.dtype.element_ty:
+        q = q.to(tl.bfloat16)
     for blk in tl.range(chunk_start_block, chunk_end_block):
         page = tl.load(bt_row + blk).to(tl.int64)
         pos = blk * BLOCK_SIZE_K + off_k
@@ -373,7 +395,12 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        kq = tl.dot(k, q)  # [N,HQ]
+        # Matched fp8 operands keep the native FP8 MMA; any mismatch upcasts,
+        # since no mixed-dtype fp8 MMA exists. FP32 accumulation preserves
+        # score accuracy either way. BF16/FP32 loads stay as stored.
+        if k.dtype.is_fp8() and k.dtype != q.dtype:
+            k = k.to(tl.bfloat16)
+        kq = tl.dot(k, q, out_dtype=tl.float32)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [HQ]
         is_visible_block = blk < num_blocks_q
@@ -673,7 +700,17 @@ def minimax_m3_index_score(
         device=idx_q.device,
     )
     BLOCK_SIZE_Q = 64
-    grid_score = (triton.cdiv(max_query_len, BLOCK_SIZE_Q), batch * num_idx_heads)
+    n_q_tiles = triton.cdiv(max_query_len, BLOCK_SIZE_Q)
+    SCORE_TARGET_GRID = 48
+    split_k = max(
+        1,
+        min(max_block, SCORE_TARGET_GRID // max(1, n_q_tiles * batch * num_idx_heads)),
+    )
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability((12, 0))
+    ):
+        split_k = 1
+    grid_score = (n_q_tiles, batch * num_idx_heads, split_k)
     _index_block_score_kernel[grid_score](
         idx_q,
         index_kv_cache,
@@ -696,6 +733,7 @@ def minimax_m3_index_score(
         block_table.stride(0),
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        USE_SPLIT_K=split_k > 1,
     )
     return score
 
@@ -709,16 +747,25 @@ def minimax_m3_index_topk(
     topk: int,
     init_blocks: int,
     local_blocks: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Select index top-k from a precomputed score tensor."""
+    """Select index top-k from a precomputed score tensor.
+
+    When ``out`` is provided (a ``[num_idx_heads, >=total_q, topk]`` buffer), the
+    result is written into ``out[:, :total_q, :]`` instead of a fresh tensor --
+    used to keep the top-k output at a stable address for cudagraph capture.
+    """
     num_idx_heads = score.shape[0]
     batch = cu_seqlens_q.shape[0] - 1
     total_q = score.shape[1]
-    topk_idx = torch.empty(
-        (num_idx_heads, total_q, topk),
-        dtype=torch.int32,
-        device=score.device,
-    )
+    if out is not None:
+        topk_idx = out[:, :total_q, :]
+    else:
+        topk_idx = torch.empty(
+            (num_idx_heads, total_q, topk),
+            dtype=torch.int32,
+            device=score.device,
+        )
     # block_size_q == 1 -> query blocks coincide with query tokens.
     grid_topk = (max_query_len, batch, num_idx_heads)
     _topk_index_kernel[grid_topk](
@@ -745,22 +792,26 @@ def minimax_m3_index_topk(
 
 
 @torch.no_grad()
-def minimax_m3_index_decode(
+def minimax_m3_index_decode_score(
     idx_q: torch.Tensor,  # [total_q, num_idx_heads, head_dim]
     index_kv_cache: torch.Tensor,  # [num_blocks, 128, head_dim]
     block_table: torch.Tensor,  # [num_reqs, max_blocks]
     seq_lens: torch.Tensor,  # [num_reqs] int32
     max_seq_len: int,
-    topk: int,
     init_blocks: int,
     local_blocks: int,
     num_kv_heads: int,
     decode_query_len: int,
     max_decode_query_len: int,
+    score_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Decode index block-score + top-k, both split-K (cudagraph-safe).
+    """Decode index block-score (split-K, cudagraph-safe); no top-k.
 
-    Returns topk_idx [num_kv_heads, total_q, topk] (0-indexed block ids, -1 pad).
+    Returns score [num_kv_heads, total_q, >=max_block] (fp32; init/local blocks
+    forced to 1e30/1e29). When ``score_out`` is given the scores are written into
+    it (read/written by strides, so a transposed view of a unified buffer is
+    accepted) instead of a fresh tensor -- used to share a unified score buffer
+    with the prefill side and run a single top-k over both.
     """
     total_q, num_idx_heads, head_dim = idx_q.shape
     assert num_idx_heads == num_kv_heads, (
@@ -768,7 +819,6 @@ def minimax_m3_index_decode(
     )
     assert decode_query_len <= max_decode_query_len
     assert total_q == seq_lens.shape[0] * decode_query_len
-    batch = total_q
     max_block = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
     use_pdl = current_platform.is_arch_support_pdl()
     # `launch_pdl` is a Triton runtime kwarg only some backends accept (CUDA
@@ -785,16 +835,19 @@ def minimax_m3_index_decode(
     if num_idx_heads > 1 and max_decode_query_len > 1:
         score_kwargs.update({"num_warps": 4, "num_stages": 2})
 
-    # Keep score strides 16-divisible to avoid Triton recompiles.
-    score_block_stride = round_up(max_block, 16)
-    score = torch.empty(
-        (num_idx_heads, total_q, score_block_stride),
-        dtype=torch.float32,
-        device=idx_q.device,
-    )
+    if score_out is not None:
+        score = score_out
+    else:
+        # Keep score strides 16-divisible to avoid Triton recompiles.
+        score_block_stride = round_up(max_block, 16)
+        score = torch.empty(
+            (num_idx_heads, total_q, score_block_stride),
+            dtype=torch.float32,
+            device=idx_q.device,
+        )
     # split-K over seq blocks; chunk count depends only on shape constants so
     # the grid is fixed within a cuda graph.
-    TARGET_GRID = 512
+    TARGET_GRID = 4096
     MAX_NUM_KV_CHUNKS = 256
     # Use the configured max decode length to avoid Triton recompiles when
     # switching between qlen=1 and spec-decode verification batches.
@@ -833,15 +886,67 @@ def minimax_m3_index_decode(
         USE_PDL=use_pdl,
         **score_kwargs,
     )
+    return score
 
-    topk_idx = torch.empty(
-        (num_idx_heads, total_q, topk),
-        dtype=torch.int32,
-        device=idx_q.device,
+
+@torch.no_grad()
+def minimax_m3_index_decode(
+    idx_q: torch.Tensor,  # [total_q, num_idx_heads, head_dim]
+    index_kv_cache: torch.Tensor,  # [num_blocks, 128, head_dim]
+    block_table: torch.Tensor,  # [num_reqs, max_blocks]
+    seq_lens: torch.Tensor,  # [num_reqs] int32
+    max_seq_len: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    num_kv_heads: int,
+    decode_query_len: int,
+    max_decode_query_len: int,
+    out: torch.Tensor | None = None,
+    score_out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Decode index block-score + top-k, both split-K (cudagraph-safe).
+
+    Returns topk_idx [num_kv_heads, total_q, topk] (0-indexed block ids, -1 pad).
+    When ``out`` ([num_kv_heads, >=total_q, topk]) is given, writes into
+    ``out[:, :total_q, :]`` (stable address for cudagraph) instead of allocating.
+    When ``score_out`` ([num_kv_heads, total_q, >=max_block]) is given, the block
+    scores are written into it (read back by the top-k) instead of a fresh
+    tensor -- used to share a unified score buffer with the prefill side. Reads
+    via strides, so a transposed view of a block-major buffer is accepted.
+    """
+    total_q, num_idx_heads, _ = idx_q.shape
+    batch = total_q
+    max_block = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
+    use_pdl = current_platform.is_arch_support_pdl()
+    pdl_kwargs: dict[str, bool | int] = {}
+    if use_pdl:
+        pdl_kwargs.update({"launch_pdl": True})
+    score = minimax_m3_index_decode_score(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        seq_lens,
+        max_seq_len,
+        init_blocks,
+        local_blocks,
+        num_kv_heads,
+        decode_query_len,
+        max_decode_query_len,
+        score_out=score_out,
     )
+
+    if out is not None:
+        topk_idx = out[:, :total_q, :]
+    else:
+        topk_idx = torch.empty(
+            (num_idx_heads, total_q, topk),
+            dtype=torch.int32,
+            device=idx_q.device,
+        )
     # Chunk count is shape-constant (cudagraph-safe), capped so the merge sorts
     # pow2(num_topk_chunks * pow2(topk)) candidates.
-    TOPK_TARGET_GRID = 64
+    TOPK_TARGET_GRID = 512
     MAX_NUM_TOPK_CHUNKS = 16
     topk_target = max(
         1, min(MAX_NUM_TOPK_CHUNKS, TOPK_TARGET_GRID // max(1, batch * num_idx_heads))

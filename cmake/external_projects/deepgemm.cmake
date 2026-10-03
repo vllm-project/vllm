@@ -8,43 +8,80 @@ if (DEFINED ENV{DEEPGEMM_SRC_DIR})
   set(DEEPGEMM_SRC_DIR $ENV{DEEPGEMM_SRC_DIR})
 endif()
 
+# Local tree: set deepgemm_SOURCE_DIR directly (no FetchContent download).
+# Upstream git: use FetchContent_Populate with explicit options (CMP0169 NEW
+# disallows one-argument Populate(dep) after Declare; MakeAvailable would run
+# DeepGEMM's top-level CMakeLists.txt, which vLLM must not load).
 if(DEEPGEMM_SRC_DIR)
-  FetchContent_Declare(
-    deepgemm
-    SOURCE_DIR ${DEEPGEMM_SRC_DIR}
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ""
-  )
+  # cmake_path(ABSOLUTE_PATH <var> ...) reads the path from <var>; NORMALIZE is a
+  # flag (no trailing path argument). Resolve relative paths against vLLM root.
+  set(_deepgemm_user_src "${DEEPGEMM_SRC_DIR}")
+  cmake_path(ABSOLUTE_PATH _deepgemm_user_src
+    BASE_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    NORMALIZE)
+  set(DEEPGEMM_SRC_DIR "${_deepgemm_user_src}")
+  if(NOT IS_DIRECTORY "${DEEPGEMM_SRC_DIR}")
+    message(FATAL_ERROR
+      "DEEPGEMM_SRC_DIR is not an existing directory: '${DEEPGEMM_SRC_DIR}'")
+  endif()
+  set(deepgemm_SOURCE_DIR "${DEEPGEMM_SRC_DIR}")
+  message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
-  # This ref should be kept in sync with tools/install_deepgemm.sh
-  FetchContent_Declare(
-    deepgemm
-    GIT_REPOSITORY https://github.com/deepseek-ai/DeepGEMM.git
-    GIT_TAG 891d57b4db1071624b5c8fa0d1e51cb317fa709f
-    GIT_SUBMODULES "third-party/cutlass" "third-party/fmt"
-    GIT_PROGRESS TRUE
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ""
-  )
+  # Keep in sync with tools/install_deepgemm.sh
+  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
+  # Pinned to the fork's dev branch: upstream 2.8.0 plus the SM120
+  # port, the SM90 paged-MQA kv_block=32/next_n=4 port, configurable SwiGLU
+  # alpha/beta, and SiTU for FP8/FP4 Mega MoE. Also includes the CUDA 12.x
+  # layout header fix from vllm-project/DeepGEMM#12.
+  set(_DEEPGEMM_UPSTREAM_TAG "e1f418c2a4f20818221f6b0e578b4c2f634d4c3f")
+
+  set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
+  if(NOT _deepgemm_fc_root)
+    set(_deepgemm_fc_root "${CMAKE_BINARY_DIR}/_deps")
+  endif()
+  set(_deepgemm_src "${_deepgemm_fc_root}/deepgemm-src")
+  set(_deepgemm_bin "${_deepgemm_fc_root}/deepgemm-build")
+  set(_deepgemm_sub "${_deepgemm_fc_root}/deepgemm-subbuild")
+
+  if(EXISTS "${_deepgemm_src}/csrc/python_api.cpp")
+    set(deepgemm_SOURCE_DIR "${_deepgemm_src}")
+    set(deepgemm_BINARY_DIR "${_deepgemm_bin}")
+  else()
+    FetchContent_Populate(
+      deepgemm
+      SUBBUILD_DIR "${_deepgemm_sub}"
+      SOURCE_DIR "${_deepgemm_src}"
+      BINARY_DIR "${_deepgemm_bin}"
+      GIT_REPOSITORY "${_DEEPGEMM_UPSTREAM_REPO}"
+      GIT_TAG "${_DEEPGEMM_UPSTREAM_TAG}"
+      GIT_SUBMODULES "third-party/cutlass" "third-party/deep_jit"
+      GIT_PROGRESS TRUE
+    )
+  endif()
+  message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
 endif()
 
-# Use FetchContent_Populate (not MakeAvailable) to avoid processing
-# DeepGEMM's own CMakeLists.txt which has incompatible find_package calls.
-FetchContent_GetProperties(deepgemm)
-if(NOT deepgemm_POPULATED)
-  FetchContent_Populate(deepgemm)
-endif()
-message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
-
-# DeepGEMM requires CUDA 12.3+ for SM90, 12.9+ for SM100
+# DeepGEMM requires CUDA 12.3+ for SM90, 12.9+ for SM100 (official upstream),
+# and 12.8+ for SM120 / SM12x. CUDA 13+ can use the family-specific SM12x
+# arch; CUDA 12.x builds the arch-specific SM120/SM121 variants.
 set(DEEPGEMM_SUPPORT_ARCHS)
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3)
   list(APPEND DEEPGEMM_SUPPORT_ARCHS "9.0a")
 endif()
-if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
-  list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.0f")
-elseif(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-  list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.0a")
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
+    list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.0f")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
+      list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.7f")
+    endif()
+  else()
+    list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.0a")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    list(APPEND DEEPGEMM_SUPPORT_ARCHS "12.0f")
+  else()
+    list(APPEND DEEPGEMM_SUPPORT_ARCHS "12.0a" "12.1a")
+  endif()
 endif()
 
 cuda_archs_loose_intersection(DEEPGEMM_ARCHS
@@ -85,13 +122,15 @@ if(DEEPGEMM_ARCHS)
   message(STATUS "DeepGEMM _C will be built for: ${_dg_pythons}")
 
   # add_custom_command does no implicit header scanning; glob explicitly so
-  # header-only edits in DeepGEMM/cutlass/fmt re-trigger the rebuild.
+  # header-only edits in DeepGEMM/cutlass/deep_jit re-trigger the rebuild.
   file(GLOB_RECURSE _dg_headers
     "${deepgemm_SOURCE_DIR}/csrc/*.h"
     "${deepgemm_SOURCE_DIR}/csrc/*.hpp"
     "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.h"
     "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.hpp"
-    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.cuh")
+    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.cuh"
+    "${deepgemm_SOURCE_DIR}/third-party/deep_jit/include/*.h"
+    "${deepgemm_SOURCE_DIR}/third-party/deep_jit/include/*.hpp")
 
   set(_dg_markers)
   set(_dg_seen_soabis)

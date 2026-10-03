@@ -62,8 +62,7 @@ The UUID will be used to identify the item for all caching purposes
 
 
 class _PromptOptions(TypedDict):
-    """
-    Additional options available to all
+    """Additional options available to all
     [`SingletonPrompt`][vllm.inputs.llm.SingletonPrompt] types.
     """
 
@@ -71,6 +70,12 @@ class _PromptOptions(TypedDict):
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
+    """
+
+    media_io_kwargs: NotRequired[dict[str, dict[str, Any]] | None]
+    """
+    Optional per-modality media loading and decoding arguments.
+    Used only for hash derivation when using multi-modal UUIDs.
     """
 
     mm_processor_kwargs: NotRequired[dict[str, Any] | None]
@@ -114,6 +119,12 @@ class TokensPrompt(_PromptOptions):
 
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
+
+    prompt_token_offsets: NotRequired[list[tuple[int, int]] | None]
+    """Char-level (start, end) offsets per token, relative to the
+    tokenized source string. Present only when offsets were requested
+    AND a Fast (Rust-backed) tokenizer was used AND no multimodal data
+    was present. The list length equals the length of `prompt_token_ids`."""
 
 
 class EmbedsPrompt(_PromptOptions):
@@ -177,11 +188,11 @@ Note:
 
 
 class ExplicitEncoderDecoderPrompt(TypedDict):
-    """
-    Schema for a pair of encoder and decoder singleton prompts.
+    """Schema for a pair of encoder and decoder singleton prompts.
 
     Note:
         This schema is not valid for decoder-only models.
+
     """
 
     encoder_prompt: EncoderPrompt
@@ -221,8 +232,7 @@ This is the input format accepted by most [`LLM`][vllm.entrypoints.llm.LLM] APIs
 
 
 class DataPrompt(_PromptOptions):
-    """
-    Represents generic inputs that are converted to
+    """Represents generic inputs that are converted to
     [`PromptType`][vllm.inputs.llm.PromptType] by IO processor plugins.
     """
 

@@ -28,6 +28,7 @@ from vllm.benchmarks.datasets import (
 )
 from vllm.benchmarks.throughput import get_requests
 from vllm.engine.arg_utils import EngineArgs
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -43,8 +44,7 @@ else:
 
 
 def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, float]]:
-    """
-    Get all multimodal timing stats from the LLM engine.
+    """Get all multimodal timing stats from the LLM engine.
 
     Collects both preprocessing stats (HF processor, hashing, cache lookup,
     prompt update) and encoder forward pass timing, merged by request_id.
@@ -69,6 +69,7 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
                 'num_encoder_calls': 1
             }
         }
+
     """
     observability_config = llm_engine.vllm_config.observability_config
     if not observability_config or not observability_config.enable_mm_processor_stats:
@@ -125,8 +126,7 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
 
 
 def collect_mm_processor_stats(llm_engine: LLMEngine) -> dict[str, list[float]]:
-    """
-    Collect multimodal processor timing stats.
+    """Collect multimodal processor timing stats.
     Returns a dictionary mapping stage names to lists of timing values (in seconds).
     """
     all_stats = get_timing_stats_from_engine(llm_engine)
@@ -146,9 +146,7 @@ def calculate_mm_processor_metrics(
     *,
     unit: Literal["us", "ms", "s"] = "ms",
 ) -> dict[str, dict[str, float]]:
-    """
-    Calculate aggregate metrics from stats by stage.
-    """
+    """Calculate aggregate metrics from stats by stage."""
     unit2mult = {"us": 1000000, "ms": 1000, "s": 1}
     unit_mult = unit2mult[unit]
 
@@ -180,9 +178,7 @@ def calculate_mm_processor_metrics(
 
 
 def validate_args(args):
-    """
-    Validate command-line arguments for mm_processor benchmark.
-    """
+    """Validate command-line arguments for mm_processor benchmark."""
     if not getattr(args, "tokenizer", None):
         args.tokenizer = args.model
     if not hasattr(args, "dataset_path"):
@@ -213,9 +209,7 @@ def validate_args(args):
 def benchmark_multimodal_processor(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    """
-    Run the multimodal processor benchmark.
-    """
+    """Run the multimodal processor benchmark."""
     from vllm import LLM, SamplingParams
 
     validate_args(args)
@@ -369,7 +363,7 @@ def benchmark_multimodal_processor(
     return benchmark_result
 
 
-def add_cli_args(parser: argparse.ArgumentParser) -> None:
+def add_cli_args(parser: FlexibleArgumentParser) -> None:
     """Add CLI arguments for the multimodal processor benchmark."""
     from vllm.engine.arg_utils import EngineArgs
 
@@ -454,7 +448,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
 
 def main(args: argparse.Namespace) -> None:
     """Main entry point for the multimodal processor benchmark."""
-
     print("Starting multimodal processor benchmark...")
     result = benchmark_multimodal_processor(args)
 
@@ -532,7 +525,7 @@ def main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Benchmark mm processor latency")
+    parser = FlexibleArgumentParser(description="Benchmark mm processor latency")
     add_cli_args(parser)
     args = parser.parse_args()
     main(args)

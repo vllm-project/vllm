@@ -31,10 +31,20 @@ from openai.types.responses.tool import Tool
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
-from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.entrypoints.generate.base.protocol import FunctionCall, FunctionDefinition
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionMessageParam,
+    ChatCompletionToolsParam,
+)
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.tool_parsers.utils import (
+    build_responses_tool_call_name_map,
+    flat_namespace_tool_name,
+    iter_response_function_tool_dicts,
+    resolve_responses_tool_call_name,
+)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -45,9 +55,10 @@ def build_response_output_items(
     content: str | None,
     tool_calls: list[FunctionCall] | None,
     logprobs: list[Logprob] | None = None,
-    tool_call_id_type: str = "random",
+    tools: list[Tool] | None = None,
 ) -> list[ResponseOutputItem]:
     outputs: list[ResponseOutputItem] = []
+    tool_call_name_map = build_responses_tool_call_name_map(tools)
 
     if reasoning:
         outputs.append(
@@ -82,19 +93,18 @@ def build_response_output_items(
 
     if tool_calls:
         for idx, tool_call in enumerate(tool_calls):
+            call_name = resolve_responses_tool_call_name(
+                tool_call.name, tool_call_name_map=tool_call_name_map
+            )
             outputs.append(
                 ResponseFunctionToolCall(
                     id=f"fc_{random_uuid()}",
                     call_id=tool_call.id
-                    if tool_call.id
-                    else make_tool_call_id(
-                        id_type=tool_call_id_type,
-                        func_name=tool_call.name,
-                        idx=idx,
-                    ),
+                    or make_tool_call_id(func_name=tool_call.name, idx=idx),
                     type="function_call",
                     status="completed",
-                    name=tool_call.name,
+                    name=call_name.name,
+                    namespace=call_name.namespace,
                     arguments=tool_call.arguments,
                 )
             )
@@ -105,8 +115,7 @@ def build_response_output_items(
 def should_continue_final_message(
     request_input: str | list[ResponseInputOutputItem],
 ) -> bool:
-    """
-    Determine if the last input message is a partial assistant message
+    """Determine if the last input message is a partial assistant message
     that should be continued rather than starting a new generation.
 
     This enables partial message completion similar to Anthropic's Messages API,
@@ -122,6 +131,7 @@ def should_continue_final_message(
 
     Returns:
         True if the final message should be continued, False otherwise
+
     """
     if isinstance(request_input, str):
         # Simple string input is always a user message
@@ -216,8 +226,7 @@ def _construct_message_from_response_item(
     item: ResponseInputOutputItem,
     prev_msg: ChatCompletionMessageParam | None = None,
 ) -> ChatCompletionMessageParam | None:
-    """
-    Returns a new message or None. If `None`, `prev_msg` might be updated.
+    """Returns a new message or None. If `None`, `prev_msg` might be updated.
     If `prev_msg` is `None`, a new message is always returned.
     """
     prev_assistant_msg = (
@@ -225,10 +234,13 @@ def _construct_message_from_response_item(
     )
 
     if isinstance(item, ResponseFunctionToolCall):
+        tool_name = item.name
+        if item.namespace:
+            tool_name = flat_namespace_tool_name(item.namespace, item.name)
         tool_call = ChatCompletionMessageToolCallParam(
             id=item.call_id,
             function=FunctionCallTool(
-                name=item.name,
+                name=tool_name,
                 arguments=item.arguments,
             ),
             type="function",
@@ -261,7 +273,10 @@ def _construct_message_from_response_item(
     elif isinstance(item, ResponseReasoningItem):
         reasoning = ""
         if item.encrypted_content:
-            raise ValueError("Encrypted content is not supported.")
+            raise VLLMValidationError(
+                "Encrypted content is not supported.",
+                parameter="input",
+            )
         elif item.content and len(item.content) >= 1:
             reasoning = item.content[0].text
         elif len(item.summary) >= 1:
@@ -306,17 +321,45 @@ def _construct_message_from_response_item(
             content=item.get("output"),
             tool_call_id=item.get("call_id"),
         )
-    return item  # type: ignore[arg-type]
+    elif isinstance(item, dict) and item.get("role") == "assistant":
+        content = item.get("content")
+        text: str | None = None
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list) and content:
+            text = content[0].get("text")
+        if text is not None:
+            if prev_assistant_msg:
+                previous_content = prev_assistant_msg.get("content")
+                if previous_content is None:
+                    prev_assistant_msg["content"] = text
+                    return None
+            return {"role": "assistant", "content": text}
+    if isinstance(item, dict) and "role" in item:
+        return item  # type: ignore[return-value]
+    item_type = item.get("type") if isinstance(item, dict) else item.type
+    raise VLLMValidationError(
+        f"Unsupported input item type: {item_type}",
+        parameter="input",
+    )
 
 
 def extract_function_tool_names(tools: list[Tool]) -> frozenset[str]:
-    return frozenset(tool.name for tool in tools if tool.type == "function")
+    names = []
+    for tool in tools:
+        if tool.type == "function":
+            names.append(tool.name)
+        elif tool.type == "namespace":
+            names.extend(
+                flat_namespace_tool_name(tool.name, namespaced_tool.name)
+                for namespaced_tool in tool.tools
+                if namespaced_tool.type == "function"
+            )
+    return frozenset(names)
 
 
 def extract_tool_types(tools: list[Tool]) -> set[str]:
-    """
-    Extracts the tool types from the given tools.
-    """
+    """Extracts the tool types from the given tools."""
     tool_types: set[str] = set()
     for tool in tools:
         if tool.type == "mcp":
@@ -330,27 +373,29 @@ def extract_tool_types(tools: list[Tool]) -> set[str]:
     return tool_types
 
 
-def convert_tool_responses_to_completions_format(tool: dict) -> dict:
-    """
-    Convert a flat tool schema:
+def convert_tool_responses_to_completions_format(
+    tool: dict,
+) -> ChatCompletionToolsParam:
+    """Convert a flat Responses tool schema:
         {"type": "function", "name": "...", "description": "...", "parameters": {...}}
-    into:
-        {"type": "function", "function": {...}}
+    into a Chat Completions tool param for chat-template rendering.
     """
-    return {
-        "type": "function",
-        "function": tool,
-    }
+    return ChatCompletionToolsParam(
+        type="function",
+        function=FunctionDefinition.model_validate(
+            {k: v for k, v in tool.items() if k != "type"}
+        ),
+    )
 
 
 def construct_tool_dicts(
-    tools: list[Tool], tool_choice: ToolChoice
+    tools: list[Tool],
+    tool_choice: ToolChoice,
+    exclude_tools_when_tool_choice_none: bool = False,
 ) -> list[dict[str, Any]] | None:
-    if not tools or (tool_choice == "none"):
-        tool_dicts = None
-    else:
-        tool_dicts = [
-            convert_tool_responses_to_completions_format(tool.model_dump())
-            for tool in tools
-        ]
-    return tool_dicts
+    if not tools or (tool_choice == "none" and exclude_tools_when_tool_choice_none):
+        return None
+    return [
+        convert_tool_responses_to_completions_format(tool).model_dump()
+        for tool in iter_response_function_tool_dicts(tools)
+    ]
