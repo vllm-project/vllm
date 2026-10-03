@@ -602,6 +602,39 @@ def test_fallback_populate_write_preserves_bytes_and_faults_pages():
         mmap_obj.close()
 
 
+def test_threaded_populate_touches_exactly_the_given_ranges():
+    """Sharding ranges across threads must fault every requested page (and
+    no others) and preserve bytes a peer already wrote."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    probe = mmap.mmap(-1, mmap.PAGESIZE, flags=mmap.MAP_SHARED)
+    try:
+        if sor._get_populate_write_fn(probe) is not sor._madvise_populate_write:
+            pytest.skip("MADV_POPULATE_WRITE is unavailable")
+    finally:
+        probe.close()
+
+    num_pages = 16
+    size = num_pages * mmap.PAGESIZE
+    mmap_obj = mmap.mmap(
+        -1,
+        size,
+        flags=mmap.MAP_SHARED,
+        prot=mmap.PROT_READ | mmap.PROT_WRITE,
+    )
+    try:
+        mmap_obj[2 * mmap.PAGESIZE] = 0xAB
+        ranges = [(p * mmap.PAGESIZE, mmap.PAGESIZE) for p in range(0, num_pages, 2)]
+        sor._populate_ranges(
+            mmap_obj, ranges, sor._madvise_populate_write, num_threads=3
+        )
+
+        assert _page_residency(mmap_obj, size) == [p % 2 == 0 for p in range(num_pages)]
+        assert mmap_obj[2 * mmap.PAGESIZE] == 0xAB
+    finally:
+        mmap_obj.close()
+
+
 def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     """Only EINVAL triggers the fallback.  Other OSErrors (e.g. EIO) must
     propagate out of __init__, not be silently masked by the fallback branch.
