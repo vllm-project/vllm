@@ -37,7 +37,7 @@ def use_cudagraph_pool(
     graph memory, and point NCCL's graph allocator at it."""
     if vllm_config.use_cumem_cudagraph_pool and not _outside_cumem.get():
         allocator = cast("CuMemAllocator", get_mem_allocator_instance())
-        with allocator.use_cudagraph_pool() as cumem_pool:
+        with allocator.cudagraph_pool() as cumem_pool:
             set_graph_pool_id(cumem_pool)
             yield cumem_pool
     else:

@@ -431,7 +431,7 @@ class CuMemAllocator:
                 unmap_and_release(self._python_free_callback(allocation["address"]))
 
     @contextmanager
-    def use_cudagraph_pool(self) -> Iterator[tuple[int, int]]:
+    def cudagraph_pool(self) -> Iterator[tuple[int, int]]:
         """Tag CUDA graph capture allocations and yield the graph pool id."""
         if "cudagraph" not in self.allocator_and_pools:
             allocator = get_pluggable_allocator(
