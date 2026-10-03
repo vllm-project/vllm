@@ -162,7 +162,7 @@ def test_native_sampling_handoff_uses_persistent_slots_and_columns(monkeypatch):
     proposer.draft_logits = torch.empty(4, 2, 7)
     proposer.draft_tokens = torch.zeros(2, 2, dtype=torch.int64)
     proposer.model = Mock(return_value=torch.randn(4, 8))
-    proposer.sample_draft = Mock(return_value=torch.tensor([11, 12, 13, 14]))
+    proposer.sample_draft = Mock(return_value=torch.tensor([11, 12, 13, 14]))  # type: ignore[method-assign]
     proposer.vllm_config = Mock()
     from contextlib import nullcontext
 
@@ -221,9 +221,9 @@ def test_graph_replay_refreshes_native_backend_without_rebuilding_metadata(
     proposer.cudagraph_manager.run_fullgraph.side_effect = lambda _: events.append(
         ("replay", None)
     )
-    proposer._copy_request_inputs = Mock()
-    proposer._build_uniform_attn_metadata = Mock(return_value={"eager": object()})
-    proposer._generate_draft = Mock()
+    proposer._copy_request_inputs = Mock()  # type: ignore[method-assign]
+    proposer._build_uniform_attn_metadata = Mock(return_value={"eager": object()})  # type: ignore[method-assign]
+    proposer._generate_draft = Mock()  # type: ignore[method-assign]
     proposer.set_lora_hook(lambda mapping: events.append(("lora", mapping)))
     fused_prepare = Mock()
     slot_builder = Mock(return_value={})
@@ -292,8 +292,8 @@ def test_eager_draft_attn_metadata_keeps_k_row_physical_capacity(monkeypatch):
     desc = BatchExecutionDescriptor(CUDAGraphMode.NONE, count, n)
     proposer.cudagraph_manager = Mock()
     proposer.cudagraph_manager.dispatch.return_value = desc
-    proposer._copy_request_inputs = Mock()
-    proposer._generate_draft = Mock()
+    proposer._copy_request_inputs = Mock()  # type: ignore[method-assign]
+    proposer._generate_draft = Mock()  # type: ignore[method-assign]
     captured: dict = {}
 
     def fake_build(
@@ -313,7 +313,7 @@ def test_eager_draft_attn_metadata_keeps_k_row_physical_capacity(monkeypatch):
         )
         return {"eager": object()}
 
-    proposer._build_uniform_attn_metadata = fake_build
+    proposer._build_uniform_attn_metadata = fake_build  # type: ignore[method-assign]
     proposer.set_lora_hook(lambda mapping: None)
     monkeypatch.setattr(f"{module}.prepare_uno_inputs_fused", Mock())
     monkeypatch.setattr(f"{module}.build_slot_mappings_by_layer", Mock(return_value={}))
@@ -423,9 +423,9 @@ def _cpu_uno_proposer(
         kernel_block_sizes=[4],
     )
     proposer.kv_cache_config = Mock()
-    proposer._copy_request_inputs = Mock()
-    proposer._build_uniform_attn_metadata = Mock(return_value={"eager": object()})
-    proposer._generate_draft = Mock()
+    proposer._copy_request_inputs = Mock()  # type: ignore[method-assign]
+    proposer._build_uniform_attn_metadata = Mock(return_value={"eager": object()})  # type: ignore[method-assign]
+    proposer._generate_draft = Mock()  # type: ignore[method-assign]
     proposer.set_lora_hook(lambda mapping: None)
     proposer.attn_groups = [[Mock()]]
     return proposer
@@ -669,7 +669,7 @@ def test_warmup_proposals_do_not_consume_the_serving_counters(monkeypatch):
     desc = manager.dispatch(2, 2 * 8, 8, 2)
     proposer._graph_attn_metadata[desc] = {"layer": object()}
     manager.graphs[desc] = Mock()
-    manager.run_fullgraph = Mock()
+    manager.run_fullgraph = Mock()  # type: ignore[method-assign]
     batch = SimpleNamespace(
         num_reqs=2,
         idx_mapping=torch.arange(2),
@@ -899,7 +899,7 @@ def test_uno_warmup_shares_filter_keys_without_prefill_verification(
 
     # Exhaust the small bounded domain independently of the representative
     # shape enumerator; partial verification includes totals below max_num_reqs.
-    served_keys = set()
+    served_keys: set[tuple[object, ...]] = set()
     for mode in UNO_SAMPLING_MODES:
         for num_reqs in range(mode.min_num_reqs, max_num_reqs + 1):
             for num_rows in range(num_reqs, num_reqs * 9 + 1):
@@ -1136,7 +1136,7 @@ def test_uno_startup_reaches_sampler_plan_when_decoder_capture_will_not_run(
     runner = object.__new__(GPUModelRunner)
     runner.speculator = object.__new__(UnoSpeculator)
     runner.speculator.k = 8
-    runner.speculator.report_draft_warmup = Mock()
+    runner.speculator.report_draft_warmup = Mock()  # type: ignore[method-assign]
     runner.sampler = SimpleNamespace(use_flashinfer=False)
     runner.model_config = SimpleNamespace(
         enforce_eager=enforce_eager, logprobs_mode="raw_logprobs", max_logprobs=20
@@ -1242,8 +1242,8 @@ def test_uno_warmup_executes_native_verification_s4(
     states.seeds = ArrayState([19, 23], np.int64)
     states.seeds_set = np.asarray([True, False])
     states.num_logprobs = np.asarray([-1, -1])
-    states.apply_staged_writes = lambda: None
-    states.apply_temperature = lambda *_: None
+    states.apply_staged_writes = lambda: None  # type: ignore[method-assign]
+    states.apply_temperature = lambda *_: None  # type: ignore[method-assign]
     sampler = object.__new__(Sampler)
     sampler.use_flashinfer = use_flashinfer
     sampler.use_xpu_sampler = False
@@ -1262,14 +1262,14 @@ def test_uno_warmup_executes_native_verification_s4(
         ("thinking_budget_state", "apply"),
     ):
         setattr(sampler, attribute, SimpleNamespace(**{method: lambda *_: None}))
-    sampler.logit_bias_state.use_logit_bias = np.zeros(2, dtype=bool)
-    sampler.bad_words_state.num_bad_words = ArrayState([0, 0], np.int32)
+    sampler.logit_bias_state.use_logit_bias = np.zeros(2, dtype=bool)  # type: ignore[attr-defined]
+    sampler.bad_words_state.num_bad_words = ArrayState([0, 0], np.int32)  # type: ignore[attr-defined]
     sampler.thinking_budget_state.enabled = False
     sampler.penalties_state.use_penalty = np.zeros(2, dtype=bool)
     sampler.penalties_state._new_penalties_reqs = []
     for name in ("repetition_penalty", "frequency_penalty", "presence_penalty"):
         setattr(sampler.penalties_state, name, ArrayState([1.0, 1.0], np.float32))
-    sampler.penalties_state.apply_staged_writes = lambda: None
+    sampler.penalties_state.apply_staged_writes = lambda: None  # type: ignore[method-assign]
     rejection = object.__new__(rejection_module.RejectionSampler)
     rejection.sampler = sampler
     rejection.watermark_key = None
@@ -1409,7 +1409,7 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
     proposer = object.__new__(UnoSpeculator)
     proposer.k = 8
     proposer._step = 9
-    proposer.report_draft_warmup = lambda *args: reported.append(args)
+    proposer.report_draft_warmup = lambda *args: reported.append(args)  # type: ignore[method-assign]
     runner.speculator = proposer
     plan = UnoServedLaunches(
         prepare_request_counts=(1, 2, 3, 4),
@@ -1526,7 +1526,7 @@ def test_profile_run_preserves_ordinary_dummy_sampler_dispatch(monkeypatch):
     runner.model = SimpleNamespace(compute_logits=lambda hidden: hidden)
     runner.sampler = Mock()
     runner.rejection_sampler = Mock()
-    runner.reset_encoder_cache = lambda: None
+    runner.reset_encoder_cache = lambda: None  # type: ignore[method-assign]
     monkeypatch.setattr(
         model_runner_module.torch.accelerator, "synchronize", lambda: None
     )
@@ -1571,7 +1571,7 @@ def test_draft_warmup_reports_execution_not_a_nonlast_rank_plan(monkeypatch):
     proposer.k = 8
     proposer._step = 5
     reports: list[tuple[object, ...]] = []
-    proposer.report_draft_warmup = lambda *args: reports.append(args)
+    proposer.report_draft_warmup = lambda *args: reports.append(args)  # type: ignore[method-assign]
     plan = UnoServedLaunches(
         prepare_request_counts=(1, 2),
         sampler_warmups=(
@@ -1805,7 +1805,7 @@ def test_uno_mode_branch_matches_production_sampler(
         temperature=SimpleNamespace(gpu=torch.tensor([p.temperature for p in params])),
         seeds=SimpleNamespace(gpu=torch.zeros(len(params), dtype=torch.int64)),
     )
-    subject.apply_sampling_params = lambda logits, *_args, **_kwargs: logits
+    subject.apply_sampling_params = lambda logits, *_args, **_kwargs: logits  # type: ignore[method-assign]
     calls: list[str] = []
 
     def record_flashinfer(logits, _top_k, _top_p):
@@ -2081,12 +2081,12 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
         num_sampled=torch.ones(num_reqs, dtype=torch.int32),
         num_rejected=torch.zeros(num_reqs, dtype=torch.int32),
     )
-    runner.sample = lambda *_args: (
+    runner.sample = lambda *_args: (  # type: ignore[method-assign]
         sampler_output,
         sampler_output.num_sampled,
         sampler_output.num_rejected,
     )
-    runner.postprocess_sampled = lambda *_args: events.append("postprocess")
+    runner.postprocess_sampled = lambda *_args: events.append("postprocess")  # type: ignore[method-assign]
     runner.num_speculative_steps = 2
     runner.draft_tokens_handler = SimpleNamespace(
         set_draft_tokens=lambda _batch, _tokens: events.append("publish"),
@@ -2307,7 +2307,7 @@ def test_draft_graph_engagement_follows_the_k_rule(
         dispatched_loras.append(args[3])
         return real_dispatch(*args, **kwargs)
 
-    manager.dispatch = recording_dispatch
+    manager.dispatch = recording_dispatch  # type: ignore[method-assign]
     monkeypatch.setattr(f"{module}.prepare_uno_inputs_fused", Mock())
     monkeypatch.setattr(f"{module}.build_slot_mappings_by_layer", Mock(return_value={}))
 
@@ -2840,7 +2840,7 @@ def test_matrix_verdicts_refuse_a_bare_divergence_list():
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
     with pytest.raises(TypeError):
-        budget.matrix_verdicts([(2, 31)], {"uno": [(2, 31)]}, 4)
+        budget.matrix_verdicts([(2, 31)], {"uno": [(2, 31)]}, 4)  # type: ignore[dict-item]
 
 
 def test_matrix_verdicts_excuse_the_reference_own_near_tie():

@@ -596,7 +596,7 @@ def test_gpu_cached_plans_match_native_punica_across_shapes_and_slots(
             kind,
             shape,
             slots,
-            lambda mapping=mapping, slots=slots: cached.update_metadata(
+            lambda mapping=mapping, slots=slots: cached.update_metadata(  # type: ignore[misc]
                 mapping, list(slots), 3, 16
             ),
         )
