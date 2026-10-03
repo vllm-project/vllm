@@ -18,10 +18,9 @@ class AbstractEplbPolicy(ABC):
         num_ranks: int,
         old_global_expert_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Entry point for expert-parallelism load balancer.
+        """Entry point for expert-parallelism load balancer.
 
-        Parameters:
+        Args:
             weight: [layers, num_logical_experts], the load statistics
                 for all logical experts
             num_replicas: number of physical experts, must be a multiple of
@@ -32,8 +31,10 @@ class AbstractEplbPolicy(ABC):
             old_global_expert_indices: [layers, num_logical_experts], the old global
                 expert indices. Used to avoid unnecessary weight copying
                 for experts moving within one rank.
+
         Returns:
             physical_to_logical_map: [layers, num_replicas], the expert
                 index of each replica
+
         """
         raise NotImplementedError

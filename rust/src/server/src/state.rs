@@ -14,7 +14,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 
-use crate::config::{ApiServerOptions, CorsConfig};
+use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::{
     LoadLoraError, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
 };
@@ -181,21 +181,31 @@ impl AppState {
     /// Returns error if the engine was started without LoRA support.
     pub async fn load_lora(
         &self,
-        lora_name: String,
-        lora_path: String,
+        module: LoraModulePath,
         load_inplace: bool,
-        is_3d_lora_weight: bool,
     ) -> Result<LoraRequest, LoadLoraError> {
         self.ensure_lora_enabled()?;
         self.lora_manager
             .load_lora(
                 self.engine_core_client(),
                 &self.served_model_names,
-                lora_name,
-                lora_path,
+                module,
                 load_inplace,
-                is_3d_lora_weight,
             )
+            .await
+    }
+
+    /// Load one adapter from `--lora-modules` and register it as a public
+    /// model name.
+    ///
+    /// Returns error if the engine was started without LoRA support.
+    pub async fn load_static_lora(
+        &self,
+        module: &LoraModulePath,
+    ) -> Result<LoraRequest, LoadLoraError> {
+        self.ensure_lora_enabled()?;
+        self.lora_manager
+            .load_static_lora(self.engine_core_client(), &self.served_model_names, module)
             .await
     }
 

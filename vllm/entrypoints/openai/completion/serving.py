@@ -10,9 +10,12 @@ from typing import cast
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    RequestResponseMetadata,
+)
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
-    GenerationError,
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
@@ -26,17 +29,15 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
-    PerRequestMetrics,
     PromptTokenUsageInfo,
-    RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -88,24 +89,20 @@ class OpenAIServingCompletion(GenerateBaseServing):
         self,
         request: CompletionRequest,
     ) -> list[EngineInput] | ErrorResponse:
-        """
-        Validate the model and preprocess a completion request.
+        """Validate the model and preprocess a completion request.
 
         Delegates preprocessing logic to OnlineRenderer, adding the
         engine-aware checks (LoRA model validation, engine health).
 
         Returns:
             A list of engine_inputs on success, or an ErrorResponse on failure.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight(request.n or 1)
 
         return await self.online_renderer.render_completion(request)
 
@@ -119,9 +116,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         See https://platform.openai.com/docs/api-reference/completions/create
         for the API specification. This API mimics the OpenAI Completion API.
 
-        NOTE: Currently we do not support the following feature:
-            - suffix (the language models we currently support do not support
-            suffix)
+        NOTE: suffix is only supported by models that implement FIM rendering.
         """
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_completion(request, raw_request), request, raw_request

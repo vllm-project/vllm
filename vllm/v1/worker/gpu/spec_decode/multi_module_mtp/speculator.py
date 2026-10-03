@@ -166,6 +166,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             input_batch.idx_mapping,
             temperature,
             seeds,
+            dummy_run=dummy_run,
         )
 
         num_tokens = input_batch.num_tokens
@@ -189,7 +190,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
         uniform_token_count = get_uniform_decode_token_count(
-            num_reqs, num_tokens, max_query_len, input_batch.has_prefill
+            num_reqs, num_tokens, max_query_len, input_batch.decode_graph_eligible
         )
         batch_desc, batch_sync = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
@@ -226,10 +227,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             slot_mappings = build_slot_mappings_by_layer(
                 slot_mappings_tensor, self.kv_cache_config
             )
-            draft_attn_metadata = self._build_draft_attn_metadata(
+            draft_attn_metadata = self._build_attn_metadata(
                 num_reqs=num_reqs,
-                num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                num_tokens_padded=batch_desc.num_tokens,
+                batch_desc=batch_desc,
                 query_start_loc_np=input_batch.query_start_loc_np,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=0,
@@ -252,6 +252,17 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
         return self.draft_tokens[:num_reqs]
+
+    # Each MTP module may carry its own LM head, selected by spec_step_idx.
+    def compute_draft_logits(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
+
+    def get_draft_top_tokens(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.get_top_tokens(hidden_states, spec_step_idx=spec_step_idx)
 
     @torch.inference_mode()
     def _run_model(
@@ -379,7 +390,11 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
-        sample_positions = self.input_buffers.positions[last_token_indices]
+        positions = self.input_buffers.positions[last_token_indices]
+        # The output hidden state at position P (= positions) and the token id
+        # at P+1 are used to draft the token at P+2. Sampling keys a draw by the
+        # position before the sampled token, so the net adjustment is +1.
+        sample_src_positions = positions + 1
         idx_mapping = self.idx_mapping[:num_reqs]
 
         # Cache the trailing token's ids, hidden states (and embeddings for
@@ -417,12 +432,13 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             sample_hidden_states = last_hidden_states[last_token_indices]
             draft_tokens = self.sample_draft(
                 sample_hidden_states,
-                sample_positions,
+                sample_src_positions,
                 idx_mapping,
                 self.temperature,
                 self.seeds,
                 self.current_draft_step,
                 self.draft_logits,
+                spec_step_idx=step,
             )
 
             self.draft_tokens[:num_reqs, step] = draft_tokens
@@ -448,7 +464,8 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                     idx_mapping,
                     num_reqs,
                 )
-                sample_positions += 1
+                # Advance the draft sampling key.
+                sample_src_positions += 1
 
 
 @triton.jit

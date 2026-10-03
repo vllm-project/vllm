@@ -156,6 +156,7 @@ class NgramEmbedding(nn.Module):
             oe_ids: ``[num_tokens, num_embedders]`` global (offset) n-gram ids,
                 as produced by the ``ngram_compute_n_gram_ids`` kernel.
         Returns: ``[num_tokens, hidden]``.
+
         """
         word = self.word_embeddings(input_ids)  # [N, H]
         flat = oe_ids.permute(1, 0).contiguous()  # [num_embedders, N]
@@ -178,6 +179,7 @@ class FlashNgramModel(FlashModel):
         if num_layers is not None and hf.num_hidden_layers != num_layers:
             hf.num_hidden_layers = num_layers
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.ngram_embeddings: NgramEmbedding | None
         if get_pp_group().is_first_rank and uses_ngram_embedding(self.config):
             self.ngram_embeddings = NgramEmbedding(self.config, self.embed_tokens)
         else:

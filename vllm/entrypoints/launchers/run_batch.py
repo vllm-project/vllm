@@ -35,11 +35,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorInfo,
-    ErrorResponse,
-    OpenAIBaseModel,
-)
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingRequest,
     EmbeddingResponse,
@@ -51,10 +46,14 @@ from vllm.entrypoints.pooling.scoring.protocol import (
     ScoreResponse,
 )
 from vllm.entrypoints.serve import create_error_response
+from vllm.entrypoints.serve.engine.protocol import (
+    ErrorInfo,
+    ErrorResponse,
+    OpenAIBaseModel,
+)
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
-    TranscriptionResponse,
-    TranscriptionResponseVerbose,
+    TranscriptionResponseVariant,
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import (
     TranslationRequest,
@@ -62,7 +61,7 @@ from vllm.entrypoints.speech_to_text.translation.protocol import (
     TranslationResponseVerbose,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_from_args, init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -88,8 +87,7 @@ def _raise_audio_filesize_limit(size_bytes: int) -> NoReturn:
 
 
 class BatchTranscriptionRequest(TranscriptionRequest):
-    """
-    Batch transcription request that uses file_url instead of file.
+    """Batch transcription request that uses file_url instead of file.
 
     This class extends TranscriptionRequest but replaces the file field
     with file_url to support batch processing from audio files written in JSON format.
@@ -119,8 +117,7 @@ class BatchTranscriptionRequest(TranscriptionRequest):
 
 
 class BatchTranslationRequest(TranslationRequest):
-    """
-    Batch translation request that uses file_url instead of file.
+    """Batch translation request that uses file_url instead of file.
 
     This class extends TranslationRequest but replaces the file field
     with file_url to support batch processing from audio files written in JSON format.
@@ -160,8 +157,7 @@ BatchRequestInputBody: TypeAlias = (
 
 
 class BatchRequestInput(OpenAIBaseModel):
-    """
-    The per-line object of the batch input file.
+    """The per-line object of the batch input file.
 
     NOTE: Currently only the `/v1/chat/completions` endpoint is supported.
     """
@@ -206,8 +202,7 @@ AllResponse: TypeAlias = (
     | EmbeddingResponse
     | ScoreResponse
     | RerankResponse
-    | TranscriptionResponse
-    | TranscriptionResponseVerbose
+    | TranscriptionResponseVariant
     | TranslationResponse
     | TranslationResponseVerbose
 )
@@ -225,9 +220,7 @@ class BatchResponseData(OpenAIBaseModel):
 
 
 class BatchRequestOutput(OpenAIBaseModel):
-    """
-    The per-line object of the batch output and error files
-    """
+    """The per-line object of the batch output and error files"""
 
     id: str
 
@@ -296,6 +289,7 @@ def make_arg_parser(parser: FlexibleArgumentParser):
 def parse_args():
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible batch runner.")
     args = make_arg_parser(parser).parse_args()
+    configure_logging_from_args(args)
 
     # Backward compatibility: If --url is set, use it for host
     url_explicit = any(arg == "--url" or arg.startswith("--url=") for arg in sys.argv)
@@ -358,8 +352,7 @@ async def read_file(path_or_url: str) -> str:
 async def write_local_file(
     output_path: str, batch_outputs: list[BatchRequestOutput]
 ) -> None:
-    """
-    Write the responses to a local file.
+    """Write the responses to a local file.
     output_path: The path to write the responses to.
     batch_outputs: The list of batch outputs to write.
     """
@@ -371,8 +364,7 @@ async def write_local_file(
 
 
 async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> None:
-    """
-    Upload a local file to a URL.
+    """Upload a local file to a URL.
     output_url: The URL to upload the file to.
     data_or_file: Either the data to upload or the path to the file to upload.
     from_file: If True, data_or_file is the path to the file to upload.
@@ -429,8 +421,7 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
 async def write_file(
     path_or_url: str, batch_outputs: list[BatchRequestOutput], output_tmp_dir: str
 ) -> None:
-    """
-    Write batch_outputs to a file or upload to a URL.
+    """Write batch_outputs to a file or upload to a URL.
     path_or_url: The path or URL to write batch_outputs to.
     batch_outputs: The list of batch outputs to write.
     output_tmp_dir: The directory to store the output file before uploading it
@@ -471,8 +462,7 @@ async def download_bytes_from_url(
     url: str,
     allowed_media_domains: list[str] | None = None,
 ) -> bytes:
-    """
-    Download data from a URL or decode from a data URL.
+    """Download data from a URL or decode from a data URL.
 
     Args:
         url: Either an HTTP/HTTPS URL or a data URL (data:...;base64,...)
@@ -482,6 +472,7 @@ async def download_bytes_from_url(
 
     Returns:
         Data as bytes
+
     """
     parsed = urlparse(url)
 
@@ -615,8 +606,7 @@ def handle_endpoint_request(
     handler_getter: Callable[[], Callable | None],
     wrapper_fn: WrapperFn | None = None,
 ) -> Awaitable[BatchRequestOutput] | None:
-    """
-    Generic handler for endpoint requests.
+    """Generic handler for endpoint requests.
 
     Args:
         request: The batch request input
@@ -628,6 +618,7 @@ def handle_endpoint_request(
     Returns:
         Awaitable[BatchRequestOutput] if the request was handled,
         None if URL didn't match
+
     """
     if not url_matcher(request.url):
         return None
@@ -649,8 +640,7 @@ def make_transcription_wrapper(
     is_translation: bool,
     allowed_media_domains: list[str] | None = None,
 ) -> WrapperFn:
-    """
-    Factory function to create a wrapper for transcription/translation handlers.
+    """Factory function to create a wrapper for transcription/translation handlers.
     The wrapper converts BatchTranscriptionRequest or BatchTranslationRequest
     to TranscriptionRequest or TranslationRequest and calls the appropriate handler.
 
@@ -662,14 +652,14 @@ def make_transcription_wrapper(
 
     Returns:
         A function that takes a handler and returns a wrapped handler
+
     """
 
     def wrapper(handler_fn: Callable):
         async def transcription_wrapper(
             batch_request_body: (BatchTranscriptionRequest | BatchTranslationRequest),
         ) -> (
-            TranscriptionResponse
-            | TranscriptionResponseVerbose
+            TranscriptionResponseVariant
             | TranslationResponse
             | TranslationResponseVerbose
             | ErrorResponse
@@ -723,8 +713,7 @@ async def build_endpoint_registry(
     engine_client: EngineClient,
     args: Namespace,
 ) -> dict[str, dict[str, Any]]:
-    """
-    Build the endpoint registry with all serving objects and handler configurations.
+    """Build the endpoint registry with all serving objects and handler configurations.
 
     Args:
         engine_client: The engine client
@@ -732,6 +721,7 @@ async def build_endpoint_registry(
 
     Returns:
         Dictionary mapping endpoint keys to their configurations
+
     """
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported tasks: %s", supported_tasks)
