@@ -7,6 +7,7 @@ from transformers import AutoModelForMaskedLM, AutoModelForTokenClassification
 
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.models.utils import softmax
+from tests.utils import multi_gpu_marks
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -72,6 +73,9 @@ def test_bert_model_runner_v2(
 
 @pytest.mark.parametrize("model", ["disham993/electrical-ner-ModernBERT-base"])
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize(
+    "tensor_parallel_size", [1, pytest.param(2, marks=multi_gpu_marks(num_gpus=2))]
+)
 @pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_modernbert_models(
@@ -80,6 +84,7 @@ def test_modernbert_models(
     example_prompts,
     model: str,
     dtype: str,
+    tensor_parallel_size: int,
 ) -> None:
     # NOTE: https://github.com/vllm-project/vllm/pull/32403
     # `disham993/electrical-ner-ModernBERT-base` is a randomly initialized
@@ -90,7 +95,12 @@ def test_modernbert_models(
         "flaky tolerance enabled due to numerical precision variance."
     )
 
-    with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
+    with vllm_runner(
+        model,
+        max_model_len=None,
+        dtype=dtype,
+        tensor_parallel_size=tensor_parallel_size,
+    ) as vllm_model:
         vllm_outputs = vllm_model.token_classify(example_prompts)
 
     with hf_runner(
