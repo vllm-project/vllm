@@ -239,6 +239,11 @@ class EngineCoreOutput(
     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
     prompt_token_id_logprobs: torch.Tensor | None = None
 
+    # [num_new_tokens, hidden_size]: the hidden states the new tokens' logits
+    # were computed from (SamplingParams.return_last_hidden_states); appended
+    # last for array_like compatibility.
+    new_last_hidden_states: torch.Tensor | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
