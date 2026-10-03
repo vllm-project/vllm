@@ -6551,6 +6551,9 @@ class GPUModelRunner(
                     layer.impl._k_scale_cache = None
                 if hasattr(layer.impl, "_v_scale_cache"):
                     layer.impl._v_scale_cache = None
+                if hasattr(layer.impl, "_repage_source"):
+                    layer.impl._repage_source = None
+                    layer.impl._repage_view = None
 
         gc.collect()
         torch.accelerator.empty_cache()
@@ -7277,6 +7280,7 @@ class GPUModelRunner(
                 self.device,
                 self.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
+                vllm_config=self.vllm_config,
             )
 
         # Set up cross-layer KV cache sharing

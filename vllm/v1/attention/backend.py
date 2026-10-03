@@ -374,6 +374,20 @@ class AttentionBackend(ABC):
         return None
 
     @classmethod
+    def get_kv_cache_view_block_size(
+        cls,
+        spec: "KVCacheSpec",
+        kernel_block_size: int,
+        vllm_config: "VllmConfig",
+    ) -> int:
+        """Physical view size when a non-dense manager block needs splitting.
+
+        Backends retaining manager blocks must adapt their read indices and
+        views themselves. The common block table still uses kernel blocks.
+        """
+        return kernel_block_size
+
+    @classmethod
     def is_ssm(cls) -> bool:
         return False
 

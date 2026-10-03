@@ -38,6 +38,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
@@ -427,6 +428,27 @@ class TestCSALinearGrouping:
 
 
 class TestSlidingWindowBucketCap:
+    @pytest.mark.parametrize("layout", ["BLHNC", "BLNHC"])
+    def test_sliding_window_keeps_manager_size_when_kernels_use_small_pages(
+        self, layout
+    ):
+        config = _mock_vllm_config(layout)
+        config.speculative_config = None
+        specs = {
+            "target": replace(_full(), block_size=640, head_size=256, head_size_v=256),
+            "draft.sliding": SlidingWindowSpec(
+                block_size=64,
+                num_kv_heads=8,
+                head_size=128,
+                dtype=torch.float16,
+                sliding_window=4096,
+            ),
+        }
+        groups = _get_packed_kv_cache_groups(config, specs)
+        sliding = next(g for g in groups if "draft.sliding" in g.layer_names)
+        assert sliding.kv_cache_spec.block_size == 640
+        assert specs["draft.sliding"].block_size == 64
+
     def test_sliding_window_bucket_is_capped_at_the_main_page(self):
         """DeepSeek-V4.1 shape: 43 SlidingWindowMLASpec SWA caches beside an
         unbalanced 8-layer paged MLA bucket. Left whole, the SWA bucket would

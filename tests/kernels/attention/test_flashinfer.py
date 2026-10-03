@@ -702,3 +702,139 @@ def test_flashinfer_decode_with_paged_fp8_kv(
         torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=1e-2),
         f"{torch.max(torch.abs(output - ref_output))}",
     )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_packed_flashinfer_indices_refresh_on_graph_replay():
+    from vllm.v1.attention.backends.flashinfer import _copy_page_indices_kernel
+    from vllm.v1.attention.ops.flashinfer_repage import (
+        PackedKVPageGeometry,
+        repage_block_table,
+    )
+
+    cache = torch.empty((4, 2, 2, 128, 128), device="cuda", dtype=torch.bfloat16)[:, 1]
+    geometry = PackedKVPageGeometry.from_cache(cache, 32)
+    storage = torch.full((3, 10), 123, device="cuda", dtype=torch.int32)
+    source = storage[1:, 1:9]
+    source[0] = torch.tensor([0, 1, 2, 3, 8, 9, -1, 11], device="cuda")
+    lengths = torch.tensor([256, 0], device="cuda", dtype=torch.int32)
+    destination = torch.empty((2, 9), device="cuda", dtype=torch.int32)
+    indptr = torch.tensor([0, 8, 8], device="cuda", dtype=torch.int32)
+    flat = torch.empty(8, device="cuda", dtype=torch.int32)
+
+    def run():
+        repage_block_table(source, lengths, destination, geometry)
+        _copy_page_indices_kernel[(2,)](
+            flat,
+            source,
+            source.stride(0),
+            indptr,
+            BLOCK_SIZE=32,
+            PAGES_PER_BLOCK=geometry.pages_per_block,
+            BLOCK_STRIDE_PAGES=geometry.block_stride_pages,
+        )
+
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    source[0, 4] = 4
+    original = source.clone()
+    destination.fill_(-999)
+    flat.fill_(-999)
+    graph.replay()
+    expected = torch.tensor(
+        [0, 1, 2, 3, 16, 33, -1, 35], device="cuda", dtype=torch.int32
+    )
+    torch.testing.assert_close(flat, expected)
+    torch.testing.assert_close(destination[0, :8], flat)
+    assert torch.all(destination[1, :8] == 0)
+    torch.testing.assert_close(source, original)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "fa2",
+        pytest.param(
+            "trtllm-gen",
+            marks=pytest.mark.skipif(
+                not current_platform.is_device_capability_family(100),
+                reason="Requires Blackwell",
+            ),
+        ),
+    ],
+)
+@torch.inference_mode()
+def test_packed_flashinfer_matches_dense_pages(backend):
+    from vllm.v1.attention.ops.flashinfer_repage import (
+        PackedKVPageGeometry,
+        repage_block_table,
+    )
+
+    set_random_seed(0)
+    manager_size, page_size, heads, dim = 592, 16, 2, 64
+    cache = torch.randn(
+        (3, 2, heads, manager_size, 2 * dim), device="cuda", dtype=torch.bfloat16
+    )[:, 1]
+    geometry = PackedKVPageGeometry.from_cache(cache, page_size)
+    packed = geometry.read_view(cache).split(dim, dim=-1)
+    ratio = manager_size // page_size
+    dense = (
+        cache.reshape(3, heads, ratio, page_size, 2 * dim)
+        .permute(0, 2, 1, 3, 4)
+        .reshape(3 * ratio, heads, page_size, 2 * dim)
+        .contiguous()
+        .split(dim, dim=-1)
+    )
+    lengths = [manager_size + 5, manager_size - 1]
+    indptr, _, last, source = _make_paged_kv_metadata(lengths, page_size, 3 * ratio)
+    source[:, 0] = 3 * ratio - 1
+    seq_lens = torch.tensor(lengths, device="cuda", dtype=torch.int32)
+    mapped = repage_block_table(source, seq_lens, torch.empty_like(source), geometry)
+    query = torch.randn((6, 4 * heads, dim), device="cuda", dtype=torch.bfloat16)
+    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+
+    def attend(kv, table):
+        if backend == "trtllm-gen":
+            return flashinfer.decode.trtllm_batch_decode_with_kv_cache(
+                query,
+                kv,
+                workspace,
+                table,
+                seq_lens,
+                max(lengths),
+                bmm1_scale=dim**-0.5,
+                bmm2_scale=1.0,
+                backend=backend,
+                q_len_per_req=3,
+            )
+        wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+            workspace, "HND", backend=backend
+        )
+        indices = torch.cat(
+            [
+                table[i, : (length + page_size - 1) // page_size]
+                for i, length in enumerate(lengths)
+            ]
+        )
+        wrapper.plan(
+            torch.tensor([0, 3, 6], device="cpu", dtype=torch.int32),
+            indptr,
+            indices,
+            last,
+            4 * heads,
+            heads,
+            dim,
+            page_size,
+            causal=False,
+            sm_scale=dim**-0.5,
+            q_data_type=query.dtype,
+            kv_data_type=query.dtype,
+        )
+        return wrapper.run(query, kv, return_lse=True)
+
+    torch.testing.assert_close(
+        attend(packed, mapped), attend(dense, source), atol=1e-2, rtol=1e-2
+    )
