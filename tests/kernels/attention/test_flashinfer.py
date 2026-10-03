@@ -707,12 +707,13 @@ def test_flashinfer_decode_with_paged_fp8_kv(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(80), reason="SM8x NVFP4 path"
+    not any(current_platform.is_device_capability_family(f) for f in (80, 120)),
+    reason="NVFP4 fa2 path",
 )
 @pytest.mark.parametrize("query_len", [1, 32])
 @pytest.mark.parametrize("layout", ["LBNHC", "LBHNC", "BLNHC", "BLHNC"])
 @torch.inference_mode
-def test_flashinfer_nvfp4_kv_cache_sm8x(
+def test_flashinfer_nvfp4_kv_cache_fa2(
     default_vllm_config, layout: str, query_len: int
 ) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
