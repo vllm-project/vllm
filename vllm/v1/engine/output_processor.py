@@ -736,10 +736,6 @@ class OutputProcessor:
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
-                if engine_core_output.new_sampling_mask is not None:
-                    req_state.sampling_mask_chunks.append(
-                        engine_core_output.new_sampling_mask
-                    )
                 # 2) Detokenize the token ids into text and perform stop checks.
                 stop_string = req_state.detokenizer.update(
                     new_token_ids, finish_reason == FinishReason.STOP
@@ -756,6 +752,17 @@ class OutputProcessor:
                             engine_core_output.new_logprobs = (
                                 engine_core_output.new_logprobs.slice_request(0, keep)
                             )
+                        if engine_core_output.new_sampling_mask is not None:
+                            engine_core_output.new_sampling_mask = (
+                                engine_core_output.new_sampling_mask.slice_request(
+                                    0, keep
+                                )
+                            )
+
+                if engine_core_output.new_sampling_mask is not None:
+                    req_state.sampling_mask_chunks.append(
+                        engine_core_output.new_sampling_mask
+                    )
 
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.

@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.detokenizer import BaseIncrementalDetokenizer
+from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.outputs import LogprobsLists, SamplingMaskLists
 
 
 @pytest.fixture(params=[True, False])
@@ -107,12 +110,39 @@ def test_stop_string_trims_speculative_overflow(include_stop_str_in_output: bool
     req = _make_request(
         stop=[stop_string], include_stop_str_in_output=include_stop_str_in_output
     )
+    req.external_req_id = req.request_id
+    assert req.sampling_params is not None
+    req.sampling_params.logprobs = 0
     detok = _DummyDetokenizer(req)
+    processor = OutputProcessor(tokenizer=None, log_stats=False)
+    processor.add_request(req, prompt=None)
+    processor.request_states[req.request_id].detokenizer = detok
 
-    result = detok.update(new_token_ids=token_ids, stop_terminated=False)
+    result = processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=req.request_id,
+                new_token_ids=token_ids,
+                new_logprobs=LogprobsLists(
+                    np.array(token_ids).reshape(-1, 1),
+                    np.zeros((len(token_ids), 1)),
+                    np.ones(len(token_ids), dtype=int),
+                    None,
+                ),
+                new_sampling_mask=SamplingMaskLists(
+                    np.array(token_ids), np.arange(len(token_ids) + 1)
+                ),
+            )
+        ]
+    ).request_outputs[0].outputs[0]
 
-    assert result == stop_string
+    assert result.stop_reason == stop_string
     expected_text = "abcd" if include_stop_str_in_output else "ab"
     assert detok.output_text == expected_text
     assert detok.output_token_ids == expected_token_ids
     assert detok.num_stop_overflow_tokens == 2
+    assert result.token_ids == expected_token_ids
+    assert result.logprobs is not None
+    assert len(result.logprobs) == len(expected_token_ids)
+    assert result.sampling_mask is not None
+    assert result.sampling_mask.token_ids == [[token] for token in expected_token_ids]
