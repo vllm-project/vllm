@@ -597,7 +597,7 @@ def snapshot_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     async def serve(*_args):
         return asyncio.sleep(0)
 
-    builder = Mock(side_effect=lambda _args: engine_context())
+    builder = Mock(side_effect=lambda _args, **_kwargs: engine_context())
     bind = Mock(return_value=("http://127.0.0.1:8000", Mock()))
     serving = AsyncMock(side_effect=serve)
     monkeypatch.setattr(api_server, "build_async_engine_client", builder)
@@ -621,6 +621,287 @@ def snapshot_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         serving=serving,
         closed=closed,
     )
+
+
+@pytest.fixture
+def startup_child(snapshot_child, tmp_path, monkeypatch):
+    import vllm.snapshot.startup as startup
+    from vllm.entrypoints.launchers.api_server import entry
+
+    child = snapshot_child
+    directory = tmp_path / "startup"
+    directory.mkdir(mode=0o700)
+    child.directory = directory
+    child.args.snapshot_config = {
+        "mode": "startup",
+        "control_dir": str(directory),
+        "timeout_s": 1.0,
+    }
+    monkeypatch.setattr(startup.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(startup.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(entry.signal, "signal", Mock())
+    monkeypatch.setattr(
+        entry, "setup_server", Mock(side_effect=AssertionError("early bind"))
+    )
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.delenv("NCCL_IB_DISABLE", raising=False)
+    return child
+
+
+async def _startup_file(path: Path):
+    async def read():
+        while not path.exists():
+            await asyncio.sleep(0.001)
+        return json.loads(path.read_text())
+
+    return await asyncio.wait_for(read(), 2)
+
+
+def _startup_activation(child, ready):
+    return {
+        "version": 1,
+        "capture_id": ready["capture_id"],
+        "activation_id": "fresh-copy",
+        "kind": "copy",
+        "native_complete": True,
+        "host": "127.0.0.1",
+        "port": 8123,
+    }
+
+
+@pytest.mark.asyncio
+async def test_ordinary_startup_snapshot_stays_private_through_canary(startup_child):
+    """A completed capture and memory wake still cannot expose the engine."""
+    from vllm.entrypoints.launchers.api_server import entry
+
+    child = startup_child
+    prepared, prepare_done = asyncio.Event(), asyncio.Event()
+    recovering, recover_done = asyncio.Event(), asyncio.Event()
+    validating, validate_done = asyncio.Event(), asyncio.Event()
+    preparations = recoveries = canaries = 0
+
+    async def rpc(method, **_kwargs):
+        nonlocal preparations, recoveries
+        if method == "checkpoint_prepare":
+            preparations += 1
+            if preparations == 2:
+                prepared.set()
+                await prepare_done.wait()
+        if method == "checkpoint_restore":
+            recoveries += 1
+            if recoveries == 2:
+                recovering.set()
+                await recover_done.wait()
+
+    async def canary(_engine):
+        nonlocal canaries
+        canaries += 1
+        if canaries == 3:
+            validating.set()
+            await validate_done.wait()
+        return _oracle()
+
+    child.engine.collective_rpc.side_effect = rpc
+    child.canary.side_effect = canary
+    task = asyncio.create_task(entry.run_server(child.args))
+    try:
+        await asyncio.wait_for(prepared.wait(), 1)
+        assert not (child.directory / "capture-ready.json").exists()
+        child.bind.assert_not_called()
+        prepare_done.set()
+        ready = await _startup_file(child.directory / "capture-ready.json")
+        activation = _startup_activation(child, ready)
+        (child.directory / "activation.json").write_text(json.dumps(activation))
+        challenge = await _startup_file(child.directory / "challenge.json")
+        child.bind.assert_not_called()
+        assert recoveries == 1  # Rehearsal only, before controller acknowledgement.
+        (child.directory / "release.json").write_text(json.dumps(challenge))
+        await asyncio.wait_for(recovering.wait(), 1)
+        child.bind.assert_not_called()
+        recover_done.set()
+        await asyncio.wait_for(validating.wait(), 1)
+        assert child.engine.wake_up.await_count == 4
+        child.bind.assert_not_called()
+        child.serving.assert_not_awaited()
+        validate_done.set()
+        await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    child.builder.assert_called_once_with(child.args, snapshot_startup=True)
+    assert child.args.host == "127.0.0.1" and child.args.port == 8123
+    assert os.environ["NCCL_IB_DISABLE"] == "1"
+    child.serving.assert_awaited_once()
+    child.closed.assert_called_once()
+    assert (
+        json.loads((child.directory / "status.json").read_text())["phase"]
+        == "validated"
+    )
+    assert not (child.directory / "error.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "stale",
+        "malformed",
+        "wrong_capture",
+        "native_incomplete",
+        "wrong_nonce",
+        "changed_context",
+        "recovery",
+        "canary",
+        "timeout",
+        "cancel",
+    ],
+)
+async def test_ordinary_startup_snapshot_failure_stays_unavailable(
+    startup_child, failure
+):
+    from vllm.entrypoints.launchers.api_server import entry
+
+    child = startup_child
+    child.args.snapshot_config["timeout_s"] = 0.2
+    if failure == "canary":
+        child.canary.side_effect = [_oracle(), _oracle(), _oracle((42,), " Lyon")]
+    if failure == "recovery":
+        restores = 0
+
+        async def rpc(method, **_kwargs):
+            nonlocal restores
+            if method == "checkpoint_restore":
+                restores += 1
+                if restores == 2:
+                    raise RuntimeError("worker recovery failed")
+
+        child.engine.collective_rpc.side_effect = rpc
+
+    task = asyncio.create_task(entry.run_server(child.args))
+    ready = await _startup_file(child.directory / "capture-ready.json")
+    activation = _startup_activation(child, ready)
+    if failure == "cancel":
+        task.cancel()
+    elif failure != "timeout":
+        if failure == "stale":
+            (child.directory / "release.json").write_text('{"old": true}')
+        if failure == "wrong_capture":
+            activation["capture_id"] = "previous-capture"
+        if failure == "native_incomplete":
+            activation["native_complete"] = False
+        (child.directory / "activation.json").write_text(
+            "{" if failure == "malformed" else json.dumps(activation)
+        )
+        if failure in {"wrong_nonce", "changed_context", "recovery", "canary"}:
+            challenge = await _startup_file(child.directory / "challenge.json")
+            if failure == "wrong_nonce":
+                challenge["nonce"] = "earlier-copy"
+            if failure == "changed_context":
+                activation["port"] += 1
+                (child.directory / "activation.json").write_text(json.dumps(activation))
+            (child.directory / "release.json").write_text(json.dumps(challenge))
+    result: BaseException | None = (await asyncio.gather(task, return_exceptions=True))[
+        0
+    ]
+    assert isinstance(result, BaseException)
+    child.bind.assert_not_called()
+    child.serving.assert_not_awaited()
+    child.closed.assert_called_once()
+    error = json.loads((child.directory / "error.json").read_text())
+    assert error["error_type"] == type(result).__name__
+    assert error["phase"] == (
+        "recovery: restore communicators"
+        if failure == "recovery"
+        else "recovery: canary"
+        if failure == "canary"
+        else "capture barrier"
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"grpc": True},
+        {"headless": True},
+        {"api_server_count": 2},
+        {"tensor_parallel_size": 2},
+        {"data_parallel_external_lb": True},
+        {"distributed_executor_backend": "ray"},
+        {"data_parallel_size_local": 0},
+        {"data_parallel_backend": "ray"},
+        {"nnodes": 2},
+        {"node_rank": 1},
+        {"subparser": "launch"},
+    ],
+)
+def test_startup_snapshot_rejects_unsupported_dispatch(startup_child, changes):
+    from vllm.entrypoints.cli.serve import ServeSubcommand
+
+    for key, value in changes.items():
+        setattr(startup_child.args, key, value)
+    with pytest.raises(ValueError, match="startup snapshots require"):
+        ServeSubcommand.cmd(startup_child.args)
+    startup_child.builder.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_startup_snapshot_rejects_stale_directory_before_engine(startup_child):
+    from vllm.entrypoints.launchers.api_server import entry
+
+    (startup_child.directory / "release.json").write_text("{}")
+    with pytest.raises(ValueError, match="must be empty"):
+        await entry.run_server(startup_child.args)
+    startup_child.builder.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_builder_preserves_primary_error_and_bounds_cleanup(monkeypatch):
+    import vllm.snapshot.startup as startup
+    from vllm.entrypoints.launchers.api_server import entry
+
+    engine = SimpleNamespace(
+        reset_mm_cache=AsyncMock(),
+        shutdown=Mock(side_effect=RuntimeError("cleanup failed")),
+    )
+    constructor = Mock(return_value=engine)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.v1.engine.async_llm",
+        SimpleNamespace(AsyncLLM=SimpleNamespace(from_vllm_config=constructor)),
+    )
+    monkeypatch.setattr(
+        startup, "validate_startup_snapshot_config", lambda _config: None
+    )
+    config = SimpleNamespace(shutdown_timeout=9999)
+    engine_args = SimpleNamespace(
+        create_engine_config=Mock(return_value=config),
+        enable_log_requests=False,
+        aggregate_engine_logging=False,
+        disable_log_stats=True,
+    )
+    with pytest.raises(ValueError, match="primary failure"):
+        async with entry.build_async_engine_client_from_engine_args(
+            engine_args, snapshot_startup=True
+        ):
+            raise ValueError("primary failure")
+    engine.shutdown.assert_called_once_with(timeout=0)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_resolved_config_is_checked_before_worker_creation(monkeypatch):
+    import vllm.snapshot.startup as startup
+    from vllm.entrypoints.launchers.api_server import entry
+
+    validation = Mock(side_effect=ValueError("unsupported resolved profile"))
+    monkeypatch.setattr(startup, "validate_startup_snapshot_config", validation)
+    engine_args = SimpleNamespace(create_engine_config=Mock(return_value=object()))
+    with pytest.raises(ValueError, match="unsupported resolved profile"):
+        async with entry.build_async_engine_client_from_engine_args(
+            engine_args, snapshot_startup=True
+        ):
+            pytest.fail("an unsupported profile reached engine construction")
+    validation.assert_called_once()
 
 
 @pytest.mark.asyncio

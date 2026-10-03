@@ -284,6 +284,12 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    snapshot_config: dict[str, Any] | None = None
+    """Opt-in startup capture through an external file controller. Requires
+    `mode: startup` and an absolute, empty private `control_dir`; optional
+    `timeout_s` bounds each preparation/recovery phase and control wait.
+    The Python TP1 server stays private until native and engine recovery finish.
+    See the initialized snapshots documentation for the controller contract."""
     grpc_port: int | None = None
     """Enable the Rust frontend's additional gRPC Inference and Control services
     on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
@@ -501,6 +507,11 @@ def validate_grpc_port_arg(args: argparse.Namespace) -> None:
 
 def validate_parsed_serve_args(args: argparse.Namespace):
     """Quick checks for model serve args that raise prior to loading."""
+    if getattr(args, "snapshot_config", None) is not None:
+        from vllm.snapshot.startup import validate_startup_snapshot_args
+
+        validate_startup_snapshot_args(args)
+
     # `vllm launch <component>` builds its parser with make_arg_parser too (see
     # LaunchSubcommandBase.add_cli_args), so its args are serve args as well.
     if hasattr(args, "subparser") and args.subparser not in ("serve", "launch"):
