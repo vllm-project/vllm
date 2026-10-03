@@ -7,6 +7,21 @@
     - Use **Nsight Systems** for low-overhead, performance-critical profiling.
     - Use **PyTorch Profiler** for medium-overhead profiling with richer debugging information (e.g., stack traces, memory, shapes). Note that enabling these features adds overhead and is not recommended for benchmarking.
 
+## Benchmark before profiling
+
+Use benchmarks to make performance claims, and use profiling to explain where
+time is spent. Profiler-enabled runs add overhead, so do not report them as
+benchmark results.
+
+Recommended workflow:
+
+1. Run an unprofiled benchmark and record serving-level metrics such as TTFT,
+   TPOT, ITL, throughput, and, when configured, goodput.
+2. Profile a small representative case to explain where time is spent.
+3. If an internal profiler span improves, re-check the end-to-end benchmark
+   metrics and nearby spans before claiming a performance win. The work may have
+   moved to another boundary such as output materialization or synchronization.
+
 ## Profile with PyTorch Profiler
 
 We support tracing vLLM workers using different profilers. You can enable profiling by setting the `--profiler-config` flag when launching the server.
