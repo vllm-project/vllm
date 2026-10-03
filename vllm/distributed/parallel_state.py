@@ -2427,7 +2427,7 @@ def destroy_distributed_environment():
         torch.distributed.destroy_process_group()
 
 
-def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+def cleanup_dist_env_and_memory(shutdown_ray: bool = False, *, collect_gc: bool = True):
     logger.debug(
         "[shutdown] Distributed: cleanup start shutdown_ray=%s",
         shutdown_ray,
@@ -2445,8 +2445,9 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 
         rocm_aiter_ops.refresh_env_variables()
 
-    # Ensure all objects are not frozen before cleanup
-    gc.unfreeze()
+    if collect_gc:
+        # Ensure all objects are not frozen before cleanup.
+        gc.unfreeze()
 
     destroy_model_parallel()
     destroy_distributed_environment()
@@ -2454,7 +2455,8 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         import ray  # Lazy import Ray
 
         ray.shutdown()
-    gc.collect()
+    if collect_gc:
+        gc.collect()
     from vllm.platforms import current_platform
 
     if not current_platform.is_cpu():
