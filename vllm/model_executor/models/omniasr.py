@@ -555,41 +555,38 @@ class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo])
     and coordinate prompt updates for speech-to-text tasks.
     """
 
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+        
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        audios = mm_data.get("audios", [])
-        if not audios:
-            prompt_ids = self.info.get_tokenizer().encode(
-                prompt, add_special_tokens=False
-            )
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]))
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         hf_config = self.info.get_hf_config()
         mm_data = dict(mm_data)
         mm_data["audio"] = mm_data.pop("audios")
-        mm_kwargs = dict(
-            **mm_kwargs,
+        hf_processor_mm_kwargs = dict(
+            **hf_processor_mm_kwargs,
             sampling_rate=hf_config.sampling_rate,
         )
-        language = mm_kwargs.pop("language", None)
-        result = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+        return mm_data, hf_processor_mm_kwargs
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        hf_config = self.info.get_hf_config()
+        language = hf_processor_mm_kwargs.get("language", None)
         lang_id = _resolve_lang_id(
-            language,
-            self.info.ctx.model_config.model,
-            hf_config.n_special_tokens,
-        )
-        result["language_id"] = torch.tensor([lang_id], dtype=torch.long)
-        return result
+                language,
+                self.info.ctx.model_config.model,
+                hf_config.n_special_tokens,
+            )
+        processed_data["language_id"] = torch.tensor([lang_id], dtype=torch.long)
+        return processed_data
 
     def _get_mm_fields_config(
         self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
