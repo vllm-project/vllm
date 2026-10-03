@@ -309,13 +309,8 @@ def test_nested_image_fields_split_per_image():
         assert pixel_values.shape[1] == int(item["num_image_patches"].data)
 
 
-def test_scoped_images_kwargs_reach_the_patch_count():
-    """A nested ``images_kwargs`` override must reach vLLM's per-image patch count.
-
-    The HF processor honors a nested ``images_kwargs`` in its ``__call__``, so a
-    count read from the flat kwargs alone still expects every image to be split
-    into crops and cannot attribute the processor's rows to the images.
-    """
+def _num_image_patches(mm_processor_kwargs) -> list[int]:
+    """Process two images with SmolVLM and return the rows each one got."""
     model_id = "HuggingFaceTB/SmolVLM-256M-Instruct"
     # Idefics3's token count updates these class-level defaults in place.
     defaults = copy.deepcopy(Idefics3ProcessorKwargs._defaults)
@@ -324,7 +319,7 @@ def test_scoped_images_kwargs_reach_the_patch_count():
             ModelConfig(
                 model=model_id,
                 model_impl="transformers",
-                mm_processor_kwargs={"images_kwargs": {"do_image_splitting": False}},
+                mm_processor_kwargs=mm_processor_kwargs,
             )
         )
         image = ImageAsset("cherry_blossom").pil_image
@@ -333,6 +328,21 @@ def test_scoped_images_kwargs_reach_the_patch_count():
             mm_items=mm_processor.info.parse_mm_data({"image": [image, image]}),
             hf_processor_mm_kwargs={},
         )
+    return [
+        int(item["num_image_patches"].data) for item in result["mm_kwargs"]["image"]
+    ]
 
-    items = result["mm_kwargs"]["image"]
-    assert [int(item["num_image_patches"].data) for item in items] == [1, 1]
+
+def test_scoped_images_kwargs_reach_the_patch_count():
+    """A nested ``images_kwargs`` override must reach vLLM's per-image patch count.
+
+    The HF processor honors a nested ``images_kwargs`` in its ``__call__``, so a
+    count read from the flat kwargs alone expects the stock number of crops and
+    cannot attribute the processor's rows to the images.
+    """
+    size = {"longest_edge": 1024}
+    flat = _num_image_patches({"size": size})
+    # Precondition: the override really changes the crop count.
+    assert flat != _num_image_patches(None)
+
+    assert _num_image_patches({"images_kwargs": {"size": size}}) == flat
