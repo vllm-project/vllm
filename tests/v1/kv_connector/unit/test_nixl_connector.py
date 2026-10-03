@@ -2691,7 +2691,7 @@ def test_release_kv_caches_is_the_inverse_of_register(
         patch.object(nixl_wrapper, "release_dlist_handle") as mock_rel_dlist,
         patch.object(nixl_wrapper, "remove_remote_agent") as mock_rem_agent,
     ):
-        assert connector.supports_sleep_mode
+        assert NixlConnector.supports_sleep_mode(vllm_config.kv_transfer_config)
         connector.register_kv_caches(kv_caches)
         registered = [c.args[0] for c in mock_reg.call_args_list]
         prepared = set(worker.src_xfer_handles_by_block_size.values())
