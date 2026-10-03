@@ -650,6 +650,15 @@ class BenchmarkWorker:
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
                     continue
+                except RuntimeError as e:
+                    # On some architectures (observed on sm_120 / RTX 5090,
+                    # bf16 E=128 N=768) certain candidate configs crash Triton
+                    # compilation itself (PassManager::run failed) rather than
+                    # raising OutOfResources. Skip them like any other invalid
+                    # config instead of aborting the whole tune.
+                    if "PassManager::run failed" in str(e):
+                        continue
+                    raise
 
                 if kernel_time < best_time:
                     best_time = kernel_time
