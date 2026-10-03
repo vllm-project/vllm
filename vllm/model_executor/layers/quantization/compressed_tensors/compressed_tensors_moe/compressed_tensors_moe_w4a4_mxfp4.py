@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    FLASHINFER_MOE_EP_MXFP4_BACKENDS,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
@@ -39,6 +40,10 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         )
 
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+
+    @property
+    def supports_eplb(self) -> bool:
+        return self.mxfp4_backend in FLASHINFER_MOE_EP_MXFP4_BACKENDS
 
     def create_weights(
         self,
@@ -174,6 +179,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
     def apply(
@@ -184,7 +190,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,

@@ -39,6 +39,7 @@ class MockModelConfig:
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
     hidden_size: int = 768
     dtype: torch.dtype = torch.float32
@@ -138,7 +139,7 @@ class TestValidatePrompt:
 
         with pytest.raises(TypeError, match="should be a list of integers"):
             renderer.render_prompts(
-                _preprocess_prompt(renderer.model_config, [[1, 2], ["foo", "bar"]])  # type: ignore[arg-type]
+                _preprocess_prompt(renderer.model_config, [[1, 2], ["foo", "bar"]])
             )
 
 
