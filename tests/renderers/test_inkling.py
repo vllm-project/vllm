@@ -240,6 +240,24 @@ class TestRenderingSemantics:
             "<|content_model_end_sampling|>"
         )
 
+    def test_thinking_content_part(self, inkling_tokenizer):
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "think"},
+                    {"type": "text", "text": "answer"},
+                ],
+            }
+        ]
+        assert render_text(
+            inkling_tokenizer, messages, add_generation_prompt=False
+        ) == (
+            "<|message_model|><|content_thinking|>think<|end_message|>"
+            "<|message_model|><|content_text|>answer<|end_message|>"
+            "<|content_model_end_sampling|>"
+        )
+
     def test_audio_part(self, inkling_tokenizer):
         messages = [
             {
