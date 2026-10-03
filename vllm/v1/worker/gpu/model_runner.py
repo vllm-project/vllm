@@ -767,7 +767,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
                 block_tables=self.block_tables,
-                attn_groups=(g for groups in self.attn_groups for g in groups),
+                # Draft groups build their own metadata, so they map the views too.
+                attn_groups=(
+                    g
+                    for groups in self.attn_groups
+                    + getattr(self.speculator, "attn_groups", [])
+                    for g in groups
+                ),
             )
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
