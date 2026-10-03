@@ -2,16 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import operator
+from unittest.mock import Mock
 
 import pytest
 import torch
+from torch._higher_order_ops.auto_functionalize import auto_functionalized
+from torch._inductor.fx_passes.control_dependencies import (
+    control_deps,
+    preserve_node_ordering,
+)
+from torch.utils._ordered_set import OrderedSet
 
 from tests.compile.backend import TestBackend
 from tests.utils import TestFP8Layer
-from vllm.compilation.passes.fusion.act_quant_fusion import (
-    ActivationQuantFusionPass,
-)
-from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
 from vllm.compilation.passes.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
@@ -251,6 +255,165 @@ class TestFunctionWithMutatedArgsAndReturn(torch.nn.Module):
         return []
 
 
+@pytest.mark.parametrize("use_return_value", [False, True])
+def test_defunctionalize_preserves_control_dependencies(use_return_value):
+    if use_return_value:
+        TestFunctionWithMutatedArgsAndReturn.register_test_custom_op()
+        target = torch.ops.vllm.function_with_mutated_args_and_return.default
+    else:
+
+        def mutate_only(x: torch.Tensor) -> None:
+            x.add_(2)
+
+        direct_register_custom_op(
+            op_name="function_with_mutated_args_without_return",
+            op_func=mutate_only,
+            mutates_args=["x"],
+            fake_impl=lambda x: None,
+        )
+        target = torch.ops.vllm.function_with_mutated_args_without_return.default
+    graph = torch.fx.Graph()
+    arg = graph.placeholder("arg")
+    independent = graph.placeholder("independent")
+    functionalized = graph.call_function(
+        auto_functionalized, args=(target,), kwargs={"x": arg}
+    )
+    mutated = graph.call_function(operator.getitem, args=(functionalized, 1))
+    returned = (
+        graph.call_function(operator.getitem, args=(functionalized, 0))
+        if use_return_value
+        else mutated
+    )
+    output = graph.call_function(torch.ops.aten.add.Tensor, args=(returned, mutated))
+    graph.output(output)
+    module = torch.fx.GraphModule(torch.nn.Module(), graph)
+    preserve_node_ordering(graph, {output: OrderedSet([independent, functionalized])})
+    module.recompile()
+    x = torch.arange(4, dtype=torch.float32, device=current_platform.device_type)
+    expected = module(x.clone(), x.clone())
+
+    func_pass = FixFunctionalizationPass(VllmConfig())
+    func_pass.nodes_to_remove = []
+    func_pass.defunctionalize(graph, functionalized, mutated_args={1: "x"})
+    for node in func_pass.nodes_to_remove:
+        graph.erase_node(node)
+    graph.lint()
+    module.recompile()
+
+    mutation = next(node for node in graph.nodes if is_func(node, target))
+    ordered = next(node for node in graph.nodes if is_func(node, control_deps))
+    assert ordered.args[0] == (independent, mutation, arg)
+    assert find_auto_fn_maybe(graph.nodes, target) is None
+    torch.testing.assert_close(module(x.clone(), x.clone()), expected)
+
+
+@pytest.mark.parametrize(
+    "use", ["dependencies", "output", "payload", "dependencies_and_payload"]
+)
+def test_fix_functionalization_preserves_unsupported_users(use, monkeypatch):
+    """Keep unsupported wrapper uses intact while optimizing ordinary nodes."""
+    TestFunctionWithMutatedArgsAndReturn.register_test_custom_op()
+    target = torch.ops.vllm.function_with_mutated_args_and_return.default
+    # This graph uses only the test op, so native kernels are not required.
+    monkeypatch.setattr(torch.ops, "_C", Mock())
+    graph = torch.fx.Graph()
+    x, y = graph.placeholder("x"), graph.placeholder("y")
+    wrappers, returned, outputs = [], [], []
+    for arg in (x, y):
+        wrapper = graph.call_function(
+            auto_functionalized, args=(target,), kwargs={"x": arg}
+        )
+        ret = graph.call_function(operator.getitem, args=(wrapper, 0))
+        mut = graph.call_function(operator.getitem, args=(wrapper, 1))
+        wrappers.append(wrapper)
+        returned.append(ret)
+        outputs.append(graph.call_function(torch.ops.aten.add.Tensor, args=(ret, mut)))
+    protected, ordinary = wrappers
+    graph.output((protected if use == "output" else outputs[0], outputs[1]))
+    module = torch.fx.GraphModule(torch.nn.Module(), graph)
+    if use == "dependencies":
+        preserve_node_ordering(
+            graph, {output: OrderedSet([y, protected]) for output in outputs}
+        )
+    elif "payload" in use:
+        dependency = protected if use == "dependencies_and_payload" else y
+        preserve_node_ordering(graph, {returned[0]: OrderedSet([dependency])})
+    module.recompile()
+    inputs = [
+        torch.arange(4, dtype=torch.float32, device=current_platform.device_type)
+        for _ in range(2)
+    ]
+    expected = module(*[arg.clone() for arg in inputs])
+
+    FixFunctionalizationPass(VllmConfig())(graph)
+    graph.lint()
+    module.recompile()
+    remaining = [node for node in graph.nodes if is_func(node, auto_functionalized)]
+    assert remaining == ([] if use == "dependencies" else [protected])
+    assert ordinary not in graph.nodes
+    actual_inputs = [arg.clone() for arg in inputs]
+    torch.testing.assert_close(module(*actual_inputs), expected)
+    if use == "dependencies":
+        mutation = next(node for node in graph.nodes if is_func(node, target))
+        controls = [node for node in graph.nodes if is_func(node, control_deps)]
+        assert len(controls) == 2
+        assert all(node.args[0] == (y, mutation, x) for node in controls)
+    else:
+        torch.testing.assert_close(actual_inputs[0], inputs[0])
+
+
+@pytest.mark.parametrize("use", ["output", "payload"])
+@pytest.mark.parametrize("use_view", [False, True])
+def test_fix_functionalization_preserves_connected_outputs(use, use_view, monkeypatch):
+    """Downstream mutations must not overwrite retained wrapper outputs."""
+    TestFunctionWithMutatedArgsAndReturn.register_test_custom_op()
+    target = torch.ops.vllm.function_with_mutated_args_and_return.default
+    monkeypatch.setattr(torch.ops, "_C", Mock())
+    graph = torch.fx.Graph()
+    x, y = graph.placeholder("x"), graph.placeholder("y")
+    wrappers: list[torch.fx.Node] = []
+    outputs: list[torch.fx.Node] = []
+    arg = x
+    for _ in range(3):
+        wrapper = graph.call_function(
+            auto_functionalized, args=(target,), kwargs={"x": arg}
+        )
+        ret = graph.call_function(operator.getitem, args=(wrapper, 0))
+        mut = graph.call_function(operator.getitem, args=(wrapper, 1))
+        wrappers.append(wrapper)
+        outputs.extend((ret, mut))
+        arg = (
+            graph.call_function(torch.ops.aten.view.default, args=(mut, [-1]))
+            if use_view
+            else mut
+        )
+    independent = graph.call_function(torch.ops.aten.alias.default, args=(y,))
+    ordinary = graph.call_function(
+        auto_functionalized, args=(target,), kwargs={"x": independent}
+    )
+    outputs.extend(
+        graph.call_function(operator.getitem, args=(ordinary, idx)) for idx in (0, 1)
+    )
+    graph.output((wrappers[0] if use == "output" else outputs[1], *outputs))
+    module = torch.fx.GraphModule(torch.nn.Module(), graph)
+    preserve_node_ordering(graph, {independent: OrderedSet([wrappers[0]])})
+    if use == "payload":
+        preserve_node_ordering(graph, {outputs[0]: OrderedSet([y])})
+    module.recompile()
+    x_value = torch.arange(4, dtype=torch.float32, device=current_platform.device_type)
+    y_value = x_value + 10
+    expected = module(x_value.clone(), y_value.clone())
+
+    FixFunctionalizationPass(VllmConfig())(graph)
+    graph.lint()
+    module.recompile()
+    actual_x = x_value.clone()
+    torch.testing.assert_close(module(actual_x, y_value.clone()), expected)
+    torch.testing.assert_close(actual_x, x_value)
+    assert all(wrapper in graph.nodes for wrapper in wrappers)
+    assert ordinary not in graph.nodes
+
+
 MODELS_AND_DO_FUSION = {
     TestSiluMul: [True, False],
     TestFusedAddRMSNorm: [True, False],
@@ -276,6 +439,11 @@ MODELS_AND_DO_FUSION = {
 def test_fix_functionalization(
     model_class: torch.nn.Module, do_fusion: bool, dtype: torch.dtype
 ):
+    from vllm.compilation.passes.fusion.act_quant_fusion import (
+        ActivationQuantFusionPass,
+    )
+    from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
+
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
