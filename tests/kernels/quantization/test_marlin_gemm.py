@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_workspace,
+    marlin_act_int8_process_scales,
     marlin_make_empty,
     marlin_make_workspace_new,
     marlin_permute_bias,
@@ -440,10 +441,8 @@ def test_marlin_gemm(
         a_input_ref = a_input_ref.to(dtype)
 
         if group_size != -1:
-            a_scales = a_scales / 4096 * marlin_s.max()
-            a_scales = a_scales.float()
-            marlin_s = marlin_s / marlin_s.max() * 4096
-            marlin_s = marlin_s.round().to(torch.int16).view(dtype)
+            marlin_s, a_scales_scale_factor = marlin_act_int8_process_scales(marlin_s)
+            a_scales = (a_scales * a_scales_scale_factor).float()
     elif a_type == scalar_types.float8_e4m3fn:
         a_input, a_scales = ops.scaled_fp8_quant(a_input, use_per_token_if_dynamic=True)
         a_input_ref = a_input.to(a_scales.dtype) * a_scales.view(-1, 1)
@@ -471,6 +470,112 @@ def test_marlin_gemm(
         a_input.shape[1],
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
+        is_zp_float=False,
+    )
+    output_ref = torch.matmul(a_input_ref, w_ref)
+
+    max_diff = compute_max_diff(output, output_ref)
+    assert max_diff < 0.04
+
+
+def _signed_group_multipliers(
+    num_groups: int, scale_signs: str, device: torch.device | str
+) -> torch.Tensor:
+    # "mixed": half the groups negative, as in symmetric AutoRound exports.
+    # "skewed_neg": negative groups 16x larger than any positive one, which
+    #   overflows int16 if scales are normalized by max() instead of abs().max().
+    # "all_neg": every group negative, so max() is itself negative.
+    if scale_signs == "all_neg":
+        neg = torch.ones(num_groups, dtype=torch.bool)
+    else:
+        neg = torch.zeros(num_groups, dtype=torch.bool)
+        neg[torch.randperm(num_groups)[: num_groups // 2]] = True
+    mult = torch.where(neg, -1.0, 1.0)
+    if scale_signs == "skewed_neg":
+        mult = torch.where(neg, mult * 16, mult)
+    return mult.to(device)
+
+
+@pytest.mark.parametrize("scale_signs", ["mixed", "skewed_neg", "all_neg"])
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_marlin_act_int8_process_scales_signed(scale_signs, dtype):
+    torch.manual_seed(0)
+    num_groups, size_n = 32, 256
+    s = torch.rand((num_groups, size_n), dtype=torch.float32) * 0.02 + 0.001
+    s = (s * _signed_group_multipliers(num_groups, scale_signs, "cpu").view(-1, 1)).to(
+        dtype
+    )
+
+    s_int16, a_scales_scale_factor = marlin_act_int8_process_scales(s.clone())
+    s_int16 = s_int16.view(torch.int16)
+
+    assert s_int16.abs().max() <= 4096
+    assert torch.equal(s_int16 < 0, s < 0)
+    s_dequant = s_int16.float() * a_scales_scale_factor
+    torch.testing.assert_close(
+        s_dequant,
+        s.float(),
+        atol=s.abs().max().item() / 4096,
+        rtol=torch.finfo(dtype).eps,
+    )
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("b_type", [scalar_types.uint4b8, scalar_types.uint4])
+@pytest.mark.parametrize("scale_signs", ["mixed", "skewed_neg", "all_neg"])
+@pytest.mark.parametrize("size_m", [1, 64])
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_marlin_gemm_int8_act_negative_group_scales(b_type, scale_signs, size_m, dtype):
+    torch.manual_seed(0)
+    group_size = 128
+    size_k, size_n = 1024, 512
+    num_groups = size_k // group_size
+
+    a_input = rand_data((size_m, size_k), dtype=dtype)
+    b_weight = rand_data((size_k, size_n), dtype=dtype)
+
+    if b_type == scalar_types.uint4:
+        w_ref, marlin_q_w, marlin_s, marlin_zp = awq_marlin_quantize(
+            b_weight, b_type, group_size, input_dtype=torch.int8
+        )
+    else:
+        w_ref, marlin_q_w, marlin_s = marlin_quantize(
+            b_weight, b_type, group_size, input_dtype=torch.int8
+        )
+        marlin_zp = None
+
+    # The marlin scale permutation only reorders within a row, so row g of
+    # marlin_s is still group g. Scaling a group's scales and its reference
+    # weight rows by the same factor keeps the reference exact.
+    mult = _signed_group_multipliers(num_groups, scale_signs, w_ref.device)
+    marlin_s = marlin_s * mult.to(marlin_s.dtype).view(-1, 1)
+    w_ref = w_ref * mult.to(w_ref.dtype).repeat_interleave(group_size).view(-1, 1)
+
+    a_input, a_scales = per_token_quant_int8(a_input)
+    a_input_ref = (a_input.to(a_scales.dtype) * a_scales.view(-1, 1)).to(dtype)
+    marlin_s, a_scales_scale_factor = marlin_act_int8_process_scales(marlin_s)
+    a_scales = (a_scales * a_scales_scale_factor).float()
+
+    workspace = marlin_make_workspace_new(w_ref.device)
+    output = ops.marlin_gemm(
+        a_input,
+        None,
+        marlin_q_w,
+        None,
+        marlin_s,
+        a_scales,
+        None,
+        marlin_zp,
+        workspace,
+        b_type,
+        size_m,
+        size_n,
+        size_k,
+        use_atomic_add=False,
+        use_fp32_reduce=True,
         is_zp_float=False,
     )
     output_ref = torch.matmul(a_input_ref, w_ref)
