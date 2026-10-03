@@ -94,6 +94,10 @@ For best results, we recommend ensuring that the expected output format / schema
 To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
 specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request.
 
+For schema-derived named function calling in the Responses API, `tool_choice={"type": "function", "name": "..."}` can select a function inside a namespace by its local name or its full `namespace__function` name. A local name containing `__` is preserved in full. Plain function names are matched literally: a function named `other__add` does not create an alias for `add` or override a namespace function's `add` alias.
+
+For parsers that support schema-derived named function calling, such as Hermes, set `VLLM_ENFORCE_STRICT_TOOL_CALLING=false` before starting the server to use this path instead of structural-tag constraints. Named calls on this path still enforce the parameter schema. See [Strict Mode](#strict-mode) for the distinction.
+
 ## Required Function Calling
 
 vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses structured outputs, so this is enabled by default and will work with any supported model. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
