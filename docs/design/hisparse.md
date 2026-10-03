@@ -37,6 +37,13 @@ memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
 to complete host blocks.
 
+Large pools can instead be backed by huge pages by setting `host_pool_dir` on
+`HiSparseConnector` to a hugetlbfs mount (for example a Kubernetes
+`medium: HugePages-1Gi` emptyDir). This cuts the number of pages that CUDA and
+RDMA registration must pin by orders of magnitude. The huge pages must be
+reserved up front (`vm.nr_hugepages` or the pod's `hugepages-<size>`
+resource); startup fails with a clear error if they are not.
+
 ## Ownership
 
 | Thing | Owner | What “owner” means |
