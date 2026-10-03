@@ -5,12 +5,23 @@
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
+from typing import TYPE_CHECKING, cast
 
 from vllm.config import VllmConfig
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.device_allocator.cumem import CuMemAllocator
+
 _plain_capture: ContextVar[bool] = ContextVar("plain_cudagraph_capture", default=False)
+
+
+def _cumem_allocator() -> "CuMemAllocator":
+    # A cast, not new MemAllocator methods: only cuMem has a graph pool (XPU's
+    # allocator does not), and the policy that gates every caller requires CUDA.
+    return cast("CuMemAllocator", get_mem_allocator_instance())
 
 
 @contextmanager
@@ -36,10 +47,7 @@ def use_cudagraph_pool(
         and not _plain_capture.get()
         and vllm_config.use_cumem_cudagraph_pool
     ):
-        # Imported here: the cuMem extension exists only on CUDA builds.
-        from vllm.device_allocator.cumem import CuMemAllocator
-
-        ctx = CuMemAllocator.get_instance().use_cudagraph_pool()
+        ctx = _cumem_allocator().use_cudagraph_pool()
     with ctx as graph_pool:
         set_graph_pool_id(graph_pool or current_platform.graph_pool_handle())
         yield graph_pool
@@ -51,6 +59,4 @@ def release_cudagraph_pool(vllm_config: VllmConfig) -> None:
     released for recapture; without the cuMem pool, destroying the graphs is
     enough."""
     if vllm_config.use_cumem_cudagraph_pool:
-        from vllm.device_allocator.cumem import CuMemAllocator
-
-        CuMemAllocator.get_instance().release_cudagraph_pool()
+        _cumem_allocator().release_cudagraph_pool()
