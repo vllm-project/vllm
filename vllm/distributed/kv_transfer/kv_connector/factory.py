@@ -233,6 +233,11 @@ KVConnectorFactory.register_connector(
     "MooncakeStoreConnector",
 )
 KVConnectorFactory.register_connector(
+    "UMBPStoreConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.umbp",
+    "UMBPStoreConnector",
+)
+KVConnectorFactory.register_connector(
     "FlexKVConnectorV1",
     "vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector",
     "FlexKVConnectorV1",
