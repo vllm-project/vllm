@@ -237,3 +237,66 @@ def test_auto_awq_config_get_name():
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
     assert AutoAWQConfig.get_name() == "auto_awq"
+
+
+def _rocm_linear_quant_method(monkeypatch, group_size: int, zero_point: bool):
+    """Resolve the AWQ linear method ROCm would pick for a given config."""
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+    from vllm.platforms.interface import PlatformEnum
+
+    # Platform predicates all derive from _enum, so this flips is_rocm() on and
+    # is_cuda()/is_cpu()/is_xpu() off consistently for every module that holds a
+    # reference to the singleton.
+    monkeypatch.setattr(current_platform, "_enum", PlatformEnum.ROCM)
+
+    quant_config = AutoAWQConfig(
+        weight_bits=4,
+        group_size=group_size,
+        zero_point=zero_point,
+        lm_head_quantized=False,
+    )
+    # get_quant_method only type-checks the layer on this path.
+    layer = object.__new__(LinearBase)
+    return quant_config.get_quant_method(layer, prefix="model.layers.0.q_proj")
+
+
+@pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
+def test_rocm_asymmetric_linear_routed_through_mp_linear_kernel(
+    group_size: int, monkeypatch
+):
+    """On ROCm, zero-point AWQ linear layers must reach choose_mp_linear_kernel.
+
+    ROCm has no Marlin kernel, but AutoAWQMarlinLinearMethod is the method that
+    dispatches through choose_mp_linear_kernel, which is where the W4A16 kernels
+    registered for PlatformEnum.ROCM live. AutoAWQLinearMethod bypasses them.
+    """
+    from vllm.model_executor.layers.quantization.auto_awq import (
+        AutoAWQMarlinLinearMethod,
+    )
+
+    quant_method = _rocm_linear_quant_method(monkeypatch, group_size, zero_point=True)
+
+    assert isinstance(quant_method, AutoAWQMarlinLinearMethod), (
+        f"Expected AutoAWQMarlinLinearMethod on ROCm for group_size={group_size}, "
+        f"got {type(quant_method)}"
+    )
+
+
+@pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
+def test_rocm_symmetric_linear_falls_back(group_size: int, monkeypatch):
+    """Symmetric AWQ must keep falling back instead of failing to load.
+
+    AutoAWQMarlinLinearMethod asserts verify_marlin_supported(), which rejects
+    the AWQ uint4 type when there are no zero points. ROCm must therefore screen
+    the same condition the CUDA path screens, or symmetric checkpoints raise
+    ValueError at load time instead of using AutoAWQLinearMethod.
+    """
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQLinearMethod
+
+    quant_method = _rocm_linear_quant_method(monkeypatch, group_size, zero_point=False)
+
+    assert isinstance(quant_method, AutoAWQLinearMethod), (
+        f"Expected AutoAWQLinearMethod fallback on ROCm for group_size="
+        f"{group_size} without zero points, got {type(quant_method)}"
+    )
