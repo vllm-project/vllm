@@ -157,6 +157,8 @@ class FileSystemTierManager(SecondaryTierManager):
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
         # Block count per in-flight job, used to report transfer_bytes.
         self._job_block_counts: dict[JobId, int] = {}
+        # Fatal errors recorded by FS worker threads.
+        self._job_errors: dict[JobId, Exception] = {}
         # Per load job: how many blocks loaded before a failure (partial keep).
         # Written by the pool worker inside the load task before it raises (so
         # before task_done publishes the job); read on the scheduler thread in
@@ -238,15 +240,31 @@ class FileSystemTierManager(SecondaryTierManager):
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
-        # Track this load's keys so a failed promotion can mark only its failed
-        # keys as a miss (see get_finished_jobs).
-        keys = list(job_metadata.keys)
-        self._load_job_keys[job_id] = keys
-        self._job_block_counts[job_id] = len(keys)
-        paths = [self.file_mapper.get_file_name(key) for key in keys]
-        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
         def load_task() -> None:
+            try:
+                materialized = job_metadata.materialize()
+            except Exception as exc:
+                # Allocation raised an error that must be propagated
+                # to the scheduler thread.
+                self._job_errors[job_id] = exc
+                raise
+            if not materialized:
+                # Job materialization failed; Setup state such that Job reaping
+                # doesn't blow up.
+                self._job_block_counts[job_id] = 0
+                self._load_job_keys[job_id] = []
+                return
+
+            keys = list(job_metadata.keys)
+            self._job_block_counts[job_id] = len(keys)
+            self._load_job_keys[job_id] = list(keys)
+            # TODO (varun): Path generation is expensive. Consider doing in
+            # Scheduler thread.
+            paths = [self.file_mapper.get_file_name(k) for k in keys]
+            offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
+            assert len(paths) == len(offsets)
+
             try:
                 batch_load_block(
                     paths,
@@ -279,6 +297,9 @@ class FileSystemTierManager(SecondaryTierManager):
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Collect finished jobs; a failed promotion marks only its failed keys
         as a miss here (scheduler thread)."""
+        if self._job_errors:
+            # Raise allocation errors in scheduler thread.
+            raise next(iter(self._job_errors.values()))
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
             block_count = self._job_block_counts.pop(job_id, 0)
