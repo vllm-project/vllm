@@ -462,19 +462,24 @@ def _run_threads(direction, size, iters, n, device) -> tuple[float, float]:
 
 
 def _process_worker(direction, size, iters, device_index, barrier, out_q) -> None:
-    device = torch.device("cuda", device_index)
-    torch.cuda.set_device(device)
-    stream = torch.cuda.Stream(device)
-    host, dev = _alloc_pair(size, device)
-    with torch.cuda.stream(stream):
-        copy_(direction, host, dev)
-        stream.synchronize()
-        barrier.wait()
-        t0 = now()
-        for _ in range(iters):
+    try:
+        device = torch.device("cuda", device_index)
+        torch.cuda.set_device(device)
+        stream = torch.cuda.Stream(device)
+        host, dev = _alloc_pair(size, device)
+        with torch.cuda.stream(stream):
             copy_(direction, host, dev)
-        stream.synchronize()
-    out_q.put((t0, now()))
+            stream.synchronize()
+            barrier.wait()
+            t0 = now()
+            for _ in range(iters):
+                copy_(direction, host, dev)
+            stream.synchronize()
+        out_q.put((t0, now()))
+    except BaseException as e:  # noqa: BLE001
+        barrier.abort()
+        out_q.put(repr(e))
+        raise
 
 
 def _run_processes(direction, size, iters, n, device) -> tuple[float, float]:
@@ -490,12 +495,13 @@ def _run_processes(direction, size, iters, n, device) -> tuple[float, float]:
     ]
     for p in procs:
         p.start()
-    spans = [out_q.get(timeout=600) for _ in procs]
+    results = [out_q.get(timeout=600) for _ in procs]
     for p in procs:
         p.join()
-        if p.exitcode != 0:
-            raise RuntimeError(f"concurrency worker exited with {p.exitcode}")
-    return min(s[0] for s in spans), max(s[1] for s in spans)
+    errors = [r for r in results if isinstance(r, str)]
+    if errors:
+        raise RuntimeError(f"concurrency worker failed: {errors[0]}")
+    return min(r[0] for r in results), max(r[1] for r in results)
 
 
 def bench_concurrency(args, device) -> list[dict[str, Any]]:
@@ -641,6 +647,13 @@ class DecodeLoop:
             )
 
     def run(self, steps: int, warmup: int) -> dict[str, Any]:
+        try:
+            return self._run(steps, warmup)
+        finally:
+            if self.pool is not None:
+                self.pool.shutdown()
+
+    def _run(self, steps: int, warmup: int) -> dict[str, Any]:
         torch.cuda.synchronize(self.device)
         pending: deque[tuple[int, int, Any]] = deque()
         t_start = 0.0
@@ -692,8 +705,6 @@ class DecodeLoop:
             self._consume(pending.popleft())
         torch.cuda.synchronize(self.device)
         wall = now() - t_start
-        if self.pool is not None:
-            self.pool.shutdown()
 
         step_us = wall / steps * 1e6
         ideal_us = (

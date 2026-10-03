@@ -85,7 +85,11 @@ def compare(off: dict[str, Any], on: dict[str, Any]) -> str:
             for metric, _, _ in metrics:
                 va, vb = a.get(metric), b.get(metric)
                 ratio = vb / va if va and vb is not None else None
-                cells += [_fmt(va), _fmt(vb), f"{ratio:.2f}x" if ratio else "-"]
+                cells += [
+                    _fmt(va),
+                    _fmt(vb),
+                    "-" if ratio is None else f"{ratio:.2f}x",
+                ]
             if test == "semantics":
                 cells += [a.get("verdict", "-"), b.get("verdict", "-")]
             lines.append("| " + " | ".join(cells) + " |")
@@ -103,6 +107,12 @@ def main(argv: list[str] | None = None) -> int:
         off = json.load(f)
     with open(args.on) as f:
         on = json.load(f)
+    if off.get("schema_version") != on.get("schema_version"):
+        print(
+            "warning: runs use different schema versions "
+            f"({off.get('schema_version')} vs {on.get('schema_version')})",
+            file=sys.stderr,
+        )
     for name, run, want in (("OFF", off, "off"), ("ON", on, "on")):
         if run["env"]["cc"] not in (want, "unknown"):
             print(
