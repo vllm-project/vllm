@@ -23,6 +23,10 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUWorkerMetadata,
     create_ec_shared_region,
 )
+from vllm.distributed.ec_transfer.ec_connector.cpu.metrics import (
+    ECCPUConnectorStats,
+    ECCPUMetricName,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.worker.descriptor_buffers import (
     DescriptorBufferPool,
     DescriptorBuffers,
@@ -152,6 +156,8 @@ class ECCPUWorker:
         self._stream_pool: list[torch.Stream] = []
         self._event_pool: list[torch.Event] = []
 
+        self._stats = ECCPUConnectorStats()
+
     def _acquire_stream(self) -> torch.Stream:
         if self._stream_pool:
             return self._stream_pool.pop()
@@ -164,7 +170,12 @@ class ECCPUWorker:
             else torch.Event(enable_timing=True)
         )
 
-    def _collect_finished(self, inflight: deque[Transfer], direction: str) -> list:
+    def _collect_finished(
+        self,
+        inflight: deque[Transfer],
+        direction: str,
+        metrics: tuple[str, str, str],
+    ) -> list:
         """Pop transfers whose end event has fired, recycle their stream,
         events, and buffers, and return their completions.
 
@@ -173,7 +184,11 @@ class ECCPUWorker:
         is reported exactly once because the transfer is popped as it is
         reported. A later transfer that happens to finish first simply waits
         behind the front and is reported on a subsequent poll.
+
+        `metrics` is the (bytes, time, size) metric name triple to record the
+        transfer's byte count and elapsed time under.
         """
+        bytes_metric, time_metric, size_metric = metrics
         done: list = []
         while inflight and inflight[0].end_event.query():
             transfer = inflight.popleft()
@@ -187,6 +202,10 @@ class ECCPUWorker:
                 transfer.num_bytes,
                 elapsed_ms,
             )
+            self._stats.increase_counter(bytes_metric, transfer.num_bytes)
+            self._stats.increase_counter(time_metric, elapsed_ms / 1000)
+            self._stats.observe_histogram(size_metric, transfer.num_bytes)
+
             self._buf_pool.release(transfer.bufs)
             self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.start_event)
@@ -429,14 +448,37 @@ class ECCPUWorker:
 
         Returns None when nothing finished, so the scheduler sees no payload.
         """
-        completed_saves = self._collect_finished(self._inflight_saves, "save")
-        completed_loads = self._collect_finished(self._inflight_loads, "load")
+        completed_saves = self._collect_finished(
+            self._inflight_saves,
+            "save",
+            (
+                ECCPUMetricName.SAVE_BYTES,
+                ECCPUMetricName.SAVE_TIME,
+                ECCPUMetricName.SAVE_SIZE,
+            ),
+        )
+        completed_loads = self._collect_finished(
+            self._inflight_loads,
+            "load",
+            (
+                ECCPUMetricName.LOAD_BYTES,
+                ECCPUMetricName.LOAD_TIME,
+                ECCPUMetricName.LOAD_SIZE,
+            ),
+        )
         if not completed_saves and not completed_loads:
             return None
         return ECCPUWorkerMetadata(
             completed_saves=completed_saves,
             completed_loads=completed_loads,
         )
+
+    def get_ec_connector_stats(self) -> ECCPUConnectorStats | None:
+        """Return and clear the stats accumulated since the last call."""
+        if self._stats.is_empty():
+            return None
+        stats, self._stats = self._stats, ECCPUConnectorStats()
+        return stats
 
     def shutdown(self) -> None:
         for transfer in (*self._inflight_saves, *self._inflight_loads):

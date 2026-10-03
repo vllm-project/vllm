@@ -41,6 +41,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
 from vllm.distributed.ec_transfer.ec_connector.cpu.worker import (
     ECCPUTransferDirection,
     ECCPUWorker,
+    Transfer,
 )
 from vllm.platforms import current_platform
 
@@ -798,6 +799,74 @@ def test_buffer_pool_is_reused_across_load_steps(make_worker):
 
     assert len(worker._buf_pool._pool) == 1
     assert id(worker._buf_pool._pool[0].src_ptrs) == buf_id
+
+
+# ── metrics ──────────────────────────────────────────────────────────────────
+
+
+def _fake_completed_transfer(
+    *, completions: list, num_bytes: int, elapsed_ms: float
+) -> Transfer:
+    end_event = Mock()
+    end_event.query.return_value = True
+    start_event = Mock()
+    start_event.elapsed_time.return_value = elapsed_ms
+    return Transfer(
+        start_event=start_event,
+        end_event=end_event,
+        completions=completions,
+        bufs=Mock(),
+        stream=Mock(),
+        num_bytes=num_bytes,
+    )
+
+
+def test_get_ec_connector_stats_records_completed_save(make_worker):
+    worker = make_worker()
+    worker._inflight_saves.append(
+        _fake_completed_transfer(completions=["h"], num_bytes=1024, elapsed_ms=12.5)
+    )
+
+    worker.build_connector_worker_meta()
+    reduced = worker.get_ec_connector_stats().reduce()
+
+    assert reduced["vllm:ec_cpu_save_bytes"] == 1024
+    assert reduced["vllm:ec_cpu_save_time_seconds"] == pytest.approx(0.0125)
+    assert reduced["vllm:ec_cpu_save_size_bytes_count"] == 1
+    assert reduced["vllm:ec_cpu_save_size_bytes_sum"] == 1024
+
+
+def test_get_ec_connector_stats_records_completed_load(make_worker):
+    worker = make_worker()
+    worker._inflight_loads.append(
+        _fake_completed_transfer(completions=[0], num_bytes=2048, elapsed_ms=5.0)
+    )
+
+    worker.build_connector_worker_meta()
+    reduced = worker.get_ec_connector_stats().reduce()
+
+    assert reduced["vllm:ec_cpu_load_bytes"] == 2048
+    assert reduced["vllm:ec_cpu_load_time_seconds"] == pytest.approx(0.005)
+    assert reduced["vllm:ec_cpu_load_size_bytes_count"] == 1
+    assert reduced["vllm:ec_cpu_load_size_bytes_sum"] == 2048
+
+
+def test_get_ec_connector_stats_resets_after_read(make_worker):
+    worker = make_worker()
+    worker._inflight_saves.append(
+        _fake_completed_transfer(completions=["h"], num_bytes=1024, elapsed_ms=1.0)
+    )
+    worker.build_connector_worker_meta()
+
+    worker.get_ec_connector_stats()
+
+    assert worker.get_ec_connector_stats() is None
+
+
+def test_get_ec_connector_stats_returns_none_when_empty(make_worker):
+    worker = make_worker()
+
+    assert worker.get_ec_connector_stats() is None
 
 
 # ── lifecycle ────────────────────────────────────────────────────────────────
