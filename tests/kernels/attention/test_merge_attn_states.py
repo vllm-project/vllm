@@ -174,6 +174,13 @@ def test_merge_attn_states(
     output_dtype = input_dtype
     output_scale = None
     if use_fp8:
+        if current_platform.is_cuda() and not current_platform.has_device_capability(
+            89
+        ):
+            pytest.skip(
+                "Triton limitation: fp8e4nv data type is not supported on CUDA "
+                "arch < 89"
+            )
         output_dtype = current_platform.fp8_dtype()
         output_scale = torch.tensor([0.05], dtype=torch.float32, device=DEVICE)
 
