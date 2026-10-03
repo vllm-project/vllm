@@ -261,8 +261,14 @@ def test_layer_helper_matches_module_sequence(gemma, round_residual_before_norm)
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton impl is CUDA-only")
 @pytest.mark.parametrize("round_residual_before_norm", [False, True])
 @pytest.mark.parametrize("n_tokens", [1, 16])
-def test_compiled_op_specializations(n_tokens, round_residual_before_norm):
+def test_compiled_op_specializations(
+    n_tokens, round_residual_before_norm, default_vllm_config
+):
     """Compile each residual rounding mode at decode and short-prefill shapes."""
+    from tests.compile.backend import TestBackend
+    from vllm.compilation.passes.ir.lowering_pass import VllmIRLoweringPass
+    from vllm.config import get_current_vllm_config
+
     set_random_seed(0)
     hidden_size = 5376
     x = torch.randn(n_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
@@ -290,9 +296,16 @@ def test_compiled_op_specializations(n_tokens, round_residual_before_norm):
             round_residual_before_norm=round_residual_before_norm,
         )
 
-    with OP.set_priority(["triton"]):
-        compiled = torch.compile(boundary, dynamic=False, fullgraph=True)
+    lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+    backend = TestBackend(lowering_pass)
+    with (
+        OP.set_priority(["triton"]),
+        ir.enable_torch_wrap(True),
+    ):
+        compiled = torch.compile(boundary, backend=backend, fullgraph=True)
         actual = compiled(x, residual)
+    backend.check_before_ops([OP.torch_op])
+    assert lowering_pass.selected_impls[OP.name] == {OP.name: "triton"}
     expected = native(
         x,
         residual,
@@ -302,3 +315,26 @@ def test_compiled_op_specializations(n_tokens, round_residual_before_norm):
         round_residual_before_norm,
     )
     assert_close(OP, actual, expected)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton impl is CUDA-only")
+def test_triton_rounding_mode_changes_low_precision_result():
+    x = torch.ones((1, 2), dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.tensor(
+        [[-0.25, 0.01171875]], dtype=torch.bfloat16, device=DEVICE
+    )
+    weight = torch.ones(2, dtype=torch.bfloat16, device=DEVICE)
+    args = (x, residual, weight, weight, 1e-6)
+    triton_impl = OP.impls["triton"]
+    assert triton_impl.supported
+    assert triton_impl.supports_args(*args, False)
+    assert triton_impl.supports_args(*args, True)
+
+    with OP.set_priority(["triton"]):
+        unrounded = OP(*args, False)
+        rounded = OP(*args, True)
+    expected_rounded = native(*args, True)
+
+    assert not torch.equal(rounded[0], unrounded[0])
+    torch.testing.assert_close(rounded[0], expected_rounded[0], rtol=0.0, atol=0.0)
+    torch.testing.assert_close(rounded[1], expected_rounded[1], rtol=0.0, atol=0.0)
