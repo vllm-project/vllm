@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-EAGLE3 Acceptance Length Regression Tests.
+"""EAGLE3 Acceptance Length Regression Tests.
 
 These tests verify that acceptance lengths for EAGLE3 speculative decoding
 do not regress across vLLM commits. Each test runs inference on the MT-Bench
@@ -132,9 +131,9 @@ def get_available_attention_backends() -> list[str]:
     )
 
     return [
-        backend.name
-        for backend, _ in valid_backends
-        if backend not in EXCLUDED_BACKENDS
+        candidate.backend.name
+        for candidate in valid_backends
+        if candidate.backend not in EXCLUDED_BACKENDS
     ]
 
 

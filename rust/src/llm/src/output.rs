@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,11 +11,27 @@ use futures::stream::FusedStream;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
-use vllm_engine_core_client::protocol::{EngineCoreFinishReason, StopReason};
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, RequestSpecDecodeMetrics, StopReason,
+};
+use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
 use crate::error::Result;
+use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
+
+/// Token usage metadata for one request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    /// Number of prompt tokens sent to the engine.
+    pub prompt_token_count: usize,
+    /// Number of output tokens generated.
+    pub output_token_count: usize,
+    /// Number of prompt tokens served from cache.
+    pub cached_token_count: usize,
+}
 
 /// Final raw token output plus terminal stream metadata.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,11 +39,20 @@ pub struct CollectedGenerateOutput {
     pub request_id: String,
     pub prompt_token_ids: Vec<u32>,
     pub prompt_logprobs: Option<Logprobs>,
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
     pub token_ids: Vec<u32>,
     pub logprobs: Option<Logprobs>,
     pub finish_reason: FinishReason,
+    pub usage: TokenUsage,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
+    /// Connector-specific encoder cache transfer parameters for disaggregated
+    /// serving.
+    pub ec_transfer_params: Option<serde_json::Value>,
+    /// Sampling support sets aligned one-to-one with generated token positions.
+    pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding metrics from the terminal output.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -36,6 +64,8 @@ pub struct GeneratePromptInfo {
     /// Prompt logprobs returned by engine-core for scored prompt positions,
     /// when requested.
     pub prompt_logprobs: Option<Logprobs>,
+    /// Log probabilities of `prompt_logprob_token_ids`, when requested.
+    pub prompt_token_id_logprobs: Option<WireNdArray>,
 }
 
 /// The reason a request finished.
@@ -56,7 +86,7 @@ pub enum FinishReason {
     /// A retryable request-level internal error occurred.
     Error,
     /// A repetitive token pattern was detected.
-    Repetition,
+    Repetition(Option<StopReason>),
 }
 
 impl FinishReason {
@@ -74,7 +104,7 @@ impl FinishReason {
             Self::Length => "length",
             Self::Abort => "abort",
             Self::Error => "error",
-            Self::Repetition => "repetition",
+            Self::Repetition(_) => "repetition",
         }
     }
 
@@ -83,6 +113,7 @@ impl FinishReason {
     pub fn as_stop_reason(&self) -> Option<&StopReason> {
         match self {
             Self::Stop(stop_reason) => stop_reason.as_ref(),
+            Self::Repetition(stop_reason) => stop_reason.as_ref(),
             _ => None,
         }
     }
@@ -92,6 +123,7 @@ impl FinishReason {
     pub fn into_stop_reason(self) -> Option<StopReason> {
         match self {
             Self::Stop(stop_reason) => stop_reason,
+            Self::Repetition(stop_reason) => stop_reason,
             _ => None,
         }
     }
@@ -106,7 +138,7 @@ fn finish_reason_from_engine(
         EngineCoreFinishReason::Length => FinishReason::Length,
         EngineCoreFinishReason::Abort => FinishReason::Abort,
         EngineCoreFinishReason::Error => FinishReason::Error,
-        EngineCoreFinishReason::Repetition => FinishReason::Repetition,
+        EngineCoreFinishReason::Repetition => FinishReason::Repetition(stop_reason),
     })
 }
 
@@ -127,8 +159,17 @@ pub struct GenerateOutput {
     pub logprobs: Option<Logprobs>,
     /// Terminal finish reason, when this is the final output for the request.
     pub finish_reason: Option<FinishReason>,
+    /// Number of prompt tokens served from cache, when reported by prefill stats.
+    pub cached_token_count: usize,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
+    /// Connector-specific encoder cache transfer parameters for disaggregated
+    /// serving.
+    pub ec_transfer_params: Option<serde_json::Value>,
+    /// Sampling support sets aligned one-to-one with `token_ids`.
+    pub sampling_mask: Option<SamplingMask>,
+    /// Per-request speculative-decoding metrics, present on terminal outputs.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
 }
 
 impl GenerateOutput {
@@ -169,23 +210,33 @@ impl GenerateOutput {
             prompt_info: prompt_token_ids.map(|ids| GeneratePromptInfo {
                 prompt_token_ids: ids,
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             token_ids,
             logprobs: None,
             finish_reason,
+            cached_token_count: 0,
             kv_transfer_params: None,
+            ec_transfer_params: None,
+            sampling_mask: None,
+            spec_decode_metrics: None,
         }
     }
 }
 
 /// Stream of per-request generate outputs for one request.
 ///
-/// - A normal termination of the stream represents a clean completion of the request.
-/// - For errors, unexpected closes, or explicit aborts, the stream terminates with an error.
+/// - A normal termination of the stream represents a clean completion of the
+///   request, including a client-initiated abort, which yields a final output
+///   with `finish_reason = Abort` before the stream ends.
+/// - For errors or unexpected engine-side closes, the stream terminates with an error.
 pub struct GenerateOutputStream {
     pending_prompt_info: Option<GeneratePromptInfo>,
     raw_stream: EngineCoreOutputStream,
     request_metrics: RequestMetricsTracker,
+    /// Removes this request's external→internal tracking edge on drop. Held for
+    /// its `Drop` side effect only; never read directly.
+    _request_guard: RequestGuard,
 }
 
 impl GenerateOutputStream {
@@ -195,14 +246,17 @@ impl GenerateOutputStream {
         prompt_token_ids: Arc<[u32]>,
         raw_stream: EngineCoreOutputStream,
         request_metrics: RequestMetricsTracker,
+        request_guard: RequestGuard,
     ) -> Self {
         Self {
             pending_prompt_info: Some(GeneratePromptInfo {
                 prompt_token_ids,
                 prompt_logprobs: None,
+                prompt_token_id_logprobs: None,
             }),
             raw_stream,
             request_metrics,
+            _request_guard: request_guard,
         }
     }
 
@@ -223,12 +277,7 @@ impl Stream for GenerateOutputStream {
         };
 
         let received_at = current_unix_timestamp_secs();
-        self.request_metrics.observe_output(
-            raw.engine_index,
-            raw.timestamp,
-            received_at,
-            &raw.output,
-        );
+        self.request_metrics.observe_output(raw.timestamp, received_at, &raw.output);
 
         let raw = raw.output;
 
@@ -239,8 +288,28 @@ impl Stream for GenerateOutputStream {
             info.prompt_logprobs =
                 raw.new_prompt_logprobs_tensors.map(|value| value.into_direct().unwrap());
         }
+        if let Some(info) = &mut self.pending_prompt_info
+            && info.prompt_token_id_logprobs.is_none()
+        {
+            info.prompt_token_id_logprobs = raw.prompt_token_id_logprobs;
+        }
 
         let logprobs = raw.new_logprobs.map(|value| value.into_direct().unwrap());
+        let sampling_mask = raw.new_sampling_mask.map(|value| value.into_direct().unwrap());
+        if let Some(mask) = sampling_mask.as_ref()
+            && mask.rows.len() != raw.new_token_ids.len()
+        {
+            return Poll::Ready(Some(Err(crate::Error::SamplingMaskTokenCountMismatch {
+                request_id: raw.request_id,
+                token_count: raw.new_token_ids.len(),
+                row_count: mask.rows.len(),
+            })));
+        }
+        let cached_token_count = raw
+            .prefill_stats
+            .as_ref()
+            .map(|stats| stats.num_cached_tokens as usize)
+            .unwrap_or(0);
 
         let finish_reason = finish_reason_from_engine(raw.finish_reason, raw.stop_reason);
         if let Some(finish_reason) = finish_reason.as_ref() {
@@ -253,7 +322,11 @@ impl Stream for GenerateOutputStream {
             token_ids: raw.new_token_ids,
             logprobs,
             finish_reason,
+            cached_token_count,
             kv_transfer_params: raw.kv_transfer_params,
+            ec_transfer_params: raw.ec_transfer_params,
+            sampling_mask,
+            spec_decode_metrics: raw.spec_decode_metrics,
         };
 
         Poll::Ready(Some(Ok(output)))
@@ -299,15 +372,22 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
             pin_mut!(stream);
             let mut prompt_token_ids = None;
             let mut prompt_logprobs = None;
+            let mut prompt_token_id_logprobs = None;
+            let mut cached_token_count = 0;
             let mut collected: Option<CollectedGenerateOutput> = None;
 
             while let Some(output) = stream.next().await.transpose()? {
+                cached_token_count = cached_token_count.max(output.cached_token_count);
+                let sampling_mask = output.sampling_mask;
                 if let Some(info) = output.prompt_info {
                     if prompt_token_ids.is_none() {
                         prompt_token_ids = Some(info.prompt_token_ids.to_vec());
                     }
                     if prompt_logprobs.is_none() {
                         prompt_logprobs = info.prompt_logprobs;
+                    }
+                    if prompt_token_id_logprobs.is_none() {
+                        prompt_token_id_logprobs = info.prompt_token_id_logprobs;
                     }
                 }
 
@@ -320,22 +400,50 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                             existing.logprobs = Some(step_logprobs);
                         }
                     }
+                    if let Some(mut mask) = sampling_mask {
+                        existing.sampling_mask.get_or_insert_default().rows.append(&mut mask.rows);
+                    }
                 } else {
                     collected = Some(CollectedGenerateOutput {
                         request_id: output.request_id,
                         prompt_token_ids: prompt_token_ids.take().unwrap_or_default(),
                         prompt_logprobs: prompt_logprobs.take(),
+                        prompt_token_id_logprobs: prompt_token_id_logprobs.take(),
                         token_ids: output.token_ids,
                         logprobs: output.logprobs,
                         finish_reason: FinishReason::Error,
+                        usage: TokenUsage {
+                            prompt_token_count: prompt_token_ids.as_ref().map_or(0, Vec::len),
+                            output_token_count: 0,
+                            cached_token_count,
+                        },
                         kv_transfer_params: None,
+                        ec_transfer_params: None,
+                        sampling_mask,
+                        spec_decode_metrics: None,
                     });
                 }
 
                 if let Some(finish_reason) = output.finish_reason {
                     let mut collected = collected.expect("terminal output must exist");
                     collected.finish_reason = finish_reason;
+                    collected.usage = TokenUsage {
+                        prompt_token_count: collected.prompt_token_ids.len(),
+                        output_token_count: collected.token_ids.len(),
+                        cached_token_count,
+                    };
                     collected.kv_transfer_params = output.kv_transfer_params;
+                    collected.ec_transfer_params = output.ec_transfer_params;
+                    collected.spec_decode_metrics = output.spec_decode_metrics;
+                    if let Some(mask) = collected.sampling_mask.as_ref()
+                        && mask.rows.len() != collected.token_ids.len()
+                    {
+                        return Err(crate::Error::SamplingMaskTokenCountMismatch {
+                            request_id: collected.request_id,
+                            token_count: collected.token_ids.len(),
+                            row_count: mask.rows.len(),
+                        });
+                    }
                     return Ok(collected);
                 }
             }

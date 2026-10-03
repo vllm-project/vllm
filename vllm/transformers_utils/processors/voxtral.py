@@ -6,15 +6,19 @@ from math import ceil
 import numpy as np
 import torch
 from mistral_common.tokens.tokenizers.audio import AudioEncoder
-from transformers import BatchFeature, ProcessorMixin, TensorType
+from transformers import (
+    BatchFeature,
+    ProcessorMixin,
+    SequenceFeatureExtractor,
+    TensorType,
+)
 from transformers.audio_utils import AudioInput
 
 from vllm.tokenizers.mistral import MistralTokenizer
 
 
-class MistralCommonFeatureExtractor:
-    """
-    Provide a HF-compatible interface for
+class MistralCommonFeatureExtractor(SequenceFeatureExtractor):
+    """Provide a HF-compatible interface for
     `mistral_common.tokens.tokenizers.multimodal.AudioEncoder`.
     """
 
@@ -53,6 +57,44 @@ class MistralCommonFeatureExtractor:
     def get_num_audio_tokens(self, audio_length: int) -> int:
         return ceil(audio_length / (self.sampling_rate // self.frame_rate))
 
+    def fetch_audio(self, audio_url_or_urls, sampling_rate=None):
+        """HF-compatible duck-typed ``fetch_audio``.
+
+        Mirrors :meth:`transformers.SequenceFeatureExtractor.fetch_audio` so
+        :class:`transformers.ProcessorMixin.prepare_inputs_layout` works on this
+        duck-typed feature extractor.
+
+        Accepts the same shapes as ``SequenceFeatureExtractor.fetch_audio``:
+
+        * ``np.ndarray`` / ``torch.Tensor`` — returned as-is.
+        * ``list[float]`` — returned as-is (a single audio sample).
+        * ``str`` URL or path — delegated to
+          :func:`transformers.audio_utils.load_audio`.
+        * ``list`` of any of the above — recursed element-wise.
+
+        ``ProcessorMixin.prepare_inputs_layout`` always passes already-decoded
+        audio (numpy array or torch tensor), so the str / list-of-str branches
+        exist only to keep the contract identical to the upstream method.
+        """
+        from transformers.audio_utils import is_valid_audio
+
+        sampling_rate = sampling_rate if sampling_rate else self.sampling_rate
+        if is_valid_audio(audio_url_or_urls):
+            return audio_url_or_urls
+        if isinstance(audio_url_or_urls, (list, tuple)):
+            return [
+                self.fetch_audio(x, sampling_rate=sampling_rate)
+                for x in audio_url_or_urls
+            ]
+        if isinstance(audio_url_or_urls, str):
+            from transformers.audio_utils import load_audio
+
+            return load_audio(audio_url_or_urls, sampling_rate=sampling_rate)
+        raise TypeError(
+            "only a numpy array, torch tensor, str URL/path, or list of those "
+            f"is supported but got type={type(audio_url_or_urls)}"
+        )
+
 
 class MistralCommonVoxtralProcessor(ProcessorMixin):
     attributes = ["feature_extractor", "tokenizer"]
@@ -63,11 +105,6 @@ class MistralCommonVoxtralProcessor(ProcessorMixin):
         feature_extractor: MistralCommonFeatureExtractor,
     ) -> None:
         self.tokenizer = tokenizer.transformers_tokenizer
-
-        # Back-compatibility for Transformers v4
-        if not hasattr(self.tokenizer, "init_kwargs"):
-            self.tokenizer.init_kwargs = {}
-
         self.feature_extractor = feature_extractor
 
         audio_special_ids = self.feature_extractor.audio_encoder.special_ids

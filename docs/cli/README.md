@@ -9,7 +9,7 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {chat,complete,serve,launch,bench,collect-env,run-batch}
+vllm {chat,complete,serve,launch,bench,collect-env,run-batch,preload}
 ```
 
 ## serve
@@ -50,6 +50,21 @@ vllm serve --help=max-num-seqs
 vllm serve --help=max
 ```
 
+!!! tip "Human-readable integer arguments"
+    Many integer arguments accept human-readable suffixes for convenience. For example:
+
+    - `1k` = 1,000 (decimal kilo)
+    - `1K` = 1,024 (binary kibibyte)
+    - `1m` = 1,000,000 (decimal mega)
+    - `1M` = 1,048,576 (binary mebibyte)
+    - `1g` / `1G` = 1 billion / 1 gibibyte
+    - `1t` / `1T` = 1 trillion / 1 tebibyte
+    
+    Decimal suffixes (`k`, `m`, `g`, `t`) also accept floating point: `25.6k` = 25,600.
+    Binary suffixes (`K`, `M`, `G`, `T`) require integers: `32K` = 32,768.
+    
+    Supported arguments include: `--max-model-len`, `--max-num-batched-tokens`, `--max-num-scheduled-tokens`, `--kv-cache-memory-bytes`, `--safetensors-prefetch-block-size`.
+
 See [vllm serve](./serve.md) for the full reference of all available arguments.
 
 ## launch
@@ -80,6 +95,9 @@ vllm chat --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 
 # Quick chat with a single prompt
 vllm chat --quick "hi"
+
+# Print TTFT and throughput statistics after each response
+vllm chat --stats
 ```
 
 See [vllm chat](./chat.md) for the full reference of all available arguments.
@@ -97,6 +115,9 @@ vllm complete --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 
 # Quick complete with a single prompt
 vllm complete --quick "The future of AI is"
+
+# Print TTFT and throughput statistics after each response
+vllm complete --stats
 ```
 
 See [vllm complete](./complete.md) for the full reference of all available arguments.
@@ -175,7 +196,7 @@ Running with a local file:
 
 ```bash
 vllm run-batch \
-    -i features/openai_batch/openai_example_batch.jsonl \
+    -i examples/features/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
@@ -190,6 +211,33 @@ vllm run-batch \
 ```
 
 See [vllm run-batch](./run-batch.md) for the full reference of all available arguments.
+
+## preload
+
+Launch weight cache daemons (one per GPU) that hold the post-quantized,
+TP-sharded weights in GPU memory and serve CUDA IPC handles to vLLM engines
+over a Unix domain socket. Restarting engines then map the weights via
+zero-copy IPC instead of reloading from disk, enabling fast engine restarts.
+
+```bash
+# Launch one daemon per GPU
+vllm preload --model meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4
+
+# Engines then load from the daemons
+vllm serve meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4 \
+    --load-format ipc_cache
+```
+
+The daemon accepts the standard engine arguments (model, dtype, quantization,
+tensor-parallel-size, ...) plus `--weight-cache-socket-dir` to override the
+directory holding the per-GPU Unix sockets, and `--weight-cache-master-port` /
+`--weight-cache-draft-master-port` to pin the daemon rendezvous ports for
+multi-node and speculative-decoding setups. Tensor, expert and data
+parallelism are supported; pipeline parallelism is rejected at launch.
+
+See [Preload](../features/preload.md) for how it works, cache modes, and
+limitations, and [vllm preload](./preload.md) for the full reference of all
+available arguments.
 
 ## More Help
 

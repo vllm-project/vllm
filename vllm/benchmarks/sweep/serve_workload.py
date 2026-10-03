@@ -10,6 +10,7 @@ import numpy as np
 from typing_extensions import assert_never
 
 from vllm.benchmarks.datasets import DEFAULT_NUM_PROMPTS
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
@@ -62,6 +63,8 @@ def run_comb_workload(
     experiment_dir: Path,
     num_runs: int,
     dry_run: bool,
+    warmup_num_prompts: int,
+    continue_on_error: bool,
     workload_var: WorkloadVariable,
     workload_value: int,
 ) -> list[dict[str, object]] | None:
@@ -81,6 +84,8 @@ def run_comb_workload(
         ),
         num_runs=num_runs,
         dry_run=dry_run,
+        warmup_num_prompts=warmup_num_prompts,
+        continue_on_error=continue_on_error,
     )
 
 
@@ -96,6 +101,8 @@ def explore_comb_workloads(
     experiment_dir: Path,
     num_runs: int,
     dry_run: bool,
+    warmup_num_prompts: int,
+    continue_on_error: bool,
 ):
     print("[WL START]")
     print(f"Serve parameters: {serve_comb.as_text() or '(None)'}")
@@ -128,6 +135,8 @@ def explore_comb_workloads(
         experiment_dir=experiment_dir,
         num_runs=num_runs,
         dry_run=dry_run,
+        warmup_num_prompts=warmup_num_prompts,
+        continue_on_error=continue_on_error,
         workload_var=workload_var,
         workload_value=1,
     )
@@ -140,16 +149,22 @@ def explore_comb_workloads(
         experiment_dir=experiment_dir,
         num_runs=num_runs,
         dry_run=dry_run,
+        warmup_num_prompts=warmup_num_prompts,
+        continue_on_error=continue_on_error,
         workload_var=workload_var,
         workload_value=dataset_size,
     )
 
-    if serial_workload_data is None or batch_workload_data is None:
+    if not serial_workload_data or not batch_workload_data:
         if dry_run:
             print("Omitting intermediate Workload iterations.")
-            print("[WL END]")
-
-        return
+        else:
+            print(
+                "Unable to establish both Workload Explorer endpoints; "
+                "skipping intermediate workload levels."
+            )
+        print("[WL END]")
+        return []
 
     serial_workload_value = math.ceil(
         _estimate_workload_avg(serial_workload_data, workload_var)
@@ -180,6 +195,8 @@ def explore_comb_workloads(
             experiment_dir=experiment_dir,
             num_runs=num_runs,
             dry_run=dry_run,
+            warmup_num_prompts=warmup_num_prompts,
+            continue_on_error=continue_on_error,
             workload_var=workload_var,
             workload_value=inter_workload_value,
         )
@@ -206,6 +223,8 @@ def explore_combs_workloads(
     experiment_dir: Path,
     num_runs: int,
     dry_run: bool,
+    warmup_num_prompts: int,
+    continue_on_error: bool,
 ):
     if any(bench_comb.has_param(workload_var) for bench_comb in bench_params):
         raise ValueError(
@@ -237,6 +256,8 @@ def explore_combs_workloads(
                     experiment_dir=experiment_dir,
                     num_runs=num_runs,
                     dry_run=dry_run,
+                    warmup_num_prompts=warmup_num_prompts,
+                    continue_on_error=continue_on_error,
                 )
 
                 if comb_data is not None:
@@ -273,7 +294,7 @@ class SweepServeWorkloadArgs(SweepServeArgs):
         )
 
     @classmethod
-    def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         parser = super().add_cli_args(parser)
 
         workload_group = parser.add_argument_group("workload options")
@@ -314,6 +335,8 @@ def run_main(args: SweepServeWorkloadArgs):
             experiment_dir=experiment_dir,
             num_runs=args.num_runs,
             dry_run=args.dry_run,
+            warmup_num_prompts=args.warmup_num_prompts,
+            continue_on_error=args.continue_on_error,
         )
 
 
@@ -322,7 +345,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=SweepServeWorkloadArgs.parser_help)
+    parser = FlexibleArgumentParser(description=SweepServeWorkloadArgs.parser_help)
     SweepServeWorkloadArgs.add_cli_args(parser)
 
     main(parser.parse_args())

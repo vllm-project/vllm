@@ -28,8 +28,8 @@ from transformers.models.gemma4_unified.processing_gemma4_unified import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import VideoDummyOptions
 from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.gemma4_mm import (
     _SUPPORTED_SOFT_TOKENS,
@@ -43,6 +43,7 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4MultimodalEmbedder,
     Gemma4MultiModalProcessor,
     Gemma4ProcessingInfo,
+    Gemma4VideoInputs,
     _get_max_soft_tokens,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -80,7 +81,7 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
     Pipeline: raw patches → LN₁ → Dense → LN₂ → +factorized_posemb → LN₃.
     """
 
-    def __init__(self, config, quant_config=None):
+    def __init__(self, config, quant_config=None, prefix=""):
         super().__init__()
         patch_dim = config.model_patch_size**2 * 3
         mm_embed_dim = config.mm_embed_dim
@@ -91,6 +92,7 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
             mm_embed_dim,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.patch_dense",
             gather_output=True,
         )
         self.patch_ln2 = nn.LayerNorm(mm_embed_dim)
@@ -174,10 +176,7 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
         num_frames = _VIDEO_MAX_FRAMES
         mm_config = self.ctx.model_config.get_multimodal_config()
         video_opts = mm_config.limit_per_prompt.get("video")
-        if (
-            isinstance(video_opts, VideoDummyOptions)
-            and video_opts.num_frames is not None
-        ):
+        if video_opts is not None and video_opts.num_frames is not None:
             num_frames = min(num_frames, video_opts.num_frames)
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
@@ -263,21 +262,16 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.audio_tower = None
 
         # ---- Encoder-free vision embedder ----
-        self.vision_embedder = (
-            Gemma4UnifiedVisionEmbedder(
-                config.vision_config,
-                quant_config=quant_config,
-            )
-            if config.vision_config is not None
-            else None
+        if config.vision_config is None:
+            raise ValueError("Gemma4 Unified requires a vision configuration")
+        self.vision_embedder = Gemma4UnifiedVisionEmbedder(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "vision_embedder"),
         )
-        self.embed_vision = (
-            Gemma4MultimodalEmbedder(
-                config.vision_config,
-                config.text_config,
-            )
-            if config.vision_config is not None
-            else None
+        self.embed_vision = Gemma4MultimodalEmbedder(
+            config.vision_config,
+            config.text_config,
         )
 
         # ---- Encoder-free audio embedder ----
@@ -307,12 +301,13 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
                 None,
             )
             if ple_dim is not None and ple_dim > 0:
+                embed = self.language_model.model.embed_tokens
                 self.per_layer_embeddings = torch.zeros(
                     vllm_config.scheduler_config.max_num_batched_tokens,
                     config.text_config.num_hidden_layers,
                     ple_dim,
-                    device=self.language_model.model.embed_tokens.weight.device,
-                    dtype=self.language_model.model.embed_tokens.weight.dtype,
+                    device=next(embed.parameters()).device,
+                    dtype=vllm_config.model_config.dtype,
                 )
             else:
                 self.per_layer_embeddings = None
@@ -332,7 +327,6 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
                 )
 
         # --- MixtureOfExperts delegation to language_model ---
-        self.expert_weights = self.language_model.expert_weights
         self.moe_layers = self.language_model.moe_layers
         self.num_moe_layers = self.language_model.num_moe_layers
         self.num_logical_experts = self.language_model.num_logical_experts
@@ -342,6 +336,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.num_expert_groups = self.language_model.num_expert_groups
         self.num_shared_experts = self.language_model.num_shared_experts
         self.num_redundant_experts = self.language_model.num_redundant_experts
+        self.set_eplb_state = self.language_model.set_eplb_state
 
         gen_cfg = vllm_config.model_config.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
@@ -378,7 +373,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
 
     def _process_video_input(
         self,
-        video_input: dict[str, torch.Tensor],
+        video_input: Gemma4VideoInputs,
     ) -> list[torch.Tensor]:
         """Project video frames to LM space, one frame at a time.
 
@@ -420,9 +415,12 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         No audio tower: the per-frame raw features are passed straight
         through the multimodal embedder, then padding is stripped.
         """
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features, input_features_mask = batch_audio_features(
+            audio_input["input_features_padded"],
+            audio_input["input_features_mask"],
+        )
 
+        assert self.embed_audio is not None
         target_dtype = self.embed_audio.embedding_projection.weight.dtype
         audio_features = self.embed_audio(input_features.to(target_dtype))
         per_audio: list[torch.Tensor] = []

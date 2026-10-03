@@ -33,6 +33,7 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
@@ -47,10 +48,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
 
@@ -58,7 +55,7 @@ from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    is_pp_missing_parameter,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -71,41 +68,71 @@ from .utils import (
 # - Adds a partial_rotary_factor to RoPE
 
 
-def _cast_if_autocast_enabled(*args):
-    if not torch.is_autocast_enabled():
+def _cast_if_autocast_enabled(device_type: str, *args):
+    if not torch.is_autocast_enabled(device_type):
         return args
-    else:
-        return torch.amp.autocast_mode._cast(
-            args, device_type="cuda", dtype=torch.get_autocast_gpu_dtype()
-        )
+    return torch.amp.autocast_mode._cast(
+        args,
+        device_type=device_type,
+        dtype=torch.get_autocast_dtype(device_type),
+    )
 
 
-class NemotronLayerNorm1P(nn.LayerNorm):
-    def __init__(
-        self,
-        normalized_shape: int | list[int] | torch.Size,
-        eps: float = 1e-5,
-        elementwise_affine: bool = True,
-        bias: bool = True,
-        device=None,
-        dtype=None,
-    ):
-        super().__init__(normalized_shape, eps, elementwise_affine, bias, device, dtype)
+@CustomOp.register("nemotron_layer_norm")
+class NemotronLayerNorm1P(CustomOp):
+    """LayerNorm variant used by Nemotron: `x * (1 + w)` instead of `x * w`."""
 
-    def forward(
+    def __init__(self, hidden_size: int, eps: float = 1e-5) -> None:
+        super().__init__()
+        self.normalized_shape = (hidden_size,)
+        self.eps = eps
+        self.weight = nn.Parameter(torch.zeros(hidden_size))
+        self.bias = nn.Parameter(torch.zeros(hidden_size))
+
+    def forward_native(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is not None:
             x = x + residual
             residual = x
+        device_type = x.device.type
         args = _cast_if_autocast_enabled(
-            x, self.normalized_shape, self.weight + 1, self.bias, self.eps
+            device_type, x, self.normalized_shape, self.weight + 1, self.bias, self.eps
         )
-        with torch.amp.autocast("cuda", enabled=False):
+        with torch.amp.autocast(device_type, enabled=False):
             x = torch.nn.functional.layer_norm(*args)
             return x if residual is None else (x, residual)
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self.forward_native(x, residual)
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        import vllm._xpu_ops  # noqa: F401 registers torch.ops.vllm.xpu_nemotron_layer_norm
+
+        if not hasattr(torch.ops._C, "nemotron_layer_norm"):
+            return self.forward_native(x, residual)
+        if residual is not None:
+            if not hasattr(torch.ops._C, "fused_add_nemotron_layer_norm"):
+                return self.forward_native(x, residual)
+            torch.ops.vllm.xpu_fused_add_nemotron_layer_norm(
+                x, residual, self.weight, self.bias, self.eps
+            )
+            return x, residual
+        # empty_like preserves x's strides, but the kernel requires a
+        # contiguous out (unlike x, which it can handle non-contiguous).
+        out = torch.empty(x.shape, device=x.device, dtype=x.dtype)
+        torch.ops.vllm.xpu_nemotron_layer_norm(out, x, self.weight, self.bias, self.eps)
+        return out
 
 
 class NemotronMLP(nn.Module):
@@ -237,7 +264,6 @@ class NemotronDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
-        # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
         )
@@ -365,70 +391,18 @@ class NemotronModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
 
     # LoRA specific attributes
@@ -459,7 +433,7 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(
@@ -496,4 +470,4 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

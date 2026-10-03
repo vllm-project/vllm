@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,14 +20,20 @@ from tests.entrypoints.openai.utils import (
 from tests.utils import RemoteOpenAIServer
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    RequestResponseMetadata,
+)
+from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    RequestResponseMetadata,
+from vllm.entrypoints.openai.chat_completion.serving import (
+    OpenAIServingChat,
+    _get_mm_token_counts,
+    _make_completion_tokens_details,
+    _make_prompt_tokens_details,
 )
 from vllm.entrypoints.openai.models.serving import (
     BaseModelPath,
@@ -34,20 +41,31 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.exceptions import VLLMValidationError
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.exceptions import QueueOverflowError, VLLMValidationError
 from vllm.inputs import TokensPrompt
+from vllm.logprobs import Logprob
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.parser import HarmonyParser
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.mistral import MistralRenderer
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
-from vllm.tool_parsers import ToolParserManager
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.stats import RequestStateStats
 
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 GPT_OSS_SPECULATOR_NAME = "RedHatAI/gpt-oss-20b-speculator.eagle3"
+_PER_REQUEST_STATS = RequestStateStats(
+    queued_ts=1.0,
+    scheduled_ts=1.5,
+    first_token_ts=2.0,
+    last_token_ts=3.0,
+    num_generation_tokens=2,
+)
 
 
 @pytest.fixture(scope="module")
@@ -460,7 +478,7 @@ class TestGPTOSSChat:
         )
 
         msg = tool_choice_none.choices[0].message
-        assert len(msg.tool_calls) == 0
+        assert msg.tool_calls is None
 
 
 class TestGPTOSSSpeculativeChat:
@@ -522,6 +540,8 @@ class MockModelConfig:
     trust_remote_code = False
     tokenizer_mode = "auto"
     max_model_len = 100
+    revision = None
+    code_revision = None
     tokenizer_revision = None
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
@@ -537,11 +557,15 @@ class MockModelConfig:
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
     enable_prompt_embeds: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
+
+    def get_vocab_size(self) -> int:
+        return 50257
 
 
 @dataclass
@@ -562,37 +586,701 @@ def _build_renderer(model_config: MockModelConfig):
     )
 
 
-def _build_serving_render(
+def _build_online_renderer(
     engine, model_registry: OpenAIModelRegistry
-) -> OpenAIServingRender:
-    return OpenAIServingRender(
+) -> OnlineRenderer:
+    return OnlineRenderer(
         model_config=engine.model_config,
         renderer=engine.renderer,
-        model_registry=model_registry,
         request_logger=None,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
     )
 
 
-def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
+def _build_mock_engine() -> MagicMock:
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    return mock_engine
+
+
+def _build_serving_chat(
+    engine: AsyncLLM,
+    *,
+    reasoning_parser: str = "",
+    tool_parser: str | None = None,
+    enable_auto_tools: bool = False,
+) -> OpenAIServingChat:
     models = OpenAIServingModels(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    openai_serving_render = _build_serving_render(engine, models.registry)
+    online_renderer = _build_online_renderer(engine, models.registry)
 
     serving_chat = OpenAIServingChat(
         engine,
         models,
         response_role="assistant",
-        openai_serving_render=openai_serving_render,
+        online_renderer=online_renderer,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
+        reasoning_parser=reasoning_parser,
+        tool_parser=tool_parser,
+        enable_auto_tools=enable_auto_tools,
     )
 
     return serving_chat
+
+
+def _build_minimal_metrics_serving_chat(
+    enable_per_request_metrics: bool,
+    enable_force_include_usage: bool = False,
+) -> OpenAIServingChat:
+    serving = OpenAIServingChat.__new__(OpenAIServingChat)
+    serving.response_role = "assistant"
+    serving.parser_cls = None
+    serving.enable_auto_tools = False
+    serving._include_reasoning_tokens_details = False
+    serving.enable_prompt_tokens_details = False
+    serving.enable_log_outputs = False
+    serving.enable_log_deltas = False
+    serving.enable_force_include_usage = enable_force_include_usage
+    serving.request_logger = None
+    serving.system_fingerprint = None
+    serving.enable_per_request_metrics = enable_per_request_metrics
+    return serving
+
+
+def _make_metrics_request_output(
+    metrics: RequestStateStats | None = _PER_REQUEST_STATS,
+    token_ids: tuple[int, ...] = (100, 101),
+) -> RequestOutput:
+    return RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="Hello",
+                token_ids=list(token_ids),
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="stop",
+            )
+        ],
+        finished=True,
+        metrics=metrics,
+    )
+
+
+async def _single_request_output(
+    request_output: RequestOutput,
+) -> AsyncIterator[RequestOutput]:
+    yield request_output
+
+
+async def _stream_request_outputs(
+    *request_outputs: RequestOutput,
+) -> AsyncIterator[RequestOutput]:
+    for request_output in request_outputs:
+        yield request_output
+
+
+async def _collect_metrics_stream_chunks(
+    serving: OpenAIServingChat,
+    request: ChatCompletionRequest,
+) -> list[dict[str, Any]]:
+    chunks: list[dict[str, Any]] = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _single_request_output(_make_metrics_request_output()),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    ):
+        line = line.strip()
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: ") :]
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+    return chunks
+
+
+def test_build_per_request_timing_metrics_valid_timestamps():
+    metrics = build_per_request_timing_metrics(
+        _PER_REQUEST_STATS, num_generation_tokens=10
+    )
+
+    assert metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert metrics.generation_time_ms == pytest.approx(1000.0)
+    assert metrics.queue_time_ms == pytest.approx(500.0)
+    assert metrics.mean_itl_ms == pytest.approx(1000.0 / 9, rel=1e-4)
+    assert metrics.tokens_per_second == pytest.approx(10.0 / 1.5, rel=1e-4)
+
+
+@pytest.mark.asyncio
+async def test_chat_per_request_metrics_follow_server_flag():
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=False,
+    )
+    request_output = _make_metrics_request_output()
+
+    disabled_serving = _build_minimal_metrics_serving_chat(
+        enable_per_request_metrics=False
+    )
+    disabled_response = await disabled_serving.chat_completion_full_generator(
+        request,
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    )
+    assert disabled_response.metrics is None
+    details = disabled_response.usage.completion_tokens_details
+    assert details is None or details.reasoning_tokens == 0
+
+    enabled_serving = _build_minimal_metrics_serving_chat(
+        enable_per_request_metrics=True
+    )
+    enabled_response = await enabled_serving.chat_completion_full_generator(
+        request,
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    )
+    assert enabled_response.metrics is not None
+    assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
+    response = await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=False,
+            n=2,
+        ),
+        _single_request_output(_make_metrics_request_output()),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    )
+    assert response.metrics is None
+
+
+@pytest.mark.asyncio
+async def test_chat_full_generator_gives_each_choice_parser_the_prompt():
+    prompts: list[list[int] | None] = []
+
+    class RecordingParser:
+        tool_parser_cls = None
+
+        def __init__(self, *args, **kwargs):
+            self.prompt_token_ids = None
+
+        def set_prompt_token_ids(self, prompt_token_ids):
+            self.prompt_token_ids = list(prompt_token_ids)
+
+        def parse(self, model_output, request, **kwargs):
+            prompts.append(self.prompt_token_ids)
+            return None, model_output, None
+
+        def count_reasoning_tokens(self, token_ids):
+            return 0
+
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.parser_cls = RecordingParser
+    serving.model_config = None
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"
+    serving.default_chat_template_kwargs = {}
+    request_output = _make_metrics_request_output()
+    request_output.prompt_token_ids = [7, 8]
+    request_output.outputs.append(
+        CompletionOutput(
+            index=1,
+            text="Hi",
+            token_ids=[102],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        )
+    )
+
+    await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            n=2,
+        ),
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        parser=RecordingParser(),
+    )
+
+    assert prompts == [[7, 8], [7, 8]]
+
+
+@pytest.mark.asyncio
+async def test_chat_streaming_metrics_ride_on_usage_chunk():
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
+    chunks = await _collect_metrics_stream_chunks(
+        serving,
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=True,
+            stream_options={"include_usage": True},
+        ),
+    )
+
+    usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
+    assert usage_chunks
+    assert usage_chunks[-1]["metrics"]["time_to_first_token_ms"] == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n", [1, 2])
+@pytest.mark.parametrize("include_reasoning", [True, False])
+@pytest.mark.parametrize("include_details", [True, False])
+@pytest.mark.parametrize("separate_finish", [True, False])
+@pytest.mark.parametrize(
+    "stream_options, force_usage, include_usage, continuous_usage",
+    [
+        (None, False, False, False),
+        ({"include_usage": True}, False, True, False),
+        ({"include_usage": True, "continuous_usage_stats": True}, False, True, True),
+        ({"include_usage": False, "continuous_usage_stats": True}, False, False, False),
+        (None, True, True, True),
+    ],
+)
+async def test_streaming_reasoning_usage_counts_across_deltas(
+    n,
+    include_reasoning,
+    include_details,
+    separate_finish,
+    stream_options,
+    force_usage,
+    include_usage,
+    continuous_usage,
+):
+    """Final usage needs one recount per choice, not per streamed delta."""
+    serving = _build_minimal_metrics_serving_chat(
+        enable_per_request_metrics=False, enable_force_include_usage=force_usage
+    )
+    serving._include_reasoning_tokens_details = include_details
+    serving.model_config = None
+
+    parsers = [MagicMock() for _ in range(n)]
+    request_outputs = []
+    num_steps = 3 if separate_finish else 2
+    for parser in parsers:
+        parser.parse_delta.side_effect = [
+            DeltaMessage(reasoning="reasoning") if include_reasoning else None,
+            DeltaMessage(content="answer"),
+            DeltaMessage(),
+        ]
+        parser.count_reasoning_tokens.side_effect = lambda token_ids: sum(
+            token_id == 20 for token_id in token_ids
+        )
+    serving.parser_cls = MagicMock(side_effect=parsers)
+    for step in range(num_steps):
+        for i in reversed(range(n)):
+            tokens = ((10,) + (20,) * (i + 1), (11, 20, 30), ())[step]
+            result = _make_metrics_request_output(metrics=None, token_ids=tokens)
+            result.outputs[0].index = i
+            result.outputs[0].text = ("<think>reasoning", "</think>answer", "")[step]
+            finished = step == num_steps - 1
+            result.outputs[0].finish_reason = "stop" if finished else None
+            result.finished = finished and i == 0
+            request_outputs.append(result)
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=True,
+        n=n,
+        include_reasoning=include_reasoning,
+        return_token_ids=True,
+        stream_options=stream_options,
+    )
+    metadata = RequestResponseMetadata(request_id="chatcmpl-test-id")
+    chunks: list[dict[str, Any]] = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _stream_request_outputs(*request_outputs),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=metadata,
+    ):
+        payload = line.removeprefix("data: ").strip()
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+
+    assert all("error" not in chunk for chunk in chunks)
+    expected_count = sum(i + 2 for i in range(n))
+    expected_details = {"reasoning_tokens": expected_count} if include_details else None
+    assert metadata.final_usage_info is not None
+    assert metadata.final_usage_info.model_dump()["completion_tokens_details"] == (
+        expected_details
+    )
+    final_chunks = [chunk for chunk in chunks if not chunk["choices"]]
+    assert len(final_chunks) == int(include_usage)
+    if include_usage:
+        assert final_chunks[0]["usage"].get("completion_tokens_details") == (
+            expected_details
+        )
+    for i, parser in enumerate(parsers):
+        expected_calls = (
+            (num_steps if continuous_usage else 1) if include_details else 0
+        )
+        assert parser.count_reasoning_tokens.call_count == expected_calls
+        if include_details:
+            assert parser.count_reasoning_tokens.call_args.args == (
+                (10,) + (20,) * (i + 1) + (11, 20, 30),
+            )
+        choices = [
+            chunk
+            for chunk in chunks
+            if chunk["choices"] and chunk["choices"][0]["index"] == i
+        ]
+        assert (
+            "".join(c["choices"][0]["delta"].get("content") or "" for c in choices)
+            == "answer"
+        )
+        if not include_reasoning:
+            assert all(c["choices"][0].get("token_ids") is None for c in choices)
+        if continuous_usage and include_details:
+            counts = [
+                c["usage"]["completion_tokens_details"]["reasoning_tokens"]
+                for c in choices
+            ]
+            expected_counts = [0, i + 1] if include_reasoning else [0]
+            assert counts == expected_counts + [i + 2] * (num_steps - 1)
+
+
+def _reasoning_lifecycle_output(
+    index: int = 0,
+    tokens: tuple[int, ...] = (20, 30),
+    text: str = "answer",
+    finish: str | None = None,
+) -> RequestOutput:
+    result = _make_metrics_request_output(None, tokens)
+    result.outputs[0].index = index
+    result.outputs[0].text = text
+    result.outputs[0].finish_reason = finish
+    result.finished = finish is not None
+    return result
+
+
+_EMPTY_OUTPUTS = _reasoning_lifecycle_output(tokens=(), text="")
+_EMPTY_OUTPUTS.outputs = []
+
+_REASONING_LIFECYCLE_CASES = [
+    ("empty-generator", 1, [], 0, 0),
+    ("empty-outputs", 1, [_EMPTY_OUTPUTS], 0, 0),
+    (
+        "empty-finish",
+        1,
+        [_reasoning_lifecycle_output(tokens=(), text="", finish="stop")],
+        0,
+        0,
+    ),
+    (
+        "empty-prefill",
+        1,
+        [
+            _reasoning_lifecycle_output(tokens=(), text=""),
+            _reasoning_lifecycle_output(finish="stop"),
+        ],
+        2,
+        1,
+    ),
+    (
+        "one-empty-choice",
+        2,
+        [_reasoning_lifecycle_output(index=1, finish="stop")],
+        2,
+        1,
+    ),
+    (
+        "uneven-finish",
+        2,
+        [
+            _reasoning_lifecycle_output(index=1, finish="stop"),
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(tokens=(20,), finish="stop"),
+        ],
+        5,
+        3,
+    ),
+    (
+        "empty-final-delta",
+        1,
+        [
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(tokens=(), text="", finish="stop"),
+        ],
+        2,
+        1,
+    ),
+    (
+        "ignore-finished-choice",
+        2,
+        [
+            _reasoning_lifecycle_output(index=1, finish="stop"),
+            _reasoning_lifecycle_output(index=1, tokens=(20, 20, 20)),
+            _reasoning_lifecycle_output(finish="stop"),
+        ],
+        4,
+        2,
+    ),
+    ("exception-before", 1, [RuntimeError("fixture engine error")], None, None),
+    (
+        "exception-after",
+        1,
+        [_reasoning_lifecycle_output(), RuntimeError("fixture engine error")],
+        None,
+        None,
+    ),
+    (
+        "generation-error",
+        1,
+        [
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(finish="error"),
+        ],
+        None,
+        None,
+    ),
+    (
+        "cancel-after",
+        1,
+        [_reasoning_lifecycle_output(), asyncio.CancelledError()],
+        None,
+        None,
+    ),
+    (
+        "close-after",
+        1,
+        [
+            _reasoning_lifecycle_output(),
+            _reasoning_lifecycle_output(finish="stop"),
+        ],
+        None,
+        None,
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage_mode", ["none", "final", "continuous"])
+@pytest.mark.parametrize(
+    "name, n, outputs, expected_tokens, expected_reasoning",
+    _REASONING_LIFECYCLE_CASES,
+    ids=[case[0] for case in _REASONING_LIFECYCLE_CASES],
+)
+async def test_streaming_reasoning_usage_lifecycle_edges(
+    usage_mode,
+    name,
+    n,
+    outputs,
+    expected_tokens,
+    expected_reasoning,
+):
+    """Cancel, errors, and empty choices still match baseline stream usage."""
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.model_config = None
+    serving._include_reasoning_tokens_details = True
+    parsers = [MagicMock() for _ in range(n)]
+    for parser in parsers:
+        parser.parse_delta.side_effect = lambda **kwargs: DeltaMessage(
+            content=kwargs["delta_text"]
+        )
+        parser.count_reasoning_tokens.side_effect = lambda ids: ids.count(20)
+    serving.parser_cls = MagicMock(side_effect=parsers)
+    stream_options = (
+        None
+        if usage_mode == "none"
+        else {
+            "include_usage": True,
+            "continuous_usage_stats": usage_mode == "continuous",
+        }
+    )
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        stream=True,
+        n=n,
+        return_token_ids=True,
+        stream_options=stream_options,
+    )
+    metadata = RequestResponseMetadata(request_id="chatcmpl-lifecycle")
+
+    async def source():
+        for result in outputs:
+            if isinstance(result, BaseException):
+                raise result
+            yield result
+
+    iterator = source()
+    stream = serving.chat_completion_stream_generator(
+        request,
+        iterator,
+        "chatcmpl-lifecycle",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=metadata,
+    )
+    chunks: list[object] = []
+    outcome = "exhausted"
+    try:
+        async for line in stream:
+            raw = line.removeprefix("data: ").strip()
+            if raw == "[DONE]":
+                chunks.append(raw)
+                continue
+            item = json.loads(raw)
+            chunks.append(item)
+            if name == "close-after" and any(
+                choice["delta"].get("content") for choice in item.get("choices", [])
+            ):
+                await stream.aclose()
+                outcome = "closed"
+                break
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+    finally:
+        await stream.aclose()
+        await iterator.aclose()
+
+    error_chunks = [c for c in chunks if isinstance(c, dict) and "error" in c]
+    call_count = sum(parser.count_reasoning_tokens.call_count for parser in parsers)
+    if expected_tokens is not None:
+        assert outcome == "exhausted" and chunks[-1] == "[DONE]" and not error_chunks
+        assert metadata.final_usage_info is not None
+        assert metadata.final_usage_info.completion_tokens == expected_tokens
+        assert (
+            metadata.final_usage_info.completion_tokens_details.reasoning_tokens
+            == expected_reasoning
+        )
+        nonempty_choices = sum(
+            bool(parser.count_reasoning_tokens.call_args) for parser in parsers
+        )
+        if usage_mode == "continuous":
+            assert call_count >= nonempty_choices
+        else:
+            assert call_count == nonempty_choices
+        return
+
+    assert metadata.final_usage_info is None
+    if name in {"cancel-after", "close-after"}:
+        assert outcome == ("cancelled" if name == "cancel-after" else "closed")
+        assert "[DONE]" not in chunks and not error_chunks
+    else:
+        assert outcome == "exhausted" and chunks[-1] == "[DONE]"
+        assert len(error_chunks) == 1
+    if usage_mode != "continuous" or name == "exception-before":
+        assert call_count == 0
+    else:
+        assert call_count >= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("include_reasoning", "expected_tokens"),
+    [(True, ["<tool_call>", "answer"]), (False, [])],
+)
+async def test_streaming_logprobs_kept_when_parser_suppresses_delta(
+    include_reasoning: bool, expected_tokens: list[str]
+):
+    """Logprobs of tokens the parser swallows (e.g. <tool_call>) must still
+    be streamed, unless per-token metadata is hidden with the reasoning."""
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.model_config = None
+    serving.return_tokens_as_token_ids = False
+
+    parser = MagicMock()
+    parser.parse_delta.side_effect = [None, DeltaMessage(content="answer")]
+    parser.count_reasoning_tokens.return_value = 0
+    serving.parser_cls = MagicMock(return_value=parser)
+
+    def make_output(token_id: int, text: str, finish_reason: str | None):
+        request_output = _make_metrics_request_output(
+            metrics=None, token_ids=(token_id,)
+        )
+        completion = request_output.outputs[0]
+        completion.text = text
+        completion.finish_reason = finish_reason
+        completion.logprobs = [
+            {token_id: Logprob(logprob=-0.5, rank=1, decoded_token=text)}
+        ]
+        return request_output
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=True,
+        logprobs=True,
+        include_reasoning=include_reasoning,
+    )
+    chunks: list[dict[str, Any]] = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _stream_request_outputs(
+            make_output(10, "<tool_call>", None), make_output(11, "answer", "stop")
+        ),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    ):
+        payload = line.removeprefix("data: ").strip()
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+
+    streamed_tokens = [
+        entry["token"]
+        for chunk in chunks
+        for choice in chunk["choices"]
+        if choice.get("logprobs")
+        for entry in choice["logprobs"]["content"]
+    ]
+    assert streamed_tokens == expected_tokens
 
 
 @dataclass
@@ -602,18 +1290,21 @@ class MockEngine:
     renderer: MagicMock = field(default_factory=MagicMock)
     errored: bool = False
 
+    def check_admission(self, n: int = 1, request_id: str | None = None) -> None:
+        pass
+
 
 async def _async_serving_chat_init():
     engine = MockEngine()
 
     models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
-    openai_serving_render = _build_serving_render(engine, models.registry)
+    online_renderer = _build_online_renderer(engine, models.registry)
 
     serving_completion = OpenAIServingChat(
         engine,
         models,
         response_role="assistant",
-        openai_serving_render=openai_serving_render,
+        online_renderer=online_renderer,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
@@ -624,6 +1315,49 @@ async def _async_serving_chat_init():
 def test_async_serving_chat_init():
     serving_completion = asyncio.run(_async_serving_chat_init())
     assert serving_completion.chat_template == CHAT_TEMPLATE
+    assert serving_completion._include_reasoning_tokens_details is False
+
+
+def test_mm_prompt_tokens_details():
+    # Text-only input has no multimodal placeholders.
+    assert _get_mm_token_counts({"type": "tokens"}) == {}
+
+    # Per-modality counts sum each modality's placeholder ranges.
+    counts = _get_mm_token_counts(
+        {
+            "mm_placeholders": {
+                "image": [
+                    PlaceholderRange(offset=0, length=576),
+                    PlaceholderRange(offset=600, length=24),
+                ],
+                "video": [PlaceholderRange(offset=700, length=1200)],
+            }
+        }
+    )
+    assert counts == {"image": 600, "video": 1200}
+
+    # Gated off, or nothing to report -> no details.
+    assert _make_prompt_tokens_details(False, 5, 0, counts) is None
+    assert _make_prompt_tokens_details(True, None, None, None) is None
+
+    # Zero cached_tokens is still reported (not None), matching the cached-only
+    # behavior; multimodal counts ride alongside even when cached_tokens is None.
+    details = _make_prompt_tokens_details(True, 0, 0, None)
+    assert details.cached_tokens == 0
+    assert details.created_cache_tokens == 0
+    assert details.multimodal_tokens is None
+    details = _make_prompt_tokens_details(True, None, None, counts)
+    assert details.cached_tokens is None
+    assert details.created_cache_tokens is None
+    assert details.multimodal_tokens == {"image": 600, "video": 1200}
+    details = _make_prompt_tokens_details(True, 3, 0, counts)
+    assert details.cached_tokens == 3
+    assert details.created_cache_tokens == 0
+    assert details.multimodal_tokens == {"image": 600, "video": 1200}
+
+
+def test_completion_tokens_details():
+    assert _make_completion_tokens_details(7).reasoning_tokens == 7
 
 
 @pytest.mark.asyncio
@@ -637,7 +1371,7 @@ async def test_serving_chat_returns_correct_model_name():
     serving_chat = _build_serving_chat(mock_engine)
     messages = [{"role": "user", "content": "what is 1+1?"}]
 
-    async def return_model_name(*args):
+    async def return_model_name(*args, **kwargs):
         return args[3]
 
     serving_chat.chat_completion_full_generator = return_model_name
@@ -653,6 +1387,35 @@ async def test_serving_chat_returns_correct_model_name():
     # Test that full name is returned when no model is specified
     req = ChatCompletionRequest(messages=messages)
     assert await serving_chat.create_chat_completion(req) == MODEL_NAME
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_admission_rejection_escapes_before_response_starts(stream):
+    """Overload rejections must propagate out of create_chat_completion.
+
+    For streaming this is the only chance to return a real HTTP status: once
+    StreamingResponse is constructed the 200 has already been sent and the
+    rejection would degrade into an in-band SSE error chunk.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    mock_engine.check_admission.side_effect = QueueOverflowError()
+
+    serving_chat = _build_serving_chat(mock_engine)
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        stream=stream,
+    )
+
+    with pytest.raises(QueueOverflowError):
+        await serving_chat.create_chat_completion(req)
+
+    mock_engine.generate.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -903,12 +1666,26 @@ async def test_serving_chat_truncation_side_controls_prompt_truncation():
     assert left_token_ids == full_token_ids[-4:]
 
 
+def test_serving_chat_starts_without_tokenizer():
+    """Regression test: building the serving objects must not require a
+    tokenizer, which is absent under `skip_tokenizer_init`."""
+    mock_engine = _build_mock_engine()
+    mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
+    mock_engine.renderer = HfRenderer(
+        MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
+        None,
+    )
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    assert serving_chat.parser_cls is None
+
+
 @pytest.mark.asyncio
 async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     """Regression test: when the Mistral tokenizer path returns token IDs
     directly, we must still apply input length + max_tokens validation.
     """
-
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
@@ -947,7 +1724,6 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
     """Regression test: MistralTokenizer token-id prompts must still enforce
     the max context length for the input itself (token_num >= max_model_len).
     """
-
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
@@ -1188,8 +1964,7 @@ async def _render_chat_prompt_token_ids(
 
 
 class TestServingChatWithHarmony:
-    """
-    These tests ensure Chat Completion requests are being properly converted into
+    """These tests ensure Chat Completion requests are being properly converted into
     Harmony messages and Harmony response messages back into Chat Completion responses.
     These tests are not exhaustive, but each one was created to cover a specific case
     that we got wrong but is now fixed.
@@ -1210,15 +1985,21 @@ class TestServingChatWithHarmony:
         mock_engine = MagicMock(spec=AsyncLLM)
         mock_engine.errored = False
         mock_engine.model_config = MockModelConfig()
+        mock_engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+        mock_engine.model_config.hf_text_config = MockHFConfig(model_type="gpt_oss")
         mock_engine.input_processor = MagicMock()
         mock_engine.renderer = _build_renderer(mock_engine.model_config)
         return mock_engine
 
     @pytest.fixture()
     def serving_chat(self, mock_engine) -> OpenAIServingChat:
-        chat = _build_serving_chat(mock_engine)
-        chat.use_harmony = True
-        chat.tool_parser = ToolParserManager.get_tool_parser("openai")
+        chat = _build_serving_chat(
+            mock_engine,
+            reasoning_parser="openai_gptoss",
+            tool_parser="openai",
+            enable_auto_tools=True,
+        )
+        assert chat.parser_cls is HarmonyParser
         return chat
 
     def mock_request_output_from_req_and_token_ids(
@@ -1277,6 +2058,7 @@ class TestServingChatWithHarmony:
         stream: bool = False,
     ) -> ChatCompletionResponse:
         harmony_token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        tokenizer = get_tokenizer(GPT_OSS_MODEL_NAME)
 
         async def result_generator():
             if stream:
@@ -1298,17 +2080,33 @@ class TestServingChatWithHarmony:
             else serving_chat.chat_completion_full_generator
         )
 
+        chat_template_kwargs = serving_chat._effective_chat_template_kwargs(req)
+        if stream:
+            extra_kwargs: dict[str, Any] = {
+                "chat_template_kwargs": chat_template_kwargs,
+            }
+        else:
+            parser = None
+            if serving_chat.parser_cls is not None:
+                parser = serving_chat.parser_cls(
+                    tokenizer,
+                    req.tools,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
+            extra_kwargs = {"parser": parser}
+
         result = generator_func(
             request=req,
             result_generator=result_generator(),
             request_id=req.request_id,
             model_name=req.model,
             conversation=[],
-            tokenizer=get_tokenizer(req.model),
+            tokenizer=tokenizer,
             request_metadata=RequestResponseMetadata(
                 request_id=req.request_id,
                 model_name=req.model,
             ),
+            **extra_kwargs,
         )
 
         if stream:
@@ -1316,14 +2114,19 @@ class TestServingChatWithHarmony:
         return await result
 
     @pytest.mark.asyncio
-    async def test_simple_chat(self, serving_chat, stream):
+    @pytest.mark.parametrize(
+        "include_reasoning", [True, False], ids=["with_reasoning", "no_reasoning"]
+    )
+    async def test_simple_chat(self, serving_chat, stream, include_reasoning):
         messages = [{"role": "user", "content": "what is 1+1?"}]
 
         # Test the Harmony messages for the first turn's input
-        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=messages,
+            include_reasoning=include_reasoning,
         )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
         verify_harmony_messages(
             input_messages,
             [
@@ -1342,7 +2145,11 @@ class TestServingChatWithHarmony:
         response = await self.generate_response_from_harmony_str(
             serving_chat, req, response_str, stream=stream
         )
-        verify_chat_response(response, content=final_str, reasoning=reasoning_str)
+        verify_chat_response(
+            response,
+            content=final_str,
+            reasoning=reasoning_str if include_reasoning else None,
+        )
 
         # Add the output messages from the first turn as input to the second turn
         for choice in response.choices:
@@ -1350,17 +2157,72 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages_2, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
+        input_messages_2, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_2
+        )
+        expected_input_messages_2 = [
+            {"role": "system"},
+            {"role": "user"},
+        ]
+        if include_reasoning:
+            expected_input_messages_2.append(
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                }
+            )
+        expected_input_messages_2.append(
+            {"role": "assistant", "channel": "final", "content": final_str}
         )
         verify_harmony_messages(
             input_messages_2,
+            expected_input_messages_2,
+        )
+
+    @pytest.mark.asyncio
+    async def test_system_message_without_tools(self, serving_chat, stream):
+        """Leading system message produces a developer message with
+        DeveloperContent (# Instructions header)."""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello"},
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+        verify_harmony_messages(
+            input_messages,
             [
                 {"role": "system"},
-                {"role": "user"},
-                # The analysis message should be dropped on subsequent inputs because
-                # of the subsequent assistant message to the final channel.
-                {"role": "assistant", "channel": "final", "content": final_str},
+                {
+                    "role": "developer",
+                    "instructions": "You are a helpful assistant.",
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_system_message_with_tools(self, serving_chat, stream, weather_tools):
+        """Leading system message is folded into the developer message
+        alongside tool definitions."""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "What's the weather?"},
+        ]
+        req = ChatCompletionRequest(
+            model=MODEL_NAME, messages=messages, tools=weather_tools
+        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {
+                    "role": "developer",
+                    "instructions": "You are a helpful assistant.",
+                    "tool_definitions": ["get_weather"],
+                },
+                {"role": "user", "content": "What's the weather?"},
             ],
         )
 
@@ -1373,9 +2235,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
         verify_harmony_messages(
             input_messages,
             [
@@ -1419,8 +2279,8 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_2, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
+        input_messages_2, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_2
         )
         verify_harmony_messages(
             input_messages_2,
@@ -1458,9 +2318,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
         verify_harmony_messages(
             input_messages,
             [
@@ -1504,8 +2362,8 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_2, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
+        input_messages_2, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_2
         )
         verify_harmony_messages(
             input_messages_2,
@@ -1516,7 +2374,6 @@ class TestServingChatWithHarmony:
                 {
                     "role": "assistant",
                     "channel": "analysis",
-                    "content": reasoning_str,
                 },
                 {
                     "role": "assistant",
@@ -1556,8 +2413,8 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the third turn's input
         req_3 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_3, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_3)
+        input_messages_3, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_3
         )
         verify_harmony_messages(
             input_messages_3,
@@ -1565,6 +2422,11 @@ class TestServingChatWithHarmony:
                 {"role": "system"},
                 {"role": "developer"},
                 {"role": "user"},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": reasoning_str,
+                },
                 {
                     "role": "assistant",
                     "channel": "commentary",
@@ -1621,8 +2483,8 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the fourth turn's input
         req_4 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_4, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_4)
+        input_messages_4, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_4
         )
         verify_harmony_messages(
             input_messages_4,
@@ -1630,6 +2492,10 @@ class TestServingChatWithHarmony:
                 {"role": "system"},
                 {"role": "developer"},
                 {"role": "user"},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                },
                 {"role": "assistant"},
                 {"role": "tool"},
                 {
@@ -1672,17 +2538,17 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
 
         verify_harmony_messages(
             input_messages,
             [
                 {"role": "system"},
                 {"role": "user", "content": messages[0]["content"]},
-                # The reasoning that would have resulted in an analysis message is
-                # dropped because of a later assistant message to the final channel.
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                },
                 {
                     "role": "assistant",
                     "channel": "final",
@@ -1705,9 +2571,7 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
 
         verify_harmony_messages(
             input_messages,
@@ -1736,9 +2600,7 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
 
         verify_harmony_messages(
             input_messages,
@@ -1768,14 +2630,14 @@ async def test_tool_choice_validation_without_parser():
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    openai_serving_render = _build_serving_render(mock_engine, models.registry)
+    online_renderer = _build_online_renderer(mock_engine, models.registry)
 
     # Create serving_chat without tool_parser (enable_auto_tools=False)
     serving_chat = OpenAIServingChat(
         mock_engine,
         models,
         response_role="assistant",
-        openai_serving_render=openai_serving_render,
+        online_renderer=online_renderer,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
@@ -1820,10 +2682,23 @@ async def test_tool_choice_validation_without_parser():
     assert isinstance(response_named, ErrorResponse)
     assert "tool_choice" in response_named.error.message
     assert "--tool-call-parser" in response_named.error.message
+    # The function name should appear in a clean, readable form -
+    # guards against leaking Pydantic's internal repr of the
+    # ChatCompletionNamedToolChoiceParam/ChatCompletionNamedFunction
+    # objects directly into the client-facing error message.
+    assert "get_weather" in response_named.error.message
+    assert "ChatCompletionNamedFunction" not in response_named.error.message
+    assert "ChatCompletionNamedToolChoiceParam" not in response_named.error.message
 
 
 @pytest.mark.asyncio
-async def test_streaming_n_gt1_independent_tool_parsers():
+@pytest.mark.parametrize(
+    ("engine_finish_reason", "expected_finish_reason"),
+    [("stop", "tool_calls"), ("length", "length")],
+)
+async def test_streaming_n_gt1_independent_tool_parsers(
+    engine_finish_reason: str, expected_finish_reason: str
+):
     """n>1 streaming must use independent parser instances
     and token-id histories per choice.
     """
@@ -1837,13 +2712,13 @@ async def test_streaming_n_gt1_independent_tool_parsers():
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    openai_serving_render = _build_serving_render(mock_engine, models.registry)
+    online_renderer = _build_online_renderer(mock_engine, models.registry)
 
     serving_chat = OpenAIServingChat(
         mock_engine,
         models,
         response_role="assistant",
-        openai_serving_render=openai_serving_render,
+        online_renderer=online_renderer,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
@@ -1928,7 +2803,7 @@ async def test_streaming_n_gt1_independent_tool_parsers():
                     token_ids=[],
                     cumulative_logprob=0.0,
                     logprobs=None,
-                    finish_reason="stop",
+                    finish_reason=engine_finish_reason,
                 )
                 for choice_idx in range(num_choices)
             ],
@@ -1992,7 +2867,177 @@ async def test_streaming_n_gt1_independent_tool_parsers():
         assert len(reasons) == 1, (
             f"Choice {choice_idx}: expected exactly 1 finish_reason, got {reasons}"
         )
-        assert reasons[0] == "tool_calls", (
-            f"Choice {choice_idx}: expected finish_reason='tool_calls', "
+        assert reasons[0] == expected_finish_reason, (
+            f"Choice {choice_idx}: expected finish_reason={expected_finish_reason!r}, "
             f"got '{reasons[0]}'"
         )
+
+
+def test_make_request_with_harmony_reuses_kv_transfer_prompt_token_ids():
+    """The Harmony reuse branch honors ids forwarded in kv_transfer_params.
+
+    A GPT-OSS server is impractical to stand up here, so this exercises the
+    branch directly on a harmony-configured renderer.
+    """
+    engine = MockEngine()
+    engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    online_renderer = _build_online_renderer(engine, models.registry)
+    assert online_renderer.use_harmony
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+    )
+    conversation, engine_inputs = online_renderer._make_request_with_harmony(request)
+
+    assert conversation == []
+    assert len(engine_inputs) == 1
+    engine_input = engine_inputs[0]
+    assert engine_input["type"] == "token"
+    assert engine_input["prompt_token_ids"] == [10, 20, 30]
+    # The reuse key is consumed and other kv_transfer_params are preserved.
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.parametrize("ids", [[-1], [1.5]])
+def test_make_request_with_harmony_rejects_invalid_kv_transfer_prompt_token_ids(ids):
+    engine = MockEngine()
+    engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    online_renderer = _build_online_renderer(engine, models.registry)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": ids},
+    )
+    with pytest.raises(VLLMValidationError, match="non-negative integers"):
+        online_renderer._make_request_with_harmony(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [[], [-1], [1.5], [1.0], ["1"], [True], "abc", 5])
+async def test_chat_kv_transfer_prompt_token_ids_rejects_invalid_ids(ids):
+    """``kv_transfer_params`` is untyped, so the ids are checked on reuse."""
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": ids},
+    )
+    with pytest.raises(VLLMValidationError, match="non-negative integers"):
+        await serving_chat.render_chat_request(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ids", "stream", "match"),
+    [
+        ([1.5], False, "non-negative integers"),
+        ([999999], True, r"out of vocabulary.*kv_transfer_params\.prompt_token_ids"),
+    ],
+)
+async def test_chat_kv_transfer_prompt_token_ids_rejection_notifies_kv_connector(
+    ids, stream, match
+):
+    """A render-time 400 on a decode request notifies the KV connector."""
+    mock_engine = _build_mock_engine()
+    mock_engine.notify_kv_transfer_request_rejected = AsyncMock()
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.has_kv_connector = True
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        stream=stream,
+        kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
+    )
+    with pytest.raises(VLLMValidationError, match=match):
+        await serving_chat.create_chat_completion(request)
+
+    mock_engine.notify_kv_transfer_request_rejected.assert_awaited_once_with(
+        request.request_id, {"do_remote_prefill": True}, data_parallel_rank=None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [[10, 20, 30], [1.5]])
+async def test_chat_kv_transfer_prompt_token_ids_ignored_with_echo(ids):
+    """``echo`` needs the rendered conversation, so the ids are not used."""
+    serving_chat = _build_serving_chat(_build_mock_engine())
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        kv_transfer_params={"prompt_token_ids": ids, "do_remote_prefill": True},
+        echo=True,
+    )
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    conversation, engine_inputs = result
+    assert [msg["role"] for msg in conversation] == ["user"]
+    assert engine_inputs[0]["prompt_token_ids"] != ids
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [
+            {"type": "text", "text": "what is in this image?"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+        ],
+        # A part written without a "type" is identified by its media key.
+        [{"image_url": "https://example.com/a.png"}],
+        # A media key counts even when the part claims to be text, which is
+        # how chat_utils reads a part carrying a "uuid".
+        [
+            {
+                "type": "text",
+                "text": "look",
+                "uuid": "u1",
+                "image_url": "https://example.com/a.png",
+            }
+        ],
+        [{"type": "hologram", "hologram": "https://a/b.holo"}],
+        [{"type": ["image_url"]}],
+    ],
+)
+def test_chat_kv_transfer_prompt_token_ids_ignored_with_non_text_content(content):
+    """The ids are dropped so that ``messages`` is rendered with its media."""
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": content}],
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
+    )
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+def test_chat_kv_transfer_prompt_token_ids_allows_text_only_parts():
+    """Text-bearing part types are not multimodal, so the ids are kept."""
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "let me think"},
+                    {"type": "refusal", "refusal": "no"},
+                ],
+            },
+            {"role": "user", "content": "plain string"},
+        ],
+        kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
+    )
+    assert request.kv_transfer_params == {"prompt_token_ids": [10, 20, 30]}

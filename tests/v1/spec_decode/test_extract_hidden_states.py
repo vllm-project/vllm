@@ -7,7 +7,7 @@ from unittest import mock
 import numpy as np
 import pytest
 import torch
-from transformers import CLIPVisionConfig, LlamaConfig, LlavaConfig, PretrainedConfig
+from transformers import CLIPVisionConfig, LlamaConfig, LlavaConfig, PreTrainedConfig
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -69,7 +69,6 @@ def _create_proposer(
         scheduler_config=SchedulerConfig(
             max_model_len=model_config.max_model_len,
             is_encoder_decoder=model_config.is_encoder_decoder,
-            enable_chunked_prefill=False,
         ),
         attention_config=AttentionConfig(),
     )
@@ -120,7 +119,6 @@ def test_proposer_initialization_missing_layer_ids():
         scheduler_config=SchedulerConfig(
             max_model_len=model_config.max_model_len,
             is_encoder_decoder=model_config.is_encoder_decoder,
-            enable_chunked_prefill=False,
         ),
         attention_config=AttentionConfig(),
     )
@@ -132,8 +130,7 @@ def test_proposer_initialization_missing_layer_ids():
 
 
 def test_prepare_next_token_ids_padded():
-    """
-    Test for prepare_next_token_ids_padded with extract_hidden_states.
+    """Test for prepare_next_token_ids_padded with extract_hidden_states.
 
     Since num_speculative_tokens == 1, sampled_token_ids has shape (batch_size, 1).
     For each request we either use the sampled token (if valid and not discarded)
@@ -149,7 +146,7 @@ def test_prepare_next_token_ids_padded():
     mock_input_batch.vocab_size = 100
     mock_input_batch.num_tokens_no_spec = np.array([5] * num_requests)
 
-    mock_requests = {}
+    mock_requests: dict[str, CachedRequestState] = {}
     for req_id in req_ids:
         mock_request = mock.MagicMock(spec=CachedRequestState)
         # Each request will have a backup next token id of 10, 20, 30, 40
@@ -198,8 +195,7 @@ def test_prepare_next_token_ids_padded():
 
 
 def test_propose():
-    """
-    Test the propose() method of ExtractHiddenStatesProposer.
+    """Test the propose() method of ExtractHiddenStatesProposer.
 
     This should:
     1. Accept target hidden states and sampled token IDs
@@ -257,6 +253,7 @@ def test_propose():
 
     # Call propose
     draft_tokens = proposer.propose(
+        num_speculative_tokens=1,
         sampled_token_ids=sampled_token_ids,
         target_hidden_states=target_hidden_states,
         common_attn_metadata=common_attn_metadata,
@@ -323,6 +320,7 @@ def test_propose_different_layer_counts(num_hidden_layers):
     ).unsqueeze(-1)
 
     draft_tokens = proposer.propose(
+        num_speculative_tokens=1,
         sampled_token_ids=sampled_token_ids,
         target_hidden_states=target_hidden_states,
         common_attn_metadata=common_attn_metadata,
@@ -338,7 +336,7 @@ def test_propose_different_layer_counts(num_hidden_layers):
 # ---------------------------------------------------------------------------
 
 
-class _DummyVLMConfig(PretrainedConfig):
+class _DummyVLMConfig(PreTrainedConfig):
     """Minimal composite config that mimics VLMs like Kimi-K2.5 or LLaVA.
 
     The text model's parameters (hidden_size, num_attention_heads, …) live
@@ -347,11 +345,11 @@ class _DummyVLMConfig(PretrainedConfig):
 
     model_type = "test_vlm"
 
-    def __init__(self, text_config: PretrainedConfig, **kwargs):
+    def __init__(self, text_config: PreTrainedConfig, **kwargs):
         self.text_config = text_config
         super().__init__(architectures=["LlamaForCausalLM"], **kwargs)
 
-    def get_text_config(self, decoder: bool = False) -> PretrainedConfig:
+    def get_text_config(self, decoder: bool = False) -> PreTrainedConfig:
         del decoder
         return self.text_config
 
@@ -405,7 +403,7 @@ def test_extract_hidden_states_config_preserves_vlm_text_config():
         eagle_aux_hidden_state_layer_ids=[1, 2],
     )
 
-    # The fix: text_config is still a PretrainedConfig, not a dict.
+    # The fix: text_config is still a PreTrainedConfig, not a dict.
     assert isinstance(extract_config.text_config, LlamaConfig)
 
     extracted = get_hf_text_config(extract_config)
@@ -475,7 +473,7 @@ def test_extract_hidden_states_speculative_config_vlm():
 
 def test_extract_hidden_states_config_invalid_text_config():
     """A nested text_config missing required attrs must still be rejected."""
-    broken_text_config = PretrainedConfig(hidden_size=128)
+    broken_text_config = PreTrainedConfig(hidden_size=128)
     vlm_config = _DummyVLMConfig(text_config=broken_text_config)
 
     extract_config = ExtractHiddenStatesConfig(

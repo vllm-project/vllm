@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -114,7 +115,7 @@ class CpuGpuBuffer:
         *size: int | torch.SymInt,
         dtype: torch.dtype,
         device: torch.device,
-        pin_memory: bool,
+        pin_memory: bool = PIN_MEMORY,
         with_numpy: bool = True,
     ) -> None:
         # these buffers are mutable runtime state, so allocate them as normal
@@ -136,9 +137,10 @@ class CpuGpuBuffer:
             self.np = self.cpu.numpy()
 
     def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
-        if n is None:
-            return self.gpu.copy_(self.cpu, non_blocking=True)
-        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+        cpu, gpu = self.cpu, self.gpu
+        if n is not None:
+            cpu, gpu = cpu[:n], gpu[:n]
+        return gpu.copy_(cpu.pin_memory() if PIN_MEMORY else cpu, non_blocking=True)
 
     def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
         """NOTE: Because this method is non-blocking, explicit synchronization
@@ -199,6 +201,7 @@ class APIServerProcessManager:
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
+
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -207,6 +210,15 @@ class APIServerProcessManager:
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
         self._address_pipes: list[connection.Connection] = []
+
+        admission_counters = None
+        if num_servers > 1 and getattr(args, "max_num_queued_reqs", None) is not None:
+            from vllm.v1.engine.admission_control import SharedAdmissionStats
+
+            admission_counters = spawn_context.RawArray(
+                "q",
+                SharedAdmissionStats.num_counters(num_servers),
+            )
 
         for i, in_addr, out_addr in zip(
             range(num_servers), input_addresses, output_addresses
@@ -217,6 +229,8 @@ class APIServerProcessManager:
                 "client_count": num_servers,
                 "client_index": i,
             }
+            if admission_counters is not None:
+                client_config["mp_admission_counters"] = admission_counters
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
             if tensor_queue is not None:
@@ -336,8 +350,11 @@ class RustFrontendProcessManager:
         args: argparse.Namespace,
         input_address: str,
         output_address: str,
+        engine_start_index: int,
         engine_count: int,
+        data_parallel_size: int,
         stats_update_address: str | None = None,
+        grpc_sock: Any | None = None,
     ):
         import os
         import subprocess
@@ -354,21 +371,61 @@ class RustFrontendProcessManager:
             input_address,
             "--output-address",
             output_address,
+            "--engine-start-index",
+            str(engine_start_index),
             "--engine-count",
             str(engine_count),
+            "--data-parallel-size",
+            str(data_parallel_size),
         ]
+        pass_fds = [fd]
+        if grpc_sock is not None:
+            grpc_fd = grpc_sock.fileno()
+            os.set_inheritable(grpc_fd, True)
+            cmd.extend(["--grpc-listen-fd", str(grpc_fd)])
+            pass_fds.append(grpc_fd)
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
-        from vllm.entrypoints.utils import jsonify_non_default_args
+        from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
 
-        args_json = json.dumps(
-            jsonify_non_default_args(args, exclude={"api_server_count"}),
-            sort_keys=True,
+        args_dict = jsonify_non_default_args(
+            args,
+            exclude={
+                "api_server_count",
+                # Python passes the bootstrapped engine range explicitly.
+                "data_parallel_rank",
+                "data_parallel_external_lb",
+                "data_parallel_hybrid_lb",
+            },
         )
+
+        # `model_tag` is the positional `vllm serve` model argument. When the
+        # model is supplied only through `--config`, argparse populates `model`
+        # while leaving `model_tag` unset. The Rust frontend requires
+        # `model_tag` in its JSON bootstrap payload, so use the resolved model
+        # as a fallback.
+        model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
+        if model_tag is not None:
+            args_dict["model_tag"] = model_tag
+
+        # The Rust `frontend` subcommand parses --args-json via serde_json,
+        # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
+        # declarations on SharedRuntimeArgs fields. Forward the env-driven
+        # values explicitly so VLLM_ENGINE_READY_TIMEOUT_S and
+        # VLLM_HTTP_TIMEOUT_KEEP_ALIVE behave the same on both Python and Rust
+        # frontends.
+        args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
+        args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+        args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 
-        logger.info("Launching Rust frontend: %s", " ".join(cmd))
-        self._proc = subprocess.Popen(cmd, pass_fds=(fd,))
+        # The subprocess needs the real values, but the log must not carry
+        # credentials such as api_key or hf_token.
+        from vllm.entrypoints.serve.utils.api_utils import redact_sensitive_args
+
+        redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
+        logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
+        self._proc = subprocess.Popen(cmd, pass_fds=pass_fds)
 
         # Create a process wrapper with a sentinel fd for monitoring
         self.processes: list[_SubprocessWrapper] = [
@@ -444,6 +501,12 @@ def _shutdown_subprocesses(
         timeout = 0.0
     timeout = max(timeout, 5.0)
 
+    logger.debug(
+        "[shutdown] Subprocess manager: start process_count=%d timeout=%ss",
+        len(procs),
+        timeout,
+    )
+
     for proc in procs:
         if proc.is_alive():
             proc.terminate()
@@ -456,22 +519,35 @@ def _shutdown_subprocesses(
         if proc.is_alive():
             proc.join(remaining)
 
-    for proc in procs:
-        if proc.is_alive() and (pid := proc.pid) is not None:
-            kill_process_tree(pid)
+    remaining_pids = [
+        proc.pid for proc in procs if proc.is_alive() and proc.pid is not None
+    ]
+    if remaining_pids:
+        logger.warning(
+            "[shutdown] Subprocess manager: force killing remaining processes count=%d",
+            len(remaining_pids),
+        )
+    for pid in remaining_pids:
+        kill_process_tree(pid)
+
+    logger.debug_once("[shutdown] Subprocess manager: complete")
 
 
 def run_api_server_worker_proc(
     listen_address, sock, args, client_config=None, **uvicorn_kwargs
 ) -> None:
     """Entrypoint for individual API server worker processes."""
+    if logging_config := getattr(args, "logging_config", None):
+        from vllm.logger import configure_logging
 
-    from vllm.entrypoints.openai.api_server import run_server_worker
+        configure_logging(logging_config)
+
+    from vllm.entrypoints.launchers.api_server.entry import run_server_worker
 
     client_config = client_config or {}
     server_index = client_config.get("client_index", 0)
 
-    # Set process title and add process-specific prefix to stdout and stderr.
+    # Set process title and process-specific log metadata.
     set_process_title("APIServer", str(server_index))
     decorate_logs()
 
@@ -496,8 +572,8 @@ def wait_for_completion_or_failure(
             If CoreEngineProcManager, it manages local engines;
             if CoreEngineActorManager, it manages all engines.
         coordinator: The coordinator for data parallel.
-    """
 
+    """
     try:
         logger.info("Waiting for API servers to complete ...")
         # Create a mapping of sentinels to their corresponding processes
@@ -559,15 +635,26 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
     Args:
         procs: List of processes to shutdown
         timeout: Maximum time in seconds to wait for graceful shutdown
+
     """
     if timeout is None:
         # Keep a small grace period for best-effort cleanup paths that do not
         # have a user-configured shutdown timeout.
         timeout = 5.0
 
+    logger.debug(
+        "[shutdown] Process manager: start process_count=%d timeout=%ss names=%s",
+        len(procs),
+        timeout,
+        (",").join([proc.name for proc in procs]),
+    )
+
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
+            logger.info(
+                "[shutdown] Process manager: send sigterm to process %s", proc.name
+            )
             proc.terminate()
 
     # Allow time for remaining procs to terminate.
@@ -579,16 +666,31 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
         if proc.is_alive():
             proc.join(remaining)
 
-    for proc in procs:
-        if proc.is_alive() and (pid := proc.pid) is not None:
-            kill_process_tree(pid)
+    remaining_procs = [
+        (proc.pid, proc.name)
+        for proc in procs
+        if proc.is_alive() and proc.pid is not None
+    ]
+    if remaining_procs:
+        logger.warning(
+            "[shutdown] Process manager: force killing remaining processes count=%d",
+            len(remaining_procs),
+        )
+    for pid, proc_name in remaining_procs:
+        logger.warning(
+            "[shutdown] Process manager: force killing remaining process %s pid %d",
+            proc_name,
+            pid,
+        )
+        kill_process_tree(pid)
+
+    logger.debug_once("[shutdown] Process manager: complete")
 
 
 def copy_slice(
     from_tensor: torch.Tensor, to_tensor: torch.Tensor, length: int
 ) -> torch.Tensor:
-    """
-    Copy the first length elements of a tensor into another tensor in a
+    """Copy the first length elements of a tensor into another tensor in a
     non-blocking manner.
 
     Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
@@ -602,35 +704,66 @@ def report_usage_stats(
     vllm_config, usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
 ) -> None:
     """Report usage statistics if enabled."""
-
     if not is_usage_stats_enabled():
         return
 
     from vllm.model_executor.model_loader import get_architecture_class_name
 
+    model_config = vllm_config.model_config
+    scheduler_config = vllm_config.scheduler_config
     parallel_config = vllm_config.parallel_config
+    attention_config = vllm_config.attention_config
+    compilation_config = vllm_config.compilation_config
+    speculative_config = vllm_config.speculative_config
 
     # Prepare KV connector string if applicable
     kv_connector = None
     if vllm_config.kv_transfer_config is not None:
         kv_connector = vllm_config.kv_transfer_config.kv_connector
 
+    # Attention backend is None when set to "auto" (resolved at runtime per platform).
+    attention_backend = (
+        attention_config.backend.name if attention_config.backend is not None else None
+    )
+
+    # CompilationMode is an IntEnum; report the name for readability in dashboards.
+    compilation_mode = (
+        compilation_config.mode.name if compilation_config.mode is not None else None
+    )
+
+    # Speculative decoding fields default to None when spec decode is disabled.
+    spec_decode_method = (
+        speculative_config.method if speculative_config is not None else None
+    )
+    num_speculative_tokens = (
+        speculative_config.num_speculative_tokens
+        if speculative_config is not None
+        else None
+    )
+
+    if model_config.using_transformers_backend():
+        backend_cls = model_config._model_info.architecture
+        # Show what was wrapped e.g. TransformersForCausalLM(Starcoder2ForCausalLM)
+        architecture = f"{backend_cls}({model_config.architectures[0]})"
+    else:
+        architecture = get_architecture_class_name(model_config)
+
     usage_message.report_usage(
-        get_architecture_class_name(vllm_config.model_config),
+        architecture,
         usage_context,
         extra_kvs={
             # Common configuration
-            "dtype": str(vllm_config.model_config.dtype),
+            "dtype": str(model_config.dtype),
             "block_size": vllm_config.cache_config.block_size,
             "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
             "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
             # Quantization
-            "quantization": vllm_config.model_config.quantization,
+            "quantization": model_config.quantization,
             "kv_cache_dtype": str(vllm_config.cache_config.cache_dtype),
             # Feature flags
             "enable_lora": bool(vllm_config.lora_config),
             "enable_prefix_caching": vllm_config.cache_config.enable_prefix_caching,
-            "enforce_eager": vllm_config.model_config.enforce_eager,
+            "enforce_eager": model_config.enforce_eager,
             "disable_custom_all_reduce": parallel_config.disable_custom_all_reduce,
             # Distributed parallelism settings
             "tensor_parallel_size": parallel_config.tensor_parallel_size,
@@ -641,6 +774,21 @@ def report_usage_stats(
             "all2all_backend": parallel_config.all2all_backend,
             # KV connector used
             "kv_connector": kv_connector,
+            # Batching limits — tuning knobs operators commonly override
+            "max_model_len": model_config.max_model_len,
+            "max_num_seqs": scheduler_config.max_num_seqs,
+            "max_num_batched_tokens": scheduler_config.max_num_batched_tokens,
+            # Attention backend (user-requested; None = auto-selected at runtime)
+            "attention_backend": attention_backend,
+            # torch.compile mode (e.g. NONE, STOCK_TORCH_COMPILE, VLLM_COMPILE)
+            "compilation_mode": compilation_mode,
+            # Speculative decoding configuration
+            "spec_decode_method": spec_decode_method,
+            "num_speculative_tokens": num_speculative_tokens,
+            # Wide expert parallel: load balancer + redundant/total expert counts
+            "enable_eplb": parallel_config.enable_eplb,
+            "num_redundant_experts": parallel_config.eplb_config.num_redundant_experts,
+            "num_experts": model_config.get_num_experts(),
         },
     )
 
@@ -676,6 +824,7 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
 
     Returns:
         A memoryview of the tensor data as uint8.
+
     """
     return tensor.flatten().cpu().contiguous().view(torch.uint8).numpy().data
 
@@ -686,17 +835,20 @@ class IterationDetails:
     num_ctx_tokens: int
     num_generation_requests: int
     num_generation_tokens: int
+    num_encoder_inputs: int = 0
+    num_encoder_output_tokens: int = 0
 
     def __repr__(self) -> str:
         return f"IterationDetails(num_ctx_requests={self.num_ctx_requests},\
                  num_ctx_tokens={self.num_ctx_tokens}, \
                  num_generation_requests={self.num_generation_requests}, \
-                 num_generation_tokens={self.num_generation_tokens})"
+                 num_generation_tokens={self.num_generation_tokens}, \
+                 num_encoder_inputs={self.num_encoder_inputs}, \
+                 num_encoder_output_tokens={self.num_encoder_output_tokens})"
 
 
 def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDetails:
-    """
-    Compute the number of context/generation requests and tokens
+    """Compute the number of context/generation requests and tokens
     for the current iteration's scheduler output. A requests is regarded
     as a context request if its output tokens are still 0, an extended chunk
     of chunked prefill falls into this category.
@@ -707,6 +859,7 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
     Returns:
         An IterationDetails object containing the number of
         context/generation requests and tokens.
+
     """
     num_context_requests = 0
     num_context_tokens = 0
@@ -722,9 +875,18 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
         else:
             num_generation_requests += 1
             num_generation_tokens += num_tokens
+    scheduled_encoder_input_stats = scheduler_output.scheduled_encoder_input_stats
+    num_encoder_inputs = 0
+    num_encoder_output_tokens = 0
+    if scheduled_encoder_input_stats is not None:
+        num_encoder_inputs = scheduled_encoder_input_stats.num_inputs
+        num_encoder_output_tokens = scheduled_encoder_input_stats.output_tokens
+
     return IterationDetails(
         num_context_requests,
         num_context_tokens,
         num_generation_requests,
         num_generation_tokens,
+        num_encoder_inputs,
+        num_encoder_output_tokens,
     )

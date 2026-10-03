@@ -5,16 +5,46 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
+    MiniMaxText01LinearAttention,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.short_conv import ShortConv
-from vllm.model_executor.models.minimax_text_01 import MiniMaxText01LinearAttention
 from vllm.v1.attention.backends.linear_attn import LinearAttentionBackend
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
+
+
+@pytest.mark.parametrize(("use_replayssm", "expected_blocks"), [(False, 3), (True, 0)])
+def test_replayssm_does_not_reserve_speculative_state_blocks(
+    use_replayssm, expected_blocks
+):
+    layer = SimpleNamespace(
+        get_state_shape=lambda: ((2,),),
+        get_state_dtype=lambda: (torch.float32,),
+        mamba_type=MambaAttentionBackendEnum.MAMBA2,
+        is_kv_cache_tp_replicated=False,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            mamba_block_size=1,
+            mamba_page_size_padded=None,
+            mamba_cache_mode="none",
+            use_replayssm=use_replayssm,
+        ),
+        num_speculative_tokens=3,
+    )
+
+    spec = MambaBase.get_kv_cache_spec(layer, vllm_config)
+
+    assert spec is not None
+    assert spec.num_speculative_blocks == expected_blocks
 
 
 @pytest.mark.parametrize(
@@ -54,15 +84,14 @@ from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
         (
             MiniMaxText01LinearAttention,
             dict(
-                hidden_size=128,
-                hidden_inner_size=256,
-                num_heads=8,
-                head_dim=32,
-                max_position=2048,
-                block_size=64,
-                num_hidden_layer=12,
-                layer_idx=0,
-                linear_layer_idx=0,
+                config=SimpleNamespace(
+                    hidden_size=256,
+                    num_attention_heads=8,
+                    head_dim=32,
+                    num_hidden_layers=12,
+                    block=64,
+                ),
+                prefix="layers.0.self_attn",
             ),
             LinearAttentionBackend,
             MambaAttentionBackendEnum.LINEAR,
@@ -88,6 +117,8 @@ def test_mamba_layers_get_attn_backend(
     expected_mamba_type,
 ):
     """Test that Mamba-like layers return the correct attention backend."""
+    if layer_class is MiniMaxText01LinearAttention:
+        init_kwargs["vllm_config"] = default_vllm_config
     layer = layer_class(**init_kwargs)
 
     backend_class = layer.get_attn_backend()

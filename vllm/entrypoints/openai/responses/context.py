@@ -10,36 +10,35 @@ from contextlib import AsyncExitStack
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, Union
 
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
+from openai.types.responses.response_output_item import McpCall
+from openai.types.responses.response_output_message import ResponseOutputMessage
+from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.tool import Mcp
-from openai_harmony import Author, Message, Role, StreamState, TextContent
+from openai_harmony import Author, Message, Role, TextContent
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import (
-    FunctionCall,
-)
-from vllm.entrypoints.openai.parser.harmony_utils import (
-    get_encoding,
-    get_streamable_parser_for_assistant,
-    render_for_completion,
-)
-from vllm.entrypoints.openai.parser.responses_parser import (
-    get_responses_parser_for_simple_context,
-)
+from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponseRawMessageAndToken,
     ResponsesRequest,
 )
-from vllm.entrypoints.openai.responses.utils import construct_tool_dicts
+from vllm.entrypoints.openai.responses.utils import (
+    build_response_output_items,
+    construct_tool_dicts,
+)
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
@@ -47,6 +46,8 @@ from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession
+
+    from vllm.v1.metrics.stats import RequestStateStats
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ _TOOL_NAME_TO_TYPE_MAP = {
     "python": "code_interpreter",
     "container": "container",
 }
+MCP_PREFIX = "mcp_"
 
 
 def _map_tool_name_to_tool_type(tool_name: str) -> str:
@@ -103,6 +105,13 @@ class TurnMetrics:
 
 
 class ConversationContext(ABC):
+    response_parser: Parser | None = None
+    request_metrics: "RequestStateStats | None" = None
+    # Built-in tools can trigger additional model generations. In that case,
+    # the stored engine timestamps cover only one turn, while token usage is
+    # accumulated across all turns.
+    request_metrics_cover_all_generation_turns: bool = True
+
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
         pass
@@ -141,9 +150,7 @@ class ConversationContext(ABC):
 def _create_json_parse_error_messages(
     last_msg: Message, e: json.JSONDecodeError
 ) -> list[Message]:
-    """
-    Creates an error message when json parse failed.
-    """
+    """Creates an error message when json parse failed."""
     error_msg = (
         f"Error parsing tool arguments as JSON: {str(e)}. "
         "Please ensure the tool call arguments are valid JSON and try again."
@@ -161,26 +168,48 @@ def _create_json_parse_error_messages(
 
 
 class SimpleContext(ConversationContext):
-    """This is a context that cannot handle MCP tool calls"""
+    """This is a context that cannot handle MCP tool calls."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        response_parser: Parser | None = None,
+        parser_cls: type[Parser] | None = None,
+        tokenizer: TokenizerLike | None = None,
+        request: ResponsesRequest | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+    ):
         self.last_output = None
+        self.response_parser = response_parser or (
+            parser_cls(
+                tokenizer,
+                request.tools,
+                chat_template_kwargs=chat_template_kwargs,
+            )
+            if parser_cls is not None and tokenizer is not None and request is not None
+            else None
+        )
 
         # Accumulated final output for streaming mode
         self._accumulated_text: str = ""
         self._accumulated_token_ids: list[int] = []
         self._accumulated_logprobs: list = []
+        # Items already sent as output_item.done events; the final
+        # streaming response reuses them instead of reparsing.
+        self.streamed_output_items: list[ResponseOutputItem] | None = None
 
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_cache_creation_tokens = 0
         # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
         # not implemented yet for SimpleContext
-        self.all_turn_metrics = []
+        self.all_turn_metrics: list[TurnMetrics] = []
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -188,9 +217,13 @@ class SimpleContext(ConversationContext):
             raise ValueError("SimpleContext only supports RequestOutput.")
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
+        if output.num_cache_creation_tokens is not None:
+            self.num_cache_creation_tokens = output.num_cache_creation_tokens
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
+        if output.ec_transfer_params is not None:
+            self.ec_transfer_params = output.ec_transfer_params
 
         # Accumulate text, token_ids, and logprobs for streaming mode
         delta_output = output.outputs[0]
@@ -276,8 +309,8 @@ class ParsableContext(ConversationContext):
         available_tools: list[str] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        response_parser: Parser | None = None,
         enable_auto_tools: bool = False,
-        tool_call_id_type: str = "random",
     ):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -286,15 +319,13 @@ class ParsableContext(ConversationContext):
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
 
-        self.parser = get_responses_parser_for_simple_context(
-            tokenizer=tokenizer,
-            parser_cls=parser_cls,
-            response_messages=response_messages,
-            request=request,
-            chat_template=chat_template,
-            chat_template_content_format=chat_template_content_format,
-            enable_auto_tools=enable_auto_tools,
-            tool_call_id_type=tool_call_id_type,
+        self.response_messages: list[ResponseInputOutputItem] = response_messages
+        self.num_init_messages = len(response_messages)
+        self.finish_reason: str | None = None
+        self.enable_auto_tools = enable_auto_tools
+
+        self.response_parser = response_parser or (
+            parser_cls(tokenizer, request.tools) if parser_cls is not None else None
         )
         self.parser_cls = parser_cls
         self.request = request
@@ -311,6 +342,7 @@ class ParsableContext(ConversationContext):
         self.output_messages: list[ResponseRawMessageAndToken] = []
         self._accumulated_token_ids: list[int] = []
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
@@ -318,11 +350,56 @@ class ParsableContext(ConversationContext):
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
-        self.parser.process(output.outputs[0])
-        output_token_ids = output.outputs[0].token_ids or []
-        self._accumulated_token_ids.extend(output_token_ids)
 
-        # only store if enable_response_messages is True, save memory
+        if output.ec_transfer_params is not None:
+            self.ec_transfer_params = output.ec_transfer_params
+
+        completion = output.outputs[0]
+        self.finish_reason = completion.finish_reason
+
+        if self.response_parser is not None:
+            reasoning, content, tool_calls = self.response_parser.parse(
+                completion.text,
+                self.request,
+                enable_auto_tools=self.enable_auto_tools,
+                model_output_token_ids=completion.token_ids,
+            )
+            # Each round is a separate generation, so count it on its own ids.
+            self.num_reasoning_tokens += self.response_parser.count_reasoning_tokens(
+                completion.token_ids or []
+            )
+            if not self.request.include_reasoning:
+                reasoning = None
+            self.response_messages.extend(
+                build_response_output_items(
+                    reasoning=reasoning,
+                    content=content,
+                    tool_calls=maybe_filter_parallel_tool_calls(
+                        tool_calls or [], self.request
+                    ),
+                    tools=self.request.tools,
+                )
+            )
+        elif completion.text:
+            self.response_messages.append(
+                ResponseOutputMessage(
+                    type="message",
+                    id=f"msg_{random_uuid()}",
+                    status="completed",
+                    role="assistant",
+                    content=[
+                        ResponseOutputText(
+                            annotations=[],
+                            type="output_text",
+                            text=completion.text,
+                            logprobs=None,
+                        )
+                    ],
+                )
+            )
+
+        self._accumulated_token_ids.extend(completion.token_ids or [])
+
         if self.request.enable_response_messages:
             output_prompt = output.prompt or ""
             output_prompt_token_ids = output.prompt_token_ids or []
@@ -342,18 +419,18 @@ class ParsableContext(ConversationContext):
                 )
             self.output_messages.append(
                 ResponseRawMessageAndToken(
-                    message=output.outputs[0].text,
-                    tokens=output.outputs[0].token_ids,
+                    message=completion.text,
+                    tokens=completion.token_ids,
                 )
             )
 
     def append_tool_output(self, output: list[ResponseInputOutputItem]) -> None:
-        self.parser.response_messages.extend(output)
+        self.response_messages.extend(output)
 
     def need_builtin_tool_call(self) -> bool:
         """Return true if the last message is a builtin tool call
         that the request has enabled."""
-        last_message = self.parser.response_messages[-1]
+        last_message = self.response_messages[-1]
         if last_message.type != "function_call":
             return False
         if last_message.name in ("code_interpreter", "python"):
@@ -365,7 +442,9 @@ class ParsableContext(ConversationContext):
         return False
 
     async def call_python_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
@@ -380,7 +459,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"mcpo_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -388,7 +467,9 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_search_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
@@ -406,7 +487,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -414,10 +495,11 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_container_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: Message
-    ) -> list[Message]:
-        """
-        Call container tool. Expect this to be run in a stateful docker
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
+    ) -> list[ResponseInputOutputItem]:
+        """Call container tool. Expect this to be run in a stateful docker
         with command line terminal.
         The official container tool would at least
         expect the following format:
@@ -449,7 +531,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -457,12 +539,12 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_tool(self) -> list[ResponseInputOutputItem]:
-        if not self.parser.response_messages:
+        if not self.response_messages:
             return []
-        last_msg = self.parser.response_messages[-1]
+        last_msg = self.response_messages[-1]
         # change this to a mcp_ function call
         last_msg.id = f"{MCP_PREFIX}{random_uuid()}"
-        self.parser.response_messages[-1] = last_msg
+        self.response_messages[-1] = last_msg
         if last_msg.name == "code_interpreter":
             return await self.call_python_tool(self._tool_sessions["python"], last_msg)
         elif last_msg.name == "web_search_preview":
@@ -472,6 +554,29 @@ class ParsableContext(ConversationContext):
                 self._tool_sessions["container"], last_msg
             )
         return []
+
+    def make_response_output_items(self) -> list[ResponseOutputItem]:
+        response_messages = self.response_messages[self.num_init_messages :]
+        output_messages: list[ResponseOutputItem] = []
+        for message in response_messages:
+            if not isinstance(message, ResponseFunctionToolCallOutputItem):
+                output_messages.append(message)
+            else:
+                if len(output_messages) == 0:
+                    raise ValueError(
+                        "Cannot have a FunctionToolCallOutput before FunctionToolCall."
+                    )
+                if isinstance(output_messages[-1], ResponseFunctionToolCall):
+                    output_messages[-1] = McpCall(
+                        id=f"{MCP_PREFIX}{random_uuid()}",
+                        arguments=output_messages[-1].arguments,
+                        name=output_messages[-1].name,
+                        server_label=output_messages[-1].name,
+                        type="mcp_call",
+                        status="completed",
+                        output=message.output,
+                    )
+        return output_messages
 
     def render_for_completion(self):
         raise NotImplementedError("Should not be called.")
@@ -484,6 +589,7 @@ class ParsableContext(ConversationContext):
         mcp_tools: dict[str, Mcp],
     ):
         if tool_server:
+            initialized_session = False
             for tool_name in self.available_tools:
                 if tool_name in self._tool_sessions:
                     continue
@@ -496,10 +602,12 @@ class ParsableContext(ConversationContext):
                     tool_server.new_session(tool_name, request_id, headers)
                 )
                 self._tool_sessions[tool_name] = tool_session
+                initialized_session = True
+            if initialized_session:
                 exit_stack.push_async_exit(self.cleanup_session)
 
     async def cleanup_session(self, *args, **kwargs) -> None:
-        """Can be used as coro to used in __aexit__"""
+        """Can be used as coro to used in __aexit__."""
 
         async def cleanup_tool_session(tool_session):
             if not isinstance(tool_session, Tool):
@@ -522,16 +630,23 @@ class HarmonyContext(ConversationContext):
         self,
         messages: list,
         available_tools: list[str],
-        function_tool_names: frozenset[str] | None = None,
+        function_tool_names: frozenset[str],
+        response_parser: Parser | None = None,
+        request: ResponsesRequest | None = None,
     ):
+        from vllm.parser.harmony import HarmonyParser, Segment
+
+        assert isinstance(response_parser, HarmonyParser)
+
         self._messages = messages
+        self.request = request
+        self.response_parser: HarmonyParser = response_parser
         self.finish_reason: str | None = None
         self.available_tools = available_tools
         self.function_tool_names = function_tool_names
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
 
-        self.parser = get_streamable_parser_for_assistant()
         self.num_init_messages = len(messages)
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -539,44 +654,50 @@ class HarmonyContext(ConversationContext):
         self.num_reasoning_tokens = 0
         self.num_tool_output_tokens = 0
 
+        self.last_append_segments: list[Segment] = []
+        self.last_append_flush_status: bool = False
+
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn_metrics = TurnMetrics()
         # Track metrics for all turns
         self.all_turn_metrics: list[TurnMetrics] = []
         self.is_first_turn = True
-        self.first_tok_of_message = True  # For streaming support
+        self.first_tok_of_message = True
         self.kv_transfer_params: dict[str, Any] | None = None
-
-    def _update_num_reasoning_tokens(self):
-        channel = self.parser.current_channel
-        if channel == "analysis":
-            self.num_reasoning_tokens += 1
-        elif channel == "commentary" and self.parser.current_recipient is not None:
-            # Tool interactions (python/browser/container) are hidden.
-            # Preambles (recipient=None) are visible user text.
-            self.num_reasoning_tokens += 1
+        self.ec_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
+        if self.first_tok_of_message:
+            self.finish_reason = None
+            self._update_prefill_token_usage(output)
+
         output_token_ids = output.outputs[0].token_ids
-        self.parser = get_streamable_parser_for_assistant()
-        for token_id in output_token_ids:
-            self.parser.process(token_id)
-            # Check if the current token is part of reasoning content
-            self._update_num_reasoning_tokens()
-        self._update_prefill_token_usage(output)
+        result = self.response_parser.process_chunk(output_token_ids)
+        segments = result.segments
+        self.num_reasoning_tokens += result.reasoning_token_count
+
+        self.first_tok_of_message = output.finished
         self._update_decode_token_usage(output)
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
-        # Append current turn to all turn list for next turn's calculations
-        self.all_turn_metrics.append(self.current_turn_metrics.copy())
-        self.current_turn_metrics.reset()
-        # append_output is called only once before tool calling
-        # in non-streaming case
-        # so we can append all the parser messages to _messages
-        output_msgs = self.parser.messages
-        # The responses finish reason is set in the last message
-        self.finish_reason = output.outputs[0].finish_reason
-        self._messages.extend(output_msgs)
+        if output.ec_transfer_params is not None:
+            self.ec_transfer_params = output.ec_transfer_params
+
+        if output.finished:
+            self.finish_reason = output.outputs[0].finish_reason
+            flushed_segments = self.response_parser.flush()
+            if flushed_segments:
+                segments.extend(flushed_segments)
+            self.last_append_flush_status = len(flushed_segments) > 0
+            self.all_turn_metrics.append(self.current_turn_metrics.copy())
+            self.current_turn_metrics.reset()
+
+        self.last_append_segments = segments
+        self._messages.extend(
+            segment.completed_message
+            for segment in segments
+            if segment.completed_message is not None
+        )
 
     def append_tool_output(self, output: list[Message]) -> None:
         output_msgs = output
@@ -598,6 +719,7 @@ class HarmonyContext(ConversationContext):
 
         Args:
             output: The RequestOutput containing prompt token information
+
         """
         if output.prompt_token_ids is not None:
             this_turn_input_tokens = len(output.prompt_token_ids)
@@ -662,6 +784,7 @@ class HarmonyContext(ConversationContext):
 
         Returns:
             int: Number of output tokens processed in this call
+
         """
         updated_output_token_count = 0
         if output.outputs:
@@ -771,6 +894,7 @@ class HarmonyContext(ConversationContext):
         mcp_tools: dict[str, Mcp],
     ):
         if tool_server:
+            initialized_session = False
             for tool_name in self.available_tools:
                 if tool_name not in self._tool_sessions:
                     tool_type = _map_tool_name_to_tool_type(tool_name)
@@ -781,13 +905,14 @@ class HarmonyContext(ConversationContext):
                         tool_server.new_session(tool_name, request_id, headers)
                     )
                     self._tool_sessions[tool_name] = tool_session
-                    exit_stack.push_async_exit(self.cleanup_session)
+                    initialized_session = True
+            if initialized_session:
+                exit_stack.push_async_exit(self.cleanup_session)
 
     async def call_container_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message
     ) -> list[Message]:
-        """
-        Call container tool. Expect this to be run in a stateful docker
+        """Call container tool. Expect this to be run in a stateful docker
         with command line terminal.
         The official container tool would at least
         expect the following format:
@@ -827,7 +952,7 @@ class HarmonyContext(ConversationContext):
         ]
 
     async def cleanup_session(self, *args, **kwargs) -> None:
-        """Can be used as coro to used in __aexit__"""
+        """Can be used as coro to used in __aexit__."""
 
         async def cleanup_tool_session(tool_session):
             if not isinstance(tool_session, Tool):
@@ -843,88 +968,3 @@ class HarmonyContext(ConversationContext):
                 for tool in self.called_tools
             )
         )
-
-
-class StreamingHarmonyContext(HarmonyContext):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.last_output = None
-
-        self.parser = get_streamable_parser_for_assistant()
-        self.encoding = get_encoding()
-        self.last_tok = None
-        self.first_tok_of_message = True
-        self.last_content_delta = None
-
-    @property
-    def messages(self) -> list:
-        return self._messages
-
-    def append_output(self, output: RequestOutput) -> None:
-        # append_output is called for each output token in streaming case,
-        # so we only want to add the prompt tokens once for each message.
-        self.last_content_delta = None
-        if self.first_tok_of_message:
-            self._update_prefill_token_usage(output)
-        # Reset self.first_tok_of_message if needed:
-        # if the current token is the last one of the current message
-        # (finished=True), then the next token processed will mark the
-        # beginning of a new message
-        self.first_tok_of_message = output.finished
-        last_delta_text = ""
-        for tok in output.outputs[0].token_ids:
-            self.parser.process(tok)
-            last_delta_text += self.parser.last_content_delta or ""
-        if last_delta_text:
-            self.last_content_delta = last_delta_text
-        self._update_decode_token_usage(output)
-        if output.kv_transfer_params is not None:
-            self.kv_transfer_params = output.kv_transfer_params
-
-        # For streaming, update previous turn when message is complete
-        if output.finished:
-            self.all_turn_metrics.append(self.current_turn_metrics.copy())
-            self.current_turn_metrics.reset()
-        # Check if the current token is part of reasoning content
-        self._update_num_reasoning_tokens()
-        self.last_tok = tok
-        if len(self._messages) - self.num_init_messages < len(self.parser.messages):
-            self._messages.extend(
-                self.parser.messages[len(self._messages) - self.num_init_messages :]
-            )
-
-    def append_tool_output(self, output: list[Message]) -> None:
-        # Handle the case of tool output in direct message format
-        assert len(output) == 1, "Tool output should be a single message"
-        msg = output[0]
-        # Sometimes the recipient is not set for tool messages,
-        # so we set it to "assistant"
-        if msg.author.role == Role.TOOL and msg.recipient is None:
-            msg.recipient = "assistant"
-        toks = self.encoding.render(msg)
-        for tok in toks:
-            self.parser.process(tok)
-        self.last_tok = toks[-1]
-        # TODO: add tool_output messages to self._messages
-
-    def is_expecting_start(self) -> bool:
-        return self.parser.state == StreamState.EXPECT_START
-
-    def is_assistant_action_turn(self) -> bool:
-        return self.last_tok in self.encoding.stop_tokens_for_assistant_actions()
-
-    def render_for_completion(self) -> list[int]:
-        # now this list of tokens as next turn's starting tokens
-        # `<|start|>assistant`,
-        # we need to process them in parser.
-        rendered_tokens = super().render_for_completion()
-
-        last_n = -1
-        to_process = []
-        while rendered_tokens[last_n] != self.last_tok:
-            to_process.append(rendered_tokens[last_n])
-            last_n -= 1
-        for tok in reversed(to_process):
-            self.parser.process(tok)
-
-        return rendered_tokens
