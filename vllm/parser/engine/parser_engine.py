@@ -152,9 +152,12 @@ class ParserEngine(Parser):
             for token in parser_engine_config.turn_boundary_tokens
             if (token_id := vocab.get(token)) is not None
         )
-        self._reasoning_end_token_ids: frozenset[int] = (
-            self._derive_reasoning_end_token_ids(parser_engine_config, vocab)
-        )
+        self._reasoning_end_token_ids: frozenset[int]
+        self._reasoning_end_content_token_ids: frozenset[int]
+        (
+            self._reasoning_end_token_ids,
+            self._reasoning_end_content_token_ids,
+        ) = self._derive_reasoning_end_token_ids(parser_engine_config, vocab)
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -614,29 +617,44 @@ class ParserEngine(Parser):
     @staticmethod
     def _derive_reasoning_end_token_ids(
         config: ParserEngineConfig, vocab: dict[str, int]
-    ) -> frozenset[int]:
-        end_terminals: dict[str, ParserState] = {}
+    ) -> tuple[frozenset[int], frozenset[int]]:
+        end_terminals: dict[str, tuple[ParserState, bool]] = {}
         for (state, terminal), transition in config.transitions.items():
             if state != ParserState.REASONING:
                 continue
             if EventType.REASONING_END in transition.events:
-                end_terminals.setdefault(terminal, transition.next_state)
+                end_terminals.setdefault(
+                    terminal,
+                    (
+                        transition.next_state,
+                        EventType.TOOL_CALL_START in transition.events,
+                    ),
+                )
             elif transition.next_state != ParserState.REASONING:
-                return frozenset()
+                return frozenset(), frozenset()
 
         token_ids: set[int] = set()
-        for terminal, next_state in end_terminals.items():
+        content_token_ids: set[int] = set()
+        for terminal, (next_state, starts_content) in end_terminals.items():
             text = config.token_id_terminals.get(terminal)
             token_id = vocab.get(text) if text is not None else None
             if token_id is not None:
                 token_ids.add(token_id)
+                if starts_content:
+                    content_token_ids.add(token_id)
             elif next_state == ParserState.CONTENT:
-                return frozenset()
-        return frozenset(token_ids)
+                return frozenset(), frozenset()
+        return frozenset(token_ids), frozenset(content_token_ids)
 
     @property
     def reasoning_end_token_ids(self) -> frozenset[int]:
         return self._reasoning_end_token_ids
+
+    @property
+    def reasoning_end_content_token_ids(self) -> frozenset[int]:
+        """End-of-reasoning tokens that are themselves content, i.e. a
+        tool-call opener that terminates reasoning without a ``</think>``."""
+        return self._reasoning_end_content_token_ids
 
     def find_reasoning_end_offset(self, token_ids: Sequence[int]) -> int | None:
         end_ids = self._reasoning_end_token_ids

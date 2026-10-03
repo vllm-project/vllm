@@ -643,6 +643,7 @@ class TestImplicitReasoningEnd:
         # token-ID fast path; the implicit tool-call exit still goes through
         # the text lexer.
         assert thinking_parser.reasoning_end_token_ids == {_THINK_END_ID}
+        assert thinking_parser.reasoning_end_content_token_ids == frozenset()
         assert thinking_parser.find_reasoning_end_offset([7, _THINK_END_ID, 8]) == 1
         assert thinking_parser.find_reasoning_end_offset([7, 8]) == 2
 
