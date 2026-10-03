@@ -174,3 +174,27 @@ def test_sm100_bf16_512_priority_unchanged(num_heads):
 def test_sm100_576_priority_unchanged():
     order = _sparse_order("auto", 576, num_heads=32)
     assert order[0] == "FLASHMLA_SPARSE", order
+
+
+@pytest.mark.parametrize("head_size", [512, 576], ids=["nope512", "ds576"])
+def test_sm90_sparse_priority_prefers_flash_attn(head_size):
+    """FlashAttention sparse leads the SM90 sparse list for both head sizes.
+
+    NoPE-512 used to put FLASHINFER_MLA_SPARSE_SM90 first, which made
+    GLM-5.3-Flash default to a backend measured 36-70% slower than
+    FLASH_ATTN_MLA_SPARSE on H100 (#56564). The two head sizes must now
+    agree on the order.
+    """
+    order = _sparse_order("auto", head_size, capability=SM90)
+    assert order[0] == "FLASH_ATTN_MLA_SPARSE", order
+    assert "FLASHINFER_MLA_SPARSE_SM90" in order, order
+    assert order.index("FLASH_ATTN_MLA_SPARSE") < order.index(
+        "FLASHINFER_MLA_SPARSE_SM90"
+    ), order
+
+
+def test_sm90_sparse_priority_identical_across_head_sizes():
+    """head_size must not reorder the SM90 sparse list at all."""
+    assert _sparse_order("auto", 512, capability=SM90) == _sparse_order(
+        "auto", 576, capability=SM90
+    )
