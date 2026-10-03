@@ -867,6 +867,50 @@ should_export_rocm_smoke() {
         || "${TARGET}" == "smoke-test-rocm-ci" ]]
 }
 
+should_export_kernel_symbol_map() {
+    [[ "${VLLM_KERNEL_SYMBOL_MAP:-0}" == "1" ]] || return 1
+    case "${TARGET}" in
+        test-rocm-ci|test-rocm-ci-with-wheel|test-rocm-ci-with-artifacts|\
+        export-wheel-rocm|csrc-rocm-ci|smoke-test-rocm-ci|kernel-symbol-map-rocm)
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+export_kernel_symbol_map() {
+    should_export_kernel_symbol_map || return 0
+    echo "--- :world_map: Exporting ROCm kernel symbol map"
+    rm -rf ./kernel-symbol-map-rocm || return 1
+    docker buildx bake \
+        "${BAKE_ALLOW_ARGS[@]}" "${BAKE_FILES[@]}" \
+        --progress "${BUILDKIT_PROGRESS:-plain}" \
+        kernel-symbol-map-rocm || return 1
+    upload_kernel_symbol_map_if_present
+}
+
+export_kernel_symbol_map_from_cache() {
+    should_export_kernel_symbol_map || return 0
+    # A separate shell keeps setup failures fatal inside the optional export.
+    FORCE_BUILD=1 VLLM_KERNEL_SYMBOL_MAP=1 UPLOAD_ROCM_WHEEL_ARTIFACTS=0 \
+        CI_HCL_SOURCE="${CI_HCL_PATH}" VLLM_BAKE_FILE="${VLLM_BAKE_FILE}" \
+        BUILDER_NAME="${BUILDER_NAME}" \
+        bash "${BASH_SOURCE[0]}" kernel-symbol-map-rocm \
+        || echo "ROCm kernel symbol map export from cache failed; continuing without it" >&2
+}
+
+upload_kernel_symbol_map_if_present() {
+    should_export_kernel_symbol_map || return 0
+    local map_dir="./kernel-symbol-map-rocm"
+    local map_name="kernel_symbol_map.rocm.json.gz"
+    if [[ ! -s "${map_dir}/${map_name}" ]]; then
+        echo "ROCm kernel symbol map export is missing: ${map_dir}/${map_name}" >&2
+        return 1
+    fi
+    if [[ "${BUILDKITE:-false}" == "true" ]]; then
+        (cd "${map_dir}" && buildkite-agent artifact upload "${map_name}")
+    fi
+}
+
 verify_rocm_smoke_export() {
     local marker="./build/rocm-smoke-export/vllm-smoke-ok"
     local expected_smoke_id="${BUILDKITE_BUILD_ID:-local}"
@@ -1456,7 +1500,8 @@ maybe_skip_existing_image() {
         return 0
     fi
     if ! is_ci_base_target \
-        && { should_upload_wheel_artifacts || should_export_rocm_smoke; }; then
+        && { should_upload_wheel_artifacts || should_export_rocm_smoke \
+            || [[ "${TARGET}" == "kernel-symbol-map-rocm" ]]; }; then
         echo "Local-output targets always run for the current build"
         return 0
     fi
@@ -1504,11 +1549,13 @@ maybe_skip_existing_image() {
 
         echo "Commit image already exists: ${IMAGE_TAG}"
         echo "Skipping build"
+        export_kernel_symbol_map_from_cache
         exit 0
     fi
 
     echo "Image already exists: ${IMAGE_TAG}"
     echo "Skipping build"
+    export_kernel_symbol_map_from_cache
     exit 0
 }
 
@@ -1812,6 +1859,7 @@ EOF
 uses_rocm_csrc_cache() {
     case "${TARGET}" in
         csrc-rocm-ci \
+            | kernel-symbol-map-rocm \
             | test-rocm-ci \
             | test-rocm-ci-with-wheel \
             | test-rocm-ci-with-artifacts \
@@ -2256,6 +2304,15 @@ EOF
 EOF
         write_hcl_string_list_attr "  " "cache-to" "${rust_cache_to[@]}"
         cat <<EOF
+}
+
+target "kernel-symbol-map-rocm" {
+  cache-from = concat(
+    get_cache_from_rocm_csrc(),
+EOF
+        write_hcl_string_list "    " "${csrc_content_cache_from[@]}"
+        cat <<EOF
+  )
 }
 
 target "test-rocm-ci" {
@@ -2771,12 +2828,21 @@ main() {
         # from an earlier build or retry.
         rm -rf ./build/rocm-smoke-export
     fi
+    if [[ "${TARGET}" == "kernel-symbol-map-rocm" ]]; then
+        rm -rf ./kernel-symbol-map-rocm
+    fi
     seed_dependency_caches_if_needed
     run_bake
     verify_rocm_smoke_export
     promote_stable_ci_base_tag
     publish_ci_base_handoff_ref
     upload_wheel_artifacts_if_present
+    if [[ "${TARGET}" == "kernel-symbol-map-rocm" ]]; then
+        upload_kernel_symbol_map_if_present
+    else
+        export_kernel_symbol_map \
+            || echo "ROCm kernel symbol map export or upload failed; continuing without it" >&2
+    fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

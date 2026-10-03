@@ -25,6 +25,10 @@ variable "BUILDKITE_BUILD_ID" {
   default = ""
 }
 
+variable "VLLM_KERNEL_SYMBOL_MAP" {
+  default = "0"
+}
+
 variable "PARENT_COMMIT" {
   default = ""
 }
@@ -283,6 +287,8 @@ target "_ci-rocm" {
     CI_BASE_IMAGE         = CI_BASE_IMAGE
     ROCM_SMOKE_ID         = BUILDKITE_BUILD_ID
     max_jobs              = CI_MAX_JOBS
+    VLLM_KERNEL_SYMBOL_MAP = VLLM_KERNEL_SYMBOL_MAP
+    buildkite_commit      = BUILDKITE_COMMIT
   }
 }
 
@@ -316,6 +322,13 @@ target "csrc-rocm-ci" {
   cache-from = get_cache_from_rocm_csrc()
   cache-to   = get_cache_to_rocm_csrc()
   output     = ["type=cacheonly"]
+}
+
+target "kernel-symbol-map-rocm" {
+  inherits   = ["_common-rocm", "_ci-rocm"]
+  target     = "kernel-symbol-map-rocm"
+  cache-from = get_cache_from_rocm_csrc()
+  output     = ["type=local,dest=./kernel-symbol-map-rocm"]
 }
 
 # Cache-only target for the Rust frontend build stage. Final-image cache

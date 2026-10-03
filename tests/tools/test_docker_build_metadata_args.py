@@ -6,6 +6,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
 ROCM_CI_BAKE = REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh"
@@ -362,3 +364,169 @@ def test_rocm_git_fetch_disables_automatic_maintenance(tmp_path: Path) -> None:
         "origin",
         "HEAD",
     ]
+
+
+def run_rocm_map_build(
+    tmp_path: Path, *, target: str = "test-rocm-ci", **settings: str
+) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+    # Exercise real orchestration/errexit; replace expensive build preparation
+    # and external services. Cached exports launch another copy of this harness.
+    harness = tmp_path / "bake.sh"
+    harness.write_text(
+        r"""
+source "$1"
+for fn in configure_ci_base_write_scope print_header validate_inputs load_ci_hcl \
+    init_bake_files compute_ci_base_hash_if_needed configure_ci_base_image_refs \
+    prepare_git_cache_metadata prepare_ci_build_context configure_custom_rocm_stages \
+    extract_dependency_pins write_rocm_build_arg_override \
+    compute_dependency_cache_keys \
+    write_ci_base_label_override compute_rocm_csrc_content_hash_if_needed \
+    compute_rocm_rust_content_hash_if_needed write_rocm_cache_override \
+    write_build_context_override resolve_ci_base_dependency_targets print_bake_config \
+    seed_dependency_caches_if_needed promote_stable_ci_base_tag \
+    publish_ci_base_handoff_ref
+do
+    eval "$fn() { :; }"
+done
+init_config() {
+    TARGET="$1"
+    BAKE_TARGETS=("$TARGET")
+    BAKE_ALLOW_ARGS=(--allow 'fs.read=/owned context')
+    BAKE_FILES=(-f 'resolved args and caches.hcl' -f 'owned context.hcl')
+    CI_HCL_PATH=ci.hcl VLLM_BAKE_FILE=bake.hcl BUILDER_NAME=builder
+}
+setup_builder() {
+    if [[ "$TARGET" == kernel-symbol-map-rocm && "$FAILURE" == setup ]]; then
+        false
+    fi
+    echo setup >> events
+}
+remote_image_exists() { [[ "$CACHED" == 1 ]]; }
+get_remote_image_label() { echo "$BUILDKITE_COMMIT"; }
+bash() { command bash "$0" "$@"; }
+docker() {
+    printf '%q ' "$@" >> calls
+    printf '\n' >> calls
+    if [[ "${*: -1}" == kernel-symbol-map-rocm ]]; then
+        [[ ! -e kernel-symbol-map-rocm ]] || return 90
+        [[ "$FAILURE" != export ]] || return 41
+        [[ "$FAILURE" != missing ]] || return 0
+        mkdir kernel-symbol-map-rocm
+        if [[ "$FAILURE" == empty ]]; then
+            touch kernel-symbol-map-rocm/kernel_symbol_map.rocm.json.gz
+        else
+            echo current > kernel-symbol-map-rocm/kernel_symbol_map.rocm.json.gz
+        fi
+        [[ "$FAILURE" != partial ]] || return 42
+    else
+        [[ "$FAILURE" != primary ]] || return 43
+    fi
+}
+buildkite-agent() {
+    printf '%q ' "$@" >> "$TEST_ROOT/calls"
+    printf '\n' >> "$TEST_ROOT/calls"
+    [[ "$(cat kernel_symbol_map.rocm.json.gz)" == current ]] || return 91
+    [[ "$FAILURE" != upload ]] || return 44
+}
+main "$2"
+"""
+    )
+    export = tmp_path / "kernel-symbol-map-rocm"
+    export.mkdir()
+    (export / "kernel_symbol_map.rocm.json.gz").write_text("stale")
+    (tmp_path / "calls").touch()
+    env = {
+        "PATH": os.environ["PATH"],
+        "TEST_ROOT": str(tmp_path),
+        "VLLM_KERNEL_SYMBOL_MAP": "1",
+        "BUILDKITE": "true",
+        "BUILDKITE_COMMIT": "current-commit",
+        "IMAGE_TAG": "test:current",
+        "CACHED": "0",
+        "FAILURE": "",
+        **settings,
+    }
+    result = subprocess.run(
+        ["bash", str(harness), str(ROCM_CI_BAKE), target],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return result, [
+        shlex.split(line) for line in (tmp_path / "calls").read_text().splitlines()
+    ]
+
+
+@pytest.mark.parametrize("cached", ["0", "1"])
+@pytest.mark.parametrize(
+    "failure", ["", "export", "partial", "missing", "empty", "upload"]
+)
+def test_rocm_optional_map_failures_preserve_image_success(
+    tmp_path: Path, cached: str, failure: str
+) -> None:
+    result, calls = run_rocm_map_build(tmp_path, CACHED=cached, FAILURE=failure)
+    assert result.returncode == 0, result.stderr
+    targets = [call[-1] for call in calls if call[:2] == ["buildx", "bake"]]
+    assert targets == (
+        ["test-rocm-ci", "kernel-symbol-map-rocm"]
+        if cached == "0"
+        else ["kernel-symbol-map-rocm"]
+    )
+    if cached == "0":
+        assert calls[0][:-1] == calls[1][:-1]
+    uploads = [call for call in calls if call[:2] == ["artifact", "upload"]]
+    assert uploads == (
+        [["artifact", "upload", "kernel_symbol_map.rocm.json.gz"]]
+        if failure in ("", "upload")
+        else []
+    )
+    assert ("continuing without it" in result.stderr) == bool(failure)
+
+
+def test_rocm_cached_map_setup_stops_on_failure_without_failing_image(
+    tmp_path: Path,
+) -> None:
+    result, calls = run_rocm_map_build(tmp_path, CACHED="1", FAILURE="setup")
+    assert result.returncode == 0, result.stderr
+    assert "continuing without it" in result.stderr
+    assert not calls
+    assert not (tmp_path / "events").exists()
+
+
+@pytest.mark.parametrize(
+    ("target", "failure", "expected_status"),
+    [
+        ("test-rocm-ci", "primary", 43),
+        ("kernel-symbol-map-rocm", "export", 41),
+        ("kernel-symbol-map-rocm", "upload", 44),
+        ("smoke-test-rocm-ci", "", 1),
+        ("export-wheel-rocm", "", 1),
+    ],
+)
+def test_rocm_required_build_failures_remain_fatal(
+    tmp_path: Path, target: str, failure: str, expected_status: int
+) -> None:
+    result, calls = run_rocm_map_build(tmp_path, target=target, FAILURE=failure)
+    assert result.returncode == expected_status, result.stderr
+    assert [call[-1] for call in calls if call[:2] == ["buildx", "bake"]] == [target]
+    assert "continuing without it" not in result.stderr
+
+
+@pytest.mark.parametrize("cached", ["0", "1"])
+@pytest.mark.parametrize("setting", ["VLLM_KERNEL_SYMBOL_MAP", "BAKE_PRINT_ONLY"])
+def test_rocm_disabled_or_print_only_build_skips_map_export(
+    tmp_path: Path, cached: str, setting: str
+) -> None:
+    settings = {setting: "0" if setting == "VLLM_KERNEL_SYMBOL_MAP" else "1"}
+    result, calls = run_rocm_map_build(tmp_path, CACHED=cached, **settings)
+    assert result.returncode == 0, result.stderr
+    expected = (
+        ["test-rocm-ci"]
+        if cached == "0" and setting == "VLLM_KERNEL_SYMBOL_MAP"
+        else []
+    )
+    assert [call[-1] for call in calls] == expected
+    assert (
+        tmp_path / "kernel-symbol-map-rocm/kernel_symbol_map.rocm.json.gz"
+    ).read_text() == "stale"

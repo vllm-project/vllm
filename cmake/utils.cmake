@@ -113,11 +113,14 @@ function (vllm_finalize_hipify_target)
   list(REMOVE_DUPLICATES ALL_BYPRODUCTS)
 
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+  set(HIPIFY_MANIFEST ${CMAKE_CURRENT_BINARY_DIR}/hipify-source-map.json)
   add_custom_target(
     hipify_all
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${ALL_SRCS}
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} --manifest ${HIPIFY_MANIFEST} ${ALL_SRCS}
     DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${ALL_SRCS}
-    BYPRODUCTS ${ALL_BYPRODUCTS}
+    BYPRODUCTS ${ALL_BYPRODUCTS} ${HIPIFY_MANIFEST}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    VERBATIM
     COMMENT "Running hipify on all extension source files.")
 endfunction()
 
