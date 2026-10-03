@@ -352,7 +352,11 @@ def rocm_aiter_fused_experts(
         intermediate_pad = 0
         assert moe_config.hidden_dim_unpadded is not None
         assert moe_config.intermediate_size_per_partition_unpadded is not None
-        hidden_pad = hidden_states.shape[1] - moe_config.hidden_dim_unpadded
+        hidden_size = hidden_states.shape[1]
+        if hidden_states.dtype == torch.float4_e2m1fn_x2:
+            # Pre-quantized MXFP4 from MoRI dispatch, packed two per byte.
+            hidden_size *= 2
+        hidden_pad = hidden_size - moe_config.hidden_dim_unpadded
         intermediate_pad = (
             (
                 moe_config.intermediate_size_per_partition
@@ -448,7 +452,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # When paired with MoRI, the prepare/finalize handles FP8
+        # When paired with MoRI, the prepare/finalize handles FP8 or MXFP4
         # quantization during dispatch to reduce network traffic,
         # so we should not defer input quantization.
         # Otherwise, AITER fused MoE kernels handle input quantization
@@ -539,7 +543,10 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # Workspaces are managed internally by AITER.
         workspace1 = (0,)
         workspace2 = (0,)
-        output = (M, K)
+        # MoRI dispatches MXFP4 activations packed two per byte, so K is
+        # half the hidden size there.
+        packed_fp4_input = self.moe_config.use_mori_fp4_dispatch(self.quant_config)
+        output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)
 
     def apply(

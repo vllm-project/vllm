@@ -5,6 +5,7 @@ import mori
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.platforms import current_platform
@@ -21,12 +22,15 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         max_tokens_per_rank: int,
         num_dispatchers: int,
         use_fp8_dispatch: bool = False,
+        use_fp4_dispatch: bool = False,
     ):
         super().__init__()
+        assert not (use_fp8_dispatch and use_fp4_dispatch)
         self.mori_op = mori_op
         self.num_dispatchers_ = num_dispatchers
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
+        self.use_fp4_dispatch = use_fp4_dispatch
         self._dispatch_topk_ids: torch.Tensor | None = None
 
     @property
@@ -73,7 +77,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         )
         scale = None
         # When defer_input_quant is True, the expert kernel handles
-        # quantization internally, so skip FP8 dispatch quantization.
+        # quantization internally, so skip dispatch quantization.
         if self.use_fp8_dispatch and not defer_input_quant:
             from aiter import QuantType, get_hip_quant
 
@@ -92,6 +96,14 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 )
                 # mori expects one scale slot per token; broadcast.
                 scale = scale.expand(a1.shape[0], 1).contiguous()
+        elif self.use_fp4_dispatch and not defer_input_quant:
+            from aiter import QuantType, get_hip_quant
+
+            # Packed MXFP4 [M, K // 2] with e8m0 scales [M, K // 32]. The
+            # scales stay unshuffled: AITER fused_moe sorts them itself
+            # when it receives pre-quantized FP4 input.
+            quant_func = get_hip_quant(QuantType.per_1x32)
+            a1, scale = quant_func(a1, shuffle=False)
 
         # mori's combine() reduces over this rank's own [num_tokens, topk]
         # routing. The modular kernel rebinds topk_ids to the dispatched ids
@@ -106,6 +118,24 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             dispatch_ids,
             dispatch_recv_token_num,
         ) = self.mori_op.dispatch(a1, topk_weights, scale, topk_ids)
+
+        # Each source rank sends a token at most once, so the valid prefix is
+        # bounded by world_size * max tokens per DP rank. Trimming to it keeps
+        # the experts' GEMM shape (and AITER's tile choice) tied to the batch
+        # rather than to mori's worst-case receive buffer.
+        dp_metadata = (
+            get_forward_context().dp_metadata
+            if is_forward_context_available()
+            else None
+        )
+        if dp_metadata is not None:
+            max_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max())
+            rows = min(self.num_dispatchers_ * max_tokens, dispatch_a1.shape[0])
+            dispatch_a1 = dispatch_a1[:rows]
+            dispatch_weights = dispatch_weights[:rows]
+            dispatch_ids = dispatch_ids[:rows]
+            if dispatch_scale is not None:
+                dispatch_scale = dispatch_scale[:rows]
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=dispatch_recv_token_num, expert_num_tokens_cpu=None
