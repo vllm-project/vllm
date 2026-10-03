@@ -328,32 +328,88 @@ def test_reentered_tag(free_x_early):
 
 
 @pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
+@pytest.mark.parametrize("runner", ["v1", "v2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
-def test_runtime_state_survives_sleep(level):
-    """Runtime state is offloaded at both levels and restored by the first
-    selective wake; a nested kv_cache pool keeps its own tag."""
+def test_kv_init_placement_survives_sleep(level, runner, monkeypatch):
+    """KV-init state lands in runtime, KV in kv_cache, and connector memory
+    outside every tag; runtime and KV survive sleep at both levels."""
+    from functools import partial
+    from types import SimpleNamespace as NS
+
+    import vllm.v1.worker.gpu.kv_connector as v2_kv_connector
+    import vllm.v1.worker.gpu_model_runner as v1_runner
+    import vllm.v1.worker.gpu_worker as gpu_worker
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
+
+    numel = 1 << 20
+
+    class Connector:
+        def get_mem_pool_context(self):
+            return None
+
+        def register_kv_caches(self, kv_caches):
+            self.kv_caches = kv_caches
+            self.buffer = torch.ones(numel, device=DEVICE_TYPE)
+
+        def set_host_xfer_buffer_ops(self, copy_op):
+            pass
+
+    connector = Connector()
+    for module in (gpu_worker, v1_runner, v2_kv_connector):
+        monkeypatch.setattr(module, "has_kv_transfer_group", lambda: True)
+        monkeypatch.setattr(module, "get_kv_transfer_group", lambda: connector)
+    monkeypatch.setattr(gpu_worker, "ensure_kv_transfer_initialized", lambda *a: None)
+
+    def initialize_kv_cache(kv_cache_config, kv_cache_allocation_context):
+        model_runner.block_table = torch.arange(numel, device=DEVICE_TYPE)
+        with kv_cache_allocation_context:
+            model_runner.kv = torch.zeros(numel, device=DEVICE_TYPE)
+        return {"layer": model_runner.kv}
+
+    runner_cls = {"v1": v1_runner.GPUModelRunner, "v2": GPUModelRunnerV2}[runner]
+    model_runner = NS(vllm_config=None, initialize_kv_cache=initialize_kv_cache)
+    model_runner.init_kv_connector = partial(runner_cls.init_kv_connector, model_runner)
+    model_config = NS(enable_cumem_allocator=True, enable_sleep_mode=True)
+    worker = NS(
+        cache_config=NS(num_gpu_blocks=None),
+        vllm_config=NS(model_config=model_config),
+        model_runner=model_runner,
+    )
+    worker._maybe_get_memory_pool_context = partial(
+        gpu_worker.Worker._maybe_get_memory_pool_context, worker
+    )
+    kv_cache_config = NS(
+        num_blocks=1, kv_cache_layout=None, needs_kv_cache_zeroing=False
+    )
+    gpu_worker.Worker.initialize_from_config(worker, kv_cache_config)
 
     allocator = get_mem_allocator_instance()
-    with allocator.use_memory_pool("runtime"):
-        state = torch.arange(1 << 20, device=DEVICE_TYPE)
-        with allocator.use_memory_pool("kv_cache"):
-            kv = torch.zeros(1 << 20, device=DEVICE_TYPE)
-    assert {d.tag for d in allocator.pointer_to_data.values()} == {
-        "runtime",
-        "kv_cache",
-    }
+
+    def tag_of(tensor):
+        ptr = tensor.data_ptr()
+        for base, data in allocator.pointer_to_data.items():
+            if base <= ptr < base + data.handle[1]:
+                return data.tag
+        return None
+
+    assert tag_of(model_runner.block_table) == "runtime"
+    assert tag_of(model_runner.kv) == "kv_cache"
+    assert connector.kv_caches["layer"] is model_runner.kv
+    assert tag_of(connector.buffer) is None
 
     backend = CuMemBackend()
     backend.suspend(level=level)
     assert mapped_usage(allocator) == 0
 
     backend.resume(tags=["weights"])
-    assert torch.equal(state, torch.arange(1 << 20, device=DEVICE_TYPE))
+    assert torch.equal(
+        model_runner.block_table, torch.arange(numel, device=DEVICE_TYPE)
+    )
     backend.resume(tags=["kv_cache"])
-    kv.fill_(1)
-    assert int(kv.sum()) == kv.numel()
+    model_runner.kv.fill_(1)
+    assert int(model_runner.kv.sum()) == numel
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")

@@ -96,8 +96,8 @@ class CPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
         kv_cache_allocation_context: AbstractContextManager | None = None,
-    ) -> None:
-        super().initialize_kv_cache(
+    ) -> dict[str, torch.Tensor]:
+        kv_caches = super().initialize_kv_cache(
             kv_cache_config,
             is_profiling,
             kv_cache_allocation_context=kv_cache_allocation_context,
@@ -108,6 +108,7 @@ class CPUModelRunner(GPUModelRunner):
                 logger.info("EAGLE drafter KV cache initialized for CPU backend")
             elif self.speculative_config.uses_draft_model():
                 logger.info("Draft model KV cache initialized for CPU backend")
+        return kv_caches
 
     def _init_device_properties(self) -> None:
         pass
