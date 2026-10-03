@@ -1155,39 +1155,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if outputs is not None:
                 self.postprocess_sampled(**outputs)
 
-    def warmup_pp_decode_update(self, num_reqs: int = 1) -> None:
-        """JIT-compile kernels behind ``update_pp_decode_requests``.
-
-        This path only runs on real steps, so non-last PP ranks otherwise hit
-        its first Triton compilation while a sampled-token collective is in
-        flight. An all -1 mapping exercises the serving specialization without
-        updating request state.
-        """
-        assert self.pp_handler is not None
-        idx_mapping = torch.full((num_reqs,), -1, dtype=torch.int32, device=self.device)
-        num_sampled = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
-        post_update(
-            idx_mapping,
-            self.req_states.num_computed_tokens.gpu,
-            self.req_states.last_sampled_tokens,
-            None,
-            torch.zeros(
-                (num_reqs, self.pp_handler.max_sample_len),
-                dtype=torch.int64,
-                device=self.device,
-            ),
-            num_sampled,
-            torch.zeros(num_reqs, dtype=torch.int32, device=self.device),
-            None,
-            self.req_states.all_token_ids.gpu,
-            self.req_states.total_len.gpu,
-        )
-        self.model_state.warmup_postprocess_state(
-            idx_mapping,
-            num_sampled,
-            self.req_states.num_computed_tokens.gpu,
-        )
-
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
             assert new_req_data.prefill_token_ids is not None

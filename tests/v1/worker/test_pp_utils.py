@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.v1.worker.gpu import model_runner, pp_utils
+from vllm.v1.worker.gpu import model_runner, pp_utils, warmup
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 
 
@@ -377,7 +377,7 @@ def test_filtered_receive_mapping_keeps_serving_int32_specialization():
 
 def test_warmup_pp_decode_update_matches_serving_specialization(monkeypatch):
     calls = []
-    monkeypatch.setattr(model_runner, "post_update", lambda *args: calls.append(args))
+    monkeypatch.setattr(warmup, "post_update", lambda *args: calls.append(args))
 
     runner = object.__new__(model_runner.GPUModelRunner)
     runner.device = torch.device("cpu")
@@ -385,7 +385,7 @@ def test_warmup_pp_decode_update_matches_serving_specialization(monkeypatch):
     runner.req_states = Mock()
     runner.model_state = Mock()
 
-    runner.warmup_pp_decode_update(num_reqs=2)
+    warmup._warmup_pp_decode_update(runner, num_reqs=2)
 
     assert len(calls) == 1
     args = calls[0]
