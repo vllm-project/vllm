@@ -11,8 +11,9 @@ ROCm port of ``nvidia/dspark.py``. Follows the same nvidia->amd recipe used for
     tilelang / triton / torch) instead of calling the tilelang kernels directly,
     and gate the trailing ``mhc_post`` on ``use_fused_mhc`` (True when AITER
     or TileLang fused MHC is available; False only on the torch fallback);
-  * drop the mega-MoE weight path (``make_deepseek_v4_expert_params_mapping`` /
-    ``use_mega_moe`` / ``finalize_mega_moe_weights`` do not exist in amd/model.py).
+  * drop the mega-MoE weight path (``make_deepseek_v4_expert_params_mapping``,
+    ``use_native_mega_moe`` and ``finalize_mega_moe_weights`` do not exist in
+    amd/model.py).
 
 Everything else — the semi-autoregressive drafting hooks, the Markov head, the
 sliding-window context-KV insert, and the checkpoint ``mtp.*`` weight remap — is
