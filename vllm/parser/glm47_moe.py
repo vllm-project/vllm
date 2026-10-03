@@ -28,6 +28,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.utils import resolve_enable_thinking
 
 logger = init_logger(__name__)
 
@@ -209,24 +210,19 @@ class Glm47MoeParser(ParserEngine):
         tools: list[Tool] | None = None,
         **kwargs,
     ) -> None:
-        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        thinking = chat_kwargs.get("thinking", None)
-        enable_thinking = chat_kwargs.get("enable_thinking", None)
-        if (thinking is False or enable_thinking is False) and _glm53_always_thinks(
-            tokenizer
-        ):
+        chat_kwargs = dict(kwargs.get("chat_template_kwargs", {}) or {})
+        if (
+            chat_kwargs.get("thinking") is False
+            or chat_kwargs.get("enable_thinking") is False
+        ) and _glm53_always_thinks(tokenizer):
             logger.warning_once(
                 "Ignoring enable_thinking/thinking: the GLM-5.3 chat template "
                 "has no thinking switch, so reasoning is always on and "
                 "disabling extraction would leak it into the content."
             )
-            thinking = None
-            enable_thinking = None
-        self.thinking_enabled = (
-            True
-            if thinking is None and enable_thinking is None
-            else bool(thinking) or bool(enable_thinking)
-        )
+            chat_kwargs.pop("thinking", None)
+            chat_kwargs.pop("enable_thinking", None)
+        self.thinking_enabled = resolve_enable_thinking(chat_kwargs, default=True)
         kwargs.setdefault(
             "parser_engine_config",
             glm47_moe_config(thinking=self.thinking_enabled),
