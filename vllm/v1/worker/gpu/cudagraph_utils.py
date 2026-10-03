@@ -397,9 +397,7 @@ class CudaGraphManager:
 
         Elastic EP reallocates the MoE workspace when it grows, which leaves
         every captured graph holding a stale data pointer. `_capture_descs` is
-        kept, so `needs_capture()` still reports the work to redo. PIECEWISE
-        graphs live in the compiled model's wrappers and are dropped too, so no
-        graph from the previous capture outlives this call.
+        kept, so `needs_capture()` still reports the work to redo.
         """
         self.graphs.clear()
         self._graphs_captured = False

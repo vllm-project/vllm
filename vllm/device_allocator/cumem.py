@@ -448,14 +448,8 @@ class CuMemAllocator:
             self.current_tag = old_tag
 
     def release_cudagraph_pool(self) -> None:
-        """Retire the graph pool once every graph captured into it is gone.
-
-        Holding the pool keeps its freed blocks cached, and they are reused
-        only on the stream that freed them, while each capture runs on a new
-        stream: a recapture into the same pool would grow it. Dropping the pool
-        unmaps its segments through the free callback; the next capture starts
-        a fresh one.
-        """
+        """Drop the graph pool once no graph uses it: kept, its freed blocks are
+        reused only on their own stream, and every capture uses a new one."""
         entries = self.allocator_and_pools.get("cudagraph")
         if not entries:
             return

@@ -257,13 +257,8 @@ def _custom_ar_active(worker) -> bool:
 @create_new_process_for_each_test()
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
 def test_sleep_cudagraph_pool(monkeypatch, runner, mode, breakable, tp, offload):
-    """With sleep_mode_offload_cudagraph, each capture site of either runner
-    (FULL, PIECEWISE CUDAGraphWrapper, BreakableCUDAGraphWrapper) captures into
-    the cuMem graph pool, which stays exact across both sleep levels, and NCCL
-    graph registration defaults off; elastic EP's release and recapture empties
-    the pool and refills it. TP=2 forces the legacy custom allreduce, which
-    must not IPC-register cuMem graph buffers. Without the option, nothing
-    changes: no cuMem graph memory and NCCL_GRAPH_REGISTER untouched."""
+    """Each runner's capture sites use the pool, exact across sleeps; elastic
+    recapture refills it; TP=2 needs unregistered custom AR; off changes nothing."""
     for name, value in [
         ("VLLM_USE_V2_MODEL_RUNNER", "1" if runner == "v2" else "0"),
         ("VLLM_USE_BREAKABLE_CUDAGRAPH", "1" if breakable else "0"),

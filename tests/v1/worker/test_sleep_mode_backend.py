@@ -159,9 +159,8 @@ class DummyBackend(SleepModeBackend):
 def test_cumem_cudagraph_pool_startup_checks(
     monkeypatch, blockers, env, expected, warns
 ):
-    """An active cuMem graph pool defaults NCCL graph registration off, which
-    would pin it through sleep; an explicit value wins with a warning. An
-    opted-in but inactive pool says why; NCCL_GRAPH_REGISTER stays untouched."""
+    """Active: NCCL_GRAPH_REGISTER defaults to 0, an explicit value wins with a
+    warning. Inactive: untouched; opted in but inactive: one warning."""
     import vllm.config.vllm as config_module
 
     warnings: list[tuple] = []

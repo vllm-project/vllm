@@ -429,10 +429,8 @@ def test_cumem_with_cudagraph():
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
 def test_cudagraph_pool_sleep_and_release(level):
-    """Captures go to the cuMem graph pool (not under profiling or with the
-    policy off), which any wake restores in place with its contents at both
-    levels. Releasing it is refused while asleep or while a graph uses it;
-    afterwards a recapture on a new stream starts from an empty pool."""
+    """Routing, backup at both sleep levels, and release: refused while asleep
+    or in use, then a recapture on a new stream starts from an empty pool."""
     from contextlib import nullcontext
     from types import SimpleNamespace
 

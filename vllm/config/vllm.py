@@ -699,9 +699,8 @@ class VllmConfig:
 
     @property
     def use_cumem_cudagraph_pool(self) -> bool:
-        """Whether CUDA graphs are captured into the cuMem pool that sleep
-        mode offloads: opted in with ``sleep_mode_offload_cudagraph``, with the
-        cumem sleep backend, CUDA graphs on and CUDA."""
+        """Capture CUDA graphs into the cuMem pool that sleep offloads: opted in,
+        with sleep mode, the cumem backend, CUDA graphs and CUDA."""
         return self._cumem_cudagraph_pool_blockers() == []
 
     def _cumem_cudagraph_pool_blockers(self) -> list[str] | None:
@@ -1288,10 +1287,8 @@ class VllmConfig:
         )
 
     def _verify_cumem_cudagraph_pool(self) -> None:
-        """Say why an opted-in cuMem graph pool is inactive. When it is active,
-        default NCCL graph registration off: it would pin the pool through
-        sleep and keep stale registrations after wake remaps it, causing hangs
-        or wrong results. An explicit value wins, with a warning."""
+        """Warn when an opted-in pool is inactive; when active, default NCCL graph
+        registration off, since it would pin the pool through sleep."""
         blockers = self._cumem_cudagraph_pool_blockers()
         if blockers is None:
             return

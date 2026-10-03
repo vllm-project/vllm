@@ -54,9 +54,7 @@ def use_cudagraph_pool(
 
 
 def release_cudagraph_pool(vllm_config: VllmConfig) -> None:
-    """Return the cuMem graph pool's memory once all its graphs are destroyed,
-    so that a recapture starts from an empty pool. Call it wherever graphs are
-    released for recapture; without the cuMem pool, destroying the graphs is
-    enough."""
+    """Free the cuMem graph pool once its graphs are destroyed, so that a
+    recapture starts from an empty pool."""
     if vllm_config.use_cumem_cudagraph_pool:
         _cumem_allocator().release_cudagraph_pool()
