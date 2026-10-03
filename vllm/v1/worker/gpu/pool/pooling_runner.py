@@ -18,7 +18,14 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.states import RequestState
 
 _SUPPORTED_TASKS: frozenset[PoolingTask] = frozenset(
-    {"embed", "classify", "token_embed", "token_classify", "embed&token_classify"}
+    {
+        "embed",
+        "classify",
+        "token_embed",
+        "token_classify",
+        "embed&token_classify",
+        "plugin",
+    }
 )
 
 
