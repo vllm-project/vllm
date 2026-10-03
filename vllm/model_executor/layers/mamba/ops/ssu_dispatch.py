@@ -8,15 +8,19 @@ the Triton, FlashInfer, or CPU backend based on the configured
 the backend defaults to 'cpu'.
 """
 
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import cache
 
 import torch
 
+import vllm.envs as envs
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
@@ -239,6 +243,83 @@ def commit_replayssm_ring_trackers(
     )
 
 
+class StochasticRoundingSeedPrefetcher:
+    """Draws a forward pass's stochastic-rounding seeds ahead, on a side stream.
+
+    Stock FlashInfer SSU draws one seed per Mamba layer per forward with
+    `torch.randint(0, 2**32, (1,))` right before the SSU kernel: a small,
+    non-overlapped kernel on the critical path of every Mamba layer.
+
+    Here the first SSU call of a forward pass records `_fork_event` on the
+    current stream, makes a dedicated side stream wait on it, and issues the
+    same `num_layers` randint calls (same shape, dtype, device and order) on
+    the side stream, recording `_events[k]` after the k-th. The k-th SSU call
+    of the forward makes the current stream wait on `_events[k]` and uses
+    seed k. The CUDA generator's (seed, offset) is advanced on the host at
+    each call, in call order, and no other user of the generator runs between
+    the Mamba layers of a forward, so seed k has exactly the value of the
+    stock k-th draw.
+
+    Ordering uses CUDA events only (graph edges under CUDA graph capture).
+    The seed tensors are allocated on the side stream; their blocks can only
+    be reused by a later side-stream allocation, i.e. by the next forward's
+    draws, which run after that forward's `_fork_event`, recorded on the
+    current stream after every consumer of the previous seeds was enqueued.
+
+    Forward passes are told apart by their ForwardContext. SSU calls beyond
+    `num_layers` in one forward, calls outside a forward context and calls
+    under DBO micro-batching return None, and the caller draws inline as
+    stock (the values stay identical). Every forward that calls the SSU must
+    call it at least `num_layers` times, otherwise the side stream is left
+    unjoined (an error under CUDA graph capture).
+    """
+
+    def __init__(self, num_layers: int):
+        assert num_layers > 0
+        self.num_layers = num_layers
+        self._stream: torch.cuda.Stream | None = None
+        self._fork_event: torch.cuda.Event | None = None
+        self._events: list[torch.cuda.Event] = []
+        self._seeds: list[torch.Tensor] = []
+        self._forward: weakref.ref | None = None
+        self._next = 0
+
+    def _draw(self, device: torch.device) -> None:
+        if self._stream is None:
+            self._stream = torch.cuda.Stream(device=device)
+            self._fork_event = torch.cuda.Event()
+            self._events = [torch.cuda.Event() for _ in range(self.num_layers)]
+        assert self._fork_event is not None
+        side = self._stream
+        self._fork_event.record(current_stream())
+        side.wait_event(self._fork_event)
+        seeds = []
+        with torch.cuda.stream(side):
+            for event in self._events:
+                seeds.append(torch.randint(0, 2**32, (1,), device=device))
+                event.record(side)
+        self._seeds = seeds
+
+    def next_seed(self, device: torch.device) -> torch.Tensor | None:
+        if not is_forward_context_available():
+            return None
+        from vllm.v1.worker.ubatching import dbo_enabled
+
+        if dbo_enabled():
+            return None
+        forward_context = get_forward_context()
+        if self._forward is None or self._forward() is not forward_context:
+            self._forward = weakref.ref(forward_context)
+            self._next = 0
+            self._draw(device)
+        k = self._next
+        if k >= self.num_layers:
+            return None
+        self._next = k + 1
+        current_stream().wait_event(self._events[k])
+        return self._seeds[k]
+
+
 class MambaSSUBackend(ABC):
     """Abstract base class for Mamba SSU backends."""
 
@@ -345,6 +426,9 @@ class FlashInferSSUBackend(MambaSSUBackend):
             ) from e
         logger.info_once("Using FlashInfer Mamba SSU algorithm: %s", self._algorithm)
         self._kernel = _fi_ssu
+        # Set by initialize_mamba_ssu_backend when VLLM_MAMBA_SR_SEED_PREFETCH
+        # is enabled.
+        self.sr_seed_prefetcher: StochasticRoundingSeedPrefetcher | None = None
 
     @property
     def _algorithm(self) -> MambaSSUAlgorithm:
@@ -374,11 +458,12 @@ class FlashInferSSUBackend(MambaSSUBackend):
         cu_seqlens: torch.Tensor | None = None,
         is_blackwell: bool = False,
     ) -> None:
-        rand_seed = (
-            torch.randint(0, 2**32, (1,), device=state.device)
-            if self._mamba_config.enable_stochastic_rounding
-            else None
-        )
+        rand_seed = None
+        if self._mamba_config.enable_stochastic_rounding:
+            if self.sr_seed_prefetcher is not None:
+                rand_seed = self.sr_seed_prefetcher.next_seed(state.device)
+            if rand_seed is None:
+                rand_seed = torch.randint(0, 2**32, (1,), device=state.device)
         self._kernel(
             state,
             x,
@@ -590,6 +675,54 @@ def selective_state_update_replayssm_flashinfer(
     return result
 
 
+def _maybe_make_sr_seed_prefetcher(
+    mamba_config: MambaConfig,
+    kv_cache_config: KVCacheConfig,
+    use_replayssm: bool,
+) -> StochasticRoundingSeedPrefetcher | None:
+    """Build the seed prefetcher for VLLM_MAMBA_SR_SEED_PREFETCH, if usable.
+
+    The number of seeds per forward is the number of Mamba-2 layers in the KV
+    cache config: each MambaMixer2 decode makes one SSU call per forward.
+    """
+    if not envs.VLLM_MAMBA_SR_SEED_PREFETCH:
+        return None
+    from vllm.platforms import current_platform
+
+    if (
+        not mamba_config.enable_stochastic_rounding
+        or use_replayssm
+        or not current_platform.is_cuda()
+    ):
+        logger.info_once(
+            "VLLM_MAMBA_SR_SEED_PREFETCH has no effect: it needs CUDA and "
+            "Mamba cache stochastic rounding, without ReplaySSM."
+        )
+        return None
+    num_layers = 0
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        if not isinstance(spec, MambaSpec):
+            continue
+        if spec.mamba_type == MambaAttentionBackendEnum.MAMBA1:
+            # Mamba-1 layers also call the SSU backend; not counted here.
+            logger.info_once(
+                "VLLM_MAMBA_SR_SEED_PREFETCH is disabled for models with "
+                "Mamba-1 layers."
+            )
+            return None
+        if spec.mamba_type == MambaAttentionBackendEnum.MAMBA2:
+            num_layers += len(group.layer_names)
+    if num_layers == 0:
+        return None
+    logger.info_once(
+        "Prefetching Mamba stochastic-rounding seeds for %d layers per "
+        "forward on a side stream.",
+        num_layers,
+    )
+    return StochasticRoundingSeedPrefetcher(num_layers)
+
+
 def initialize_mamba_ssu_backend(
     mamba_config: MambaConfig,
     kv_cache_config: KVCacheConfig,
@@ -633,6 +766,11 @@ def initialize_mamba_ssu_backend(
     if not isinstance(_mamba_ssu_backend, backend_cls):
         _mamba_ssu_backend = backend_cls(mamba_config)
         logger.info("Using %s Mamba SSU backend.", _mamba_ssu_backend.name)
+
+    if isinstance(_mamba_ssu_backend, FlashInferSSUBackend):
+        _mamba_ssu_backend.sr_seed_prefetcher = _maybe_make_sr_seed_prefetcher(
+            mamba_config, kv_cache_config, use_replayssm=use_replayssm
+        )
 
     _flashinfer_replayssm_kernel = None
     if use_replayssm and backend == MambaBackendEnum.FLASHINFER:

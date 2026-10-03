@@ -302,6 +302,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
+    VLLM_MAMBA_SR_SEED_PREFETCH: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -2104,6 +2105,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
+    ),
+    # With the FlashInfer Mamba SSU backend and Mamba cache stochastic
+    # rounding enabled, draw the per-layer stochastic-rounding seeds of a
+    # forward pass up front on a side CUDA stream (same values, same order as
+    # the per-layer draws), instead of one small RNG kernel on the critical
+    # path before every SSU call. Each SSU call waits on a CUDA event for its
+    # seed.
+    "VLLM_MAMBA_SR_SEED_PREFETCH": lambda: bool(
+        int(os.getenv("VLLM_MAMBA_SR_SEED_PREFETCH", "0"))
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
