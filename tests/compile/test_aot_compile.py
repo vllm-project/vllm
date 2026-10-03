@@ -19,6 +19,7 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
     VllmSerializableFunction,
+    validate_mega_artifact,
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
@@ -719,6 +720,39 @@ class TestStandaloneCompiledArtifacts:
         assert restored_cache.size_bytes() == cache.size_bytes()
 
         assert len(restored_cache.loaded_submodule_store) == 0
+
+    def test_validate_rejects_empty_artifact(self):
+        # An empty artifact deserializes fine and reconstructs into a callable
+        # that silently runs eager, so the load must be rejected instead.
+        cache = StandaloneCompiledArtifacts()
+
+        assert cache.num_artifacts() == 0
+        assert cache.submodule_names() == []
+
+        with pytest.raises(RuntimeError, match="no compiled submodules"):
+            validate_mega_artifact(cache)
+
+    def test_validate_accepts_populated_artifact(self):
+        cache = StandaloneCompiledArtifacts()
+        cache.insert("submod_0", "s0", b"compiled_bytes")
+
+        assert cache.num_artifacts() == 1
+        assert cache.submodule_names() == ["submod_0"]
+
+        validate_mega_artifact(cache)
+
+    def test_validate_rejects_entries_without_bytes(self):
+        # submodule_bytes and submodule_bytes_store are separate dicts, so a
+        # corrupt artifact can name submodules while holding no bytes for them.
+        cache = StandaloneCompiledArtifacts()
+        cache.insert("submod_0", "s0", b"compiled_bytes")
+        cache.submodule_bytes_store.clear()
+
+        assert cache.num_artifacts() == 0
+        assert cache.submodule_names() == ["submod_0"]
+
+        with pytest.raises(RuntimeError, match="no compiled submodules"):
+            validate_mega_artifact(cache)
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
