@@ -3276,6 +3276,15 @@ class Scheduler(SchedulerInterface):
                     )
                     request.num_computed_tokens = req_num_computed_tokens
 
+                # The request restarts from the truncated frontier, so any
+                # in-flight output was sampled from the invalid KV: drain and
+                # drop it as it returns, and restart with no placeholders or
+                # drafts carried over (same idiom as _handle_stopped_request).
+                request.drop_stale_output = True
+                request.num_stale_output_tokens = request.num_in_flight_tokens
+                request.num_output_placeholders = 0
+                request.spec_token_ids = []
+
                 affected_req_ids.add(request.request_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
