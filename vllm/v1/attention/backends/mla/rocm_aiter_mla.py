@@ -1751,8 +1751,12 @@ class AiterMLAHelper:
         )
         if num_heads == m:
             return q
+        if q.shape[1] == m:
+            return q
         if m % num_heads == 0:
             return q.repeat_interleave(m // num_heads, dim=1)
+        if q.stride(0) == m * q.stride(1):
+            return q.as_strided((q.shape[0], m, q.shape[2]), q.stride())
         # Non-divisor head counts cannot be padded by repeat_interleave. Tile
         # the query heads and slice to exactly m. MLA attention is independent
         # per query head over the shared KV, so padding heads cannot affect
@@ -1954,6 +1958,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
             self._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
             self._mla_reduce_v1 = mla_reduce_v1
+            self._fp8_prefill_one_scale: torch.Tensor | None = None
+            # fused_mla_prefill_qkv_fp8 asserts power-of-two head dims.
+            head_dims = (self.qk_nope_head_dim, self.qk_rope_head_dim, self.v_head_dim)
+            self._fused_prefill_qkv = rocm_aiter_ops.is_enabled() and not any(
+                d & (d - 1) for d in head_dims
+            )
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
@@ -2033,7 +2043,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         if v.dtype != fp8_dtype:
             v = v.to(fp8_dtype)
 
-        one_scale = torch.ones((), dtype=torch.float32, device=q.device)
+        if self._fp8_prefill_one_scale is None:
+            self._fp8_prefill_one_scale = torch.ones(
+                (), dtype=torch.float32, device=q.device
+            )
+        one_scale = self._fp8_prefill_one_scale
 
         # num_partial_tiles is resolved during metadata build to avoid an
         # in-forward .item() sync that would prevent CUDA Graph capture.
@@ -2164,7 +2178,24 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = self._concat_k_nope_k_pe(k_nope, k_pe)
+        if self._fused_prefill_qkv:
+            from aiter.ops.triton.fusions.fused_mla_prefill_qkv_fp8 import (
+                fused_mla_prefill_qkv_fp8,
+            )
+
+            from vllm.platforms import current_platform
+
+            # The k_pe concat, the head padding and the FP8 cast in one launch.
+            q, k, v = fused_mla_prefill_qkv_fp8(
+                q,
+                k_nope,
+                v,
+                k_pe,
+                AiterMLAHelper.get_fp8_prefill_num_heads(self.num_heads),
+                current_platform.fp8_dtype(),
+            )
+        else:
+            k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
         self._mla_fp8_prefill_attn(q, k, v, attn_metadata, output)
 
