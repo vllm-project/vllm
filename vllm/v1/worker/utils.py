@@ -167,6 +167,7 @@ class KVBlockZeroer:
                 if not isinstance(kv, torch.Tensor):
                     continue
                 if group.kernel_block_stride:
+                    # Bound views address kernel blocks; zero by manager block.
                     assert group.kernel_block_size is not None
                     bpk = spec.block_size // group.kernel_block_size
                     kv = kv.as_strided(
