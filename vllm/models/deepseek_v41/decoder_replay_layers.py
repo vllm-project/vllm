@@ -1,67 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Decoder-side SWA bounded replay: running the replay layers on their batch.
+"""Decoder-side SWA bounded replay: the replay batch of a step.
 
-The layers past the last KV-source layer own nothing but sliding-window KV, so
-in eager prefill steps they run on each request's last ``window`` rows only.
-``DeepseekV41ModelState`` prepares those rows as a sub-batch with attention
-metadata and a forward context of its own, like a microbatch;
-``DecoderReplayLayers`` gathers the layer inputs by its rows, runs the layers
-under that context and scatters the outputs back to batch rows. Steps that run
-in a CUDA graph keep the layers on the whole batch, inside the graph.
+Past the last KV-source layer (the cut layer), the layers own nothing but
+sliding-window KV, and the cut layer's own output feeds only them. So in eager
+prefill steps the cut layer writes its KV for every row, and its query side,
+its FFN and every layer after it run on each request's last ``window`` rows
+only. ``DeepseekV41ModelState`` prepares those rows as a sub-batch with
+attention metadata and forward contexts of its own, like a microbatch;
+``DeepseekV4Model._run_replay`` gathers the layer inputs by its rows, runs the
+layers under those contexts and scatters the outputs back to batch rows. Steps
+that run in a CUDA graph keep the layers on the whole batch, inside the graph.
 """
-
-from collections.abc import Callable
 
 import torch
 
-from vllm.forward_context import ForwardContext, override_forward_context
-from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
+from vllm.forward_context import ForwardContext
 
 
 class DecoderReplayLayers:
-    """Runs the replay layers on the step's replay batch.
+    """The step's replay batch, set by the model state every step.
 
-    ``run_layers`` takes a batch's layer inputs and returns its per-row
-    outputs. ``row_buffers`` hold per-row results the source layer's indexer
-    publishes for the layers after it; they are compacted to the replay rows
-    in place.
+    ``rows`` are its rows of the batch, None when the step does not replay.
+    ``forward_context`` serves the layers after the cut layer, whose window KV
+    starts at each request's first replay row; ``cut_forward_context`` serves
+    the cut layer's query side, whose window KV the cut layer wrote for every
+    row, so it keeps the encoder-side window starts.
     """
 
-    def __init__(
-        self,
-        window: int,
-        run_layers: Callable[..., tuple[torch.Tensor, ...]],
-        row_buffers: list[torch.Tensor],
-    ) -> None:
+    def __init__(self, window: int) -> None:
         self.window = window
-        self.run_layers = run_layers
-        self.row_buffers = row_buffers
-        # The replay batch, set by the model state every step: its rows of the
-        # batch and its forward context. None runs the layers on the batch.
         self.rows: torch.Tensor | None = None
         self.forward_context: ForwardContext | None = None
-
-    def __call__(
-        self, hidden_states: torch.Tensor | MoEOutput, *states: torch.Tensor | None
-    ) -> tuple[torch.Tensor, ...]:
-        rows = self.rows
-        if rows is None:
-            return self.run_layers(hidden_states, *states)
-        # A trimming step holds a prefill longer than the window, more tokens
-        # than any step whose MoE leaves its finalize to the next layer.
-        assert isinstance(hidden_states, torch.Tensor)
-        num_rows = rows.shape[0]
-        for buf in self.row_buffers:
-            buf[:num_rows].copy_(buf.index_select(0, rows))
-        with override_forward_context(self.forward_context):
-            row_outputs = self.run_layers(
-                hidden_states.index_select(0, rows),
-                *(None if t is None else t.index_select(0, rows) for t in states),
-            )
-        # The trimmed rows' outputs stay zero; nothing reads them.
-        num_tokens = hidden_states.shape[0]
-        return tuple(
-            out.new_zeros((num_tokens, *out.shape[1:])).index_copy_(0, rows, out)
-            for out in row_outputs
-        )
+        self.cut_forward_context: ForwardContext | None = None

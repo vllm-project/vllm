@@ -6,7 +6,7 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, cast
 
 import regex as re
 import torch
@@ -171,6 +171,21 @@ def _resolve_dsv4_kv_cache_dtype(
         return kv_cache_dtype, torch.float8_e4m3fn
     # auto / bfloat16 -> plain bf16 KV row.
     return kv_cache_dtype, torch.bfloat16
+
+
+class AttnQueryInputs(NamedTuple):
+    """Per-row inputs of an attention layer's query side, produced with its KV
+    (``DeepseekV4Attention.forward_kv``)."""
+
+    qr_kv: torch.Tensor  # the fused Q-lora / KV projection
+    q: torch.Tensor  # attention-ready Q
+    kv: torch.Tensor
+    indexer_weights: torch.Tensor | None
+
+    def select(self, rows: torch.Tensor) -> "AttnQueryInputs":
+        return AttnQueryInputs(
+            *(None if t is None else t.index_select(0, rows) for t in self)
+        )
 
 
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
@@ -681,6 +696,70 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             qr_scale,
             kv_score,
             indexer_weights,
+            positions,
+            attn_out,
+        )
+        return self._o_proj(attn_out, positions)
+
+    def forward_kv(
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
+    ) -> AttnQueryInputs:
+        """The KV side of ``forward``, over every row of the batch: the SWA KV,
+        the compressor's latent into the compressed cache and, where this layer
+        owns it, the index K. Returns what ``forward_query`` reads per row.
+        Eager only (a decoder replay step)."""
+        attn_metadata = get_forward_context().attn_metadata
+        qr_kv, kv_score, indexer_weights = self._run_parallel_input_projections(
+            hidden_states
+        )
+        qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
+        # The fused SWA insert readies Q in the same launch.
+        q = self._wq_b_proj(qr, qr_scale).view(-1, self.n_local_heads, self.head_dim)
+        q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+        latent: torch.Tensor | None = None
+        if self.compressor is not None:
+            latent = self.compressor(kv_score, positions)
+            self.compressor.insert_cache(latent, positions, self.rotary_emb)
+        if self.indexer is not None and self.indexer.owns_k:
+            self.indexer._produce_k(latent, positions, self.indexer_rotary_emb)
+        return AttnQueryInputs(qr_kv, q, kv, indexer_weights)
+
+    def forward_query(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        inputs: AttnQueryInputs,
+    ) -> torch.Tensor:
+        """The query side of ``forward`` on rows of ``forward_kv``'s batch,
+        reading the KV it wrote: the indexer's scoring and top-k, sparse
+        attention and wo. Eager only."""
+        index_q: torch.Tensor | None = None
+        index_q_scale: torch.Tensor | None = None
+        index_weights: torch.Tensor | None = None
+        indexer = self.indexer
+        if indexer is not None:
+            if indexer.is_short_context():
+                indexer.fill_short_context_topk(positions)
+            else:
+                # The normed (possibly quantized) Q-lora is not row-sliceable;
+                # norm the rows' own.
+                qr, qr_scale, _ = self._split_qkv_and_norm(inputs.qr_kv)
+                assert inputs.indexer_weights is not None
+                index_q, index_q_scale, index_weights = indexer.forward_q(
+                    qr,
+                    qr_scale,
+                    inputs.indexer_weights,
+                    positions,
+                    self.indexer_rotary_emb,
+                )
+        attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
+        self._sparse_indexer_and_attn(
+            hidden_states,
+            index_q,
+            index_q_scale,
+            index_weights,
+            inputs.q,
+            inputs.kv,
             positions,
             attn_out,
         )
@@ -1448,32 +1527,13 @@ class DeepseekV4Indexer(nn.Module):
         rotary_emb: nn.Module,
         qr_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        attn_metadata = get_forward_context().attn_metadata
-        if isinstance(attn_metadata, dict):
-            indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
-            if (
-                indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
-                and not torch.cuda.is_current_stream_capturing()
-            ):
-                # candidates num smaller than topk, every candidate is selected
-                # but we still need to build k cache
-                if self.owns_k:
-                    self._produce_k(latent, positions, rotary_emb)
-                assert self.topk_indices_buffer is not None
-                num_tokens = (
-                    indexer_metadata.num_decode_tokens
-                    + indexer_metadata.num_prefill_tokens
-                )
-                if num_tokens > 0:
-                    _fill_short_context_topk_indices[(num_tokens,)](
-                        self.topk_indices_buffer,
-                        positions,
-                        TOP_K=self.topk_tokens,
-                        COMPRESS_RATIO=self.compress_ratio,
-                        PADDED_TOP_K=triton.next_power_of_2(self.topk_tokens),
-                        num_warps=8,
-                    )
-                return None, None, None
+        if self.is_short_context():
+            # candidates num smaller than topk, every candidate is selected
+            # but we still need to build k cache
+            if self.owns_k:
+                self._produce_k(latent, positions, rotary_emb)
+            self.fill_short_context_topk(positions)
+            return None, None, None
 
         if self.owns_k:
             # K write must land before indexer_op reads the cache
@@ -1481,6 +1541,36 @@ class DeepseekV4Indexer(nn.Module):
             self._produce_k(latent, positions, rotary_emb)
 
         return self.forward_q(qr, qr_scale, indexer_weights, positions, rotary_emb)
+
+    def is_short_context(self) -> bool:
+        """Whether this context's batch has no more candidates than top-k, so
+        every candidate is selected without scoring."""
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return False
+        indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
+        return (
+            indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
+            and not torch.cuda.is_current_stream_capturing()
+        )
+
+    def fill_short_context_topk(self, positions: torch.Tensor) -> None:
+        """Select every candidate for this context's tokens."""
+        attn_metadata = cast(dict, get_forward_context().attn_metadata)
+        indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
+        assert self.topk_indices_buffer is not None
+        num_tokens = (
+            indexer_metadata.num_decode_tokens + indexer_metadata.num_prefill_tokens
+        )
+        if num_tokens > 0:
+            _fill_short_context_topk_indices[(num_tokens,)](
+                self.topk_indices_buffer,
+                positions,
+                TOP_K=self.topk_tokens,
+                COMPRESS_RATIO=self.compress_ratio,
+                PADDED_TOP_K=triton.next_power_of_2(self.topk_tokens),
+                num_warps=8,
+            )
 
     def _wq_b_proj(
         self,
