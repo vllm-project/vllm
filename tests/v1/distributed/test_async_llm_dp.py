@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import statistics
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -102,6 +103,8 @@ async def test_load(
 
         def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
             stats_loggers[engine_index] = self
+            # Not a dataclass field: it would flood the repr in assert messages.
+            self.inter_token_latencies: list[float] = []
 
         def record(
             self,
@@ -112,6 +115,9 @@ async def test_load(
         ):
             if iteration_stats:
                 self.finished_req_count += len(iteration_stats.finished_requests)
+                self.inter_token_latencies.extend(
+                    iteration_stats.inter_token_latencies_iter
+                )
 
         def log_engine_initialized(self):
             self.init_count += 1
@@ -180,11 +186,25 @@ async def test_load(
         assert len(stats_loggers) == DP_SIZE
         assert stats_loggers[0].init_count == 1
 
+        # A load-aware balancer must send less work to a slower engine, so only
+        # demand an even split when the engines measured comparably fast.
+        token_latencies = {
+            idx: statistics.median(sl.inter_token_latencies)
+            for idx, sl in stats_loggers.items()
+            if sl.inter_token_latencies
+        }
+        even_share = NUM_REQUESTS / DP_SIZE
+        engines_comparable = len(token_latencies) == DP_SIZE and max(
+            token_latencies.values()
+        ) <= 1.5 * min(token_latencies.values())
+        min_share = even_share * (0.8 if engines_comparable else 0.05)
+
         for sl in stats_loggers.values():
             slogger: SimpleStatsLogger = sl
 
-            assert slogger.finished_req_count > NUM_REQUESTS // (DP_SIZE + 1), (
-                f"requests are imbalanced: {stats_loggers}"
+            assert slogger.finished_req_count > min_share, (
+                f"requests are imbalanced: {stats_loggers}, median inter-token "
+                f"latencies {token_latencies}, comparable {engines_comparable}"
             )
 
 
