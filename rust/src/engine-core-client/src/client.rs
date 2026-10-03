@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +26,7 @@ use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
 pub(crate) mod imp;
+mod output_channel;
 mod state;
 mod stream;
 
@@ -614,7 +616,20 @@ fn validate_lora_capabilities(engines: &[ConnectedEngine]) -> Result<()> {
 impl EngineCoreClient {
     /// Add a new request to the engine and return a per-request raw output
     /// stream.
-    pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
+    pub async fn call(&self, req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
+        self.call_with_stream_interval(req, NonZeroU32::MIN).await
+    }
+
+    /// Like [`Self::call`], but deliver outputs after the first one to the
+    /// stream in batches of at least `stream_interval` new tokens. The
+    /// terminal output is delivered immediately together with any held-back
+    /// outputs. The stream still yields every raw output in order; batching
+    /// only reduces how often the consuming task is woken.
+    pub async fn call_with_stream_interval(
+        &self,
+        mut req: EngineCoreRequest,
+        stream_interval: NonZeroU32,
+    ) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
         trace!(
@@ -628,8 +643,12 @@ impl EngineCoreClient {
         let request_id = req.request_id.clone();
         let lora_name = req.lora_request.as_ref().map(|lora| lora.lora_name.clone());
         let data_parallel_rank = req.data_parallel_rank;
-        let (engine_id, rx) =
-            self.inner.register_request(request_id.clone(), lora_name, data_parallel_rank)?;
+        let (engine_id, rx) = self.inner.register_request(
+            request_id.clone(),
+            lora_name,
+            data_parallel_rank,
+            stream_interval,
+        )?;
 
         // Construct the output stream first before actually sending the request to the engine.
         // This ensures that cancelling the future will properly clean up the request registration

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::num::NonZeroU32;
+
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
 
@@ -34,6 +36,7 @@ use crate::request_metrics::RequestMetricsTracker;
 pub struct Llm {
     client: EngineCoreClient,
     randomize_request_id: bool,
+    stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
     inflight: InflightRequests,
 }
@@ -45,6 +48,7 @@ impl Llm {
         Self {
             client,
             randomize_request_id: true,
+            stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
         }
@@ -68,6 +72,14 @@ impl Llm {
     /// engine-core.
     pub fn with_request_id_randomization(mut self, enabled: bool) -> Self {
         self.randomize_request_id = enabled;
+        self
+    }
+
+    /// Set the frontend-level stream interval: the minimum number of newly
+    /// generated tokens batched into each streamed output after the first one.
+    /// A request's own `stream_interval` can only raise it.
+    pub fn with_stream_interval(mut self, stream_interval: NonZeroU32) -> Self {
+        self.stream_interval = stream_interval;
         self
     }
 
@@ -97,7 +109,14 @@ impl Llm {
             (prepared.engine_request.sampling_params.as_ref()).map(|p| p.max_tokens);
         let prompt_len = prepared.prompt_token_ids().len() as u32;
 
-        let stream = self.client.call(prepared.engine_request).await?;
+        // Clamp to the frontend-level stream interval, like Python.
+        let stream_interval = prepared.stream_interval.map_or(self.stream_interval, |interval| {
+            interval.max(self.stream_interval)
+        });
+        let stream = self
+            .client
+            .call_with_stream_interval(prepared.engine_request, stream_interval)
+            .await?;
 
         let request_metrics = RequestMetricsTracker::new(
             self.client.model_name().to_string(),
@@ -114,6 +133,7 @@ impl Llm {
             prompt_token_ids,
             stream,
             request_metrics,
+            stream_interval,
             guard,
         ))
     }

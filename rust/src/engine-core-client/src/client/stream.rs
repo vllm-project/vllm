@@ -89,7 +89,7 @@ impl Stream for EngineCoreOutputStream {
             return Poll::Ready(None);
         }
 
-        match Pin::new(&mut self.rx).poll_recv(cx) {
+        match self.rx.poll_recv(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(item)) => {
                 match &item {

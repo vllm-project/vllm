@@ -70,6 +70,7 @@ pub fn lower_text_request(
         lora_request: request.lora_request.clone(),
         arrival_time: request.arrival_time,
         trace_headers: None,
+        stream_interval: request.sampling_params.stream_interval,
     };
 
     Ok(PreparedTextRequest {
@@ -124,6 +125,8 @@ pub fn lower_sampling_params(
         structured_outputs,
         skip_reading_prefix_cache,
         vllm_xargs,
+        // Frontend-only: carried on `GenerateRequest` by `lower_text_request`.
+        stream_interval: _,
     } = sampling_params;
 
     validate_logprobs(
@@ -341,6 +344,7 @@ fn merge_unique_token_ids(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap};
+    use std::num::NonZeroU32;
 
     use serial_test::file_serial;
     use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
@@ -1428,6 +1432,26 @@ mod tests {
 
         assert!(!prepared.text_request.intermediate);
         assert_eq!(prepared.generate_request.request_id, "text-1");
+    }
+
+    #[test]
+    fn lower_text_request_carries_stream_interval_outside_engine_sampling_params() {
+        let mut request = sample_request();
+        request.sampling_params.stream_interval = NonZeroU32::new(4);
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.generate_request.stream_interval,
+            NonZeroU32::new(4)
+        );
     }
 
     #[test]

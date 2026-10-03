@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
@@ -177,6 +178,7 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         reasoning_parser_kwargs: None,
         reasoning_ended: None,
         lora_request: None,
+        stream_interval: None,
     }
 }
 
@@ -306,6 +308,113 @@ async fn generate_streams_outputs() {
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
     llm.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generate_merges_outputs_by_stream_interval() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-stream-interval".to_vec();
+
+    // One logprobs position per token, so merged outputs can be checked
+    // against the logprobs of their concatenated tokens.
+    fn token_logprobs(token_ids: &[u32]) -> Logprobs {
+        Logprobs {
+            positions: token_ids
+                .iter()
+                .map(|&token_id| PositionLogprobs {
+                    entries: vec![TokenLogprob {
+                        token_id,
+                        logprob: -0.5,
+                        rank: 1,
+                    }],
+                })
+                .collect(),
+        }
+    }
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+
+                // One engine step per batch.
+                let steps: [(&[u32], Option<EngineCoreFinishReason>); 6] = [
+                    (&[1], None),
+                    (&[2], None),
+                    (&[3], None),
+                    (&[4, 5], None),
+                    (&[6], None),
+                    (&[7], Some(EngineCoreFinishReason::Length)),
+                ];
+                for (token_ids, finish_reason) in steps {
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![request_output_with_logprobs(
+                                &request.request_id,
+                                token_ids.to_vec(),
+                                finish_reason,
+                                Some(token_logprobs(token_ids)),
+                                None,
+                            )],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                }
+            })
+        },
+    );
+
+    // The request's interval raises the frontend-level one.
+    let llm = connect_async_llm_with_ipc(handshake_address, 7, "test-model", &ipc)
+        .await
+        .with_stream_interval(NonZeroU32::new(2).unwrap());
+    let request = GenerateRequest {
+        stream_interval: NonZeroU32::new(3),
+        ..sample_generate_request("req-stream-interval", 7)
+    };
+    let outputs: Vec<_> = llm
+        .generate(request)
+        .await
+        .unwrap()
+        .map(|output| output.unwrap())
+        .collect()
+        .await;
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+
+    // The first output is yielded immediately, later ones once they carry at
+    // least 3 tokens, and the terminal one flushes the rest.
+    let shapes: Vec<_> = outputs
+        .iter()
+        .map(|output| {
+            (
+                output.prompt_info.is_some(),
+                output.token_ids.clone(),
+                output.finish_reason.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        [
+            (true, vec![1], None),
+            (false, vec![2, 3, 4, 5], None),
+            (false, vec![6, 7], Some(FinishReason::Length)),
+        ]
+    );
+    for output in &outputs {
+        assert_eq!(output.logprobs, Some(token_logprobs(&output.token_ids)));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

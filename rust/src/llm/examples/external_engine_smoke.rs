@@ -64,6 +64,7 @@ fn build_request(request_id: String, max_tokens: u32) -> GenerateRequest {
         reasoning_parser_kwargs: None,
         reasoning_ended: None,
         lora_request: None,
+        stream_interval: None,
     }
 }
 
