@@ -15,6 +15,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    eagle_proof_margin,
     partial_hash_hits_enabled,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -197,12 +198,11 @@ class MooncakeStoreCoordinator:
             gid for g in attention_groups if g.use_eagle for gid in g.group_ids
         }
         self.eagle_proof_margin_by_group = {
-            gid: (
-                self.hash_block_size
-                if self.enable_partial_hash_hits
-                and group.manager_cls.supports_fine_grained_hash_lookup
-                and group.spec.block_size > self.hash_block_size
-                else group.spec.block_size
+            gid: eagle_proof_margin(
+                group.spec.block_size,
+                self.hash_block_size,
+                self.enable_partial_hash_hits
+                and group.manager_cls.supports_fine_grained_hash_lookup,
             )
             for group in attention_groups
             if group.use_eagle and not isinstance(group.spec, MambaSpec)
@@ -435,12 +435,11 @@ class MooncakeStoreCoordinator:
                 # never drops a block, so a widened bound would match past the
                 # attention-verified hit and resume from speculative state (#43559).
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
-                    eagle_margin = (
-                        self.hash_block_size
-                        if self.enable_partial_hash_hits
-                        and manager_cls.supports_fine_grained_hash_lookup
-                        and spec.block_size > self.hash_block_size
-                        else spec.block_size
+                    eagle_margin = eagle_proof_margin(
+                        spec.block_size,
+                        self.hash_block_size,
+                        self.enable_partial_hash_hits
+                        and manager_cls.supports_fine_grained_hash_lookup,
                     )
                     _max_length = min(
                         curr_hit_length + eagle_margin,

@@ -11,6 +11,7 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    eagle_proof_margin,
     partial_hash_hits_enabled,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -893,12 +894,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 # mamba: its finder never drops (draft models have no mamba
                 # layers), so the hit would grow past the candidate.
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
-                    eagle_margin = (
-                        self.hash_block_size
-                        if self.enable_partial_hash_hits
-                        and manager_cls.supports_fine_grained_hash_lookup
-                        and group_block_size > self.hash_block_size
-                        else group_block_size
+                    eagle_margin = eagle_proof_margin(
+                        group_block_size,
+                        self.hash_block_size,
+                        self.enable_partial_hash_hits
+                        and manager_cls.supports_fine_grained_hash_lookup,
                     )
                     _max_length = min(
                         curr_hit_length + eagle_margin,
@@ -980,12 +980,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             manager = self.single_type_managers[group_ids[0]]
             lookup_length = max_cache_hit_length
             if use_eagle and not isinstance(spec, MambaSpec):
-                eagle_margin = (
-                    self.hash_block_size
-                    if self.enable_partial_hash_hits
-                    and manager_cls.supports_fine_grained_hash_lookup
-                    and manager.block_size > self.hash_block_size
-                    else manager.block_size
+                eagle_margin = eagle_proof_margin(
+                    manager.block_size,
+                    self.hash_block_size,
+                    self.enable_partial_hash_hits
+                    and manager_cls.supports_fine_grained_hash_lookup,
                 )
                 lookup_length = min(
                     max_cache_hit_length + eagle_margin,
