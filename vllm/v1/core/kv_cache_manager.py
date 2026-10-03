@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -232,6 +232,57 @@ class KVCacheManager:
 
         """
         return self.block_pool.get_usage()
+
+    def token_usage(self, running_requests: Iterable[Request]) -> float:
+        """Get the KV cache usage measured in token slots rather than blocks.
+
+        ``usage`` counts blocks, which is the right unit for scheduling because
+        blocks are the allocation unit. It is not the right unit for judging how
+        much of the KV cache actually holds keys and values: a block holding one
+        token is indistinguishable from a full one. With ``block_size=16`` and a
+        stream of 17-token prompts, ``usage`` reads ~100% while just over half
+        the token slots hold anything.
+
+        This is exact rather than sampled, and needs no per-block bookkeeping,
+        because of one property of prefix caching: only *full* blocks are ever
+        cached (``BlockPool.cache_full_blocks`` returns early at
+        ``num_cached_blocks >= num_full_blocks``), so only full blocks can be
+        shared between requests. A partially filled block is therefore private to
+        the request that owns it, and each request owns at most one -- its tail.
+        The shortfall is then exactly the sum of the tail remainders, with no
+        risk of counting a shared token twice::
+
+            held_tokens = used_blocks * block_size - sum(tail remainder)
+
+        Caveats, both of which make this an over-estimate rather than an
+        under-estimate:
+
+        * With more than one KV cache group (hybrid models) the groups have
+          different block sizes and a single token-slot denominator is not
+          well defined, so this falls back to ``usage``.
+        * Speculative decoding pre-allocates lookahead slots, so a request may
+          own blocks beyond its computed tokens. The excess is bounded by the
+          number of lookahead tokens per running request.
+
+        Returns:
+            The KV cache token-slot usage (between 0.0 and 1.0).
+
+        """
+        if self.num_kv_cache_groups != 1:
+            return self.usage
+
+        total_blocks = self.block_pool.num_gpu_blocks - 1
+        if total_blocks <= 0:
+            return 0.0
+        block_size = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+        used_blocks = total_blocks - self.block_pool.get_num_free_blocks()
+        tail_waste = sum(
+            -request.num_computed_tokens % block_size for request in running_requests
+        )
+        held_tokens = used_blocks * block_size - tail_waste
+        if held_tokens <= 0:
+            return 0.0
+        return held_tokens / (total_blocks * block_size)
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
