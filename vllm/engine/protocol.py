@@ -232,7 +232,8 @@ class EngineClient(ABC):
                   :meth:`resume_generation`.
             wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
-                after draining.
+                after pausing. With ``mode="keep"``, in-flight requests are
+                preempted and rescheduled on resume.
 
         """
         ...

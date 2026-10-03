@@ -24,9 +24,19 @@ The `mode` parameter controls how in-flight requests are handled:
 | ---- | -------- |
 | `"abort"` | Abort all in-flight requests immediately and return partial results (default) |
 | `"wait"` | Wait for all in-flight requests to finish before pausing |
-| `"keep"` | Freeze requests in the queue; they resume when `resume_generation` is called |
+| `"keep"` | Stop scheduling; in-flight requests stay queued and continue after `resume_generation` is called |
 
-The `clear_cache` parameter controls whether to clear the KV cache and prefix cache after pausing.
+The `clear_cache` parameter (default `True`) controls whether to clear the KV cache and prefix cache after pausing. With `mode="keep"`, it also decides what happens to the in-flight requests:
+
+| `clear_cache` | In-flight requests with `mode="keep"` |
+| ------------- | ------------------------------------- |
+| `True` | Preempted: their KV blocks are freed and they go back to the waiting queue. On resume they are scheduled like any preempted request, so their KV is either recomputed or loaded from a KV connector that still holds it. |
+| `False` | Their KV cache is kept. Resuming skips the recompute, but tokens generated after resume attend to KV computed with the old weights. |
+
+`clear_cache=True` also asks the configured KV connector to reset its cache. Connectors that do not implement `reset_cache()` keep their cache, so resumed requests can load KV computed with the old weights from them.
+
+!!! note
+    `clear_cache=True` fails while a request is still waiting for KV from a remote instance, for example on the decode side of disaggregated prefill/decode.
 
 ### resume_generation
 
@@ -58,7 +68,7 @@ A typical async RL loop with weight syncing looks like this:
 4. Resume generation -- in-flight requests continue with the new weights
 5. Repeat
 
-The key insight is that requests paused with `mode="keep"` will produce tokens from the **old** weights before the pause and tokens from the **new** weights after resume. The `clear_cache` parameter controls whether the KV cache is invalidated during the pause. When `clear_cache=True`, previously cached key-value entries are discarded, so all tokens generated after resume will be computed entirely with the new weights. When `clear_cache=False`, existing KV cache entries are retained, meaning some tokens in context may still reflect the old weights (stale KV cache).
+The key insight is that requests paused with `mode="keep"` will produce tokens from the **old** weights before the pause and tokens from the **new** weights after resume. The `clear_cache` parameter controls whether the KV cache is invalidated during the pause. When `clear_cache=True`, the in-flight requests are preempted and their context is rebuilt on resume without the old KV cache, so tokens generated after resume are computed with the new weights, unless a KV connector that does not reset its cache still serves old blocks. When `clear_cache=False`, existing KV cache entries are retained, meaning some tokens in context may still reflect the old weights (stale KV cache).
 
 ## Example
 
