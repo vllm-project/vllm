@@ -541,15 +541,17 @@ def deserialize_tensorizer_model(
     start = time.perf_counter()
     device_index = torch.accelerator.current_device_index()
     device_type = current_platform.device_type
+    deserialization_kwargs = _get_deserialization_kwargs(
+        tensorizer_config, tensorizer_args
+    )
     with (
         open_stream(
             tensorizer_config.tensorizer_uri, mode="rb", **tensorizer_args.stream_kwargs
         ) as stream,
         TensorDeserializer(
             stream,
-            dtype=tensorizer_config.dtype,
             device=f"{device_type}:{device_index}",
-            **tensorizer_args.deserialization_kwargs,
+            **deserialization_kwargs,
         ) as deserializer,
     ):
         deserializer.load_into_module(model)
@@ -569,6 +571,27 @@ def deserialize_tensorizer_model(
     _check_tensors_on_meta_device(model)
     _resize_lora_embeddings(model)
     del model.vllm_tensorized_marker
+
+
+def _should_preserve_serialized_tensor_dtypes(
+    tensorizer_config: TensorizerConfig,
+) -> bool:
+    hf_config = tensorizer_config.hf_config
+    if hf_config is None:
+        return False
+    return getattr(hf_config, "quantization_config", None) is not None
+
+
+def _get_deserialization_kwargs(
+    tensorizer_config: TensorizerConfig,
+    tensorizer_args: "TensorizerArgs",
+) -> dict[str, Any]:
+    deserialization_kwargs = tensorizer_args.deserialization_kwargs.copy()
+    # Quantized checkpoints can contain non-floating tensors, such as packed
+    # int32 weights, that must keep their serialized dtype.
+    if not _should_preserve_serialized_tensor_dtypes(tensorizer_config):
+        deserialization_kwargs["dtype"] = tensorizer_config.dtype
+    return deserialization_kwargs
 
 
 def tensorizer_weights_iterator(
