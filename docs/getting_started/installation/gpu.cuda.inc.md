@@ -117,13 +117,16 @@ If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and
 
     This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
 
-In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the `main` branch was just merged and its precompiled wheel is not available yet. You can wait around an hour and retry, or set `VLLM_PRECOMPILED_WHEEL_COMMIT=nightly` to automatically select the most recent already-built commit on `main`.
+For a local Git checkout, automatic wheel selection starts at the merge-base with
+upstream `main` and searches up to 50 commits along its first-parent history for a
+published wheel matching your CUDA variant and architecture. This handles delays
+in wheel publication. Before using the wheel, the installer checks for changes to
+compiled sources and build files (including Rust and tracked local edits). If
+these differ, installation stops with instructions to build from source or rebase.
+This is a conservative source check, not a guarantee of binary compatibility.
 
-```bash
-export VLLM_PRECOMPILED_WHEEL_COMMIT=nightly
-export VLLM_USE_PRECOMPILED=1
-uv pip install --editable .
-```
+Explicit wheel locations or full commit SHA overrides bypass this automatic
+compatibility check. Docker build contexts retain their existing wheel selection behavior.
 
 There are more environment variables to control the behavior of Python-only build:
 
