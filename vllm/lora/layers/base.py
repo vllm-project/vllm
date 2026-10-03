@@ -101,6 +101,8 @@ class BaseLayerWithLoRA(nn.Module):
         local to this rank (sharded the way `set_lora` shards) and padded to
         `max_lora_rank`. The views alias the buffers the forward reads, so an
         in-place write takes effect on the next forward without a copy.
+        MoE factors additionally carry the local expert axis (one for shared
+        factors); see `FusedMoEWithLoRA.slot_weights` for their slice order.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not expose its LoRA slot buffers"

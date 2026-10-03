@@ -254,7 +254,40 @@ llm.collective_rpc("set_down_proj", args=(lora_id, 0, 1234))
 ```
 
 - `update_adapter_weights(lora_id, weights)` takes a mapping from module name to `(lora_a, lora_b)`, with one entry per slice for packed modules such as `qkv_proj` (`None` keeps a slice). Modules held by another pipeline-parallel rank are skipped, so every worker can receive the same mapping. The cached copy of the adapter is updated too, so the weights survive GPU-slot eviction for as long as the adapter stays registered; an adapter removed from the CPU cache is reloaded from its `lora_path`. Passing `update_cpu_cache=False` writes only the GPU slot, avoiding a device-to-host copy for frequent updates, and requires the adapter to be pinned (`pin_lora`).
-- `get_adapter_slot(lora_id)` returns the slot index, and `get_adapter_slot_weights(lora_id)` returns per-module views of the slot's A and B buffers (local to the rank, padded to `max_lora_rank`) for reading or in-place updates under `torch.inference_mode()`.
+- `get_adapter_slot(lora_id)` returns the slot index, and `get_adapter_slot_weights(lora_id)` returns per-module views of the slot's A and B buffers (local to the rank, padded to `max_lora_rank`) for reading or in-place updates under `torch.inference_mode()`. These are views, not checkpoint-format weights: on TP workers, do not pass them as full unsharded inputs to `update_adapter_weights`.
+
+Both APIs support dense and MoE LoRA layers. MoE updates use stacked A `(experts, rank, in_features)` and B `(experts, out_features, rank)` factors, with scaling folded into B:
+
+| MoE layer | Slice order |
+| --- | --- |
+| Gated, per-expert format | `w1`, `w2`, `w3` |
+| Non-gated | `w1`, `w2` |
+| 3D fused format | `w13`, `w2` |
+
+`update_adapter_weights` preserves the loaded rank and expects full TP dimensions. For EP, it accepts global-expert tensors and selects this worker's contiguous expert range, or accepts already local-expert tensors. Shared factors keep an expert axis of size one. Slot views expose the actual local buffers, including TP sharding and rank padding. Metadata errors are rejected before any writes; sources aliasing a destination are cloned before the slot is reset.
+
+### Frequent GPU-Resident Updates (ZO / ES)
+
+Zeroth-order optimization and evolution strategies can write new perturbations before every probe forward. Repeated checkpoint loading, CPU-cache updates, and clearing a slot before replacing all of its factors add work to every probe. Pin an active adapter and obtain its views once, then generate directions directly into those views or copy prepared GPU factors into them. This avoids checkpoint I/O, device-to-host copies, intermediate adapter allocation, repeated slot lookup, and reset-then-copy work. The buffers and their addresses stay the same, including when CUDA graphs read them.
+
+For example, the following worker-extension methods prepare a rank-local write plan and overwrite B directly. The adapter must already be loaded and active; its A buffers must contain the intended factors.
+
+```python
+class ProbeWriter:
+    def prepare_probe(self, lora_id: int, module_names: list[str]) -> None:
+        manager = self.model_runner.lora_manager
+        manager.pin_adapter(lora_id)
+        weights = manager.get_adapter_slot_weights(lora_id, module_names)
+        self.probe_b = [b for _, bs in weights.values() for b in bs]
+
+    def zero_probe_b(self) -> None:
+        with torch.inference_mode():
+            torch._foreach_zero_(self.probe_b)
+```
+
+Direct writes affect only the GPU copy. Keep the adapter pinned while retaining views; removal, or eviction after unpinning, allows another adapter to reuse the slot. Overwrite the whole intended region, including unused padded rank entries, so previous perturbations cannot leak into a probe. The adapter's CPU copy stays unchanged; use `update_adapter_weights` when weights must survive eviction. Cache persistence can synchronize CPU/GPU transfers. `update_cpu_cache=False` is a validated GPU-only replacement API, while retained views let a caller generate factors in place without a replacement/reset cycle. Use GPU-resident inputs to avoid host transfers on these paths.
+
+Perform writes between forwards on the worker stream. A worker extension must join any separate producer stream before writing and must not modify buffers while a forward is using them. These methods do not quiesce in-flight requests or implement a concurrent weight-transfer protocol.
 
 Prefix-cache entries computed with an adapter's previous weights are not invalidated by these calls. Call `llm.reset_prefix_cache()` after an update if requests for that adapter may share cached prefixes.
 

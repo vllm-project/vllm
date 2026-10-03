@@ -8,6 +8,7 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
+import vllm.utils.gpu_sync_debug as gpu_sync_debug
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
@@ -1218,14 +1219,16 @@ def test_gpu_only_update_requires_a_pinned_adapter(
 
 
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("update_cpu_cache", [False, True])
 def test_update_adapter_weights_validates_before_writing(
-    default_vllm_config, dist_init, dummy_model, device
+    default_vllm_config, dist_init, dummy_model, device, update_cpu_cache
 ):
     manager = _slot_manager(dummy_model, default_vllm_config, device)
     lora = create_lora(1, manager.model, ["dense1", "dense2"], device)
     before = lora.clone(1)
     manager.add_adapter(lora)
     manager.activate_adapter(1)
+    manager.pin_adapter(1)
     good = before.get_lora("dense1")
     bad = before.get_lora("dense2")
     with pytest.raises(ValueError, match="dense2 slice 0 A"):
@@ -1235,6 +1238,7 @@ def test_update_adapter_weights_validates_before_writing(
                 "dense1": (torch.rand_like(good.lora_a), torch.rand_like(good.lora_b)),
                 "dense2": (bad.lora_a[:4], bad.lora_b),
             },
+            update_cpu_cache=update_cpu_cache,
         )
     # dense1 came first in the mapping and must not have been written.
     _assert_slot_holds(manager, 1, "dense1", good.lora_a, good.lora_b)
@@ -1244,6 +1248,155 @@ def test_update_adapter_weights_validates_before_writing(
         manager.update_adapter_weights(7, {})
     with pytest.raises(ValueError, match="no weights for output"):
         manager.update_adapter_weights(1, {"output": (good.lora_a, good.lora_b)})
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("update_cpu_cache", [False, True])
+def test_update_snapshots_aliases_before_reset(
+    default_vllm_config, dist_init, dummy_model, device, update_cpu_cache
+):
+    """Resubmitting a slot view must not erase its own input."""
+    manager = _slot_manager(dummy_model, default_vllm_config, device)
+    lora = create_lora(1, manager.model, ["dense1"], device)
+    manager.add_adapter(lora)
+    manager.activate_adapter(1)
+    manager.pin_adapter(1)
+    (a,), (b,) = manager.get_adapter_slot_weights(1, ["dense1"])["dense1"]
+    source_a, source_b = a[:8], b[:, :8]
+    expected_a, expected_b = source_a.clone(), source_b.clone()
+    manager.update_adapter_weights(
+        1, {"dense1": (source_a, source_b)}, update_cpu_cache=update_cpu_cache
+    )
+    _assert_slot_holds(manager, 1, "dense1", expected_a, expected_b)
+
+
+@pytest.mark.parametrize(
+    "layout", ["gated", "non_gated", "3d", "3d_interleaved", "shared"]
+)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA sync check")
+def test_moe_slot_write_does_not_sync_with_cpu(moe_lora_layer, monkeypatch, layout):
+    layer = moe_lora_layer(layout, device="cuda")
+    views_a, views_b = layer.slot_weights(0)
+    source_a, source_b = (
+        [torch.ones_like(a) for a in views_a],
+        [torch.ones_like(b) for b in views_b],
+    )
+    if layout == "non_gated":
+        source_a.append(source_a[0])
+        source_b.append(source_b[0])
+    monkeypatch.setattr(gpu_sync_debug, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", True)
+
+    @gpu_sync_debug.with_gpu_sync_check
+    def write_and_reset():
+        with torch.inference_mode():
+            layer.set_lora(0, source_a, source_b)
+            layer.reset_lora(0)
+
+    write_and_reset()
+    assert layer.adapter_enabled[0] == 0
+
+
+@pytest.mark.parametrize(
+    "layout", ["gated", "non_gated", "3d", "3d_interleaved", "shared"]
+)
+@pytest.mark.parametrize("parallel", ["none", "tp", "sharded", "ep"])
+@pytest.mark.parametrize("update_cpu_cache", [False, True])
+def test_moe_slot_updates_follow_loading_layout_and_cache_policy(
+    default_vllm_config,
+    dist_init,
+    dummy_model,
+    moe_lora_layer,
+    layout,
+    parallel,
+    update_cpu_cache,
+):
+    """Updates use the same TP/EP/shared layout as loading, and survive eviction."""
+    layer = moe_lora_layer(layout, parallel)
+    manager = _slot_manager(dummy_model, default_vllm_config, "cpu")
+    manager.modules["experts"] = layer
+    shapes_a = [(4, 8, 16), (4, 8, 32)]
+    shapes_b = [(4, 64 if layout.startswith("3d") else 32, 8), (4, 16, 8)]
+    if layout in ("gated", "shared"):
+        shapes_a.append(shapes_a[0])
+        shapes_b.append(shapes_b[0])
+    if layout == "shared":
+        shapes_a[0] = shapes_a[2] = (1, 8, 16)
+        shapes_b[1] = (1, 16, 8)
+    new_a = [torch.randn(shape) for shape in shapes_a]
+    new_b = [torch.randn(shape) for shape in shapes_b]
+
+    # EP's cache contains local experts; callers can still supply global tensors.
+    def cached(t):
+        return (t[2:] if parallel == "ep" and t.shape[0] == 4 else t).clone()
+
+    old_a, old_b = (
+        [torch.zeros_like(cached(t)) for t in new_a],
+        [torch.zeros_like(cached(t)) for t in new_b],
+    )
+    if layout == "non_gated":
+        old_a.append(old_a[0])
+        old_b.append(old_b[0])
+    weights = PackedLoRALayerWeights(
+        "experts",
+        8,
+        [8] * len(old_a),
+        old_a,
+        old_b,
+        scaling=[1.0] * len(old_a),
+    )
+    lora = LoRAModel(1, 8, {"experts": weights})
+    manager.add_adapter(lora)
+    manager.activate_adapter(1)
+    if not update_cpu_cache:
+        manager.pin_adapter(1)
+    manager.update_adapter_weights(
+        1, {"experts": (new_a, new_b)}, update_cpu_cache=update_cpu_cache
+    )
+    actual = manager.get_adapter_slot_weights(1, ["experts"])["experts"]
+    # Independently load the expected weights through the existing layer API.
+    reference = moe_lora_layer(layout, parallel)
+    expected_a, expected_b = [cached(t) for t in new_a], [cached(t) for t in new_b]
+    if layout == "non_gated":
+        expected_a.append(expected_a[0])
+        expected_b.append(expected_b[0])
+    reference.set_lora(0, expected_a, expected_b)
+    for views, expected in zip(actual, reference.slot_weights(0)):
+        for view, value in zip(views, expected):
+            torch.testing.assert_close(view, value)
+    assert layer.adapter_enabled[manager.get_adapter_slot(1)] == 1
+    malformed_a = [new_a[0][..., :-1], *new_a[1:]]
+    with pytest.raises(ValueError, match="experts slice 0 A"):
+        manager.update_adapter_weights(
+            1,
+            {"experts": (malformed_a, new_b)},
+            update_cpu_cache=update_cpu_cache,
+        )
+    for views, expected in zip(actual, reference.slot_weights(0)):
+        for view, value in zip(views, expected):
+            torch.testing.assert_close(view, value)
+    if update_cpu_cache:
+        # A partial B update must retain every other factor, including
+        # non-gated w1's aliased placeholder and shared-outer factors.
+        replacement = torch.zeros_like(new_b[0])
+        manager.update_adapter_weights(
+            1,
+            {
+                "experts": (
+                    [None] * len(new_a),
+                    [replacement] + [None] * (len(new_b) - 1),
+                )
+            },
+        )
+        expected_b[0].zero_()
+        reference.set_lora(0, expected_a, expected_b)
+        manager.deactivate_adapter(1)
+        manager.activate_adapter(1)
+        for views, expected in zip(layer.slot_weights(0), reference.slot_weights(0)):
+            for view, value in zip(views, expected):
+                torch.testing.assert_close(view, value)
+    else:
+        assert all(not t.any() for t in weights.lora_a + weights.lora_b)
 
 
 @pytest.mark.parametrize("device", DEVICES)
