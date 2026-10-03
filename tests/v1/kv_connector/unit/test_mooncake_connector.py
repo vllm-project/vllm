@@ -50,6 +50,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -1908,6 +1909,58 @@ def test_register_kv_caches_collapses_shared_mla_storage(
     assert worker.registered_group_indices == [expected_group_index]
     if expected_group_index == _SHARED_REGION_GROUP_ID:
         assert worker.region_shared_groups == [(0, 1)]
+
+
+def test_register_kv_caches_pages_kpool_indexer_and_folds_its_tail():
+    """A kpool indexer row holding several kernel blocks registers per page, and
+    the kpool tail inside its allocation is read through that region."""
+    num_blocks, pages_per_row = 8, 4
+    indexer_spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=132,
+        dtype=torch.uint8,
+        tokens_per_state=4,
+    )
+    tail_spec = KpoolTailSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=8,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        sliding_window=4,
+    )
+    page = indexer_spec.page_size_bytes
+    state = indexer_spec.state_content_size_bytes
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["model.layers.0.indexer"], indexer_spec),
+            KVCacheGroupSpec(["model.layers.0.tail"], tail_spec),
+        ],
+    )
+    with mooncake_register_worker(config) as (worker, reg):
+        assert worker._physical_blocks_per_logical_kv_block == 1
+        backing = torch.zeros(num_blocks * page, dtype=torch.uint8)
+        indexer = backing.view(
+            num_blocks // pages_per_row, 1, pages_per_row * page // state, state
+        )
+        tail_bytes = num_blocks * tail_spec.page_size_bytes
+        tail = backing[:tail_bytes].view(torch.bfloat16).view(num_blocks, 2, 4, 8)
+        worker.register_kv_caches(
+            {"model.layers.0.indexer": indexer, "model.layers.0.tail": tail}
+        )
+
+    reg.assert_called_once()
+    assert reg.call_args[0][0] == [backing.data_ptr()]
+    # Kernel block j is the j-th page, not the j-th tensor row.
+    assert worker.kv_caches_base_addr == [indexer.data_ptr()]
+    assert worker.block_len_per_layer == [page]
+    assert worker.kv_block_len_per_layer == [page]
+    assert worker.registered_layer_names == ["model.layers.0.indexer"]
+    assert worker.registered_group_indices == [_SHARED_REGION_GROUP_ID]
+    assert worker.region_shared_groups == [(0, 1)]
 
 
 def test_block_ids_for_region_flattens_shared_groups():

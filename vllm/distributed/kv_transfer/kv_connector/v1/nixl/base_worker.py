@@ -32,6 +32,8 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
+    tensor_byte_span_end,
+    uses_dense_virtual_transfer_pages,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -115,46 +117,6 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     block_strides = {cache.stride(0) * cache.element_size() for cache in caches}
     storage_ptrs = {cache.untyped_storage().data_ptr() for cache in caches}
     return len(block_strides) == len(storage_ptrs) == 1
-
-
-def _tensor_byte_span_end(cache: torch.Tensor) -> int:
-    """Return the exclusive end address touched by a nonnegative-stride view."""
-    if cache.numel() == 0:
-        return cache.data_ptr()
-    if any(stride < 0 for stride in cache.stride()):
-        raise ValueError("NIXL cache views must have nonnegative strides")
-    max_element_offset = sum(
-        (size - 1) * stride for size, stride in zip(cache.shape, cache.stride())
-    )
-    return cache.data_ptr() + (max_element_offset + 1) * cache.element_size()
-
-
-def _uses_dense_virtual_transfer_pages(
-    layer_spec: KVCacheSpec,
-    cache: torch.Tensor,
-    physical_page_size: int,
-    num_blocks: int,
-) -> bool:
-    """Return whether a compressed kernel view can be split into NIXL pages."""
-    if not (
-        isinstance(layer_spec, MLAAttentionSpec)
-        and layer_spec.tokens_per_state > 1
-        and cache.ndim == 4
-        and cache.shape[1] == 1
-        and cache.is_contiguous()
-        and physical_page_size > 0
-        and layer_spec.state_content_size_bytes > 0
-    ):
-        return False
-
-    block_stride = cache.stride(0) * cache.element_size()
-    return (
-        block_stride > physical_page_size
-        and block_stride % physical_page_size == 0
-        and physical_page_size % layer_spec.state_content_size_bytes == 0
-        and cache.shape[0] * (block_stride // physical_page_size) == num_blocks
-        and cache.nbytes == num_blocks * physical_page_size
-    )
 
 
 class NixlBaseConnectorWorker:
@@ -1479,7 +1441,7 @@ class NixlBaseConnectorWorker:
                 if isinstance(layer_spec, MambaSpec)
                 else self.num_blocks
             )
-            if _uses_dense_virtual_transfer_pages(
+            if uses_dense_virtual_transfer_pages(
                 layer_spec, cache, physical_page_size, num_blocks
             ):
                 compressed_region_owners.setdefault(cache.data_ptr(), cache)
@@ -1576,7 +1538,7 @@ class NixlBaseConnectorWorker:
                     tail_is_covered = (
                         compressed_owner.is_contiguous()
                         and owner_storage.data_ptr() == storage_addr
-                        and _tensor_byte_span_end(cache) <= owner_end
+                        and tensor_byte_span_end(cache) <= owner_end
                     )
                     if not tail_is_covered:
                         raise AssertionError(
@@ -1628,7 +1590,7 @@ class NixlBaseConnectorWorker:
                     and cache[0].is_contiguous()
                     and cache[0].nbytes == physical_page_size
                 )
-                virtual_transfer_pages = _uses_dense_virtual_transfer_pages(
+                virtual_transfer_pages = uses_dense_virtual_transfer_pages(
                     layer_spec, cache, physical_page_size, num_blocks
                 )
                 # Push workers address the pages of packed MLA rows by layer.
