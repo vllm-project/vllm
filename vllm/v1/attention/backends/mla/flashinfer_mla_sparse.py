@@ -593,7 +593,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         return self._run_mqa_kernel(
             q,
-            # Top-k ids are flat row ids, so the rows can be re-paged freely.
+            # Block sizes and strides have been aligned to 32 rows.
             kv_rows.view(
                 -1,
                 math.gcd(block_stride_rows, attn_metadata.block_size, 64),
