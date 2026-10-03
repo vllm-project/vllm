@@ -1196,8 +1196,6 @@ def get_segmented_config(
     has_sinks=False,
 ):
     """Return a warmed ceiling bucket, or None for the static fallback."""
-    if not envs.VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE:
-        return None
     data = _TABLES.get(
         _key(
             device,
@@ -1238,7 +1236,7 @@ def get_segmented_config(
 
 def warmup_rocm_segmented_attention(config, device, *, impl_to_tune=None):
     """Tune the selected backend before KV-cache memory profiling."""
-    if not envs.VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE:
+    if not config.kernel_config.enable_rocm_segmented_attn_autotune:
         return
 
     from vllm.v1.attention.backends.rocm_segmented_attn import (

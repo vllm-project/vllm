@@ -231,7 +231,7 @@ def test_segmented_attention_rejects_mm_prefix_at_selection(monkeypatch):
 
 
 def test_segmented_attention_autotune_is_default_on_and_opt_out(monkeypatch):
-    import vllm.envs as envs
+    from vllm.config import KernelConfig
     from vllm.platforms import rocm
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionImpl,
@@ -239,12 +239,12 @@ def test_segmented_attention_autotune_is_default_on_and_opt_out(monkeypatch):
 
     monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
     monkeypatch.setattr(rocm, "on_gfx12x", lambda: True)
-    monkeypatch.delenv("VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE", raising=False)
-    assert envs.VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE
+    assert KernelConfig().enable_rocm_segmented_attn_autotune
 
     impl = RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
     impl._segmented_attention_warmed_up = False
     config = MagicMock()
+    config.kernel_config = KernelConfig()
     config.scheduler_config.max_num_batched_tokens = 1024
     config.scheduler_config.max_num_seqs = 4
     config.model_config.max_model_len = 8192
@@ -302,8 +302,7 @@ def test_segmented_attention_autotune_is_default_on_and_opt_out(monkeypatch):
         assert warmup.call_args.kwargs["causal"] is False
         assert warmup.call_args.kwargs["max_query_len"] == 8
 
-        monkeypatch.setenv("VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE", "0")
-        assert not envs.VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE
+        config.kernel_config.enable_rocm_segmented_attn_autotune = False
         impl._segmented_attention_warmed_up = False
         warmup.reset_mock()
         impl._warmup_segmented_attention(layer, torch.device("cuda:0"), torch.bfloat16)
@@ -311,8 +310,7 @@ def test_segmented_attention_autotune_is_default_on_and_opt_out(monkeypatch):
 
 
 def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
-    from types import SimpleNamespace
-
+    from vllm.config import KernelConfig
     from vllm.platforms import rocm
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionImpl,
@@ -321,6 +319,7 @@ def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
     monkeypatch.setattr(rocm, "on_gfx1x", lambda: True)
     impl = RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
     impl._segmented_attention_config = SimpleNamespace(
+        kernel_config=KernelConfig(),
         scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=3),
         model_config=SimpleNamespace(max_model_len=16),
     )

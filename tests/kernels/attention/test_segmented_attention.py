@@ -536,7 +536,6 @@ def segmented_tuner(tmp_path, monkeypatch):
     from vllm.v1.attention.ops import segmented_attention as segmented
     from vllm.v1.attention.ops import segmented_attention_tuning as tuning
 
-    monkeypatch.setenv("VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE", "1")
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
     monkeypatch.setattr(
         torch.cuda,

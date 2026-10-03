@@ -216,7 +216,7 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
         super().process_weights_after_loading(act_dtype)
         config = get_current_vllm_config()
         self._segmented_attention_config = config
-        if envs.VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE:
+        if config.kernel_config.enable_rocm_segmented_attn_autotune:
             from vllm.v1.attention.ops.segmented_attention_tuning import (
                 warmup_rocm_segmented_attention,
             )
@@ -224,6 +224,13 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             warmup_rocm_segmented_attention(
                 config, config.device_config.device, impl_to_tune=self
             )
+
+    def _autotune_enabled(self) -> bool:
+        config = self._segmented_attention_config
+        return (
+            config is not None
+            and config.kernel_config.enable_rocm_segmented_attn_autotune
+        )
 
     def _get_workspace(self, device):
         config = self._segmented_attention_config
@@ -236,12 +243,13 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             config.model_config.max_model_len,
             max_tokens=config.scheduler_config.max_num_batched_tokens,
             fp8=self.kv_cache_dtype in ("fp8", "fp8_e4m3"),
+            autotune=self._autotune_enabled(),
         )
         return get_segmented_attention_workspace(device, sizes)
 
     def _warmup_segmented_attention(self, layer, device, dtype, **limits) -> None:
         if (
-            envs.VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE
+            self._autotune_enabled()
             and not self._segmented_attention_warmed_up
             and self.alibi_slopes is None
             and not self.logits_soft_cap
@@ -352,6 +360,7 @@ class RocmSegmentedAttentionImpl(RocmAttentionImpl):
             causal=attn_metadata.causal,
             softcap=self.logits_soft_cap,
             workspace=workspace,
+            use_tuned_config=self._autotune_enabled(),
         )
         return output
 

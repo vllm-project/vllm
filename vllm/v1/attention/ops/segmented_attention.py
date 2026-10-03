@@ -9,7 +9,6 @@ from functools import lru_cache
 
 import torch
 
-import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
@@ -577,12 +576,14 @@ def segmented_attention_workspace_size(
     *,
     max_tokens=None,
     fp8=False,
+    autotune=False,
 ):
     """Size the largest selected attention workspace before graph capture.
 
     ``max_tokens`` bounds reachable ``(batch, query_len)`` pairs using one
     longest query and one token for each remaining sequence. Omitting it keeps
     the legacy reservation behavior for callers without scheduler limits.
+    ``autotune`` reserves additional splits for tuned D64 candidates.
     """
     largest = 0
     previous_capacity = 0
@@ -599,12 +600,7 @@ def segmented_attention_workspace_size(
                     batch, query_len, max_seq_len, hq, hk, dim, fp8
                 )
                 splits = cfg["splits"]
-                if (
-                    dim == 64
-                    and query_len <= 512
-                    and max_seq_len >= 4096
-                    and envs.VLLM_ROCM_SEGMENTED_ATTN_AUTOTUNE
-                ):
+                if dim == 64 and query_len <= 512 and max_seq_len >= 4096 and autotune:
                     split_limit = (
                         512
                         if batch == 1 and query_len == 1 and max_seq_len >= 131072
@@ -956,6 +952,7 @@ def segmented_attention(
     causal: bool | torch.Tensor = True,
     softcap: float = 0.0,
     workspace=None,
+    use_tuned_config: bool = True,
 ) -> None:
     """Run segmented attention when eligible, otherwise use unified Triton."""
     if kv_cache_dtype in ("fp8", "fp8_e4m3"):
@@ -1003,22 +1000,24 @@ def segmented_attention(
         attention_span = max_seq_len
         if sliding_window >= 0:
             attention_span = min(max_seq_len, sliding_window + max_query_len)
-        config = get_segmented_config(
-            query.device,
-            query.dtype,
-            key_cache.dtype,
-            query.shape[1],
-            key_cache.shape[2],
-            query.shape[2],
-            key_cache.shape[1],
-            sm_scale,
-            len(seq_lens),
-            max_query_len,
-            attention_span,
-            sliding_window,
-            causal,
-            has_sinks=sinks is not None,
-        )
+        config = None
+        if use_tuned_config:
+            config = get_segmented_config(
+                query.device,
+                query.dtype,
+                key_cache.dtype,
+                query.shape[1],
+                key_cache.shape[2],
+                query.shape[2],
+                key_cache.shape[1],
+                sm_scale,
+                len(seq_lens),
+                max_query_len,
+                attention_span,
+                sliding_window,
+                causal,
+                has_sinks=sinks is not None,
+            )
         if config is None:
             config = select_segmented_config(
                 len(seq_lens),
