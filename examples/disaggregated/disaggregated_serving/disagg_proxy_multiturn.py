@@ -94,6 +94,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("disagg_proxy")
 
+_UNTRACKED_OUTPUT_FIELDS = (
+    "reasoning",
+    "reasoning_content",
+    "tool_calls",
+    "function_call",
+)
+
 
 # Data structures
 @dataclass
@@ -101,6 +108,8 @@ class CachedKVEntry:
     """KV transfer parameters cached from D's response for one turn."""
 
     kv_transfer_params: dict[str, Any]
+    expected_chat_prefix: list[dict[str, Any]] | None = None
+    expected_completion_prefix: str | None = None
     timestamp: float = field(default_factory=time.time)
 
 
@@ -117,7 +126,11 @@ class ConversationKVCache:
         self._store: dict[str, CachedKVEntry] = {}
         self._ttl = ttl_seconds
 
-    def get(self, conversation_id: str) -> dict[str, Any] | None:
+    def get(
+        self,
+        conversation_id: str,
+        req_data: dict[str, Any],
+    ) -> dict[str, Any] | None:
         """Retrieve and consume cached KV params for a conversation.
 
         Returns a *copy* of the kv_transfer_params dict, or None.
@@ -135,17 +148,61 @@ class ConversationKVCache:
                 self._ttl,
             )
             return None
-        logger.info(
-            "conv=%s: cache HIT (age=%.1fs)",
-            conversation_id,
-            age,
-        )
+        matches_expected_prefix = False
+        if entry.expected_chat_prefix is not None:
+            messages = req_data.get("messages")
+            matches_expected_prefix = (
+                isinstance(messages, list)
+                and messages[: len(entry.expected_chat_prefix)]
+                == entry.expected_chat_prefix
+            )
+        elif entry.expected_completion_prefix is not None:
+            prompt = req_data.get("prompt")
+            matches_expected_prefix = isinstance(prompt, str) and prompt.startswith(
+                entry.expected_completion_prefix
+            )
+
+        if not matches_expected_prefix:
+            logger.info(
+                "conv=%s: cache MISS (request history changed)",
+                conversation_id,
+            )
+            return None
+        logger.info("conv=%s: cache HIT (age=%.1fs)", conversation_id, age)
         return dict(entry.kv_transfer_params)
 
-    def put(self, conversation_id: str, kv_params: dict[str, Any]) -> None:
+    def put(
+        self,
+        conversation_id: str,
+        kv_params: dict[str, Any],
+        req_data: dict[str, Any],
+        generated_text: str,
+    ) -> None:
         """Store D's kv_transfer_params for a conversation."""
+        expected_chat_prefix: list[dict[str, Any]] | None = None
+        expected_completion_prefix: str | None = None
+
+        messages = req_data.get("messages")
+        if isinstance(messages, list) and all(
+            isinstance(message, dict) for message in messages
+        ):
+            expected_chat_prefix = [dict(message) for message in messages] + [
+                {"role": "assistant", "content": generated_text}
+            ]
+        elif isinstance(req_data.get("prompt"), str):
+            expected_completion_prefix = req_data["prompt"] + generated_text
+
+        if expected_chat_prefix is None and expected_completion_prefix is None:
+            logger.info(
+                "conv=%s: not caching D blocks for unsupported request shape",
+                conversation_id,
+            )
+            return
+
         self._store[conversation_id] = CachedKVEntry(
             kv_transfer_params=dict(kv_params),  # defensive copy
+            expected_chat_prefix=expected_chat_prefix,
+            expected_completion_prefix=expected_completion_prefix,
         )
         logger.info(
             "conv=%s: cached D blocks (remote_request_id=%s, blocks=%d)",
@@ -246,6 +303,10 @@ async def _stream_from_decode(
     model_name: str | None = None
     created: int | None = None
     captured_kv: dict[str, Any] | None = None
+    cache_safe = not (
+        isinstance(req_data.get("messages"), list)
+        and req_data.get("include_reasoning") is False
+    )
 
     async with client.client.stream(
         "POST",
@@ -270,9 +331,20 @@ async def _stream_from_decode(
                 created = chunk.get("created")
 
             for choice in chunk.get("choices", []):
-                collected_text += choice.get("text", "")
-                delta = choice.get("delta", {})
-                collected_text += delta.get("content", "")
+                if not isinstance(choice, dict):
+                    continue
+                delta = choice.get("delta")
+                if any(choice.get(field) for field in _UNTRACKED_OUTPUT_FIELDS):
+                    cache_safe = False
+                if isinstance(delta, dict):
+                    if any(delta.get(field) for field in _UNTRACKED_OUTPUT_FIELDS):
+                        cache_safe = False
+                    delta_content = delta.get("content")
+                    if isinstance(delta_content, str):
+                        collected_text += delta_content
+                text = choice.get("text")
+                if isinstance(text, str):
+                    collected_text += text
                 if choice.get("finish_reason"):
                     finish_reason = choice["finish_reason"]
 
@@ -280,8 +352,16 @@ async def _stream_from_decode(
             if kv_params:
                 kv_params["remote_host"] = client.host
                 captured_kv = kv_params
-                if conversation_id:
-                    kv_cache.put(conversation_id, kv_params)
+
+    if captured_kv and conversation_id:
+        if cache_safe:
+            kv_cache.put(conversation_id, captured_kv, req_data, collected_text)
+        else:
+            logger.info(
+                "conv=%s: not caching D blocks because response history "
+                "cannot be validated",
+                conversation_id,
+            )
 
     return (
         collected_text,
@@ -303,6 +383,12 @@ async def _stream_from_decode_sse(
     """Yield SSE chunks from D to the client, capturing kv_transfer_params."""
     payload = req_data.copy()
     payload["stream"] = True
+    collected_text = ""
+    captured_kv: dict[str, Any] | None = None
+    cache_safe = not (
+        isinstance(req_data.get("messages"), list)
+        and req_data.get("include_reasoning") is False
+    )
 
     async with client.client.stream(
         "POST",
@@ -319,14 +405,42 @@ async def _stream_from_decode_sse(
             if line.startswith("data: ") and line != "data: [DONE]":
                 try:
                     chunk = json.loads(line[6:])
+                    for choice in chunk.get("choices", []):
+                        if not isinstance(choice, dict):
+                            continue
+                        delta = choice.get("delta")
+                        if any(choice.get(field) for field in _UNTRACKED_OUTPUT_FIELDS):
+                            cache_safe = False
+                        if isinstance(delta, dict):
+                            if any(
+                                delta.get(field) for field in _UNTRACKED_OUTPUT_FIELDS
+                            ):
+                                cache_safe = False
+                            delta_content = delta.get("content")
+                            if isinstance(delta_content, str):
+                                collected_text += delta_content
+                        text = choice.get("text")
+                        if isinstance(text, str):
+                            collected_text += text
+
                     kv_params = chunk.get("kv_transfer_params")
-                    if kv_params and conversation_id:
+                    if kv_params:
                         kv_params["remote_host"] = client.host
-                        kv_cache.put(conversation_id, kv_params)
+                        captured_kv = kv_params
                 except json.JSONDecodeError:
                     pass
 
             yield line + "\n"
+
+    if captured_kv and conversation_id:
+        if cache_safe:
+            kv_cache.put(conversation_id, captured_kv, req_data, collected_text)
+        else:
+            logger.info(
+                "conv=%s: not caching D blocks because response history "
+                "cannot be validated",
+                conversation_id,
+            )
 
 
 # FastAPI application
@@ -404,7 +518,7 @@ async def _handle_request(api_path: str, request: Request):
         )
 
     # Step 1: Look up cached D blocks from the previous turn
-    cached_kv = kv_cache.get(conversation_id) if conversation_id else None
+    cached_kv = kv_cache.get(conversation_id, req_data) if conversation_id else None
 
     if cached_kv:
         # Tell P to read D's blocks (bidirectional transfer)
