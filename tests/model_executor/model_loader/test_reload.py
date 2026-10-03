@@ -505,13 +505,31 @@ def test_padded_moe_reload_releases_each_layer(
     hidden, intermediate, experts = 4, 3, 2
     stored_hidden, stored_intermediate = (8, 8) if padded else (hidden, intermediate)
     config = SimpleNamespace(
+        hidden_dim=stored_hidden,
         hidden_dim_unpadded=hidden,
+        intermediate_size_per_partition=stored_intermediate,
         intermediate_size_per_partition_unpadded=intermediate,
+        num_experts=experts,
+        num_local_experts=experts,
+        experts_per_token=1,
+        activation=None,
+        in_dtype=torch.float32,
+        rocm_aiter_fmoe_enabled=False,
+        shared_expert_prefix=None,
         is_act_and_mul=is_gated,
         has_bias=has_bias,
         tp_rank=tp_rank,
         tp_shard_with_padding=False,
-        moe_parallel_config=SimpleNamespace(tp_size=2),
+        moe_parallel_config=SimpleNamespace(tp_size=2, enable_eplb=False),
+    )
+    expert_map_manager = SimpleNamespace(
+        local_num_experts=experts,
+        placement_strategy="linear",
+        expert_map=None,
+        expert_mask=None,
+        routing_tables=None,
+        num_fused_shared_experts=0,
+        map_global_to_local=lambda i: i,
     )
     model = torch.nn.ModuleList()
     processed: list[torch.nn.Module] = []
@@ -521,20 +539,20 @@ def test_padded_moe_reload_releases_each_layer(
         method.moe = config
         # The regression concerns streaming reload, not kernel conversion.
         monkeypatch.setattr(method, "process_weights_after_loading", processed.append)
-        layer = object.__new__(RoutedExperts)
-        torch.nn.Module.__init__(layer)
-        layer.moe_config = config
-        layer.quant_config = None
-        layer.quant_method = method
-        layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
-        layer._loaded_expert_biases = set()
-        method.create_weights(
-            layer,
-            experts,
-            stored_hidden,
-            stored_intermediate,
-            torch.float32,
-            weight_loader=layer.weight_loader,
+        monkeypatch.setattr(
+            method,
+            "maybe_roundup_sizes",
+            lambda *_: (stored_hidden, stored_intermediate),
+        )
+        monkeypatch.setattr(
+            RoutedExperts, "_get_quant_method", lambda *_, method=method: method
+        )
+        layer = RoutedExperts(
+            layer_name="test_moe",
+            params_dtype=torch.float32,
+            moe_config=config,
+            quant_config=None,
+            expert_map_manager=expert_map_manager,
         )
         model.append(layer)
 
