@@ -754,6 +754,18 @@ def partial_hash_hits_enabled(
     )
 
 
+def eagle_proof_margin(
+    block_size: int, hash_block_size: int, fine_grained_lookup: bool
+) -> int:
+    """Tokens an EAGLE group matches past a cache hit before dropping them.
+
+    Fine-grained lookups drop one hash unit; others drop one cache block.
+    """
+    if fine_grained_lookup and block_size > hash_block_size:
+        return hash_block_size
+    return block_size
+
+
 def initialize_prefix_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
