@@ -467,6 +467,15 @@ class DeepseekV41ModelState(DefaultModelState):
             query_lens,
             np.minimum(query_lens, layers.window),
         )
+        # A batch of context-free non-prefill rows is a dummy (an idle DP rank's):
+        # nothing reads it and its idx_mapping hits stale slots, so keep one row.
+        seq_lens = input_batch.seq_lens_cpu_upper_bound[:num_reqs].numpy()
+        is_dummy = not input_batch.is_prefilling_np[:num_reqs].any() and bool(
+            (seq_lens == query_lens).all()
+        )
+        if is_dummy and capture_desc is None:
+            kept_lens = np.zeros_like(kept_lens)
+            kept_lens[0] = 1
         # Dummy batches (captures, an idle DP rank's) are not prefills: they
         # keep their rows unless a rank trims.
         needs_replay_batch = force_replay_batch or bool(

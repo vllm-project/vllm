@@ -252,12 +252,13 @@ def test_dp_ranks_replay_together(dp_state):
 
 
 def test_idle_dp_rank_dummy_trims_with_its_peers(dp_state):
-    dummy = _input_batch([512], [512], [False])
+    """An idle rank's dummy keeps one row, so peers do not wait on its replay."""
+    dummy = _input_batch([256, 256], [256, 256], [False, False])
     dp_state.other = (True, 129)
     replay, _ = _prepare(dp_state, dummy, CUDAGraphMode.NONE)
-    assert replay is not None and replay.rows.shape[0] == WINDOW
+    assert replay is not None and replay.rows.shape[0] == 1
     dp_metadata = replay.forward_context.dp_metadata
-    assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [WINDOW, 129]
+    assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [1, 129]
 
 
 def test_dp_ranks_pad_to_one_replay_graph(dp_state):
