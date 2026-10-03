@@ -11,9 +11,18 @@ from datetime import datetime
 from itertools import product
 from typing import Any, TypedDict
 
-import ray
 import torch
-from ray.experimental.tqdm_ray import tqdm
+
+try:
+    import ray
+    from ray.experimental.tqdm_ray import tqdm
+
+    RAY_AVAILABLE = True
+except ImportError:
+    ray = None
+    from tqdm import tqdm  # type: ignore[no-redef]
+
+    RAY_AVAILABLE = False
 
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -519,16 +528,76 @@ def merge_unique_dicts(list1, list2):
     return result
 
 
-@ray.remote(num_gpus=1)
+def prune_cuda_search_space(
+    num_tokens: int,
+    num_experts: int,
+    shard_intermediate_size: int,
+    hidden_size: int,
+    search_space: list[dict[str, int]],
+    topk: int = 1,
+) -> list[dict[str, int]]:
+    """Prune Triton search space for CUDA based on batch size and MoE structure."""
+    from vllm.platforms import current_platform
+
+    pruned: list[dict[str, int]] = []
+    intermediate_size = shard_intermediate_size // 2
+
+    for cfg in search_space:
+        bm = cfg["BLOCK_SIZE_M"]
+        bn = cfg["BLOCK_SIZE_N"]
+        gm = cfg["GROUP_SIZE_M"]
+        stages = cfg["num_stages"]
+
+        # When tokens per expert are sparse (e.g. fine-grained MoE decode),
+        # large M tiles cause massive zero padding.
+        if num_tokens <= 16 and num_experts >= 64:
+            if bm > 32:
+                continue
+            if gm > 1:
+                continue
+        elif num_tokens <= 64 and num_experts >= 64:
+            if bm > 64:
+                continue
+            if gm > 16:
+                continue
+        elif num_tokens <= 128:
+            if bm > 64:
+                continue
+            if gm > 32:
+                continue
+        elif num_tokens >= 1024:
+            # Prefill regime: small M tiles under-utilize Tensor Cores
+            if bm < 32:
+                continue
+
+        # Tile size shouldn't vastly exceed intermediate_size
+        if bn > 256 and intermediate_size <= 512:
+            continue
+
+        # Skip configs with sub-optimal staging on Hopper
+        if current_platform.is_cuda():
+            cc = current_platform.get_device_capability()
+            if cc and cc[0] >= 9 and stages < 3 and num_tokens > 4:
+                continue
+
+        pruned.append(cfg)
+
+    return pruned if pruned else search_space
+
+
 class BenchmarkWorker:
-    def __init__(self, seed: int) -> None:
+    def __init__(self, seed: int, device_id: int = 0) -> None:
         torch.set_default_device("cuda")
         set_random_seed(seed)
         self.seed = seed
         # Get the device ID to allocate tensors and kernels
         # on the respective GPU. This is required for Ray to work
         # correctly with multi-GPU tuning on the ROCm platform.
-        self.device_id = int(ray.get_gpu_ids()[0])
+        if RAY_AVAILABLE and ray is not None and ray.is_initialized():
+            gpu_ids = ray.get_gpu_ids()
+            self.device_id = int(gpu_ids[0]) if gpu_ids else device_id
+        else:
+            self.device_id = device_id
 
     def benchmark(
         self,
@@ -617,6 +686,15 @@ class BenchmarkWorker:
                 hidden_size,
                 search_space,
                 is_fp16,
+                topk,
+            )
+        elif current_platform.is_cuda():
+            search_space = prune_cuda_search_space(
+                num_tokens,
+                num_experts,
+                shard_intermediate_size,
+                hidden_size,
+                search_space,
                 topk,
             )
 
@@ -720,11 +798,27 @@ def save_configs(
         num_experts, shard_intermediate_size // 2, dtype_str, block_quant_shape
     )
     os.makedirs(save_dir, exist_ok=True)
-    filename = os.path.join(save_dir, filename)
-    print(f"Writing best config to {filename}...")
-    with open(filename, "w") as f:
+    full_path = os.path.join(save_dir, filename)
+    print(f"Writing best config to {full_path}...")
+    with open(full_path, "w") as f:
         json.dump({"triton_version": triton.__version__, **configs}, f, indent=4)
         f.write("\n")
+
+    # For H100 family devices, also save a generic NVIDIA_H100 alias
+    device_name = get_device_name_as_file_name()
+    if "H100" in device_name.split("_") and device_name != "NVIDIA_H100":
+        alias_filename = get_config_file_name(
+            num_experts,
+            shard_intermediate_size // 2,
+            dtype_str,
+            block_quant_shape,
+            device_name="NVIDIA_H100",
+        )
+        alias_path = os.path.join(save_dir, alias_filename)
+        print(f"Writing generic alias config to {alias_path}...")
+        with open(alias_path, "w") as f:
+            json.dump({"triton_version": triton.__version__, **configs}, f, indent=4)
+            f.write("\n")
 
 
 def get_compressed_tensors_block_structure(config, default_value=None):
@@ -803,6 +897,20 @@ def get_model_params(config):
         topk = text_config.top_k_experts
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
+    elif architecture in (
+        "Gemma4ForConditionalGeneration",
+        "Gemma4ForCausalLM",
+    ):
+        text_config = (
+            config.get_text_config() if hasattr(config, "get_text_config") else config
+        )
+        E = getattr(text_config, "num_experts", None) or config.num_experts
+        topk = getattr(text_config, "top_k_experts", None) or config.top_k_experts
+        intermediate_size = (
+            getattr(text_config, "moe_intermediate_size", None)
+            or config.moe_intermediate_size
+        )
+        hidden_size = getattr(text_config, "hidden_size", None) or config.hidden_size
     elif architecture == "HunYuanMoEV1ForCausalLM":
         E = config.num_experts
         topk = config.moe_topk[0]
@@ -949,30 +1057,49 @@ def main(args: argparse.Namespace):
 
     use_deep_gemm = bool(args.use_deep_gemm)
 
-    if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
-        # Ray will set ROCR_VISIBLE_DEVICES for device visibility
-        logger.warning(
-            "Ray uses ROCR_VISIBLE_DEVICES to control device accessibility."
-            "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES."
-        )
-        val = os.environ["HIP_VISIBLE_DEVICES"]
-        os.environ["ROCR_VISIBLE_DEVICES"] = val
-        del os.environ["HIP_VISIBLE_DEVICES"]
+    if RAY_AVAILABLE and ray is not None:
+        if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
+            # Ray will set ROCR_VISIBLE_DEVICES for device visibility
+            logger.warning(
+                "Ray uses ROCR_VISIBLE_DEVICES to control device accessibility."
+                "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES."
+            )
+            val = os.environ["HIP_VISIBLE_DEVICES"]
+            os.environ["ROCR_VISIBLE_DEVICES"] = val
+            del os.environ["HIP_VISIBLE_DEVICES"]
 
-    ray.init()
-    num_gpus = int(ray.available_resources()["GPU"])
-    workers = [BenchmarkWorker.remote(args.seed) for _ in range(num_gpus)]
+        try:
+            ray.init(ignore_reinit_error=True)
+            num_gpus = int(ray.available_resources().get("GPU", 0))
+        except Exception:
+            num_gpus = 0
+    else:
+        num_gpus = 0
 
-    def _distribute(method: str, inputs: list[Any]) -> list[Any]:
-        outputs = []
-        worker_idx = 0
-        for input_args in inputs:
-            worker = workers[worker_idx]
+    if num_gpus > 0:
+        worker_cls = ray.remote(num_gpus=1)(BenchmarkWorker)
+        workers = [worker_cls.remote(args.seed) for _ in range(num_gpus)]
+
+        def _distribute(method: str, inputs: list[Any]) -> list[Any]:
+            outputs = []
+            worker_idx = 0
+            for input_args in inputs:
+                worker = workers[worker_idx]
+                worker_method = getattr(worker, method)
+                output = worker_method.remote(*input_args)
+                outputs.append(output)
+                worker_idx = (worker_idx + 1) % num_gpus
+            return ray.get(outputs)
+    else:
+        worker = BenchmarkWorker(args.seed, device_id=0)
+
+        def _distribute(method: str, inputs: list[Any]) -> list[Any]:
+            outputs = []
             worker_method = getattr(worker, method)
-            output = worker_method.remote(*input_args)
-            outputs.append(output)
-            worker_idx = (worker_idx + 1) % num_gpus
-        return ray.get(outputs)
+            for input_args in inputs:
+                output = worker_method(*input_args)
+                outputs.append(output)
+            return outputs
 
     if args.tune:
         # int4_w4a16 weights are uint8-packed, not fp16; treat like fp8 for
