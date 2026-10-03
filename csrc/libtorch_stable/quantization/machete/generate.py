@@ -599,7 +599,30 @@ def generate():
         )
     ]
 
-    # TODO: Support W4A8 when ready
+    qqq_schedule = ScheduleConfig(
+        tile_shape_mn=(128, 16),
+        cluster_shape_mnk=(1, 1, 1),
+        **sch_common_params,
+    )
+    qqq_kernel_type = TypeConfig(
+        a=DataType.s8,
+        b=VLLMDataType.u4b8,
+        b_group_scale=DataType.f16,
+        b_group_zeropoint=DataType.void,
+        b_channel_scale=DataType.f32,
+        a_token_scale=DataType.f32,
+        out=DataType.f16,
+        accumulator=DataType.s32,
+    )
+    impl_configs.append(
+        ImplConfig(
+            qqq_kernel_type,
+            schedules=[qqq_schedule],
+            heuristic=[(None, qqq_schedule)],
+        )
+    )
+
+    # TODO: Support additional W4A8 configurations when ready.
     # # Stored as "condition": ((tile_shape_mn), (cluster_shape_mnk))
     # # TODO (LucasWilkinson): Further tuning required
     # qqq_tile_heuristic_config = {
