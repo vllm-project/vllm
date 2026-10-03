@@ -84,6 +84,16 @@ class QuantizeMethodBase(ABC):
         """
         return
 
+    def initialize_runtime_state_after_loading(
+        self, layer: nn.Module
+    ) -> None:
+        """Initialize non-serialized runtime state.
+
+        Unlike process_weights_after_loading, this must not transform
+        registered parameters or buffers.
+        """
+        return
+
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:
     """Not all quant methods have embedding implemented, so we need to check that
