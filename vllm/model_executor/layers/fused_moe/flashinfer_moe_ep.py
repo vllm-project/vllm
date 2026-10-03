@@ -315,8 +315,8 @@ class FlashInferMoeEp:
             w2_scale=weights.w2_scale,
         )
         if spec.kernel == "cutedsl":
-            # In-kernel fc2 reduce keeps its default (off): FlashInfer 0.7.1
-            # renamed the field from in_kernel_fc2_reduce.
+            # In-kernel fc2 reduce keeps its default (off); FlashInfer 0.7.1rc1
+            # renamed in_kernel_fc2_reduce to enable_in_kernel_fc2_reduce.
             megakernel = api.Nvfp4CutedslMegaMoeConfig(
                 intermediate_size=moe.intermediate_size,
                 top_k=moe.experts_per_token,

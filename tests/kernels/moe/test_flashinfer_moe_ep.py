@@ -11,8 +11,9 @@ the DeepGEMM kernel (FP8 activations and FP4 weights, power-of-two scales per
 32). The expected output is then known in closed form and compared bit for
 bit.
 
-A device-agnostic test also checks the adapter against the installed
-FlashInfer's config types, so API drift fails on any CI runner.
+A test that needs no SM100 also checks the adapter's kwargs against the
+installed FlashInfer's config types, so config drift fails on any CI runner
+with FlashInfer installed.
 """
 
 from dataclasses import dataclass
@@ -316,9 +317,12 @@ def test_init_warmup_forward_is_exact_on_grid_inputs(
 def test_adapter_kwargs_match_installed_flashinfer(
     monkeypatch: pytest.MonkeyPatch, backend: str
 ):
-    """The adapter builds FlashInfer's own config types without a GPU, so a
-    renamed or removed kwarg fails here instead of at model load on SM100.
-    Only the megakernel layer, which allocates symmetric memory, is faked."""
+    """The adapter's kwargs construct the installed FlashInfer's config types.
+
+    Needs no SM100, so config kwarg drift fails in CI rather than at model load.
+    Fakes only the megakernel layer (symmetric memory), the EP group, the device
+    index and the DeepGEMM import.
+    """
     moe_ep = pytest.importorskip("flashinfer.moe_ep")
     layer_args: list[tuple] = []
 
