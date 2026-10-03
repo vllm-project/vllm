@@ -42,8 +42,7 @@ from vllm.sampling_params import SamplingParams
 # ```
 #
 # Usage:
-#     python demo.py simple
-#     python demo.py advanced
+#     python chat_with_tools_offline.py
 
 model_name = "mistralai/Mistral-7B-Instruct-v0.3"
 # or switch to "mistralai/Mistral-Nemo-Instruct-2407"
