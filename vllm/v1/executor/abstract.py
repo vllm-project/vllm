@@ -110,6 +110,10 @@ class Executor(ABC):
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        if envs.VLLM_SLEEP_DISCARD_GRAPHS:
+            from vllm.v1.worker.gpu.sleep_graphs import validate_graph_sleep
+
+            validate_graph_sleep(vllm_config)
         self._init_executor()
         self.sleeping_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
