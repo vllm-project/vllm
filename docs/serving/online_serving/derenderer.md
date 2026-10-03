@@ -40,6 +40,8 @@ Seeding only reads the last few IDs (7 today), so a suffix of the prompt is enou
 
 Each request wraps the engine's `GenerateResponse`(s) together with the caller metadata needed to reconstruct the final response without a GPU.
 
+Only `output_mode: "tokens"` responses are accepted which is the default. A response from a request with `output_mode: "text"` gets a 400 because its text is already detokenized with stop strings removed. Responses without `output_mode`, from older servers, are treated as `tokens`.
+
 `/v1/chat/completions/derender`:
 
 ??? code
@@ -127,7 +129,7 @@ Streaming derender is stateless on the server side: all mutable state lives in t
 - `logprob_context_token_ids`: the trailing sampled token IDs (at most 4) from previous chunks, used to seed byte-fallback (U+FFFD) correction so multi-byte characters whose tokens split across chunk boundaries still resolve to real strings
 - `logprob_text_offset`: the cumulative emitted text length, so `text_offset` in completion streaming logprobs stays absolute across chunks instead of restarting at 0
 
-When a streamed `GenerateResponseStreamChoice` carries `logprobs`, the `token_id:N` placeholders are resolved per chunk and the resolved logprobs are attached to the corresponding streamed choice — for chat as `ChatCompletionLogProbs`, for completions converted to the flat `CompletionLogProbs` lists. Chunks without `logprobs` produce choices with `logprobs: null`.
+When a streamed `GenerateTokensStreamChoice` carries `logprobs`, the `token_id:N` placeholders are resolved per chunk and the resolved logprobs are attached to the corresponding streamed choice. For chat it is as `ChatCompletionLogProbs` and for completions it is converted to the flat `CompletionLogProbs` lists. Chunks without `logprobs` produce choices with `logprobs: null`.
 
 ## Example
 
