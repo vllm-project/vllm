@@ -10,9 +10,13 @@ CuTeDSL kernel (NVFP4 activations and weights, E4M3 scales per 16) as well as
 the DeepGEMM kernel (FP8 activations and FP4 weights, power-of-two scales per
 32). The expected output is then known in closed form and compared bit for
 bit.
+
+A device-agnostic test also checks the adapter against the installed
+FlashInfer's config types, so API drift fails on any CI runner.
 """
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -22,6 +26,7 @@ from tests.distributed.eplb_utils import distributed_run, set_env_vars_and_devic
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.kernel import FLASHINFER_MOE_EP_CUTEDSL, FLASHINFER_MOE_EP_DEEP_GEMM
 from vllm.distributed.parallel_state import ensure_model_parallel_initialized
+from vllm.model_executor.layers.fused_moe import flashinfer_moe_ep as fi_ep
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -305,3 +310,58 @@ def test_init_warmup_forward_is_exact_on_grid_inputs(
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs")
     distributed_run(_init_warmup_forward, world_size, geometry, backend)
+
+
+@pytest.mark.parametrize("backend", BACKENDS, ids=("cutedsl", "deep_gemm"))
+def test_adapter_kwargs_match_installed_flashinfer(
+    monkeypatch: pytest.MonkeyPatch, backend: str
+):
+    """The adapter builds FlashInfer's own config types without a GPU, so a
+    renamed or removed kwarg fails here instead of at model load on SM100.
+    Only the megakernel layer, which allocates symmetric memory, is faked."""
+    pytest.importorskip("flashinfer.moe_ep")
+    api = fi_ep._load_flashinfer_moe_ep_api()
+    layer_args: list[tuple] = []
+
+    class FakeMegaLayer:
+        def __init__(self, *args) -> None:
+            layer_args.append(args)
+
+        def destroy(self) -> None:
+            pass
+
+    api.MoEEpMegaLayer = FakeMegaLayer
+    monkeypatch.setattr(fi_ep, "_load_flashinfer_moe_ep_api", lambda: api)
+    monkeypatch.setattr(fi_ep, "_expose_deep_gemm_to_flashinfer", lambda: None)
+    monkeypatch.setattr(
+        fi_ep,
+        "get_ep_group",
+        lambda: SimpleNamespace(world_size=2, rank_in_group=0, device_group=None),
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+
+    geometry = GEOMETRIES[0]
+    moe = SimpleNamespace(
+        moe_backend=backend,
+        num_experts=geometry.num_experts,
+        experts_per_token=geometry.top_k,
+        hidden_dim=geometry.hidden_size,
+        intermediate_size=geometry.intermediate_size,
+        max_num_tokens=MAX_TOKENS_PER_RANK,
+        swiglu_limit=10.0,
+        routing_method=_routing_method(backend),
+    )
+    weight = torch.zeros(1, dtype=torch.bfloat16)
+    FlashInferMoeEp(
+        moe,
+        FlashInferMoeEpWeights(w13=weight, w2=weight),
+        apply_topk_in_fc1=apply_topk_in_fc1(moe),
+    )
+
+    ((_, _, _, mega_config),) = layer_args
+    expected = (
+        api.Nvfp4CutedslMegaMoeConfig
+        if backend == FLASHINFER_MOE_EP_CUTEDSL
+        else api.DeepGemmMegaMoeConfig
+    )
+    assert isinstance(mega_config.megakernel, expected)
