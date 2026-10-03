@@ -583,6 +583,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int numRows, int stride0, int stride1, int topK) -> ()");
 
   ops.def(
+      "litetopk_decode(Tensor scores, Tensor lengths, Tensor(a!) histogram, "
+      "Tensor(b!) output, Tensor(c!) workspace, int capacity) -> ()");
+  ops.def(
       "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
       "Tensor workspace, int k, int max_seq_len) -> ()");
 
@@ -858,6 +861,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
   ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
   ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
+#ifdef VLLM_ENABLE_LITETOPK_DECODE
+  ops.impl("litetopk_decode", TORCH_BOX(&litetopk_decode));
+#endif
 #ifdef VLLM_ENABLE_COOPERATIVE_TOPK
   ops.impl("cooperative_topk", TORCH_BOX(&cooperative_topk));
 #endif

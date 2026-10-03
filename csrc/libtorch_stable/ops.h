@@ -482,6 +482,12 @@ void persistent_topk(const torch::stable::Tensor& logits,
                      int64_t max_seq_len);
 
 #ifdef VLLM_ENABLE_COOPERATIVE_TOPK
+void litetopk_decode(const torch::stable::Tensor& scores,
+                     const torch::stable::Tensor& lengths,
+                     torch::stable::Tensor& histogram,
+                     torch::stable::Tensor& output,
+                     torch::stable::Tensor& workspace, int64_t capacity);
+
 void cooperative_topk(const torch::stable::Tensor& logits,
                       const torch::stable::Tensor& lengths,
                       torch::stable::Tensor& output,
