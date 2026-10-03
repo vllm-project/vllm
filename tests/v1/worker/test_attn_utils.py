@@ -714,9 +714,6 @@ class _TableBuilder:
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         self.kv_cache_spec = kv_cache_spec
 
-    def set_kernel_block_size(self, kernel_block_size):
-        pass
-
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         return common_attn_metadata.block_table_tensor
 

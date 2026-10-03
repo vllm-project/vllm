@@ -1023,8 +1023,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 dtype=torch.int32,
                 device=self.device,
             )
-        self.indexer_decode_block_table_buffer: torch.Tensor | None = None
-        self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
 
     def _dcp_localize_decode_seq_lens(
         self,
@@ -1309,16 +1307,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
 
         compressed_slot_mapping = slot_mapping
-        indexer_block_table = block_table
         if self.compress_ratio > 1:
-            kernel_block_size = self.kernel_block_size
-            if (
-                kernel_block_size is not None
-                and self.kv_cache_spec.block_size != kernel_block_size
-                and self.kv_cache_spec.block_size % kernel_block_size == 0
-            ):
-                factor = self.kv_cache_spec.block_size // kernel_block_size
-                indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
             padded_num_tokens = num_tokens
             local_slot_mapping = slot_mapping
             if self.use_pcp:
@@ -1334,7 +1323,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 local_slot_mapping,
                 query_start_loc,
                 seq_lens,
-                indexer_block_table,
+                block_table,
                 self.kv_cache_spec.num_states,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
@@ -1451,7 +1440,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     seq_lens,
                     compressed_seq_lens,
                     compressed_seq_lens_cpu,
-                    indexer_block_table,
+                    block_table,
                     self.compress_ratio,
                     query_slice=query_slice,
                     skip_kv_gather=query_slice.start > 0,
@@ -1585,27 +1574,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                         max_decode_len=max_decode_len,
                     )
                 )
-
-            if self.compress_ratio > 1:
-                kernel_block_size = self.kernel_block_size
-                if (
-                    kernel_block_size is not None
-                    and self.kv_cache_spec.block_size != kernel_block_size
-                    and self.kv_cache_spec.block_size % kernel_block_size == 0
-                ):
-                    factor = self.kv_cache_spec.block_size // kernel_block_size
-                    compressed = block_table[:, ::factor] // factor
-                    rows, cols = compressed.shape
-                    if self.indexer_decode_block_table_buffer is None:
-                        self.indexer_decode_block_table_buffer = torch.zeros(
-                            (self._max_num_batched_tokens, cols),
-                            dtype=torch.int32,
-                            device=self.device,
-                        )
-                    self.indexer_decode_block_table_buffer[:rows, :cols].copy_(
-                        compressed
-                    )
-                    block_table = self.indexer_decode_block_table_buffer[:rows, :cols]
 
             # Flattening always returns a buffer view, including single-token
             # batches. Keep its address stable across varlen graph replays.

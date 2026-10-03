@@ -327,9 +327,6 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
-        if kernel_block_size is not None:
-            for builder in self.metadata_builders:
-                builder.set_kernel_block_size(kernel_block_size)
 
     def build_metadata(
         self,
