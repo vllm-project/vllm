@@ -2152,6 +2152,34 @@ class TestThinkMarkupWithoutReasoningParser:
         assert streamed_reasoning == ""
         assert content == streamed_content == text
 
+    @pytest.mark.parametrize("tool_parser_name", _PARSERS)
+    def test_stripped_think_markers_do_not_resurface(self, tool_parser_name):
+        """A request without tools keeps skip_special_tokens, so the
+        markers reach the parser as ids with no text. The remaining text
+        must stream as it arrives, without the markers appended at the
+        end (vllm-project/vllm#57232)."""
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert request.skip_special_tokens
+        parser = self._make_parser(tool_parser_name)
+        steps = [("", [90]), ("reasoning here", [1]), ("", [91]), ("the answer", [2])]
+
+        contents = []
+        for i, (delta_text, delta_token_ids) in enumerate(steps):
+            delta = parser.parse_delta(
+                delta_text,
+                delta_token_ids,
+                request,
+                prompt_token_ids=[1],
+                finished=(i == len(steps) - 1),
+            )
+            if delta and delta.content:
+                contents.append(delta.content)
+
+        assert contents == ["reasoning here", "the answer"]
+
     def test_think_block_preserved_alongside_tool_call(self, mock_request):
         """The tools-called branch also returns the tool parser's content;
         a think block preceding a promoted tool call must survive in it."""

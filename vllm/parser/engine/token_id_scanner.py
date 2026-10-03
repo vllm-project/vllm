@@ -6,7 +6,7 @@ pre-lexed terminals and plain text chunks."""
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 DROP_TERMINAL = "__DROP__"
 
@@ -40,15 +40,23 @@ class TokenIDScanner:
     When a terminal's text is not yet in ``delta_text`` (held back by
     the detokenizer), the terminal is deferred until the text arrives
     in a subsequent delta.
+
+    With ``skip_special_tokens`` set, the detokenizer drops the ids in
+    ``special_token_ids`` from ``delta_text``, so their text never
+    arrives. A deferred terminal for such an id is resolved text-less at
+    the next delta, or at finish, instead of holding the stream.
     """
 
     def __init__(
         self,
         token_id_to_terminal: dict[int, str],
         tokenizer,
+        special_token_ids: frozenset[int] = frozenset(),
     ) -> None:
         self.token_id_to_terminal = token_id_to_terminal
         self.tokenizer = tokenizer
+        self.special_token_ids = special_token_ids
+        self.skip_special_tokens = False
         self._token_text_cache: dict[int, str] = {}
         self._deferred_terminals: list[PreLexedTerminal] = []
         self._deferred_prefix_token_counts: list[int] = []
@@ -61,6 +69,9 @@ class TokenIDScanner:
         self._deferred_prefix_token_counts.clear()
         self._deferred_trailing_token_count = 0
         self._deferred_post_text = ""
+
+    def _text_never_arrives(self, terminal: PreLexedTerminal) -> bool:
+        return self.skip_special_tokens and terminal.token_id in self.special_token_ids
 
     def _decode_token(self, token_id: int) -> str:
         if token_id not in self._token_text_cache:
@@ -199,7 +210,10 @@ class TokenIDScanner:
                 TextChunk(self._deferred_post_text, token_count=prefix_count)
             )
             self._deferred_post_text = ""
-        results.extend(self._deferred_terminals)
+        results.extend(
+            replace(t, text="") if self._text_never_arrives(t) else t
+            for t in self._deferred_terminals
+        )
         if self._deferred_trailing_token_count:
             results.append(
                 TextChunk("", token_count=self._deferred_trailing_token_count)
@@ -255,6 +269,18 @@ class TokenIDScanner:
             elif pos == 0:
                 results.append(terminal)
                 remaining = remaining[len(terminal.text) :]
+            elif self._text_never_arrives(terminal):
+                # Text captured with the terminal precedes it; the
+                # current delta follows it.
+                carried_len = max(len(remaining) - len(delta_text), 0)
+                if carried_len or prefix_token_count:
+                    results.append(
+                        TextChunk(
+                            remaining[:carried_len], token_count=prefix_token_count
+                        )
+                    )
+                    remaining = remaining[carried_len:]
+                results.append(replace(terminal, text=""))
             else:
                 # Accumulate text until terminal text arrives —
                 # only the terminal provides a reliable split point.
