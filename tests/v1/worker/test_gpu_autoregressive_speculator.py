@@ -85,6 +85,7 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
     speculator.max_model_len = speculator.draft_max_seq_len = 32
     speculator.draft_is_prefilling = torch.zeros(4, dtype=torch.bool)
     speculator.input_buffers = SimpleNamespace(
+        positions=torch.arange(4, dtype=torch.int64),
         query_start_loc=torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
         seq_lens=torch.tensor([11, 21, 0, 0], dtype=torch.int32),
     )
