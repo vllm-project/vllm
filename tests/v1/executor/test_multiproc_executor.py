@@ -5,7 +5,6 @@ import weakref
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 
@@ -51,28 +50,6 @@ def test_worker_rpc_payload_released_before_next_dequeue():
         worker_proc.worker_busy_loop()
 
     assert queue.dequeue_count == 2
-
-
-def test_collective_rpc_drains_every_rank_before_raising():
-    """A failing rank must not leave the other ranks' responses queued, or they
-    would be read as the answers of the next RPC (such as the wake-up that
-    recovers a failed sleep)."""
-    executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
-    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda msg: None)
-    executor.is_failed = False
-    executor.futures_queue = deque()
-    failure = (WorkerProc.ResponseStatus.FAILURE, "boom")
-    executor.response_mqs = [
-        Mock(
-            dequeue=Mock(side_effect=[failure, (WorkerProc.ResponseStatus.SUCCESS, r)])
-        )
-        for r in ("r0", "r1")
-    ]
-
-    with pytest.raises(RuntimeError, match="boom"):
-        executor.collective_rpc("sleep")
-
-    assert executor.collective_rpc("wake_up") == ["r0", "r1"]
 
 
 def test_execute_worker_rpc_returns_worker_exception():

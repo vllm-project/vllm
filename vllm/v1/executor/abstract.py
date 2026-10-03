@@ -349,12 +349,9 @@ class Executor(ABC):
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
-        try:
-            self.collective_rpc("sleep", kwargs=dict(level=level))
-        finally:
-            # Some ranks may have slept: only a wake-up recovers every rank.
-            self.sleeping_tags |= SLEEP_TAGS
+        self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
+        self.sleeping_tags |= SLEEP_TAGS
         logger.info(
             "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
         )

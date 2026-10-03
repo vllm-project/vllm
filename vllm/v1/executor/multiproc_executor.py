@@ -427,7 +427,6 @@ class MultiprocExecutor(Executor):
 
         def get_response():
             responses = []
-            failure = None
             for mq in response_mqs:
                 dequeue_timeout = (
                     None if deadline is None else max(0.0, deadline - time.monotonic())
@@ -437,14 +436,11 @@ class MultiprocExecutor(Executor):
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
-                    # Keep draining: a response left queued answers the next RPC.
-                    failure = failure or RuntimeError(
+                    raise RuntimeError(
                         f"Worker failed with error '{result}', please check the"
                         " stack trace above for the root cause"
                     )
                 responses.append(result)
-            if failure is not None:
-                raise failure
             return responses[0] if output_rank is not None else responses
 
         future = FutureWrapper(

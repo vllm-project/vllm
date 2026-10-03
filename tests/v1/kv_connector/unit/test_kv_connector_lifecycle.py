@@ -95,9 +95,8 @@ def test_kv_connector_mixin_clears_metadata():
 def test_worker_connector_follows_the_kv_cache_mapping_iff_it_supports_sleep_mode(
     monkeypatch, supported
 ):
-    """While it is alive, a connector that declares sleep-mode support is
-    released right before the allocator unmaps the KV cache and restored once
-    it is mapped again; no other connector is ever called."""
+    """Only a connector that supports sleep mode is released before the KV
+    cache is unmapped and restored after it is mapped again."""
     monkeypatch.setattr(device_allocator, "_tag_hooks", {})
     monkeypatch.setattr(ExampleConnector, "supports_sleep_mode", supported)
     monkeypatch.setattr(ExampleConnector, "release_kv_caches", lambda self: None)

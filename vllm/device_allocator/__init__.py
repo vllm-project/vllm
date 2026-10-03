@@ -33,11 +33,8 @@ _tag_hooks: dict[str, list[tuple[Callable[[], None], Callable[[], None]]]] = {}
 def register_tag_hooks(
     tag: str, before_unmap: Callable[[], None], after_map: Callable[[], None]
 ) -> Callable[[], None]:
-    """Have the sleep-mode allocator call `before_unmap` right before it unmaps
-    allocations of `tag` (sleep, discard), and the idempotent `after_map` after
-    every wake-up that leaves all of them mapped. For state on that memory that
-    must live exactly as long as its mapping, such as transport registrations
-    of the KV cache. Returns the function that unregisters them."""
+    """Call `before_unmap` before allocations of `tag` are unmapped and the
+    idempotent `after_map` once all are mapped again. Returns the unregister."""
     hooks = (before_unmap, after_map)
     _tag_hooks.setdefault(tag, []).append(hooks)
     return lambda: _tag_hooks[tag].remove(hooks)
@@ -46,8 +43,7 @@ def register_tag_hooks(
 def run_before_unmap_hooks(
     allocations: Iterable[AllocationData], tags: Collection[str] | None = None
 ) -> None:
-    """Run the `before_unmap` hooks of each tag in `tags` (every tag if None)
-    that still has mapped allocations."""
+    """Run `before_unmap` for each tag in `tags` (all if None) still mapped."""
     mapped = {
         d.tag
         for d in allocations
@@ -59,8 +55,7 @@ def run_before_unmap_hooks(
 
 
 def run_after_map_hooks(allocations: Iterable[AllocationData]) -> None:
-    """Run the `after_map` hooks of every fully mapped tag. Being idempotent,
-    they also retry one that failed on an earlier wake-up."""
+    """Run `after_map` for every fully mapped tag; also retries a failed one."""
     asleep = {d.tag for d in allocations if d.is_asleep}
     for tag in _tag_hooks.keys() - asleep:
         for _, after_map in _tag_hooks[tag]:

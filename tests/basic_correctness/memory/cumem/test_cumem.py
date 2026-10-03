@@ -203,11 +203,8 @@ def test_sleep_with_only_weights_asleep(first_level, second_level, monkeypatch):
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_tag_hooks_bracket_the_mapping_of_their_tag():
-    """`before_unmap` runs while the tag is still mapped, right before any of
-    it is unmapped (sleep, discard); operations that unmap none of it do not
-    call it. The idempotent `after_map` runs after every wake-up that leaves
-    the tag fully mapped, so a restore that failed is retried by the next
-    wake-up. A failing `before_unmap` leaves everything mapped."""
+    """`before_unmap` runs right before a tag is unmapped, `after_map` after every
+    wake-up that maps it fully; a failing `before_unmap` unmaps nothing."""
     allocator = get_mem_allocator_instance()
     with allocator.use_memory_pool("weights"):
         weights = torch.ones(1024, 1024, device=DEVICE_TYPE)  # noqa: F841

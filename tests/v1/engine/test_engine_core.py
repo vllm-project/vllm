@@ -738,9 +738,8 @@ def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_ba
 def test_unmapping_the_kv_cache_refuses_unsupported_kv_connector(
     call, unmaps, supported
 ):
-    """Without sleep mode (the cumem allocator alone) an unsupported connector
-    passes startup, so unmapping the KV cache refuses it before anything is
-    paused or unmapped; a pause alone is never refused."""
+    """Without sleep mode (cumem allocator alone), unmapping the KV cache
+    refuses an unsupported connector before pausing; a pause is not refused."""
     core = _pausable_engine_core_proc()
     core.scheduler.pause_state = PauseState.PAUSED_ALL
     core.model_executor.is_sleeping = False
@@ -766,8 +765,7 @@ def test_unmapping_the_kv_cache_refuses_unsupported_kv_connector(
     ids=["all", "kv_cache", "scheduling-only"],
 )
 def test_wake_up_republishes_kv_connector_handshake_metadata(tags, published):
-    """A wake-up that maps the KV cache back registers it anew, so the
-    scheduler's connector then serves the workers' new handshake metadata."""
+    """A wake-up that maps the KV cache republishes the handshake metadata."""
     core = _pausable_engine_core_proc()
     core.model_executor.is_sleeping = False
     core.model_executor.get_kv_connector_handshake_metadata.return_value = [
@@ -810,8 +808,7 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
 
 @create_new_process_for_each_test()
 def test_sleep_mode_refuses_unsupported_kv_connector_at_startup():
-    """Whether a connector supports sleep mode is a property of its class, so
-    an engine with sleep mode enabled refuses an unsupported one at startup."""
+    """With sleep mode, an unsupported connector is refused at startup."""
     engine_args = EngineArgs(
         model=MODEL_NAME,
         enable_sleep_mode=True,

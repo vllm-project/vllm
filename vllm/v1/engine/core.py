@@ -840,9 +840,8 @@ class EngineCore:
         self.model_executor.reset_encoder_cache()
 
     def _set_kv_connector_handshake_metadata(self) -> None:
-        """Hand the workers' KV connector handshake metadata to the scheduler's
-        connector, which serves it to peers. Called after the KV caches are
-        registered: at startup and after a wake-up."""
+        """Give the workers' handshake metadata to the scheduler's connector,
+        after KV cache registration: at startup and after a wake-up."""
         kv_connector = self.scheduler.get_kv_connector()
         if kv_connector is not None:
             # Collect and store KV connector xfer metadata from workers
@@ -852,9 +851,7 @@ class EngineCore:
             )
 
             if xfer_handshake_metadata:
-                # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {(pp_rank, tp_rank): metadata}
-                # Merge all worker dicts into a single dict
+                # Merge the per-worker {(pp_rank, tp_rank): metadata} dicts.
                 content: dict[tuple[int, int], Any] = {}
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
@@ -862,9 +859,8 @@ class EngineCore:
                 kv_connector.set_xfer_handshake_metadata_pp_aware(content)
 
     def _check_kv_connector_supports_sleep_mode(self) -> None:
-        """Refuse to unmap the KV cache under a connector that may hold
-        references to it: at startup with sleep mode, otherwise (cumem
-        allocator only) before a sleep or a KV cache release."""
+        """Refuse to unmap the KV cache under a connector that does not
+        support sleep mode."""
         kv_connector = self.scheduler.get_kv_connector()
         if kv_connector is not None and not kv_connector.supports_sleep_mode:
             raise ValueError(
@@ -989,7 +985,6 @@ class EngineCore:
 
         if tags is None or tags:
             self.model_executor.wake_up(tags)
-            # Waking the KV cache registers it anew with the KV connector.
             self._set_kv_connector_handshake_metadata()
 
         # Partial wakes intentionally keep the remaining allocations asleep.

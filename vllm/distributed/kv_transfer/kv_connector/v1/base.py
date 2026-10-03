@@ -202,20 +202,8 @@ class KVConnectorBase_V1(ABC):
 
     @property
     def supports_sleep_mode(self) -> bool:
-        """Whether the connector stays correct across sleep mode, which unmaps
-        the KV cache memory and later maps new pages at the same addresses.
-
-        A connector that registers that memory with a transport, or shares it
-        with another process, references the old pages; it may declare support
-        only by implementing `release_kv_caches` and `restore_kv_caches`, which
-        the allocator then calls around the unmap and the map. A connector that
-        only copies KV blocks (registers nothing, shares nothing) releases by
-        waiting for its queued and in-flight copies and restores nothing. The
-        base class cannot tell whether a connector holds such references, so
-        the engine refuses every connector that does not declare support: at
-        startup with sleep mode, and before unmapping the KV cache otherwise.
-        Defaults to False.
-        """
+        """Whether the connector survives sleep mode remapping the KV cache;
+        True requires `release_kv_caches` and `restore_kv_caches`."""
         return False
 
     def __init__(
@@ -307,25 +295,13 @@ class KVConnectorBase_V1(ABC):
         return
 
     def release_kv_caches(self) -> None:
-        """Release everything set up on the KV cache memory.
-
-        Called on the worker by the sleep-mode allocator right before it unmaps
-        the KV cache (sleep, or a discard of the KV cache), with the engine
-        paused. First waits until no transfer this worker issued and no access
-        a peer may still make to that memory (such as a read of blocks leased
-        to it) is in flight. On return the memory may be unmapped. Idempotent.
-        """
+        """Before the KV cache is unmapped: wait for in-flight transfers, then
+        drop registrations of that memory. Idempotent."""
         raise NotImplementedError(f"{type(self).__name__} does not support sleep mode")
 
     def restore_kv_caches(self) -> None:
-        """Set up again on the KV cache memory what `release_kv_caches`
-        released.
-
-        Called on the worker by the sleep-mode allocator right after it maps
-        the KV cache back. On return transfers use the new pages and
-        `get_handshake_metadata` describes them. Idempotent: does nothing while
-        nothing is released.
-        """
+        """After the KV cache is mapped again: redo what `release_kv_caches`
+        dropped. Idempotent."""
         raise NotImplementedError(f"{type(self).__name__} does not support sleep mode")
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
