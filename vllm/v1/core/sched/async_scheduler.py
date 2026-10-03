@@ -70,9 +70,9 @@ class AsyncScheduler(Scheduler):
             request.num_output_placeholders -= len(new_token_ids)
             assert request.num_output_placeholders >= 0
 
-        # Fault tolerance publishes blocks in the base scheduler only after
-        # validating this output. Preserve the normal async caching path when
-        # fault tolerance is disabled.
+        # Cache the new tokens. Preempted requests should be skipped.
+        # If NaN fault tolerance is enabled, we delay this step until
+        # logits are checked for NaNs.
         if (
             status_before_update == RequestStatus.RUNNING
             and not self.enable_nan_fault_tolerance
