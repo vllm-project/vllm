@@ -3091,9 +3091,6 @@ class VllmConfig:
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
 
-        if self.cache_config.mamba_cache_mode == "all":
-            unsupported.append("mamba cache mode 'all'")
-
         return unsupported
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
@@ -3499,10 +3496,6 @@ class VllmConfig:
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
                 )
-            if self.cache_config.mamba_cache_mode not in ("none", "align"):
-                raise ValueError(
-                    "RecoverSSM supports only none and align Mamba cache modes"
-                )
             if (
                 self.cache_config.mamba_cache_mode == "align"
                 and not self.use_v2_model_runner
@@ -3535,11 +3528,6 @@ class VllmConfig:
                     "Mamba2 ReplaySSM speculative decoding requires "
                     "--mamba-backend flashinfer"
                 )
-        elif self.cache_config.mamba_cache_mode == "all":
-            raise ValueError(
-                "--use-replayssm supports prefix caching only in align mode; "
-                "pass --mamba-cache-mode align"
-            )
         elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
             if self.cache_config.mamba_cache_mode == "align":
                 raise ValueError(
