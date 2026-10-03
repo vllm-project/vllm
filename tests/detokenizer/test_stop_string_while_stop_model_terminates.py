@@ -118,7 +118,7 @@ def test_stop_string_trims_speculative_overflow(include_stop_str_in_output: bool
     processor.add_request(req, prompt=None)
     processor.request_states[req.request_id].detokenizer = detok
 
-    result = processor.process_outputs(
+    outputs = processor.process_outputs(
         [
             EngineCoreOutput(
                 request_id=req.request_id,
@@ -134,7 +134,8 @@ def test_stop_string_trims_speculative_overflow(include_stop_str_in_output: bool
                 ),
             )
         ]
-    ).request_outputs[0].outputs[0]
+    )
+    result = outputs.request_outputs[0].outputs[0]
 
     assert result.stop_reason == stop_string
     expected_text = "abcd" if include_stop_str_in_output else "ab"
