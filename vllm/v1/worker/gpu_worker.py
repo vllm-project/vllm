@@ -532,6 +532,8 @@ class Worker(WorkerBase):
             self.device,
             num_ubatches,
             _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
+            # Scratch holds no state across steps: discard it on sleep.
+            alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
         self.model_runner: GPUModelRunner = self._make_model_runner()
         if self.rank == 0:
@@ -839,10 +841,17 @@ class Worker(WorkerBase):
         if mem_pool_context is None:
             mem_pool_context = self._maybe_get_memory_pool_context(tag="kv_cache")
 
-        self.model_runner.initialize_kv_cache(
-            kv_cache_config,
-            kv_cache_allocation_context=mem_pool_context,
+        # Offload KV-init state, except on XPU, whose outermost pool would win.
+        runtime_pool = (
+            nullcontext()
+            if current_platform.is_xpu()
+            else self._maybe_get_memory_pool_context(tag="runtime")
         )
+        with runtime_pool:
+            self.model_runner.initialize_kv_cache(
+                kv_cache_config,
+                kv_cache_allocation_context=mem_pool_context,
+            )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
