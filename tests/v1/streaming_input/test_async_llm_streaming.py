@@ -173,12 +173,15 @@ async def test_generate_with_async_generator():
 
 
 @pytest.mark.asyncio
-async def test_empty_input_stream_finishes_without_engine_request():
+async def test_empty_input_stream_finishes_without_engine_request(monkeypatch):
     llm = AsyncLLM.__new__(AsyncLLM)
-    llm._validate_streaming_input_sampling_params = MagicMock()
-    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
-    llm._run_output_handler = MagicMock()
-    llm._add_request = AsyncMock()
+    monkeypatch.setattr(llm, "_validate_streaming_input_sampling_params", MagicMock())
+    monkeypatch.setattr(
+        llm, "get_supported_tasks", AsyncMock(return_value=("generate",))
+    )
+    monkeypatch.setattr(llm, "_run_output_handler", MagicMock())
+    add_request = AsyncMock()
+    monkeypatch.setattr(llm, "_add_request", add_request)
 
     final_req = MagicMock()
     final_req.request_id = "request-int"
@@ -197,4 +200,4 @@ async def test_empty_input_stream_finishes_without_engine_request():
     await task
 
     assert queue.get_nowait() is STREAM_FINISHED
-    llm._add_request.assert_not_awaited()
+    add_request.assert_not_awaited()

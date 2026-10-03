@@ -215,7 +215,7 @@ class TestContentBlocks:
 
     def test_non_string_non_dict_part_rejected(self):
         with pytest.raises(TypeError, match="Unexpected content part"):
-            _content_blocks([42])  # type: ignore[list-item]
+            _content_blocks([42])
 
 
 # ======================================================================

@@ -549,9 +549,9 @@ class TokenizeParams:
         This method is run after tokenization occurs.
         """
         if "prompt_token_ids" in prompt:
-            prompt["prompt_token_ids"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]
+            prompt["prompt_token_ids"] = self._validate_tokens(
                 tokenizer,
-                prompt["prompt_token_ids"],  # type: ignore[typeddict-item]
+                prompt["prompt_token_ids"],
             )
         if "prompt_embeds" in prompt:
             prompt["prompt_embeds"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]

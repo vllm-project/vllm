@@ -24,7 +24,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 
 
-def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
+def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.is_last_pp_rank = False
     local_batch = object()
@@ -39,7 +39,9 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
     pp_receive = Mock(return_value=False)
     runner.pp_handler = SimpleNamespace(receive=pp_receive)
     postprocess_num_computed_tokens = Mock()
-    runner.postprocess_num_computed_tokens = postprocess_num_computed_tokens  # type: ignore[method-assign]  # stub
+    monkeypatch.setattr(
+        runner, "postprocess_num_computed_tokens", postprocess_num_computed_tokens
+    )
     postprocess_state = Mock()
     runner.model_state = SimpleNamespace(postprocess_state=postprocess_state)
     runner.kv_connector = SimpleNamespace(post_forward=Mock(return_value=None))
@@ -270,7 +272,9 @@ def _no_dummy_loras(
     yield
 
 
-def _make_capture_runner(captured: bool) -> GPUModelRunner:
+def _make_capture_runner(
+    monkeypatch: pytest.MonkeyPatch, captured: bool
+) -> GPUModelRunner:
     """Minimal V2 runner for capture_model: fakes everything except the
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
@@ -282,7 +286,7 @@ def _make_capture_runner(captured: bool) -> GPUModelRunner:
         capture=lambda *args, **kwargs: None,
     )
     runner.lora_config = None
-    runner.maybe_setup_dummy_loras = _no_dummy_loras  # type: ignore[method-assign]  # stub
+    monkeypatch.setattr(runner, "maybe_setup_dummy_loras", _no_dummy_loras)
     runner.speculator = None
     runner.adaptive_verification = None
     runner.model = None
@@ -301,7 +305,7 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
     """A workspace resize after capture frees the buffer the captured graphs
     baked in, so capture_model must lock the workspace before returning
     (https://github.com/vllm-project/vllm/issues/55336)."""
-    runner = _make_capture_runner(captured=True)
+    runner = _make_capture_runner(monkeypatch, captured=True)
     monkeypatch.setattr(
         model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
     )
@@ -322,7 +326,7 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
 def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):
     """With no graphs to capture (e.g. enforce_eager) there is nothing baked
     into the workspace, so the early return must not lock it."""
-    runner = _make_capture_runner(captured=False)
+    runner = _make_capture_runner(monkeypatch, captured=False)
     lock_calls = []
     monkeypatch.setattr(
         model_runner_module, "lock_workspace", lambda: lock_calls.append("lock")
@@ -336,7 +340,7 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     """The memory-profiling capture pass runs before kernel warmup and the
     real capture; locking there would stop the warmup from growing the
     workspace to its scheduler-realistic size."""
-    runner = _make_capture_runner(captured=True)
+    runner = _make_capture_runner(monkeypatch, captured=True)
     monkeypatch.setattr(
         model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
     )

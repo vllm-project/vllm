@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
 import types
+from unittest.mock import patch
 
 import pytest
 
@@ -22,24 +23,28 @@ def _test_oink_availability_impl(
 
     # Mock device capability (class method, override on class)
     dc = platforms.interface.DeviceCapability(*device_capability)
-    platforms.current_platform.__class__.get_device_capability = lambda device_id=0: dc  # type: ignore[method-assign]  # stub
+    with patch.object(
+        platforms.current_platform.__class__,
+        "get_device_capability",
+        lambda device_id=0: dc,
+    ):
+        # Mock oink ops
+        oink_ops = types.SimpleNamespace()
+        if has_rmsnorm:
+            oink_ops.rmsnorm = lambda x, w, eps: x
+        if has_fused_add_rms_norm:
+            oink_ops.fused_add_rms_norm = lambda x, residual, w, eps: None
 
-    # Mock oink ops
-    oink_ops = types.SimpleNamespace()
-    if has_rmsnorm:
-        oink_ops.rmsnorm = lambda x, w, eps: x
-    if has_fused_add_rms_norm:
-        oink_ops.fused_add_rms_norm = lambda x, residual, w, eps: None
+        torch.ops.oink = oink_ops
 
-    torch.ops.oink = oink_ops
+        # Now import vllm modules with mocks in place (fresh import with mocked
+        # platform)
+        import vllm.kernels.oink_ops  # noqa: F401
+        from vllm.ir.ops import fused_add_rms_norm, rms_norm
 
-    # Now import vllm modules with mocks in place (fresh import with mocked platform)
-    import vllm.kernels.oink_ops  # noqa: F401
-    from vllm.ir.ops import fused_add_rms_norm, rms_norm
-
-    # Verify support checks
-    assert rms_norm.impls["oink"].supported is expected_available
-    assert fused_add_rms_norm.impls["oink"].supported is expected_fused
+        # Verify support checks
+        assert rms_norm.impls["oink"].supported is expected_available
+        assert fused_add_rms_norm.impls["oink"].supported is expected_fused
 
 
 @pytest.mark.parametrize(

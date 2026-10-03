@@ -15,13 +15,17 @@ def make_model() -> MiniCPMV2_6:
     return object.__new__(MiniCPMV2_6)  # type: ignore[type-abstract]  # protocol attrs unset
 
 
-def make_model_4_6() -> MiniCPMV4_6ForConditionalGeneration:
+def make_model_4_6(
+    monkeypatch: pytest.MonkeyPatch,
+) -> MiniCPMV4_6ForConditionalGeneration:
     model = object.__new__(
         MiniCPMV4_6ForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
     )
-    model._process_vision_input = lambda vision_input, use_vit_merger=None: [  # type: ignore[method-assign]  # stub
-        vision_input["image_embeds"]
-    ]
+    monkeypatch.setattr(
+        model,
+        "_process_vision_input",
+        lambda vision_input, use_vit_merger=None: [vision_input["image_embeds"]],
+    )
     return model
 
 
@@ -36,10 +40,10 @@ def test_video_embeds_reach_the_vision_parser():
     assert torch.equal(video_input["image_embeds"], embeds)
 
 
-def test_video_embeds_are_embedded_by_4_6():
+def test_video_embeds_are_embedded_by_4_6(monkeypatch):
     embeds = torch.arange(32, dtype=torch.float32).reshape(1, 4, 8)
 
-    embeddings = make_model_4_6().embed_multimodal(video_embeds=embeds)
+    embeddings = make_model_4_6(monkeypatch).embed_multimodal(video_embeds=embeds)
 
     assert len(embeddings) == 1
     assert torch.equal(embeddings[0], embeds)

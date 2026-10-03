@@ -134,6 +134,7 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     mock_processor,
     mock_tokenizer,
     mock_image_processor,
+    monkeypatch,
 ):
     """Test the get_updates_use_audio_in_video method directly."""
     from vllm.model_executor.models.qwen3_omni_moe_thinker import (
@@ -152,11 +153,15 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
 
     # Create processing info
     info = Qwen3OmniMoeThinkerProcessingInfo(mock_ctx)
-    info._get_expected_hidden_size = lambda: 100  # type: ignore[method-assign]  # stub
-    info.get_hf_config = Mock(return_value=mock_qwen3_omni_config)  # type: ignore[method-assign]  # stub
-    info.get_hf_processor = Mock(return_value=mock_processor)  # type: ignore[method-assign]  # stub
-    info.get_tokenizer = Mock(return_value=mock_tokenizer)  # type: ignore[method-assign]  # stub
-    info.get_image_processor = Mock(return_value=mock_image_processor)  # type: ignore[method-assign]  # stub
+    monkeypatch.setattr(info, "_get_expected_hidden_size", lambda: 100)
+    monkeypatch.setattr(
+        info, "get_hf_config", Mock(return_value=mock_qwen3_omni_config)
+    )
+    monkeypatch.setattr(info, "get_hf_processor", Mock(return_value=mock_processor))
+    monkeypatch.setattr(info, "get_tokenizer", Mock(return_value=mock_tokenizer))
+    monkeypatch.setattr(
+        info, "get_image_processor", Mock(return_value=mock_image_processor)
+    )
 
     # Create a mock dummy_inputs builder
     mock_dummy_inputs = Mock()

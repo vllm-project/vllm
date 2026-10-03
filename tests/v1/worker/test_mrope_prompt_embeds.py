@@ -26,12 +26,12 @@ class FakeMRoPEModel(SupportsMRoPE):
         return positions.clone(), 0
 
 
-def _make_runner_and_req(prompt_token_ids, prompt_embeds):
+def _make_runner_and_req(monkeypatch, prompt_token_ids, prompt_embeds):
     """Create a minimal GPUModelRunner instance and request state."""
     model = FakeMRoPEModel()
     instance = object.__new__(GPUModelRunner)
     # Stub the bound method on a hand-built runner to serve the fake MRoPE model.
-    instance.get_model = lambda: model  # type: ignore[method-assign]
+    monkeypatch.setattr(instance, "get_model", lambda: model)
 
     req_state = Mock(spec=CachedRequestState)
     req_state.prompt_token_ids = prompt_token_ids
@@ -45,9 +45,10 @@ def _make_runner_and_req(prompt_token_ids, prompt_embeds):
 class TestMRopePromptEmbeds:
     """Verify _init_mrope_positions handles prompt_embeds-only inputs."""
 
-    def test_prompt_embeds_only_does_not_crash(self):
+    def test_prompt_embeds_only_does_not_crash(self, monkeypatch):
         """Prompt-embeds-only request must not raise AssertionError."""
         instance, req_state = _make_runner_and_req(
+            monkeypatch,
             prompt_token_ids=None,
             prompt_embeds=torch.randn(15, 896),
         )
@@ -57,9 +58,10 @@ class TestMRopePromptEmbeds:
         assert req_state.mrope_positions is not None
         assert req_state.mrope_positions.shape == (3, 15)
 
-    def test_prompt_token_ids_still_works(self):
+    def test_prompt_token_ids_still_works(self, monkeypatch):
         """Normal path with prompt_token_ids continues working."""
         instance, req_state = _make_runner_and_req(
+            monkeypatch,
             prompt_token_ids=[1, 2, 3, 4, 5],
             prompt_embeds=None,
         )
@@ -69,9 +71,10 @@ class TestMRopePromptEmbeds:
         assert req_state.mrope_positions is not None
         assert req_state.mrope_positions.shape == (3, 5)
 
-    def test_neither_token_ids_nor_embeds_raises(self):
+    def test_neither_token_ids_nor_embeds_raises(self, monkeypatch):
         """When both are None, a ValueError should be raised."""
         instance, req_state = _make_runner_and_req(
+            monkeypatch,
             prompt_token_ids=None,
             prompt_embeds=None,
         )
