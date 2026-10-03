@@ -18,6 +18,7 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import _layout_from_name
+from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
@@ -1156,6 +1157,54 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens
 
 
+@triton.jit
+def _mamba_align_state_indices_kernel(
+    block_table_ptr,
+    block_table_stride,
+    num_cols,
+    seq_lens_ptr,
+    out_ptr,
+    block_size,
+    N: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    row = tl.program_id(0)
+    seq_len = tl.load(seq_lens_ptr + row)
+    # seq_len >= 0, so truncating division matches the torch path's floor
+    # division after the clamp (seq_len == 0 -> start 0).
+    start = tl.maximum((seq_len - 1) // block_size, 0)
+    offs = tl.arange(0, BLOCK_N)
+    cols = start + offs
+    mask = (offs < N) & (cols < num_cols)
+    vals = tl.load(block_table_ptr + row * block_table_stride + cols, mask=mask)
+    tl.store(out_ptr + row * N + offs, vals, mask=offs < N)
+
+
+def _mamba_align_state_indices(
+    block_table: torch.Tensor, seq_lens: torch.Tensor, block_size: int, n: int
+) -> torch.Tensor:
+    """block_table[r, max((seq_lens[r] - 1) // block_size, 0) + k] for k < n
+    in one launch; equals the torch path below for in-range columns."""
+    logger.info_once(
+        "Using the fused Mamba align-mode state-index kernel "
+        "(VLLM_MAMBA_FUSED_STATE_INDEX=1)."
+    )
+    num_reqs = block_table.shape[0]
+    out = torch.empty((num_reqs, n), dtype=block_table.dtype, device=block_table.device)
+    if num_reqs > 0:
+        _mamba_align_state_indices_kernel[(num_reqs,)](
+            block_table,
+            block_table.stride(0),
+            block_table.shape[1],
+            seq_lens,
+            out,
+            block_size,
+            N=n,
+            BLOCK_N=triton.next_power_of_2(n),
+        )
+    return out
+
+
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -1176,6 +1225,18 @@ def mamba_get_block_table_tensor(
         return block_table
     else:
         assert isinstance(kv_cache_spec, MambaSpec)
+        if (
+            envs.VLLM_MAMBA_FUSED_STATE_INDEX
+            and block_table.is_cuda
+            and block_table.stride(1) == 1
+            and seq_lens.is_contiguous()
+        ):
+            return _mamba_align_state_indices(
+                block_table,
+                seq_lens,
+                kv_cache_spec.block_size,
+                1 + kv_cache_spec.num_speculative_blocks,
+            )
         # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
         # to handle the invalid block table.
         start_indices = (seq_lens - 1) // kv_cache_spec.block_size

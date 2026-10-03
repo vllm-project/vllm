@@ -302,6 +302,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
+    VLLM_MAMBA_FUSED_STATE_INDEX: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -2104,6 +2105,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
+    ),
+    # Compute the Mamba "align"-mode state indices (the last
+    # 1 + num_speculative_blocks block-table entries of each request) with one
+    # Triton kernel instead of seven eager torch ops per Mamba KV-cache group.
+    "VLLM_MAMBA_FUSED_STATE_INDEX": lambda: bool(
+        int(os.getenv("VLLM_MAMBA_FUSED_STATE_INDEX", "0"))
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
