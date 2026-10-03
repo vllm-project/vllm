@@ -53,6 +53,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.block_table import (
     MultiGroupBlockTable,
     SlotMappingMode,
@@ -792,6 +793,56 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
 
     assert _is_req_added(model_runner, req_ids[1])
     assert not _is_req_scheduled(model_runner, req_ids[1])
+
+
+def test_replayssm_acceptance_survives_reordering_without_cpu_counts(monkeypatch):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner._use_flashinfer_replayssm = True
+    runner._needs_prefix_state_migration = True
+    runner.num_spec_tokens = 3
+    runner.max_num_reqs = 4
+    runner.num_accepted_tokens = SimpleNamespace(gpu=torch.ones(4, dtype=torch.int32))
+    runner.num_accepted_tokens_event = None
+    runner._replayssm_accepted_tokens = torch.ones(5, dtype=torch.int32)
+    runner._replayssm_paused_accepted_tokens = {}
+    index_tensor = torch.empty(4, dtype=torch.int64)
+    runner._replayssm_acceptance_indices = SimpleNamespace(
+        np=index_tensor.numpy(), gpu=index_tensor, copy_to_gpu=lambda: None
+    )
+    runner.input_batch = SimpleNamespace(
+        req_ids=["a", "b"], req_id_to_index={"a": 0, "b": 1}
+    )
+    runner.cache_config = SimpleNamespace(mamba_cache_mode="align", use_replayssm=True)
+    runner.kv_cache_config = Mock()
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner._get_mamba_bufs = Mock()
+    runner._get_mamba_state_copy_funcs = Mock()
+
+    def postprocess(**kwargs):
+        assert kwargs["num_accepted_tokens_cpu_tensor"] is None
+        # Boundary materialization normalizes a's convolution offset, while b
+        # retains its partial acceptance. Snapshot the postprocessed counts.
+        assert kwargs["num_accepted_tokens_gpu"][:2].tolist() == [3, 2]
+        kwargs["num_accepted_tokens_gpu"][0] = 1
+
+    monkeypatch.setattr(mamba_utils, "postprocess_mamba_gpu", postprocess)
+    runner._update_states_after_model_execute(
+        torch.tensor([[11, 12, 13, -1], [21, 22, -1, -1]]), Mock()
+    )
+    runner.input_batch.req_ids = ["b", "new", "a"]
+    runner.num_accepted_tokens.gpu.fill_(99)
+    runner._restore_replayssm_accepted_tokens()
+    assert runner.num_accepted_tokens.gpu.tolist() == [2, 1, 1, 1]
+    # Pausing b must retain its scalar even if another batch reuses its row.
+    runner._pause_replayssm_accepted_tokens("b")
+    runner._replayssm_accepted_tokens[1] = 4
+    runner.input_batch.req_ids = ["a"]
+    runner._restore_replayssm_accepted_tokens()
+    assert "b" in runner._replayssm_paused_accepted_tokens
+    runner.input_batch.req_ids = ["new", "b"]
+    runner._restore_replayssm_accepted_tokens()
+    assert runner.num_accepted_tokens.gpu.tolist() == [1, 2, 1, 1]
+    assert not runner._replayssm_paused_accepted_tokens
 
 
 def test_update_states_pp_non_async_multi_request_keeps_token_buffers_consistent(

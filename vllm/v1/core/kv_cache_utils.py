@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, replace
 from functools import partial, reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, overload
 
+import torch
+
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -1043,9 +1045,9 @@ def check_enough_kv_cache_memory(
         )
         _check_enough_kv_cache_memory(
             check_memory,
-            lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
+            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
             vllm_config.model_config.max_model_len,
-            lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
+            partial(_estimate_max_model_len_from_groups, vllm_config, groups),
         )
 
 
@@ -1623,7 +1625,15 @@ def _get_per_layer_spec(
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
-    """Return the largest cache group's bytes per block."""
+    """Return canonical KV plus ReplaySSM bytes per physical block."""
+    return _get_kv_cache_main_bytes_per_block(
+        kv_cache_groups
+    ) + _get_replayssm_bytes_per_block(kv_cache_groups)
+
+
+def _get_kv_cache_main_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         _, _, mla_names, idx_names, mla_page, idx_page, _, _ = glm5_layout
         return len(mla_names) * mla_page + len(idx_names) * idx_page
@@ -1647,6 +1657,52 @@ def _get_kv_cache_bytes_per_block(
         for layer_name in group.layer_names
     )
     return round_up(bytes_per_block, math.lcm(*alignments))
+
+
+def get_replayssm_ring_layout(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> tuple[int, dict[str, tuple[int, ...]], int]:
+    """Return the block-major ring stride, layer offsets, and tracker bytes.
+
+    Mamba managers use the coordinator's shared block pool: a non-null physical
+    block belongs to only one cache group at a time. Rings can therefore overlay
+    across groups, while layers and states within a group must be disjoint.
+    Trackers retain separate group storage and are accounted for independently.
+    """
+    ring_bytes = 0
+    alignment = 1
+    tracker_bytes = 0
+    offsets: dict[str, tuple[int, ...]] = {}
+    for group in kv_cache_groups:
+        group_bytes = 0
+        has_replayssm = False
+        for layer_name in group.layer_names:
+            spec = _get_per_layer_spec(group, layer_name)
+            if not isinstance(spec, MambaSpec) or not spec.replayssm_shapes:
+                continue
+            assert layer_name not in offsets
+            has_replayssm = True
+            state_offsets = []
+            for shape, dtype in zip(
+                spec.replayssm_shapes, spec.replayssm_dtypes, strict=True
+            ):
+                element_size = get_dtype_size(dtype)
+                alignment = math.lcm(alignment, element_size)
+                group_bytes = round_up(group_bytes, element_size)
+                state_offsets.append(group_bytes)
+                group_bytes += math.prod(shape) * element_size
+            offsets[layer_name] = tuple(state_offsets)
+        ring_bytes = max(ring_bytes, group_bytes)
+        if has_replayssm:
+            tracker_bytes += 2 * get_dtype_size(torch.int32)
+    return round_up(ring_bytes, alignment), offsets, tracker_bytes
+
+
+def _get_replayssm_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    ring_bytes, _, tracker_bytes = get_replayssm_ring_layout(kv_cache_groups)
+    return ring_bytes + tracker_bytes
 
 
 def validate_kv_cache_layout(
@@ -1728,11 +1784,14 @@ def get_kv_cache_config_from_groups(
             tail_names,
             _,
         ) = glm5_layout
-        bytes_per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
+        main_bytes_per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
+        bytes_per_block = main_bytes_per_block + _get_replayssm_bytes_per_block(
+            kv_cache_groups
+        )
         num_blocks = may_override_num_blocks(
             vllm_config, available_memory // bytes_per_block
         )
-        size = bytes_per_block * num_blocks
+        size = main_bytes_per_block * num_blocks
         attn_specs = cast(
             UniformTypeKVCacheSpecs, attn_group.kv_cache_spec
         ).kv_cache_specs
@@ -1782,12 +1841,18 @@ def get_kv_cache_config_from_groups(
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
-    interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
+    main_bytes_per_block = _get_kv_cache_main_bytes_per_block(kv_cache_groups)
+    bytes_per_block = main_bytes_per_block + _get_replayssm_bytes_per_block(
+        kv_cache_groups
+    )
+    assert bytes_per_block > 0
+    interleaved_block_stride = (
+        main_bytes_per_block if layout.is_block_outermost else None
+    )
 
     num_blocks = available_memory // bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-    size = bytes_per_block * num_blocks
+    size = main_bytes_per_block * num_blocks
 
     # Groups alias from byte 0. Spec regions are laid out differently:
     #
@@ -2509,10 +2574,10 @@ def _max_memory_usage_bytes_from_groups(
         (
             attn_group,
             mamba_groups,
-            mla_names,
-            idx_names,
-            mla_page,
-            idx_page,
+            _,
+            _,
+            _,
+            _,
             tail_names,
             _,
         ) = glm5_layout
@@ -2527,7 +2592,7 @@ def _max_memory_usage_bytes_from_groups(
         )
         if tail_names:
             total_blocks += 1
-        return total_blocks * (len(mla_names) * mla_page + len(idx_names) * idx_page)
+        return total_blocks * _pool_bytes_per_block(kv_cache_groups)
 
     bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
     total_blocks = 0

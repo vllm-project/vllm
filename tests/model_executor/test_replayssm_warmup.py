@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -117,7 +118,50 @@ def test_replayssm_autotune_kwargs_skipped(runner_kwargs, flashinfer_supported):
     assert result is None
 
 
-def test_replayssm_autotune_slots_restore_state_and_trackers():
+@pytest.mark.parametrize("fail_warmup", [False, True])
+def test_replayssm_autotune_clears_overlaid_views_with_different_widths(fail_warmup):
+    raw = torch.full((5, 16), 3.0)
+    mixers = []
+    for width in (3, 11):
+        mixer = MambaMixer2.__new__(MambaMixer2)
+        torch.nn.Module.__init__(mixer)
+        mixer.use_replayssm = True
+        mixer.replayssm_buffer_len = 16
+        mixer.kv_cache = (torch.empty(0),)
+        mixer.replayssm_cache = (raw[:, :width],)
+        mixer._replayssm_ring_start = torch.full((5,), 3, dtype=torch.int32)
+        mixer._replayssm_prev_num_accepted = torch.full((5,), 3, dtype=torch.int32)
+        mixers.append(mixer)
+    assert (
+        mixers[0].replayssm_cache[0].data_ptr()
+        == mixers[1].replayssm_cache[0].data_ptr()
+    )
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(use_v2_model_runner=True),
+        block_tables=SimpleNamespace(get_dummy_block_tables=Mock()),
+        get_model=lambda: SimpleNamespace(modules=lambda: mixers),
+    )
+    error = (
+        pytest.raises(RuntimeError, match="warmup failed")
+        if fail_warmup
+        else nullcontext()
+    )
+    with error, warmup._temporary_replayssm_autotune_state(runner, 2):
+        mixers[1].replayssm_cache[0][1:3].fill_(9)
+        if fail_warmup:
+            raise RuntimeError("warmup failed")
+    assert torch.count_nonzero(raw[1:3, :11]) == 0
+    assert torch.all(raw[0] == 3)  # null slot remains outside bounded cleanup
+    assert torch.all(raw[3:] == 3)  # large-cache tail is untouched
+    assert torch.all(raw[1:3, 11:] == 3)
+    for mixer in mixers:
+        assert torch.count_nonzero(mixer._replayssm_ring_start) == 0
+        assert torch.count_nonzero(mixer._replayssm_prev_num_accepted) == 0
+
+
+@pytest.mark.parametrize("use_v2", [False, True])
+@pytest.mark.parametrize("fail_warmup", [False, True])
+def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, fail_warmup):
     mixer = MambaMixer2.__new__(MambaMixer2)
     torch.nn.Module.__init__(mixer)
     mixer.use_replayssm = True
@@ -125,16 +169,15 @@ def test_replayssm_autotune_slots_restore_state_and_trackers():
     mixer.kv_cache = (
         torch.full((4, 2), 3.0),
         torch.full((4, 2), 3.0),
-        *(torch.full((4, 2, 17), 3.0) for _ in range(3)),
     )
+    mixer.replayssm_cache = tuple(torch.full((4, 2, 17), 3.0) for _ in range(3))
     mixer._replayssm_ring_start = torch.full((4,), 3, dtype=torch.int32)
     mixer._replayssm_prev_num_accepted = torch.full((4,), 3, dtype=torch.int32)
-    mixer._replayssm_prev_query_len = torch.full((4,), 3, dtype=torch.int32)
     tracked = (
         *mixer.kv_cache,
+        *mixer.replayssm_cache,
         mixer._replayssm_ring_start,
         mixer._replayssm_prev_num_accepted,
-        mixer._replayssm_prev_query_len,
     )
 
     block_ids = np.arange(10, 14, dtype=np.int32).reshape(4, 1)
@@ -144,22 +187,36 @@ def test_replayssm_autotune_slots_restore_state_and_trackers():
         block_tables=[block_table], commit_block_table=Mock()
     )
     runner = SimpleNamespace(
-        vllm_config=SimpleNamespace(use_v2_model_runner=False),
+        vllm_config=SimpleNamespace(use_v2_model_runner=use_v2),
         input_batch=SimpleNamespace(block_table=multi_group_block_table),
+        block_tables=SimpleNamespace(get_dummy_block_tables=Mock()),
         get_model=lambda: SimpleNamespace(modules=lambda: (mixer,)),
     )
 
-    with warmup._temporary_replayssm_autotune_state(runner, 2):
-        assert block_ids[:2, 0].tolist() == [1, 2]
+    error = (
+        pytest.raises(RuntimeError, match="warmup failed")
+        if fail_warmup
+        else nullcontext()
+    )
+    with error, warmup._temporary_replayssm_autotune_state(runner, 2):
+        if not use_v2:
+            assert block_ids[:2, 0].tolist() == [1, 2]
         for tensor in tracked:
             tensor[1:3].fill_(9)
+        if fail_warmup:
+            raise RuntimeError("warmup failed")
 
     assert np.array_equal(block_ids, original_block_ids)
-    assert multi_group_block_table.commit_block_table.call_args_list == [
-        ((2,), {}),
-        ((2,), {}),
-    ]
-    for tensor in tracked:
+    if use_v2:
+        runner.block_tables.get_dummy_block_tables.assert_called_once_with(2)
+    else:
+        assert multi_group_block_table.commit_block_table.call_args_list == [
+            ((2,), {}),
+            ((2,), {}),
+        ]
+    for tensor in (*mixer.kv_cache, *mixer.replayssm_cache):
         assert torch.count_nonzero(tensor[1:3]) == 0
         assert torch.all(tensor[0] == 3)
         assert torch.all(tensor[3] == 3)
+    for tensor in (mixer._replayssm_ring_start, mixer._replayssm_prev_num_accepted):
+        assert torch.count_nonzero(tensor) == 0
