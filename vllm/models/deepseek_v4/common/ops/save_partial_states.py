@@ -110,16 +110,18 @@ class SavePartialStatesKernel(
             return []
 
         coefficient = 2 if compress_ratio == 4 else 1
+        block_size = 4 if compress_ratio == 4 else 128
+        state_width = coefficient * head_dim
         return self._trace_dispatch(self.dispatch)(
             head_size=coefficient * head_dim,
-            state_width=coefficient * head_dim,
+            state_width=state_width,
             compress_ratio=compress_ratio,
             kv_stride=2 * coefficient * head_dim,
             score_stride=2 * coefficient * head_dim,
             ape_stride=coefficient * head_dim,
-            state_cache_stride0=8 * coefficient * head_dim,
-            state_cache_stride1=2 * coefficient * head_dim,
-            block_size=4 if compress_ratio == 4 else 8,
+            state_cache_stride0=block_size * 2 * state_width,
+            state_cache_stride1=2 * state_width,
+            block_size=block_size,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
@@ -142,7 +144,7 @@ class SavePartialStatesKernel(
             positions=TritonWarmupTensor(torch.int64),
             state_cache=TritonWarmupTensor(
                 torch.float32,
-                shape=(1, 1, compile_key.state_width),
+                shape=(1, 1, 2 * compile_key.state_width),
                 strides=(
                     compile_key.state_cache_stride0,
                     compile_key.state_cache_stride1,
