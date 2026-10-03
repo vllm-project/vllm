@@ -258,6 +258,32 @@ def test_startup_plan_apply_gate(plan_env):
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike()
+    or not torch.accelerator.is_available()
+    or torch.cuda.memory.get_allocator_backend() != "native",
+    reason="needs the native CUDA or ROCm allocator",
+)
+@create_new_process_for_each_test("spawn")
+def test_pinned_kv_releases_profile_run_cache():
+    """With kv_cache_memory_bytes set, the blocks the profile run leaves cached
+    are released before the pinned KV cache is allocated on top of them."""
+
+    def profile_run(randomize_inputs):
+        torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+
+    worker = _plan_worker(kv_bytes=7 * GiB_bytes)
+    worker.randomize_dummy_inputs = False
+    worker.model_config = SimpleNamespace(multimodal_config=None)
+    worker.model_runner = SimpleNamespace(profile_run=profile_run)
+
+    torch.accelerator.empty_cache()
+    baseline = torch.accelerator.memory_reserved()
+    with patch.object(gpu_worker, "maybe_apply_startup_plan"):
+        assert gpu_worker.Worker.determine_available_memory(worker) == 7 * GiB_bytes
+    assert torch.accelerator.memory_reserved() == baseline
+
+
 # Memory accounting of the profiling run (Worker.determine_available_memory).
 
 # The fallback reads only the sign of the measured drop and this process's torch
