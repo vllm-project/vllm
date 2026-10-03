@@ -6,6 +6,7 @@ steps:
   key: model-executor
   device: intel_gpu
   timeout_in_minutes: 60
+  optional: true
   working_dir: .
   no_plugin: true
   env:
