@@ -449,7 +449,9 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability >= DeviceCapability(8, 0)
+        # Platforms without a CUDA-style capability (e.g. XPU) report None;
+        # their device constraints are enforced by the platform layer.
+        return capability is None or capability >= DeviceCapability(8, 0)
 
     @classmethod
     def supports_combination(
@@ -464,7 +466,11 @@ class FlashAttentionBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        if has_sink and device_capability < DeviceCapability(9, 0):
+        if (
+            has_sink
+            and device_capability is not None
+            and device_capability < DeviceCapability(9, 0)
+        ):
             return "sink not supported on compute capability < 9.0"
         if (
             use_mm_prefix
