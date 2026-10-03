@@ -5,20 +5,37 @@
 import hashlib
 import os
 import tempfile
+from collections.abc import Iterable
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
+from vllm.logger import init_logger
+from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+logger = init_logger(__name__)
+
+FLASHINFER_AUTOTUNE_ARTIFACT = "flashinfer_autotune"
+"""Artifact kind the weight cache daemon caches the tuned table under."""
+
 
 def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     config_hash = runner.vllm_config.compute_hash(include_version=False)
     return hashlib.sha256(config_hash.encode()).hexdigest()
+
+
+def _flashinfer_workspace_id() -> str:
+    """Identity of the FlashInfer build the tuned tactics belong to."""
+    import flashinfer
+    from flashinfer.jit import env as flashinfer_jit_env
+
+    workspace = flashinfer_jit_env.FLASHINFER_WORKSPACE_DIR
+    return f"{workspace.parent.name}/{workspace.name}@{flashinfer.__version__}"
 
 
 def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
@@ -41,6 +58,71 @@ def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
     return output_dir / "autotune_configs.json"
 
 
+def flashinfer_autotune_artifact_key(
+    runner: "GPUModelRunner",
+    skip_ops: Iterable[str] | None = None,
+    pp_rank: int = 0,
+) -> ArtifactCacheKey:
+    """Key the tuned table is cached under on the weight cache daemon.
+
+    A hit means every tactic this engine would profile is already chosen, so
+    the whole autotune pass can be skipped. That is only true when the table
+    was produced for the same computation graph and pipeline stage, by the
+    same FlashInfer build, and without skipping any op this engine does tune,
+    so all of these go into the hash. The vLLM version is carried by
+    ``ArtifactCacheKey`` itself.
+    """
+    parts = [
+        flashinfer_autotune_cache_hash(runner),
+        _flashinfer_workspace_id(),
+        ",".join(sorted(skip_ops or ())),
+        str(pp_rank),
+    ]
+    return ArtifactCacheKey(
+        kind=FLASHINFER_AUTOTUNE_ARTIFACT,
+        content_hash=hashlib.sha256("\x00".join(parts).encode()).hexdigest(),
+    )
+
+
+def dump_flashinfer_autotune_configs() -> bytes:
+    """Serialize the process-wide tuned tactics.
+
+    ``AutoTuner`` only exposes file-based serialization, so the table is
+    written to a temporary file and read back.
+    """
+    from flashinfer.autotuner import AutoTuner
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "autotune_configs.json"
+        AutoTuner.get().save_configs(str(path))
+        return path.read_bytes()
+
+
+def load_flashinfer_autotune_configs(configs: bytes) -> bool:
+    """Load serialized tactics into the process-wide ``AutoTuner``."""
+    from flashinfer.autotuner import AutoTuner
+
+    with tempfile.NamedTemporaryFile() as f:
+        f.write(configs)
+        f.flush()
+        return bool(AutoTuner.get().load_configs(f.name))
+
+
+def try_load_flashinfer_autotune_configs(configs: bytes) -> bool:
+    """Load serialized tactics, reporting an unusable table as a miss.
+
+    ``AutoTuner.load_configs`` returns False before populating anything when
+    the table records a different environment (FlashInfer, CUDA, cuBLAS or
+    cuDNN version, or GPU), so a rejected table leaves the tuner untouched
+    and the caller can safely fall back to a full autotune pass.
+    """
+    try:
+        return load_flashinfer_autotune_configs(configs)
+    except Exception:
+        logger.exception("Discarding an unreadable FlashInfer autotune table")
+        return False
+
+
 def sync_flashinfer_autotune_cache(
     runner: "GPUModelRunner",
     group: "GroupCoordinator",
@@ -55,12 +137,7 @@ def sync_flashinfer_autotune_cache(
             from vllm.utils.flashinfer import has_flashinfer
 
             if has_flashinfer() and current_platform.has_device_capability(90):
-                from flashinfer.autotuner import AutoTuner
-
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    path = Path(temp_dir) / "autotune_configs.json"
-                    AutoTuner.get().save_configs(str(path))
-                    cache = path.read_bytes()
+                cache = dump_flashinfer_autotune_configs()
         except Exception as exc:
             cache = f"{type(exc).__name__}: {exc}"
 
@@ -70,13 +147,8 @@ def sync_flashinfer_autotune_cache(
     if cache is None or group.rank_in_group == 0:
         return
 
-    from flashinfer.autotuner import AutoTuner
-
-    with tempfile.NamedTemporaryFile() as f:
-        f.write(cache)
-        f.flush()
-        if not AutoTuner.get().load_configs(f.name):
-            raise RuntimeError("FlashInfer autotune cache is incompatible")
+    if not load_flashinfer_autotune_configs(cache):
+        raise RuntimeError("FlashInfer autotune cache is incompatible")
 
 
 def write_flashinfer_autotune_cache(cache_path: Path, contents: bytes) -> None:

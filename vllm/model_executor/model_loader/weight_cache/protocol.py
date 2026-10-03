@@ -19,8 +19,8 @@ import socket
 import stat
 import struct
 import tempfile
-from dataclasses import dataclass, fields
-from typing import Any, NamedTuple
+from dataclasses import asdict, dataclass, fields
+from typing import Any, NamedTuple, TypeVar
 
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
@@ -45,6 +45,19 @@ _LEN_STRUCT = struct.Struct("!Q")
 # Sanity bound for a single message. IPC handles are tiny; only small
 # non-CUDA tensors are ever shipped by value.
 MAX_MSG_SIZE = 1 << 34
+# Host-side artifacts are configuration tables (the FlashInfer autotune table
+# is JSON in the kilobyte range), so cap them far below MAX_MSG_SIZE: unlike
+# the weights they are copied into the daemon's host memory and kept there.
+MAX_ARTIFACT_SIZE = 64 << 20
+# A remote peer is authenticated before any payload is decoded, so the control
+# plane it speaks must not be pickle: recv_msg would deserialize
+# attacker-controlled bytes before the token is ever compared. JSON carries
+# everything a cross-host seed needs -- the cache key is a flat dataclass, a
+# manifest is plain shapes and dtypes, and an RDMA seed is a session string
+# plus integer regions.
+MAX_JSON_MSG_SIZE = 1 << 26
+
+_DataclassT = TypeVar("_DataclassT")
 
 
 def _current_uid() -> int:
@@ -349,6 +362,26 @@ class WeightCacheKey:
         ]
 
 
+@dataclass(frozen=True)
+class ArtifactCacheKey:
+    """Identifies a host-side artifact the daemon caches for engines.
+
+    Unlike the weights, these artifacts are plain bytes rather than GPU
+    allocations, so the daemon can hand one to any local process that reaches
+    its socket instead of only to the engine that owns the GPU.
+
+    The daemon treats the key as opaque and only ever returns bytes stored
+    under the exact key requested, so the producer must fold everything the
+    contents depend on into ``content_hash``.
+    """
+
+    kind: str
+    """Artifact type, e.g. "flashinfer_autotune"."""
+    content_hash: str
+    """Hash of every input the artifact's contents depend on."""
+    vllm_version: str = vllm.version.__version__
+
+
 @dataclass
 class TensorEntry:
     """A single cached tensor.
@@ -361,24 +394,31 @@ class TensorEntry:
     """Either "param" or "buffer"."""
     ipc_args: tuple | None = None
     cpu_tensor: torch.Tensor | None = None
+    shape: tuple[int, ...] = ()
+    dtype: str = ""
+    """Recorded so a seeding peer can size its mirror without a handle."""
 
     @classmethod
     def from_tensor(cls, tensor: torch.Tensor, kind: str) -> "TensorEntry":
         tensor = tensor.detach()
+        shape = tuple(tensor.shape)
+        dtype = str(tensor.dtype)
         if tensor.is_cuda:
             _, ipc_args = reduce_tensor(tensor)
-            return cls(kind=kind, ipc_args=ipc_args)
-        return cls(kind=kind, cpu_tensor=tensor.cpu())
+            return cls(kind=kind, ipc_args=ipc_args, shape=shape, dtype=dtype)
+        return cls(kind=kind, cpu_tensor=tensor.cpu(), shape=shape, dtype=dtype)
 
-    def rebuild(self, device_index: int) -> torch.Tensor:
+    def rebuild(self, device_index: int, *, retarget: bool = True) -> torch.Tensor:
         if self.ipc_args is None:
             assert self.cpu_tensor is not None
             return self.cpu_tensor
         args = list(self.ipc_args)
         # Index 6 of the args from reduce_tensor is the device index. It must
         # be retargeted to the local index since the daemon and the engine may
-        # have different CUDA_VISIBLE_DEVICES mappings.
-        args[6] = device_index
+        # have different CUDA_VISIBLE_DEVICES mappings. A seeding daemon
+        # instead leaves it at the source index while opening a peer handle.
+        if retarget:
+            args[6] = device_index
         return rebuild_cuda_tensor(*args)
 
 
@@ -391,6 +431,72 @@ class WeightCacheState(NamedTuple):
     """Duplicate (tied) weight names aliased to their canonical entry."""
     attrs: dict[str, bool]
     """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
+
+
+def connect_daemon(
+    socket_path: str, timeout: float, *, strict_perms: bool = True
+) -> socket.socket:
+    """Connect to a daemon socket after verifying it is safe to trust.
+
+    The auto-derived per-user directory is locked to 0700 and checked
+    strictly. When the operator explicitly configures a path they own the
+    trust decision, so ``strict_perms=False`` enforces only ownership and
+    symlink safety.
+
+    Raises:
+        WeightCacheUnavailableError: If the socket is missing, untrusted or
+            not accepting connections.
+
+    """
+    try:
+        verify_socket_owner(socket_path, strict_perms=strict_perms)
+    except OSError as e:
+        raise WeightCacheUnavailableError(
+            f"Weight cache socket {socket_path} is unavailable: {e}"
+        ) from e
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(socket_path)
+    except OSError as e:
+        sock.close()
+        raise WeightCacheUnavailableError(
+            f"Cannot connect to weight cache daemon at {socket_path}: {e}"
+        ) from e
+    return sock
+
+
+def json_to_dataclass(cls: type[_DataclassT], payload: Any) -> _DataclassT:
+    """Rebuild a flat, JSON-safe dataclass, rejecting anything undeclared.
+
+    Used on the remote control plane, where the payload is untrusted: only
+    the declared fields are accepted, so a peer cannot smuggle extra state
+    into the daemon.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object for {cls.__name__}")
+    unknown = set(payload) - {f.name for f in fields(cls)}  # type: ignore[arg-type]
+    if unknown:
+        raise ValueError(f"Unknown {cls.__name__} fields: {sorted(unknown)}")
+    return cls(**payload)
+
+
+def dataclass_to_json(instance: Any) -> dict[str, Any]:
+    """Render a flat dataclass for the remote control plane."""
+    return asdict(instance)
+
+
+def send_json(sock: socket.socket, obj: Any) -> None:
+    payload = json.dumps(obj).encode()
+    sock.sendall(_LEN_STRUCT.pack(len(payload)))
+    sock.sendall(payload)
+
+
+def recv_json(sock: socket.socket) -> Any:
+    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size))
+    if length > MAX_JSON_MSG_SIZE:
+        raise ValueError(f"Message size {length} exceeds limit {MAX_JSON_MSG_SIZE}")
+    return json.loads(_recv_exact(sock, length))
 
 
 def send_msg(sock: socket.socket, obj: Any) -> None:
