@@ -21,7 +21,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.cudagraph_pool import (
     capture_outside_cumem_pool,
-    use_cudagraph_pool,
+    capture_pool,
 )
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -488,7 +488,7 @@ class CudaGraphManager:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
                         with (
-                            use_cudagraph_pool(self.pool, self.vllm_config) as pool,
+                            capture_pool(self.pool, self.vllm_config) as pool,
                             torch.cuda.graph(
                                 graph, pool, stream=self._capture_stream(desc)
                             ),

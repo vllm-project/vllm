@@ -437,7 +437,7 @@ def test_cudagraph_pool_sleep(level):
     import vllm.distributed.device_communicators.pynccl_allocator as nccl_alloc
     from vllm.compilation.cudagraph_pool import (
         capture_outside_cumem_pool,
-        use_cudagraph_pool,
+        capture_pool,
     )
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
 
@@ -445,7 +445,7 @@ def test_cudagraph_pool_sleep(level):
     on, off = (SimpleNamespace(use_cumem_cudagraph_pool=v) for v in (True, False))
     handle = current_platform.graph_pool_handle()
     for cfg, ctx in ((off, nullcontext()), (on, capture_outside_cumem_pool())):
-        with ctx, use_cudagraph_pool(handle, cfg) as used:
+        with ctx, capture_pool(handle, cfg) as used:
             assert used == handle and allocator.current_tag != "cudagraph"
     with allocator.use_memory_pool("weights"):
         weight = torch.full((1 << 20,), 2.0, device=DEVICE_TYPE)
@@ -455,7 +455,7 @@ def test_cudagraph_pool_sleep(level):
         graph = torch.cuda.CUDAGraph()
         stream = torch.cuda.Stream()
         with (
-            use_cudagraph_pool(handle, on) as pool,
+            capture_pool(handle, on) as pool,
             torch.cuda.graph(graph, pool=pool, stream=stream),
         ):
             assert nccl_alloc._graph_pool_id == pool != handle

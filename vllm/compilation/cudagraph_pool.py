@@ -30,7 +30,7 @@ def capture_outside_cumem_pool() -> Iterator[None]:
 
 
 @contextmanager
-def use_cudagraph_pool(
+def capture_pool(
     pool: tuple[int, int] | None, vllm_config: VllmConfig
 ) -> Iterator[tuple[int, int] | None]:
     """Yield the pool to capture into, the cuMem graph pool when sleep offloads
