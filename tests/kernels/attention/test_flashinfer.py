@@ -73,12 +73,18 @@ def test_dcp_prefill_lse_merge_and_replay(
     wrapper = fi_backend.BatchDCPPrefillWrapper(
         "NHD", workspace, dcp_a2a=dcp_a2a, lse_buffer=lse_buffer
     )
-    wrapper._context = SimpleNamespace(
-        plan=lambda **kwargs: None,
-        run=lambda *args, **kwargs: (
+
+    def run_context(*args, **kwargs):
+        if world_size == 1:
+            return context_out, context_log2
+        return (
             context_out.repeat(1, world_size, 1),
             context_log2.repeat(1, world_size) - math.log2(world_size),
-        ),
+        )
+
+    wrapper._context = SimpleNamespace(
+        plan=lambda **kwargs: None,
+        run=run_context,
     )
     wrapper._new_tokens = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
         workspace, backend=backend
@@ -149,7 +155,7 @@ def test_dcp_prefill_lse_merge_and_replay(
     # Replanning changes pointer dtype and token-stride specialization while
     # selecting a shorter view of the same owned LSE allocation.
     del graph
-    tokens = 3
+    tokens = 4
     q, k, v, out = (tensor[:tokens].to(torch.float16) for tensor in (q, k, v, out))
     context_out = context_out[:tokens].to(torch.float16)
     context_lse = context_lse[:, :tokens]
