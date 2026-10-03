@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_BATCH_INVARIANT_KERNEL_LIB: str | None = None
+    VLLM_DS4_DECODE_KERNEL: Literal["paged", "sparse"] = "paged"
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -633,6 +634,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Standalone fused SiLU+A2-quant kernel used by batch-invariant MoE.
     "VLLM_BATCH_INVARIANT_KERNEL_LIB": lambda: os.getenv(
         "VLLM_BATCH_INVARIANT_KERNEL_LIB"
+    ),
+    # Opt in to the prefill FlashMLA path for decode. Batch invariance alone
+    # does not imply prefill/decode or train/rollout equivalence.
+    "VLLM_DS4_DECODE_KERNEL": env_with_choices(
+        "VLLM_DS4_DECODE_KERNEL",
+        "paged",
+        ["paged", "sparse"],
+        case_sensitive=False,
     ),
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
