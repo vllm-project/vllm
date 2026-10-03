@@ -147,6 +147,47 @@ def test_probabilistic_draft_probs_are_exact_over_full_vocab(lm_head, logits_pro
     torch.testing.assert_close(probs[:, ids], full[:, ids].softmax(dim=-1))
 
 
+@pytest.mark.cpu_test
+def test_dynamic_rows_at_full_rank_and_width_match_full_argmax(
+    lm_head, logits_processor
+):
+    """With every off-list row picked, drafting is exact full-vocab drafting."""
+    ids = torch.tensor(DRAFT_IDS)
+    hidden = _hidden()
+    drafter = _Drafter(lm_head, nn.Identity())
+    dv = DraftVocab(ids, lm_head, VOCAB - len(DRAFT_IDS), HIDDEN)
+    dv.install(drafter, lm_head)
+
+    logits = dv.restrict(logits_processor(drafter.lm_head, hidden))
+    full = logits_processor(lm_head, hidden)
+    assert torch.equal(dv.to_target(logits.argmax(dim=-1)), full.argmax(dim=-1))
+    torch.testing.assert_close(dv.scatter(logits, VOCAB), full)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("rank", [4, HIDDEN])
+def test_dynamic_rows_draft_over_list_plus_picked_rows(lm_head, logits_processor, rank):
+    """The proposal is the exact softmax over the list plus each token's picks."""
+    ids = torch.tensor(DRAFT_IDS)
+    hidden = _hidden(8)
+    drafter = _Drafter(lm_head, nn.Identity())
+    dv = DraftVocab(ids, lm_head, 16, rank)
+    dv.install(drafter, lm_head)
+
+    logits = dv.restrict(logits_processor(drafter.lm_head, hidden))
+    picked = dv.dynamic.ids
+    assert logits.shape == (hidden.shape[0], len(DRAFT_IDS) + 16)
+    assert not torch.isin(picked, ids).any()
+
+    full = logits_processor(lm_head, hidden)
+    allowed = torch.zeros_like(full, dtype=torch.bool)
+    allowed[:, ids] = True
+    allowed.scatter_(1, picked, True)
+    expected = full.masked_fill(~allowed, float("-inf"))
+    torch.testing.assert_close(dv.scatter(logits, VOCAB), expected)
+    assert torch.equal(dv.to_target(logits.argmax(dim=-1)), expected.argmax(dim=-1))
+
+
 class _FakeTPHead(nn.Module):
     """One TP rank of a vocab-parallel lm_head, without a process group."""
 

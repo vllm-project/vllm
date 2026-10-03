@@ -410,7 +410,12 @@ class DraftModelSpeculator(BaseSpeculator):
         if target_lm_head is None:
             raise ValueError("draft_token_map requires the target lm_head.")
         self.draft_vocab = make_draft_vocab(
-            token_map, self.vllm_config.model_config, self.model, target_lm_head
+            token_map,
+            self.vllm_config.model_config,
+            self.model,
+            target_lm_head,
+            self.speculative_config.draft_token_map_dynamic_rows,
+            self.speculative_config.draft_token_map_dynamic_rank,
         )
 
     def _validate_local_argmax_reduction(self) -> None:
@@ -454,7 +459,11 @@ class DraftModelSpeculator(BaseSpeculator):
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         draft_vocab = self.draft_vocab
-        if draft_logits is None and self.use_local_argmax_reduction:
+        if (
+            draft_logits is None
+            and self.use_local_argmax_reduction
+            and (draft_vocab is None or draft_vocab.dynamic is None)
+        ):
             top = self.get_draft_top_tokens(hidden_states, spec_step_idx)
             return top if draft_vocab is None else draft_vocab.col_to_target[top]
 
@@ -485,7 +494,7 @@ class DraftModelSpeculator(BaseSpeculator):
         else:
             sampled = logits.argmax(dim=-1)
             if draft_vocab is not None:
-                sampled = draft_vocab.target_ids[sampled]
+                sampled = draft_vocab.to_target(sampled)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
 

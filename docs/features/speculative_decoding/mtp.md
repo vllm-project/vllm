@@ -98,6 +98,23 @@ vllm serve <mtp-model> \
   Measure the real acceptance length (see
   [acceptance metrics](acceptance_metrics.md)) with and without the list.
 
+A static list loses acceptance on traffic it was not built from (for example
+other languages). `draft_token_map_dynamic_rows` adds that many tokens per
+draft step on top of the list: the rows outside the list are scored with a
+rank-`draft_token_map_dynamic_rank` (default 256) projection of the lm_head and
+the best ones get exact logits.
+
+```bash
+vllm serve <mtp-model> \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3,
+                           "draft_token_map": "draft_vocab_32k.pt",
+                           "draft_token_map_dynamic_rows": 16384}'
+```
+
+It costs more per draft token than the list alone, and that cost grows with
+batch size, so measure decode speed at your concurrency. Tensor parallel size 1
+only.
+
 ## Notes
 
 - MTP only works for model families that support MTP in vLLM.
