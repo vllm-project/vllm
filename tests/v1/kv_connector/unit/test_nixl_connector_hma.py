@@ -1674,6 +1674,22 @@ def test_mamba_n1_p_side_truncation():
     d_req.mm_features = [image]
     assert fa_sched.get_num_new_matched_tokens(d_req, 0) == (4, True)
 
+    # An item from the start of the prompt leaves no prefix to transfer: the
+    # prefiller keeps its prompt and the decoder computes all of it.
+    whole = MultiModalFeatureSpec(
+        data=None,
+        mm_position=PlaceholderRange(offset=0, length=10),
+        identifier="whole",
+        modality="image",
+    )
+    mm_req = create_request(num_tokens=10, do_remote_decode=True)
+    mm_req.mm_features = [whole]
+    fa_sched.on_new_request(mm_req)
+    assert mm_req.num_prompt_tokens == 10 and mm_req.mm_features == [whole]
+    d_req = create_request(num_tokens=10, do_remote_prefill=True)
+    d_req.mm_features = [whole]
+    assert fa_sched.get_num_new_matched_tokens(d_req, 0) == (0, False)
+
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(

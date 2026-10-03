@@ -40,14 +40,15 @@ def get_prefill_stop(request: "Request", backoff: int) -> int:
     Both sides derive it from the same prompt. It leaves the trailing
     ``backoff`` tokens to the decoder, and moves back to the start of a
     multimodal item that cut would split: models parse an item from its
-    whole placeholder.
+    whole placeholder. 0 means no prefix can be transferred, and the decoder
+    computes the whole prompt.
     """
     stop = request.num_prompt_tokens - backoff
     for feature in request.mm_features:
         position = feature.mm_position
         if position.offset < stop < position.offset + position.length:
             stop = position.offset
-    return stop if stop > 0 else request.num_prompt_tokens
+    return max(stop, 0)
 
 
 def truncate_prompt_for_prefill(request: "Request", stop: int) -> None:
