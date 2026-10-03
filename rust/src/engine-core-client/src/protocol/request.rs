@@ -152,10 +152,8 @@ impl EngineCoreRequest {
                 feature.extract_aux_frames(&mut aux_frames, threshold);
             }
         }
-        if let Some(ids) = self
-            .sampling_params
-            .as_mut()
-            .and_then(|params| params.prompt_logprob_token_ids.as_mut())
+        if let Some(params) = &mut self.sampling_params
+            && let Some(ids) = &mut params.prompt_logprob_token_ids
         {
             ids.extract_aux_frame(&mut aux_frames, threshold);
         }
