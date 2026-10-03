@@ -3,6 +3,7 @@
 
 import asyncio
 from collections.abc import AsyncGenerator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -225,7 +226,7 @@ async def test_streaming_session_does_not_mutate_caller_prompt():
     llm.get_supported_tasks = AsyncMock(return_value=("generate",))
 
     # Record the prompt objects handed to the input processor.
-    processed_prompts = []
+    processed_prompts: list[Any] = []
     added = []
 
     def fake_process_inputs(**kwargs):
@@ -296,7 +297,7 @@ async def test_streaming_session_does_not_mutate_structured_tokens_prompt():
     llm._run_output_handler = MagicMock()
     llm.get_supported_tasks = AsyncMock(return_value=("generate",))
 
-    processed_prompts = []
+    processed_prompts: list[Any] = []
 
     def fake_process_inputs(**kwargs):
         req = MagicMock()
@@ -367,7 +368,7 @@ async def test_streaming_session_does_not_mutate_enc_dec_prompt():
     llm._run_output_handler = MagicMock()
     llm.get_supported_tasks = AsyncMock(return_value=("generate",))
 
-    processed_prompts = []
+    processed_prompts: list[Any] = []
 
     def fake_process_inputs(**kwargs):
         req = MagicMock()
