@@ -258,3 +258,112 @@ def test_abort_during_kv_transfer():
     )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,token_budget,num_lookahead_tokens",
+    [
+        (40, 24, 0),  # chunk 2 = tokens 24..39: rest of b1 plus b2
+        (20, 18, 0),  # chunk 2 = tokens 18..19: fits in b1, no new block
+        (40, 30, 3),  # spec decode: chunk 1 also allocates lookahead block b2
+    ],
+)
+def test_host_buffer_save_resaves_block_straddling_chunk_boundary(
+    num_tokens: int, token_budget: int, num_lookahead_tokens: int
+):
+    """Host-buffer mode (kv_buffer_device="cpu") copies each prefill step's
+    blocks to host memory. When a chunk boundary is not block aligned, the
+    next chunk writes the rest of the previous chunk's last block, so that
+    block must be copied again. Blocks allocated ahead of the written tokens
+    (spec-decode lookahead) must not be copied before they are written."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=token_budget,
+        kv_role="kv_producer",
+    )
+    scheduler = create_scheduler(vllm_config)
+    scheduler.num_lookahead_tokens = num_lookahead_tokens
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+    request = create_request(
+        request_id=1,
+        num_tokens=num_tokens,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = request.request_id
+    scheduler.add_request(request)
+
+    out1 = scheduler.schedule()
+    (saved1,) = out1.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    # Only the blocks holding tokens written in chunk 1.
+    assert saved1 == table[: -(-token_budget // block_size)]
+    model_output = create_model_runner_output([request])
+    model_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(out1, model_output)
+    assert request.num_computed_tokens % block_size != 0
+    first = request.num_computed_tokens // block_size
+    straddling = table[first]
+
+    out2 = scheduler.schedule()
+    (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert saved2[0] == straddling
+    assert saved2 == table[first : -(-num_tokens // block_size)]
+    assert req_id not in connector_scheduler._reqs_need_save
+    assert req_id not in connector_scheduler._reqs_save_state
+
+
+def test_host_buffer_save_includes_prefix_cache_hit_blocks():
+    """A first chunk that starts after a local prefix-cache hit still copies
+    the cached blocks: D pulls the whole prompt from the host buffer."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=64,
+        kv_role="kv_producer",
+    )
+    scheduler = create_scheduler(vllm_config)
+    connector_scheduler = scheduler.get_kv_connector().connector_scheduler
+    connector_scheduler.use_host_buffer = True
+
+    # Request 1 computes and caches a 32-token (2-block) prefix.
+    first = create_request(
+        request_id=1,
+        num_tokens=40,
+        common_prefix_len=32,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    scheduler.add_request(first)
+    out = scheduler.schedule()
+    (cached_prefix,) = scheduler.kv_cache_manager.get_block_ids(first.request_id)
+    cached_prefix = cached_prefix[:2]
+    scheduler.update_from_output(out, create_model_runner_output([first]))
+
+    # Request 2 hits the prefix and needs two chunks for the rest.
+    second = create_request(
+        request_id=2,
+        num_tokens=110,
+        common_prefix_len=32,
+        block_size=block_size,
+        do_remote_decode=True,
+    )
+    req_id = second.request_id
+    scheduler.add_request(second)
+    out1 = scheduler.schedule()
+    (saved1,) = out1.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert table[:2] == cached_prefix  # the prefix came from the cache
+    assert saved1 == table[: (32 + 64) // block_size]
+    model_output = create_model_runner_output([second])
+    model_output.sampled_token_ids = [[]]
+    scheduler.update_from_output(out1, model_output)
+
+    out2 = scheduler.schedule()
+    (saved2,) = out2.kv_connector_metadata.reqs_to_save[req_id].local_block_ids
+    (table,) = scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert saved2 == table[96 // block_size : -(-110 // block_size)]
+    assert req_id not in connector_scheduler._reqs_save_state
