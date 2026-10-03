@@ -112,6 +112,37 @@ def build_response_output_items(
     return outputs
 
 
+def apply_streamed_item_ids(
+    output: list[ResponseOutputItem],
+    streamed_items: list[ResponseOutputItem] | None,
+) -> list[ResponseOutputItem]:
+    """Overlay ids from streamed output items onto rebuilt ones.
+
+    The final streaming response reparses the model output, which mints fresh
+    item ids. Clients correlate response.output_item.done events with the
+    completed response by id, so the streamed ids win. Items are matched by
+    (type, name) in order; rebuilt items without a streamed counterpart (e.g.
+    zero-delta items whose done event was suppressed) keep their fresh id.
+    """
+    if not streamed_items:
+        return output
+    start = 0
+    for item in output:
+        key = (item.type, getattr(item, "name", None))
+        for idx in range(start, len(streamed_items)):
+            candidate = streamed_items[idx]
+            if (candidate.type, getattr(candidate, "name", None)) != key:
+                continue
+            item.id = candidate.id
+            if isinstance(item, ResponseFunctionToolCall) and isinstance(
+                candidate, ResponseFunctionToolCall
+            ):
+                item.call_id = candidate.call_id
+            start = idx + 1
+            break
+    return output
+
+
 def should_continue_final_message(
     request_input: str | list[ResponseInputOutputItem],
 ) -> bool:

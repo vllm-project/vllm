@@ -656,6 +656,9 @@ class HarmonyContext(ConversationContext):
 
         self.last_append_segments: list[Segment] = []
         self.last_append_flush_status: bool = False
+        # Items already sent as output_item.done events; the final streaming
+        # response reuses their ids instead of minting new ones.
+        self.streamed_output_items: list[ResponseOutputItem] | None = None
 
         # Turn tracking - replaces multiple individual tracking variables
         self.current_turn_metrics = TurnMetrics()

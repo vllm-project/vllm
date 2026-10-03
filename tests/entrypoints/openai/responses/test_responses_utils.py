@@ -18,6 +18,7 @@ from openai.types.responses.response_reasoning_item import (
 
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
+    apply_streamed_item_ids,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
     should_continue_final_message,
@@ -903,3 +904,90 @@ class TestConstructInputMessagesInstructionsLeak:
         assert len(msgs) == 2
         assert msgs[0] == {"role": "system", "content": "be helpful"}
         assert msgs[1] == {"role": "user", "content": "hello"}
+
+
+class TestApplyStreamedItemIds:
+    def test_overlays_id_and_call_id(self):
+        output = [
+            make_output_message("rebuilt text", id="msg_rebuilt"),
+            make_function_call(
+                name="get_weather", id="fc_rebuilt", call_id="call_rebuilt"
+            ),
+        ]
+        streamed = [
+            make_output_message("streamed text", id="msg_streamed"),
+            make_function_call(
+                name="get_weather", id="fc_streamed", call_id="call_streamed"
+            ),
+        ]
+
+        result = apply_streamed_item_ids(output, streamed)
+
+        assert [item.id for item in result] == ["msg_streamed", "fc_streamed"]
+        assert result[1].call_id == "call_streamed"
+        # Only ids are overlaid; the rebuilt content wins.
+        assert result[0].content[0].text == "rebuilt text"
+
+    def test_same_name_calls_pair_in_order(self):
+        output = [
+            make_function_call(name="get_weather", id="fc_r1", call_id="call_r1"),
+            make_function_call(name="get_weather", id="fc_r2", call_id="call_r2"),
+        ]
+        streamed = [
+            make_function_call(name="get_weather", id="fc_s1", call_id="call_s1"),
+            make_function_call(name="get_weather", id="fc_s2", call_id="call_s2"),
+        ]
+
+        result = apply_streamed_item_ids(output, streamed)
+
+        assert [item.id for item in result] == ["fc_s1", "fc_s2"]
+        assert [item.call_id for item in result] == ["call_s1", "call_s2"]
+
+    def test_function_calls_matched_by_name(self):
+        output = [
+            make_function_call(name="get_weather", id="fc_rw", call_id="call_rw"),
+            make_function_call(name="get_news", id="fc_rn", call_id="call_rn"),
+        ]
+        streamed = [
+            make_function_call(name="get_weather", id="fc_sw", call_id="call_sw"),
+            make_function_call(name="get_news", id="fc_sn", call_id="call_sn"),
+        ]
+
+        result = apply_streamed_item_ids(output, streamed)
+
+        assert [item.id for item in result] == ["fc_sw", "fc_sn"]
+
+    def test_item_without_streamed_counterpart_keeps_fresh_id(self):
+        # Zero-delta items never emitted a done event, so they have no
+        # streamed counterpart and must keep their freshly minted id.
+        output = [
+            make_reasoning_item(id="rs_rebuilt"),
+            make_output_message("hi", id="msg_rebuilt"),
+        ]
+        streamed = [make_output_message("hi", id="msg_streamed")]
+
+        result = apply_streamed_item_ids(output, streamed)
+
+        assert result[0].id == "rs_rebuilt"
+        assert result[1].id == "msg_streamed"
+
+    def test_streamed_gap_does_not_shift_later_matches(self):
+        output = [
+            make_output_message("one", id="msg_r1"),
+            make_function_call(name="get_weather", id="fc_r", call_id="call_r"),
+            make_output_message("two", id="msg_r2"),
+        ]
+        streamed = [
+            make_output_message("one", id="msg_s1"),
+            make_output_message("two", id="msg_s2"),
+        ]
+
+        result = apply_streamed_item_ids(output, streamed)
+
+        assert [item.id for item in result] == ["msg_s1", "fc_r", "msg_s2"]
+
+    def test_no_streamed_items_is_noop(self):
+        output = [make_output_message("hi", id="msg_rebuilt")]
+
+        assert apply_streamed_item_ids(output, [])[0].id == "msg_rebuilt"
+        assert apply_streamed_item_ids(output, None)[0].id == "msg_rebuilt"

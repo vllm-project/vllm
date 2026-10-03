@@ -12,6 +12,7 @@ from typing import Any, Final, cast
 from fastapi import Request
 from openai.types.responses import (
     ResponseOutputItem,
+    ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseStatus,
@@ -65,6 +66,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     split_delta,
 )
 from vllm.entrypoints.openai.responses.utils import (
+    apply_streamed_item_ids,
     build_response_output_items,
     extract_function_tool_names,
     extract_tool_types,
@@ -792,6 +794,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         incomplete=context.last_append_flush_status,
                     )
                 )
+                output = apply_streamed_item_ids(output, context.streamed_output_items)
 
             if request.enable_response_messages:
                 input_messages = context.messages[: context.num_init_messages]
@@ -1276,6 +1279,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
+        streamed_items: list[ResponseOutputItem] = []
 
         async for ctx in result_generator:
             assert isinstance(ctx, HarmonyContext)
@@ -1295,13 +1299,20 @@ class OpenAIServingResponses(GenerateBaseServing):
                     for event in emit_previous_item_done_events(
                         completed_message, state, ctx.function_tool_names
                     ):
+                        if isinstance(event, ResponseOutputItemDoneEvent):
+                            streamed_items.append(event.item)
                         yield _increment_sequence_number_and_return(event)
 
                     for event in emit_tool_action_events(
                         completed_message, state, self.tool_server
                     ):
+                        if isinstance(event, ResponseOutputItemDoneEvent):
+                            streamed_items.append(event.item)
                         yield _increment_sequence_number_and_return(event)
                     state.reset_for_new_item()
+
+        assert isinstance(context, HarmonyContext)
+        context.streamed_output_items = streamed_items
 
     async def responses_stream_generator(
         self,
