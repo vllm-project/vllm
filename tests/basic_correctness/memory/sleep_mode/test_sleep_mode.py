@@ -227,40 +227,25 @@ def _custom_ar_active(worker) -> bool:
 
 
 @pytest.mark.parametrize(
-    ("runner", "mode", "breakable", "tp", "offload"),
+    ("mode", "breakable", "tp", "offload"),
     [
-        *(
-            (runner, mode, breakable, 1, True)
-            for runner in ("v2", "v1")
-            for mode, breakable in (
-                ("FULL", False),
-                ("PIECEWISE", False),
-                ("PIECEWISE", True),
-            )
-        ),
+        ("FULL", False, 1, True),
+        ("PIECEWISE", False, 1, True),
+        ("PIECEWISE", True, 1, True),
         pytest.param(
-            "v2",
-            "FULL_AND_PIECEWISE",
-            False,
-            2,
-            True,
-            marks=multi_gpu_marks(num_gpus=2),
+            "FULL_AND_PIECEWISE", False, 2, True, marks=multi_gpu_marks(num_gpus=2)
         ),
-        ("v2", "FULL_AND_PIECEWISE", False, 1, False),
+        ("FULL_AND_PIECEWISE", False, 1, False),
     ],
-    ids=[
-        *(f"{r}-{m}" for r in ("v2", "v1") for m in ("full", "piecewise", "breakable")),
-        "custom-ar-tp2",
-        "off-by-default",
-    ],
+    ids=["full", "piecewise", "breakable", "custom-ar-tp2", "off-by-default"],
 )
 @create_new_process_for_each_test()
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
-def test_sleep_cudagraph_pool(monkeypatch, runner, mode, breakable, tp, offload):
-    """Each runner's capture sites use the pool, exact across sleeps; elastic
-    recapture refills it; TP=2 needs unregistered custom AR; off changes nothing."""
+def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
+    """Each capture site uses the pool, exact across sleeps; elastic recapture
+    refills it; TP=2 needs unregistered custom AR; off changes nothing."""
     for name, value in [
-        ("VLLM_USE_V2_MODEL_RUNNER", "1" if runner == "v2" else "0"),
+        ("VLLM_USE_V2_MODEL_RUNNER", "1"),
         ("VLLM_USE_BREAKABLE_CUDAGRAPH", "1" if breakable else "0"),
         ("VLLM_ALLOW_INSECURE_SERIALIZATION", "1"),
         ("VLLM_ALLREDUCE_USE_FLASHINFER", "0"),
@@ -294,7 +279,7 @@ def test_sleep_cudagraph_pool(monkeypatch, runner, mode, breakable, tp, offload)
             llm.collective_rpc("reload_weights")
         llm.wake_up(tags=["kv_cache"])
         assert llm.generate(prompt, params)[0].outputs[0].text == expected
-    if tp == 1 and runner == "v2":  # Elastic EP's V2 path; V1 drops wrappers.
+    if tp == 1:
         for _ in range(2):
             rpc = llm.collective_rpc(_cudagraph_bytes, kwargs={"recapture": True})
             assert rpc == [(0, graph_bytes[0])]

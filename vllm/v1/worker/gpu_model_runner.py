@@ -27,7 +27,6 @@ from vllm.compilation.breakable_cudagraph import (
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
-from vllm.compilation.cudagraph_pool import plain_cudagraph_capture
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
     CompilationMode,
@@ -6649,12 +6648,7 @@ class GPUModelRunner(
         # because encoder graph capture is opt-in.
         try:
             set_cudagraph_capturing_enabled(True)
-            # Profiling graphs are destroyed below; keep them out of cuMem.
-            with (
-                self._freeze_gc(),
-                graph_capture(device=self.device),
-                plain_cudagraph_capture(),
-            ):
+            with self._freeze_gc(), graph_capture(device=self.device):
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
 
