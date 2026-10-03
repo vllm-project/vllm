@@ -213,6 +213,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
     PerTensorTorchFP8ScaledMMLinearKernel,
     RowWiseTorchFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.rdna4_w8a8_fp8 import (
+    RDNA4W8A8Fp8BlockScaledMMKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
@@ -466,6 +469,10 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        # Gated on VLLM_ROCM_USE_HIP_W8A8; is_supported() returns False when
+        # unset or the device is not gfx1201, so the list falls through to the
+        # entries below unchanged.
+        RDNA4W8A8Fp8BlockScaledMMKernel,
         AiterFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],
@@ -1324,4 +1331,5 @@ __all__ = [
     "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",
     "B12xFp8BlockScaledMMKernel",
     "B12xTensorFP8ScaledMMLinearKernel",
+    "RDNA4W8A8Fp8BlockScaledMMKernel",
 ]
