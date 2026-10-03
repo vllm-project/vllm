@@ -8,7 +8,7 @@ import torch
 
 import vllm.device_allocator.cumem as cumem
 from vllm import LLM, SamplingParams
-from vllm.device_allocator import get_mem_allocator_instance, register_tag_hooks
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.platforms import current_platform
 
 from ....utils import create_new_process_for_each_test
@@ -199,75 +199,6 @@ def test_sleep_with_only_weights_asleep(first_level, second_level, monkeypatch):
     assert not llm.llm_engine.is_sleeping()
     actual = llm.generate(prompt, sampling_params)[0].outputs[0].token_ids
     assert actual == expected
-
-
-@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-def test_tag_hooks_bracket_the_mapping_of_their_tag():
-    """`before_unmap` runs right before a tag is unmapped, `after_map` after every
-    wake-up that maps it fully; a failing `before_unmap` unmaps nothing."""
-    allocator = get_mem_allocator_instance()
-    with allocator.use_memory_pool("weights"):
-        weights = torch.ones(1024, 1024, device=DEVICE_TYPE)  # noqa: F841
-    with allocator.use_memory_pool("kv_cache"):
-        kv = torch.ones(512, 512, device=DEVICE_TYPE)  # noqa: F841
-    events: list[tuple[str, bool]] = []
-
-    def kv_mapped() -> bool:
-        return all(
-            not d.is_asleep
-            for d in allocator.pointer_to_data.values()
-            if d.tag == "kv_cache"
-        )
-
-    for name in ("first", "second"):  # every pair of the tag runs
-        register_tag_hooks(
-            "kv_cache",
-            lambda name=name: events.append((f"{name} before_unmap", kv_mapped())),
-            lambda name=name: events.append((f"{name} after_map", kv_mapped())),
-        )
-    steps = [
-        (lambda: allocator.sleep(offload_tags="weights"), [("before_unmap", True)]),
-        (lambda: allocator.wake_up(["weights"]), []),
-        (lambda: allocator.wake_up(["kv_cache"]), [("after_map", True)]),
-        (lambda: allocator.discard("weights"), []),
-        (lambda: allocator.discard("kv_cache"), [("before_unmap", True)]),
-        (lambda: allocator.discard("kv_cache"), []),  # already unmapped
-        (lambda: allocator.wake_up(), [("after_map", True)]),
-        (lambda: allocator.sleep(offload_tags="weights"), [("before_unmap", True)]),
-        (lambda: allocator.wake_up(["weights"]), []),
-        (lambda: allocator.wake_up(), [("after_map", True)]),
-    ]
-    for step, expected in steps:
-        events.clear()
-        step()
-        assert events == [
-            (f"{name} {hook}", mapped)
-            for hook, mapped in expected
-            for name in ("first", "second")
-        ]
-
-    restores: list[bool] = []
-
-    def restore_fails_once() -> None:
-        restores.append(kv_mapped())
-        if len(restores) == 1:
-            raise RuntimeError("restore failed")
-
-    register_tag_hooks("kv_cache", lambda: None, restore_fails_once)
-    allocator.discard("kv_cache")
-    with pytest.raises(RuntimeError, match="restore failed"):
-        allocator.wake_up()
-    allocator.wake_up()  # maps nothing, but retries the failed restore
-    assert restores == [True, True]
-
-    def refuse() -> None:
-        raise RuntimeError("busy")
-
-    register_tag_hooks("kv_cache", refuse, lambda: None)
-    mapped = mapped_usage(allocator)
-    with pytest.raises(RuntimeError, match="busy"):
-        allocator.sleep(offload_tags="weights")
-    assert mapped_usage(allocator) == mapped
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")

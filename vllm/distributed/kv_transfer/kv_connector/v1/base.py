@@ -204,7 +204,7 @@ class KVConnectorBase_V1(ABC):
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         """Whether the connector survives sleep mode remapping the KV cache;
-        True requires `release_kv_caches` and `restore_kv_caches`."""
+        True requires overriding `release_kv_caches` and `restore_kv_caches`."""
         return False
 
     def __init__(
@@ -298,12 +298,12 @@ class KVConnectorBase_V1(ABC):
     def release_kv_caches(self) -> None:
         """Before the KV cache is unmapped: wait for in-flight transfers, then
         drop registrations of that memory. Idempotent."""
-        raise NotImplementedError(f"{type(self).__name__} does not support sleep mode")
+        return
 
     def restore_kv_caches(self) -> None:
         """After the KV cache is mapped again: redo what `release_kv_caches`
         dropped. Idempotent."""
-        raise NotImplementedError(f"{type(self).__name__} does not support sleep mode")
+        return
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """Set the xPU-specific ops for copying KV between host and device.

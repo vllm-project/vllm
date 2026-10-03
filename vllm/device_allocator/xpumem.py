@@ -9,13 +9,7 @@ from typing import Any
 
 import torch
 
-from vllm.device_allocator import (
-    DEFERRABLE_TAGS,
-    AllocationData,
-    HandleType,
-    run_after_map_hooks,
-    run_before_unmap_hooks,
-)
+from vllm.device_allocator import DEFERRABLE_TAGS, AllocationData, HandleType
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -183,7 +177,6 @@ class XpuMemAllocator:
         backup_bytes = 0
         has_policy_conflict = False
 
-        run_before_unmap_hooks(self.pointer_to_data.values())
         for ptr, data in self.pointer_to_data.items():
             if data.is_asleep:
                 requests_offload = data.tag in offload_tags
@@ -246,7 +239,6 @@ class XpuMemAllocator:
 
         discarded_bytes = 0
         has_policy_conflict = False
-        run_before_unmap_hooks(self.pointer_to_data.values(), tags)
         for data in self.pointer_to_data.values():
             if data.tag not in tags:
                 continue
@@ -297,7 +289,6 @@ class XpuMemAllocator:
                 device,
             )
             data.cpu_backup_tensor = None
-        run_after_map_hooks(self.pointer_to_data.values())
 
     def release_pools(self) -> None:
         """Drop Python references to MemPool/pluggable allocators eagerly.
