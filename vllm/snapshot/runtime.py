@@ -31,6 +31,7 @@ from typing import NoReturn
 import regex as re
 from pydantic import ValidationError
 
+from vllm.logger import init_logger
 from vllm.snapshot.manifest import (
     ReadyMarker,
     SnapshotManifest,
@@ -42,6 +43,8 @@ from vllm.snapshot.manifest import (
     write_manifest_atomic,
 )
 from vllm.snapshot.types import Oracle
+
+logger = init_logger(__name__)
 
 
 class SnapshotCreateError(RuntimeError):
@@ -59,6 +62,7 @@ _COMMON_CRIU_OPTIONS = (
     "--link-remap",
     "--file-locks",
 )
+_CRIU_DIAGNOSTIC_LIMIT = 8192
 _TCP_TABLES = (
     ("AF_INET", Path("/proc/net/tcp")),
     ("AF_INET6", Path("/proc/net/tcp6")),
@@ -503,7 +507,49 @@ class LocalSnapshotTools:
             str(self.plugin_dir),
             *arguments,
         ]
-        self._run(command)
+        try:
+            self._run(command)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            self._log_criu_diagnostics(error, action, artifact)
+            raise
+
+    def _log_criu_diagnostics(
+        self,
+        error: subprocess.CalledProcessError | subprocess.TimeoutExpired,
+        action: str,
+        artifact: Path,
+    ) -> None:
+        def bounded(value: str | bytes) -> str:
+            if isinstance(value, bytes):
+                return value[-_CRIU_DIAGNOSTIC_LIMIT:].decode(errors="replace")
+            return value[-_CRIU_DIAGNOSTIC_LIMIT:]
+
+        for name in ("stdout", "stderr"):
+            value = getattr(error, name, None)
+            if value:
+                logger.error("CRIU %s (tail):\n%s", name, bounded(value))
+
+        log_path = artifact / "images" / f"{action}.log"
+        try:
+            result = self._run(
+                [
+                    *self._privileged(),
+                    "tail",
+                    "-c",
+                    str(_CRIU_DIAGNOSTIC_LIMIT),
+                    "--",
+                    str(log_path),
+                ],
+                timeout=5,
+            )
+            if result.stdout:
+                logger.error("CRIU %s.log (tail):\n%s", action, bounded(result.stdout))
+        except BaseException as diagnostic_error:
+            logger.error(
+                "CRIU %s.log unavailable: %s",
+                action,
+                bounded(_error_detail(diagnostic_error)),
+            )
 
     def _record_child_log_size(self, artifact: Path) -> None:
         child_log = artifact / "child.log"
