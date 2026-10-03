@@ -3,7 +3,8 @@
 
 import math
 import time
-from unittest.mock import MagicMock, Mock
+from copy import copy
+from unittest.mock import MagicMock, Mock, call
 
 import numpy as np
 import pytest
@@ -40,6 +41,8 @@ from vllm.v1.engine.output_processor import (
     RequestOutputCollector,
     RequestState,
 )
+from vllm.v1.engine.parallel_sampling import ParentRequest
+from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 from vllm.v1.outputs import SamplingMaskLists
 
@@ -212,7 +215,7 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
     cache hits (passed via kv_transfer_params) instead of the local count,
     which sees the KVs pulled from the remote prefill as a ~100% hit.
     """
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(tokenizer=None, log_stats=True)
 
     prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
     kv_transfer_params = {
@@ -249,13 +252,23 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
                 new_token_ids=[42],
                 prefill_stats=prefill_stats,
             )
-        ]
+        ],
+        engine_core_timestamp=1.0,
+        iteration_stats=IterationStats(),
     )
     request_output = processed.request_outputs[0]
     if do_remote_prefill:
         assert request_output.num_cached_tokens == 5
     else:
         assert request_output.num_cached_tokens == len(prompt_tokens) - 1
+
+    stats = IterationStats()
+    output_processor.abort_requests(
+        [request.request_id], internal=True, iteration_stats=stats
+    )
+    logger = MagicMock(kv_cache_metrics_enabled=False, gauge_lora_info=None)
+    PrometheusStatLogger.record(logger, None, stats)
+    logger.histogram_prefill_kv_computed_request[0].observe.assert_called_once_with(1)
 
 
 def test_request_stream_interval_raises_but_not_below_engine_default(
@@ -1581,6 +1594,74 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize(
+    ("pooling", "abort_stage"),
+    [(False, "queued"), (False, "prefill"), (False, "decode"), (True, "prefill")],
+)
+def test_abort_requests_updates_finished_stats(pooling: bool, abort_stage: str):
+    decoding = abort_stage == "decode"
+    processor = OutputProcessor(None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=None if pooling else SamplingParams(n=2, detokenize=False),
+        pooling_params=PoolingParams(task="embed") if pooling else None,
+    )
+    parent = None if pooling else ParentRequest(request)
+    num_requests = 2 if parent else 1
+    for index in range(num_requests):
+        child = copy(request)
+        if parent:
+            child.request_id, child.sampling_params = parent.get_child_info(index)
+        processor.add_request(child, None, parent, index)
+        request_stats = processor.request_states[child.request_id].stats
+        assert request_stats is not None
+        request_stats.queued_ts = 1.0
+        request_stats.scheduled_ts = 0.0 if abort_stage == "queued" else 2.0
+        if decoding:
+            prefill_stats = PrefillStats()
+            prefill_stats.set(3, 1, 0)
+            for timestamp, tokens, prefill in [
+                (3.0, [4], prefill_stats),
+                (5.0, [5, 6], None),
+            ]:
+                processor.process_outputs(
+                    [EngineCoreOutput(child.request_id, tokens, prefill_stats=prefill)],
+                    timestamp,
+                    IterationStats(),
+                )
+
+    stats = IterationStats()
+    processor.abort_requests([request.request_id], internal=True, iteration_stats=stats)
+    assert not processor.has_unfinished_requests()
+    assert not processor.parent_requests
+    assert len(stats.finished_requests) == num_requests
+    assert stats.n_params_iter == [num_requests]
+    assert stats.max_num_generation_tokens_iter == [3 if decoding else 0]
+    for finished in stats.finished_requests:
+        assert finished.finish_reason == FinishReason.ABORT
+        assert finished.request_id == request.external_req_id
+        assert finished.num_prompt_tokens == 3
+        assert finished.num_computed_prefill_tokens == (2 if decoding else None)
+        assert finished.num_generation_tokens == (3 if decoding else 0)
+        assert finished.queued_time == (None if abort_stage == "queued" else 1.0)
+        assert finished.prefill_time == (1.0 if decoding else None)
+        assert finished.decode_time == (2.0 if decoding else None)
+        assert finished.inference_time == (3.0 if decoding else None)
+        assert finished.mean_time_per_output_token == (1.0 if decoding else None)
+
+    logger = MagicMock(kv_cache_metrics_enabled=False, gauge_lora_info=None)
+    PrometheusStatLogger.record(logger, None, stats)
+    observed = logger.histogram_prefill_kv_computed_request[0].observe
+    assert observed.call_args_list == ([call(2)] * num_requests if decoding else [])
 
 
 @pytest.mark.parametrize("output_kind", list(RequestOutputKind))

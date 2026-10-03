@@ -36,9 +36,10 @@ from vllm.exceptions import (
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import human_readable_int
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, FinishReason
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.engine.output_processor import OutputProcessor
 
 pytestmark = pytest.mark.cpu_test
@@ -104,6 +105,7 @@ def _make_request_test_llm(
         resources=SimpleNamespace(engine_dead=False),
         add_request_async=AsyncMock(side_effect=add_request_async),
         abort_requests_async=AsyncMock(),
+        group_requests_by_engine=lambda ids: {0: ids},
         shutdown=MagicMock(),
     )
     llm.vllm_config = SimpleNamespace(
@@ -111,6 +113,8 @@ def _make_request_test_llm(
     )
     llm.output_handler = None
     llm.log_requests = False
+    llm.log_stats = False
+    llm.logger_manager = None
     llm._run_output_handler = MagicMock()
     llm.input_processor = MagicMock()
     llm.input_processor.assign_request_id.side_effect = lambda request: setattr(
@@ -406,15 +410,51 @@ async def test_parallel_admission_is_all_or_nothing(first_n: int):
 
 
 @pytest.mark.asyncio
-async def test_parallel_admission_cancellation_cleans_up_all_children():
+async def test_parallel_admission_registration_failure_cleans_up_parent(monkeypatch):
+    llm = _make_request_test_llm(2, AsyncMock())
+    add_request = llm.output_processor.add_request
+
+    def register(request, *args):
+        if request.request_id == "1_parallel":
+            raise RuntimeError("frontend registration failed")
+        add_request(request, *args)
+
+    monkeypatch.setattr(llm.output_processor, "add_request", register)
+    request = _make_engine_request("parallel", 2)
+    with pytest.raises(RuntimeError, match="frontend registration failed"):
+        await llm.add_request("parallel", request, request.params)
+
+    assert not llm.output_processor.request_states
+    assert not llm.output_processor.parent_requests
+    assert not llm.output_processor.external_req_ids
+    llm.engine_core.add_request_async.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unknown_first", [False, True])
+async def test_parallel_admission_cancellation_cleans_up_all_children(unknown_first):
     """Cancellation during core submission must release every reserved slot."""
     first_submission_started = asyncio.Event()
+    client = object.__new__(DPLBAsyncMPClient)
+    client.reqs_in_flight = {}
+    client._finished_request_engines = {}
 
-    async def add_request_async(_request):
+    async def add_request_async(request):
+        client.reqs_in_flight[request.request_id] = (2).to_bytes(2, "little")
         first_submission_started.set()
         await asyncio.Event().wait()
 
     llm = _make_request_test_llm(3, add_request_async)
+    llm.log_stats = True
+    llm.output_processor = OutputProcessor(None, log_stats=True)
+    llm.logger_manager = MagicMock()
+
+    def group_requests(ids):
+        groups = client.group_requests_by_engine(ids)
+        order = (None, 2) if unknown_first else (2, None)
+        return {engine: groups[engine] for engine in order if engine in groups}
+
+    llm.engine_core.group_requests_by_engine = group_requests
     request = _make_engine_request("parallel", 3)
     output = llm.generate(request, request.params, request.request_id)
     generate_task = asyncio.create_task(anext(output))
@@ -426,8 +466,18 @@ async def test_parallel_admission_cancellation_cleans_up_all_children():
 
     assert llm.engine_core.add_request_async.await_count == 1
     assert llm.output_processor.get_num_unfinished_requests() == 0
+    assert not llm.output_processor.parent_requests
+    assert not llm.output_processor.external_req_ids
     aborted_ids = llm.engine_core.abort_requests_async.await_args.args[0]
     assert set(aborted_ids) == {"0_parallel", "1_parallel", "2_parallel"}
+    llm.logger_manager.record.assert_called_once()
+    recorded = llm.logger_manager.record.call_args.kwargs
+    assert recorded["engine_idx"] == 2
+    stats = recorded["iteration_stats"]
+    assert len(stats.finished_requests) == 1
+    assert stats.finished_requests[0].finish_reason == FinishReason.ABORT
+    assert stats.n_params_iter == [3]
+    assert stats.max_num_generation_tokens_iter == [0]
 
 
 # ---------------------------------------------------------------------------

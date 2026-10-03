@@ -526,6 +526,10 @@ class AsyncLLM(EngineClient):
                 if self.log_requests:
                     logger.info("Added request %s.", child_request.request_id)
         except BaseException:
+            # Drop children whose frontend registration did not complete.
+            parent_request.child_requests.intersection_update(
+                self.output_processor.request_states
+            )
             await self.abort(parent_request.request_id, internal=True)
             raise
         return queue
@@ -862,6 +866,9 @@ class AsyncLLM(EngineClient):
                                 processed_outputs.reqs_to_abort
                             )
 
+                    engine_core.acknowledge_finished_requests(
+                        outputs.finished_requests or ()
+                    )
                     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
                     # 4) Logging.
@@ -887,8 +894,40 @@ class AsyncLLM(EngineClient):
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
+        internal_ids = self.output_processor.resolve_abort_request_ids(
+            request_ids, internal
+        )
+        requests_by_engine = self.engine_core.group_requests_by_engine(internal_ids)
+        stats_by_engine: dict[int, IterationStats] = {}
+        all_request_ids = []
+        # Remove all frontend state before yielding to the output handler.
+        # Finish unsubmitted children first so parent metrics have an engine.
+        for engine_idx, engine_request_ids in sorted(
+            requests_by_engine.items(), key=lambda item: item[0] is not None
+        ):
+            iteration_stats = (
+                IterationStats() if self.log_stats and engine_idx is not None else None
+            )
+            all_request_ids.extend(
+                self.output_processor.abort_requests(
+                    engine_request_ids, internal=True, iteration_stats=iteration_stats
+                )
+            )
+            if (
+                engine_idx is not None
+                and iteration_stats is not None
+                and iteration_stats.finished_requests
+            ):
+                stats_by_engine[engine_idx] = iteration_stats
+
         await self.engine_core.abort_requests_async(all_request_ids)
+        if self.logger_manager is not None:
+            for engine_idx, iteration_stats in stats_by_engine.items():
+                self.logger_manager.record(
+                    scheduler_stats=None,
+                    iteration_stats=iteration_stats,
+                    engine_idx=engine_idx,
+                )
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
