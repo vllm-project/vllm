@@ -11,7 +11,6 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-    SM120_PAGE_ROWS,
     FlashInferMLASparseMetadata,
     _get_workspace_buffer,
 )
@@ -203,13 +202,8 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         return (
             self._run_mqa_kernel(
                 q,
-                kv_rows.view(
-                    -1,
-                    256
-                    if block_stride_rows % 256 == attn_metadata.block_size % 256 == 0
-                    else SM120_PAGE_ROWS,
-                    kv_rows.shape[-1],
-                ),
+                # The SM120 kernels are built for 64-row pages only.
+                kv_rows.view(-1, 64, kv_rows.shape[-1]),
                 topk_indices_physical,
             ),
             None,

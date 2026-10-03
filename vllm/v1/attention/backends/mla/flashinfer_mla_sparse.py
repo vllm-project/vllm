@@ -43,9 +43,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-SM120_PAGE_ROWS = 64
-
-
 class _FlashInferMLASparseBackendBase(AttentionBackend):
     """Common metadata for concrete FlashInfer sparse MLA backends."""
 
