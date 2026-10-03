@@ -4,6 +4,7 @@
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
+import functools
 from typing import Any
 
 import torch
@@ -14,6 +15,17 @@ from vllm.triton_utils import tl, triton
 # Static kernels parameters
 BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
 NUM_WARPS = 4 if current_platform.is_rocm() else 8
+
+
+@functools.cache
+def _rocm_prefill_num_warps() -> int:
+    """num_warps counts wavefronts, which are 64 lanes on CDNA but 32 on RDNA,
+    so the ROCm default of 4 launches half the intended threads per block
+    there. Only the two archs this was measured on are switched over."""
+    from vllm.platforms.rocm import on_gfx1100, on_gfx1201
+
+    return 8 if (on_gfx1100() or on_gfx1201()) else 4
+
 
 # To check compatibility
 IS_TURING = current_platform.get_device_capability() == (7, 5)
@@ -944,8 +956,10 @@ def context_attention_fwd(
 
     max_seq_len = 0 if max_seq_len is None else max_seq_len
     extra_kargs: dict[str, Any] = {}
+    num_warps = 4
     if current_platform.is_rocm():
         extra_kargs = {}
+        num_warps = _rocm_prefill_num_warps()
 
     real_block_size = v_cache.shape[3]
     # _paged_kv_cache_offsets resolves context tokens against PHYSICAL_BLOCK_SIZE
@@ -1007,7 +1021,7 @@ def context_attention_fwd(
         BLOCK_N=BLOCK_N,
         num_unroll_cache=4,
         num_unroll_request=1,
-        num_warps=4,
+        num_warps=num_warps,
         num_stages=1,
         USE_SINKS=sinks is not None,
         CAUSAL=causal,
