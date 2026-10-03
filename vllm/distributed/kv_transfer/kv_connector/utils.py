@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -41,6 +42,51 @@ def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
     if num_scratch := min(num_spec_blocks, len(blocks) - 1):
         blocks = blocks[:-num_scratch]
     return blocks[-1:]
+
+
+def tensor_byte_span_end(cache: torch.Tensor) -> int:
+    """Return the exclusive end address touched by a nonnegative-stride view."""
+    if cache.numel() == 0:
+        return cache.data_ptr()
+    if any(stride < 0 for stride in cache.stride()):
+        raise ValueError("KV cache views must have nonnegative strides")
+    max_element_offset = sum(
+        (size - 1) * stride for size, stride in zip(cache.shape, cache.stride())
+    )
+    return cache.data_ptr() + (max_element_offset + 1) * cache.element_size()
+
+
+def uses_dense_virtual_transfer_pages(
+    layer_spec: KVCacheSpec,
+    cache: torch.Tensor,
+    physical_page_size: int,
+    num_blocks: int,
+) -> bool:
+    """Return whether a compressed kernel view can be split into transfer pages.
+
+    A compressed cache (``tokens_per_state > 1``, such as GLM-5.3-Flash's kpool
+    indexer) can store several kernel blocks in one tensor row. Its kernel block
+    ``j`` is then the ``j``-th ``physical_page_size`` page of the tensor.
+    """
+    if not (
+        isinstance(layer_spec, MLAAttentionSpec)
+        and layer_spec.tokens_per_state > 1
+        and cache.ndim == 4
+        and cache.shape[1] == 1
+        and cache.is_contiguous()
+        and physical_page_size > 0
+        and layer_spec.state_content_size_bytes > 0
+    ):
+        return False
+
+    block_stride = cache.stride(0) * cache.element_size()
+    return (
+        block_stride > physical_page_size
+        and block_stride % physical_page_size == 0
+        and physical_page_size % layer_spec.state_content_size_bytes == 0
+        and cache.shape[0] * (block_stride // physical_page_size) == num_blocks
+        and cache.nbytes == num_blocks * physical_page_size
+    )
 
 
 def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
