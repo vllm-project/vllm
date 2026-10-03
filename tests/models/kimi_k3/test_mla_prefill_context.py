@@ -86,15 +86,8 @@ class _RecordingPrefillBackend:
 class _KVBProj(torch.nn.Module):
     """Stand-in for the layer's ``kv_b_proj`` (returns an (out, bias) tuple).
 
-    Enforces the same input contract as the real linear methods, because that is
-    what decides whether the gathered latent needs a cast:
-
-    * an fp8 weight consumes the fp8 latent directly and dequantizes internally,
-      so it takes fp8 or bf16;
-    * a bf16 weight -- what a stock K3 checkpoint carries -- is a plain
-      ``F.linear`` and rejects anything but bf16, exactly as torch does.
-
-    Either weight dtype produces a bf16 output.
+    Both MXFP8 and bf16 weights consume model-dtype activations. MXFP8 stores its
+    weight in fp8 but quantizes a bf16 activation internally.
     """
 
     def __init__(self, device: torch.device, weight_dtype: torch.dtype) -> None:
@@ -109,12 +102,13 @@ class _KVBProj(torch.nn.Module):
             * 0.05
         )
         self.register_buffer("weight", weight.to(weight_dtype))
+        self.params_dtype = torch.bfloat16
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, None]:
-        if self.weight.dtype == torch.bfloat16 and x.dtype != torch.bfloat16:
+        if x.dtype != self.params_dtype:
             raise RuntimeError(
-                "a bfloat16 kv_b_proj cannot consume the gathered latent as "
-                f"{x.dtype}; it must be cast first"
+                "kv_b_proj cannot consume the gathered latent as "
+                f"{x.dtype}; it requires {self.params_dtype}"
             )
         return torch.nn.functional.linear(
             x.to(torch.bfloat16), self.weight.to(torch.bfloat16)
@@ -201,7 +195,7 @@ def _build_prefill_metadata(
 @pytest.mark.parametrize("honors_out", [False, True], ids=["copy_out", "writes_out"])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize(
-    "kv_b_proj_quantized", [True, False], ids=["fp8_kv_b_proj", "bf16_kv_b_proj"]
+    "kv_b_proj_quantized", [True, False], ids=["mxfp8_kv_b_proj", "bf16_kv_b_proj"]
 )
 @torch.inference_mode()
 def test_fused_context_matches_generic_impl(

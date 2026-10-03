@@ -399,8 +399,8 @@ def _get_kv_b_proj_input_dtype(
             and quant_method.spec.weight is kFp8Static128BlockSym
         ):
             return quant_method.input_dtype
-        if not use_fp8_prefill:
-            return None
+        input_dtype = getattr(kv_b_proj, "params_dtype", weight_dtype)
+        return input_dtype if use_fp8_prefill else None
     return weight_dtype
 
 
