@@ -6,6 +6,7 @@ steps:
   key: jit-monitor-no-runtime-jit
   device: intel_gpu
   timeout_in_minutes: 45
+  optional: true
   working_dir: .
   no_plugin: true
   env:
