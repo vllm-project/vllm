@@ -421,18 +421,12 @@ class CudaPlatformBase(Platform):
         )
         if not index_kpool or index_kpool <= 1:
             return None
-        from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
+        from vllm.utils.deep_gemm import get_paged_mqa_page_sizes
 
         # kpool paged-MQA indexer: the storage block (block_size /
         # index_kpool) is virtually split into pool pages, so block_size
         # must be a multiple of index_kpool times a legal pool page.
-        page = min(PAGED_MQA_PAGE_SIZES)
-        if cls.is_device_capability_family(120):
-            # On sm120 the DeepGEMM paged-MQA kernel only accepts block_kv
-            # 64 for the fp8 indexer cache, so align to the largest pool
-            # page here to make the page split land on 64 not the min 32.
-            page = max(PAGED_MQA_PAGE_SIZES)
-        return index_kpool * page
+        return index_kpool * min(get_paged_mqa_page_sizes())
 
     @classmethod
     def get_attn_backend_cls(
