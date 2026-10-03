@@ -98,6 +98,7 @@ def flashinfer_sampler_supported() -> bool:
             "VLLM_USE_FLASHINFER_SAMPLER=0."
         )
         return False
+    from vllm.utils.flashinfer import warn_flashinfer_jit_cache_sm75
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
     capability = current_platform.get_device_capability()
@@ -122,6 +123,7 @@ def flashinfer_sampler_supported() -> bool:
 
     if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
+        warn_flashinfer_jit_cache_sm75()
         return True
     if envs.is_set("VLLM_USE_FLASHINFER_SAMPLER"):
         raise RuntimeError(
