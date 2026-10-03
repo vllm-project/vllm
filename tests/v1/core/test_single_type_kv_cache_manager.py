@@ -240,7 +240,6 @@ def get_sliding_window_manager(
     sliding_window_spec,
     block_pool,
     enable_caching=True,
-    needs_kv_cache_zeroing=False,
 ):
     # Tests don't exercise admission gating; pass a large cap that is a no-op.
     return SlidingWindowManager(
@@ -249,7 +248,6 @@ def get_sliding_window_manager(
         enable_caching=enable_caching,
         kv_cache_group_id=0,
         scheduler_block_size=sliding_window_spec.block_size,
-        needs_kv_cache_zeroing=needs_kv_cache_zeroing,
         max_admission_blocks_per_request=10**9,
     )
 
@@ -258,7 +256,6 @@ def get_chunked_local_attention_manager(
     chunked_local_attention_spec,
     block_pool,
     enable_caching=True,
-    needs_kv_cache_zeroing=False,
 ):
     return ChunkedLocalAttentionManager(
         chunked_local_attention_spec,
@@ -266,7 +263,6 @@ def get_chunked_local_attention_manager(
         enable_caching=enable_caching,
         kv_cache_group_id=0,
         scheduler_block_size=chunked_local_attention_spec.block_size,
-        needs_kv_cache_zeroing=needs_kv_cache_zeroing,
         max_admission_blocks_per_request=10**9,
     )
 
@@ -288,7 +284,6 @@ def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
         enable_caching=True,
         kv_cache_group_id=0,
         scheduler_block_size=block_size,
-        needs_kv_cache_zeroing=True,
         max_admission_blocks_per_request=1,
     )
     request_id = "request"
@@ -348,7 +343,6 @@ def test_sliding_window_records_new_blocks_for_zeroing():
         spec,
         block_pool,
         enable_caching=False,
-        needs_kv_cache_zeroing=True,
     )
 
     blocks = manager.allocate_new_blocks(
@@ -376,7 +370,6 @@ def test_chunked_local_attention_records_new_blocks_for_zeroing():
         spec,
         block_pool,
         enable_caching=False,
-        needs_kv_cache_zeroing=True,
     )
 
     blocks = manager.allocate_new_blocks(

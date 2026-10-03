@@ -1559,7 +1559,6 @@ def test_scheduler_filters_connector_loaded_blocks_from_zeroing():
             return [9, 10, 11, 12]
 
     scheduler = object.__new__(Scheduler)
-    scheduler.needs_kv_cache_zeroing = True
     scheduler.kv_cache_manager = FakeKVCacheManager()
     scheduler._skip_zero_block_ids = {10, 12}
 
@@ -1577,7 +1576,6 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
     scheduler = object.__new__(Scheduler)
     scheduler.connector = MagicMock()
-    scheduler.needs_kv_cache_zeroing = True
     scheduler.kv_cache_manager = _make_fake_kv_cache_manager()
     scheduler.kv_cache_manager.cache_blocks = MagicMock()
     scheduler.failed_recving_kv_req_ids = {"req-1"}

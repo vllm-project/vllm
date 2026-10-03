@@ -4126,22 +4126,6 @@ def test_iter_layer_specs_returns_group_members():
     assert list(iter_layer_specs(wrapped)) == [full, mla]
 
 
-def test_wrapped_mamba_group_requires_block_zeroing():
-    mamba = MambaSpec(
-        block_size=4,
-        shapes=((4, 1),),
-        dtypes=(torch.float32,),
-    )
-    wrapped = UniformTypeKVCacheSpecs(block_size=4, kv_cache_specs={"mamba": mamba})
-    config = KVCacheConfig(
-        num_blocks=4,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["mamba"], wrapped)],
-    )
-
-    assert config.needs_kv_cache_zeroing
-
-
 def _spec_decode_grouping_config(method="dspark", model_type=None):
     """Grouping config with an EAGLE-family speculative method enabled."""
     return SimpleNamespace(

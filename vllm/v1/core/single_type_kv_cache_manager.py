@@ -77,7 +77,6 @@ class SingleTypeKVCacheManager(ABC):
         scheduler_block_size: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-        needs_kv_cache_zeroing: bool = False,
         max_admission_blocks_per_request: int | None = None,
     ) -> None:
         """Initializes the SingleTypeKVCacheManager.
@@ -91,8 +90,6 @@ class SingleTypeKVCacheManager(ABC):
                 block sizes); a multiple of this manager's ``block_size``.
             dcp_world_size: Decode context parallel world size.
             pcp_world_size: Prefill context parallel world size.
-            needs_kv_cache_zeroing: Whether worker-side KV cache zeroing needs
-                newly allocated block IDs from this manager.
             max_admission_blocks_per_request: Recycling-aware per-request
                 block cap used by `get_num_blocks_to_allocate`. Only set for
                 spec types that recycle blocks across chunks (SWA,
@@ -115,13 +112,12 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool = block_pool
         self.enable_caching = enable_caching
         self._max_admission_blocks_per_request = max_admission_blocks_per_request
-        # Record newly allocated block ids only when worker-side zeroing will
-        # consume them and this manager holds a spec type that gets zeroed.
-        self._record_new_block_ids = (
-            needs_kv_cache_zeroing
-            and isinstance(kv_cache_spec, AttentionSpec)
-            and not isinstance(kv_cache_spec, CircularBufferSpec)
-        )
+        # The worker zeros every newly allocated attention block so kernels never
+        # read stale data (e.g. NaN) from a block's unused slots. Circular buffers
+        # hold one block for the request lifetime and are not zeroed.
+        self._record_new_block_ids = isinstance(
+            kv_cache_spec, AttentionSpec
+        ) and not isinstance(kv_cache_spec, CircularBufferSpec)
         self.new_block_ids: list[int] = []
 
         # Mapping from request ID to blocks to track the blocks allocated

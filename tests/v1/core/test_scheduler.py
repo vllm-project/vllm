@@ -272,6 +272,38 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
         assert scheduler.running[i] == request
 
 
+def test_schedule_reports_new_blocks_for_zeroing():
+    """Every block freshly allocated in a step is handed to the worker for
+    zeroing; a step that allocates nothing reports nothing."""
+    scheduler = create_scheduler(block_size=16)
+    requests = create_requests(num_requests=2, num_tokens=40, block_size=16)
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    manager = scheduler.kv_cache_manager
+    allocated = [
+        block_id
+        for request in requests
+        for block_id in manager.get_block_ids(request.request_id)[0]
+    ]
+    assert len(allocated) == 6
+    assert output.new_block_ids_to_zero == allocated
+
+    model_output = ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index={request.request_id: i for i, request in enumerate(requests)},
+        sampled_token_ids=[[1000] for _ in requests],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # 41 tokens still fit in the three blocks: nothing new to zero.
+    assert scheduler.schedule().new_block_ids_to_zero is None
+
+
 def test_scheduler_stats_route_to_existing_output_client():
     scheduler = create_scheduler()
     request = create_requests(num_requests=1)[0]

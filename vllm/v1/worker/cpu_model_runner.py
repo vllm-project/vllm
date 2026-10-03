@@ -176,6 +176,9 @@ class CPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         pass
 
+    def _init_kv_zero_meta(self) -> None:
+        """No Triton metadata: _zero_block_ids below zeros with torch."""
+
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         # Zero full-attention blocks to prevent stale data corruption on partial writes.
         # Encoder-only (runner-only) layers are not FullAttentionSpec, so the
