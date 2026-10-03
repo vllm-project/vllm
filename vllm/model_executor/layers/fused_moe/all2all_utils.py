@@ -324,7 +324,7 @@ def maybe_make_prepare_finalize(
 
         # MXFP4 activations are dispatched as packed FP4 with their e8m0
         # block scales, which the experts consume without re-quantizing.
-        use_fp4_dispatch = quant_config.use_mxfp4_w4a4
+        use_fp4_dispatch = moe.use_mori_fp4_dispatch(quant_config)
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
         use_fp8_dispatch = not use_fp4_dispatch and (

@@ -545,9 +545,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         workspace2 = (0,)
         # MoRI dispatches MXFP4 activations packed two per byte, so K is
         # half the hidden size there.
-        packed_fp4_input = (
-            self.moe_config.use_mori_kernels and self.quant_config.use_mxfp4_w4a4
-        )
+        packed_fp4_input = self.moe_config.use_mori_fp4_dispatch(self.quant_config)
         output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)
 
