@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    flashinfer_b12x_unsupported_reason,
     flashinfer_convert_sf_to_mma_layout,
     has_flashinfer_b12x_moe,
 )
@@ -168,6 +169,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             p.is_cuda()
             and p.is_device_capability_family(120)
             and has_flashinfer_b12x_moe()
+            and flashinfer_b12x_unsupported_reason() is None
         )
 
     @staticmethod
