@@ -157,6 +157,26 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
         return output, output_bias
 
+    def apply_mla_kv_b_lora_linear(
+        self,
+        input_: torch.Tensor,
+        output: torch.Tensor,
+        token_lora_mapping: torch.Tensor,
+    ) -> None:
+        """Project prefill rows using explicit slots, including cached tokens."""
+        lora_a = self.lora_a_stacked[0]
+        if self.lora_config.fully_sharded_loras and self.tp_size > 1:
+            lora_a = tensor_model_parallel_all_gather(lora_a, dim=2)
+        lora_b = self.lora_b_stacked[0]
+        input_ = input_.reshape(input_.shape[0], -1)
+        flat_output = output.view(input_.shape[0], -1)
+        for slot in range(lora_a.shape[0]):
+            delta = input_.float() @ lora_a[slot, 0].float().T
+            delta = (delta @ lora_b[slot, 0].float().T).to(output.dtype)
+            flat_output.add_(
+                torch.where((token_lora_mapping == slot)[:, None], delta, 0)
+            )
+
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
