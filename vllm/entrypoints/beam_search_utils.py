@@ -19,7 +19,7 @@ from typing import Any
 from vllm.config import VllmConfig
 from vllm.entrypoints.choice_trie import ChoiceTrie
 from vllm.entrypoints.generate.beam_search.utils import BeamSearchSequence
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.bitmask import bitmask_to_token_ids
 from vllm.v1.structured_output.backend_types import (
@@ -27,6 +27,40 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputOptions,
 )
 from vllm.v1.structured_output.request import get_structured_output_key
+
+
+def validate_and_resolve_beam_search_so(
+    structured_outputs: StructuredOutputsParams,
+    vllm_config: VllmConfig,
+    tokenizer: TokenizerLike,
+) -> None:
+    """Validate a beam-search structured output request and resolve its backend.
+
+    Beam search builds :class:`BeamSearchParams` directly and never runs the
+    :class:`SamplingParams` validation that the non-beam path applies, so the
+    same checks are replicated here. Validation rejects degenerate inputs
+    (e.g. an empty choice list) and resolves ``structured_outputs._backend``
+    from ``"auto"`` to a concrete backend using the identical fallback the
+    non-beam path uses (xgrammar, falling back to guidance/outlines, with
+    Tekken Mistral + Lark grammars routed to guidance).
+
+    The resolution mutates ``structured_outputs`` in place.
+
+    Args:
+        structured_outputs: The structured output parameters from the request.
+        vllm_config: The engine-level vLLM configuration.
+        tokenizer: The tokenizer used by the model.
+
+    Raises:
+        VLLMValidationError: If the structured output request is invalid.
+
+    """
+    probe = SamplingParams(structured_outputs=structured_outputs)
+    probe._validate_structured_outputs(
+        model_config=vllm_config.model_config,
+        structured_outputs_config=vllm_config.structured_outputs_config,
+        tokenizer=tokenizer,
+    )
 
 
 def init_beam_search_so_backend(
@@ -67,6 +101,8 @@ def init_beam_search_so_backend(
         ValueError: If the requested backend is not supported.
 
     """
+    validate_and_resolve_beam_search_so(structured_outputs, vllm_config, tokenizer)
+
     key = get_structured_output_key(structured_outputs)
     request_type, grammar_spec = key
 
@@ -77,19 +113,8 @@ def init_beam_search_so_backend(
         trie = ChoiceTrie.build(choices, tokenizer, eos_token_id=eos_token_id)
         return None, None, None, trie
 
-    so_config = vllm_config.structured_outputs_config
-
-    # Resolve the backend name from engine config if not already set.
-    if not structured_outputs._backend:
-        structured_outputs._backend = so_config.backend
-
+    # `_backend` is now a concrete backend resolved by the validator above.
     backend_name = structured_outputs._backend
-
-    # Resolve "auto" to a concrete backend.  The normal request path
-    # does this during SamplingParams validation; beam search bypasses
-    # that, so we replicate the resolution here.
-    if backend_name == "auto":
-        backend_name = "xgrammar"
 
     backend: StructuredOutputBackend
     if backend_name == "xgrammar":

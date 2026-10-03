@@ -327,7 +327,10 @@ class BeamSearchOnlineMixin(ABC):
                     beam, so_backend, so_key, so_bitmask, vocab_size
                 )
             if not allowed_ids:
+                # Grammar/trie reached a terminal state (no EOS emitted), so
+                # this beam is a completed valid output, not a truncation.
                 if beam.logprobs:
+                    beam.finish_reason = "stop"
                     completed.append(beam)
                 continue
             # The engine caps the size of allowed_token_ids. When the allowed

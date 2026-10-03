@@ -9,7 +9,10 @@ import torch
 from tqdm import tqdm
 
 from vllm import RequestOutput, TextPrompt, TokensPrompt
-from vllm.entrypoints.beam_search_utils import get_trie_allowed_token_ids
+from vllm.entrypoints.beam_search_utils import (
+    get_trie_allowed_token_ids,
+    validate_and_resolve_beam_search_so,
+)
 from vllm.entrypoints.choice_trie import ChoiceTrie
 from vllm.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.logger import init_logger
@@ -263,6 +266,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     assert beam.orig_prompt["type"] != "enc_dec"
                     prompt_len = len(beam.orig_prompt["prompt_token_ids"])
                     if len(beam.tokens) > prompt_len:
+                        # Grammar/trie reached a terminal state (no EOS
+                        # emitted); this beam is a completed valid output.
+                        beam.finish_reason = "stop"
                         for (s, e), inst in zip(
                             instance_start_and_end,
                             instances_batch,
@@ -347,6 +353,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         )
 
                         if token_id == eos_token_id and not ignore_eos:
+                            new_beam.finish_reason = "stop"
+                            new_beam.stop_reason = eos_token_id
                             instance.completed.append(new_beam)
                         else:
                             instance_new_beams.append(new_beam)
@@ -378,6 +386,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         ``trie`` is set.
         """
         # CHOICE fast path: build a prefix trie and skip the grammar backend.
+        vllm_config = self.llm_engine.vllm_config
+        validate_and_resolve_beam_search_so(structured_outputs, vllm_config, tokenizer)
+
         key = get_structured_output_key(structured_outputs)
         if key[0] == StructuredOutputOptions.CHOICE:
             choices = json.loads(key[1])
@@ -386,7 +397,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             )
             return None, None, None, trie
 
-        vllm_config = self.llm_engine.vllm_config
         so_config = vllm_config.structured_outputs_config
         if so_config is None:
             raise ValueError(
@@ -394,10 +404,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 "with structured outputs"
             )
 
-        # Resolve the backend name from engine config if not already set.
-        if not structured_outputs._backend:
-            structured_outputs._backend = so_config.backend
-
+        # `_backend` is now a concrete backend resolved by the validator above.
         backend_name = structured_outputs._backend
         vocab_size = self.model_config.get_vocab_size()
 
