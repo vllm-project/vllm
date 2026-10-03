@@ -1142,9 +1142,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.counter_connector_prefix_cache_hits[engine_idx].inc(
                     connector_stats.hits
                 )
-                for source, num_tokens in connector_stats.hits_by_source.items():
+                for tier, num_tokens in connector_stats.hits_by_source.items():
                     self.counter_prompt_tokens_cached_by_source.labels(
-                        *labelvalues, source.value
+                        *labelvalues, tier.value
                     ).inc(num_tokens)
 
             if scheduler_stats.spec_decoding_stats is not None:
