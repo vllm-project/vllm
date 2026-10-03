@@ -1254,6 +1254,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         and loaded_weight.dtype == torch.float8_e8m0fnu
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
+                    name_mapped = None
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
@@ -1279,7 +1280,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         if success:
                             name = name_mapped
                             break
-                    loaded_params.add(name_mapped)
+                    if name_mapped is not None:
+                        loaded_params.add(name_mapped)
                     continue
                 elif "attn_sink" in name:
                     if is_pp_missing_parameter(name, self):
@@ -1617,7 +1619,6 @@ class DeepseekV41LLMForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self.process_weights_after_loading()
         config = self.model.vllm_config
         if config.engram_config and config.engram_config.use_thp:
             # Loading weights refills the file cache; release it before MADV_COLLAPSE.
