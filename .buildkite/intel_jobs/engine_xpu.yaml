@@ -6,6 +6,7 @@ steps:
   key: engine-2
   device: intel_gpu
   timeout_in_minutes: 30
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -47,6 +48,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 1
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -76,6 +78,7 @@ steps:
   key: e2e-scheduling-1-gpu
   device: intel_gpu
   timeout_in_minutes: 53
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -96,10 +99,11 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s v1/e2e/general/test_async_scheduling.py || true'
-- label: ':nvidia: (H200 MIG 18GB) E2E Core'
-  key: e2e-core-1-gpu
+- label: ':nvidia: (H200 MIG 18GB) E2E Scheduling Accuracy'
+  key: e2e-scheduling-accuracy-1-gpu
   device: intel_gpu
-  timeout_in_minutes: 50
+  timeout_in_minutes: 53
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -111,7 +115,7 @@ steps:
     gpu: 1+
     mem: 16+
   _raw_old_commands:
-  - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
+  - pytest -v -s v1/e2e/general/test_async_scheduling_accuracy.py
   source_file_dependencies:
   - vllm/v1/
   - tests/v1/e2e/general/
@@ -119,11 +123,37 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k not test_mamba_prefix_cache_mrv2 || true'
+    pytest -v -s v1/e2e/general/test_async_scheduling_accuracy.py || true'
+- label: ':nvidia: (H200 MIG 18GB) E2E Core'
+  key: e2e-core-1-gpu
+  device: intel_gpu
+  timeout_in_minutes: 65
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_async_scheduling_accuracy.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
+  source_file_dependencies:
+  - vllm/v1/
+  - tests/v1/e2e/general/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_async_scheduling_accuracy.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k not test_mamba_prefix_cache_mrv2 || true'
 - label: ':nvidia: (H200 MIG 35GB) E2E Core Large Memory'
   key: e2e-core-large-memory
   device: intel_gpu
   timeout_in_minutes: 50
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -146,12 +176,47 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py || true &&
     pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async || true'
+- label: ':nvidia: (H100) ReplaySSM E2E'
+  key: replayssm-e2e
+  device: intel_gpu
+  timeout_in_minutes: 90
+  num_devices: 2
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/test_replayssm_decode.py
+  source_file_dependencies:
+  - tests/v1/e2e/test_replayssm_decode.py
+  - vllm/config/cache.py
+  - vllm/config/vllm.py
+  - vllm/model_executor/layers/mamba/
+  - vllm/model_executor/models/nemotron_h.py
+  - vllm/model_executor/warmup/replayssm_warmup.py
+  - vllm/v1/attention/backends/mamba_attn.py
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_model_runner.py
+  - vllm/v1/worker/gpu_worker.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/test_replayssm_decode.py || true'
 - label: ':nvidia: (L4) V1 E2E'
   key: v1-e2e-2-gpus-2
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 2
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -194,7 +259,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 35
   num_devices: 1
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:

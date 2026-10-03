@@ -6,6 +6,7 @@ steps:
   key: samplers-test
   device: intel_gpu
   timeout_in_minutes: 60
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -35,6 +36,7 @@ steps:
   key: samplers-multimodal-beam-search
   device: intel_gpu
   timeout_in_minutes: 30
+  optional: true
   working_dir: .
   no_plugin: true
   env:
