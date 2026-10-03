@@ -20,7 +20,9 @@ Key design points:
   none of them are available. On CPU none of them apply, so we
   bypass that logic and set the attributes ourselves.
 * Chunked prefill and prefix caching are disabled by the CPU platform
-  when ``use_mla`` is set.
+  when ``use_mla`` is set. Hybrid MLA+Mamba models (e.g. KimiLinear)
+  then fall back to mamba cache mode ``none`` so config validation
+  stays consistent.
 * The CPU decode kernel only supports ``head_dim=576``,
   ``v_head_dim=512`` and ``block_size=16`` today; the platform layer
   forces ``block_size=16`` for MLA models.
