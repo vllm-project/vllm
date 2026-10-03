@@ -1452,8 +1452,22 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # (block_tables, seq_lens) directly.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
         if needs_seq_lens_cpu:
-            with gpu_sync_allowed():
-                seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+            cpu_upper_bound = common_attn_metadata.seq_lens_cpu_upper_bound
+            is_prefilling = common_attn_metadata.is_prefilling
+            # DCP can route speculative decode through prefill, so the
+            # dispatch split alone does not prove the CPU lengths are exact.
+            if (
+                num_decodes == 0
+                and cpu_upper_bound is not None
+                and cpu_upper_bound.device.type == "cpu"
+                and is_prefilling is not None
+                and is_prefilling.device.type == "cpu"
+                and bool(is_prefilling.all())
+            ):
+                seq_lens_cpu = cpu_upper_bound
+            else:
+                with gpu_sync_allowed():
+                    seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
         else:
             seq_lens_cpu = None
 

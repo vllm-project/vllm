@@ -865,6 +865,108 @@ def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+@pytest.mark.parametrize("dcp_world_size", [1, 2])
+@pytest.mark.parametrize(
+    ("query_lens", "prefill_flags", "has_cpu_lens", "needs_readback"),
+    [
+        ([3, 5], [True, True], True, False),
+        ([3, 5], [True, True], False, True),
+        ([3, 5], None, True, True),
+        ([1, 1], [False, False], True, True),
+        ([1, 5], [False, True], True, True),
+        # DCP sends speculative decode to the prefill wrapper too.
+        ([3, 5], [False, False], True, True),
+    ],
+)
+def test_flashinfer_prefill_cpu_lengths_require_exact_metadata(
+    monkeypatch, dcp_world_size, query_lens, prefill_flags, has_cpu_lens, needs_readback
+):
+    """Only exact prefill mirrors may replace readback; DCP must not mutate them."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.page_size = 16
+    builder.reorder_batch_threshold = 1
+    builder.num_qo_heads, builder.num_kv_heads = 8, 2
+    builder.dcp_world_size = dcp_world_size
+    builder.dcp_rank = dcp_world_size - 1
+    builder.dcp_kv_cache_interleave_size = 4
+    builder.use_dcp = dcp_world_size > 1
+    builder.use_xqa = builder.use_trtllm_decode_attention = False
+    builder.cache_dtype = "auto"
+    builder.q_data_type_prefill = builder.q_data_type_decode = torch.bfloat16
+    builder.attention_config = SimpleNamespace(use_trtllm_attention=False)
+    builder.has_sinks = False
+    builder.global_hyperparameters = SimpleNamespace(
+        has_same_window_lefts=True, has_same_all_params=True
+    )
+    monkeypatch.setattr(
+        flashinfer_backend, "use_trtllm_attention", lambda *a, **k: False
+    )
+
+    seq_lens = torch.tensor([33, 50], dtype=torch.int32)
+    cpu_lens = seq_lens.clone()
+    if prefill_flags is not None:
+        cpu_lens[~torch.tensor(prefill_flags)] += 100  # Optimistic async decode.
+    original_cpu_lens = cpu_lens.clone()
+    qo_indptr = torch.tensor([0, query_lens[0], sum(query_lens)], dtype=torch.int32)
+    common = CommonAttentionMetadata(
+        query_start_loc=qo_indptr,
+        query_start_loc_cpu=qo_indptr,
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=cpu_lens if has_cpu_lens else None,
+        is_prefilling=torch.tensor(prefill_flags)
+        if prefill_flags is not None
+        else None,
+        num_reqs=2,
+        num_actual_tokens=sum(query_lens),
+        max_query_len=max(query_lens),
+        max_seq_len=150,
+        block_table_tensor=torch.zeros((2, 10), dtype=torch.int32),
+        slot_mapping=torch.empty(0, dtype=torch.int64),
+    )
+    readbacks = []
+    tensor_cpu = torch.Tensor.cpu
+
+    def record_readback(tensor, *args, **kwargs):
+        if tensor is seq_lens:
+            readbacks.append(True)
+            assert needs_readback, "exact prefill lengths should not synchronize"
+        return tensor_cpu(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "cpu", record_readback)
+    planned = []
+
+    class PlanningReached(Exception):
+        pass
+
+    def record_lengths(num_blocks, lengths, *_args):
+        planned.extend(lengths.tolist())
+        # Stop before GPU page-table staging; the planner consumes these lengths.
+        raise PlanningReached
+
+    monkeypatch.setattr(builder, "_compute_flashinfer_kv_metadata", record_lengths)
+    with pytest.raises(PlanningReached):
+        builder.build(0, common)
+
+    expected = [33, 50]
+    if dcp_world_size > 1:
+        for row, query_len in enumerate(query_lens):
+            context_len = expected[row] - (query_len if query_len > 1 else 0)
+            expected[row] = sum(
+                token // 4 % dcp_world_size == builder.dcp_rank
+                for token in range(context_len)
+            )
+    assert planned == expected
+    assert len(readbacks) == int(needs_readback)
+    torch.testing.assert_close(cpu_lens, original_cpu_lens)
+    torch.testing.assert_close(seq_lens, torch.tensor([33, 50], dtype=torch.int32))
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 def test_flashinfer_xqa_draft_masks():
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
