@@ -93,7 +93,7 @@ class FunctionGemmaToolParser(ToolParser):
             )
 
         try:
-            matches = self.tool_call_regex.findall(model_output)
+            matches = list(self.tool_call_regex.finditer(model_output))
 
             if not matches:
                 return ExtractedToolCallInformation(
@@ -101,10 +101,17 @@ class FunctionGemmaToolParser(ToolParser):
                 )
 
             tool_calls: list[ToolCall] = []
+            # Text outside the function call blocks (before, between and
+            # after them) is content, the same as the streaming path emits.
+            content_parts: list[str] = []
+            last_end = 0
 
             for match in matches:
-                func_name = match[0] if match[0] else match[2]
-                args_str = match[1] if match[1] else match[3]
+                content_parts.append(model_output[last_end : match.start()])
+                last_end = match.end()
+
+                func_name = match.group(1) or match.group(3)
+                args_str = match.group(2) or match.group(4) or ""
 
                 if not func_name:
                     continue
@@ -121,11 +128,10 @@ class FunctionGemmaToolParser(ToolParser):
                     )
                 )
 
+            content_parts.append(model_output[last_end:])
+
             if tool_calls:
-                content_end = model_output.find(self.tool_call_start_token)
-                content = (
-                    model_output[:content_end].strip() if content_end > 0 else None
-                )
+                content = "".join(content_parts).strip()
 
                 return ExtractedToolCallInformation(
                     tools_called=True,
