@@ -175,6 +175,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         # something to pull; a full local hit stays RUNNING.
                         num_external_tokens > 0,
                     )
+                    if num_external_tokens > 0:
+                        self._reqs_awaiting_recv.add(request.request_id)
 
                 else:
                     logger.warning(
@@ -215,6 +217,13 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         # Stop heartbeating for aborted requests that never reached finished_recving:
         # normal path cleans up in update_connector_output.
         self._stop_heartbeat(request.request_id)
+
+        if request.request_id in self._reqs_awaiting_recv:
+            # The scheduler holds the blocks until every worker reports the
+            # request in finished_recving; workers that have no READ in flight
+            # for it report it as soon as they learn of the abort.
+            self._reqs_awaiting_recv.remove(request.request_id)
+            self._reqs_to_abort.add(request.request_id)
 
         if params.get("do_remote_prefill"):
             # If do_remote_prefill is still True when the request is finished,
