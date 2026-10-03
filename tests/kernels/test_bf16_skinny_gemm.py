@@ -97,6 +97,12 @@ QWEN4_EXP_SM121_CASES = [
     for num_tokens, config in plans.items()
 ]
 
+QWEN4_EXP_SM120_CASES = [
+    (n, k, num_tokens, config)
+    for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM120_GEMM_PLANS.items()
+    for num_tokens, config in plans.items()
+]
+
 EXPECTED_CUTE_CONFIGS = {
     (3072, 7168, 1): (224, 3, 4, 8),
     (3072, 7168, 2): (128, 3, 2, 8),
@@ -725,6 +731,24 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
             assert config.static_k in (None, k)
 
 
+def test_qwen4_exp_sm120_plans_are_valid() -> None:
+    plans = qwen4_exp_gemm.QWEN4_EXP_SM120_GEMM_PLANS
+
+    assert len(plans) == 13
+    assert sum(map(len, plans.values())) == 58
+    # TP=1 and TP=2 LM heads; the TP=4 key the other tables carry must not leak in.
+    assert (248320, 2560) in plans
+    assert (124160, 2560) in plans
+    assert (62080, 2560) not in plans
+    for (n, k), shape_plans in plans.items():
+        for num_tokens, config in shape_plans.items():
+            assert 1 <= num_tokens <= 16
+            assert config.num_rows == num_tokens
+            assert n % config.outputs_per_block == 0
+            assert k % (config.block_size * config.vector_width) == 0
+            assert config.static_k in (None, k)
+
+
 @pytest.mark.parametrize(
     "capability,expected_plans",
     [
@@ -732,6 +756,7 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
         ((10, 0), qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS),
         ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
         ((12, 1), qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS),
+        ((12, 0), qwen4_exp_gemm.QWEN4_EXP_SM120_GEMM_PLANS),
         ((8, 0), {}),
     ],
 )
@@ -959,6 +984,29 @@ def test_qwen4_exp_sm121_selected_shapes(
     weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
 
     selected = qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS[(n, k)][num_tokens]
+    assert selected == config
+    output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
+
+    reference = torch.nn.functional.linear(x, weight)
+    cosine = torch.nn.functional.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+    assert cosine > 0.999
+
+
+@pytest.mark.parametrize("n,k,num_tokens,config", QWEN4_EXP_SM120_CASES)
+def test_qwen4_exp_sm120_selected_shapes(
+    n: int,
+    k: int,
+    num_tokens: int,
+    config: SkinnyGemmConfig,
+) -> None:
+    _require_capability_and_cute((12, 0))
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+
+    selected = qwen4_exp_gemm.QWEN4_EXP_SM120_GEMM_PLANS[(n, k)][num_tokens]
     assert selected == config
     output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
 
