@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from vllm.entrypoints.choice_trie import ChoiceTrie
 
 # ---------------------------------------------------------------------------
@@ -193,11 +195,16 @@ def test_sequence_dedup_eliminates_duplicates():
 # ---------------------------------------------------------------------------
 
 
-def test_empty_choices_no_allowed_tokens():
+def test_empty_choices_rejected():
     tok = make_tokenizer(VOCAB)
-    trie = build([], tok)
-    allowed = trie.allowed_tokens_for([])
-    assert allowed is not None and len(allowed) == 0
+    with pytest.raises(ValueError):
+        build([], tok)
+
+
+def test_all_empty_token_choices_rejected():
+    tok = make_tokenizer(VOCAB)
+    with pytest.raises(ValueError):
+        build([""], tok)
 
 
 def test_single_token_choices():

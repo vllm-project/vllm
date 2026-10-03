@@ -294,6 +294,8 @@ async def test_beam_search_structured_output_choice(
         assert text in CHOICES, f"Expected one of {CHOICES}, got: {text!r}"
         assert text not in seen, f"Duplicate choice returned: {text!r}"
         seen.add(text)
+        # A trie-constrained completion must report "stop", not "length".
+        assert choice.finish_reason == "stop"
 
 
 # ---- Auto Backend Test (no explicit --structured-outputs-config.backend) ----

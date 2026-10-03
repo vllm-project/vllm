@@ -84,6 +84,12 @@ class ChoiceTrie:
                 node = node.children[tid]
             node.is_terminal = True
 
+        if not root.children:
+            raise ValueError(
+                "No valid choices to constrain beam search: every choice "
+                "tokenized to an empty sequence."
+            )
+
         return ChoiceTrie(root)
 
     def allowed_tokens_for(self, generated_ids: list[int]) -> list[int] | None:
