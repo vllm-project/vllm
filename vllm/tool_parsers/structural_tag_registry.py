@@ -1063,9 +1063,12 @@ def get_glm_4_7_structural_tag(
         else _glm_4_7_tool_tag(tool)
         for tool in function_tools
     ]
-    if tool_choice == "auto":
+    if tool_choice == "auto" and not tags:
+        # No function tools (only builtin tools): free text, like the builtin.
+        suffix_tag: Any = AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES)
+    elif tool_choice == "auto":
         # Keep the trigger itself out of the excludes so tag dispatch works.
-        suffix_tag: Any = TriggeredTagsFormat(
+        suffix_tag = TriggeredTagsFormat(
             triggers=["<tool_call>"],
             tags=tags,
             excludes=[e for e in _GLM_4_7_VALUE_EXCLUDES if e != "<tool_call>"],

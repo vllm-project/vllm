@@ -1784,6 +1784,35 @@ def test_glm47_responses_request_attaches_shallow_tag(
     )
 
 
+@pytest.mark.parametrize(
+    "tools",
+    [
+        [{"type": "web_search"}],
+        [{"type": "mcp", "server_label": "docs", "server_url": "http://mcp"}],
+    ],
+)
+def test_glm47_auto_without_function_tools_allows_free_text(
+    monkeypatch: pytest.MonkeyPatch, tools: list[dict[str, Any]]
+):
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", True)
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = Glm47MoeModelToolParser
+
+    request = ResponsesRequest.model_validate(
+        {"input": "hi", "tools": tools, "tool_choice": "auto"}
+    )
+    parser = TestParser(MagicMock(), tools=None)
+    parser._reasoning_parser = MagicMock(adjust_request=lambda request: request)
+
+    out = parser.adjust_request(request)
+
+    assert out.structured_outputs is not None
+    grammar = Grammar.from_structural_tag(out.structured_outputs.structural_tag)
+    assert _is_grammar_accept_string(grammar, "Plain answer.")
+    assert not _is_grammar_accept_string(grammar, "<arg_key>x</arg_key>")
+
+
 def test_glm47_operator_level_overrides_parser_default(
     monkeypatch: pytest.MonkeyPatch,
     sample_tools: list[ChatCompletionToolsParam],
