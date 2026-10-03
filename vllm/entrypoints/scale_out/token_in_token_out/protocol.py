@@ -28,6 +28,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.logprobs import Logprob
+from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -334,6 +335,9 @@ class GenerateResponseChoice(BaseModel):
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
+    # Weight versions that sampled the output tokens, as contiguous spans over
+    # output-token indexes, in generation order.
+    weight_versions: list[WeightVersionSpan] | None = None
 
     @field_validator("token_ids")
     @classmethod
@@ -350,6 +354,8 @@ class GenerateResponseStreamChoice(BaseModel):
     token_ids: list[int] | None = None
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
+    # Set on the final chunk only; covers the whole output.
+    weight_versions: list[WeightVersionSpan] | None = None
 
 
 class GenerateStreamResponse(BaseModel):
