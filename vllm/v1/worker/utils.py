@@ -806,6 +806,7 @@ def bind_kv_cache(
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
     kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+    layer_kv_caches: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Bind the allocated KV cache to both ModelRunner and forward context so
     that the KV cache can be used in the forward pass.
@@ -824,6 +825,9 @@ def bind_kv_cache(
         runner_kv_caches: The kv_cache declared by ModelRunner.
         kv_cache_groups: The KV cache groups of the model, used to resolve
             layers that share a KV cache.
+        layer_kv_caches: The views to bind to layers when they differ from
+            kv_caches (e.g. kernel-block views). The runner keeps kv_caches,
+            which are addressed by scheduler block IDs.
 
     """
     # Bind kv_caches to ModelRunner
@@ -849,7 +853,7 @@ def bind_kv_cache(
             runner_kv_caches.append(kv_caches[layer_name])
 
     bind_kv_cache_to_layers(
-        kv_caches, forward_context, num_attn_module, kv_cache_groups
+        layer_kv_caches or kv_caches, forward_context, num_attn_module, kv_cache_groups
     )
 
 

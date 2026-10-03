@@ -7281,11 +7281,12 @@ class GPUModelRunner(
         if self.speculative_config:
             attn_groups += getattr(self.drafter, "draft_attn_groups", [])
         bind_kv_cache(
-            map_kv_caches_to_kernel_blocks(kv_caches, attn_groups),
+            kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_caches,
             num_attn_module,
             kv_cache_groups=kv_cache_config.kv_cache_groups,
+            layer_kv_caches=map_kv_caches_to_kernel_blocks(kv_caches, attn_groups),
         )
         return kv_caches
 

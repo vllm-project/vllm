@@ -33,6 +33,7 @@ from vllm.v1.worker.utils import (
     bind_kv_cache,
     bind_kv_cache_to_layers,
     copy_kv_cache_blocks_inplace,
+    map_kv_cache_to_kernel_blocks,
     request_memory,
 )
 
@@ -439,6 +440,42 @@ def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
     torch.testing.assert_close(cache[4:6], torch.full_like(cache[4:6], 11))
     assert (backing[0] == -1).all()
     assert (backing[9] == -1).all()
+
+
+def test_bind_kv_cache_keeps_scheduler_block_views_for_runner():
+    """Block copies index scheduler blocks, so the runner keeps the unmapped
+    views while a packed layer is bound with kernel blocks."""
+
+    class _Layer:
+        def bind_kv_cache(self, kv_cache):
+            self.kv_cache = kv_cache
+
+    num_blocks, row = 4, 64
+    storage = torch.zeros(num_blocks * row)
+    # Two layers packed into one block row: an 8x4 page, then a 4x2 page
+    # split into two 2-row kernel blocks.
+    mla = storage.as_strided((num_blocks, 8, 4), (row, 4, 1))
+    indexer = storage.as_strided((num_blocks, 1, 4, 2), (row, 8, 2, 1), 40)
+    mapped = map_kv_cache_to_kernel_blocks(indexer, 2)
+    kv_caches = {"layers.0.attn": mla, "layers.1.indexer": indexer}
+    ctx = {name: _Layer() for name in kv_caches}
+    runner_kv_caches: list[torch.Tensor] = []
+
+    bind_kv_cache(
+        kv_caches,
+        ctx,
+        runner_kv_caches,
+        layer_kv_caches={**kv_caches, "layers.1.indexer": mapped},
+    )
+
+    assert ctx["layers.1.indexer"].kv_cache is mapped
+    assert runner_kv_caches == [mla, indexer]
+    copies = [KVCacheBlockCopy(1, 3)]
+    with pytest.raises(AssertionError, match="not divisible"):
+        copy_kv_cache_blocks_inplace([mapped], num_blocks, copies)
+    storage[row : 2 * row] = 7
+    copy_kv_cache_blocks_inplace(runner_kv_caches, num_blocks, copies)
+    assert (mla[3] == 7).all() and (indexer[3] == 7).all()
 
 
 @pytest.mark.parametrize("shared,rank", [(False, 0), (True, 0), (True, 1)])
