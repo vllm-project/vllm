@@ -115,6 +115,7 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
             character_level_parser = compile_regex_with_timeout(
                 lmformatenforcer.RegexParser,
                 grammar_spec,
+                pattern=grammar_spec,
             )
         elif request_type == StructuredOutputOptions.CHOICE:
             choices = ast.literal_eval(grammar_spec)
@@ -165,6 +166,7 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
             compile_regex_with_timeout(
                 lmformatenforcer.RegexParser,
                 so_params.regex,
+                pattern=so_params.regex,
             )
         except Exception as err:
             raise VLLMValidationError(
