@@ -811,7 +811,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         return num_video_tokens
 
     def get_image_size_with_most_features(
-        self, max_pixels: int | None = None
+        self, max_pixels: int | None = None, modality: str = "image"
     ) -> ImageSize:
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
@@ -820,11 +820,7 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
 
         if max_pixels is None:
             image_processor = self.get_image_processor()
-            # Unscoped on purpose: this bound is shared by the image budget,
-            # the video budget and the dummy data, so a modality-scoped
-            # override must not move it. get_num_{image,video}_tokens
-            # re-resize it with the cap for their own modality.
-            mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+            mm_kwargs = self.ctx.get_modality_mm_kwargs({}, modality)
             size = image_processor.size
             if override_size := mm_kwargs.get("size"):
                 size = size | override_size
@@ -863,7 +859,9 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
 
     def _get_max_video_frames(self, max_tokens: int, start_num_frames: int = 1) -> int:
         image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self.get_image_size_with_most_features(
+            modality="video"
+        )
         num_frames = start_num_frames
         while True:
             next_num_frames = num_frames + 1
@@ -898,7 +896,9 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self.get_image_size_with_most_features(
+            modality="video"
+        )
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
@@ -1206,21 +1206,24 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        image_width, image_height = self.info.get_image_size_with_most_features()
+        video_width, video_height = self.info.get_image_size_with_most_features(
+            modality="video"
+        )
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
         return {
             "image": self._get_dummy_images(
-                width=target_width,
-                height=target_height,
+                width=image_width,
+                height=image_height,
                 num_images=mm_counts.get("image", 0),
                 overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
+                width=video_width,
+                height=video_height,
                 num_frames=target_num_frames,
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),

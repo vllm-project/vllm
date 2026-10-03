@@ -1116,10 +1116,7 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
         if max_pixels is None:
             image_processor = self.get_image_processor()
 
-            # Unscoped on purpose: this bound also sizes the dummy data used
-            # for profiling, so a modality-scoped override must not move it.
-            # get_num_image_tokens re-resizes it with the image cap.
-            mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+            mm_kwargs = self.ctx.get_modality_mm_kwargs({}, "image")
             size = image_processor.size
             if override_size := mm_kwargs.get("size"):
                 size = size | override_size
