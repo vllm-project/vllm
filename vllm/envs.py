@@ -302,6 +302,8 @@ if TYPE_CHECKING:
     VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
+    VLLM_NEMOTRON_H_MOE_ROUTER_OVERLAP: bool = False
+    VLLM_NEMOTRON_H_MOE_ROUTER_OVERLAP_MAX_TOKENS: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -2104,6 +2106,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
         os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
+    ),
+    # NemotronH latent MoE: run the router gate GEMM on a side CUDA stream,
+    # concurrently with the routed input transform (fc1_latent_proj). The two
+    # GEMMs only read the layer input; the MoE op waits on a CUDA event before
+    # it reads the router logits. Same kernels on the same inputs, so outputs
+    # are bitwise identical to the sequential order.
+    "VLLM_NEMOTRON_H_MOE_ROUTER_OVERLAP": lambda: bool(
+        int(os.getenv("VLLM_NEMOTRON_H_MOE_ROUTER_OVERLAP", "0"))
+    ),
+    # Largest number of tokens for which VLLM_NEMOTRON_H_MOE_ROUTER_OVERLAP
+    # forks the router gate onto the side stream. Larger batches run the gate
+    # inline on the current stream, as without the overlap.
+    "VLLM_NEMOTRON_H_MOE_ROUTER_OVERLAP_MAX_TOKENS": lambda: int(
+        os.getenv("VLLM_NEMOTRON_H_MOE_ROUTER_OVERLAP_MAX_TOKENS", "256")
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
