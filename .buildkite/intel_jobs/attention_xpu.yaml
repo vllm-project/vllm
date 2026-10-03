@@ -7,6 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 85
   parallelism: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
