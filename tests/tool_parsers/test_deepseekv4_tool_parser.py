@@ -254,6 +254,71 @@ def test_streaming_emits_incremental_argument_chunks():
     }
 
 
+def _stream_param_body(properties: dict, param_open: str, body: str) -> list[str]:
+    """Stream one parameter body in 32-char chunks, one argument list per chunk."""
+    tool = ChatCompletionToolsParam(
+        function=FunctionDefinition(
+            name="emit",
+            parameters={"type": "object", "properties": properties},
+        ),
+    )
+    parser = make_parser(tools=[tool])
+    chunks = [
+        f'{TC_START}\n{INV_START}emit">\n{param_open}',
+        *(body[i : i + 32] for i in range(0, len(body), 32)),
+        f"{PARAM_END}\n{INV_END}\n{TC_END}",
+    ]
+    per_chunk_args = []
+    previous_text = ""
+    for delta_text in chunks:
+        current_text = previous_text + delta_text
+        delta = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[1],
+            request=make_request(),
+        )
+        previous_text = current_text
+        per_chunk_args.append(
+            "".join(
+                tool_call.function.arguments
+                for tool_call in (delta.tool_calls if delta else [])
+                if tool_call.function and tool_call.function.arguments
+            )
+        )
+    return per_chunk_args
+
+
+def test_streaming_long_string_argument_is_incremental():
+    # Regression for #52846: a string body has no ">" so it used to be
+    # buffered until </parameter> arrived.
+    body = "A" * 4096
+    per_chunk_args = _stream_param_body(
+        {"text": {"type": "string"}},
+        f'{PARAM_START}text" string="true">',
+        body,
+    )
+
+    body_chunks = per_chunk_args[1:-1]
+    assert sum(1 for args in body_chunks if args) > 1
+    assert json.loads("".join(per_chunk_args)) == {"text": body}
+
+
+def test_streaming_non_string_argument_is_withheld_until_close():
+    body = "1" * 128
+    per_chunk_args = _stream_param_body(
+        {"count": {"type": "integer"}},
+        f'{PARAM_START}count" string="false">',
+        body,
+    )
+
+    assert not any(per_chunk_args[1:-1])
+    assert json.loads("".join(per_chunk_args)) == {"count": int(body)}
+
+
 def _with_strict(
     tools: list[ChatCompletionToolsParam],
 ) -> list[ChatCompletionToolsParam]:

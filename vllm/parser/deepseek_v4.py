@@ -64,12 +64,14 @@ def _param_patterns(
 
     The ``string`` attribute is optional: the model sometimes omits it, and
     dropping such a parameter hands the client a tool call with no arguments.
+    The trailing-partial regex holds back an unfinished next parameter tag
+    so a streamed string value never includes it.
     """
     start, close = re.escape(param_start), re.escape(param_close)
     head = rf'{start}\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'
     return (
         re.compile(rf"{head}(.*?)(?:{close}|(?={start}\s+name=))", re.DOTALL),
-        re.compile(rf"{head}(.*)$", re.DOTALL),
+        re.compile(rf"{head}(.*?)(?:{start}[^>]*)?$", re.DOTALL),
     )
 
 
