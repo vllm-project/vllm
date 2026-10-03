@@ -36,6 +36,7 @@ from vllm.transformers_utils.processor import get_video_processor_cls_name
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of, is_list_of_numbers
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.sparse_utils import TensorDecodeBudget
 
 from ...connections import MediaRequestDownloadBudget
 from .content_parser import (
@@ -218,6 +219,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._modality_order = defaultdict[str, list[str]](list)
         self.decoded_budget = MediaDecodedBudget()
         self.download_budget = MediaRequestDownloadBudget()
+        self.prompt_embeds_budget = TensorDecodeBudget()
 
     @cached_property
     def use_unified_vision_chunk_modality(self) -> bool:
