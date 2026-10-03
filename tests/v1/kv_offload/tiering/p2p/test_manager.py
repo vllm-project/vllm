@@ -100,8 +100,8 @@ def _job_metadata(
         chunk_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
-        keys=keys,
-        chunk_ids=np.array(chunk_ids),
+        _keys=keys,
+        _chunk_ids=np.array(chunk_ids),
         is_promotion=False,
         req_context=_req_context(kv_params),
     )

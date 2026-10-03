@@ -111,8 +111,8 @@ def make_job(
         chunk_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
-        keys=keys,
-        chunk_ids=np.array(chunk_ids, dtype=np.int32),
+        _keys=keys,
+        _chunk_ids=np.array(chunk_ids, dtype=np.int32),
         is_promotion=False,
         req_context=_CTX,
     )

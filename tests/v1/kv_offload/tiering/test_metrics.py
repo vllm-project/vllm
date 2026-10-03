@@ -9,6 +9,7 @@ import pytest
 from vllm.v1.kv_offload.base import LookupResult, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    LazyTransferJob,
     TieringOffloadingMetrics,
     TransferJob,
 )
@@ -24,7 +25,7 @@ def to_keys(int_ids: Iterable[int]):
 
 def test_tiering_metrics_tracker_records_lookup_metrics():
     tracker = TieringMetricsTracker(
-        tier_types=["fs", "p2p"],
+        tier_types=["example", "p2p"],
         num_primary_chunks=5,
         primary_chunk_size=16,
     )
@@ -46,15 +47,15 @@ def test_tiering_metrics_tracker_records_lookup_metrics():
     assert stats is not None
     values = stats.data["data"]
     assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("0:primary",)] == 1
-    assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("1:fs",)] == 1
+    assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("1:example",)] == 1
     assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("2:p2p",)] == 1
     assert values[TieringOffloadingMetrics.CHUNK_HITS][("2:p2p",)] == 1
-    assert ("1:fs",) not in values[TieringOffloadingMetrics.CHUNK_HITS]
+    assert ("1:example",) not in values[TieringOffloadingMetrics.CHUNK_HITS]
 
 
 def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
     tracker = TieringMetricsTracker(
-        tier_types=["fs"],
+        tier_types=["example"],
         num_primary_chunks=5,
         primary_chunk_size=16,
     )
@@ -74,8 +75,8 @@ def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
     assert stats is not None
     values = stats.data["data"]
     assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("0:primary",)] == 1
-    assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("1:fs",)] == 1
-    assert values[TieringOffloadingMetrics.CHUNK_HITS][("1:fs",)] == 1
+    assert values[TieringOffloadingMetrics.CHUNK_QUERIES][("1:example",)] == 1
+    assert values[TieringOffloadingMetrics.CHUNK_HITS][("1:example",)] == 1
 
     tracker.on_request_allocated(_CTX)
     tracker.on_lookup(
@@ -96,7 +97,7 @@ def test_tiering_metrics_tracker_stops_lookup_metrics_after_allocation():
 
 def test_tiering_metrics_tracker_records_finished_job_metrics():
     tracker = TieringMetricsTracker(
-        tier_types=["fs"],
+        tier_types=["example"],
         num_primary_chunks=5,
         primary_chunk_size=16,
     )
@@ -136,7 +137,7 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
     stats = tracker.take_stats()
     assert stats is not None
     values = stats.data["data"]
-    label = ("1:fs",)
+    label = ("1:example",)
     assert values[TieringOffloadingMetrics.WRITE_BYTES][label] == 16
     assert values[TieringOffloadingMetrics.WRITE_TIME][label] == 0.5
     assert values[TieringOffloadingMetrics.READ_BYTES][label] == 16
@@ -148,7 +149,7 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
 
 def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
     tracker = TieringMetricsTracker(
-        tier_types=["fs"],
+        tier_types=["example"],
         num_primary_chunks=5,
         primary_chunk_size=16,
     )
@@ -172,7 +173,7 @@ def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
     stats = tracker.take_stats()
     assert stats is not None
     values = stats.data["data"]
-    label = ("1:fs",)
+    label = ("1:example",)
     assert values[TieringOffloadingMetrics.READ_BYTES][label] == 32
     assert values[TieringOffloadingMetrics.READ_TIME][label] == 0.5
     assert values[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES][label] == 1
@@ -181,11 +182,11 @@ def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
 
 def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
     tracker = TieringMetricsTracker(
-        tier_types=["fs", "p2p"],
+        tier_types=["example", "p2p"],
         num_primary_chunks=6,
         primary_chunk_size=16,
     )
-    fs_job = JobMetadata(
+    ex_job = JobMetadata(
         TransferJob(0, to_keys([0, 1]), np.array([0, 1]), False, _CTX),
         0,
     )
@@ -193,18 +194,18 @@ def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
         TransferJob(1, to_keys([2, 3, 4]), np.array([2, 3, 4]), True, _CTX),
         1,
     )
-    tracker.on_job_registered(fs_job)
+    tracker.on_job_registered(ex_job)
     tracker.on_job_registered(p2p_job)
 
     stats = tracker.take_stats()
     assert stats is not None
     values = stats.data["data"]
-    fs_label = ("1:fs",)
+    ex_label = ("1:example",)
     p2p_label = ("2:p2p",)
     assert values[TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC][
-        fs_label
+        ex_label
     ] == pytest.approx(2 / 6)
-    assert values[TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS][fs_label] == 1
+    assert values[TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS][ex_label] == 1
     assert values[TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC][
         p2p_label
     ] == pytest.approx(3 / 6)
@@ -213,7 +214,7 @@ def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
 
 def test_tiering_metrics_tracker_records_promotion_allocation_failures():
     tracker = TieringMetricsTracker(
-        tier_types=["fs"],
+        tier_types=["ex"],
         num_primary_chunks=1,
         primary_chunk_size=16,
     )
@@ -224,3 +225,54 @@ def test_tiering_metrics_tracker_records_promotion_allocation_failures():
     assert stats is not None
     values = stats.data["data"]
     assert values[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES][()] == 1
+
+
+def test_metrics_promotion_chunk_count_at_registration():
+    keys = to_keys(range(3))
+
+    # --- Eager path ---
+    tracker = TieringMetricsTracker(
+        tier_types=["example"], num_primary_chunks=5, primary_chunk_size=16
+    )
+    eager_job = JobMetadata(TransferJob(0, keys, np.array([0, 1, 2]), True, _CTX), 0)
+    tracker.on_job_registered(eager_job)
+    state = tracker._tier_states[0]
+    assert state.active_promotion_count == 1
+    assert (
+        state.primary_write_chunk_count == 3
+    )  # updated at registration, no extra call
+
+    tracker.on_job_finished(
+        eager_job, JobResult(job_id=0, success=True, transfer_time=0.1)
+    )
+    tracker.assert_idle()
+
+    # --- Lazy path ---
+    tracker = TieringMetricsTracker(
+        tier_types=["fs"], num_primary_chunks=5, primary_chunk_size=16
+    )
+    lazy_job = JobMetadata(
+        LazyTransferJob(
+            1,
+            keys,
+            None,
+            True,
+            _CTX,
+            primary_alloc_fn=lambda k, ctx: (list(k), list(range(len(list(k))))),
+        ),
+        0,
+    )
+    tracker.on_job_registered(lazy_job)
+    state = tracker._tier_states[0]
+    assert state.active_promotion_count == 1
+    assert state.primary_write_chunk_count == 0  # not yet materialized
+
+    # Materialization happens in worker thread; then on_promotion_chunk_count fires
+    tracker.on_promotion_chunk_count(0, len(keys))
+    assert state.primary_write_chunk_count == 3
+
+    lazy_job.transfer_job.materialize()
+    tracker.on_job_finished(
+        lazy_job, JobResult(job_id=1, success=True, transfer_time=0.1)
+    )
+    tracker.assert_idle()

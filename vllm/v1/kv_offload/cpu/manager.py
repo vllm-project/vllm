@@ -30,6 +30,17 @@ from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 
+class _RequestFinalized:
+    """Sentinel returned by safe_prepare_write when the requesting request has
+    already been finalized. Distinct from None (allocation failure) so callers
+    can handle the two cases differently without recording a failure metric."""
+
+    __slots__ = ()
+
+
+REQUEST_FINALIZED = _RequestFinalized()
+
+
 @dataclass(slots=True)
 class _RequestCacheAccess:
     """Cache keys observed by one request, grouped in prefix order."""
@@ -178,6 +189,15 @@ class CPUOffloadingManager(OffloadingManager):
             key for key in reused_keys if key not in state.inserted_keys
         )
 
+    def _extra_eviction_protected(self) -> set[OffloadKey]:
+        """Additional keys to exclude from eviction candidates.
+
+        Called during prepare_store() eviction. Override in subclasses to
+        protect keys that must not be evicted (e.g. scheduler HIT keys
+        awaiting prepare_load()).
+        """
+        return set()
+
     # --- OffloadingManager interface ---
 
     @override
@@ -321,6 +341,7 @@ class CPUOffloadingManager(OffloadingManager):
             # Chunks from the original input are excluded from eviction candidates:
             # a chunk that was already stored must remain in the cache after this call.
             protected = set(keys)
+            protected.update(self._extra_eviction_protected())
             evicted = self._policy.evict(num_chunks_to_evict, protected)
             if evicted is None:
                 return None
