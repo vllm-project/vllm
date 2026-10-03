@@ -53,6 +53,7 @@ class _HintedRequest:
         )
         self.session_id = session_id
         self.num_prompt_tokens = num_prompt_tokens
+        self.block_hashes: list = []
 
 
 @pytest.fixture(autouse=True)
@@ -76,7 +77,7 @@ def _set_meta(
     """Test helper: install a sidecar entry directly without going through
     apply_directives. Reaches into the queue's private dict — acceptable
     in tests of the queue itself."""
-    queue._meta[block.block_id] = RetentionMeta(
+    queue._meta[block.block_id] = RetentionMeta.single(
         priority=priority,
         expiry=expiry,
         scope=scope,
@@ -497,7 +498,7 @@ class TestApplyDirectives:
         )
         meta = self._peek_meta(queue, 0)
         assert meta.priority == 80
-        assert meta.scope == "bob"
+        assert "bob" in meta.holds
 
     def test_downgrade_blocked_from_different_scope(self):
         queue = PriorityEvictionQueue()
@@ -512,7 +513,7 @@ class TestApplyDirectives:
         )
         meta = self._peek_meta(queue, 0)
         assert meta.priority == 80
-        assert meta.scope == "alice"
+        assert "alice" in meta.holds
 
     def test_owner_can_downgrade(self):
         queue = PriorityEvictionQueue()
@@ -526,7 +527,7 @@ class TestApplyDirectives:
         )
         meta = self._peek_meta(queue, 0)
         assert meta.priority == 20
-        assert meta.scope == "alice"
+        assert "alice" in meta.holds
 
     def test_owner_saying_nothing_does_not_clear(self):
         """Silence is not a release. An owner whose directives skip a block it
@@ -546,7 +547,7 @@ class TestApplyDirectives:
         meta = self._peek_meta(queue, 0)
         assert meta is not None, "an uncovered block must keep its protection"
         assert meta.priority == 50
-        assert meta.scope == "alice"
+        assert "alice" in meta.holds
 
     def test_owner_releases_with_priority_zero(self):
         """Priority 0 is the explicit release: the owner names the range and the
@@ -580,7 +581,7 @@ class TestApplyDirectives:
         meta = self._peek_meta(queue, 0)
         assert meta is not None
         assert meta.priority == 50
-        assert meta.scope == "alice"
+        assert "alice" in meta.holds
 
     def test_priority_zero_on_unprotected_block_is_noop(self):
         """Releasing something already unprotected must not create an entry."""
@@ -626,7 +627,7 @@ class TestApplyDirectives:
         )
         meta = self._peek_meta(queue, 0)
         assert meta is not None
-        assert meta.scope == "alice"
+        assert "alice" in meta.holds
 
     def test_no_scope_no_clear(self):
         queue = PriorityEvictionQueue()
@@ -767,7 +768,7 @@ class TestBlockPoolPriorityEviction:
         meta = pool.priority_eviction_queue._meta.get(blocks[0].block_id)
         assert meta is not None
         assert meta.priority == 80
-        assert meta.scope == "alice"
+        assert "alice" in meta.holds
 
     def test_no_hints_zero_overhead_path(self):
         pool = self._make_pool()
@@ -1200,7 +1201,7 @@ class TestBlockPoolPriorityEviction:
         blocks = [pool.blocks[1]]
         pool._apply_retention_hook(request, blocks, num_full_blocks=1, block_size=16)
         meta = pool.priority_eviction_queue._meta[blocks[0].block_id]
-        assert meta.scope == "sess-7"
+        assert "sess-7" in meta.holds
 
     def test_covers_output_resolves_to_prompt_tail(self):
         pool = self._make_pool(num_blocks=8, block_size=16)
@@ -1503,7 +1504,7 @@ def test_reading_a_claimed_block_keeps_the_claim():
     pool.touch([block])
 
     meta = pq._meta.get(block.block_id)
-    assert meta is not None and meta.priority == 90 and meta.scope == "alice"
+    assert meta is not None and meta.priority == 90 and "alice" in meta.holds
     assert block not in pq  # suspended while referenced
 
 
@@ -1630,3 +1631,204 @@ class TestStaleCopyDrop:
         assert old.block_hash == key
         assert pool.cached_block_hash_to_block.contain(key, old.block_id)
         assert pool.cached_block_hash_to_block.contain(key, new.block_id)
+
+
+class TestScopeHolds:
+    """North star: a block keeps one hold per scope and is protected at the
+    strongest of them. A scope only ever edits its own hold."""
+
+    def _pq_with(self, holds):
+        queue = PriorityEvictionQueue()
+        block = _make_block(0)
+        for scope, priority in holds:
+            queue.apply_directives(
+                [block], [_d(start=0, end=16, priority=priority)], scope, 16
+            )
+        return queue, block
+
+    def test_lower_value_from_another_scope_is_recorded(self):
+        queue, block = self._pq_with([("a", 80), ("b", 60)])
+        meta = queue._meta[block.block_id]
+        assert meta.priority == 80
+        assert meta.holds["b"].priority == 60
+
+    def test_owner_lowering_keeps_the_other_scopes_maximum(self):
+        queue, block = self._pq_with([("a", 80), ("b", 60)])
+        queue.apply_directives([block], [_d(start=0, end=16, priority=20)], "a", 16)
+        meta = queue._meta[block.block_id]
+        assert meta.priority == 60
+        assert meta.holds["a"].priority == 20
+
+    def test_release_drops_only_the_releasing_scope(self):
+        queue, block = self._pq_with([("a", 80), ("b", 60)])
+        assert queue.try_insert(block)
+        released = queue.apply_directives(
+            [block], [_d(start=0, end=16, priority=0)], "a", 16
+        )
+        assert released == []
+        assert block in queue
+        assert queue._meta[block.block_id].priority == 60
+        released = queue.apply_directives(
+            [block], [_d(start=0, end=16, priority=0)], "b", 16
+        )
+        assert released == [0]
+        assert block not in queue
+        assert block.block_id not in queue._meta
+
+    def test_queued_block_is_repushed_at_the_new_maximum(self):
+        queue, block = self._pq_with([("a", 80), ("b", 60)])
+        other = _make_block(1)
+        queue.apply_directives([other], [_d(start=0, end=16, priority=70)], "c", 16)
+        assert queue.try_insert(block) and queue.try_insert(other)
+        queue.apply_directives([block], [_d(start=0, end=16, priority=20)], "a", 16)
+        assert queue.pop_lowest() is block  # now 60 < 70
+
+    def test_expiry_is_per_scope(self, monkeypatch):
+        import time as time_mod
+
+        monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.0)
+        queue = PriorityEvictionQueue()
+        block = _make_block(0)
+        queue.apply_directives(
+            [block], [_d(start=0, end=16, priority=80, duration=10.0)], "a", 16
+        )
+        queue.apply_directives(
+            [block], [_d(start=0, end=16, priority=60, duration=600.0)], "b", 16
+        )
+        assert queue.try_insert(block)
+        monkeypatch.setattr(time_mod, "monotonic", lambda: 1020.0)
+        assert queue.release_expired() == []
+        meta = queue._meta[block.block_id]
+        assert "a" not in meta.holds and meta.priority == 60
+        monkeypatch.setattr(time_mod, "monotonic", lambda: 1700.0)
+        assert queue.release_expired() == [0]
+
+    def test_holds_per_block_are_capped_at_the_strongest(self):
+        queue = PriorityEvictionQueue()
+        block = _make_block(0)
+        for i in range(PriorityEvictionQueue._MAX_HOLDS_PER_BLOCK + 3):
+            queue.apply_directives(
+                [block], [_d(start=0, end=16, priority=10 + i)], f"s{i}", 16
+            )
+        meta = queue._meta[block.block_id]
+        assert len(meta.holds) == PriorityEvictionQueue._MAX_HOLDS_PER_BLOCK
+        assert meta.priority == 10 + PriorityEvictionQueue._MAX_HOLDS_PER_BLOCK + 2
+        assert "s0" not in meta.holds
+
+
+def _chain_pool(num_blocks=32):
+    """A pool with one cached chain b1 -> b2 -> ... built through the public
+    cache_full_blocks path (so the parent/child index is populated)."""
+    from vllm.v1.core.block_pool import BlockPool
+
+    pool = BlockPool(
+        num_gpu_blocks=num_blocks,
+        enable_caching=True,
+        hash_block_size=16,
+        enable_kv_cache_events=False,
+    )
+    return pool
+
+
+def _cache_chain(pool, request, blocks, num_full):
+    for b in blocks:
+        if b.prev_free_block is not None or b.next_free_block is not None:
+            pool.free_block_queue.remove(b)
+        b.ref_cnt = 1
+    pool.cache_full_blocks(request, blocks, 0, num_full, 16, 0)
+
+
+def _free_chain(pool, blocks):
+    pool.free_blocks(reversed(blocks))
+
+
+class TestChainCascades:
+    def _request(self, directives, scope, num_blocks):
+        from vllm.v1.core.kv_cache_utils import BlockHash
+
+        req = _HintedRequest(directives, scope, num_prompt_tokens=16 * num_blocks)
+        req.block_hashes = [BlockHash(bytes([i]) * 4) for i in range(num_blocks)]
+        return req
+
+    def test_lowering_a_block_caps_the_scopes_holds_below_it(self):
+        pool = _chain_pool()
+        pq = pool.priority_eviction_queue
+        trunk = pool.blocks[1:5]  # b1..b4, one chain
+        req = self._request([_d(start=0, end=None, priority=80)], "a", 4)
+        _cache_chain(pool, req, trunk, 4)
+        # another scope holds b3..b4 (a sibling branch would share b1..b2)
+        pq.apply_directives(trunk[2:], [_d(start=0, end=None, priority=60)], "b", 16)
+        _free_chain(pool, trunk)
+        assert all(b in pq for b in trunk)
+        # a new turn of scope "a" that only contains b1 lowers it to 20
+        again = self._request([_d(start=0, end=16, priority=20)], "a", 1)
+        again.block_hashes = req.block_hashes[:1]
+        pool._apply_retention_hook(again, trunk[:1], 1, 16)
+        holds = {b.block_id: pq._meta[b.block_id].holds for b in trunk}
+        assert holds[trunk[0].block_id]["a"].priority == 20
+        assert holds[trunk[1].block_id]["a"].priority == 20
+        assert holds[trunk[3].block_id]["a"].priority == 20
+        assert holds[trunk[3].block_id]["b"].priority == 60
+        assert pq._meta[trunk[3].block_id].priority == 60
+
+    def test_releasing_a_block_drops_the_scopes_holds_below_it(self):
+        pool = _chain_pool()
+        pq = pool.priority_eviction_queue
+        trunk = pool.blocks[1:4]
+        req = self._request([_d(start=0, end=None, priority=80)], "a", 3)
+        _cache_chain(pool, req, trunk, 3)
+        _free_chain(pool, trunk)
+        free_before = pool.get_num_free_blocks()
+        again = self._request([_d(start=0, end=16, priority=0)], "a", 1)
+        again.block_hashes = req.block_hashes[:1]
+        pool._apply_retention_hook(again, trunk[:1], 1, 16)
+        assert all(b.block_id not in pq._meta for b in trunk)
+        assert all(b not in pq for b in trunk)
+        assert pool.get_num_free_blocks() == free_before, "blocks left both lists"
+
+    def test_evicting_the_last_copy_reaps_free_descendants(self):
+        pool = _chain_pool()
+        pq = pool.priority_eviction_queue
+        trunk = pool.blocks[1:4]
+        req = self._request([_d(start=0, end=None, priority=80)], "a", 3)
+        _cache_chain(pool, req, trunk, 3)
+        _free_chain(pool, trunk)
+        keys = [b.block_hash for b in trunk]
+        free_before = pool.get_num_free_blocks()
+        # evict the head copy (the only one)
+        pq.unprotect(trunk[0].block_id)
+        pool._maybe_evict_cached_block(trunk[0])
+        for k in keys:
+            assert pool.cached_block_hash_to_block.get_one_block(k) is None
+        assert all(b not in pq and b.block_hash is None for b in trunk[1:])
+        assert (
+            pool.get_num_free_blocks() == free_before - 1
+        )  # head left both lists by hand
+        assert pool.free_block_queue.popleft() in trunk[1:], "orphans are reused first"
+
+    def test_descendants_survive_while_another_copy_remains(self):
+        pool = _chain_pool()
+        trunk = pool.blocks[1:4]
+        req = self._request([_d(start=0, end=None, priority=80)], "a", 3)
+        _cache_chain(pool, req, trunk, 3)
+        _free_chain(pool, trunk)
+        # a second copy of the head (a duplicate prefill)
+        dup = pool.blocks[10]
+        pool.free_block_queue.remove(dup)
+        dup.ref_cnt = 1
+        pool._insert_block_hash(trunk[0].block_hash, dup, num_tokens=16)
+        pool.priority_eviction_queue.unprotect(trunk[0].block_id)
+        pool._maybe_evict_cached_block(trunk[0])
+        assert all(b.block_hash is not None for b in trunk[1:])
+        assert all(b in pool.priority_eviction_queue for b in trunk[1:])
+
+    def test_referenced_descendants_are_left_alone(self):
+        pool = _chain_pool()
+        trunk = pool.blocks[1:4]
+        req = self._request([_d(start=0, end=None, priority=80)], "a", 3)
+        _cache_chain(pool, req, trunk, 3)
+        # free only the head; b2, b3 stay referenced by a running request
+        pool.free_blocks([trunk[0]])
+        pool.priority_eviction_queue.unprotect(trunk[0].block_id)
+        pool._maybe_evict_cached_block(trunk[0])
+        assert trunk[1].block_hash is not None and trunk[1].ref_cnt == 1
