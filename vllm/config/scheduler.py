@@ -202,9 +202,24 @@ class SchedulerConfig:
     (the default) disables the watermark."""
 
     prefill_schedule_interval: int = Field(default=1, ge=1)
-    """For data-parallel deployments, only admit new prefill requests
-    once every N engine steps, aligned across DP ranks, to better balance
-    per-step forward-pass times."""
+    """Only admit new prefill requests once every N engine steps, leaving the
+    steps in between to decode alone. 1 (the default) admits prefill on every
+    step.
+
+    For data-parallel deployments the cadence is aligned across DP ranks, to
+    better balance per-step forward-pass times. For a single engine there is no
+    alignment requirement, so the interval is instead measured from the last
+    step that carried prefill. Either way, prefill is only deferred when at
+    least one running request can decode in its place, so the interval never
+    leaves the model idle.
+
+    A deferred step carries no prefill at all, not merely no new admissions: an
+    already-admitted request that is still being prefilled in chunks is held
+    for the remainder of the interval too. That is the point of the cadence --
+    letting a chunk through would give decode the interrupted step the interval
+    exists to prevent -- but it does mean a long prompt takes up to N times as
+    many steps to finish prefilling. Size the interval against the prompt
+    lengths you serve, not just the decode benefit."""
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
