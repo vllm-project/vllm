@@ -1017,6 +1017,23 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     return 1 - sim
 
 
+def deep_gemm_supports_scale_fmt() -> bool:
+    """Whether DeepGEMM can consume the scale format the oracle resolved to.
+
+    The 120 family has no working float32-scale path: its kernels read packed
+    UE8M0 scales. `VLLM_USE_DEEP_GEMM_E8M0=0` resolves the oracle to FLOAT32,
+    and feeding those scales to DeepGEMM there silently produces NaNs on older
+    pins and fails outright on current ones, so DeepGEMM must not be selected.
+
+    Deliberately a selection-time check rather than a change to the oracle:
+    `DeepGemmQuantScaleFMT.from_oracle()` also drives scale *layout* for
+    non-DeepGEMM consumers (`QuantFP8`, `fp8_utils`), which are correct as-is.
+    """
+    if not current_platform.is_device_capability_family(120):
+        return True
+    return DeepGemmQuantScaleFMT.from_oracle() is not DeepGemmQuantScaleFMT.FLOAT32
+
+
 def should_use_deepgemm_for_fp8_linear(
     output_dtype: torch.dtype,
     weight_shape: tuple[int, int],
@@ -1033,6 +1050,7 @@ def should_use_deepgemm_for_fp8_linear(
 
     return (
         supports_deep_gemm
+        and deep_gemm_supports_scale_fmt()
         and output_dtype == torch.bfloat16
         and weight_shape[0] % N_MULTIPLE == 0
         and weight_shape[1] % K_MULTIPLE == 0
@@ -1059,6 +1077,7 @@ __all__ = [
     "get_num_sms",
     "set_num_sms",
     "should_use_deepgemm_for_fp8_linear",
+    "deep_gemm_supports_scale_fmt",
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
     "get_theoretical_mk_alignment_for_contiguous_layout",
