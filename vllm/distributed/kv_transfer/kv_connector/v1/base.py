@@ -55,6 +55,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
@@ -200,8 +201,8 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_transfer_config.is_kv_producer
 
-    @property
-    def supports_sleep_mode(self) -> bool:
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         """Whether the connector survives sleep mode remapping the KV cache;
         True requires `release_kv_caches` and `restore_kv_caches`."""
         return False

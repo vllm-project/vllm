@@ -221,9 +221,16 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
 
-    @property
-    def supports_sleep_mode(self) -> bool:
-        return all(c.supports_sleep_mode for c in self._connectors)
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
+        return bool(children) and all(
+            KVConnectorFactory.get_connector_class(c).supports_sleep_mode(c)
+            for c in children
+        )
 
     @classmethod
     def _get_connector_classes_and_configs(

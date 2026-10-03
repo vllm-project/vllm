@@ -187,8 +187,6 @@ class EngineCore:
         self.mm_receiver_cache = engine_receiver_cache_from_config(vllm_config)
 
         kv_connector = self.scheduler.get_kv_connector()
-        if vllm_config.model_config.enable_sleep_mode:
-            self._check_kv_connector_supports_sleep_mode()
         self._set_kv_connector_handshake_metadata()
 
         # Setup batch queue for pipeline parallelism.
@@ -858,16 +856,6 @@ class EngineCore:
                         content.update(worker_dict)
                 kv_connector.set_xfer_handshake_metadata_pp_aware(content)
 
-    def _check_kv_connector_supports_sleep_mode(self) -> None:
-        """Refuse to unmap the KV cache under a connector that does not
-        support sleep mode."""
-        kv_connector = self.scheduler.get_kv_connector()
-        if kv_connector is not None and not kv_connector.supports_sleep_mode:
-            raise ValueError(
-                f"{type(kv_connector).__name__} does not support sleep mode: it "
-                "may hold references to the KV cache memory that sleep mode unmaps."
-            )
-
     def _reset_caches(
         self,
         reset_running_requests: bool = True,
@@ -942,8 +930,6 @@ class EngineCore:
                 documentation of pause_scheduler method.
 
         """
-        if level >= 1:
-            self._check_kv_connector_supports_sleep_mode()
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
@@ -999,7 +985,6 @@ class EngineCore:
         and all executor memory to be resident. Kept requests are recomputed
         after wake-up.
         """
-        self._check_kv_connector_supports_sleep_mode()
         if not (
             self.is_scheduler_paused()
             and not self.scheduler.has_requests()

@@ -94,7 +94,7 @@ def ensure_kv_transfer_initialized(
             role=KVConnectorRole.WORKER,
             kv_cache_config=kv_cache_config,
         )
-        if _KV_CONNECTOR_AGENT.supports_sleep_mode:
+        if type(_KV_CONNECTOR_AGENT).supports_sleep_mode(kv_transfer_config):
             _unregister_kv_cache_hooks = register_tag_hooks(
                 "kv_cache",
                 _KV_CONNECTOR_AGENT.release_kv_caches,

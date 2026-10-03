@@ -98,7 +98,9 @@ def test_worker_connector_follows_the_kv_cache_mapping_iff_it_supports_sleep_mod
     """Only a connector that supports sleep mode is released before the KV
     cache is unmapped and restored after it is mapped again."""
     monkeypatch.setattr(device_allocator, "_tag_hooks", {})
-    monkeypatch.setattr(ExampleConnector, "supports_sleep_mode", supported)
+    monkeypatch.setattr(
+        ExampleConnector, "supports_sleep_mode", classmethod(lambda cls, c: supported)
+    )
     monkeypatch.setattr(ExampleConnector, "release_kv_caches", lambda self: None)
     monkeypatch.setattr(ExampleConnector, "restore_kv_caches", lambda self: None)
     kv_cache = AllocationData(handle=(0, 0, 0, 0), tag="kv_cache")

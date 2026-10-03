@@ -237,13 +237,32 @@ def test_multi_connector_rejects_multiple_mem_pool_contexts(mc: MultiConnector):
     [((True, True), True), ((True, False), False), ((False, True), False)],
 )
 def test_multi_connector_follows_the_kv_cache_mapping_through_every_connector(
-    mc: MultiConnector, children, supported
+    monkeypatch, mc: MultiConnector, children, supported
 ):
-    for connector, child_supported in zip(mc._connectors, children):
-        connector.supports_sleep_mode = child_supported
+    monkeypatch.setattr(
+        MockConnector,
+        "supports_sleep_mode",
+        classmethod(lambda cls, c: c.kv_connector_extra_config["sleep"]),
+    )
+    child = {
+        "kv_connector": "MockConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",
+    }
+    config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {**child, "kv_connector_extra_config": {"sleep": s}} for s in children
+            ]
+        },
+    )
+    assert MultiConnector.supports_sleep_mode(config) is supported
+
+    for connector in mc._connectors:
         connector.release_kv_caches = MagicMock()
         connector.restore_kv_caches = MagicMock()
-    assert mc.supports_sleep_mode is supported
 
     mc.release_kv_caches()
     mc.restore_kv_caches()
