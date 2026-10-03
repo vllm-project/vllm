@@ -33,10 +33,14 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         # RoutedExperts was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
-        unfused_names = [
-            layer_name + proj_name
-            for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
-        ]
+        # A gateless MoE has no gate_proj. Asking for its scheme makes the
+        # absence resolve differently from the projections that do exist,
+        # and the check below then reports a conflict where there is only
+        # a missing projection. The layer already knows which kind it is.
+        proj_names = [".0.up_proj", ".0.down_proj"]
+        if layer.moe_config.is_act_and_mul:
+            proj_names.insert(0, ".0.gate_proj")
+        unfused_names = [layer_name + proj_name for proj_name in proj_names]
         # TODO: refactor this to use expert_mapping and check all layer numbers
         all_scheme_dicts = [
             quant_config.get_scheme_dict(layer, name) for name in unfused_names
