@@ -5,6 +5,7 @@ import mori
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.platforms import current_platform
@@ -117,6 +118,24 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             dispatch_ids,
             dispatch_recv_token_num,
         ) = self.mori_op.dispatch(a1, topk_weights, scale, topk_ids)
+
+        # Each source rank sends a token at most once, so the valid prefix is
+        # bounded by world_size * max tokens per DP rank. Trimming to it keeps
+        # the experts' GEMM shape (and AITER's tile choice) tied to the batch
+        # rather than to mori's worst-case receive buffer.
+        dp_metadata = (
+            get_forward_context().dp_metadata
+            if is_forward_context_available()
+            else None
+        )
+        if dp_metadata is not None:
+            max_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max())
+            rows = min(self.num_dispatchers_ * max_tokens, dispatch_a1.shape[0])
+            dispatch_a1 = dispatch_a1[:rows]
+            dispatch_weights = dispatch_weights[:rows]
+            dispatch_ids = dispatch_ids[:rows]
+            if dispatch_scale is not None:
+                dispatch_scale = dispatch_scale[:rows]
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=dispatch_recv_token_num, expert_num_tokens_cpu=None

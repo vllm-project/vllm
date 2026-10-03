@@ -154,6 +154,14 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
     assert prepare.num_dispatchers() == 2
     experts = AiterExperts(config, quant)
     assert not experts.expects_unquantized_inputs
+    expert_rows = []
+    experts_apply = experts.apply
+
+    def recording_apply(**kwargs):
+        expert_rows.append(kwargs["hidden_states"].shape[0])
+        return experts_apply(**kwargs)
+
+    experts.apply = recording_apply
     kernel = FusedMoEKernel(prepare, experts)
     expert_mask = torch.zeros(32, dtype=torch.int32, device=pgi.device)
     expert_mask[start:end] = 1
@@ -177,8 +185,15 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
             per_act_token_quant=fp8,
         )
 
+    num_tokens_across_dp = torch.tensor([m, m], dtype=torch.int32, device="cpu")
+
     def run():
-        with set_forward_context(None, vllm_config):
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=m,
+            num_tokens_across_dp=num_tokens_across_dp,
+        ):
             return kernel.apply(
                 x,
                 local_w1,
@@ -218,6 +233,8 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
 
     actual = run()
     check(actual)
+    # The experts see the valid receive prefix, not mori's max-sized buffer.
+    assert expert_rows[-1] == 2 * m
     if graph:
         saved = actual.clone()
         run()
