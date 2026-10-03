@@ -242,18 +242,20 @@ def test_custom_reduce_scatter_disabled_under_batch_invariance(
 
 
 @pytest.mark.parametrize(
-    ("major", "local_multicast", "expected"),
+    ("major", "local_multicast", "fabric_support", "expected"),
     [
-        (8, True, False),
-        (9, True, False),
-        (10, False, False),
-        (10, True, True),
+        (8, True, True, False),
+        (9, True, True, False),
+        (10, False, True, False),
+        (10, True, False, False),
+        (10, True, True, True),
     ],
 )
-def test_cross_node_mnnvl_gate_checks_generation_and_multicast(
+def test_cross_node_mnnvl_gate_checks_generation_multicast_and_fabric(
     monkeypatch,
     major,
     local_multicast,
+    fabric_support,
     expected,
 ):
     def has_device_capability(capability, device_id):
@@ -272,11 +274,13 @@ def test_cross_node_mnnvl_gate_checks_generation_and_multicast(
         lambda _device: local_multicast,
     )
     monkeypatch.setattr(car.dist, "all_reduce", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(car, "has_mnnvl_fabric_support", lambda _device: fabric_support)
 
     assert car._group_can_attempt_mnnvl(object(), torch.device("cuda:3")) is expected
 
 
 def test_cross_node_mnnvl_gate_requires_support_on_every_rank(monkeypatch):
+    monkeypatch.setattr(car, "has_mnnvl_fabric_support", lambda _device: True)
     monkeypatch.setattr(
         car.current_platform,
         "has_device_capability",
