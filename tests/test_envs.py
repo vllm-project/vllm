@@ -48,6 +48,14 @@ def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
+def test_anthropic_usage_interval_is_not_compile_factor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_ANTHROPIC_USAGE_STREAM_INTERVAL", "10")
+
+    assert "VLLM_ANTHROPIC_USAGE_STREAM_INTERVAL" not in envs.compile_factors()
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
