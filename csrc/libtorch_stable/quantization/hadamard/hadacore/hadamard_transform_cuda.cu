@@ -518,6 +518,11 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                 remaining_log_had_size -= 4;
                 if (remaining_log_had_size <= 0 && i == 0) {
                     // TODO: consider different storing so no need for transpose
+                    // A free transpose here has no effect on performance. 
+                    // I tested commenting out the below transposes and running the exact same kernel  
+                    // The output was wrong but the timing was ineffected. The TODO should be removed.
+                    // benchmark results with and without transpose included in pr
+                    // The kernel is not compute bound but memory bound
                     matrix_transpose_m8_n8_b16_inplace(b_frag_all[k][0]);
                     matrix_transpose_m8_n8_b16_inplace(b_frag_all[k][1]);
                     matrix_transpose_m8_n8_b16_inplace(b_frag_all[k][2]);
