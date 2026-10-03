@@ -54,6 +54,14 @@ PYNVVIDEOCODEC_DECODER_CACHE_SIZE = 2
 # Per-API-server CUDA context and driver allocation, measured with
 # PyNvVideoCodec 2.0.4 on H100.
 PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES = int(1.8 * 1024 * MiB_bytes)
+# Peak GPU memory multiplier for the pool lease during PyNvVideoCodec decode.
+# Inside _decode_to_pinned_host, up to three batch-sized GPU allocations are
+# simultaneously live: (1) native decoded frames held via DLPack wrappers,
+# (2) the torch.stack result, and (3) the contiguous NHWC tensor produced by
+# permute().contiguous() when the decoder outputs NCHW. Accounting for only
+# one batch allows requests to pass admission while real transient usage
+# exceeds the pool budget.
+_PYNVVC_LEASE_MULTIPLIER = 3
 
 
 def validate_pynvvideocodec_hw_decoders(hw_decoders: object) -> int:
@@ -362,7 +370,8 @@ class PyNvVideoCodecVideoBackendMixin:
             if pool is None or raw_frame_bytes == 0:
                 frames = cls._decode_to_pinned_host(temp_path, frame_idx, nvc)
             else:
-                with pool.acquire(raw_frame_bytes):
+                lease_bytes = raw_frame_bytes * _PYNVVC_LEASE_MULTIPLIER
+                with pool.acquire(lease_bytes):
                     frames = cls._decode_to_pinned_host(temp_path, frame_idx, nvc)
         finally:
             with suppress(FileNotFoundError):
