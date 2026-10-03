@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 from xgrammar import Grammar
 from xgrammar.testing import _is_grammar_accept_string
 
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.structured_output.backend_xgrammar import (
+    has_non_terminating_ref_cycle,
     has_xgrammar_unsupported_json_features,
     validate_xgrammar_grammar,
 )
@@ -323,3 +327,144 @@ class TestIsGrammarAcceptString:
             assert _is_grammar_accept_string(grammar, "yes")
             assert _is_grammar_accept_string(grammar, "no\nplease")
             assert not _is_grammar_accept_string(grammar, r"no\nplease")
+
+
+class TestIssue57725NonTerminatingRefCycles:
+    """A `$ref` cycle with no base case compiles into a grammar that allows
+    no token at all, so the request used to be admitted and then killed on
+    its first token with "Failed to advance FSM" and a 500. It must be
+    rejected at request time instead (#57725)."""
+
+    NON_TERMINATING = {
+        "direct": {"$ref": "#/$defs/n", "$defs": {"n": {"$ref": "#/$defs/n"}}},
+        "mutual": {
+            "$ref": "#/$defs/a",
+            "$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}},
+        },
+        "three_way": {
+            "$ref": "#/$defs/a",
+            "$defs": {
+                "a": {"$ref": "#/$defs/b"},
+                "b": {"$ref": "#/$defs/c"},
+                "c": {"$ref": "#/$defs/a"},
+            },
+        },
+        "any_of_all_cyclic": {
+            "$ref": "#/$defs/n",
+            "$defs": {"n": {"anyOf": [{"$ref": "#/$defs/n"}, {"$ref": "#/$defs/n"}]}},
+        },
+        "one_of_all_cyclic": {
+            "$ref": "#/$defs/n",
+            "$defs": {"n": {"oneOf": [{"$ref": "#/$defs/n"}]}},
+        },
+        "legacy_definitions": {
+            "$ref": "#/definitions/n",
+            "definitions": {"n": {"$ref": "#/definitions/n"}},
+        },
+    }
+
+    TERMINATING = {
+        # Recursion whose recursive member is optional: {} satisfies it.
+        "optional_recursion": {
+            "$ref": "#/$defs/n",
+            "$defs": {
+                "n": {"type": "object", "properties": {"c": {"$ref": "#/$defs/n"}}}
+            },
+        },
+        # A cycle with a non-recursive branch is satisfiable.
+        "any_of_with_base_case": {
+            "$ref": "#/$defs/n",
+            "$defs": {"n": {"anyOf": [{"type": "string"}, {"$ref": "#/$defs/n"}]}},
+        },
+        "linked_list": {
+            "$ref": "#/$defs/n",
+            "$defs": {
+                "n": {
+                    "type": "object",
+                    "properties": {
+                        "v": {"type": "integer"},
+                        "next": {"anyOf": [{"$ref": "#/$defs/n"}, {"type": "null"}]},
+                    },
+                    "required": ["v", "next"],
+                }
+            },
+        },
+        "tree": {
+            "$ref": "#/$defs/n",
+            "$defs": {
+                "n": {
+                    "type": "object",
+                    "properties": {
+                        "kids": {"type": "array", "items": {"$ref": "#/$defs/n"}}
+                    },
+                    "required": ["kids"],
+                }
+            },
+        },
+        # Emits a token before recursing, so the FSM has a legal first token.
+        # Unsatisfiable for other reasons, but out of scope for this check.
+        "required_recursion": {
+            "$ref": "#/$defs/n",
+            "$defs": {
+                "n": {
+                    "type": "object",
+                    "properties": {"c": {"$ref": "#/$defs/n"}},
+                    "required": ["c"],
+                }
+            },
+        },
+        # xgrammar does not fully compose multi-branch allOf, and still
+        # admits a first token here, so this must not be rejected.
+        "all_of_cyclic_branch": {
+            "$ref": "#/$defs/n",
+            "$defs": {"n": {"allOf": [{"type": "object"}, {"$ref": "#/$defs/n"}]}},
+        },
+        "no_refs": {"type": "object", "properties": {"a": {"type": "string"}}},
+        "resolvable_leaf_ref": {
+            "type": "object",
+            "properties": {"x": {"$ref": "#/$defs/leaf"}},
+            "$defs": {"leaf": {"type": "string"}},
+        },
+        # A dangling or remote ref is xgrammar's to report, not this check's.
+        "dangling_ref": {"$ref": "#/$defs/missing"},
+        "remote_ref": {"$ref": "https://example.com/schema.json"},
+    }
+
+    @pytest.mark.parametrize("name", sorted(NON_TERMINATING))
+    def test_non_terminating_cycles_are_detected(self, name):
+        assert has_non_terminating_ref_cycle(self.NON_TERMINATING[name])
+
+    @pytest.mark.parametrize("name", sorted(TERMINATING))
+    def test_satisfiable_schemas_are_left_alone(self, name):
+        assert not has_non_terminating_ref_cycle(self.TERMINATING[name])
+
+    @pytest.mark.parametrize("name", sorted(NON_TERMINATING))
+    def test_validate_rejects_non_terminating_cycle(self, name):
+        params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(json=self.NON_TERMINATING[name])
+        )
+        with pytest.raises(VLLMValidationError, match=r"\$ref' cycle with no base"):
+            validate_xgrammar_grammar(params)
+
+    @pytest.mark.parametrize("name", sorted(TERMINATING))
+    def test_validate_accepts_satisfiable_schema(self, name):
+        schema = self.TERMINATING[name]
+        params = SamplingParams(structured_outputs=StructuredOutputsParams(json=schema))
+        if name == "dangling_ref":
+            # Rejected by xgrammar itself, with its own message. A remote
+            # $ref is not: xgrammar only warns and leaves it unconstrained.
+            with pytest.raises(VLLMValidationError) as exc_info:
+                validate_xgrammar_grammar(params)
+            assert "cycle with no base" not in str(exc_info.value)
+        else:
+            validate_xgrammar_grammar(params)
+
+    def test_cyclic_schema_json_string_form_is_rejected(self):
+        """The schema may arrive as a JSON string rather than a dict."""
+        params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(
+                json=json.dumps(self.NON_TERMINATING["direct"])
+            )
+        )
+        with pytest.raises(VLLMValidationError, match=r"\$ref' cycle with no base"):
+            validate_xgrammar_grammar(params)
