@@ -11,6 +11,7 @@ from vllm._custom_ops import (
     scaled_fp8_quant,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.ops.merge_attn_states import _merge_attn_states_torch
 from vllm.v1.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton,
 )
@@ -109,6 +110,93 @@ def test_merge_attn_states_both_empty(merge_fn, output_dtype) -> None:
     merge_fn(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
 
     assert not output.isnan().any()
+
+
+@pytest.mark.parametrize(
+    "merge_fn", [merge_attn_states_native, merge_attn_states_triton]
+)
+@pytest.mark.parametrize("output_dtype", [torch.float32, torch.half, torch.bfloat16])
+def test_merge_attn_states_lse_view(merge_fn, output_dtype) -> None:
+    """Strided LSE and exact suffix-output alias preserve the merged result."""
+    tokens, heads, dim = 5, 4, 128
+    prefix = torch.randn(tokens, heads, dim, device=DEVICE, dtype=output_dtype)
+    # An empty prefix is zero: native merge preserves it when both sides are empty.
+    prefix[1].zero_()
+    # A mixed decode/prefill batch writes its prefill portion at a token offset.
+    suffix_storage = torch.full(
+        (tokens + 4, heads, dim), 123.0, device=DEVICE, dtype=output_dtype
+    )
+    suffix = suffix_storage[2 : tokens + 2]
+    suffix.normal_()
+    original_suffix = suffix.clone()
+    assert suffix.is_contiguous() and suffix.storage_offset() > 0
+    # AG/RS returns this rank's head slice of the wider all-gathered LSE.
+    prefix_lse = torch.randn(tokens, heads * 3, device=DEVICE)[:, heads : 2 * heads].T
+    suffix_lse = torch.randn(heads, tokens, device=DEVICE)
+    prefix_lse[:, :2] = -torch.inf
+    suffix_lse[:, 1] = -torch.inf
+    assert not prefix_lse.is_contiguous()
+
+    expected = torch.empty_like(prefix, device="cpu")
+    expected_lse = torch.empty_like(suffix_lse, device="cpu")
+    _merge_attn_states_torch(
+        expected,
+        prefix.cpu(),
+        prefix_lse.cpu(),
+        suffix.cpu(),
+        suffix_lse.cpu(),
+        expected_lse,
+        prefill_tokens_with_context=tokens - 1,
+    )
+    torch.testing.assert_close(expected[0], suffix[0].cpu())
+    torch.testing.assert_close(expected[1], torch.zeros_like(expected[1]))
+    torch.testing.assert_close(expected[-1], suffix[-1].cpu())
+    joint_lse = torch.logaddexp(prefix_lse.cpu(), suffix_lse.cpu())
+    joint_lse[:, -1] = suffix_lse[:, -1].cpu()
+    torch.testing.assert_close(expected_lse, joint_lse)
+    output = torch.empty_like(prefix)
+    output_lse = torch.empty_like(suffix_lse)
+
+    def merge(target):
+        merge_fn(
+            target,
+            prefix,
+            prefix_lse,
+            suffix,
+            suffix_lse,
+            output_lse,
+            prefill_tokens_with_context=tokens - 1,
+        )
+
+    merge(output)
+    torch.testing.assert_close(output.cpu(), expected)
+    torch.testing.assert_close(output_lse.cpu(), expected_lse)
+
+    # Reuse the exact compact suffix tensor; partial overlap is not exercised.
+    output_lse.fill_(torch.nan)
+    merge(suffix)
+    torch.testing.assert_close(suffix, output, rtol=0, atol=0)
+    torch.testing.assert_close(output_lse.cpu(), expected_lse)
+
+    if current_platform.is_cuda():
+        suffix.copy_(original_suffix)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            merge(suffix)
+        # Replay must load fresh suffix values from the aliased output buffer.
+        suffix.copy_(original_suffix).mul_(0.7).add_(0.3)
+        merge(output)
+        output_lse.fill_(torch.nan)
+        graph.replay()
+        torch.testing.assert_close(suffix, output, rtol=0, atol=0)
+        torch.testing.assert_close(output_lse.cpu(), expected_lse)
+
+    torch.testing.assert_close(
+        suffix_storage[:2], torch.full_like(suffix_storage[:2], 123.0)
+    )
+    torch.testing.assert_close(
+        suffix_storage[-2:], torch.full_like(suffix_storage[-2:], 123.0)
+    )
 
 
 def generate_markdown_table():

@@ -26,6 +26,143 @@ SOFT_CAPS = [None, 30.0]
 SLIDING_WINDOWS = [None, 64]
 
 
+@pytest.mark.parametrize("backend", ["fa2", "cudnn"])
+@pytest.mark.parametrize("strided_context", [False, True])
+@pytest.mark.parametrize("dcp_a2a", [False, True])
+@torch.inference_mode()
+def test_dcp_prefill_lse_merge_and_replay(
+    monkeypatch, backend: str, strided_context: bool, dcp_a2a: bool
+) -> None:
+    """Merge real ragged attention with base-2 context, including empty context."""
+    import math
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends import flashinfer as fi_backend
+
+    if backend == "cudnn":
+        pytest.importorskip("cudnn")
+    set_random_seed(0)
+    tokens, heads, kv_heads, dim = 5, 4, 2, 128
+    q = torch.randn(tokens, heads, dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(tokens, kv_heads, dim, device="cuda", dtype=q.dtype)
+    v = torch.randn_like(k)
+    context_out = torch.randn_like(q)
+    context_lse = torch.linspace(-2, 3, heads * tokens, device=q.device).view(
+        heads, tokens
+    )
+    context_lse[:, 0] = -torch.inf
+    context_log2 = (context_lse.T / math.log(2)).contiguous()
+    if strided_context:
+        # AG/RS combine returns a rank's head slice of a wider NH tensor.
+        all_rank_lse = torch.empty(tokens, heads * 3, device=q.device)
+        context_log2 = all_rank_lse[:, heads : 2 * heads].copy_(context_log2)
+        assert not context_log2.is_contiguous()
+    group = SimpleNamespace(
+        world_size=1, rank_in_group=0, all_gather=lambda tensor, dim: tensor
+    )
+    monkeypatch.setattr(fi_backend, "get_dcp_group", lambda: group)
+    workspace = torch.empty(128 * 1024 * 1024, device=q.device, dtype=torch.uint8)
+    lse_buffer = torch.full((tokens + 3, heads), torch.nan, device=q.device)
+    wrapper = fi_backend.BatchDCPPrefillWrapper(
+        "NHD", workspace, dcp_a2a=dcp_a2a, lse_buffer=lse_buffer
+    )
+    wrapper._context = SimpleNamespace(
+        plan=lambda **kwargs: None,
+        run=lambda *args, **kwargs: (context_out, context_log2),
+    )
+    wrapper._new_tokens = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
+        workspace, backend=backend
+    )
+
+    def plan():
+        indptr = torch.tensor([0, tokens], dtype=torch.int32, device="cpu")
+        wrapper.plan(
+            qo_indptr_cpu=indptr,
+            paged_kv_indptr_cpu=indptr,
+            paged_kv_indices=indptr,
+            paged_kv_last_page_len_cpu=indptr,
+            kv_lens_cpu=indptr,
+            page_size=16,
+            num_qo_heads=heads,
+            dcp_world_size=1,
+            num_kv_heads=kv_heads,
+            head_dim=dim,
+            sm_scale=dim**-0.5,
+            window_left=-1,
+            logits_soft_cap=None,
+            q_data_type=q.dtype,
+            kv_cache_dtype=q.dtype,
+            prefill_fixed_split_size=0,
+            disable_split_kv=False,
+        )
+
+    plan()
+    layer = SimpleNamespace(_k_scale_float=1.0, _v_scale_float=1.0)
+    # A mixed batch's prefill output follows decode tokens. Padded head storage
+    # exercises the allocating fallback; compact storage supports in-place merge.
+    out_storage = torch.empty(
+        tokens + 2,
+        heads,
+        dim + (8 if strided_context else 0),
+        device=q.device,
+        dtype=q.dtype,
+    )
+    out = out_storage[2:, :, :dim]
+
+    def check_output():
+        keys = k.float().repeat_interleave(heads // kv_heads, dim=1)
+        values = v.float().repeat_interleave(heads // kv_heads, dim=1)
+        scores = torch.einsum("qhd,khd->hqk", q.float(), keys) * dim**-0.5
+        mask = torch.ones(tokens, tokens, device=q.device, dtype=torch.bool).triu(1)
+        scores.masked_fill_(mask, -torch.inf)
+        query_lse = scores.logsumexp(-1)
+        query_out = torch.einsum("hqk,khd->qhd", scores.softmax(-1), values)
+        joint_lse = torch.logaddexp(context_lse, query_lse)
+        context_weight = (context_lse - joint_lse).exp().T.unsqueeze(-1)
+        query_weight = (query_lse - joint_lse).exp().T.unsqueeze(-1)
+        expected = context_out.float() * context_weight + query_out * query_weight
+        torch.testing.assert_close(out.float(), expected, atol=2e-2, rtol=1e-2)
+
+    assert wrapper.run(layer, q, (k, v), k, v, out) is out
+    check_output()
+    assert torch.isfinite(lse_buffer[:tokens]).all()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        wrapper.run(layer, q, (k, v), k, v, out)
+    q.mul_(0.5).add_(0.4)
+    context_lse.add_(0.7)
+    context_log2.copy_(context_lse.T / math.log(2))
+    out.fill_(torch.nan)
+    graph.replay()
+    check_output()
+
+    # Replanning selects a shorter view of the same owned LSE allocation.
+    del graph
+    tokens = 3
+    q, k, v, out = q[:tokens], k[:tokens], v[:tokens], out[:tokens]
+    context_out = context_out[:tokens]
+    context_lse = context_lse[:, :tokens]
+    context_log2 = context_log2[:tokens]
+    plan()
+    lse_buffer.fill_(torch.nan)
+    wrapper.run(layer, q, (k, v), k, v, out)
+    check_output()
+    assert torch.isfinite(lse_buffer[:tokens]).all()
+    assert torch.isnan(lse_buffer[tokens:]).all()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        wrapper.run(layer, q, (k, v), k, v, out)
+    q.add_(0.2)
+    out.fill_(torch.nan)
+    graph.replay()
+    check_output()
+    context_lse.fill_(-torch.inf)
+    context_log2.fill_(-torch.inf)
+    out.fill_(torch.nan)
+    graph.replay()
+    check_output()
+
+
 def ref_paged_attn(
     query: torch.Tensor,
     key_cache: torch.Tensor,

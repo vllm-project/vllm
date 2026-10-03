@@ -9,6 +9,7 @@ Tests cover:
 """
 
 import math
+from types import SimpleNamespace
 
 import multiprocess as mp
 import pytest
@@ -43,6 +44,7 @@ def _packed_a2a_reference(
     world_size: int,
     h_per_rank: int,
     is_lse_base_on_e: bool,
+    output_lse_base_on_e: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
@@ -59,6 +61,7 @@ def _packed_a2a_reference(
         lses,
         return_lse=True,
         is_lse_base_on_e=is_lse_base_on_e,
+        output_lse_base_on_e=output_lse_base_on_e,
     )
 
 
@@ -97,7 +100,9 @@ def _distributed_run(fn, world_size: int, extra_env: dict[str, str]) -> None:
     for process in processes:
         if process.is_alive():
             process.kill()
-            process.join()
+    for process in processes:
+        process.join()
+    for process in processes:
         assert process.exitcode == 0
 
 
@@ -116,6 +121,7 @@ class TestDCPCommBackendConfig:
             dcp_comm_backend="a2a",
             tensor_parallel_size=4,
             decode_context_parallel_size=4,
+            distributed_executor_backend="mp",
         )
         assert config.dcp_comm_backend == "a2a"
 
@@ -221,6 +227,16 @@ class TestLSEWeightedCombine:
         result = _lse_weighted_combine(outputs, lses)
 
         torch.testing.assert_close(result, outputs[1])
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+    def test_all_empty_shards_return_zero_and_negative_infinity(self, dtype):
+        from vllm.v1.attention.ops.dcp import _lse_weighted_combine
+
+        outputs = torch.full((2, 1, 1, 4), torch.nan, dtype=dtype)
+        lses = torch.full((2, 1, 1), -torch.inf, dtype=dtype)
+        output, lse = _lse_weighted_combine(outputs, lses, return_lse=True)
+        torch.testing.assert_close(output, torch.zeros_like(output))
+        assert torch.isneginf(lse).all()
 
     def test_ag_rs_masks_empty_shard_and_padded_lse(self, monkeypatch):
         import vllm.v1.attention.ops.dcp as dcp
@@ -351,6 +367,128 @@ class TestLSEWeightedCombine:
         assert _dcp_a2a_lse_pack_dim(torch.float16) == 2
         assert _dcp_a2a_lse_pack_dim(torch.float32) == 1
 
+    @pytest.mark.parametrize("input_base_e", [False, True])
+    @pytest.mark.parametrize("output_base_e", [None, False, True])
+    def test_independent_output_base(self, input_base_e, output_base_e):
+        """Changing the returned LSE base must not change attention weights."""
+        from vllm.v1.attention.ops.dcp import _lse_weighted_combine
+
+        outputs = torch.tensor([[[[2.0]], [[float("nan")]]], [[[7.0]], [[3.0]]]])
+        ln_lses = torch.tensor([[[1.0], [-torch.inf]], [[3.0], [2.0]]])
+        lses = ln_lses if input_base_e else ln_lses / math.log(2)
+        actual, lse = _lse_weighted_combine(
+            outputs, lses, True, input_base_e, output_base_e
+        )
+        expected_lse = ln_lses.logsumexp(0)
+        weights = (ln_lses - expected_lse).exp()
+        expected = (outputs.nan_to_num() * weights.unsqueeze(-1)).sum(0)
+        if output_base_e is False or (output_base_e is None and not input_base_e):
+            expected_lse = expected_lse / math.log(2)
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(lse, expected_lse)
+
+    @pytest.mark.parametrize(
+        "combine_name", ["cp_lse_ag_out_rs", "cp_lse_ag_out_ar", "dcp_a2a_lse_reduce"]
+    )
+    @pytest.mark.parametrize("input_base_e", [False, True])
+    @pytest.mark.parametrize("output_base_e", [None, False, True])
+    def test_single_rank_preserves_output(
+        self, combine_name, input_base_e, output_base_e
+    ):
+        """Single-rank combine only allocates for an explicit LSE base change."""
+        import vllm.v1.attention.ops.dcp as dcp
+
+        output = torch.randn(2, 4, 8)
+        lse = torch.tensor([[1.0, -torch.inf, torch.inf, torch.nan]]).expand(2, -1)
+        group = SimpleNamespace(world_size=1, rank_in_group=0)
+        combine = getattr(dcp, combine_name)
+        assert (
+            combine(
+                output,
+                lse,
+                group,
+                is_lse_base_on_e=input_base_e,
+                output_lse_base_on_e=output_base_e,
+            )
+            is output
+        )
+        actual_out, actual_lse = combine(
+            output,
+            lse,
+            group,
+            return_lse=True,
+            is_lse_base_on_e=input_base_e,
+            output_lse_base_on_e=output_base_e,
+        )
+        assert actual_out is output
+        if output_base_e is None or input_base_e == output_base_e:
+            assert actual_lse is lse
+        else:
+            scale = 1 / math.log(2) if input_base_e else math.log(2)
+            torch.testing.assert_close(actual_lse, lse * scale, equal_nan=True)
+        torch.testing.assert_close(lse[0, 0], torch.tensor(1.0))
+
+
+@pytest.mark.skipif(torch.accelerator.device_count() < 1, reason="CUDA is required.")
+@pytest.mark.parametrize("input_base_e", [False, True])
+@pytest.mark.parametrize("strided_lse", [False, True])
+def test_correct_attn_out_output_base_and_replay(input_base_e, strided_lse):
+    """Base changes on one context keep weights, empty shards, and replay correct."""
+    from vllm.v1.attention.ops.dcp import (
+        CPTritonContext,
+        _lse_weighted_combine,
+        correct_attn_out,
+    )
+
+    torch.manual_seed(123)
+    partials = torch.randn(2, 5, 4, 32, device="cuda", dtype=torch.bfloat16)
+    lses = torch.randn(2, 5, 4, device="cuda")
+    lses[0, 0] = -torch.inf
+    lses[:, 1] = -torch.inf
+    lses[0, 2] = torch.nan
+    lses[0, 3] = torch.inf
+    partials[0, :4] = torch.nan
+    partials[1, 1] = torch.nan
+    if strided_lse:
+        storage = torch.empty(2, 5, 12, device="cuda")
+        lses = storage[:, :, 4:8].copy_(lses)
+    contexts = [CPTritonContext(), CPTritonContext()]
+    outputs = torch.empty_like(partials)
+
+    def run(output_base_e):
+        outputs.copy_(partials)
+        for rank in range(2):
+            _, final_lse = correct_attn_out(
+                outputs[rank],
+                lses,
+                rank,
+                contexts[rank],
+                input_base_e,
+                output_base_e,
+            )
+        return final_lse
+
+    def check(final_lse, output_base_e):
+        expected_out, expected_lse = _lse_weighted_combine(
+            partials.float(), lses, True, input_base_e, output_base_e
+        )
+        torch.testing.assert_close(
+            outputs.float().sum(0), expected_out, rtol=1e-2, atol=1e-2
+        )
+        torch.testing.assert_close(final_lse, expected_lse, rtol=1e-5, atol=1e-5)
+
+    for output_base_e in (None, not input_base_e, input_base_e, not input_base_e):
+        check(run(output_base_e), output_base_e)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        final_lse = run(not input_base_e)
+    lses[0].add_(0.4)
+    lses[1].sub_(0.2)
+    partials.mul_(0.5)
+    outputs.fill_(torch.nan)
+    graph.replay()
+    check(final_lse, not input_base_e)
+
 
 class TestPackedA2AKernels:
     @pytest.mark.skipif(
@@ -359,11 +497,13 @@ class TestPackedA2AKernels:
     @pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32"])
     @pytest.mark.parametrize("return_lse", [False, True])
     @pytest.mark.parametrize("is_lse_base_on_e", [False, True])
+    @pytest.mark.parametrize("output_lse_base_on_e", [None, False, True])
     def test_pack_unpack_combine_matches_reference(
         self,
         dtype_name: str,
         return_lse: bool,
         is_lse_base_on_e: bool,
+        output_lse_base_on_e: bool | None,
     ):
         from vllm.v1.attention.ops.dcp import (
             _dcp_a2a_lse_pack_dim,
@@ -378,6 +518,11 @@ class TestPackedA2AKernels:
         H = world_size * h_per_rank
         cp_attn_out = torch.randn(B, H, D, device=device, dtype=dtype)
         cp_attn_lse = torch.randn(B, H, device=device, dtype=dtype)
+        cp_attn_lse[0] = -torch.inf
+        cp_attn_out[0] = torch.nan
+        cp_attn_lse[1, :h_per_rank] = torch.nan
+        cp_attn_lse[2, :h_per_rank] = torch.inf
+        cp_attn_out[1:3, :h_per_rank] = torch.nan
         lse_pack_dim = _dcp_a2a_lse_pack_dim(dtype)
         send_buffer = torch.empty(
             (world_size, B, h_per_rank, D + lse_pack_dim),
@@ -395,10 +540,20 @@ class TestPackedA2AKernels:
             lse_pack_dim,
         )
         actual = _dcp_a2a_unpack_combine(
-            send_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
+            send_buffer,
+            D,
+            lse_pack_dim,
+            return_lse,
+            is_lse_base_on_e,
+            output_lse_base_on_e,
         )
         expected_out, expected_lse = _packed_a2a_reference(
-            cp_attn_out, cp_attn_lse, world_size, h_per_rank, is_lse_base_on_e
+            cp_attn_out,
+            cp_attn_lse,
+            world_size,
+            h_per_rank,
+            is_lse_base_on_e,
+            output_lse_base_on_e,
         )
 
         if return_lse:
@@ -495,12 +650,29 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
         from vllm.v1.worker.workspace import init_workspace_manager
 
         init_workspace_manager(torch.device(f"cuda:{local_rank}"))
+    capture_replay = env.get("CAPTURE_REPLAY") == "1"
+    if capture_replay:
+        from vllm.distributed.parallel_state import GroupCoordinator
+
+        cp_group = GroupCoordinator(
+            [list(range(world_size))],
+            local_rank,
+            "nccl",
+            use_device_communicator=True,
+            group_name="dcp",
+        )
+    else:
+        cp_group = _FakeCPGroup(world_size, dist.group.WORLD)
+    graph = None
     try:
-        from vllm.v1.attention.ops.dcp import dcp_a2a_lse_reduce
+        from vllm.v1.attention.ops.dcp import cp_lse_ag_out_rs, dcp_a2a_lse_reduce
 
         dtype = _dtype_from_name(env["TEST_DTYPE"])
         return_lse = env["RETURN_LSE"] == "1"
         is_lse_base_on_e = env["LSE_BASE_E"] == "1"
+        output_lse_base_on_e = (
+            env["OUTPUT_LSE_BASE_E"] == "1" if "OUTPUT_LSE_BASE_E" in env else None
+        )
         rank = dist.get_rank()
         world_size = dist.get_world_size()
         B, h_per_rank, D = 5, 2, 32
@@ -520,16 +692,48 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
             B,
             H,
             device=f"cuda:{local_rank}",
-            dtype=dtype,
+            dtype=torch.float32 if capture_replay else dtype,
             generator=generator,
         )
-        actual = dcp_a2a_lse_reduce(
-            cp_attn_out,
-            cp_attn_lse,
-            _FakeCPGroup(world_size, dist.group.WORLD),
-            return_lse=return_lse,
-            is_lse_base_on_e=is_lse_base_on_e,
+        combine = (
+            cp_lse_ag_out_rs
+            if env.get("COMM_BACKEND") == "ag_rs"
+            else dcp_a2a_lse_reduce
         )
+        # Include an empty local shard and one globally empty token.
+        cp_attn_lse[0] = -torch.inf
+        cp_attn_out[0] = torch.nan
+        if rank == 0:
+            cp_attn_lse[1] = -torch.inf
+            cp_attn_out[1] = torch.nan
+        local_out = torch.empty_like(cp_attn_out)
+
+        def run():
+            # AG/RS correction updates its local partial in place.
+            local_out.copy_(cp_attn_out)
+            return combine(
+                local_out,
+                cp_attn_lse,
+                cp_group,
+                return_lse=return_lse,
+                is_lse_base_on_e=is_lse_base_on_e,
+                output_lse_base_on_e=output_lse_base_on_e,
+            )
+
+        actual = run()
+        if capture_replay:
+            for _ in range(2):
+                run()
+            torch.accelerator.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with (
+                cp_group.graph_capture() as capture,
+                torch.cuda.graph(graph, stream=capture.stream),
+            ):
+                actual = run()
+            cp_attn_out.mul_(0.5)
+            cp_attn_lse.add_(0.3 * (rank + 1))
+            graph.replay()
 
         gathered_out = [torch.empty_like(cp_attn_out) for _ in range(world_size)]
         gathered_lse = [torch.empty_like(cp_attn_lse) for _ in range(world_size)]
@@ -553,6 +757,7 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
             lses,
             return_lse=True,
             is_lse_base_on_e=is_lse_base_on_e,
+            output_lse_base_on_e=output_lse_base_on_e,
         )
 
         if return_lse:
@@ -562,6 +767,13 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
         else:
             _assert_packed_a2a_close(actual, expected_out, dtype)
     finally:
+        if graph is not None:
+            # Captured NCCL operations retain their communicator until the
+            # graph is released. Release it before process-group teardown.
+            torch.accelerator.synchronize()
+            graph.reset()
+        if capture_replay:
+            cp_group.destroy()
         if use_workspace:
             from vllm.v1.worker.workspace import reset_workspace_manager
 
@@ -597,6 +809,25 @@ def test_distributed_packed_a2a_with_workspace_matches_reference():
             "RETURN_LSE": "1",
             "LSE_BASE_E": "1",
             "USE_WORKSPACE": "1",
+        },
+    )
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs."
+)
+@pytest.mark.parametrize("comm_backend", ["ag_rs", "a2a"])
+def test_distributed_dcp_ln_output_and_replay(comm_backend):
+    _distributed_run(
+        _distributed_packed_a2a_worker,
+        world_size=2,
+        extra_env={
+            "TEST_DTYPE": "bfloat16",
+            "RETURN_LSE": "1",
+            "LSE_BASE_E": "0",
+            "OUTPUT_LSE_BASE_E": "1",
+            "COMM_BACKEND": comm_backend,
+            "CAPTURE_REPLAY": "1",
         },
     )
 
