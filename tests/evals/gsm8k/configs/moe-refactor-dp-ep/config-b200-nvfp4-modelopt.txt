@@ -1,0 +1,3 @@
+Qwen3-30B-A3B-NvFp4-ModelOpt-fi-cutedsl-deepep-ll.yaml
+Qwen3-30B-A3B-NvFp4-ModelOpt-fi-trtllm.yaml
+Qwen3-30B-A3B-NvFp4-ModelOpt-fi-cutlass.yaml
