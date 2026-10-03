@@ -3,7 +3,7 @@
 """Graph pool routing for CUDA graph capture under sleep mode."""
 
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, cast
 
@@ -18,16 +18,10 @@ if TYPE_CHECKING:
 _outside_cumem: ContextVar[bool] = ContextVar("capture_outside_cumem", default=False)
 
 
-def _cumem_allocator() -> "CuMemAllocator":
-    # A cast, not new MemAllocator methods: only cuMem has a graph pool (XPU's
-    # allocator does not), and the policy that gates every caller requires CUDA.
-    return cast("CuMemAllocator", get_mem_allocator_instance())
-
-
 @contextmanager
 def capture_outside_cumem_pool() -> Iterator[None]:
-    """CUDA graphs captured here stay out of cuMem. Memory profiling captures
-    under it so that destroying its graphs frees their pool normally."""
+    """CUDA graphs captured here stay out of cuMem, so that memory profiling can
+    free its throwaway graphs normally."""
     token = _outside_cumem.set(True)
     try:
         yield
@@ -39,15 +33,13 @@ def capture_outside_cumem_pool() -> Iterator[None]:
 def use_cudagraph_pool(
     pool: tuple[int, int] | None, vllm_config: VllmConfig
 ) -> Iterator[tuple[int, int] | None]:
-    """Yield the pool to capture into, the cuMem graph pool when sleep mode
-    offloads graph pools, and point NCCL's graph allocator at it."""
-    ctx: AbstractContextManager[tuple[int, int] | None] = nullcontext(pool)
-    if (
-        pool is not None
-        and not _outside_cumem.get()
-        and vllm_config.use_cumem_cudagraph_pool
-    ):
-        ctx = _cumem_allocator().use_cudagraph_pool()
-    with ctx as graph_pool:
-        set_graph_pool_id(graph_pool or current_platform.graph_pool_handle())
-        yield graph_pool
+    """Yield the pool to capture into, the cuMem graph pool when sleep offloads
+    graph memory, and point NCCL's graph allocator at it."""
+    if vllm_config.use_cumem_cudagraph_pool and not _outside_cumem.get():
+        allocator = cast("CuMemAllocator", get_mem_allocator_instance())
+        with allocator.use_cudagraph_pool() as cumem_pool:
+            set_graph_pool_id(cumem_pool)
+            yield cumem_pool
+    else:
+        set_graph_pool_id(pool or current_platform.graph_pool_handle())
+        yield pool
