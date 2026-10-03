@@ -2130,10 +2130,12 @@ def test_uno_tail_nonfinal_prefill_does_not_count_as_sampling(
     scheduler = uno_scheduler_factory(
         async_scheduling=async_scheduling, long_prefill_token_threshold=2
     )
-    (request,) = create_requests(
-        num_requests=1, num_tokens=5, max_tokens=1, block_size=4
+    request, waiting = create_requests(
+        num_requests=2, num_tokens=5, max_tokens=1, block_size=4
     )
     scheduler.add_request(request)
+    # The long-prefill cap applies only while another request is eligible.
+    scheduler.add_request(waiting)
     for expected_queries in [2, 2]:
         chunk = scheduler.schedule()
         assert not chunk.skip_speculator_proposal
