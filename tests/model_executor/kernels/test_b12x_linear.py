@@ -147,7 +147,7 @@ def test_b12x_module_lookup_is_dynamo_safe(monkeypatch) -> None:
     def forward(x: torch.Tensor) -> torch.Tensor:
         blockscaled = b12x_utils.get_b12x_blockscaled()
         assert blockscaled is not None
-        return blockscaled.run(x)  # type: ignore[attr-defined]
+        return blockscaled.run(x)
 
     x = torch.ones(1)
     torch.testing.assert_close(forward(x), x + 1)

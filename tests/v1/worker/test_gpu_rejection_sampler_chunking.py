@@ -69,7 +69,9 @@ def test_iter_request_chunks_preserves_request_boundaries():
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
-def test_chunked_scores_match_full_batch(logprobs_mode: str):
+def test_chunked_scores_match_full_batch(
+    monkeypatch: pytest.MonkeyPatch, logprobs_mode: str
+):
     device = torch.device("cuda")
     cu_num_logits_np = np.array([0, 3, 4, 8, 10], dtype=np.int32)
     num_logits_per_req = np.diff(cu_num_logits_np)
@@ -96,7 +98,9 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
         ) % logits.shape[1]
         return logits.float() + 1, sampled, num_sampled
 
-    rejection_sampler._verify = MethodType(fake_verify, rejection_sampler)  # type: ignore[method-assign]  # stub
+    monkeypatch.setattr(
+        rejection_sampler, "_verify", MethodType(fake_verify, rejection_sampler)
+    )
     logits = torch.arange(170, dtype=torch.float32, device=device).view(10, 17)
 
     sampled, num_sampled, chunked_logprobs, sampling_mask_tensors = (

@@ -1241,7 +1241,7 @@ class TestBidirectionalManager:
         assert 201 in b_ok, f"B loads succeeded: {b_ok}"
         assert 200 in b_ok, f"B stores succeeded: {b_ok}"
 
-    def test_late_fetch_after_reap_fails_immediately(self):
+    def test_late_fetch_after_reap_fails_immediately(self, monkeypatch):
         """A fetch for a reaped kv_request_id fails in one round trip.
 
         The producer drops parked blocks once unbound_store_timeout_s
@@ -1266,7 +1266,7 @@ class TestBidirectionalManager:
             sent_from_a.extend(msg.get("type") for _, msg in out)
             return out
 
-        ctrl_a._drain_outbound_to = recording_drain  # type: ignore[method-assign]  # spy on drain
+        monkeypatch.setattr(ctrl_a, "_drain_outbound_to", recording_drain)
 
         # Producer parks the blocks, then reaps them before any fetch lands.
         mgr_b.submit_store(

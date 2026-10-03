@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -2405,7 +2406,7 @@ class TestDispatchErrorHandling:
         session.poll()
         assert not session.alive
 
-    def test_internal_error_does_not_disconnect_once(self):
+    def test_internal_error_does_not_disconnect_once(self, monkeypatch):
         """A non-ValueError raised by a handler is treated as an internal
         bug: counter increments, session stays alive on a single hit."""
         session, conn, _ = _make_session()
@@ -2414,7 +2415,7 @@ class TestDispatchErrorHandling:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
-        session._server.on_fetch = _boom  # type: ignore[method-assign]  # inject fault
+        monkeypatch.setattr(session._server, "on_fetch", _boom)
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2428,7 +2429,7 @@ class TestDispatchErrorHandling:
         assert session.alive
         assert session._dispatch_error_count == 1
 
-    def test_internal_error_threshold_disconnects(self):
+    def test_internal_error_threshold_disconnects(self, monkeypatch):
         """Once consecutive non-protocol errors hit the threshold, the
         session tears down via _protocol_error."""
         session, conn, _ = _make_session()
@@ -2437,7 +2438,7 @@ class TestDispatchErrorHandling:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
-        session._server.on_fetch = _boom  # type: ignore[method-assign]  # inject fault
+        monkeypatch.setattr(session._server, "on_fetch", _boom)
         for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS):
             conn.enqueue(
                 {
@@ -2458,26 +2459,23 @@ class TestDispatchErrorHandling:
         session, conn, _ = _make_session()
         _activate(session, conn)
 
-        original_on_fetch = session._server.on_fetch
-
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
         # Alternate (boom, success) (_MAX-1) times: counter rises to 1
         # then resets to 0 each cycle, never reaching the threshold.
         for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS - 1):
-            session._server.on_fetch = _boom  # type: ignore[method-assign]  # inject fault
-            conn.enqueue(
-                {
-                    TYPE_KEY: FetchMsg.TYPE,
-                    FetchMsg.ROUND_SEQ: 0,
-                    FetchMsg.KV_REQUEST_ID: "req-1",
-                    FetchMsg.KEYS: [b"k1"],
-                    FetchMsg.BLOCK_INDEXES: [0],
-                }
-            )
-            session.poll()
-            session._server.on_fetch = original_on_fetch  # type: ignore[method-assign]  # restore
+            with patch.object(session._server, "on_fetch", _boom):
+                conn.enqueue(
+                    {
+                        TYPE_KEY: FetchMsg.TYPE,
+                        FetchMsg.ROUND_SEQ: 0,
+                        FetchMsg.KV_REQUEST_ID: "req-1",
+                        FetchMsg.KEYS: [b"k1"],
+                        FetchMsg.BLOCK_INDEXES: [0],
+                    }
+                )
+                session.poll()
             # A benign no-op message (unknown type) dispatches cleanly
             # and resets the consecutive-error counter.
             conn.enqueue({TYPE_KEY: "unknown_for_test"})

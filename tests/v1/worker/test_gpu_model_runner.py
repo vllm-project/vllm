@@ -392,8 +392,10 @@ def test_sample_tokens_receives_pp_sampled_ids_only_on_non_last_rank(
         nonlocal receive_calls
         receive_calls += 1
 
-    runner._pp_receive_prev_sampled_token_ids_to_input_batch = (  # type: ignore[method-assign]  # stub
-        receive_prev_sampled_token_ids
+    monkeypatch.setattr(
+        runner,
+        "_pp_receive_prev_sampled_token_ids_to_input_batch",
+        receive_prev_sampled_token_ids,
     )
     monkeypatch.setattr(
         gpu_model_runner_module,
