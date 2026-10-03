@@ -26,7 +26,7 @@ fastsafetensors >= 0.3.3
 instanttensor >= 0.1.9
 
 # QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
-nvidia-cutlass-dsl[cu13]==4.7.1
+nvidia-cutlass-dsl[cu13]==4.8.0
 quack-kernels==0.6.5  # Required by MSA
 
 # Tokenspeed_MLA for faster mla with spec decode
