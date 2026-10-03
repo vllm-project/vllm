@@ -480,6 +480,28 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     ],
 }
 
+
+def _possible_fp8_block_kernels() -> dict[
+    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
+]:
+    possible_kernels = _POSSIBLE_FP8_BLOCK_KERNELS
+    if current_platform.is_cuda() and current_platform.is_device_capability(89):
+        # SM89 (Ada: L4/L20/L40(S), RTX 4090) has native FP8 tensor cores but
+        # cannot run the SM90+ block-FP8 kernels listed ahead of Marlin.
+        # There the Triton kernel (native FP8 MMA) beats Marlin (which
+        # dequantizes to bf16) by up to 2x at M >= 128 with tuned configs,
+        # e.g. ~1.7x lower TTFT on L20 with Qwen3.8-27B-FP8, at a small
+        # single-stream decode cost, so prefer it.
+        cuda_kernels = list(possible_kernels[PlatformEnum.CUDA])
+        cuda_kernels.remove(TritonFp8BlockScaledMMKernel)
+        cuda_kernels.insert(
+            cuda_kernels.index(MarlinFP8ScaledMMLinearKernel),
+            TritonFp8BlockScaledMMKernel,
+        )
+        possible_kernels = {**possible_kernels, PlatformEnum.CUDA: cuda_kernels}
+    return possible_kernels
+
+
 _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
     PlatformEnum.CUDA: [
         HummingFP8ScaledMMLinearKernel,
@@ -718,7 +740,7 @@ def init_fp8_linear_kernel(
     if activation_quant_key.scale.group_shape.is_per_group():
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
-            possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
+            possible_kernels=_possible_fp8_block_kernels(),  # type: ignore[misc]
             quantization="fp8_block_w8a8",
             force_kernel=force_kernel,
         )
