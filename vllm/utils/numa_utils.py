@@ -501,6 +501,12 @@ def _resolve_numactl_args(numactl_args: str) -> str:
                     candidate or "no binding",
                 )
             return candidate
+    logger.warning(
+        "numactl is not installed or not usable; launching without NUMA "
+        "binding (requested args %r). Install numactl (e.g. apt-get "
+        "install numactl) or check container permissions.",
+        numactl_args,
+    )
     return ""
 
 
