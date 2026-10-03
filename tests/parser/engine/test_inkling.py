@@ -492,6 +492,21 @@ class TestPromptSeededState:
         )
         assert parser._engine.state == ParserState.MESSAGE_HEADER
 
+    def test_parse_does_not_depend_on_prompt(self, mock_tokenizer, mock_request):
+        """``parse()`` output does not depend on the prompt set via
+        ``set_prompt_token_ids()``.
+        """
+        text = f"{TEXT_START}hello world{END_MESSAGE}"
+        prompt_ids = [200001, _TML_VOCAB[THINK_START]]
+
+        prompted = InklingParser(mock_tokenizer)
+        prompted.set_prompt_token_ids(prompt_ids)
+        with_prompt = prompted.parse(text, mock_request)
+        without_prompt = InklingParser(mock_tokenizer).parse(text, mock_request)
+
+        assert with_prompt == without_prompt
+        assert with_prompt[:2] == (None, "hello world")
+
     def test_generation_prompt_header_hides_tool_name(self, parser, mock_request):
         text = "get_weather" + _tool_block("get_weather", '{"city":"SF"}')
         delta = parser.parse_delta(
