@@ -223,6 +223,7 @@ class WeightCacheDaemon:
         self.is_draft = is_draft
         self.role = format_daemon_role(is_draft)
         self.model: torch.nn.Module | None = None
+        key_dp_size, key_dp_rank = get_engine_dp_placement(vllm_config, dp_rank)
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
@@ -231,8 +232,8 @@ class WeightCacheDaemon:
             tp_rank=self.tp_rank,
             pp_size=self.pp_size,
             pp_rank=self.pp_rank,
-            dp_size=self.dp_size,
-            dp_rank=dp_rank,
+            dp_size=key_dp_size,
+            dp_rank=key_dp_rank,
             is_draft=is_draft,
         )
 
@@ -490,6 +491,17 @@ def plan_local_ranks(
         pp_rank, tp_rank = divmod(rank_in_dp, tp_size)
         placements.append((local_rank, dp_rank, pp_rank, tp_rank))
     return placements
+
+
+def get_engine_dp_placement(vllm_config: VllmConfig, dp_rank: int) -> tuple[int, int]:
+    """``(dp_size, dp_rank)`` as the engine fingerprints this DP rank.
+
+    The engine runs the DP ranks of a non-MoE target as independent DP=1
+    replicas, so their workers all report ``(1, 0)``.
+    """
+    if vllm_config.model_config.is_moe:
+        return vllm_config.parallel_config.data_parallel_size, dp_rank
+    return 1, 0
 
 
 def get_draft_daemon_config(vllm_config: VllmConfig) -> VllmConfig | None:

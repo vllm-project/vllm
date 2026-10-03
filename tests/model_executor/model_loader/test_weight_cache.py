@@ -331,6 +331,32 @@ def test_daemon_rejects_unmappable_parallelism():
         )
 
 
+def test_daemon_keys_dense_dp_ranks_like_the_engine():
+    """The engine runs non-MoE DP ranks as independent DP=1 replicas, so the
+    daemon must fingerprint them the same way or no engine can map them."""
+    from types import SimpleNamespace
+
+    from vllm.config import ParallelConfig
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        get_engine_dp_placement,
+    )
+
+    def daemon_config(is_moe: bool):
+        return SimpleNamespace(
+            model_config=SimpleNamespace(is_moe=is_moe),
+            parallel_config=ParallelConfig(data_parallel_size=4),
+        )
+
+    dense_engine_rank = ParallelConfig(data_parallel_size=4, data_parallel_rank=3)
+    dense_engine_rank.reconfigure_for_independent_dp_rank()
+    assert get_engine_dp_placement(daemon_config(is_moe=False), dp_rank=3) == (
+        dense_engine_rank.data_parallel_size,
+        dense_engine_rank.data_parallel_rank,
+    )
+    # MoE ranks stay in one DP group and keep their placement.
+    assert get_engine_dp_placement(daemon_config(is_moe=True), dp_rank=3) == (4, 3)
+
+
 def test_weight_cache_key_distinguishes_dp_ranks():
     from dataclasses import replace
 
