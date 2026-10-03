@@ -680,7 +680,7 @@ class OffloadingConnectorScheduler:
         for local_idx, key in enumerate(keys):
             result = self.manager.lookup(key, req_context)
             match result:
-                case LookupResult.HIT:
+                case LookupResult.HIT | LookupResult.HIT_PENDING:
                     self._events_tracker.record_lookup(
                         req,
                         group_config,
@@ -688,9 +688,7 @@ class OffloadingConnectorScheduler:
                         key,
                     )
                     hit_count += 1
-                case LookupResult.HIT_PENDING:
-                    defer_lookup = True
-                    hit_count += 1
+                    defer_lookup |= result is LookupResult.HIT_PENDING
                 case LookupResult.RETRY:
                     # Don't break: keep scanning to let manager kick off
                     # async lookups (until a miss is detected).

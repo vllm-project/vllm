@@ -362,6 +362,7 @@ class CPUOffloadingManager(OffloadingManager):
         success: bool = True,
     ) -> None:
         stored_keys: list[OffloadKey] = []
+        removed_keys: list[OffloadKey] = []
 
         if success:
             for key in keys:
@@ -379,6 +380,16 @@ class CPUOffloadingManager(OffloadingManager):
                     self._num_write_pending_chunks -= 1
                     self._policy.remove(key)
                     self._free_chunk(chunk)
+                    removed_keys.append(key)
+
+        if removed_keys and self.events is not None:
+            self.events.append(
+                OffloadingEvent(
+                    keys=removed_keys,
+                    medium=self.medium,
+                    removed=True,
+                )
+            )
 
         if stored_keys and self.events is not None:
             self.events.append(
