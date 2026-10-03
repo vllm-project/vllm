@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -1689,6 +1690,23 @@ def test_mamba_n1_p_side_truncation():
     logprobs_req.sampling_params.skip_reading_prefix_cache = True
     swa_sched.on_new_request(logprobs_req)
     assert len(logprobs_req.prompt_token_ids) == 10
+    # A prompt ending in an image is cut before the image rather than inside
+    # it, since models parse an item from its whole placeholder; the decoder
+    # loads the same prefix and computes the image itself.
+    image = MultiModalFeatureSpec(
+        data=None,
+        mm_position=PlaceholderRange(offset=4, length=6),
+        identifier="image",
+        modality="image",
+    )
+    mm_req = create_request(num_tokens=10, do_remote_decode=True)
+    mm_req.mm_features = [image]
+    fa_sched.on_new_request(mm_req)
+    assert mm_req.num_prompt_tokens == len(mm_req.prompt_token_ids) == 4
+    assert mm_req.mm_features == []
+    d_req = create_request(num_tokens=10, do_remote_prefill=True)
+    d_req.mm_features = [image]
+    assert fa_sched.get_num_new_matched_tokens(d_req, 0) == (4, True)
 
 
 @pytest.mark.cpu_test

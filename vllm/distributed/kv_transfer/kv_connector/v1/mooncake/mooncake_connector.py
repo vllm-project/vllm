@@ -29,6 +29,8 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     TransferTopology,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
+    get_prefill_stop,
+    truncate_prompt_for_prefill,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -976,13 +978,11 @@ class MooncakeConnectorScheduler:
             for i, blocks in enumerate(selected)
         ]
 
-    def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
+    def _get_remote_prefill_token_count(self, request: "Request") -> int:
         """D-side only. Returns N-1: the decoder always recomputes the last
         token, so the state kept near the resume position (Mamba h(N-1), the
         sliding window the token attends to) must be laid out for it."""
-        if num_prompt_tokens > 1:
-            return num_prompt_tokens - 1
-        return num_prompt_tokens
+        return get_prefill_stop(request, 1)
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
         """P-side only: drop the last prompt token, which the decoder
@@ -990,25 +990,14 @@ class MooncakeConnectorScheduler:
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
+        stop = get_prefill_stop(request, 1)
         params = request.kv_transfer_params
         if (
             params is not None
             and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > 1
-            # A request that skips reading the prefix cache (prompt logprobs)
-            # loads nothing on the decoder, which recomputes its whole prompt.
-            and not request.get_skip_reading_prefix_cache()
+            and stop < request.num_prompt_tokens
         ):
-            # A mixed-mode prompt carries token ids, embeddings and a mask.
-            if request.prompt_token_ids is not None:
-                request.prompt_token_ids.pop()
-            if request.prompt_embeds is not None:
-                request.prompt_embeds = request.prompt_embeds[:-1]
-            if request.prompt_is_token_ids is not None:
-                request.prompt_is_token_ids.pop()
-
-            request._all_token_ids.pop()
-            request.num_prompt_tokens -= 1
+            truncate_prompt_for_prefill(request, stop)
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 
@@ -1048,8 +1037,7 @@ class MooncakeConnectorScheduler:
         if params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             assert not self.is_kv_producer
-            token_ids = request.prompt_token_ids or []
-            count = self._get_remote_prefill_token_count(len(token_ids)) - (
+            count = self._get_remote_prefill_token_count(request) - (
                 num_computed_tokens
             )
             if count > 0:
