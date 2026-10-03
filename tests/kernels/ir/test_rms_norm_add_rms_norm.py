@@ -269,6 +269,16 @@ def test_compiled_op_specializations(n_tokens, round_residual_before_norm):
     residual = torch.randn_like(x)
     weight = torch.randn(hidden_size, dtype=torch.bfloat16, device=DEVICE)
     weight_residual = torch.randn_like(weight)
+    triton_impl = OP.impls["triton"]
+    assert triton_impl.supported
+    assert triton_impl.supports_args(
+        x,
+        residual,
+        weight,
+        weight_residual,
+        1e-6,
+        round_residual_before_norm,
+    )
 
     def boundary(x_i, residual_i):
         return OP(
@@ -280,8 +290,8 @@ def test_compiled_op_specializations(n_tokens, round_residual_before_norm):
             round_residual_before_norm=round_residual_before_norm,
         )
 
-    with OP.set_priority(["triton", "native"]):
-        compiled = torch.compile(boundary, dynamic=False)
+    with OP.set_priority(["triton"]):
+        compiled = torch.compile(boundary, dynamic=False, fullgraph=True)
         actual = compiled(x, residual)
     expected = native(
         x,
