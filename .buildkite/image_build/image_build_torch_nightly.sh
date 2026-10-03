@@ -40,6 +40,7 @@ docker buildx ls
 echo "--- :mag: Checking if image already exists"
 if docker manifest inspect "$IMAGE_TAG" >/dev/null 2>&1; then
   echo "Image found: $IMAGE_TAG — skipping build"
+  .buildkite/scripts/annotate-image-build.sh "$IMAGE_TAG"
   exit 0
 fi
 echo "Image not found, proceeding with build..."
@@ -47,8 +48,17 @@ echo "Image not found, proceeding with build..."
 # --- CUDA 13.0 for nightly builds ---
 # Nightly CI uses CUDA 13.0 while regular CI stays on CUDA 12.9
 NIGHTLY_CUDA_VERSION="13.0.2"
-NIGHTLY_BUILD_BASE_IMAGE="nvidia/cuda:${NIGHTLY_CUDA_VERSION}-devel-ubuntu22.04"
-NIGHTLY_FINAL_BASE_IMAGE="nvidia/cuda:${NIGHTLY_CUDA_VERSION}-base-ubuntu22.04"
+NIGHTLY_BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
+# Must track ARG UBUNTU_VERSION in docker/Dockerfile. The nightly lane exists to
+# run the normal pipeline against nightly torch, so it has to differ from the
+# regular image in torch only -- not in the OS underneath it. This was pinned to
+# 22.04 while everything else moved to 24.04, and the runtime dependency list in
+# tools/install_snapshot_runtime.sh is 24.04-only (libgnutls30t64 is the 64-bit
+# time_t rename and does not exist on jammy), so the nightly build failed with
+# "E: Unable to locate package libgnutls30t64" while regular CI stayed green on
+# a cached layer.
+NIGHTLY_UBUNTU_VERSION="24.04"
+NIGHTLY_FINAL_BASE_IMAGE="nvidia/cuda:${NIGHTLY_CUDA_VERSION}-base-ubuntu${NIGHTLY_UBUNTU_VERSION}"
 
 echo "--- :docker: Building torch nightly image (CUDA ${NIGHTLY_CUDA_VERSION})"
 docker buildx build --file docker/Dockerfile \
@@ -66,3 +76,5 @@ docker buildx build --file docker/Dockerfile \
   --progress plain .
 
 echo "--- :white_check_mark: Torch nightly image build complete: $IMAGE_TAG"
+
+.buildkite/scripts/annotate-image-build.sh "$IMAGE_TAG"

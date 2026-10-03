@@ -12,14 +12,13 @@ from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParse
 from .identity_reasoning_parser import IdentityReasoningParser
 
 if TYPE_CHECKING:
+    from vllm.entrypoints.generate.base.protocol import DeltaMessage
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 class DeepSeekV3ReasoningParser(ReasoningParser):
-    """
-    V3 parser that delegates to either DeepSeekR1ReasoningParser or
+    """V3 parser that delegates to either DeepSeekR1ReasoningParser or
     IdentityReasoningParser based on `thinking` and `separate_reasoning`.
     """
 
@@ -56,6 +55,9 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return self._parser.extract_content_ids(input_ids)
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        return self._parser.count_reasoning_tokens(token_ids)
+
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
@@ -81,9 +83,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
 
 
 class DeepSeekV3ReasoningWithThinkingParser(DeepSeekV3ReasoningParser):
-    """
-    DeepSeekV3ReasoningParser that defaults to thinking mode.
-    """
+    """DeepSeekV3ReasoningParser that defaults to thinking mode."""
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
