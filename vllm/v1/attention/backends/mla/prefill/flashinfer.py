@@ -38,11 +38,30 @@ _DEFAULT_NUM_CHUNKS = 32
 class FlashInferPrefillBackend(MLAPrefillBackend):
     """FlashInfer backend for MLA prefill."""
 
+    # The wrapper is planned with head_dim_qk = qk_nope + qk_rope and
+    # head_dim_vo = v_head_dim, so what matters is the (qk, vo) pair the
+    # underlying kernel serves. With backend="auto" on Blackwell that is
+    # {(128,128), (192,128), (256,256)}: CUTLASS covers the first two and cuDNN
+    # adds (256,256). Listed by MLA dims rather than by (qk, vo) because that is
+    # what the selector compares against.
     supported_mla_dimensions: ClassVar[list[MLADimensions]] = [
+        # DeepSeek-V3 family -> (192, 128)
         MLADimensions(
             qk_nope_head_dim=128,
             qk_rope_head_dim=64,
             v_head_dim=128,
+        ),
+        # GLM-5.3 / Glm5Next NoPE MLA -> (256, 256), cuDNN only
+        MLADimensions(
+            qk_nope_head_dim=256,
+            qk_rope_head_dim=0,
+            v_head_dim=256,
+        ),
+        # Rope-carrying variant of the same (256, 256) wrapper shape
+        MLADimensions(
+            qk_nope_head_dim=192,
+            qk_rope_head_dim=64,
+            v_head_dim=256,
         ),
     ]
 
@@ -101,7 +120,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             for _ in range(len(self._prefill_chunks), num_chunks):
                 self._prefill_chunks.append(
                     BatchPrefillWithRaggedKVCacheWrapper(
-                        workspace_buffer, "NHD", backend="cutlass"
+                        workspace_buffer, "NHD", backend="auto"
                     )
                 )
 
@@ -110,7 +129,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             return self._global_hyperparameters
 
         from vllm.model_executor.layers.attention.mla_attention import (
-            MLACommonImpl,
+            MLACommonBaseImpl,
         )
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -119,19 +138,26 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         # Match any layer with an MLA impl, not just the MLAAttention wrapper:
         # fused MLA modules (Kimi-K3's MultiHeadLatentAttention) register a
         # different layer type. Keying on impl also excludes linear/KDA layers.
+        #
+        # Filter on MLACommonBaseImpl, not MLACommonImpl: sparse-MLA models
+        # (DSA indexer -- GLM-5.3, GLM-5.3-Flash, DeepSeek-V3.2) use
+        # SparseMLACommonImpl, which is a *sibling* of MLACommonImpl under
+        # MLACommonBaseImpl rather than a subclass. Filtering on the subclass
+        # matched zero layers for them and tripped the "No attention layers
+        # found in the model." assertion below.
         forward_context = self.vllm_config.compilation_config.static_forward_context
         layer_names = [
             name
             for name, layer in forward_context.items()
             if isinstance(layer, AttentionLayerBase)
-            and isinstance(getattr(layer, "impl", None), MLACommonImpl)
+            and isinstance(getattr(layer, "impl", None), MLACommonBaseImpl)
         ]
 
         self._global_hyperparameters = infer_global_hyperparameters(
             get_per_layer_parameters(
                 self.vllm_config,
                 layer_names,
-                MLACommonImpl,  # type: ignore[type-abstract]
+                MLACommonBaseImpl,  # type: ignore[type-abstract]
             )
         )
         return self._global_hyperparameters
@@ -145,7 +171,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         has_context = prefill_metadata.chunked_context is not None
         if self._prefill_main is None:
             self._prefill_main = BatchPrefillWithRaggedKVCacheWrapper(
-                self._workspace_buffer, "NHD", backend="cutlass"
+                self._workspace_buffer, "NHD", backend="auto"
             )
             self._ensure_chunks(_DEFAULT_NUM_CHUNKS, self._workspace_buffer)
 
