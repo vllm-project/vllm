@@ -20,7 +20,7 @@ from vllm.compilation.breakable_cudagraph import (
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.cudagraph_pool import (
-    plain_cudagraph_capture,
+    capture_outside_cumem_pool,
     use_cudagraph_pool,
 )
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
@@ -944,7 +944,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             mem_samples: list[int] = []
             manager._capture_mem_samples = mem_samples
 
-            with plain_cudagraph_capture():
+            with capture_outside_cumem_pool():
                 measured = int(runner.capture_model(profile_only=True))
 
             # The measured delta covers PIECEWISE, encoder and speculator graphs

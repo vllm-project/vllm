@@ -15,7 +15,7 @@ from vllm.platforms import current_platform
 if TYPE_CHECKING:
     from vllm.device_allocator.cumem import CuMemAllocator
 
-_plain_capture: ContextVar[bool] = ContextVar("plain_cudagraph_capture", default=False)
+_outside_cumem: ContextVar[bool] = ContextVar("capture_outside_cumem", default=False)
 
 
 def _cumem_allocator() -> "CuMemAllocator":
@@ -25,14 +25,14 @@ def _cumem_allocator() -> "CuMemAllocator":
 
 
 @contextmanager
-def plain_cudagraph_capture() -> Iterator[None]:
+def capture_outside_cumem_pool() -> Iterator[None]:
     """CUDA graphs captured here stay out of cuMem. Memory profiling captures
     under it so that destroying its graphs frees their pool normally."""
-    token = _plain_capture.set(True)
+    token = _outside_cumem.set(True)
     try:
         yield
     finally:
-        _plain_capture.reset(token)
+        _outside_cumem.reset(token)
 
 
 @contextmanager
@@ -44,7 +44,7 @@ def use_cudagraph_pool(
     ctx: AbstractContextManager[tuple[int, int] | None] = nullcontext(pool)
     if (
         pool is not None
-        and not _plain_capture.get()
+        and not _outside_cumem.get()
         and vllm_config.use_cumem_cudagraph_pool
     ):
         ctx = _cumem_allocator().use_cudagraph_pool()

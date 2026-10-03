@@ -436,7 +436,7 @@ def test_cudagraph_pool_sleep_and_release(level):
 
     import vllm.distributed.device_communicators.pynccl_allocator as nccl_alloc
     from vllm.compilation.cudagraph_pool import (
-        plain_cudagraph_capture,
+        capture_outside_cumem_pool,
         release_cudagraph_pool,
         use_cudagraph_pool,
     )
@@ -445,7 +445,7 @@ def test_cudagraph_pool_sleep_and_release(level):
     allocator = get_mem_allocator_instance()
     on, off = (SimpleNamespace(use_cumem_cudagraph_pool=v) for v in (True, False))
     handle = current_platform.graph_pool_handle()
-    for cfg, ctx in ((off, nullcontext()), (on, plain_cudagraph_capture())):
+    for cfg, ctx in ((off, nullcontext()), (on, capture_outside_cumem_pool())):
         with ctx, use_cudagraph_pool(handle, cfg) as used:
             assert used == handle and allocator.current_tag != "cudagraph"
     with allocator.use_memory_pool("weights"):
