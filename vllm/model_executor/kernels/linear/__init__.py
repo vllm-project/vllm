@@ -12,7 +12,8 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-from typing import TypeVar
+import functools
+from typing import TypeVar, cast
 
 import torch
 
@@ -228,7 +229,11 @@ from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
 from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
     ZentorchInt8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
+)
 from vllm.platforms import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
@@ -603,6 +608,48 @@ _KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 
+@functools.cache
+def _get_normalized_device_name() -> str:
+    return current_platform.get_device_name().replace(" ", "_")
+
+
+def _apply_auto_kernel_preferences(
+    config: _KernelConfigT,
+    kernels: list[type[_KernelT]],
+) -> list[type[_KernelT]]:
+    """Apply benchmark-backed kernel preferences for auto selection."""
+    if not (
+        isinstance(config, FP8ScaledMMLinearLayerConfig)
+        and current_platform._enum == PlatformEnum.CUDA
+        and config.weight_shape == (32, 1024)
+        and config.input_dtype == torch.bfloat16
+        and config.out_dtype == torch.bfloat16
+        and config.weight_quant_key == kFp8Static128BlockSym
+        and config.activation_quant_key == kFp8Dynamic128Sym
+        and TritonFp8BlockScaledMMKernel in kernels
+        and CutlassFp8BlockScaledMMKernel in kernels
+    ):
+        return kernels
+
+    device_name = _get_normalized_device_name()
+    if device_name not in {
+        "NVIDIA_H20",
+        "NVIDIA_RTX_PRO_5000_72GB_Blackwell",
+    }:
+        return kernels
+
+    triton_kernel = cast(type[_KernelT], TritonFp8BlockScaledMMKernel)
+    cutlass_kernel = cast(type[_KernelT], CutlassFp8BlockScaledMMKernel)
+    reordered = [kernel for kernel in kernels if kernel is not triton_kernel]
+    cutlass_index = reordered.index(cutlass_kernel)
+    if device_name == "NVIDIA_RTX_PRO_5000_72GB_Blackwell":
+        # Native CUTLASS block FP8 requires N and K to be multiples of 128 on
+        # SM12x, so this N=32 shape must not fall through when Triton is disabled.
+        reordered.pop(cutlass_index)
+    reordered.insert(cutlass_index, triton_kernel)
+    return reordered
+
+
 def is_supported_and_can_implement_kernel(
     kernel: type[_KernelT], config: _KernelConfigT, compute_capability: int | None
 ) -> tuple[bool, str]:
@@ -683,6 +730,7 @@ def choose_scaled_mm_linear_kernel(
         "scaled-mm",
         quantization=quantization,
     )
+    platform_kernels = _apply_auto_kernel_preferences(config, platform_kernels)
 
     for kernel in platform_kernels:
         is_supported_and_can_implement, failure_reason = (
