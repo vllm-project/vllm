@@ -46,7 +46,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear.mixed_precision.xpu import XPUwNa16LinearKernel
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -69,6 +68,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearMethodBase,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
@@ -110,6 +110,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -373,6 +374,95 @@ def fused_mova_impl(
     ops.moe_sum(intermediate_cache1, out_hidden_states)
 
     return out_hidden_states
+
+
+def k2_horizon_mova_experts(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: torch.Tensor | None = None,
+    group_size: int = 0,
+) -> torch.Tensor:
+    """Run the MoVA value experts outside the compiled graph.
+
+    The kernel config depends on the runtime token count, and the int4 path
+    chooses between the CUDA and Triton WNA16 kernels per call.
+    """
+    use_int4 = w1_scale is not None
+    block_shape = [0, group_size] if use_int4 else None
+    num_experts, n = w1.shape[:2]
+    config = try_get_optimal_moe_config(
+        w1_shape=w1.shape,
+        w2_shape=(num_experts, hidden_states.size(1), n // 2 if use_int4 else n),
+        top_k=topk_ids.size(1),
+        dtype=_get_config_dtype_str(
+            use_fp8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=use_int4,
+            dtype=hidden_states.dtype,
+        ),
+        M=hidden_states.size(0),
+        block_shape=block_shape,
+    )
+    return fused_mova_impl(
+        config=config,
+        hidden_states=hidden_states,
+        w1=w1,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        use_int4_w4a16=use_int4,
+        global_num_experts=num_experts,
+        w1_scale=w1_scale,
+        block_shape=block_shape,
+    )
+
+
+def k2_horizon_mova_experts_fake(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: torch.Tensor | None = None,
+    group_size: int = 0,
+) -> torch.Tensor:
+    return hidden_states.new_empty(hidden_states.size(0), w1.size(1))
+
+
+direct_register_custom_op(
+    op_name="k2_horizon_mova_experts",
+    op_func=k2_horizon_mova_experts,
+    fake_impl=k2_horizon_mova_experts_fake,
+)
+
+
+class K2HorizonMoVAWNA16Method(LinearMethodBase):
+    """Stores GPTQ INT4 value experts in the fused-MoE ``int4_w4a16`` layout.
+
+    The value experts always run through ``fused_mova_impl``, so the
+    platform-specific linear repacking (e.g. Marlin) is skipped.
+    """
+
+    def __init__(self, gptq_method: AutoGPTQLinearMethod) -> None:
+        self.gptq_method = gptq_method
+
+    def create_weights(self, *args, **kwargs) -> None:
+        self.gptq_method.create_weights(*args, **kwargs)
+
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        # GPTQ packs eight nibbles along K per int32, low nibble first, so the
+        # transposed bytes are [N, K // 2] with even k in the low nibble.
+        # Symmetric INT4 relies on the kernels' implicit zero point of 8.
+        layer.qweight.data = layer.qweight.data.t().contiguous()
+        layer.scales.data = layer.scales.data.t().contiguous()
+
+    def apply(
+        self,
+        layer: nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError("MoVA value experts run via fused_mova_impl.")
 
 
 class K2HorizonRMSNorm(RMSNorm):
@@ -824,15 +914,10 @@ class K2HorizonMoVAAttention(nn.Module):
         self.mova_group_size = None
         if isinstance(method, AutoGPTQLinearMethod):
             config = method.quant_config
-            if (
-                not isinstance(method.kernel, XPUwNa16LinearKernel)
-                or config.weight_bits != 4
-                or not config.is_sym
-                or config.desc_act
-            ):
+            if config.weight_bits != 4 or not config.is_sym or config.desc_act:
                 raise NotImplementedError(
                     "Quantized MoVA requires symmetric GPTQ INT4 without "
-                    "activation ordering and the XPU WNA16 backend."
+                    "activation ordering."
                 )
             if self.total_num_kv_heads < tp_size:
                 raise NotImplementedError(
@@ -841,6 +926,7 @@ class K2HorizonMoVAAttention(nn.Module):
             self.mova_group_size = (
                 hidden_size if config.group_size == -1 else config.group_size
             )
+            self.v_experts_fused.quant_method = K2HorizonMoVAWNA16Method(method)
         elif not isinstance(method, UnquantizedLinearMethod):
             raise NotImplementedError("Unsupported quantization method for MoVA.")
 
@@ -929,57 +1015,30 @@ class K2HorizonMoVAAttention(nn.Module):
             scaling_factor=self.router_scaling_factor,
         )
 
-        use_int4 = self.mova_group_size is not None
         w1_scale = None
-        block_shape = None
-        if use_int4:
-            # XPU's linear post-load conversion packs K contiguously per output.
+        if self.mova_group_size is not None:
+            # K2HorizonMoVAWNA16Method stores K contiguously per output.
             w1 = self.v_experts_fused.qweight.view(torch.uint8).view(
                 self.num_experts, self.kv_size, self.hidden_size // 2
             )
-            w1_scale = self.v_experts_fused.scales.t().view(
+            w1_scale = self.v_experts_fused.scales.view(
                 self.num_experts,
                 self.kv_size,
                 self.hidden_size // self.mova_group_size,
             )
-            block_shape = [0, self.mova_group_size]
         else:
             w1 = self.v_experts_fused.weight.view(
                 self.num_experts, self.kv_size, self.hidden_size
             )
-        config_dtype = _get_config_dtype_str(
-            use_fp8_w8a8=False,
-            use_int8_w8a16=False,
-            use_int4_w4a16=use_int4,
-            dtype=hidden_states.dtype,
-        )
-        config = try_get_optimal_moe_config(
-            w1_shape=w1.shape,
-            w2_shape=(
-                self.num_experts,
-                self.hidden_size,
-                self.kv_size // 2 if use_int4 else self.kv_size,
-            ),
-            top_k=self.num_experts_per_tok,
-            dtype=config_dtype,
-            M=hidden_states.shape[0],
-            block_shape=block_shape,
-        )
 
-        v = fused_mova_impl(
-            config=config,
-            hidden_states=hidden_states.contiguous(),
-            w1=w1,
-            topk_weights=routing_weights.contiguous(),
-            topk_ids=selected_values.contiguous(),
-            global_num_experts=self.num_experts,
-            expert_map=None,
-            use_int4_w4a16=use_int4,
-            w1_scale=w1_scale,
-            block_shape=block_shape,
+        return torch.ops.vllm.k2_horizon_mova_experts(
+            hidden_states.contiguous(),
+            w1,
+            routing_weights.contiguous(),
+            selected_values.contiguous(),
+            w1_scale,
+            self.mova_group_size or 0,
         )
-
-        return v
 
     def forward(
         self,
@@ -1331,9 +1390,7 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
             if ".self_attn.v_experts." in name:
                 prefix_name, suffix = name.split(".self_attn.v_experts.", 1)
                 expert_id_str, param_suffix = suffix.split(".", 1)
-                fused_name = (
-                    f"{prefix_name}.self_attn.v_experts_fused.{param_suffix}"
-                )
+                fused_name = f"{prefix_name}.self_attn.v_experts_fused.{param_suffix}"
                 if is_pp_missing_parameter(fused_name, self):
                     continue
                 if fused_name not in params_dict:
