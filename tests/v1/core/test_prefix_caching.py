@@ -571,8 +571,12 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     )
     request.kv_transfer_params = {"do_remote_prefill": True}
     count, is_async = connector.get_num_new_matched_tokens(request, 0)
-    # The decoder computes the last prompt token, except for a 1-token prompt.
-    assert count == max(num_tokens - 1, 1) and is_async
+    # The decoder computes the last prompt token, so a 1-token prompt imports
+    # nothing.
+    if num_tokens == 1:
+        assert (count, is_async) == (0, False)
+        return
+    assert count == num_tokens - 1 and is_async
     assert allocate_external_prefix(manager, request, count) is not None
     source, _, resident, _ = manager.get_blocks(request.request_id).blocks
     assert len(source) == len(resident) == (count + 15) // 16

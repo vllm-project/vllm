@@ -408,7 +408,8 @@ class NixlBaseConnectorScheduler:
             params is not None
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
-            and stop < request.num_prompt_tokens
+            # With nothing to transfer, the prefiller's own result is unused.
+            and 0 < stop < request.num_prompt_tokens
         ):
             truncate_prompt_for_prefill(request, stop)
             request.max_tokens = 1
