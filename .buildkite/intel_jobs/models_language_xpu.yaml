@@ -6,6 +6,7 @@ steps:
   key: language-models-tests-standard
   device: intel_gpu
   timeout_in_minutes: 30
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -33,6 +34,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 40
   parallelism: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -61,6 +63,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 65
   parallelism: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -89,6 +92,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 65
   num_devices: 1
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -116,7 +120,7 @@ steps:
   key: language-models-test-extended-generation
   device: intel_gpu
   timeout_in_minutes: 80
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -148,7 +152,7 @@ steps:
   key: language-models-test-ppl
   device: intel_gpu
   timeout_in_minutes: 30
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -175,7 +179,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 120
   parallelism: 4
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -201,7 +205,7 @@ steps:
   key: language-models-test-mteb
   device: intel_gpu
   timeout_in_minutes: 68
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:

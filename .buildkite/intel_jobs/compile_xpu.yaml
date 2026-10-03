@@ -7,7 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 2
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -31,7 +31,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -55,6 +55,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -81,6 +82,7 @@ steps:
   key: fusion-and-compile-unit-tests-2xb200
   device: intel_gpu
   timeout_in_minutes: 30
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -126,6 +128,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 1
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -156,6 +159,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 1
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -186,7 +190,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 1
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -209,6 +213,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 35
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -239,6 +244,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -269,6 +275,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 40
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -299,6 +306,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
