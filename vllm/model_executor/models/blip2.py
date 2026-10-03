@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, TypeAlias
+from collections.abc import Hashable, Iterable, Mapping, Sequence
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -40,6 +40,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .blip import BlipVisionModel, get_blip_num_patches
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -500,7 +501,12 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
     dummy_inputs=Blip2DummyInputsBuilder,
 )
 class Blip2ForConditionalGeneration(
-    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP, SupportsQuant
+    nn.Module,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsQuant,
+    SupportsEncoderCudaGraph,
 ):
     supports_tower_connector_lora = True
 
@@ -592,16 +598,8 @@ class Blip2ForConditionalGeneration(
 
         return image_features
 
-    def _process_image_pixels(self, inputs: Blip2ImagePixelInputs) -> torch.Tensor:
-        pixel_values = inputs["data"]
-
-        return self._image_pixels_to_features(self.vision_model, pixel_values)
-
-    def _process_image_input(self, image_input: Blip2ImageInputs) -> torch.Tensor:
-        if image_input.type == "image_embeds":
-            return image_input.data
-
-        image_features = self._process_image_pixels(image_input)
+    def _process_image_pixels(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        image_features = self._image_pixels_to_features(self.vision_model, pixel_values)
 
         query_tokens = self.query_tokens.expand(image_features.shape[0], -1, -1)
         query_output = self.qformer(
@@ -611,12 +609,94 @@ class Blip2ForConditionalGeneration(
 
         return self.language_projection(query_output)
 
+    def _process_image_input(self, image_input: Blip2ImageInputs) -> torch.Tensor:
+        if image_input.type == "image_embeds":
+            return image_input.data
+
+        return self._process_image_pixels(image_input["data"])
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=self.config.text_config.hidden_size,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self, vllm_config: VllmConfig
+    ) -> tuple[int, int]:
+        # Every image yields exactly num_query_tokens Q-Former outputs.
+        min_budget = self.config.num_query_tokens
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        return [
+            EncoderItemSpec(
+                input_size=self._vision_tokens_per_image,
+                output_tokens=self.config.num_query_tokens,
+            )
+            for _ in range(len(mm_kwargs["pixel_values"]))
+        ]
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        return {"pixel_values": mm_kwargs["pixel_values"][indices]}
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphCaptureInputs
+
+        num_images = min(token_budget // self.config.num_query_tokens, max_batch_size)
+        size = self.config.vision_config.image_size
+        dummy = torch.randn(num_images, 3, size, size, device=device, dtype=dtype)
+        return EncoderCudaGraphCaptureInputs({"pixel_values": dummy})
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
+
+        return EncoderCudaGraphReplayBuffers(
+            {"pixel_values": mm_kwargs["pixel_values"]}
+        )
+
+    def encoder_cudagraph_forward(
+        self, values: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        return self._process_image_pixels(values["pixel_values"]).flatten(end_dim=1)
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        return self._process_image_pixels(mm_kwargs["pixel_values"]).flatten(end_dim=1)
 
     def forward(
         self,
