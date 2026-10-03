@@ -238,9 +238,6 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        if current_platform.is_rocm():
-            # Pool pages are DeepGEMM's; ROCm keeps the base indexer's sizes.
-            return DeepseekV32IndexerBackend.get_supported_kernel_block_sizes()
         if kv_cache_spec is not None:
             # Worker get_kv_cache_spec: runs without the current config.
             index_kpool = int(kv_cache_spec.tokens_per_state)

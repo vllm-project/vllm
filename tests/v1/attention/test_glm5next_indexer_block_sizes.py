@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla import indexer
 from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
 
@@ -20,8 +19,8 @@ KPOOL = 4
         (False, False, [KPOOL * 32, KPOOL * 64]),
         # SM120 DeepGEMM takes only 64-entry pages for the fp8 cache.
         (False, True, [KPOOL * 64]),
-        # ROCm keeps the base indexer's sizes.
-        (True, False, [1, MultipleOf(16)]),
+        # ROCm's AITER paged-MQA logits take the same pool pages.
+        (True, False, [KPOOL * 32, KPOOL * 64]),
     ],
 )
 def test_glm5next_indexer_kernel_block_sizes(monkeypatch, rocm, sm120, expected):
