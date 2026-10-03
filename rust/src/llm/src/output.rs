@@ -18,6 +18,7 @@ use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
+use crate::RequestTimestamps;
 use crate::error::Result;
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
@@ -170,6 +171,8 @@ pub struct GenerateOutput {
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics, present on terminal outputs.
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    /// Snapshot of engine lifecycle timestamps after this output.
+    pub timestamps: RequestTimestamps,
 }
 
 impl GenerateOutput {
@@ -220,6 +223,7 @@ impl GenerateOutput {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            timestamps: RequestTimestamps::default(),
         }
     }
 }
@@ -327,6 +331,7 @@ impl Stream for GenerateOutputStream {
             ec_transfer_params: raw.ec_transfer_params,
             sampling_mask,
             spec_decode_metrics: raw.spec_decode_metrics,
+            timestamps: self.request_metrics.timestamps(),
         };
 
         Poll::Ready(Some(Ok(output)))
