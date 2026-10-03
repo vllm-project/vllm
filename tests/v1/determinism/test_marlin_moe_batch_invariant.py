@@ -100,25 +100,29 @@ def _quantize_experts(
     }
 
 
-# (n, k) shapes mirror the small/large matrices in MARLIN_MOE_SCENARIOS
-# (tests/kernels/moe/test_moe.py). The large shape exercises the multi-tile
-# K reduction that the batch-invariant ``use_full_k`` path pins.
-SHAPES: list[tuple[int, int]] = [(512, 512), (1024, 2048)]
+# (n, k, e, topk). small/large mirror MARLIN_MOE_SCENARIOS
+# (tests/kernels/moe/test_moe.py) and exercise the multi-tile K reduction that
+# the batch-invariant ``use_full_k`` path pins. FP4 schemes only diverge without
+# it at the xlarge shape, which approximates a real NVFP4 MoE layer.
+SHAPES: list[tuple[int, int, int, int]] = [
+    (512, 512, 8, 2),
+    (1024, 2048, 8, 2),
+    (1024, 4096, 64, 8),
+]
 
 
 @skip_unsupported
 @pytest.mark.parametrize("scheme", SCHEMES, ids=[s.name for s in SCHEMES])
-@pytest.mark.parametrize("n,k", SHAPES, ids=["small", "large"])
+@pytest.mark.parametrize("n,k,e,topk", SHAPES, ids=["small", "large", "xlarge"])
 @pytest.mark.parametrize("batch_size", [4, 16, 64, 257])
 def test_marlin_moe_kernel_is_batch_invariant(
-    scheme: Scheme, n: int, k: int, batch_size: int
+    scheme: Scheme, n: int, k: int, e: int, topk: int, batch_size: int
 ):
     """A token's Marlin MoE output is bitwise identical regardless of batch
     size or its position in the batch, and matches a dequantized reference."""
     assert envs.VLLM_BATCH_INVARIANT
 
     torch.manual_seed(0)
-    e, topk = 8, 2
     dtype = scheme.dtype
 
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
