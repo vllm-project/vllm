@@ -822,14 +822,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 raise NotImplementedError(
                     "The DCP prefill wrapper cannot read NVFP4 block scales."
                 )
-            if (
-                self.nvfp4_fa2
-                and self.head_dim == 64
-                and current_platform.is_device_capability_family(120)
-            ):
-                raise NotImplementedError(
-                    "fa2 prefill misreads NVFP4 at head_size 64 on SM12x."
-                )
+            if self.nvfp4_fa2 and self.head_dim == 64:
+                raise NotImplementedError("fa2 prefill misreads NVFP4 at head_size 64.")
             if self.nvfp4_trtllm:
                 if (
                     force_use_trtllm_attention() is False
