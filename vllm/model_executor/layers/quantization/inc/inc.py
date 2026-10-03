@@ -19,7 +19,11 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     QuantizationMethods,
 )
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
+)
 
 from .config_parser import INCConfigParser
 
@@ -327,6 +331,8 @@ class INCConfig(QuantizationConfig):
                 if (
                     layer_name == prefix or layer_name == f"model.{prefix}"
                 ) and self.extra_config[layer_name].get("bits", 16) >= 16:
+                    if isinstance(layer, VocabParallelEmbedding):
+                        return UnquantizedEmbeddingMethod()
                     if isinstance(layer, (LinearBase, ParallelLMHead)):
                         return UnquantizedLinearMethod()
                     if isinstance(layer, RoutedExperts):
@@ -335,6 +341,8 @@ class INCConfig(QuantizationConfig):
 
         layer_config = self.config_parser.resolve(layer, prefix)
         if not layer_config.quantized:
+            if isinstance(layer, VocabParallelEmbedding):
+                return UnquantizedEmbeddingMethod()
             if isinstance(layer, (LinearBase, ParallelLMHead)):
                 return UnquantizedLinearMethod()
             if isinstance(layer, RoutedExperts):
