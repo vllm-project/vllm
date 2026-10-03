@@ -224,13 +224,13 @@ class DraftModelSpeculator(BaseSpeculator):
         self.model = self.load_draft_model(target_model, target_attn_layer_names)
         self._validate_local_argmax_reduction()
 
-        all_attn_layers = set[str](
-            get_layers_from_vllm_config(
-                self.vllm_config,
-                AttentionLayerBase,  # type: ignore[type-abstract]
-            ).keys()
+        all_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        self.draft_attn_layer_names = all_attn_layers - target_attn_layer_names
+        self.draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
+        for layer_name in self.draft_attn_layer_names:
+            all_attn_layers[layer_name].is_draft_layer = True
 
         target_supports_mm = self.vllm_config.model_config.supports_multimodal_inputs
         draft_supports_mm = supports_multimodal_embeddings(self.model)
@@ -373,6 +373,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
+            positions=self.input_buffers.positions[:num_tokens],
             is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
         )
         return attn_metadata
