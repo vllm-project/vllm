@@ -147,6 +147,12 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
 
+# Checkpoints whose config.json has no model_type, only remote code in auto_map
+_ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
+    "LongcatFlashForCausalLM": "longcat_flash",
+    "LongcatFlashNgramForCausalLM": "longcat_flash",
+}
+
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
 # Model types whose checkpoints carry shared RoPE parameters alongside the
@@ -352,6 +358,8 @@ class HFConfigParser(ConfigParserBase):
                 if config_dict.get("speculators_config") is not None
                 else model_type
             )
+        if model_type is None and (architectures := config_dict.get("architectures")):
+            model_type = _ARCHITECTURE_TO_MODEL_TYPE.get(architectures[0])
         # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
         if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
             if isinstance(hf_overrides, dict) and "model_type" in hf_overrides:
@@ -396,6 +404,11 @@ class HFConfigParser(ConfigParserBase):
             }
             kwargs.setdefault("name_or_path", str(model))
             config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
+        elif model_type in _ARCHITECTURE_TO_MODEL_TYPE.values():
+            from transformers import CONFIG_MAPPING
+
+            kwargs.setdefault("name_or_path", str(model))
+            config = CONFIG_MAPPING[model_type].from_dict(config_dict, **kwargs)
         elif model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
