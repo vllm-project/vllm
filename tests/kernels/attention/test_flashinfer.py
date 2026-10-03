@@ -57,8 +57,15 @@ def test_dcp_prefill_lse_merge_and_replay(
         all_rank_lse = torch.empty(tokens, heads * 3, device=q.device)
         context_log2 = all_rank_lse[:, heads : 2 * heads].copy_(context_log2)
         assert not context_log2.is_contiguous()
+    # Exercise AG/RS correction on the real kernel with two identical shards.
+    # Real multi-process communication has separate coverage in test_dcp_a2a.
+    world_size = 1 if dcp_a2a else 2
     group = SimpleNamespace(
-        world_size=1, rank_in_group=0, all_gather=lambda tensor, dim: tensor
+        world_size=world_size,
+        rank_in_group=0,
+        all_gather=lambda tensor, dim: torch.cat([tensor] * world_size, dim=dim),
+        reduce_scatter=lambda tensor, dim: tensor.chunk(world_size, dim=dim)[0]
+        * world_size,
     )
     monkeypatch.setattr(fi_backend, "get_dcp_group", lambda: group)
     workspace = torch.empty(128 * 1024 * 1024, device=q.device, dtype=torch.uint8)
@@ -68,7 +75,10 @@ def test_dcp_prefill_lse_merge_and_replay(
     )
     wrapper._context = SimpleNamespace(
         plan=lambda **kwargs: None,
-        run=lambda *args, **kwargs: (context_out, context_log2),
+        run=lambda *args, **kwargs: (
+            context_out.repeat(1, world_size, 1),
+            context_log2.repeat(1, world_size) - math.log2(world_size),
+        ),
     )
     wrapper._new_tokens = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
         workspace, backend=backend
@@ -84,7 +94,7 @@ def test_dcp_prefill_lse_merge_and_replay(
             kv_lens_cpu=indptr,
             page_size=16,
             num_qo_heads=heads,
-            dcp_world_size=1,
+            dcp_world_size=world_size,
             num_kv_heads=kv_heads,
             head_dim=dim,
             sm_scale=dim**-0.5,
@@ -136,11 +146,12 @@ def test_dcp_prefill_lse_merge_and_replay(
     graph.replay()
     check_output()
 
-    # Replanning selects a shorter view of the same owned LSE allocation.
+    # Replanning changes pointer dtype and token-stride specialization while
+    # selecting a shorter view of the same owned LSE allocation.
     del graph
     tokens = 3
-    q, k, v, out = q[:tokens], k[:tokens], v[:tokens], out[:tokens]
-    context_out = context_out[:tokens]
+    q, k, v, out = (tensor[:tokens].to(torch.float16) for tensor in (q, k, v, out))
+    context_out = context_out[:tokens].to(torch.float16)
     context_lse = context_lse[:, :tokens]
     context_log2 = context_log2[:tokens]
     plan()

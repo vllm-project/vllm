@@ -77,6 +77,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.dcp import (
+    CPTritonContext,
     cp_lse_ag_out_rs,
     dcp_a2a_lse_reduce,
 )
@@ -304,6 +305,7 @@ class BatchDCPPrefillWrapper:
         self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer)
         self._lse_buffer = lse_buffer
         self._lse: torch.Tensor | None = None
+        self._dcp_combine_ctx = None if dcp_a2a else CPTritonContext()
 
     def plan(
         self,
@@ -363,6 +365,11 @@ class BatchDCPPrefillWrapper:
             if num_tokens > self._lse_buffer.shape[0]:
                 raise ValueError("DCP prefill exceeds the LSE buffer capacity")
             self._lse = self._lse_buffer[:num_tokens]
+        if self._dcp_combine_ctx is not None:
+            # Within a plan, FI and the collective own compact, aligned buffers
+            # with fixed dtypes and strides. Replanning can change the Triton
+            # pointer/scalar specialization even if its constexprs are unchanged.
+            self._dcp_combine_ctx = CPTritonContext()
 
     def run(
         self,
@@ -387,6 +394,7 @@ class BatchDCPPrefillWrapper:
             output_context_tmp,
             lse_context_tmp,
             get_dcp_group(),
+            ctx=self._dcp_combine_ctx,
             return_lse=True,
         )
         lse_context = lse_context.transpose(0, 1)
