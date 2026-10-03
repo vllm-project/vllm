@@ -324,10 +324,11 @@ def _async_retry(
 class HTTPConnection:
     """Helper class to send HTTP requests."""
 
-    def __init__(self, *, reuse_client: bool = True) -> None:
+    def __init__(self, *, reuse_client: bool = True, trust_env: bool = False) -> None:
         super().__init__()
 
         self.reuse_client = reuse_client
+        self._trust_env = trust_env
 
         self._sync_client: requests.Session | None = None
         self._async_client: aiohttp.ClientSession | None = None
@@ -335,6 +336,7 @@ class HTTPConnection:
     def get_sync_client(self) -> requests.Session:
         if self._sync_client is None or not self.reuse_client:
             self._sync_client = requests.Session()
+            self._sync_client.trust_env = self._trust_env
 
         return self._sync_client
 
@@ -342,7 +344,7 @@ class HTTPConnection:
     # required, so that the client is only accessible inside async event loop
     async def get_async_client(self) -> aiohttp.ClientSession:
         if self._async_client is None or not self.reuse_client:
-            self._async_client = aiohttp.ClientSession(trust_env=True)
+            self._async_client = aiohttp.ClientSession(trust_env=self._trust_env)
 
         return self._async_client
 
