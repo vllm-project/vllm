@@ -1151,6 +1151,24 @@ def _max_decode_logits_rows(num_batched_tokens: int) -> int:
     return min(num_batched_tokens, max_num_seqs * (1 + num_spec))
 
 
+@functools.lru_cache
+def _dcp_merge_params() -> tuple[int, int, int]:
+    """(world, rank, interleave) for the indexer top-k merge, cached per
+    process; only consulted when the builder produced DCP metadata."""
+    from vllm.config import get_current_vllm_config
+    from vllm.distributed import get_dcp_group
+
+    try:
+        group = get_dcp_group()
+    except AssertionError:
+        # DCP group not initialized (single-process runs).
+        return 1, 0, 1
+    interleave = (
+        get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
+    )
+    return group.world_size, group.rank_in_group, interleave
+
+
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -1373,6 +1391,26 @@ def rocm_aiter_sparse_attn_indexer(
                     topk_tokens,
                 )
 
+            dcp_world, dcp_rank, cp_interleave = _dcp_merge_params()
+            if dcp_world > 1 and chunk.pcp_deinterleave_idx is None:
+                # DCP: local-shard top-k -> candidate exchange -> global ids,
+                # ragged row starts bound each row's local candidates. The
+                # PCP+DCP gather path (deinterleave set) already ran over the
+                # whole context and needs no merge.
+                from vllm.model_executor.layers.sparse_attn_indexer import (
+                    _merge_dcp_topk_global,
+                )
+
+                _merge_dcp_topk_global(
+                    logits,
+                    topk_indices,
+                    topk_tokens,
+                    dcp_rank,
+                    dcp_world,
+                    cp_interleave,
+                    row_starts=chunk.cu_seqlen_ks,
+                )
+
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
         assert decode_metadata is not None
@@ -1474,6 +1512,25 @@ def rocm_aiter_sparse_attn_indexer(
                 logits.stride(0),
                 logits.stride(1),
                 topk_tokens,
+            )
+
+        if decode_metadata.global_seq_lens is not None:
+            # DCP: the rows above were scored and top-k'd against this rank's
+            # KV shard only; exchange the per-rank candidates and overwrite
+            # with the global top-k ids (the attention backend localizes them
+            # back per rank). Same merge the native path runs.
+            from vllm.model_executor.layers.sparse_attn_indexer import (
+                _merge_dcp_topk_global,
+            )
+
+            dcp_world, dcp_rank, cp_interleave = _dcp_merge_params()
+            _merge_dcp_topk_global(
+                logits,
+                topk_indices,
+                topk_tokens,
+                dcp_rank,
+                dcp_world,
+                cp_interleave,
             )
 
         if decode_metadata.requires_padding:
