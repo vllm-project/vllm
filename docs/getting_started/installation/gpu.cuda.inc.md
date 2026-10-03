@@ -25,6 +25,20 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 uv pip install vllm --torch-backend=auto
 ```
 
+!!! note "Upgrading FlashInfer optional packages"
+    vLLM installs `flashinfer-python` from PyPI. The optional `flashinfer-cubin`
+    and `flashinfer-jit-cache` packages are hosted on
+    [flashinfer.ai/whl](https://flashinfer.ai/whl), not current PyPI.
+
+    If you upgrade vLLM with `pip install -U vllm` while an older `flashinfer-cubin`
+    remains installed, `import flashinfer` can fail with a version mismatch. Either
+    upgrade the optional packages (`flashinfer install-cubin-wheel` and
+    `flashinfer install-jit-cache-wheel`; see
+    [FlashInfer artifact management](https://docs.flashinfer.ai/cli.html#artifact-management)),
+    or uninstall `flashinfer-cubin` to use runtime JIT instead.
+
+    On DGX Spark / GB10 (SM121), `flashinfer-cubin` is optional.
+
 ??? console "pip"
     ```bash
     # Install vLLM with CUDA 12.9.
