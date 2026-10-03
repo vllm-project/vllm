@@ -546,7 +546,8 @@ def select_common_block_size(
     raise ValueError(
         f"No common block size for {kv_manager_block_size} ("
         + "; ".join(
-            f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}" for b in backends
+            f"{b.get_name()}: {b.get_supported_kernel_block_sizes(s)}"
+            for b, s in zip(backends, specs, strict=True)
         )
         + ")."
     )
