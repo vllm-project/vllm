@@ -26,9 +26,15 @@ NATIVE = rocm_aiter_mla._NATIVE_CPRR_HEADS
 MIN_QLEN = rocm_aiter_mla._MIN_CPRR_QLEN
 
 
-def test_dcp_verify_env_defaults_to_segmented(monkeypatch):
+def test_dcp_verify_env_defaults_to_auto(monkeypatch):
     monkeypatch.delenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", raising=False)
-    assert rocm_aiter_mla.envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY == "segmented"
+    assert rocm_aiter_mla.envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY == "auto"
+
+
+@pytest.mark.parametrize("route", ["auto", "asm", "segmented"])
+def test_dcp_verify_env_accepts_routes(monkeypatch, route):
+    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", route)
+    assert route == rocm_aiter_mla.envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY
 
 
 def test_dcp_verify_env_rejects_unknown_route(monkeypatch):
