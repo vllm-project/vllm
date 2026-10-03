@@ -48,6 +48,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       pytest -v -s kernels/core/test_uva.py'
+
 - label: Mamba SSD Tensor-Descriptor Tests
   key: mamba-ssd-tensor-descriptor-tests
   timeout_in_minutes: 30
@@ -63,13 +64,21 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
+    - requirements/xpu.txt
+    - vllm/model_executor/layers/mamba/ops/mamba_ssm.py
+    - vllm/model_executor/layers/mamba/ops/ssd_bmm.py
     - vllm/model_executor/layers/mamba/ops/ssd_chunk_scan.py
     - vllm/model_executor/layers/mamba/ops/ssd_chunk_state.py
+    - vllm/model_executor/layers/mamba/ops/ssd_combined.py
+    - vllm/model_executor/layers/mamba/ops/ssd_state_passing.py
     - vllm/model_executor/layers/mamba/ops/triton_helpers.py
+    - vllm/triton_utils/__init__.py
+    - vllm/triton_utils/allocation.py
     - vllm/triton_utils/tensor_descriptor.py
-    - tests/kernels/mamba/test_ssd_tensor_descriptor.py
+    - vllm/v1/attention/backends/mamba2_attn.py
+    - tests/kernels/mamba/test_mamba_ssm_ssd.py
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s kernels/mamba/test_ssd_tensor_descriptor.py'
+      pytest -v -s kernels/mamba/test_mamba_ssm_ssd.py -k ssd_td'
