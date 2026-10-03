@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
+    partial_tail_block_ranges,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BlobBlockHashes,
@@ -56,7 +57,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     StoreShardId,
     TailKeyBoundary,
     TPShardedStoreLayout,
-    partial_tail_block_indices,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # noqa: E501
     LOOKUP_MSG,
@@ -86,7 +86,6 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
-    get_mamba_prefill_checkpoint_position,
     group_kernel_blocks,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -616,6 +615,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self,
         req_meta: ReqMeta,
         boundary: int,
+        tail_blocks_by_group: dict[int, tuple[int, range]],
         mamba_offloads: list[tuple[int, int, int]],
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
         """Puts for the request's sub-block partial tail (its last prompt hash
@@ -629,41 +629,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
         boundary block by the boundary sub-hash; a mamba "align" group
         contributes only its boundary block, from the core-provided CoW block.
         """
-        if any(position != boundary for _, _, position in mamba_offloads):
-            raise ValueError(
-                "Sub-block partial-tail offloads for one request must share a boundary"
-            )
         hash_block_size = self.coord.hash_block_size
-        if boundary == 0 or boundary // hash_block_size - 1 >= len(
-            req_meta.block_hashes
-        ):
-            return []
-
         mamba_block_ids = {
             group_id: block_id for group_id, block_id, _ in mamba_offloads
         }
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
         for g_idx, db in enumerate(self.token_databases):
-            if not self.group_participates[g_idx]:
+            if not self.group_participates[g_idx] or g_idx not in tail_blocks_by_group:
                 continue
-            group_boundary = boundary + self.coord.eagle_proof_margin_by_group.get(
-                g_idx, 0
-            )
-            completed = req_meta.completed_token_len
-            if completed is None:
-                completed = boundary
-            if group_boundary > completed:
-                continue
-            if group_boundary // hash_block_size > len(req_meta.block_hashes):
-                continue
+            group_boundary, block_indices = tail_blocks_by_group[g_idx]
             group_blocks = req_meta.block_ids[g_idx]
             # Distribute across ranks by the same rule as normal chunks.
             put_step = self.group_put_steps[g_idx]
             put_step_rank = (self.tp_rank + g_idx) % put_step
-            # Earlier full blocks belong to normal save jobs, not this tail.
-            for block_idx in partial_tail_block_indices(
-                boundary, group_boundary, db.block_size, self.coord.lcm_block_size
-            ):
+            for block_idx in block_indices:
                 if block_idx % put_step != put_step_rank:
                     continue
                 valid_end = min((block_idx + 1) * db.block_size, group_boundary)
@@ -716,13 +695,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         """
         mamba_offloads = req_meta.boundary_state_offloads or []
-        num_prompt_tokens = req_meta.num_prompt_tokens or 0
-        publish_tail = (
-            req_meta.completed_token_len is not None
-            and 0 < num_prompt_tokens <= req_meta.completed_token_len
-            and self.coord.enable_partial_hash_hits
+        if not req_meta.block_hashes:
+            return True
+        partial_tail = partial_tail_block_ranges(
+            self.coord, req_meta, [db.block_size for db in self.token_databases]
         )
-        if not req_meta.block_hashes or not (mamba_offloads or publish_tail):
+        if not mamba_offloads and partial_tail is None:
             return True
 
         mamba_snapshots: list[tuple[int, int, int]] = []
@@ -735,16 +713,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 mamba_tails.append(entry)
 
         puts = self._boundary_snapshot_puts(req_meta, mamba_snapshots)
-        if self.coord.enable_partial_hash_hits and (mamba_tails or publish_tail):
-            boundary = get_mamba_prefill_checkpoint_position(
-                num_prompt_tokens,
-                self.coord.hash_block_size,
-                bool(self.coord.eagle_proof_margin_by_group),
+        if partial_tail is not None:
+            boundary, tail_blocks_by_group = partial_tail
+            puts.extend(
+                self._sub_block_tail_puts(
+                    req_meta, boundary, tail_blocks_by_group, mamba_tails
+                )
             )
-            assert all(position == boundary for _, _, position in mamba_tails), (
-                "Mamba tail offloads must match the prompt checkpoint boundary"
-            )
-            puts.extend(self._sub_block_tail_puts(req_meta, boundary, mamba_tails))
         puts = list({put[0]: put for put in puts}.values())
 
         if not puts:
