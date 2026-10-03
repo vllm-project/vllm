@@ -365,11 +365,13 @@ def test_fused_moe_lora_kernel(
 @pytest.mark.parametrize("max_lora_rank", [128, 256])
 @pytest.mark.parametrize("add_inputs", [True, False])
 @pytest.mark.parametrize("num_slices", [1, 2])
+@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 def test_fused_moe_lora_kernel_large_rank_fallback(
     max_lora_rank,
     add_inputs,
     num_slices,
+    dtype,
     device,
 ):
     """Ranks above the one-shot limit fall back to shrink/expand kernels."""
@@ -384,8 +386,6 @@ def test_fused_moe_lora_kernel_large_rank_fallback(
     N = 256
     K = 256
     block_size = 16
-    dtype = torch.bfloat16
-
     topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
         num_tokens, num_sequences, max_loras, num_experts, top_k_num
     )
