@@ -129,6 +129,8 @@ pub fn lower_sampling_params(
         logprobs,
         prompt_logprobs,
         logprob_token_ids.as_deref(),
+        prompt_logprob_token_ids.as_deref(),
+        prompt_logprob_start,
         sampling_limits,
     )?;
     validate_repetition_detection(repetition_detection.as_ref())?;
@@ -154,7 +156,7 @@ pub fn lower_sampling_params(
         prompt_logprob_token_ids,
         prompt_logprob_start,
         prompt_len,
-        sampling_limits,
+        sampling_limits.model_vocab_size,
     )?;
     let min_tokens = min_tokens.unwrap_or(0);
     if min_tokens > max_tokens {
