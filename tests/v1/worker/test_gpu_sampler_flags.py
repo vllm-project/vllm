@@ -30,7 +30,10 @@ class MockReasoningConfig:
     natural_reasoning_end_token_ids = [91]
 
 
-def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> Sampler:
+def _make_sampler(
+    custom_logits_processors: Sequence[LogitsProcessor] = (),
+    default_seed: Sequence[int] | None = None,
+) -> Sampler:
     req_states = RequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -46,6 +49,7 @@ def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> S
         device=DEVICE,
         req_states=req_states,
         custom_logits_processors=custom_logits_processors,
+        default_seed=default_seed,
     )
 
 
@@ -119,3 +123,32 @@ def test_logits_processing_cache_only_checks_active_requests():
 
     assert not np.any(sampler.needs_logits_processing[sampling_only])
     assert np.any(sampler.needs_logits_processing[with_processing])
+
+
+def test_unseeded_requests_get_distinct_seeds_per_data_parallel_rank():
+    """DP engines share the engine seed; their n-th unseeded requests must still
+    draw different sampling seeds, or identical prompts sample identically."""
+
+    def seeds(default_seed):
+        sampler = _make_sampler(default_seed=default_seed)
+        for idx in range(4):
+            sampler.add_request(idx, SamplingParams(temperature=1.0))
+        return sampler.sampling_states.seeds.np[:4].tolist()
+
+    assert seeds((42, 0)) == seeds((42, 0))
+    assert seeds((42, 0)) != seeds((42, 1))
+    assert len(set(seeds((42, 0)))) == 4
+    sampler = _make_sampler(default_seed=(42, 0))
+    sampler.add_request(0, SamplingParams(temperature=1.0, seed=7))
+    assert sampler.sampling_states.seeds.np[0] == 7
+
+
+def test_fused_sampler_generator_differs_per_data_parallel_rank():
+    """Unseeded top-k/top-p requests sample from the sampler's own generator;
+    it must differ across DP ranks and be reproducible for one rank."""
+
+    def initial_seed(default_seed):
+        return _make_sampler(default_seed=default_seed).generator.initial_seed()
+
+    assert initial_seed((42, 0)) == initial_seed((42, 0))
+    assert initial_seed((42, 0)) != initial_seed((42, 1))

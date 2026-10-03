@@ -463,6 +463,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "enable_trace_replay": self.model_config.enable_trace_replay,
                 "return_sampling_mask": self.model_config.return_sampling_mask,
                 "custom_logits_processors": custom_logits_processors,
+                "default_seed": (
+                    self.model_config.seed & 0xFFFFFFFFFFFFFFFF,
+                    self.parallel_config.data_parallel_rank,
+                ),
             }
             if self.vllm_config.watermark_config is None:
                 self.sampler = Sampler(**sampler_kwargs)
