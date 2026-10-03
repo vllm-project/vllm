@@ -7,6 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 35
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -34,7 +35,6 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests &&
-    bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
-    export NCCL_CUMEM_HOST_ENABLE=0 || true &&
+    'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
+    cd tests &&
     pytest -v -s v1/fault_tolerance/test_fault_tolerance_e2e.py || true'

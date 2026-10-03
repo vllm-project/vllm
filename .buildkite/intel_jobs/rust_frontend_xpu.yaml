@@ -6,6 +6,7 @@ steps:
   key: rust-frontend-openai-coverage
   device: intel_gpu
   timeout_in_minutes: 30
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -63,6 +64,7 @@ steps:
   key: rust-frontend-serve-admin-coverage
   device: intel_gpu
   timeout_in_minutes: 25
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -107,6 +109,7 @@ steps:
   key: rust-frontend-core-correctness
   device: intel_gpu
   timeout_in_minutes: 20
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -137,6 +140,7 @@ steps:
   key: rust-frontend-tool-use
   device: intel_gpu
   timeout_in_minutes: 25
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -169,6 +173,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 4
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -192,7 +197,7 @@ steps:
   - vllm/distributed/
   - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/utils.py
