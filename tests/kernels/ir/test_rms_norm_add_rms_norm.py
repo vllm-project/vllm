@@ -320,9 +320,7 @@ def test_compiled_op_specializations(
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton impl is CUDA-only")
 def test_triton_rounding_mode_changes_low_precision_result():
     x = torch.ones((1, 2), dtype=torch.bfloat16, device=DEVICE)
-    residual = torch.tensor(
-        [[-0.25, 0.01171875]], dtype=torch.bfloat16, device=DEVICE
-    )
+    residual = torch.tensor([[-0.25, 0.01171875]], dtype=torch.bfloat16, device=DEVICE)
     weight = torch.ones(2, dtype=torch.bfloat16, device=DEVICE)
     args = (x, residual, weight, weight, 1e-6)
     triton_impl = OP.impls["triton"]
