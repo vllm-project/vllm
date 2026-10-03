@@ -89,6 +89,60 @@ def test_memory_profiling():
     lib.cudaFree(handle2)
 
 
+@create_new_process_for_each_test()
+def test_memory_profiling_excludes_compilation_peak():
+    """A compile-time spike must not be charged as activation memory.
+
+    torch.compile and Inductor autotuning allocate large temporaries inside
+    profile_run(), which runs inside the memory_profiling window. They are
+    freed before the first real forward, so charging them as activation
+    headroom shrinks the KV cache until the compile cache is warm (#54122).
+    A peak recorded before compilation must still survive, because the
+    multimodal encoder pass runs before the backbone compiles.
+    """
+    from vllm.compilation.monitor import monitor_torch_compile
+    from vllm.config import CompilationMode, VllmConfig
+
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+
+    _warmup = torch.zeros(1, device="cuda")
+    del _warmup
+    torch.accelerator.empty_cache()
+
+    baseline_snapshot = MemorySnapshot()
+
+    weights = torch.randn(64, 1024, 1024, device="cuda", dtype=torch.float32)
+    weights_memory = 64 * 1024 * 1024 * 4  # 256 MiB
+
+    with memory_profiling(
+        baseline_snapshot=baseline_snapshot, weights_memory=weights_memory
+    ) as result:
+        # Encoder pass, before anything compiles: 512 MiB.
+        encoder_spike = torch.randn(128, 1024, 1024, device="cuda", dtype=torch.float32)
+        del encoder_spike
+
+        # Compilation allocates far more than any forward, then frees it: 2 GiB.
+        with monitor_torch_compile(vllm_config):
+            compile_spike = torch.randn(
+                512, 1024, 1024, device="cuda", dtype=torch.float32
+            )
+            del compile_spike
+
+        # The profiling forward itself: 256 MiB.
+        activation_spike = torch.randn(
+            64, 1024, 1024, device="cuda", dtype=torch.float32
+        )
+        del activation_spike
+
+    # The 2 GiB compile spike is excluded and the 512 MiB encoder peak, the
+    # largest real one, is kept. Without the fix this is the 2 GiB spike;
+    # discarding the peak outright instead would report the 256 MiB forward.
+    assert result.torch_peak_increase == 512 * 1024 * 1024
+
+    del weights
+
+
 def test_memory_snapshot_uses_psutil_on_integrated_gpu():
     """On integrated (UMA) GPUs, free_memory should come from psutil."""
     mock_cuda_free = 40 * 1024**3
