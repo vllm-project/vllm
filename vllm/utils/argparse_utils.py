@@ -7,7 +7,6 @@ import json
 import sys
 import textwrap
 from argparse import (
-    Action,
     ArgumentDefaultsHelpFormatter,
     ArgumentParser,
     ArgumentTypeError,
@@ -119,7 +118,6 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpForma
 class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
-    _deprecated: set[Action] = set()
     _json_tip: str = (
         "When passing JSON CLI arguments, the following sets of arguments "
         "are equivalent:\n"
@@ -160,9 +158,10 @@ class FlexibleArgumentParser(ArgumentParser):
 
         def parse_known_args(self, args=None, namespace=None):
             namespace, args = super().parse_known_args(args, namespace)
-            for action in FlexibleArgumentParser._deprecated:
+            for action in self._actions:
                 if (
-                    hasattr(namespace, dest := action.dest)
+                    getattr(action, "deprecated", False)
+                    and hasattr(namespace, dest := action.dest)
                     and getattr(namespace, dest) != action.default
                 ):
                     logger.warning_once("argument '%s' is deprecated", dest)
@@ -171,16 +170,14 @@ class FlexibleArgumentParser(ArgumentParser):
         def add_argument(self, *args, **kwargs):
             deprecated = kwargs.pop("deprecated", False)
             action = super().add_argument(*args, **kwargs)
-            if deprecated:
-                FlexibleArgumentParser._deprecated.add(action)
+            action.deprecated = deprecated  # type: ignore[attr-defined]
             return action
 
         class _FlexibleArgumentGroup(_ArgumentGroup):
             def add_argument(self, *args, **kwargs):
                 deprecated = kwargs.pop("deprecated", False)
                 action = super().add_argument(*args, **kwargs)
-                if deprecated:
-                    FlexibleArgumentParser._deprecated.add(action)
+                action.deprecated = deprecated  # type: ignore[attr-defined]
                 return action
 
         def add_argument_group(self, *args, **kwargs):
