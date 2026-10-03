@@ -247,6 +247,36 @@ def test_consumer_xfer_handle_ack_nack_returns_false():
     data.post_read.assert_not_called()
 
 
+def test_consumer_xfer_handle_ack_block_count_mismatch_returns_false():
+    """A shorter remote index list must fail the transfer, not raise."""
+    data = _make_data()
+    x = _xfer(data)
+    assert x.handle_ack(_ok_ack(src_indices=[0]), agent_name="agent-1") is False
+    assert x.transfer_handle is None
+    data.post_read.assert_not_called()
+
+
+def test_consumer_xfer_handle_ack_non_list_indices_returns_false():
+    data = _make_data()
+    x = _xfer(data)
+    ack = _ok_ack(src_indices=[5, 6])
+    ack.src_block_indices = "ab"  # type: ignore[assignment]
+    assert x.handle_ack(ack, agent_name="agent-1") is False
+    assert x.transfer_handle is None
+    data.post_read.assert_not_called()
+
+
+def test_consumer_xfer_handle_ack_post_read_value_error_returns_false():
+    """The data-plane mismatch error must not escape the transfer."""
+    data = _make_data()
+    data.post_read.side_effect = ValueError(
+        "EC: local/remote block count mismatch (2 vs 2)"
+    )
+    x = _xfer(data)
+    assert x.handle_ack(_ok_ack(src_indices=[5, 6]), agent_name="agent-1") is False
+    assert x.transfer_handle is None
+
+
 # ── ConsumerXfer.poll — WAITING_ACK ──────────────────────────────────────────
 
 
@@ -433,6 +463,31 @@ def test_consumer_session_poll_nack_goes_to_tombstoned():
     results = s.take_results()
     assert "h1" in results.tombstoned
     assert not results.completed
+
+
+def test_consumer_session_poll_block_count_mismatch_tombstones():
+    """An OK ack whose block count differs from the local allocation fails
+    the transfer and does not complete it.
+    """
+    import msgspec
+
+    data = _make_data()
+    s = _make_consumer_session(data)
+    s.start_xfer("h1", [0, 1], deadline=time.monotonic() + 10)
+    ack = XferAck(
+        mm_hash="h1",
+        status=XferStatus.OK,
+        session_id=s._session_id,
+        src_block_indices=[0],
+        agent_metadata=b"meta",
+        mem_descriptor=b"desc",
+    )
+    data.add_remote_peer.return_value = "agent-1"
+    s.poll([msgspec.msgpack.encode(ack)], time.monotonic())
+    results = s.take_results()
+    assert "h1" in results.tombstoned
+    assert not results.completed
+    data.post_read.assert_not_called()
 
 
 def test_consumer_session_poll_not_ready_nack_goes_to_retryable():
