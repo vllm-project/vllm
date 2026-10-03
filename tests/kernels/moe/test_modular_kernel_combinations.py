@@ -42,7 +42,7 @@ from .modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
     parallel_launch_with_config,
 )
-from .utils import check_accuracy
+from .utils import check_accuracy, make_test_weights
 
 has_any_multi_gpu_package = (
     has_deep_ep() or has_deep_gemm() or has_flashinfer_cutlass_fused_moe()
@@ -753,14 +753,12 @@ def _slice_unpadded_weights(
     k_unpadded: int,
     n_unpadded: int,
 ) -> WeightTensors:
-    """Derive the "real" (unpadded) sub-block of a padded WeightTensors: same
-    weight values, restricted to the region hidden_pad/intermediate_pad keeps."""
+    """Derive the unpadded sub-block of a padded WeightTensors: same values,
+    restricted to the region hidden_pad/intermediate_pad keeps.
+
+    Scale-shape choice (per_out_ch) must match _make_padding_matrix_weights()."""
     block_shape = quant_config.block_shape if quant_config is not None else None
-    # WeightTensors.make() (common.py) builds weight scales with
-    # per_out_ch_quant=config.is_per_act_token_quant -- i.e. the weight
-    # scale's per-channel-ness is tied to whether *activations* are
-    # per-token quantized, not to `quant_config.per_out_ch_quant` itself.
-    per_out_ch = quant_config is not None and quant_config.per_act_token_quant
+    per_out_ch = quant_config is not None and quant_config.per_out_ch_quant
 
     w1 = _slice_gate_up_rows(weights.w1[:, :, :k_unpadded], n_unpadded)
     w2 = weights.w2[:, :k_unpadded, :n_unpadded]
@@ -784,6 +782,28 @@ def _slice_unpadded_weights(
         w2_scale = weights.w2_scale
 
     return WeightTensors(w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale)
+
+
+def _make_padding_matrix_weights(config: Config) -> WeightTensors:
+    """Like WeightTensors.make(), but scales weights by
+    config.is_per_out_ch_quant instead of is_per_act_token_quant.
+
+    WeightTensors.make() ties weight-scale shape to activation quant, so
+    fp8_tensor_token would get per-channel scales despite being a per-tensor
+    weight scheme. Scoped here rather than fixing WeightTensors.make(),
+    which other tests depend on."""
+    (_, w1, w1_scale, w1_gs), (_, w2, w2_scale, w2_gs) = make_test_weights(
+        e=config.E,
+        n=config.N,
+        k=config.K,
+        in_dtype=config.dtype,
+        quant_dtype=config.quant_dtype,
+        block_shape=config.quant_block_shape,
+        per_out_ch_quant=config.is_per_out_ch_quant,
+    )
+    return WeightTensors(
+        w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale, w1_gs=w1_gs, w2_gs=w2_gs
+    )
 
 
 def _slice_unpadded_rank_tensors(
@@ -866,10 +886,19 @@ def _aiter_padding_matrix_worker(
             padded_config, unpadded_weights, unpadded_rank_tensors
         )
 
-    if padded_config.quant_config is not None:
-        check_accuracy(ref_out, mk_out, atol=3e-2, rtol=3e-2, percent=0.9)
-    else:
-        torch.testing.assert_close(ref_out, mk_out, atol=3e-2, rtol=3e-2)
+    # ref_out's magnitude here (~1e-3-1e-2) is below atol=3e-2, so a zeroed-out
+    # mk_out would still pass check_accuracy below -- guard against that.
+    ref_scale = ref_out.abs().mean()
+    mk_scale = mk_out.abs().mean()
+    assert mk_scale > 0.5 * ref_scale, (
+        f"AiterExperts output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
+        f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
+    )
+
+    # Lenient check for every scheme, including unquantized: a strict
+    # assert_close(atol=rtol=3e-2) spuriously fails ~0.1-0.2% of elements
+    # on MI300 even for unquantized AiterExperts (confirmed on hardware).
+    check_accuracy(ref_out, mk_out, atol=3e-2, rtol=3e-2, percent=0.9)
 
 
 @require_aiter_moe
@@ -929,7 +958,7 @@ def test_aiter_moe_padding_matrix(mode: str, quant_config: TestMoEQuantConfig | 
         f"AiterExperts does not support quant scheme {quant_config}."
     )
 
-    weights = WeightTensors.make(config)
+    weights = _make_padding_matrix_weights(config)
     vllm_config, env_dict = config.make_env_data()
 
     hidden_pad_expected = _PADDING_HIDDEN_PAD_EXPECTED if pad_hidden else 0
