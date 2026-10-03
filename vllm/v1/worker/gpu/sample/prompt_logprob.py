@@ -57,8 +57,7 @@ class PromptLogprobsWorker:
             # Decoded arrays may be read-only; torch.from_numpy warns on those.
             if not ids.flags.writeable:
                 ids = ids.copy()
-            # Upload int32 and widen on device: gather takes int64 indices.
-            ids = async_tensor_h2d(ids, self.device).long()
+            ids = async_tensor_h2d(ids, self.device, torch.int64)
             self.token_id_scores[req_id] = _TokenIdScores(
                 ids.clamp_min(0), ids < 0, sampling_params.prompt_logprob_start or 0
             )
