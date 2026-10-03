@@ -8,7 +8,6 @@ from typing import NamedTuple, cast
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ReqMeta,
     chunk_hashes_for_block_size,
-    partial_tail_block_indices,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -126,54 +125,24 @@ class MooncakeStoreCoordinator:
     def tail_attention_block_ids(self, req_meta: ReqMeta) -> list[int]:
         """Return full-attention block IDs needed to complete a Mamba tail hit.
 
-        Include KV beyond normal LCM-aligned saves and any EAGLE proof margin.
-        For example, with LCM 16, attention blocks of 4 tokens, and a Mamba
-        checkpoint at 44, select the blocks covering [32, 44).
-
         Mamba state IDs are handled separately.
         """
-        if not self.enable_partial_hash_hits or not req_meta.block_hashes:
-            return []
-        mamba_tails = [
-            boundary
-            for group_id, _, boundary in req_meta.boundary_state_offloads or []
-            if boundary % self.kv_cache_groups[group_id].kv_cache_spec.block_size
-        ]
-        completed = req_meta.completed_token_len
-        prompt_tokens = req_meta.num_prompt_tokens
-        if prompt_tokens is None:
-            assert not mamba_tails, "Mamba tail offloads require the prompt length"
-            return []
-        boundary = get_mamba_prefill_checkpoint_position(
-            prompt_tokens,
-            self.hash_block_size,
-            bool(self.eagle_proof_margin_by_group),
+        partial_tail = partial_tail_block_ranges(
+            self,
+            req_meta,
+            [group.kv_cache_spec.block_size for group in self.kv_cache_groups],
         )
-        assert all(position == boundary for position in mamba_tails), (
-            "Mamba tail offloads must match the prompt checkpoint boundary"
-        )
-        if not mamba_tails and (completed is None or prompt_tokens > completed):
-            return []
-        if boundary <= 0 or boundary // self.hash_block_size > len(
-            req_meta.block_hashes
-        ):
+        if partial_tail is None:
             return []
         block_ids: list[int] = []
-        for group_id in range(len(self.kv_cache_groups)):
+        _, tail_blocks_by_group = partial_tail
+        for group_id, (_, block_indices) in tail_blocks_by_group.items():
             if group_id in self.mamba_group_ids:
                 continue
-            proof_end = boundary + self.eagle_proof_margin_by_group.get(group_id, 0)
-            if proof_end > (boundary if completed is None else completed):
-                continue
-            if proof_end // self.hash_block_size > len(req_meta.block_hashes):
-                continue
             group_blocks = req_meta.block_ids[group_id]
-            block_size = self.kv_cache_groups[group_id].kv_cache_spec.block_size
             block_ids.extend(
                 group_blocks[idx]
-                for idx in partial_tail_block_indices(
-                    boundary, proof_end, block_size, self.lcm_block_size
-                )
+                for idx in block_indices
                 if idx < len(group_blocks) and group_blocks[idx] != NULL_BLOCK_ID
             )
         return block_ids
@@ -524,3 +493,62 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
+
+
+def partial_tail_block_ranges(
+    coord: MooncakeStoreCoordinator,
+    req_meta: ReqMeta,
+    block_sizes: Sequence[int],
+) -> tuple[int, dict[int, tuple[int, range]]] | None:
+    """Locate the blocks a partial-tail save publishes for this request.
+
+    A later request resumes at the prompt's Mamba checkpoint (``boundary``) only
+    if both pieces of KV are stored:
+
+    - Mamba groups: the state at ``boundary``, i.e. the last block of the range.
+    - Full-attention groups: the KV from the last LCM-aligned normal save up to
+      ``boundary`` plus the group's EAGLE proof margin (``proof_end``).
+
+    Returns ``(boundary, {group_id: (proof_end, block_indices)})``, or None when
+    there is no tail to publish. Groups whose proof is not computed yet are
+    omitted. For example, with LCM 16, blocks of 4 tokens, and a checkpoint at
+    44, the full-attention blocks are 8-10, covering [32, 44).
+
+    ``block_sizes`` are the per-group block sizes, indexed like
+    ``req_meta.block_ids``.
+    """
+    mamba_tails = [
+        position
+        for group_id, _, position in req_meta.boundary_state_offloads or []
+        if position % block_sizes[group_id]
+    ]
+    prompt_tokens = req_meta.num_prompt_tokens or 0
+    completed = req_meta.completed_token_len
+    # The tail is due once the prompt is computed, or when Mamba hands it off.
+    if not mamba_tails and (completed is None or not 0 < prompt_tokens <= completed):
+        return None
+    if not coord.enable_partial_hash_hits or not req_meta.block_hashes:
+        return None
+    hash_block_size = coord.hash_block_size
+    boundary = get_mamba_prefill_checkpoint_position(
+        prompt_tokens, hash_block_size, bool(coord.eagle_proof_margin_by_group)
+    )
+    assert all(position == boundary for position in mamba_tails), (
+        "Mamba tail offloads must match the prompt checkpoint boundary"
+    )
+    num_hashes = len(req_meta.block_hashes)
+    if boundary == 0 or boundary // hash_block_size > num_hashes:
+        return None
+    if completed is None:
+        completed = boundary
+    start = boundary // coord.lcm_block_size * coord.lcm_block_size
+    tail_blocks_by_group: dict[int, tuple[int, range]] = {}
+    for group_id, block_size in enumerate(block_sizes):
+        proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
+        if proof_end > completed or proof_end // hash_block_size > num_hashes:
+            continue
+        tail_blocks_by_group[group_id] = (
+            proof_end,
+            range(start // block_size, cdiv(proof_end, block_size)),
+        )
+    return boundary, tail_blocks_by_group

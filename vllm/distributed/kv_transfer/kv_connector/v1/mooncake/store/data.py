@@ -27,28 +27,6 @@ from vllm.v1.core.kv_cache_utils import (
 logger = init_logger(__name__)
 
 
-def partial_tail_block_indices(
-    boundary: int, proof_end: int, block_size: int, lcm_block_size: int
-) -> range:
-    """Return full-attention blocks IDs for the partial tail.
-
-    Args:
-        boundary: Prefix-cache replay boundary.
-        proof_end: Full-attention boundary including the EAGLE margin;
-            When EAGLE is not used, this becomes same as boundary.
-        block_size: Physical block size.
-        lcm_block_size: LCM block size used for normal external saves.
-
-    Example: boundary=44, proof_end=48, block_size=4,
-    and lcm_block_size=16, return indices 8–11, covering [32, 48).
-    Without EAGLE, proof_end=44, the returned indices are 8–10.
-
-    """
-    last_block = cdiv(proof_end, block_size) - 1
-    start = boundary // lcm_block_size * lcm_block_size
-    return range(start // block_size, last_block + 1)
-
-
 class BlobBlockHashes(Sequence[BlockHash]):
     """Lazy view over a flat buffer of fixed-size block hashes to avoid the overhead
     of materializing all hashes upfront.
