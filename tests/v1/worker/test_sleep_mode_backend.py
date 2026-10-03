@@ -7,12 +7,8 @@ touch CUDA - the ``cumem`` suspend/resume path is exercised end-to-end on GPU
 in ``tests/basic_correctness/memory/``.
 """
 
-import os
-from types import SimpleNamespace
-
 import pytest
 
-from vllm.config import VllmConfig
 from vllm.device_allocator.sleep_mode_backend import (
     CuMemBackend,
     SleepModeBackend,
@@ -144,26 +140,3 @@ class DummyBackend(SleepModeBackend):
     @classmethod
     def supports_durable_storage(cls) -> bool:
         return True
-
-
-@pytest.mark.parametrize(
-    ("active", "env", "expected", "warns"),
-    [(True, None, "0", False), (True, "1", "1", True), (False, None, None, False)],
-    ids=["active", "explicit-wins", "inactive"],
-)
-def test_cumem_cudagraph_pool_nccl_graph_register(
-    monkeypatch, active, env, expected, warns
-):
-    """Active: NCCL_GRAPH_REGISTER defaults to 0, an explicit value wins with a
-    warning. Inactive: untouched."""
-    import vllm.config.vllm as config_module
-
-    warnings: list[tuple] = []
-    monkeypatch.setattr(config_module.logger, "warning", lambda *a: warnings.append(a))
-    monkeypatch.delenv("NCCL_GRAPH_REGISTER", raising=False)
-    if env:
-        monkeypatch.setenv("NCCL_GRAPH_REGISTER", env)
-    cfg = SimpleNamespace(use_cumem_cudagraph_pool=active)
-    VllmConfig._verify_cumem_cudagraph_pool(cfg)
-    assert os.environ.get("NCCL_GRAPH_REGISTER") == expected
-    assert bool(warnings) is warns

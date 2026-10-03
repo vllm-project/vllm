@@ -1274,17 +1274,6 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
-    def _verify_cumem_cudagraph_pool(self) -> None:
-        """NCCL graph registration pins the offloaded pool, so default it off."""
-        if not self.use_cumem_cudagraph_pool:
-            return
-        # Set before workers start so that they inherit it.
-        value = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
-        if value != "0":
-            logger.warning(
-                "NCCL_GRAPH_REGISTER=%s pins the CUDA graph pool during sleep.", value
-            )
-
     def _verify_sampling_replay_config(self) -> None:
         model_config = self.model_config
         if model_config is None or not model_config.return_sampling_mask:
@@ -2347,7 +2336,14 @@ class VllmConfig:
                 custom_ops.append("+quant_fp8")
 
         self._verify_kv_transfer_compat()
-        self._verify_cumem_cudagraph_pool()
+        if self.use_cumem_cudagraph_pool:
+            # NCCL graph registration pins the offloaded pool; workers inherit this.
+            value = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
+            if value != "0":
+                logger.warning(
+                    "NCCL_GRAPH_REGISTER=%s pins the CUDA graph pool during sleep.",
+                    value,
+                )
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
 
