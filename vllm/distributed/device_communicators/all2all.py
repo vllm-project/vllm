@@ -735,6 +735,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
 
     rank: int
     world_size: int
+    low_precision_combine: bool = False
 
     def __init__(self, cpu_group):
         assert has_flashinfer_nvlink_one_sided(), (
@@ -755,6 +756,27 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.top_k = 0
         self.num_experts = 0
         self._combine_supports_output = False
+        self.low_precision_combine = self._resolve_low_precision_combine()
+
+    def _resolve_low_precision_combine(self) -> bool:
+        """Whether to use the low-precision combine: requested via the env var
+        and supported by the installed FlashInfer.
+        """
+        if not envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE:
+            return False
+        try:
+            supported = supports_kw(
+                MoeAlltoAll.combine, "use_low_precision", allow_var_kwargs=False
+            )
+        except (TypeError, ValueError):
+            supported = False
+        if not supported:
+            logger.warning_once(
+                "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE is set, but the "
+                "installed FlashInfer MoeAlltoAll.combine() does not accept "
+                "`use_low_precision`. Falling back to a BF16 combine."
+            )
+        return supported
 
     def initialize(
         self,
@@ -772,7 +794,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             + top_k * 4  # int32 topks ids
             + top_k * 4  # float32 topk weights
         )
-        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
+        # Sized from the bf16 payload passed to combine(), which is what the
+        # kernel checks this region against. Low-precision transport quantizes
+        # on write, so it does not shrink the requirement.
+        combine_payload_size_per_token = hidden_size * 2
         needed_workspace_size = moe_a2a_get_workspace_size_per_rank(
             ep_size=self.world_size,
             max_num_tokens=max_num_tokens,
@@ -888,8 +913,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
                 payload=payload,
                 runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
                 output=output,
+                use_low_precision=self.low_precision_combine,
             )
         else:
+            # FlashInfer < 0.6.16 has neither `output` nor `use_low_precision`.
             combined_output = self.moe_alltoall.combine(
                 payload=payload,
                 runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
