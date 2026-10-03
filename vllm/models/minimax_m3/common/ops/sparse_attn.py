@@ -456,8 +456,10 @@ def _merge_topk_attn_out_kernel(
     o = tl.load(o_ptrs, boundary_check=(0, 1), padding_option="zero")
     lse = tl.load(lse_ptrs)  # empty chunks contribute -inf -> weight 0
     lse_max = tl.max(lse, axis=0)
-    weights = tl.exp2(lse - lse_max)
-    weights = weights / tl.sum(weights, axis=0)
+    has_values = lse_max > float("-inf")
+    safe_lse_max = tl.where(has_values, lse_max, 0.0)
+    weights = tl.exp2(lse - safe_lse_max)
+    weights = weights / tl.where(has_values, tl.sum(weights, axis=0), 1.0)
     o_merged = tl.sum(o * weights[:, None], axis=0)
     out_ptrs = (
         out_ptr + pid_b * stride_out_n + pid_h * stride_out_h + off_d * stride_out_d
