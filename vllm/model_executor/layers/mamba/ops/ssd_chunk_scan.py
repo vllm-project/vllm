@@ -8,8 +8,13 @@
 
 from packaging import version
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp, td_compatible
-from vllm.triton_utils import tl, triton, use_tensor_descriptor
+from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.triton_utils import (
+    tensor_descriptor_compatible,
+    tl,
+    triton,
+    use_tensor_descriptor,
+)
 from vllm.triton_utils.allocation import set_triton_allocator
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
@@ -209,8 +214,9 @@ def _chunk_scan_fwd_kernel(
     BLOCK_SIZE_DSTATE: tl.constexpr,
     IS_TRITON_22: tl.constexpr,
     HAS_INITSTATES: tl.constexpr,
-    # Load/store the 2D tiles through tensor descriptors (Intel Xe 2D block
-    # reads); the pointer path below is dead-code-eliminated when set.
+    # Load/store the 2D tiles through tensor descriptors (TMA on NVIDIA
+    # sm90+, 2D block IO on Intel); the pointer-path branches are then
+    # compiled out.
     USE_TD: tl.constexpr = False,
 ):
     pid_c = tl.program_id(axis=1).to(tl.int64)
@@ -280,7 +286,7 @@ def _chunk_scan_fwd_kernel(
         # prev_states is stored [hdim, dstate], so load it that way and
         # transpose the tile. A new sequence without initial states has zero
         # prev_states, so skip the dot (acc is already zero) rather than
-        # merging a zeros tile into the loaded one, which spills on XPU.
+        # merging a zeros tile into the loaded one, which measured slower on XPU.
         BLOCK_K_DSTATE: tl.constexpr = (
             BLOCK_SIZE_DSTATE if BLOCK_SIZE_DSTATE <= 128 else BLOCK_SIZE_K
         )
@@ -544,11 +550,14 @@ def _chunk_scan_fwd(
         nheads,
     )
 
-    # TD tiles need a unit inner stride and 16-byte aligned bases/row strides.
-    use_td = use_tensor_descriptor() and all(
-        td_compatible(t) for t in (cb, x, C, states, out, z, initial_states)
+    # Any operand a descriptor cannot cover sends the whole launch down the
+    # pointer path.
+    use_td = use_tensor_descriptor() and tensor_descriptor_compatible(
+        cb, x, C, states, out, z, initial_states
     )
     if use_td:
+        # On every launch: Triton's allocator is a per-thread ContextVar, and
+        # DBO runs forwards on fresh threads.
         set_triton_allocator(x.device)
 
     z_strides = (z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0)

@@ -8,8 +8,13 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp, td_compatible
-from vllm.triton_utils import tl, triton, use_tensor_descriptor
+from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.triton_utils import (
+    tensor_descriptor_compatible,
+    tl,
+    triton,
+    use_tensor_descriptor,
+)
 from vllm.triton_utils.allocation import set_triton_allocator
 
 from .mamba_ssm import softplus
@@ -228,8 +233,9 @@ def _chunk_state_fwd_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
-    # Load/store the 2D tiles through tensor descriptors (Intel Xe 2D block
-    # reads); the pointer path below is dead-code-eliminated when set.
+    # Load/store the 2D tiles through tensor descriptors (TMA on NVIDIA
+    # sm90+, 2D block IO on Intel); the pointer-path branches are then
+    # compiled out.
     USE_TD: tl.constexpr = False,
 ):
     pid_c = tl.program_id(axis=1).to(tl.int64)
@@ -407,9 +413,12 @@ def _chunk_state_fwd(
             (nchunks, nheads, headdim, dstate), device=x.device, dtype=states_dtype
         )
 
-    # TD tiles need a unit inner stride and 16-byte aligned bases/row strides.
-    use_td = use_tensor_descriptor() and all(td_compatible(t) for t in (x, B, states))
+    # Any operand a descriptor cannot cover sends the whole launch down the
+    # pointer path.
+    use_td = use_tensor_descriptor() and tensor_descriptor_compatible(x, B, states)
     if use_td:
+        # On every launch: Triton's allocator is a per-thread ContextVar, and
+        # DBO runs forwards on fresh threads.
         set_triton_allocator(x.device)
 
     grid = lambda META: (
