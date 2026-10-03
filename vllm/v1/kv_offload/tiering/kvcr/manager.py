@@ -77,6 +77,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.policies.base import order_request_keys
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    ParentContext,
     ParentManager,
     SecondaryTierManager,
     TransferJob,
@@ -294,7 +295,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
-        primary_kv_view: memoryview,
+        parent_ctx: "ParentContext",
         tier_type: str,
         router_capabilities: Iterable[str] | None = None,
         control_host: str = "0.0.0.0",
@@ -315,9 +316,8 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         remote_fw_dram_backend: str = "UCX",
         backpressure_detector: "BackpressureDetector | None" = None,
     ) -> None:
-        super().__init__(
-            offloading_spec, primary_kv_view, tier_type, backpressure_detector
-        )
+        super().__init__(offloading_spec, parent_ctx, tier_type, backpressure_detector)
+        primary_kv_view = parent_ctx.kv_view
         selected_policy = _resolve_policy(policy)
         if (kvcr_service_socket_path is None) != (compatibility_digest is None):
             raise ValueError(
@@ -497,6 +497,12 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
+        if not job_metadata.materialize():
+            # Materialization / Allocation failed.
+            self._finished_jobs.append(
+                JobResult(job_id=job_metadata.job_id, success=True)
+            )
+            return
         blocks = {
             self._key_adapter.decode_from_framework(key): [
                 self._make_descriptor(chunk_id)
