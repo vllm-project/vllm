@@ -511,6 +511,8 @@ steps:
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
+  - vllm/triton_utils/allocation.py
+  - vllm/triton_utils/tensor_descriptor.py
   commands:
     - pytest -v -s kernels/mamba
   mirror:
