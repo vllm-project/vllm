@@ -13,3 +13,16 @@ def reset_default_torch_device():
     """
     yield
     torch.set_default_device(None)
+
+
+@pytest.fixture
+def batch_invariant_kernel() -> None:
+    """Require the packaged batch-invariant CUDA extension."""
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        require_batch_invariant_quant_kernel,
+    )
+
+    try:
+        require_batch_invariant_quant_kernel()
+    except RuntimeError as error:
+        pytest.skip(str(error))

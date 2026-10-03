@@ -7,7 +7,13 @@ import torch
 from torch import nn
 
 import vllm.models.deepseek_v4.nvidia.flashmla as flashmla_module
+from vllm.models.deepseek_v4.common.ops.cache_utils import (
+    combine_topk_swa_indices,
+    fill_c128_topk,
+    zero_invalid_lens,
+)
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
+from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize("sm120", [False, True])
@@ -1140,3 +1146,137 @@ def test_decode_sparse_fails_closed_without_scheduler_metadata(
             swa_only=True,
             output=torch.empty((2, 2, 8), dtype=torch.bfloat16),
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("top_k", [0, 128, 129, 512])
+@pytest.mark.usefixtures("batch_invariant_kernel")
+@torch.inference_mode()
+def test_fused_c4_decode_indices_match_existing_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    top_k: int,
+) -> None:
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+
+    rows = 32
+    window_size = 128
+    compress_ratio = 4
+    compressed_width = 4096
+    row_stride = compressed_width + window_size
+    output_width = ((top_k + window_size + 127) // 128) * 128
+    boundary_lens = torch.tensor(
+        [0, 1, 3, 4, 127, 128, 511, 512, 2047, 2048, 2049, 16048],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    seq_lens = boundary_lens.repeat(3)[:rows]
+    query_start_loc = torch.arange(rows + 1, dtype=torch.int32, device="cuda")
+    gather_lens = seq_lens.clamp_max(window_size)
+    topk_indices = torch.full((rows, top_k), -1, dtype=torch.int32, device="cuda")
+    for row, seq_len in enumerate(seq_lens.cpu().tolist()):
+        length = min(seq_len // compress_ratio, top_k)
+        if length:
+            topk_indices[row, :length] = torch.randperm(
+                length, dtype=torch.int32, device="cuda"
+            )
+    is_valid = torch.arange(rows, device="cuda") % 7 != 0
+
+    expected_indices = torch.empty(
+        (rows, output_width), dtype=torch.int32, device="cuda"
+    )
+    expected_lens = torch.empty(rows, dtype=torch.int32, device="cuda")
+    combine_topk_swa_indices(
+        topk_indices.clone(),
+        query_start_loc,
+        seq_lens,
+        gather_lens,
+        window_size,
+        compress_ratio,
+        top_k,
+        row_stride,
+        compressed_width,
+        out=(expected_indices, expected_lens),
+    )
+    zero_invalid_lens(expected_lens, is_valid)
+
+    actual_indices = torch.empty_like(expected_indices)
+    actual_lens = torch.empty_like(expected_lens)
+    torch.ops.vllm_batch_invariant.combine_topk_swa_decode(
+        actual_indices,
+        actual_lens,
+        topk_indices,
+        seq_lens,
+        is_valid,
+        row_stride,
+        compressed_width,
+        top_k,
+        compress_ratio,
+        window_size,
+    )
+    torch.testing.assert_close(actual_indices, expected_indices, rtol=0, atol=0)
+    torch.testing.assert_close(actual_lens, expected_lens, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.usefixtures("batch_invariant_kernel")
+@torch.inference_mode()
+def test_fused_c128_decode_indices_match_existing_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+
+    rows = 32
+    top_k = 128
+    window_size = 128
+    compress_ratio = 128
+    compressed_width = 126
+    row_stride = compressed_width + window_size
+    output_width = 256
+    boundary_lens = torch.tensor(
+        [0, 1, 127, 128, 129, 255, 256, 2047, 2048, 2049, 16047, 16048],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    seq_lens = boundary_lens.repeat(3)[:rows]
+    compressed_lens = torch.div(
+        seq_lens, compress_ratio, rounding_mode="floor"
+    ).clamp_max(top_k)
+    query_start_loc = torch.arange(rows + 1, dtype=torch.int32, device="cuda")
+    gather_lens = seq_lens.clamp_max(window_size)
+    is_valid = torch.arange(rows, device="cuda") % 7 != 0
+
+    local_topk = torch.empty((rows, top_k), dtype=torch.int32, device="cuda")
+    fill_c128_topk(local_topk, compressed_lens)
+    expected_indices = torch.empty(
+        (rows, output_width), dtype=torch.int32, device="cuda"
+    )
+    expected_lens = torch.empty(rows, dtype=torch.int32, device="cuda")
+    combine_topk_swa_indices(
+        local_topk,
+        query_start_loc,
+        seq_lens,
+        gather_lens,
+        window_size,
+        compress_ratio,
+        top_k,
+        row_stride,
+        compressed_width,
+        out=(expected_indices, expected_lens),
+    )
+    zero_invalid_lens(expected_lens, is_valid)
+
+    actual_indices = torch.empty_like(expected_indices)
+    actual_lens = torch.empty_like(expected_lens)
+    torch.ops.vllm_batch_invariant.combine_c128_swa_decode(
+        actual_indices,
+        actual_lens,
+        seq_lens,
+        is_valid,
+        row_stride,
+        compressed_width,
+        top_k,
+        compress_ratio,
+        window_size,
+    )
+    torch.testing.assert_close(actual_indices, expected_indices, rtol=0, atol=0)
+    torch.testing.assert_close(actual_lens, expected_lens, rtol=0, atol=0)
