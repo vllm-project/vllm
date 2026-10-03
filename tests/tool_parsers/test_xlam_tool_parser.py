@@ -113,6 +113,7 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
         "single_tool_with_json_code_block",
         "single_tool_with_tool_calls_tag",
         "single_tool_with_tool_call_xml_tags",
+        "argument_named_name",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -217,6 +218,20 @@ def test_extract_tool_calls_no_tools(xlam_tool_parser):
                 )
             ],
             "I'll help you check the weather.",
+        ),
+        (
+            # Argument literally named "name" must not be mistaken for a
+            # second tool call's name field.
+            """[{"name": "create_user", "arguments": {"name": "Alice", "age": 30}}]""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="create_user",
+                        arguments=json.dumps({"name": "Alice", "age": 30}),
+                    )
+                )
+            ],
+            None,
         ),
     ],
 )
@@ -360,6 +375,29 @@ def test_streaming_with_list_structure(xlam_tool_parser):
         assert hasattr(result, "tool_calls")
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].function.name == "get_current_weather"
+
+
+def test_streaming_argument_named_name(xlam_tool_parser, xlam_tokenizer):
+    """An argument literally named "name" must not spawn a phantom tool call
+    or drop the real call's arguments in streaming mode (regression test)."""
+    model_output = (
+        """[{"name": "create_user", "arguments": {"name": "Alice", "age": 30}}]"""
+    )
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    names: dict[int, str] = {}
+    args: dict[int, str] = {}
+    for delta_message in stream_delta_message_generator(
+        xlam_tool_parser, xlam_tokenizer, model_output, request
+    ):
+        for tc in delta_message.tool_calls or []:
+            if tc.function and tc.function.name:
+                names[tc.index] = names.get(tc.index, "") + tc.function.name
+            if tc.function and tc.function.arguments:
+                args[tc.index] = args.get(tc.index, "") + tc.function.arguments
+
+    assert list(names.values()) == ["create_user"]
+    assert json.loads(args[0]) == {"name": "Alice", "age": 30}
 
 
 @pytest.mark.parametrize(

@@ -54,6 +54,13 @@ class xLAMToolParser(ToolParser):
         ]
         self.thinking_tag_pattern = r"</think>([\s\S]*)"
 
+        # Anchored on the following "arguments" key so this only matches a
+        # tool's own name field, not an argument literally called "name"
+        # (e.g. {"name": "create_user", "arguments": {"name": "Alice"}}).
+        self.tool_name_reg = re.compile(
+            r'"name"\s*:\s*"([^"]+)"(?=\s*,\s*"arguments"\s*:)'
+        )
+
         # Define streaming state type to be initialized later
         self.streaming_state: dict[str, Any] = {
             "current_tool_index": -1,
@@ -270,8 +277,7 @@ class xLAMToolParser(ToolParser):
                     and self.current_tools_sent[0] is False
                 ):
                     # Extract the function name using regex
-                    name_pattern = r'"name"\s*:\s*"([^"]+)"'
-                    name_match = re.search(name_pattern, current_text)
+                    name_match = self.tool_name_reg.search(current_text)
                     if name_match:
                         function_name = name_match.group(1)
 
@@ -327,8 +333,7 @@ class xLAMToolParser(ToolParser):
                         search_text = potential_json
 
             # Try to find complete tool names first
-            name_pattern = r'"name"\s*:\s*"([^"]+)"'
-            name_matches = list(re.finditer(name_pattern, search_text))
+            name_matches = list(self.tool_name_reg.finditer(search_text))
             tool_count = len(name_matches)
 
             # If no complete tool names found, check for partial tool names
