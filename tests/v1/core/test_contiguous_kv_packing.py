@@ -10,6 +10,7 @@ block); the allocation is the same either way.
 """
 
 from dataclasses import replace
+from math import lcm
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,9 +27,11 @@ from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_groups,
     resolve_kv_cache_block_sizes,
 )
+from vllm.v1.hisparse.layout import _build_hisparse_kv_cache_tensors
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
+    HiSparseHotSpec,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheSpec,
@@ -77,6 +80,30 @@ def _mock_vllm_config(layout: str | None):
     config.cache_config.kv_cache_layout = layout
     config.attention_config.hisparse_config = None
     return config
+
+
+def test_packed_alignment_preserves_hot_pages_and_generic_stride():
+    """One shared stride must satisfy both constraints, regardless of rounding order."""
+    spec = replace(_mla(128), block_stride_alignment=1152)
+    hot = HiSparseHotSpec(block_size=16, page_size=5120, blocks_per_request=2)
+    groups = [KVCacheGroupSpec(["attention"], spec), KVCacheGroupSpec(["hot"], hot)]
+    alignment = lcm(1152, hot.page_size_bytes)
+    stride = _pool_bytes_per_block(groups)
+    assert stride == alignment
+    layout = KVCacheLayout.BLHNC
+    tensors = _build_hisparse_kv_cache_tensors(groups, 3, 3 * stride, layout, stride)
+    assert {tensor.block_stride for tensor in tensors} == {alignment}
+    assert {tensor.size for tensor in tensors} == {3 * alignment}
+
+
+@pytest.mark.parametrize("spec", [_full(), _mla(128)])
+def test_block_alignment_survives_merge_and_rejects_incompatible_specs(spec):
+    aligned = replace(spec, block_stride_alignment=512)
+    assert type(spec).merge([aligned, aligned]).block_stride_alignment == 512
+    with pytest.raises(AssertionError):
+        type(spec).merge([aligned, spec])
+    with pytest.raises(ValueError, match="must be positive"):
+        replace(spec, block_stride_alignment=0)
 
 
 def _pages(groups) -> dict[str, int]:

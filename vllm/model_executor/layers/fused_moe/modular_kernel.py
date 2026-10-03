@@ -23,6 +23,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsSink,
+)
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
@@ -238,6 +241,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return False
 
+    def supports_deferred_moe_finalize(self) -> bool:
+        """Whether ``finalize`` can be skipped for a deferring consumer.
+
+        An implementation opts in only if everything it does in ``finalize``
+        -- the top-k reduction, and any combine or reduce-scatter -- is work
+        the consumer takes over.
+        """
+        return False
+
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
@@ -403,9 +415,6 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
     """An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above for the monolithic case.
     """
-
-    def supports_deferred_moe_finalize(self) -> bool:
-        return False
 
     @abstractmethod
     def prepare(
@@ -895,9 +904,13 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ) -> None:
+    ) -> UnfinalizedMoEOutput | None:
         """This function computes the intermediate result of a Mixture of Experts
         (MoE) layer using two sets of weights, w1 and w2.
+
+        Writes into `output` and returns None, unless the implementation stopped
+        after GEMM2 and left the top-k reduction to a fused consumer, in which
+        case `output` is untouched and the unfinalized result is returned.
 
         Args:
             output: (torch.Tensor): The unweighted, unreduced output tensor.
@@ -969,9 +982,6 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     def is_monolithic() -> bool:
         return True
 
-    routing_replay_capture_fn: Callable[[torch.Tensor], None] | None = None
-    _routing_replay_buffer: torch.Tensor | None = None
-
     def supports_routing_replay_capture(self) -> bool:
         """Whether this expert supports routing replay capture.
 
@@ -979,53 +989,6 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         (e.g. FlashInfer's ``routing_replay_out``) should override.
         """
         return False
-
-    def set_capture_fn(
-        self,
-        capture_fn: Callable[[torch.Tensor], None] | None,
-    ) -> None:
-        self.routing_replay_capture_fn = capture_fn
-        if capture_fn is None:
-            self._routing_replay_buffer = None
-            return
-        # Allocate for per-rank batches gathered across the DP or EP group.
-        dispatch_group_size = (
-            self.moe_config.ep_size
-            if self.moe_config.use_ep
-            else self.moe_config.dp_size
-        )
-        max_num_replay_tokens = self.moe_config.max_num_tokens * dispatch_group_size
-        self._routing_replay_buffer = torch.empty(
-            (max_num_replay_tokens, self.moe_config.experts_per_token),
-            dtype=torch.int16,
-            device=self.moe_config.device,
-        )
-
-    def _maybe_make_routing_replay_buffer(
-        self,
-        num_tokens: int,
-        device: torch.device,
-    ) -> torch.Tensor | None:
-        if self.routing_replay_capture_fn is None:
-            return None
-        buf = self._routing_replay_buffer
-        assert buf is not None
-        if buf.shape[0] < num_tokens or buf.device != device:
-            raise ValueError(
-                "Routing replay buffer was initialized for "
-                f"{buf.shape[0]} tokens on {buf.device}, but the kernel "
-                f"received {num_tokens} tokens on {device}."
-            )
-        return buf
-
-    def _maybe_dispatch_routing_replay(
-        self,
-        routing_replay_out: torch.Tensor | None,
-        num_tokens: int,
-    ) -> None:
-        if routing_replay_out is None or self.routing_replay_capture_fn is None:
-            return
-        self.routing_replay_capture_fn(routing_replay_out[:num_tokens])
 
     def apply(
         self,
@@ -1043,10 +1006,14 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as ``FusedMoEExperts.apply``, except uses router_logits as opposed
         to the topk_ids and topk_weights. This is useful for kernels
         with fused router and fused_experts (e.g. FLASHINFER_TRTLLM).
+
+        Kernels that ``supports_routing_replay_capture`` write each token's
+        routed expert ids into the leading rows of ``routing_replay_out``.
         """
         raise NotImplementedError
 
@@ -1270,7 +1237,7 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
         output_alias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
         )
@@ -1318,7 +1285,7 @@ class FusedMoEKernelModularImpl:
         elif use_output_alias:
             fused_out = output_alias
 
-        self.fused_experts.apply(
+        unfinalized = self.fused_experts.apply(
             output=fused_out,
             hidden_states=a1q,
             w1=w1,
@@ -1335,6 +1302,11 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
+
+        # Experts that stopped after GEMM2 wrote nothing into `fused_out`; the
+        # top-k reduction they left open belongs to whoever takes this.
+        if isinstance(unfinalized, UnfinalizedMoEOutput):
+            return unfinalized
 
         return fused_out
 
@@ -1426,7 +1398,7 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool = False,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """This function computes a Mixture of Experts (MoE) layer using two sets
         of weights, w1 and w2, and top-k gating mechanism.
 
@@ -1453,7 +1425,9 @@ class FusedMoEKernelModularImpl:
                 hidden_states before latent projection.
 
         Returns:
-            torch.Tensor: The output tensor after applying the MoE layer.
+            torch.Tensor: The output tensor after applying the MoE layer, or
+            the unfinalized output when the experts left the top-k reduction to
+            a fused consumer.
 
         """
         output = torch.empty_like(hidden_states)
@@ -1498,6 +1472,17 @@ class FusedMoEKernelModularImpl:
         if lora_ctx is not None:
             lora_ctx.original_hidden_states = None
 
+        if isinstance(fused_out, UnfinalizedMoEOutput):
+            # Nothing below can run on an unfinalized output: finalize is the
+            # local top-k reduction (and, for DP/EP, the combine) that the
+            # consumer takes over.
+            if not self.prepare_finalize.supports_deferred_moe_finalize():
+                raise RuntimeError(
+                    f"{type(self.prepare_finalize).__name__} cannot pass through "
+                    "a deferred MoE output."
+                )
+            return fused_out
+
         return self._finalize(
             output,
             fused_out,
@@ -1535,6 +1520,8 @@ class FusedMoEKernelMonolithicImpl:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        *,
+        routing_sink: RoutedExpertsSink | None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
@@ -1547,6 +1534,15 @@ class FusedMoEKernelMonolithicImpl:
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
         )
 
+        routing_replay_out = None
+        if routing_sink is not None:
+            # Checked per call: a weight reload may rebuild a different kernel.
+            if not self.fused_experts.supports_routing_replay_capture():
+                raise ValueError(
+                    "Routed-experts capture is not supported with monolithic MoE "
+                    f"kernel {type(self.fused_experts).__name__}."
+                )
+            routing_replay_out = routing_sink.buffer[: len(a1q)]
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
@@ -1562,7 +1558,10 @@ class FusedMoEKernelMonolithicImpl:
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            routing_replay_out=routing_replay_out,
         )
+        if routing_sink is not None:
+            routing_sink.capture_fn(routing_replay_out)
 
         if isinstance(fused_out, UnfinalizedMoEOutput):
             if not self.prepare_finalize.supports_deferred_moe_finalize():
@@ -1653,10 +1652,7 @@ class FusedMoEKernel:
         return self.prepare_finalize.output_is_reduced()
 
     def supports_deferred_moe_finalize(self) -> bool:
-        return (
-            isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
-            and self.prepare_finalize.supports_deferred_moe_finalize()
-        )
+        return self.prepare_finalize.supports_deferred_moe_finalize()
 
     def apply_monolithic(
         self,
@@ -1673,6 +1669,8 @@ class FusedMoEKernel:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        *,
+        routing_sink: RoutedExpertsSink | None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1688,6 +1686,7 @@ class FusedMoEKernel:
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            routing_sink=routing_sink,
         )
 
     def apply(
@@ -1703,7 +1702,7 @@ class FusedMoEKernel:
         apply_router_weight_on_input: bool,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelModularImpl)
         return self.impl.apply(
             hidden_states=hidden_states,
