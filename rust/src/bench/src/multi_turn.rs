@@ -25,6 +25,10 @@ use crate::output::json::{
 };
 use crate::ready_checker::{get_first_model, wait_for_endpoint};
 
+/// Multiplier on `--num-prompts` for the HF multi-turn row budget; the downloader
+/// doubles it again before reading shards.
+const HF_MULTI_TURN_ROW_BUDGET_FACTOR: usize = 2;
+
 /// Output from a single turn within a conversation.
 #[derive(Debug, Clone)]
 pub struct TurnOutput {
@@ -163,6 +167,8 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
                 config.sharegpt_multi_turn_max_turns,
                 config.seed,
                 &config.request_id_prefix,
+                config.no_oversample,
+                config.disable_shuffle,
             )?
         }
         DatasetName::RandomMm => {
@@ -192,11 +198,15 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
             let dataset_id = config.dataset_path.as_deref().ok_or_else(|| {
                 BenchError::Config("--dataset-path is required for --dataset-name hf".into())
             })?;
+            // The multi-turn filter (>= 2 full human/gpt turns) rejects far more rows
+            // than the single-turn loader's, so widen the downloader's row budget
+            // rather than backfilling the shortfall with cloned conversations.
+            let rows_needed = config.num_prompts.saturating_mul(HF_MULTI_TURN_ROW_BUDGET_FACTOR);
             let (rows, _config, _split) = crate::datasets::hf_dataset::download_hf_dataset(
                 dataset_id,
                 config.hf_subset.as_deref(),
                 config.hf_split.as_deref(),
-                config.num_prompts,
+                rows_needed,
                 config.seed,
                 config.disable_shuffle,
             )
@@ -209,6 +219,8 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
                 config.sharegpt_multi_turn_max_turns,
                 config.seed,
                 &config.request_id_prefix,
+                config.no_oversample,
+                config.disable_shuffle,
             )?
         }
     };

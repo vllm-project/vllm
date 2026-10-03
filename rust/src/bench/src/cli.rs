@@ -621,7 +621,7 @@ pub struct BenchServeArgs {
 
     /// Maximum turns per conversation.
     /// For synthetic multi-turn, 0 = use --multi-turn-num-turns.
-    /// For ShareGPT multi-turn, 0 = uncapped.
+    /// For ShareGPT/HF multi-turn, 0 = uncapped.
     #[arg(long, default_value_t = 0)]
     pub multi_turn_max_turns: usize,
 
