@@ -1582,14 +1582,24 @@ async def test_kv_consumuer(monkeypatch):
                 remote_engine_id="p-engine",
                 remote_bootstrap_addr="http://bootstrap:33333",
                 pull_tasks_count=1,
-            )
+            ),
+            # Nothing to load (e.g. a full prefix hit on D): the pull only asks
+            # P to release its blocks.
+            "d-req-2": PullReqMeta(
+                d_req_id="d-req-2",
+                transfer_id="xfer-req-2",
+                local_block_ids=[],
+                remote_engine_id="p-engine",
+                remote_bootstrap_addr="http://bootstrap:33333",
+                pull_tasks_count=1,
+            ),
         }
         decode_worker._remote_agents = {"p-engine": {0: {0: "tcp://producer:1234"}}}
         decode_worker._tp_size["p-engine"] = 1
 
         # Mock the response from the producer.
         mock_response = MooncakeXferResponse(
-            status=MooncakeXferResponseStatus.FINISH, ok_reqs=["d-req-1"]
+            status=MooncakeXferResponseStatus.FINISH, ok_reqs=["d-req-1", "d-req-2"]
         )
         encoded_response = decode_worker._encoder.encode(mock_response)
         mocks["mock_socket_object"].recv.return_value = encoded_response
@@ -1619,6 +1629,7 @@ async def test_kv_consumuer(monkeypatch):
 
         # Verify internal state is updated correctly.
         assert "d-req-1" in decode_worker.finished_recving_reqs
+        assert "d-req-2" not in decode_worker.finished_recving_reqs
 
         # Clean up
         decode_worker.shutdown()
