@@ -86,7 +86,9 @@ def _serve(vllm_runner, model_path, prompts):
 
 def test_hw_agnostic_matches_vllm_end_to_end(monkeypatch, vllm_runner, tiny_llama_path):
     """Serving the tiny model with hw-agnostic layers matches the vLLM baseline."""
-    # spawn: worker re-imports layers with the env set (see docstring).
+    # spawn: `layers` resolves its symbols at import time, so the worker must
+    # re-import it with VLLM_USE_HW_AGNOSTIC already set (fork would inherit
+    # the parent's already-resolved module).
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     # apply_model pickles the introspection function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
