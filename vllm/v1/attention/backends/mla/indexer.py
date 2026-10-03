@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
@@ -238,11 +238,14 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        if kv_cache_spec is None:
-            return [MultipleOf(1)]
-        return [
-            int(kv_cache_spec.tokens_per_state) * n for n in get_paged_mqa_page_sizes()
-        ]
+        if kv_cache_spec is not None:
+            # Worker get_kv_cache_spec: runs without the current config.
+            index_kpool = int(kv_cache_spec.tokens_per_state)
+        else:
+            # Platform block-size selection: no spec yet, under the current config.
+            model_config = get_current_vllm_config().model_config
+            index_kpool = model_config.hf_text_config.index_kpool
+        return [index_kpool * n for n in get_paged_mqa_page_sizes()]
 
 
 class KpoolTailBackend(DeepseekV32IndexerBackend):

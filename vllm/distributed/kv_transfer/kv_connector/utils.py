@@ -389,7 +389,8 @@ def get_current_attn_backends_and_specs(
 ) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
     """Distinct (backend, spec) pairs of the transfer layers, else ``fallback``.
 
-    Compressed specs are dropped: their kernel pages never split transferred blocks.
+    Compressed caches are skipped: their kernel pages never split transferred
+    blocks.
     """
     pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
@@ -398,7 +399,9 @@ def get_current_attn_backends_and_specs(
         layers = get_layers_from_vllm_config(vllm_config, layer_type, group.layer_names)
         for name, layer in layers.items():
             spec = specs.get(name, group.kv_cache_spec)
-            if not isinstance(spec, AttentionSpec) or spec.tokens_per_state > 1:
+            if isinstance(spec, AttentionSpec) and spec.tokens_per_state > 1:
+                continue
+            if not isinstance(spec, AttentionSpec):
                 spec = None
             pairs[layer.get_attn_backend(), spec] = None
     if not pairs:
