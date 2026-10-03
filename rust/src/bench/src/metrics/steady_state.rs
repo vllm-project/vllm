@@ -213,7 +213,7 @@ pub fn compute(
         }
 
         if started_in {
-            input_tokens_in_window += input_requests[idx].prompt_len;
+            input_tokens_in_window += o.prompt_len;
             if !is_pooling {
                 ttfts_in_window.push(o.ttft);
                 // Per-request TPOT: (latency - ttft) / (output_tokens - 1).
