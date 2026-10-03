@@ -319,8 +319,7 @@ def test_adapter_kwargs_match_installed_flashinfer(
     """The adapter builds FlashInfer's own config types without a GPU, so a
     renamed or removed kwarg fails here instead of at model load on SM100.
     Only the megakernel layer, which allocates symmetric memory, is faked."""
-    pytest.importorskip("flashinfer.moe_ep")
-    api = fi_ep._load_flashinfer_moe_ep_api()
+    moe_ep = pytest.importorskip("flashinfer.moe_ep")
     layer_args: list[tuple] = []
 
     class FakeMegaLayer:
@@ -330,8 +329,7 @@ def test_adapter_kwargs_match_installed_flashinfer(
         def destroy(self) -> None:
             pass
 
-    api.MoEEpMegaLayer = FakeMegaLayer
-    monkeypatch.setattr(fi_ep, "_load_flashinfer_moe_ep_api", lambda: api)
+    monkeypatch.setattr(moe_ep, "MoEEpMegaLayer", FakeMegaLayer)
     monkeypatch.setattr(fi_ep, "_expose_deep_gemm_to_flashinfer", lambda: None)
     monkeypatch.setattr(
         fi_ep,
@@ -360,8 +358,8 @@ def test_adapter_kwargs_match_installed_flashinfer(
 
     ((_, _, _, mega_config),) = layer_args
     expected = (
-        api.Nvfp4CutedslMegaMoeConfig
+        moe_ep.Nvfp4CutedslMegaMoeConfig
         if backend == FLASHINFER_MOE_EP_CUTEDSL
-        else api.DeepGemmMegaMoeConfig
+        else moe_ep.DeepGemmMegaMoeConfig
     )
     assert isinstance(mega_config.megakernel, expected)
