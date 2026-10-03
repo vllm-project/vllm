@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from glob import glob
+from typing import Any
 from uuid import uuid4
 
 import torch
@@ -196,6 +197,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         local_rank: int,
         activities: Sequence[TorchProfilerActivity],
         on_trace_ready: Callable[[torch.profiler.profile], None] | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(profiler_config)
 
@@ -261,6 +263,8 @@ class TorchProfilerWrapper(WorkerProfiler):
             with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=trace_handler,
         )
+        if profiler_kwargs:
+            self._profiler_kwargs.update(profiler_kwargs)
         self.profiler: torch.profiler.profile
 
         # Track if we're using a schedule (need to call step())
@@ -677,6 +681,7 @@ def create_worker_profiler(
     *,
     worker_name: str,
     local_rank: int,
+    profiler_kwargs: dict | None = None,
 ) -> WorkerProfiler:
     """Create a profiler using a validated config and platform defaults."""
     profiler_type = profiler_config.profiler
@@ -691,6 +696,7 @@ def create_worker_profiler(
             worker_name=worker_name,
             local_rank=local_rank,
             activities=default_activities if configured is None else tuple(configured),
+            profiler_kwargs=profiler_kwargs,
         )
     if profiler_type == "cuda":
         logger.debug("Starting CUDA profiler")
