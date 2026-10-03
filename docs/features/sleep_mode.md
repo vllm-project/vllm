@@ -121,6 +121,21 @@ size 1). `NCCL_GRAPH_REGISTER` defaults to `0`, since NCCL graph registration
 would pin the pool; an explicit value is kept with a warning. Graph executables
 outside PyTorch pools stay resident.
 
+#### Releasing NCCL communicator memory
+
+By default, NCCL communicators keep their GPU buffers while asleep. With
+`enable_nccl_comm_suspend=True` (off by default, experimental), sleep releases
+them with `ncclCommSuspend` and wake restores them with `ncclCommResume`. The
+communicators keep their topology, so they are not re-created. It needs NCCL
+2.29.7 or newer; with an older library, a warning is logged and the memory stays
+on the GPU.
+
+```python
+llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, enable_nccl_comm_suspend=True)
+```
+
+or `vllm serve <model> --enable-sleep-mode --enable-nccl-comm-suspend`.
+
 ### Online Serving
 
 To enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server.
