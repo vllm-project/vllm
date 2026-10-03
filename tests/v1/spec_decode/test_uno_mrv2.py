@@ -1249,6 +1249,7 @@ def test_uno_warmup_executes_native_verification_s4(
     sampler = object.__new__(Sampler)
     sampler.use_flashinfer = use_flashinfer
     sampler.use_xpu_sampler = False
+    sampler.return_sampling_mask = False
     sampler.compute_nans = False
     sampler.logprobs_mode = "raw_logprobs"
     sampler.use_fp64_gumbel = False
