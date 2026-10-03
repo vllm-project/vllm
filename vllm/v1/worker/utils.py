@@ -279,6 +279,7 @@ class AttentionGroup:
     kernel_block_stride: int = 0
     # Persistent per ubatch: CUDA graphs capture the mapped block table.
     kernel_block_table: torch.Tensor | None = None
+    kernel_block_offsets: torch.Tensor | None = None
     # When ubatching is enabled we will have a metadata builder for each ubatch
     # so that if they use internal persistent buffers for cudagraphs, and they
     # won't have to worry about conflicting with the other ubatches.
@@ -382,9 +383,12 @@ class AttentionGroup:
             self.kernel_block_table = block_table.new_zeros(
                 len(self.metadata_builders), max_rows, cols * blocks_per_kv_block
             )
+            self.kernel_block_offsets = torch.arange(
+                blocks_per_kv_block, dtype=block_table.dtype, device=block_table.device
+            )
         out = self.kernel_block_table[ubatch_idx, :rows, : cols * blocks_per_kv_block]
         torch.add(
-            torch.arange(blocks_per_kv_block, dtype=out.dtype, device=out.device),
+            self.kernel_block_offsets,
             block_table.unsqueeze(-1),
             alpha=self.kernel_block_stride or blocks_per_kv_block,
             out=out.unflatten(1, (cols, -1)),
