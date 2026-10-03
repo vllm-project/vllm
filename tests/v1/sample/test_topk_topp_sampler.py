@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import pytest
 import torch
 from torch import Generator
@@ -367,6 +368,217 @@ class TestTritonTopkTopp:
         # Mixed values
         p = torch.tensor([0.1, 0.5, 0.9, 1.0] * 4, dtype=torch.float32)
         self._compare_results(logits.clone(), k=None, p=p)
+
+    def test_topp_keeps_whole_row_when_p_exceeds_reachable_mass(self):
+        """Regression for #59785: when reaching p requires every token, the
+        kernel must not drop the min-prob one.
+
+        Rows repeat the reporter's logits, and the batch exceeds the split
+        pipeline's limit so the monolithic kernel handles them on CUDA too.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        row = [
+            -0.9507,
+            -0.7643,
+            -0.9077,
+            -1.0789,
+            -0.0125,
+            -0.5607,
+            -1.1629,
+            -0.3498,
+        ]
+        logits = torch.tensor([row] * 128, dtype=torch.float32)
+        p = torch.full((128,), 0.95, dtype=torch.float32)
+
+        ref = apply_top_k_top_p_pytorch(logits.clone(), k=None, p=p)
+        out = apply_top_k_top_p_triton(logits.clone(), k=None, p=p)
+
+        assert torch.equal(out != float("-inf"), ref != float("-inf"))
+
+    def test_topk_topp_keeps_all_k_when_p_exceeds_topk_mass(self):
+        """Regression for #59785: with top-k+top-p, if reaching p needs the
+        k-th token, the kernel must keep the whole top-k set."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.full((1, 32), -30.0, dtype=torch.float32)
+        logits[0, :5] = torch.log(
+            torch.tensor([0.4, 0.3, 0.15, 0.1, 0.05], dtype=torch.float32)
+        )
+        k = torch.tensor([5], dtype=torch.int32)
+        p = torch.tensor([0.97], dtype=torch.float32)
+
+        ref = apply_top_k_top_p_pytorch(logits.clone(), k=k, p=p)
+        out = apply_top_k_top_p_triton(logits.clone(), k=k, p=p)
+
+        assert torch.equal(out != float("-inf"), ref != float("-inf"))
+
+    @staticmethod
+    def _exact_topp(row: np.ndarray, p: float) -> tuple[int, np.ndarray]:
+        """fp64 reference: exact top-p count and per-token probabilities."""
+        q = np.exp(row.astype(np.float64) - row.max())
+        q /= q.sum()
+        n = int(np.searchsorted(np.cumsum(np.sort(q)[::-1]), p) + 1)
+        return n, q
+
+    @staticmethod
+    def _confident_row(vocab: int, sd: float, d: float, seed: int) -> np.ndarray:
+        """One token holding softmax mass d over an N(0, sd) logit tail."""
+        rng = np.random.default_rng(seed)
+        row = rng.normal(0.0, sd, vocab)
+        i = int(rng.integers(vocab))
+        row[i] = -np.inf
+        row[i] = np.log(np.exp(row[np.isfinite(row)]).sum()) + np.log(d / (1 - d))
+        return row.astype(np.float32)
+
+    def test_topp_confident_row_does_not_keep_all(self):
+        """Regression: the pivot search used to starve on confident rows.
+        Arithmetic bisection over a probability range spanning orders of
+        magnitude needs one iteration per factor of two, so the search hit
+        its iteration cap with best_pivot == 0 and kept the whole row,
+        effectively turning top-p off."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        row = self._confident_row(32768, 0.5, 0.95, seed=3)
+        p = float(np.float32(0.96))
+        logits = torch.from_numpy(np.tile(row, (128, 1)).copy()).to(DEVICE_TYPE)
+
+        out = apply_top_k_top_p_triton(
+            logits, k=None, p=torch.full((128,), p, dtype=torch.float32)
+        )
+        keep = torch.isfinite(out[0]).cpu().numpy()
+
+        exact, q = self._exact_topp(row, p)
+        assert keep.sum() < len(row), "top-p disabled: whole row kept"
+        assert keep.sum() <= exact * 1.1
+        assert q[keep].sum() >= p - 1e-4
+
+    def test_topp_fallback_trim_does_not_wrap_num_keep(self):
+        """Regression: a coarse fallback pivot made (sum - p) / min_prob
+        exceed the duplicate count, the uint32 num_keep wrapped to ~4e9 and
+        the trim was skipped, leaving 2.8x too many tokens."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        row = self._confident_row(151936, 0.5, 0.5, seed=5)
+        p = float(np.float32(0.6))
+        logits = torch.from_numpy(np.tile(row, (128, 1)).copy()).to(DEVICE_TYPE)
+
+        out = apply_top_k_top_p_triton(
+            logits, k=None, p=torch.full((128,), p, dtype=torch.float32)
+        )
+        keep = torch.isfinite(out[0]).cpu().numpy()
+
+        exact, q = self._exact_topp(row, p)
+        assert keep.sum() <= exact * 1.1
+        assert q[keep].sum() >= p - 1e-4
+
+    def test_topp_tiny_vocab_converges_to_exact_count(self):
+        """Regression: on a tiny vocab the bracket could not get inside a
+        1e-5-wide probability spread within the iteration cap, so the kernel
+        kept 5 of 6 tokens where 3 reach p."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        row = np.array([-1e-5, 0.847759, -3e-6, -4e-6, -4e-6, 4e-6], np.float32)
+        p = float(np.float32(0.5530601))
+        logits = torch.from_numpy(np.tile(row, (128, 1)).copy()).to(DEVICE_TYPE)
+
+        out = apply_top_k_top_p_triton(
+            logits, k=None, p=torch.full((128,), p, dtype=torch.float32)
+        )
+        kept = torch.isfinite(out).sum(dim=-1)
+
+        assert (kept == 3).all()
+
+    def test_topp_boundary_token_not_dropped_by_logit_roundtrip(self):
+        """Regression: the boundary token could have prob > p_pivot yet
+        logit < final_pivot after the prob->logit conversion, leaving kept
+        mass below p (0.499552 for p = 0.5). The mask now recomputes
+        probabilities with the same fp ops as the buffer pass, so the kept
+        set is exactly the search's above-set."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        row = (np.random.default_rng(16).normal(0, 1, 1024) / 2).astype(np.float32)
+        p = float(np.float32(0.5))
+        logits = torch.from_numpy(np.tile(row, (128, 1)).copy()).to(DEVICE_TYPE)
+
+        out = apply_top_k_top_p_triton(
+            logits, k=None, p=torch.full((128,), p, dtype=torch.float32)
+        )
+        keep = torch.isfinite(out[0]).cpu().numpy()
+
+        exact, q = self._exact_topp(row, p)
+        assert q[keep].sum() >= p - 1e-4
+        assert keep.sum() <= exact * 1.1
+
+    def test_topp_flat_row_trims_to_exact_count(self):
+        """Regression: on a flat row every evaluated pivot had an empty
+        above-set, the search failed and the whole row was kept. The
+        zero-pivot fallback now engages the duplicate trim and cuts the
+        row to the exact top-p count."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.zeros(128, 1024, dtype=torch.float32)
+        p = torch.full((128,), 0.9, dtype=torch.float32)
+
+        out = apply_top_k_top_p_triton(logits.clone(), k=None, p=p)
+        kept = torch.isfinite(out).sum(dim=-1)
+
+        # ceil(0.9 * 1024 / 1) = 922 tokens of a uniform row reach p = 0.9
+        assert (kept == 922).all()
+
+    def test_topk_topp_near_flat_boundary_does_not_drop_below_p(self):
+        """Regression: the combined top-k+top-p mask converted the winning
+        probability pivot back to a logit cut, and the round trip could
+        leave a boundary survivor below that cut, so kept mass landed
+        under p (24 tokens at 0.480427 for p = 0.5 where 25 reach it). The
+        mask now stays in probability space and replays the top-k survivor
+        selection, so the kept set is exactly the search's above-set."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        rng = np.random.default_rng(59804)
+        row = rng.normal(0, 1, 1024)
+        idx = rng.choice(1024, 50, replace=False)
+        row[idx] = 20.0 + rng.normal(0, 1e-3, 50)
+        row = row.astype(np.float32)
+        k = torch.tensor([50] * 4, dtype=torch.int32)
+        p = torch.full((4,), 0.5, dtype=torch.float32)
+        logits = torch.from_numpy(np.tile(row, (4, 1)).copy()).to(DEVICE_TYPE)
+
+        out = apply_top_k_top_p_triton(logits, k=k, p=p)
+        keep = torch.isfinite(out[0]).cpu().numpy()
+
+        # fp64 reference restricted to (and renormalized over) the top-50
+        # set, matching the kernel's top-p-after-top-k convention.
+        q = np.exp(row.astype(np.float64) - row.max())
+        cutoff = np.sort(q)[::-1][49]
+        q[q < cutoff] = 0.0
+        q /= q.sum()
+        n_exact = int(np.searchsorted(np.cumsum(np.sort(q)[::-1]), 0.5) + 1)
+
+        assert q[keep].sum() >= 0.5 - 1e-4
+        assert keep.sum() <= n_exact * 1.1
+        assert q[keep].min() >= q[~keep].max() * (1 - 1e-6)
+
+    def test_topp_boundary_ties_do_not_break_prefix(self):
+        """Regression: the min-prob tie band had an absolute 1e-9 width,
+        which spans hundreds of distinct fp32 probabilities around 1e-5,
+        so the trim removed band members by position and could keep a
+        lower-probability token while dropping a higher one. Tie groups
+        are now bit-exact, so trimmed members are interchangeable."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        row = np.random.default_rng(3).normal(0, 1, 32768).astype(np.float32)
+        p = float(np.float32(0.9))
+        logits = torch.from_numpy(np.tile(row, (128, 1)).copy()).to(DEVICE_TYPE)
+
+        out = apply_top_k_top_p_triton(
+            logits, k=None, p=torch.full((128,), p, dtype=torch.float32)
+        )
+        keep = torch.isfinite(out[0]).cpu().numpy()
+
+        _, q = self._exact_topp(row, p)
+        assert q[keep].min() >= q[~keep].max() * (1 - 1e-6)
+        assert q[keep].sum() >= p - 1e-4
 
     def test_large_batch(self):
         """Test with a large batch size."""
