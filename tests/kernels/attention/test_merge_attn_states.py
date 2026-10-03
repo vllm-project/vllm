@@ -130,7 +130,8 @@ def test_merge_attn_states_lse_view(merge_fn, output_dtype) -> None:
     suffix.normal_()
     original_suffix = suffix.clone()
     assert suffix.is_contiguous() and suffix.storage_offset() > 0
-    prefix_lse = torch.randn(tokens, heads, device=DEVICE).T
+    # AG/RS returns this rank's head slice of the wider all-gathered LSE.
+    prefix_lse = torch.randn(tokens, heads * 3, device=DEVICE)[:, heads : 2 * heads].T
     suffix_lse = torch.randn(heads, tokens, device=DEVICE)
     prefix_lse[:, :2] = -torch.inf
     suffix_lse[:, 1] = -torch.inf

@@ -28,9 +28,10 @@ SLIDING_WINDOWS = [None, 64]
 
 @pytest.mark.parametrize("backend", ["fa2", "cudnn"])
 @pytest.mark.parametrize("strided_context", [False, True])
+@pytest.mark.parametrize("dcp_a2a", [False, True])
 @torch.inference_mode()
 def test_dcp_prefill_lse_merge_and_replay(
-    monkeypatch, backend: str, strided_context: bool
+    monkeypatch, backend: str, strided_context: bool, dcp_a2a: bool
 ) -> None:
     """Merge real ragged attention with base-2 context, including empty context."""
     import math
@@ -56,16 +57,19 @@ def test_dcp_prefill_lse_merge_and_replay(
         all_rank_lse = torch.empty(tokens, heads * 3, device=q.device)
         context_log2 = all_rank_lse[:, heads : 2 * heads].copy_(context_log2)
         assert not context_log2.is_contiguous()
-    group = SimpleNamespace(all_gather=lambda tensor, dim: tensor)
+    group = SimpleNamespace(
+        world_size=1, rank_in_group=0, all_gather=lambda tensor, dim: tensor
+    )
     monkeypatch.setattr(fi_backend, "get_dcp_group", lambda: group)
     workspace = torch.empty(128 * 1024 * 1024, device=q.device, dtype=torch.uint8)
     lse_buffer = torch.full((tokens + 3, heads), torch.nan, device=q.device)
-    wrapper = fi_backend.BatchDCPPrefillWrapper("NHD", workspace, lse_buffer=lse_buffer)
+    wrapper = fi_backend.BatchDCPPrefillWrapper(
+        "NHD", workspace, dcp_a2a=dcp_a2a, lse_buffer=lse_buffer
+    )
     wrapper._context = SimpleNamespace(
         plan=lambda **kwargs: None,
         run=lambda *args, **kwargs: (context_out, context_log2),
     )
-    wrapper._dcp_combine = lambda o, lse, *args, **kwargs: (o, lse)
     wrapper._new_tokens = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
         workspace, backend=backend
     )

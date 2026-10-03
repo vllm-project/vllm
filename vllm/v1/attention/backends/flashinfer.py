@@ -74,7 +74,6 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
-    log2_lse_to_ln,
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.dcp import (
@@ -290,9 +289,17 @@ class BatchDCPPrefillWrapper:
         lse_buffer: torch.Tensor | None = None,
     ):
         if dcp_a2a:
-            self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
+            self._dcp_combine = partial(
+                dcp_a2a_lse_reduce,
+                is_lse_base_on_e=False,
+                output_lse_base_on_e=True,
+            )
         else:
-            self._dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
+            self._dcp_combine = partial(
+                cp_lse_ag_out_rs,
+                is_lse_base_on_e=False,
+                output_lse_base_on_e=True,
+            )
         self._context = BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, kv_layout)
         self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer)
         self._lse_buffer = lse_buffer
@@ -382,7 +389,7 @@ class BatchDCPPrefillWrapper:
             get_dcp_group(),
             return_lse=True,
         )
-        lse_context = log2_lse_to_ln(lse_context).transpose(0, 1)
+        lse_context = lse_context.transpose(0, 1)
 
         # The merge loads each suffix element before overwriting it. Keep the
         # allocating path for padded outputs or differing attention dtypes.

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import functools
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -114,6 +115,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
         head_dim: int
         n_rounded: int
         is_base_e: bool
+        output_is_base_e: bool
 
     @staticmethod
     @triton.jit
@@ -132,6 +134,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
         HEAD_DIM: tl.constexpr,
         N_ROUNDED: tl.constexpr,
         IS_BASE_E: tl.constexpr,
+        OUTPUT_IS_BASE_E: tl.constexpr,
     ):
         """Apply the all-gathered lses to correct each local rank's attention
         output. we still need perform a cross-rank reduction to obtain the
@@ -156,6 +159,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
             HEAD_DIM: Head dimension, as a constexpr
             N_ROUNDED: Rank count rounded to a power of two, as a constexpr
             IS_BASE_E: Whether the lses are natural-log based, as a constexpr
+            OUTPUT_IS_BASE_E: Whether the returned LSE is natural-log based
 
         """
         batch_idx = tl.program_id(axis=0).to(tl.int64)
@@ -187,7 +191,12 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
         lse += lse_max
 
         lse_offsets = batch_idx * lses_stride_B + head_idx * lses_stride_H
-        tl.store(vlse_ptr + lse_offsets, lse)
+        output_lse = lse
+        if IS_BASE_E and not OUTPUT_IS_BASE_E:
+            output_lse *= 1.4426950408889634
+        elif not IS_BASE_E and OUTPUT_IS_BASE_E:
+            output_lse *= 0.6931471805599453
+        tl.store(vlse_ptr + lse_offsets, output_lse)
 
         # shape = [D]
         output_offsets = (
@@ -227,6 +236,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
         n_rounded: int,
         lse_idx: int,
         is_base_e: bool,
+        output_is_base_e: bool | None = None,
     ) -> CompileKey:
         # Warm the contiguous [B, H, D] output and [N, B, H] LSE layouts used
         # by the production collective path. Runtime still forwards real
@@ -251,6 +261,9 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
             head_dim=head_dim,
             n_rounded=n_rounded,
             is_base_e=is_base_e,
+            output_is_base_e=(
+                is_base_e if output_is_base_e is None else output_is_base_e
+            ),
         )
 
     def get_warmup_keys(
@@ -261,6 +274,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
         num_heads: int | None = None,
         head_dim: int | None = None,
         is_base_e: bool | tuple[bool, ...] = (False, True),
+        output_is_base_e: bool | None = None,
     ) -> list[CompileKey]:
         from vllm.model_executor.layers.attention.mla_attention import (
             get_mla_dims,
@@ -292,6 +306,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
             n_rounded=dcp_world_size,
             lse_idx=WarmupIntRange(0, dcp_world_size),
             is_base_e=is_base_e,
+            output_is_base_e=output_is_base_e,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
@@ -321,6 +336,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
             lse_idx=compile_key.lse_idx,
             ctx=None,
             is_base_e=compile_key.is_base_e,
+            output_is_base_e=compile_key.output_is_base_e,
         )
 
     @kernel_launcher
@@ -334,6 +350,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
         ctx: Any,
         *,
         is_base_e: bool,
+        output_is_base_e: bool | None = None,
     ) -> LaunchSpec:
         num_tokens, num_heads, head_dim = outputs.shape
         n_rounded = lses.shape[0]
@@ -350,6 +367,9 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
             HEAD_DIM=head_dim,
             N_ROUNDED=n_rounded,
             IS_BASE_E=is_base_e,
+            OUTPUT_IS_BASE_E=(
+                is_base_e if output_is_base_e is None else output_is_base_e
+            ),
             _runtime_launcher=None if self._warming else ctx.call_kernel,
             # CPTritonContext caches the non-constexpr positional prefix; derive
             # its length so adding/reordering a kernel arg cannot silently
@@ -360,14 +380,16 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
 
 
 class CPTritonContext:
-    """The CPTritonContext is used to avoid recompilation of the Triton JIT."""
+    """Reuse a compiled kernel while its dimensions and LSE bases are unchanged."""
 
     def __init__(self):
         self.inner_kernel = None
+        self.const_args = None
 
     def call_kernel(self, kernel, grid, *regular_args, **const_args):
-        if self.inner_kernel is None:
+        if self.inner_kernel is None or self.const_args != const_args:
             self.inner_kernel = kernel[grid](*regular_args, **const_args)
+            self.const_args = const_args
         else:
             self.inner_kernel[grid](*regular_args)
 
@@ -378,6 +400,7 @@ def correct_attn_out(
     cp_rank: int,
     ctx: CPTritonContext,
     is_lse_base_on_e: bool = True,
+    output_lse_base_on_e: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Correct the attention output using the all-gathered lses.
 
@@ -387,6 +410,7 @@ def correct_attn_out(
         cp_rank: Current rank in the context-parallel group
         ctx: Triton context to avoid recompilation
         is_lse_base_on_e: Whether the lses use base e rather than base 2
+        output_lse_base_on_e: Returned LSE base. None preserves the input base.
 
     Returns:
         Tuple of (out, lse) with corrected attention and final log-sum-exp.
@@ -430,8 +454,19 @@ def correct_attn_out(
         cp_rank,
         ctx,
         is_base_e=is_lse_base_on_e,
+        output_is_base_e=output_lse_base_on_e,
     )
     return out, lse
+
+
+def _convert_lse_base(
+    lse: torch.Tensor,
+    is_lse_base_on_e: bool,
+    output_lse_base_on_e: bool | None,
+) -> torch.Tensor:
+    if output_lse_base_on_e is None or output_lse_base_on_e == is_lse_base_on_e:
+        return lse
+    return lse * (math.log2(math.e) if is_lse_base_on_e else math.log(2))
 
 
 def _cp_lse_common(
@@ -442,12 +477,15 @@ def _cp_lse_common(
     is_lse_base_on_e=True,
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
+    output_lse_base_on_e: bool | None = None,
 ):
     """cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     if cp_group.world_size == 1:
-        return cp_attn_out
+        return cp_attn_out, _convert_lse_base(
+            cp_attn_lse, is_lse_base_on_e, output_lse_base_on_e
+        )
 
     if ctx is None:
         ctx = CPTritonContext()
@@ -463,6 +501,7 @@ def _cp_lse_common(
         cp_group.rank_in_group,
         ctx,
         is_lse_base_on_e=is_lse_base_on_e,
+        output_lse_base_on_e=output_lse_base_on_e,
     )
     return out, lse
 
@@ -476,9 +515,10 @@ def cp_lse_ag_out_rs(
     is_lse_base_on_e=True,
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
+    output_lse_base_on_e: bool | None = None,
 ):
     """cp_attn_out: [ B, H, D ]
-    cp_attn_lse: [ B, H ]
+    cp_attn_lse: [ B, H ]. output_lse_base_on_e=None preserves its base.
     """
     out, lse = _cp_lse_common(
         cp_attn_out,
@@ -488,13 +528,16 @@ def cp_lse_ag_out_rs(
         is_lse_base_on_e=is_lse_base_on_e,
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
+        output_lse_base_on_e=output_lse_base_on_e if return_lse else None,
     )
-    out = cp_group.reduce_scatter(out, dim=1)
+    if cp_group.world_size > 1:
+        out = cp_group.reduce_scatter(out, dim=1)
 
-    if return_lse:
+    if return_lse and cp_group.world_size > 1:
         cp_num_heads = lse.shape[1] // cp_group.world_size
         cp_rank = cp_group.rank_in_group
         lse = lse[:, cp_num_heads * cp_rank : cp_num_heads * (cp_rank + 1)]
+    if return_lse:
         return out, lse
     return out
 
@@ -508,9 +551,10 @@ def cp_lse_ag_out_ar(
     is_lse_base_on_e=True,
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
+    output_lse_base_on_e: bool | None = None,
 ):
     """cp_attn_out: [ B, H, D ]
-    cp_attn_lse: [ B, H ]
+    cp_attn_lse: [ B, H ]. output_lse_base_on_e=None preserves its base.
     """
     out, lse = _cp_lse_common(
         cp_attn_out,
@@ -520,8 +564,10 @@ def cp_lse_ag_out_ar(
         is_lse_base_on_e=is_lse_base_on_e,
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
+        output_lse_base_on_e=output_lse_base_on_e if return_lse else None,
     )
-    out = cp_group.all_reduce(out)
+    if cp_group.world_size > 1:
+        out = cp_group.all_reduce(out)
 
     if return_lse:
         return out, lse
@@ -536,6 +582,7 @@ def _lse_weighted_combine(
     lses: torch.Tensor,
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
+    output_lse_base_on_e: bool | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """CPU reference implementation for LSE-weighted combination.
 
@@ -550,12 +597,17 @@ def _lse_weighted_combine(
         lses: Log-sum-exp values [N, B, H]
         return_lse: If True, also return the global LSE
         is_lse_base_on_e: If True, LSE is base e; if False, base 2
+        output_lse_base_on_e: Returned LSE base. None preserves the input base.
 
     Returns:
         Combined output [B, H, D], and optionally global LSE [B, H]
 
     """
     N, B, H, D = outputs.shape
+
+    # The kernels accumulate LSE in FP32; in FP16 the zero-weight clamp below
+    # would round to zero and give NaNs for an entirely empty row.
+    lses = lses.float()
 
     # Handle NaN and inf in LSEs
     lses = torch.where(
@@ -595,7 +647,9 @@ def _lse_weighted_combine(
             global_lse = torch.log(weight_sum.squeeze(0)) + lse_max  # [B, H]
         else:
             global_lse = torch.log2(weight_sum.squeeze(0)) + lse_max  # [B, H]
-        return result, global_lse
+        return result, _convert_lse_base(
+            global_lse, is_lse_base_on_e, output_lse_base_on_e
+        )
 
     return result
 
@@ -739,6 +793,7 @@ def _dcp_a2a_unpack_combine_kernel(
     IS_BASE_E: tl.constexpr,
     RETURN_LSE: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
+    OUTPUT_IS_BASE_E: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
     head_idx = tl.program_id(1).to(tl.int64)
@@ -842,6 +897,10 @@ def _dcp_a2a_unpack_combine_kernel(
 
     if RETURN_LSE:
         out_lse_offset = batch_idx * out_lse_stride_B + head_idx * out_lse_stride_H
+        if IS_BASE_E and not OUTPUT_IS_BASE_E:
+            global_lse *= 1.4426950408889634
+        elif not IS_BASE_E and OUTPUT_IS_BASE_E:
+            global_lse *= 0.6931471805599453
         tl.store(out_lse_ptr + out_lse_offset, global_lse)
 
 
@@ -898,6 +957,7 @@ def _dcp_a2a_unpack_combine(
     lse_pack_dim: int,
     return_lse: bool,
     is_lse_base_on_e: bool,
+    output_lse_base_on_e: bool | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     world_size, num_tokens, h_per_rank, _ = recv_buffer.shape
     out = torch.empty(
@@ -929,6 +989,9 @@ def _dcp_a2a_unpack_combine(
         IS_BASE_E=is_lse_base_on_e,
         RETURN_LSE=return_lse,
         LSE_PACK_DIM=lse_pack_dim,
+        OUTPUT_IS_BASE_E=(
+            is_lse_base_on_e if output_lse_base_on_e is None else output_lse_base_on_e
+        ),
     )
     if return_lse:
         return out, out_lse
@@ -944,6 +1007,7 @@ def dcp_a2a_lse_reduce(
     is_lse_base_on_e: bool = True,
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
+    output_lse_base_on_e: bool | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Combine partial attention outputs across DCP ranks using All-to-All.
 
@@ -959,6 +1023,7 @@ def dcp_a2a_lse_reduce(
         is_lse_base_on_e: If True, LSE is base e; if False, base 2
         seq_lens: Local KV lengths. Empty shards contribute zero weight.
         query_start_loc: Cumulative query-token offsets for each request.
+        output_lse_base_on_e: Returned LSE base. None preserves the input base.
 
     Returns:
         Combined output [B, H/N, D] (head-scattered)
@@ -969,7 +1034,9 @@ def dcp_a2a_lse_reduce(
 
     if world_size == 1:
         if return_lse:
-            return cp_attn_out, cp_attn_lse
+            return cp_attn_out, _convert_lse_base(
+                cp_attn_lse, is_lse_base_on_e, output_lse_base_on_e
+            )
         return cp_attn_out
 
     B, H, D = cp_attn_out.shape
@@ -1005,7 +1072,12 @@ def dcp_a2a_lse_reduce(
     work.wait()
 
     return _dcp_a2a_unpack_combine(
-        recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
+        recv_buffer,
+        D,
+        lse_pack_dim,
+        return_lse,
+        is_lse_base_on_e,
+        output_lse_base_on_e,
     )
 
 
