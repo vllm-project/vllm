@@ -6054,6 +6054,44 @@ def test_eagle3_mm_encoder_cache_with_shift():
         f"{start_pos}. The fix must schedule encoder inputs."
     )
 
+    # A P/D prefill whose prompt ends in the image, cut one token short by the
+    # KV connector as it stops before the token decode recomputes: the image
+    # now runs past the prompt, which must not keep it from being scheduled.
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        disable_chunked_mm_input=True,
+        max_model_len=2048,
+    )
+    scheduler.num_prefill_lookahead = shift_computed_tokens
+    request = create_requests(
+        num_requests=1,
+        num_tokens=mm_start_pos + mm_length,
+        mm_positions=mm_positions,
+    )[0]
+    del request.prompt_token_ids[-1]
+    del request._all_token_ids[-1]
+    request.num_prompt_tokens -= 1
+    req_id = request.request_id
+    scheduler.add_request(request)
+    encoder_scheduled = False
+    for _ in range(3):
+        output = scheduler.schedule()
+        encoder_scheduled |= req_id in output.scheduled_encoder_inputs
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=[req_id],
+                req_id_to_index={req_id: 0},
+                sampled_token_ids=[[]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+    assert encoder_scheduled
+    assert request.num_computed_tokens == request.num_prompt_tokens
+
 
 def test_free_encoder_inputs_respects_unconfirmed_placeholders():
     """Regression test for issue #38551 (rollback path): under async

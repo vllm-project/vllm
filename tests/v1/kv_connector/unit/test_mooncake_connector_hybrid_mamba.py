@@ -131,7 +131,7 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
     # Prefix-cache matching must not mutate the request after its local lookup.
     with patch.object(
         scheduler,
-        "_truncate_mamba_request_for_prefill",
+        "_truncate_request_for_prefill",
         side_effect=AssertionError("late Mamba truncation"),
     ):
         num_new_tokens, is_async = scheduler.get_num_new_matched_tokens(
