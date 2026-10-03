@@ -36,7 +36,9 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
 from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.kvcr import manager as kvcr_manager
 from vllm.v1.kv_offload.tiering.kvcr.manager import KVCRSecondaryTierManager
 
@@ -182,6 +184,7 @@ def _make_tier(
     g3: dict[str, object] | None = None,
     control_ports: list[int] | None = None,
     data_parallel_rank_local: int | None = None,
+    backpressure: dict[str, Any] | None = None,
 ) -> KVCRSecondaryTierManager:
     def make_control(_bind_host, bind_port, advertise_host):
         return _StubControlChannel(f"tcp://{advertise_host}:{int(bind_port)}")
@@ -198,7 +201,25 @@ def _make_tier(
 
     monkeypatch.setattr(kvcr_manager, "KVCR", make_kvcr)
     monkeypatch.setattr(kvcr_manager, "ZmqPeerControlChannel", make_control)
-    return KVCRSecondaryTierManager(
+    tier_config = {
+        "type": "kvcr",
+        "router_capabilities": ["router_hint"],
+        "control_host": "127.0.0.1",
+        "control_ports": control_ports if control_ports is not None else [7777],
+        "control_advertise_host": "127.0.0.1",
+        "enable_telemetry": enable_telemetry,
+        "secondary_g2_slots": secondary_g2_slots,
+        "kvcr_service_socket_path": kvcr_service_socket_path,
+        "compatibility_digest": compatibility_digest,
+        "policy": policy,
+        "g3": g3,
+        "local_dram_backend": "UCX",
+        "remote_fw_dram_backend": "UCX",
+    }
+    if backpressure is not None:
+        tier_config["backpressure"] = backpressure
+    tier = SecondaryTierFactory.create_secondary_tier(
+        tier_config=tier_config,
         offloading_spec=SimpleNamespace(
             config=SimpleNamespace(
                 parallel=SimpleNamespace(
@@ -211,20 +232,9 @@ def _make_tier(
             ),
         ),
         primary_kv_view=memoryview(np.zeros((4, 16), dtype=np.int8)),
-        tier_type="kvcr",
-        router_capabilities=["router_hint"],
-        control_host="127.0.0.1",
-        control_ports=control_ports if control_ports is not None else [7777],
-        control_advertise_host="127.0.0.1",
-        enable_telemetry=enable_telemetry,
-        secondary_g2_slots=secondary_g2_slots,
-        kvcr_service_socket_path=kvcr_service_socket_path,
-        compatibility_digest=compatibility_digest,
-        policy=policy,
-        g3=g3,
-        local_dram_backend="UCX",
-        remote_fw_dram_backend="UCX",
     )
+    assert isinstance(tier, KVCRSecondaryTierManager)
+    return tier
 
 
 def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
@@ -269,10 +279,19 @@ def test_kvcr_tier_converts_g3_paths(monkeypatch, tmp_path):
     )
 
 
-def test_kvcr_tier_adapts_request_and_load(monkeypatch):
-    """Check hint forwarding, key conversion, load descriptors, and cleanup."""
+@pytest.mark.parametrize(
+    "backpressure",
+    [None, {"backpressure_cls": "EMABackpressureDetector"}],
+    ids=["default", "backpressure"],
+)
+def test_kvcr_tier_adapts_request_and_load(monkeypatch, backpressure):
+    """Factory-created tiers preserve configuration and complete hinted loads."""
     kvcr = RecordingKVCR()
-    tier = _make_tier(monkeypatch, kvcr)
+    tier = _make_tier(monkeypatch, kvcr, backpressure=backpressure)
+    if backpressure is None:
+        assert tier.bp_detector is None
+    else:
+        assert isinstance(tier.bp_detector, EMABackpressureDetector)
     kv_hint = KvHintsEnvelope(protocol_version="0.1", message_id="msg", actions=[])
     ctx = ReqContext(
         req_id="req",
