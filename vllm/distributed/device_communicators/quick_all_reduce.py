@@ -9,7 +9,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config_or_none
+from vllm.config import get_current_vllm_config_or_none, in_draft_model
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -312,7 +312,9 @@ class QuickAllReduce:
 
     def should_quick_allreduce(self, inp: torch.Tensor):
         """Check if quickreduce is available."""
-        if self.disabled:
+        # Quick reduce quantizes and/or casts to FP16, so speculative drafts
+        # fall back to a full-precision all-reduce.
+        if self.disabled or in_draft_model():
             return False
         if inp.dtype not in self._SUPPORTED_DTYPES:
             return False

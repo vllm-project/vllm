@@ -780,6 +780,20 @@ def test_quick_allreduce_accepts_input_at_threshold():
     assert qar.should_quick_allreduce(inp) is True
 
 
+def test_quick_allreduce_rejects_draft_model_input():
+    """Speculative drafts keep full-precision all-reduces, so quick reduce's
+    quantization cannot lower their acceptance rate."""
+    from vllm.config import draft_model_scope
+
+    qar = _make_quick_allreduce(quant_level="INT4")
+    inp = torch.zeros(4 * MB, dtype=torch.float16)
+
+    assert qar.should_quick_allreduce(inp) is True
+    with draft_model_scope():
+        assert qar.should_quick_allreduce(inp) is False
+    assert qar.should_quick_allreduce(inp) is True
+
+
 def test_quick_allreduce_rejects_input_larger_than_max_size():
     qar = _make_quick_allreduce(qr_max_size=1 * MB)
 

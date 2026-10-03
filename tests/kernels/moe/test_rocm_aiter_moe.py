@@ -700,6 +700,48 @@ def test_aiter_moe_a4w4_dsv4_is_opt_in(
         assert moe_config.use_mxfp4_w4a4_dsv4 is expected
 
 
+def test_aiter_moe_a4w4_dsv4_skips_draft_model(monkeypatch: pytest.MonkeyPatch):
+    """a4w4 lowers the checkpoint's FP8 activations to FP4, so it must apply to
+    the target only; a speculative draft keeps its shipped a8w4."""
+    import types
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import draft_model_scope
+
+    _assert_aiter_supported()
+
+    fake_vllm_config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(
+            hf_config=types.SimpleNamespace(model_type="deepseek_v41")
+        )
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", "1")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        def make():
+            return make_dummy_moe_config(
+                num_experts=4,
+                experts_per_token=2,
+                hidden_dim=256,
+                intermediate_size=512,
+                in_dtype=torch.bfloat16,
+            )
+
+        with mock.patch(
+            "vllm.config.get_current_vllm_config_or_none",
+            return_value=fake_vllm_config,
+        ):
+            assert make().use_mxfp4_w4a4_dsv4
+            with draft_model_scope():
+                assert not make().use_mxfp4_w4a4_dsv4
+
+
 @pytest.mark.parametrize("model_type", ["deepseek_v4", "gpt_oss", None])
 def test_aiter_moe_a4w4_dsv4_rejects_unvalidated_model_type(
     model_type: str | None,
