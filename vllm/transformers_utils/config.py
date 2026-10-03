@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial, wraps
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
@@ -15,7 +14,6 @@ import huggingface_hub
 import torch
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
-from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
@@ -69,12 +67,6 @@ _DENSE_MODULE_TYPES = {
     "pylate.models.Dense.Dense",
 }
 
-if Version(version("transformers")) < Version("5.0.0"):
-    raise ImportError(
-        "Support for Transformers v4 is deprecated and was removed in vLLM v0.24.0. "
-        "Please upgrade to Transformers v5: pip install --upgrade transformers"
-    )
-
 
 class LazyConfigDict(dict):
     def __getitem__(self, key):
@@ -107,9 +99,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
     granite4_vision="Granite4VisionConfig",
-    glm5_next="Glm5NextConfig",
-    glm5_next_text="Glm5NextTextConfig",
-    glm5_next_vision="Glm5NextVisionConfig",
     hyperclovax="HyperCLOVAXConfig",
     hy_v3="HYV3Config",
     hy_v4="HYV4Config",
@@ -145,8 +134,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
-    qwen4_exp="Qwen4ExpConfig",
-    qwen4_exp_text="Qwen4ExpTextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_text="Qwen3_5TextConfig",
     qwen3_5_moe="Qwen3_5MoeConfig",
