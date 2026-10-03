@@ -4,12 +4,21 @@
 server arguments, mainly --api-key and --enable-request-id-headers.
 """
 
+import json
+from argparse import Namespace
 from http import HTTPStatus
+from unittest.mock import AsyncMock
 
 import pytest
 import requests
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.serve.middleware.omit_unset_chat_fields import (
+    OmitUnsetChatFieldsMiddleware,
+)
+from vllm.entrypoints.serve.middleware.register import init_entrypoints_middleware
 
 # Use a small embeddings model for faster startup and smaller memory footprint.
 # Since we are not testing any chat functionality,
@@ -159,3 +168,138 @@ async def test_custom_request_id_header(server: RemoteOpenAIServer):
     )
     assert "X-Request-Id" in response.headers
     assert response.headers.get("X-Request-Id") == "Custom"
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("enabled", "path"),
+    [
+        (False, "/v1/chat/completions"),
+        (True, "/v1/chat/completions"),
+        (True, "/v1/chat/completions/batch"),
+    ],
+)
+def test_omit_unset_chat_fields_is_optional(enabled, path, monkeypatch):
+    monkeypatch.delenv("VLLM_API_KEY", raising=False)
+    populated_fields = {
+        "prompt_logprobs": [],
+        "prompt_token_ids": [1, 2],
+        "prompt_text": "",
+        "kv_transfer_params": {},
+        "ec_transfer_params": {},
+        "metrics": {"time_to_first_token_ms": 1.0},
+    }
+    openai_fields = {
+        "service_tier": None,
+        "system_fingerprint": None,
+        "choices": [{"message": {"content": "hello"}, "logprobs": None}],
+    }
+    payload = openai_fields | dict.fromkeys(populated_fields)
+    app = FastAPI()
+
+    @app.post(path)
+    async def completion():
+        return payload
+
+    args = Namespace(
+        allowed_origins=[],
+        allow_credentials=False,
+        allowed_methods=["*"],
+        allowed_headers=["*"],
+        api_key=None,
+        enable_request_id_headers=False,
+        middleware=[
+            "vllm.entrypoints.serve.middleware.omit_unset_chat_fields."
+            "OmitUnsetChatFieldsMiddleware"
+        ]
+        if enabled
+        else [],
+    )
+    init_entrypoints_middleware(args, app, supported_tasks=())
+    with TestClient(app) as client:
+        response = client.post(path)
+        assert response.status_code == HTTPStatus.OK
+        assert response.json() == (openai_fields if enabled else payload)
+        payload.update(populated_fields)
+        assert client.post(path).json() == payload
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("root_path", "path"),
+    [
+        ("/proxy", "/proxy/v1/chat/completions"),
+        ("/v", "/v1/chat/completions"),
+        ("/", "/v1/chat/completions"),
+    ],
+)
+async def test_omit_unset_chat_fields_handles_multipart_json(root_path, path):
+    body = '{"prompt_text": null, "id": "中文"}'.encode()
+    headers = [
+        (b"content-type", b"application/json; charset=utf-8"),
+        (b"content-length", str(len(body)).encode()),
+        (b"set-cookie", b"first=1"),
+        (b"set-cookie", b"second=2"),
+    ]
+    original_headers = headers.copy()
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": headers})
+        await send({"type": "http.response.body", "body": body[:-3], "more_body": True})
+        await send({"type": "http.response.body", "body": body[-3:]})
+
+    send = AsyncMock()
+    await OmitUnsetChatFieldsMiddleware(app)(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "root_path": root_path,
+        },
+        AsyncMock(),
+        send,
+    )
+    messages = [call.args[0] for call in send.await_args_list]
+    result = b"".join(message.get("body", b"") for message in messages)
+    assert json.loads(result) == {"id": "中文"}
+    result_headers = messages[0]["headers"]
+    assert dict(result_headers)[b"content-length"] == str(len(result)).encode()
+    assert [(k, v) for k, v in result_headers if k != b"content-length"] == [
+        (k, v) for k, v in original_headers if k != b"content-length"
+    ]
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["sse", "error", "other", "compressed", "websocket"])
+async def test_omit_unset_chat_fields_bypasses_other_responses(case):
+    scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions"}
+    headers = [(b"content-type", b"application/json")]
+    if case == "sse":
+        headers = [(b"content-type", b"text/event-stream")]
+    elif case == "other":
+        scope["path"] = "/v1/completions"
+    elif case == "compressed":
+        headers.append((b"content-encoding", b"gzip"))
+    messages = [
+        {
+            "type": "http.response.start",
+            "status": 400 if case == "error" else 200,
+            "headers": headers,
+        },
+        {"type": "http.response.body", "body": b"first", "more_body": True},
+        {"type": "http.response.body", "body": b"second"},
+    ]
+    if case == "websocket":
+        scope["type"] = "websocket"
+        messages = [{"type": "websocket.accept"}, {"type": "websocket.close"}]
+    downstream_send = AsyncMock()
+
+    async def app(scope, receive, send):
+        for index, message in enumerate(messages):
+            await send(message)
+            assert downstream_send.await_count == index + 1
+
+    await OmitUnsetChatFieldsMiddleware(app)(scope, AsyncMock(), downstream_send)
+    assert [call.args[0] for call in downstream_send.await_args_list] == messages
