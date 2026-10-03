@@ -546,17 +546,21 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertTrue(github.comments[0].startswith("✅ "))
         self.assertIn("Buildkite CI #123", github.comments[0])
 
-    def test_run_variants_require_current_base_without_changing_commit(self) -> None:
+    def test_author_runs_require_current_base_without_updating(self) -> None:
         for command in RUN_CI_COMMAND_ENV:
             if command.endswith(" --allow-stale"):
                 continue
             for behind in (0, 1, 5):
                 with self.subTest(command=command, behind=behind):
                     github = FakeGitHub(
-                        behind=behind, pr=make_pr(base={"ref": "release/1.0"})
+                        permission="read",
+                        behind=behind,
+                        pr=make_pr(
+                            base={"ref": "release/1.0"}, labels=[{"name": "ready"}]
+                        ),
                     )
                     buildkite = FakeBuildkite([[], []])
-                    run(make_event(command), github, buildkite)
+                    run(make_event(command, "author"), github, buildkite)
 
                     self.assertEqual(
                         github.lag_queries,
@@ -581,6 +585,85 @@ class RunCiCommandTest(unittest.TestCase):
                             "No new CI build was started.", github.comments[0]
                         )
                         self.assertIn(command, github.comments[0])
+
+    @patch("run_ci_command.time.sleep")
+    def test_branch_update_waits_for_new_head(self, sleep: Any) -> None:
+        updated = make_pr(head={"sha": "updated-sha"})
+        transport = FakeTransport(({}, make_pr(), updated))
+        github = GitHubClient("token", "vllm-project/vllm", transport)
+        self.assertEqual(github.update_pr_branch(42, "0123456789abcdef"), updated)
+        self.assertEqual(transport.calls[0]["method"], "PUT")
+        self.assertTrue(transport.calls[0]["url"].endswith("/pulls/42/update-branch"))
+        self.assertEqual(
+            transport.calls[0]["body"], {"expected_head_sha": "0123456789abcdef"}
+        )
+        self.assertEqual(sleep.call_count, 2)
+        transport.response = make_pr()
+        with self.assertRaisesRegex(ApiError, "Timed out"):
+            github.update_pr_branch(42, "0123456789abcdef")
+
+    def test_committer_update_builds_new_head_or_reuses_active_build(self) -> None:
+        for active in (False, True):
+            with self.subTest(active=active):
+                github = FakeGitHub(pr=make_pr(base={"ref": "release/1.0"}))
+                updated = make_pr(base=github.pr["base"])
+                updated["head"]["sha"] = "updated-sha"
+                build = {
+                    "state": "running",
+                    "pull_request": {"id": 42},
+                    "web_url": "https://buildkite.example/builds/456",
+                }
+                buildkite = FakeBuildkite([[], [], [], [build] if active else []])
+                with (
+                    patch.object(
+                        github, "update_pr_branch", create=True, return_value=updated
+                    ) as update,
+                    patch.object(
+                        github,
+                        "get_pr",
+                        side_effect=[github.pr, github.pr, updated, updated],
+                    ),
+                    patch.object(
+                        github, "get_commits_behind_base", side_effect=[5, 0, 0]
+                    ),
+                ):
+                    run(make_event(COMMAND_RUN_CI), github, buildkite)
+                update.assert_called_once_with(42, "0123456789abcdef")
+                self.assertEqual(buildkite.list_calls[-1], ("updated-sha", None))
+                self.assertEqual(len(buildkite.created_builds), int(not active))
+                if not active:
+                    self.assertEqual(
+                        buildkite.created_builds[0]["commit"], "updated-sha"
+                    )
+
+    def test_failed_or_stale_update_does_not_start_ci(self) -> None:
+        for fault in (403, 422, "base", "closed", "behind"):
+            with self.subTest(fault=fault):
+                github = FakeGitHub(behind=5)
+                updated = make_pr()
+                updated["head"]["sha"] = "updated-sha"
+                if fault == "base":
+                    updated["base"]["ref"] = "different-base"
+                if fault == "closed":
+                    updated["state"] = "closed"
+                buildkite = FakeBuildkite([[], []])
+                with (
+                    patch.object(
+                        github,
+                        "update_pr_branch",
+                        create=True,
+                        return_value=updated,
+                        side_effect=ApiError(fault, "Update denied")
+                        if isinstance(fault, int)
+                        else None,
+                    ),
+                    patch.object(
+                        github, "get_pr", side_effect=[github.pr, github.pr, updated]
+                    ),
+                ):
+                    run(make_event(COMMAND_RUN_CI), github, buildkite)
+                self.assertEqual(buildkite.created_builds, [])
+                self.assertIn("No new CI build was started", github.comments[0])
 
     def test_allow_stale_preserves_author_permissions_and_run_configuration(
         self,
