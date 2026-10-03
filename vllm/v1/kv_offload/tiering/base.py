@@ -4,7 +4,7 @@
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -68,16 +68,83 @@ class TieringOffloadingMetrics:
     PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
 
 
+PrimaryAllocFn = Callable[
+    [Collection[OffloadKey], ReqContext], tuple[list[OffloadKey], list[int]] | None
+]
+
+
 @dataclass
 class TransferJob:
     """Metadata for an in-flight async transfer job."""
 
     job_id: JobId
-    keys: Collection[OffloadKey]
-    chunk_ids: np.ndarray
+    _keys: Collection[OffloadKey]
+    _chunk_ids: np.ndarray
     is_promotion: bool
     req_context: ReqContext
     submit_time: float = field(default_factory=time.monotonic)
+
+    @property
+    def keys(self) -> Collection[OffloadKey]:
+        return self._keys
+
+    @property
+    def chunk_ids(self) -> np.ndarray:
+        return self._chunk_ids
+
+    def is_materialized(self) -> bool:
+        return True
+
+
+@dataclass
+class DeferredTransferJob(TransferJob):
+    """Defer CPU cache block allocation until the transfer is ready
+    to begin.
+    """
+
+    # Was deferred allocation successful?
+    deferred_alloc_succeeded: bool | None = None
+    # Keys / chunk_ids after allocation
+    _deferred_keys: Collection[OffloadKey] | None = None
+    _deferred_chunk_ids: np.ndarray | None = None
+    # Allocator fn
+    primary_alloc_fn: PrimaryAllocFn = field(kw_only=True)
+
+    def __post_init__(self):
+        assert self.is_promotion, (
+            "Deferred allocation jobs applies only to promotion jobs"
+        )
+        assert self.primary_alloc_fn is not None, (
+            "Deferred allocation jobs need an allocation function"
+        )
+
+    def is_materialized(self) -> bool:
+        return self._deferred_keys is not None and self._deferred_chunk_ids is not None
+
+    @property
+    def keys(self) -> Collection[OffloadKey]:
+        assert self.is_materialized(), "Cannot access keys before materialization"
+        assert self._deferred_keys is not None
+        return self._deferred_keys
+
+    @property
+    def chunk_ids(self) -> np.ndarray:
+        assert self.is_materialized(), "Cannot access chunk_ids before materialization"
+        assert self._deferred_chunk_ids is not None
+        return self._deferred_chunk_ids
+
+    def materialize(self):
+        if self.is_materialized():
+            return
+        alloc = self.primary_alloc_fn(self._keys, self.req_context)
+        if alloc is None:
+            # This is technically a transfer job with 0 keys now.
+            self._deferred_keys = []
+            self._deferred_chunk_ids = np.array([])
+            self.deferred_alloc_succeeded = False
+            return
+        self.deferred_alloc_succeeded = True
+        self._deferred_keys, self._deferred_chunk_ids = alloc
 
 
 @dataclass
@@ -289,6 +356,10 @@ class SecondaryTierManager(ABC):
 
         """
         pass
+
+    def supports_deferred_promotion_allocation(self) -> bool:
+        """Return true iff the supports/requests deferring of CPU block allocation."""
+        return False
 
     def has_pending_work(self) -> bool:
         """Whether this tier needs the engine to keep stepping.

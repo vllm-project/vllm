@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
 from vllm.v1.kv_offload.tiering.base import (
+    DeferredTransferJob,
     JobResult,
     SecondaryTierManager,
     TieringOffloadingMetrics,
@@ -112,13 +113,18 @@ class TieringMetricsTracker:
     def on_job_registered(self, job_metadata: _JobMetadataLike) -> None:
         transfer_job = job_metadata.transfer_job
         state = self._tier_states[job_metadata.tier_idx]
-        chunk_count = len(transfer_job.chunk_ids)
         if transfer_job.is_promotion:
             state.active_promotion_count += 1
-            state.primary_write_chunk_count += chunk_count
+            if transfer_job.is_materialized():
+                # Handle only eager allocation here. DeferredTransferJob updates
+                # chunk count during allocation.
+                self.on_promotion_chunk_count(
+                    job_metadata.tier_idx, len(transfer_job.chunk_ids)
+                )
         else:
+            assert not isinstance(transfer_job, DeferredTransferJob)
             state.active_cascade_count += 1
-            state.primary_read_chunk_count += chunk_count
+            state.primary_read_chunk_count += len(transfer_job.chunk_ids)
 
     def on_job_finished(
         self, job_metadata: _JobMetadataLike, result: JobResult
@@ -127,6 +133,10 @@ class TieringMetricsTracker:
         if job_metadata.transfer_job.is_promotion:
             self._observe_promotion_latency(job_metadata, result)
         self._decrement_tier_state(job_metadata)
+
+    def on_promotion_chunk_count(self, tier_idx: int, chunk_alloc_count: int):
+        state = self._tier_states[tier_idx]
+        state.primary_write_chunk_count += chunk_alloc_count
 
     def on_promotion_allocation_failure(self) -> None:
         self._stats.increase_counter(
@@ -189,6 +199,7 @@ class TieringMetricsTracker:
 
     def _decrement_tier_state(self, job_metadata: _JobMetadataLike) -> None:
         transfer_job = job_metadata.transfer_job
+        assert transfer_job.is_materialized(), "Job must be materialzed before finish"
         state = self._tier_states[job_metadata.tier_idx]
         chunk_count = len(transfer_job.chunk_ids)
         if transfer_job.is_promotion:
@@ -208,6 +219,15 @@ class TieringMetricsTracker:
         completed_job: JobResult,
     ) -> None:
         transfer_job = job_metadata.transfer_job
+        assert transfer_job.is_materialized(), "Job must materialize before finish"
+        if (
+            isinstance(transfer_job, DeferredTransferJob)
+            and not transfer_job.deferred_alloc_succeeded
+        ):
+            # deferred allocation failed. Failure is captured by
+            # PROMOTION_ALLOCATION_FAILURES already.
+            return
+
         labelvalues = self.tier_label(job_metadata.tier_idx)
         completed_key_count = len(transfer_job.keys)
         if not completed_job.success:
