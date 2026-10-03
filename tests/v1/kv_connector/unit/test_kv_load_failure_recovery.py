@@ -69,6 +69,92 @@ def test_failed_receive_completion_honors_failure_policy(policy):
         assert request.request_id in next_output.num_scheduled_tokens
 
 
+def _create_async_load_scheduler(
+    req_num_new_matched_tokens: dict[str, int],
+) -> Scheduler:
+    # 10 usable blocks (plus the null block), recompute on load failure.
+    vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
+    scheduler = create_scheduler(vllm_config, num_blocks=11)
+    scheduler.connector = Mock()
+    scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
+    )
+    scheduler.connector.take_events.return_value = ()
+    return scheduler
+
+
+@pytest.mark.parametrize(
+    "failure,expected_status",
+    [
+        ("failed_recving", RequestStatus.WAITING_FOR_REMOTE_KVS),
+        ("invalid_first_block", RequestStatus.WAITING_FOR_REMOTE_KVS),
+        # Control: the valid prefix keeps its blocks and the rest is recomputed.
+        ("invalid_last_block", RequestStatus.RUNNING),
+    ],
+)
+def test_async_load_retry_after_failure(failure: str, expected_status: RequestStatus):
+    """A failed load that frees all blocks must not reserve blocks against
+    the request's own retry, or the retry is never admitted."""
+    request = create_request(num_tokens=6 * 16)
+    scheduler = _create_async_load_scheduler({request.request_id: 5 * 16})
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    invalid_block_ids = {
+        "failed_recving": set(),
+        "invalid_first_block": {block_ids[0]},
+        "invalid_last_block": {block_ids[-1]},
+    }[failure]
+    output = create_model_runner_output(
+        [], finished_recving={request.request_id}, invalid_block_ids=invalid_block_ids
+    )
+    if failure == "failed_recving":
+        assert output.kv_connector_output is not None
+        output.kv_connector_output.failed_recving = {request.request_id}
+    scheduler.update_from_output(scheduler_output, output)
+
+    # The connector offers the same async load again; all blocks are free.
+    scheduler.schedule()
+    assert request.status == expected_status
+
+
+def test_failed_async_load_does_not_block_completed_loads():
+    """A request freed by a failed load must not stay ahead of requests that
+    hold blocks, or its failed allocation stops the scheduling scan."""
+    failed = create_request(num_tokens=4 * 16)
+    loaded = [create_request(num_tokens=4 * 16) for _ in range(2)]
+    scheduler = _create_async_load_scheduler(
+        {
+            failed.request_id: 3 * 16,
+            loaded[0].request_id: 3 * 16,
+            loaded[1].request_id: 2 * 16,
+        }
+    )
+    for request in (failed, *loaded):
+        scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    for request in (failed, *loaded):
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    output = create_model_runner_output(
+        [], finished_recving={r.request_id for r in (failed, *loaded)}
+    )
+    assert output.kv_connector_output is not None
+    output.kv_connector_output.failed_recving = {failed.request_id}
+    scheduler.update_from_output(scheduler_output, output)
+
+    # The failed request's retry does not fit next to the loaded requests'
+    # reservations, but the loaded requests fit and must still be scheduled.
+    scheduler_output = scheduler.schedule()
+    for request in loaded:
+        assert request.request_id in scheduler_output.num_scheduled_tokens
+
+
 @pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
     [
