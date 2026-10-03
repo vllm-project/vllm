@@ -153,7 +153,10 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 reduce_results=not self.use_attn_reduce_scatter_for_moe,
             )
         elif self.layer_type == "full_attention":
-            mm_config = model_config.multimodal_config
+            # A drafter gets the target's positions, so it follows the target.
+            spec = vllm_config.speculative_config
+            target_config = (spec and spec.target_model_config) or model_config
+            mm_config = target_config.multimodal_config
             self.self_attn = Qwen3NextAttention(
                 config,
                 model_config=model_config,
