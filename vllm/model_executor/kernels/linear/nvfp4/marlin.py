@@ -9,6 +9,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    cutlass_fp4_supported,
+)
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
@@ -31,12 +34,24 @@ class MarlinNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        logger.warning_once(
-            "Your GPU does not have native support for FP4 computation but "
-            "FP4 quantization is being used. Weight-only FP4 compression "
-            "will be used leveraging the Marlin kernel. This may degrade "
-            "performance for compute-heavy workloads."
-        )
+        # Reachable on FP4-native GPUs too: weight-only (W4A16_NVFP4)
+        # checkpoints have no activation scales, so Marlin is their only
+        # valid kernel regardless of hardware.
+        if cutlass_fp4_supported():
+            logger.warning_once(
+                "FP4 weights will be dequantized to the activation dtype "
+                "inside the Marlin kernel instead of using this GPU's "
+                "native FP4 tensor cores (weight-only FP4 checkpoints such "
+                "as W4A16_NVFP4 only support this path). This may degrade "
+                "performance for compute-heavy workloads."
+            )
+        else:
+            logger.warning_once(
+                "Your GPU does not have native support for FP4 computation "
+                "but FP4 quantization is being used. Weight-only FP4 "
+                "compression will be used leveraging the Marlin kernel. "
+                "This may degrade performance for compute-heavy workloads."
+            )
         prepare_fp4_layer_for_marlin(layer)
 
     def apply_weights(
