@@ -7,16 +7,20 @@ n-gram embedding table can be kept in pinned host memory and looked up through
 Unified Virtual Addressing on any CUDA-alike platform.
 """
 
+import mmap
 import threading
+import weakref
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.distributed import get_dp_group, get_etp_group, get_tp_group
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -44,6 +48,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -405,6 +410,57 @@ def _lookup_ple_embedding_from_pinned_kernel(
     )
 
 
+def _unregister_host_table(
+    cudart: CudaRTLibrary, mapping: mmap.mmap, pointer: int
+) -> None:
+    # Holds the mapping until CUDA has released the registration.
+    if cudart.cudaHostUnregister(pointer) != 0:
+        cudart.cudaGetLastError()
+        logger.warning("cudaHostUnregister of the PLE table failed")
+
+
+def _registered_host_table(
+    num_embeddings: int, embedding_dim: int, dtype: torch.dtype
+) -> torch.Tensor | None:
+    """Exact-size registered host table, or None to fall back to pin_memory=True.
+
+    The mapping is unregistered once the table and every view of it, including
+    the UVA view, are gone.
+    """
+    num_bytes = num_embeddings * embedding_dim * dtype.itemsize
+    if num_bytes == 0 or not current_platform.is_cuda():
+        return None
+    try:
+        cudart = CudaRTLibrary()
+        mapping = mmap.mmap(-1, num_bytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+        # A fork must not copy-on-write the pinned pages into the child.
+        mapping.madvise(mmap.MADV_DONTFORK)
+    except (AssertionError, AttributeError, OSError) as exc:
+        logger.warning_once("PLE table mapping failed (%s); using pin_memory.", exc)
+        return None
+    owner = np.frombuffer(mapping, dtype=np.uint8)
+    pointer = owner.ctypes.data
+    # Register, drain and unregister through one runtime handle.
+    if (result := cudart.cudaHostRegister(pointer, num_bytes)) != 0:
+        cudart.cudaGetLastError()
+        logger.warning_once(
+            "cudaHostRegister of the PLE table failed (error %d); using pin_memory.",
+            result,
+        )
+        return None
+    # Tensor views retain owner; its finalizer retains mapping until unregister.
+    finalizer = weakref.finalize(
+        owner, _unregister_host_table, cudart, mapping, pointer
+    )
+    finalizer.atexit = False  # type: ignore[misc]
+    table = torch.from_numpy(owner)
+    # The UVA view would otherwise silently use a private pinned copy.
+    if not table.is_pinned():
+        logger.warning_once("CUDA did not pin the PLE table; using pin_memory.")
+        return None
+    return table.view(dtype).view(num_embeddings, embedding_dim)
+
+
 class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
     """PLE table loaded into pinned CPU memory and looked up through UVA."""
 
@@ -453,6 +509,9 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         """Allocate the complete PLE weight directly in pinned CPU memory."""
+        table = _registered_host_table(num_embeddings, embedding_dim, dtype)
+        if table is not None:
+            return table
         return torch.empty(
             num_embeddings,
             embedding_dim,

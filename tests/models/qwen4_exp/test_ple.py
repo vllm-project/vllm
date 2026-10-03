@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 from dataclasses import dataclass
 from functools import partial
 from itertools import accumulate
@@ -2273,3 +2274,62 @@ def test_amd_ngram_embedding_matches_reference_under_compile(
     )
     expected = loaded_weight[ngram_ids.cpu()].flatten(-2).to(device)
     torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+def _record_cudart(monkeypatch, calls, register_result=None):
+    class RecordingCudaRT(ngram_embedding_module.CudaRTLibrary):
+        def cudaHostRegister(self, ptr, size, flags=0):
+            calls.append(("register", ptr, size))
+            if register_result is not None:
+                return register_result
+            return super().cudaHostRegister(ptr, size, flags)
+
+        def cudaHostUnregister(self, ptr):
+            calls.append(("unregister", ptr))
+            return super().cudaHostUnregister(ptr)
+
+        def cudaGetLastError(self):
+            calls.append(("get_last_error",))
+            return super().cudaGetLastError()
+
+    monkeypatch.setattr(ngram_embedding_module, "CudaRTLibrary", RecordingCudaRT)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_registered_ple_table_is_exact_size_and_outlives_its_views(monkeypatch):
+    """The table is registered at its exact size, the UVA view taken before
+    loading sees the loaded rows, and it is unregistered after the last view."""
+    from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+    torch.cuda.init()  # is_pinned() reports False before CUDA is initialized
+    calls: list[tuple] = []
+    _record_cudart(monkeypatch, calls)
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
+    table = embedding.allocate_embedding_weight(3, 1000, torch.bfloat16)
+    assert table.is_pinned()
+    assert calls == [("register", table.data_ptr(), 3 * 1000 * 2)]
+
+    view = get_accelerator_view_from_cpu_tensor(table)
+    table.copy_(torch.arange(3000, dtype=torch.bfloat16).view(3, 1000))
+    assert torch.equal(view.cpu(), table)
+
+    del table
+    gc.collect()
+    assert [c[0] for c in calls] == ["register"]
+    del view
+    gc.collect()
+    assert calls[-1] == ("unregister", calls[0][1])
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_pinned_ple_table_falls_back_when_registration_fails(monkeypatch):
+    """A failed registration clears the CUDA error and uses pin_memory=True."""
+    calls: list[tuple] = []
+    _record_cudart(monkeypatch, calls, register_result=1)
+    embedding = Qwen4ExpPLEPinnedHostEmbedding.__new__(Qwen4ExpPLEPinnedHostEmbedding)
+    table = embedding.allocate_embedding_weight(3, 1000, torch.bfloat16)
+    assert table.is_pinned() and table.shape == (3, 1000)
+    del table
+    gc.collect()
+    # The pin_memory fallback, not a registered table that was later released.
+    assert [c[0] for c in calls] == ["register", "get_last_error"]
