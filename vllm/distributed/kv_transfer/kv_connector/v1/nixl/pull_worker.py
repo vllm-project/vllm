@@ -128,13 +128,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         self._send_heartbeats(metadata)
 
     def _start_recv(self, req_id: str, meta: ReqMeta) -> None:
-        """Read the request's blocks, or handshake first.
-
-        A handshake is redone when the engine was released since it completed,
-        or when the request names a newer registration of the engine; then the
-        engine is evicted first, once nothing is read through its old keys. A
-        request naming an older registration fails.
-        """
+        """Read the request's blocks, handshaking again (after old reads drain) if
+        the engine registered anew; fail a request naming an older registration."""
         assert meta.remote is not None
         engine_id = meta.remote.engine_id
         delta = self._registration_epoch_delta(

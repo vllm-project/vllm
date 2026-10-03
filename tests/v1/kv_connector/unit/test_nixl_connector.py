@@ -527,9 +527,7 @@ def test_kv_transfer_handshake(dist_init):
         assert kv_connector_metadata["remote_registration_epoch"] == 1
         assert decode_worker._remote_registration_epochs[engine_id] == 1
 
-        # Sleep mode registers the KV caches anew: the scheduler learns the new
-        # epoch from every rank, stamps it on later requests, and serves the new
-        # metadata to a peer handshaking with both ranks.
+        # Re-registration after sleep: the scheduler learns and serves the new epoch.
         prefill_connector.release_kv_caches()
         assert prefill_connector.get_handshake_metadata() is None
         prefill_connector.restore_kv_caches()
@@ -2648,12 +2646,8 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
 def test_release_kv_caches_is_the_inverse_of_register(
     default_vllm_config, dist_init, connector_cls, transfers
 ):
-    """The release deregisters every registration and descriptor list built
-    on the KV caches and forgets every peer, so that the restore rebuilds the
-    same layout under a new epoch instead of stacking onto the old one. Both
-    are idempotent. The release first waits for this worker's transfers and
-    for peers' reads of leased blocks; past the lease duration it fails and
-    publishes the new epoch with the unchanged registration."""
+    """Release drops every registration and peer so restore rebuilds the same layout
+    under a new epoch; both idempotent; release times out past the lease."""
     vllm_config = create_vllm_config()
     vllm_config.cache_config.kv_cache_layout = "LBHNC"
     kv_cache_config = make_kv_cache_config(block_size=16)
@@ -2836,9 +2830,8 @@ class _EpochNixlConnectorWorker(FakeNixlConnectorWorker):
 def test_pull_handshakes_again_for_a_new_registration_epoch(
     default_vllm_config, dist_init
 ):
-    """A request naming a newer registration of the remote engine evicts the
-    cached handshake and redoes it, but only once no read through the old
-    keys is in flight; a request naming the cached epoch reads right away."""
+    """A newer remote epoch evicts and redoes the handshake once old reads drain;
+    the cached epoch reads right away."""
     vllm_config = create_vllm_config()
     kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=10)
     connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
@@ -4594,12 +4587,8 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
 def test_decoder_reads_only_while_the_prefillers_lease_holds(
     default_vllm_config, dist_init, monkeypatch
 ):
-    """The prefiller may reuse a request's blocks once the lease it exported
-    ends, and nothing confirms that a heartbeat extended it. So a decoder that
-    admits 4 requests per step fails the load (recomputed or reported per the
-    KV load failure policy) of every request it schedules within the safety
-    margin of that expiry or later, however long it heartbeated or slept, and
-    reads all others."""
+    """Requests scheduled within the margin of the exported lease expiry fail the
+    load, however long they heartbeated; all others are read."""
     vllm_config = create_vllm_config()
     kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=64)
     clock = [1000.0]
@@ -4738,9 +4727,8 @@ def test_lease_margin_follows_the_remote_lease(
 def test_sleep_mode_disables_the_ucx_registration_cache(
     dist_init, monkeypatch, sleep_mode, cumem
 ):
-    """UCX's registration cache keeps a deregistered region pinned until it sees
-    the memory freed, which sleep mode's unmap does not signal: with sleep mode
-    it is disabled before the agent starts, unless the user configured it."""
+    """With sleep mode, UCX's registration cache is disabled before the agent
+    starts, since it keeps deregistered memory pinned; a user setting wins."""
     monkeypatch.delenv("UCX_RCACHE_ENABLE", raising=False)
     vllm_config = create_vllm_config()
     vllm_config.model_config.enable_sleep_mode = sleep_mode

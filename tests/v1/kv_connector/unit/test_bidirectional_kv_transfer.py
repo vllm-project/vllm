@@ -985,8 +985,7 @@ def test_turn2_full_prefix_hit_with_expired_deadline_skips_gate(
     dist_init, awaiting_kvs
 ):
     """A full local prefix hit issues no READ, so an expired deadline fails
-    nothing; the remote already released its blocks, so it is not notified.
-    A request waiting for the transfer completes."""
+    nothing and the remote is not notified."""
     connector, worker = _make_connector_with_fake_worker()
     worker._engine_clock_offset[_REMOTE] = 0.0
 

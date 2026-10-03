@@ -747,9 +747,8 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
 def test_do_start_push_kv_evicts_a_reregistered_decoder_first(
     epoch, writing_to, evicted, written
 ):
-    """A registration naming a newer epoch of the decoder evicts the cached
-    handshake before the WRITE; while a WRITE to that decoder is in flight it
-    waits on the deferred inbox. One naming an older epoch was aborted by D."""
+    """A newer decoder epoch evicts the cached handshake before the WRITE, after
+    in-flight WRITEs; an older epoch was aborted by D."""
     w = _StubWriterWorker.fresh()
     w._logical_to_kernel_block_ids = lambda x, ratio: x
     w._remote_agents["decode-engine"] = {(0, 0): "agent"}
@@ -2214,10 +2213,8 @@ def test_layer_handshake_rejects_unsupported_geometry(
 
 
 def test_decoder_registers_only_leases_the_prefiller_holds():
-    """A push decoder does not register a request with the producer once the
-    lease the producer exported is within the safety margin of its end; it
-    fails the request instead (recomputed or reported per the KV load failure
-    policy). Without an exported expiry it registers as before."""
+    """A push decoder fails instead of registering a request within the margin of
+    the exported lease expiry; without an expiry it registers as before."""
     w = _StubWriterWorker.fresh()
     w._logical_to_kernel_block_ids = lambda x, ratio: x
     w._ensure_handshake = lambda *a, **k: None
@@ -2250,9 +2247,8 @@ def test_decoder_registers_only_leases_the_prefiller_holds():
 
 
 def test_push_writes_only_blocks_still_leased():
-    """The producer never WRITEs blocks whose lease it already reaped (the
-    scheduler may have reused them) and tells every decoder rank, which fails
-    exactly that request instead of waiting until the client gives up."""
+    """The producer never WRITEs blocks whose lease it reaped and tells every
+    decoder rank, which fails exactly that request."""
     w = _StubWriterWorker.fresh()
     w._logical_to_kernel_block_ids = lambda x, ratio: x
     w._ensure_handshake = lambda *a, **k: None
@@ -2302,9 +2298,8 @@ def test_push_writes_only_blocks_still_leased():
     ids=["one-failed", "failed-then-done", "done-then-failed", "both-done", "unknown"],
 )
 def test_decoder_fails_a_push_only_once_every_producer_reported(notifs, failed, done):
-    """With two producers writing into one decoder, a PUSH_FAIL ends only that
-    producer's push: the decoder fails the request (its blocks may then be
-    reused) once the other producer finished writing too."""
+    """With two producers, a PUSH_FAIL fails the request only once the other
+    producer has finished writing too."""
     d = _StubWriterWorker.fresh()
     d.transfer_topo = MagicMock()
     d._recving_metadata = {"r": SimpleNamespace(pp_size=1)}

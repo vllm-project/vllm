@@ -1916,13 +1916,8 @@ class NixlBaseConnectorWorker:
         )
 
     def release_kv_caches(self) -> None:
-        """Release the NIXL registrations of the KV caches and everything
-        prepared on them, leaving the worker as before `register_kv_caches`.
-
-        First waits until no transfer this worker issued is in flight and no
-        peer can still read a block leased to it (see `_wait_until_unused`).
-        Peers learn of the next registration through its epoch. Idempotent.
-        """
+        """Drop the NIXL registrations of the KV caches and what was built on them,
+        after `_wait_until_unused`; peers see the new epoch. Idempotent."""
         if not self._registered_descs:
             return
         # Every rank counts every attempt, so that a rank whose release fails
@@ -1962,11 +1957,8 @@ class NixlBaseConnectorWorker:
         self.xfer_handshake_metadata = None
 
     def _wait_until_unused(self) -> None:
-        """Wait until neither this worker nor a peer can access the KV cache
-        memory: no transfer handle is still processing, no block is leased to
-        a peer, and a peer's read of blocks whose lease ended has had the
-        safety margin to finish (it started at least that long before the
-        end). Raises TimeoutError after the lease duration."""
+        """Wait until no local transfer, leased block or late peer read can touch
+        the KV cache. Raises TimeoutError after the lease duration."""
         deadline = time.perf_counter() + self._kv_lease_duration + self._lease_margin
         while (
             (now := time.perf_counter()) < self._lease_quarantine_until
@@ -3188,12 +3180,8 @@ class NixlBaseConnectorWorker:
             done_sending.add(req_id)
 
     def _is_lease_expired(self, meta: ReqMeta) -> bool:
-        """Whether the remote may release the request's blocks before a transfer
-        of them completes, so that they must not be transferred.
-
-        Only the expiry the remote exported counts: heartbeats ask it for more
-        time, but nothing confirms that it granted it.
-        """
+        """Whether the remote may free the blocks before a transfer completes; only
+        the exported expiry counts, since heartbeats are not confirmed."""
         assert meta.remote is not None
         expiry = meta.remote.blocks_expiry_time
         # The router may not forward the expiry: transfer as before.
@@ -3730,11 +3718,8 @@ class NixlBaseConnectorWorker:
     def _registration_epoch_delta(
         self, engine_id: EngineId, requested_epoch: int | None
     ) -> int:
-        """Registration epoch a transfer names minus the one of the cached
-        handshake with `engine_id`: positive when the engine registered anew
-        since (its cached keys are dead), negative when the transfer predates
-        the cached registration (its blocks are gone), 0 when nothing is known.
-        """
+        """Requested minus cached registration epoch of `engine_id`: >0 the engine
+        registered anew, <0 the transfer is stale, 0 unknown."""
         if requested_epoch is None:
             return 0
         cached_epoch = self._remote_registration_epochs.get(engine_id)
