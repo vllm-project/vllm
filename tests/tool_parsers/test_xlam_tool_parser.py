@@ -534,6 +534,100 @@ def test_extract_tool_calls_streaming_incremental(
     assert parsed_args == expected_args
 
 
+@pytest.mark.parametrize(
+    ids=[
+        "parallel_tool_calls",
+        "single_tool_with_think_tag",
+        "single_tool_with_json_code_block",
+        "single_tool_with_tool_calls_tag",
+        "single_tool_with_tool_call_xml_tags",
+        "json_code_block_with_leading_content",
+        "json_code_block_with_surrounding_content",
+        "tool_calls_tag_with_leading_content",
+        "single_tool_non_ascii",
+        "empty_args_then_second_tool",
+    ],
+    argnames=["model_output"],
+    argvalues=[
+        (
+            """[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}, {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}]""",  # noqa: E501
+        ),
+        (
+            """<think>I'll help you with that.</think>[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]""",  # noqa: E501
+        ),
+        (
+            """```json\n[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]\n```""",  # noqa: E501
+        ),
+        (
+            """[TOOL_CALLS][{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]""",  # noqa: E501
+        ),
+        (
+            """I can help with that.<tool_call>[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]</tool_call>""",  # noqa: E501
+        ),
+        (
+            """I'll help you with that.\n```json\n[{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]\n```""",  # noqa: E501
+        ),
+        (
+            """Before.\n```json\n[{"name": "get_current_weather", "arguments": {"city": "Dallas"}}]\n```\nAfter.""",  # noqa: E501
+        ),
+        (
+            """I'll check the weather for you.[TOOL_CALLS][{"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]""",  # noqa: E501
+        ),
+        ("""[{"name": "get_current_weather", "arguments": {"city": "北京"}}]""",),
+        (
+            """[{"name": "enable_dark_mode", "arguments": {}}, {"name": "set_brightness", "arguments": {"level": 7}}]""",  # noqa: E501
+        ),
+    ],
+)
+def test_streaming_matches_nonstreaming(xlam_tool_parser, xlam_tokenizer, model_output):
+    """Streaming must reconstruct exactly what non-streaming extracts.
+
+    Guards two regressions: wrapper markers and partial tool-call JSON
+    leaking into streamed content, and the serving layer's end-of-stream
+    flush (get_remaining_unstreamed_args) re-appending the full argument
+    string because the parser did not maintain streamed_args_for_tool.
+    Reconstruction applies the same conditional flush the serving layer
+    does in finalize_generation: remaining unstreamed arguments are
+    appended only when the final delta carries tool calls.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    content = ""
+    names: dict[int, str] = {}
+    args: dict[int, str] = {}
+    final_delta = None
+    for delta in stream_delta_message_generator(
+        xlam_tool_parser, xlam_tokenizer, model_output, request
+    ):
+        if delta.content:
+            content += delta.content
+        for tool_call in delta.tool_calls or []:
+            if tool_call.function and tool_call.function.name:
+                names[tool_call.index] = tool_call.function.name
+            if tool_call.function and tool_call.function.arguments:
+                args[tool_call.index] = (
+                    args.get(tool_call.index, "") + tool_call.function.arguments
+                )
+        final_delta = delta
+
+    tail = xlam_tool_parser.get_remaining_unstreamed_args()
+    if tail and final_delta is not None and final_delta.tool_calls:
+        last_index = max(args) if args else final_delta.tool_calls[-1].index
+        args[last_index] = args.get(last_index, "") + tail
+
+    reference = xLAMToolParser(xlam_tokenizer).extract_tool_calls(
+        model_output, request=request
+    )
+    assert content == (reference.content or "")
+    assert [names[i] for i in sorted(names)] == [
+        tool_call.function.name for tool_call in reference.tool_calls
+    ]
+    for i, tool_call in enumerate(reference.tool_calls):
+        # json.loads also fails if the old duplication bug re-appends the
+        # full argument string, e.g. {"city": "X"}{"city": "X"}.
+        assert json.loads(args[i]) == json.loads(tool_call.function.arguments)
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 def test_extract_tool_calls_non_ascii(xlam_tool_parser, xlam_tokenizer, streaming):
     # Use parallel tool calls so the streaming path re-serializes arguments
