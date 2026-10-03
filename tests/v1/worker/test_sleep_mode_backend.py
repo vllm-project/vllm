@@ -7,8 +7,12 @@ touch CUDA - the ``cumem`` suspend/resume path is exercised end-to-end on GPU
 in ``tests/basic_correctness/memory/``.
 """
 
+import os
+from types import SimpleNamespace
+
 import pytest
 
+from vllm.config import VllmConfig
 from vllm.device_allocator.sleep_mode_backend import (
     CuMemBackend,
     SleepModeBackend,
@@ -140,3 +144,32 @@ class DummyBackend(SleepModeBackend):
     @classmethod
     def supports_durable_storage(cls) -> bool:
         return True
+
+
+@pytest.mark.parametrize(
+    ("blockers", "env", "expected", "warns"),
+    [
+        ([], None, "0", False),
+        ([], "1", "1", True),
+        (None, None, None, False),
+        (["CUDA graphs are off"], None, None, True),
+    ],
+    ids=["active", "explicit-wins", "not-opted-in", "opted-in-inactive"],
+)
+def test_cumem_cudagraph_pool_startup_checks(
+    monkeypatch, blockers, env, expected, warns
+):
+    """An active cuMem graph pool defaults NCCL graph registration off, which
+    would pin it through sleep; an explicit value wins with a warning. An
+    opted-in but inactive pool says why; NCCL_GRAPH_REGISTER stays untouched."""
+    import vllm.config.vllm as config_module
+
+    warnings: list[tuple] = []
+    monkeypatch.setattr(config_module.logger, "warning", lambda *a: warnings.append(a))
+    monkeypatch.delenv("NCCL_GRAPH_REGISTER", raising=False)
+    if env:
+        monkeypatch.setenv("NCCL_GRAPH_REGISTER", env)
+    cfg = SimpleNamespace(_cumem_cudagraph_pool_blockers=lambda: blockers)
+    VllmConfig._verify_cumem_cudagraph_pool(cfg)
+    assert os.environ.get("NCCL_GRAPH_REGISTER") == expected
+    assert bool(warnings) is warns

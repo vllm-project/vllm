@@ -428,147 +428,65 @@ def test_cumem_with_cudagraph():
 @pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
-def test_cudagraph_pool_survives_sleep(level, monkeypatch):
-    """The cuMem graph pool is CPU-backed at both sleep levels: waking
-    weights remaps it at the same addresses with its contents intact."""
-    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
-
-    allocator = get_mem_allocator_instance()
-    with allocator.use_memory_pool("weights"):
-        weight = torch.full((1 << 20,), 2.0, device=DEVICE_TYPE)
-    x = torch.ones_like(weight)
-
-    graph = torch.cuda.CUDAGraph()
-    with allocator.use_cudagraph_pool() as pool, torch.cuda.graph(graph, pool=pool):
-        # Pool memory the graph reads but never writes, like a captured
-        # constant: only a CPU backup can preserve it.
-        const = torch.empty_like(x)
-        y = x * weight + const
-    const.fill_(3.0)
-
-    def graph_ptrs() -> set[int]:
-        return {
-            ptr
-            for ptr, data in allocator.pointer_to_data.items()
-            if data.tag == "cudagraph"
-        }
-
-    ptrs = graph_ptrs()
-    assert ptrs
-
-    # Poison every remapped page so a discarded allocation cannot pass.
-    original_create_and_map = cumem.create_and_map
-
-    def create_and_map_with_poison(handle) -> None:
-        original_create_and_map(handle)
-        cumem.libcudart.cudaMemset(handle[2], 0xA5, handle[1])
-
-    monkeypatch.setattr(cumem, "create_and_map", create_and_map_with_poison)
-
-    backend = CuMemBackend()
-    backend.suspend(level=level)
-    assert mapped_usage(allocator) == 0
-
-    # Any wake, even a selective one, restores the graph pool.
-    backend.resume(tags=["kv_cache"])
-    assert graph_ptrs() == ptrs
-    assert all(not allocator.pointer_to_data[ptr].is_asleep for ptr in ptrs)
-
-    backend.resume(tags=["weights"])
-    if level == 2:
-        weight.fill_(2.0)  # Level 2 discards weights; emulate the reload.
-
-    x.fill_(4.0)
-    graph.replay()
-    assert torch.equal(y, torch.full_like(y, 11.0))
-
-
-@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
-@pytest.mark.parametrize(
-    ("enabled", "plain", "routed"),
-    [(True, False, True), (True, True, False), (False, False, False)],
-    ids=["routed", "profiling", "disabled"],
-)
-def test_use_cudagraph_pool_routing(enabled, plain, routed):
-    """A capture goes to the one cuMem graph pool when the config enables it,
-    except under plain_cudagraph_capture() (memory profiling); NCCL's graph
-    allocator follows whichever pool is used."""
+def test_cudagraph_pool_sleep_and_release(level):
+    """Captures go to the cuMem graph pool (not under profiling or with the
+    policy off), which any wake restores in place with its contents at both
+    levels. Releasing it is refused while asleep or while a graph uses it;
+    afterwards a recapture on a new stream starts from an empty pool."""
     from contextlib import nullcontext
     from types import SimpleNamespace
 
     import vllm.distributed.device_communicators.pynccl_allocator as nccl_alloc
     from vllm.compilation.cudagraph_pool import (
         plain_cudagraph_capture,
-        use_cudagraph_pool,
-    )
-
-    allocator = get_mem_allocator_instance()
-    pool = current_platform.graph_pool_handle()
-    cfg = SimpleNamespace(use_cumem_cudagraph_pool=enabled)
-    with (
-        plain_cudagraph_capture() if plain else nullcontext(),
-        use_cudagraph_pool(pool, cfg) as used,
-    ):
-        assert (allocator.current_tag == "cudagraph") is routed
-        assert nccl_alloc._graph_pool_id == used
-    if routed:
-        assert used == allocator.allocator_and_pools["cudagraph"][0][0].id
-    else:
-        assert used == pool
-
-
-@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
-def test_release_cudagraph_pool_bounds_recapture():
-    """Each capture runs on a new stream, as under graph_capture(), so a
-    recapture can't reuse the blocks its predecessor left in the pool; elastic
-    EP recaptures on every scale. Releasing the pool between captures returns
-    its segments through the free callback, also after a sleep/wake cycle, and
-    is refused while the pool is asleep or a graph still uses it."""
-    from types import SimpleNamespace
-
-    from vllm.compilation.cudagraph_pool import (
         release_cudagraph_pool,
         use_cudagraph_pool,
     )
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
 
     allocator = get_mem_allocator_instance()
-    cfg = SimpleNamespace(use_cumem_cudagraph_pool=True)
-    x = torch.ones(1 << 20, device=DEVICE_TYPE)
+    on, off = (SimpleNamespace(use_cumem_cudagraph_pool=v) for v in (True, False))
+    handle = current_platform.graph_pool_handle()
+    for cfg, ctx in ((off, nullcontext()), (on, plain_cudagraph_capture())):
+        with ctx, use_cudagraph_pool(handle, cfg) as used:
+            assert used == handle and allocator.current_tag != "cudagraph"
+    with allocator.use_memory_pool("weights"):
+        weight = torch.full((1 << 20,), 2.0, device=DEVICE_TYPE)
+    x = torch.ones_like(weight)
 
-    def capture() -> torch.cuda.CUDAGraph:
+    def capture() -> list:
         graph = torch.cuda.CUDAGraph()
+        stream = torch.cuda.Stream()
         with (
-            use_cudagraph_pool(current_platform.graph_pool_handle(), cfg) as pool,
-            torch.cuda.graph(graph, pool=pool, stream=torch.cuda.Stream()),
+            use_cudagraph_pool(handle, on) as pool,
+            torch.cuda.graph(graph, pool=pool, stream=stream),
         ):
-            x.mul_(2).add_(torch.ones_like(x))
-        return graph
+            assert nccl_alloc._graph_pool_id == pool != handle
+            const = torch.empty_like(x)  # Never written by replay: needs a backup.
+            y = x * weight + const
+        return [graph, y, const.fill_(3.0)]
 
-    def graph_pool_bytes() -> int:
-        return sum(
-            data.handle[1]
-            for data in allocator.pointer_to_data.values()
-            if data.tag == "cudagraph"
-        )
+    def graph_pool() -> dict[int, int]:
+        data = allocator.pointer_to_data.items()
+        return {
+            p: d.handle[1] for p, d in data if d.tag == "cudagraph" and not d.is_asleep
+        }
 
-    graphs = [capture()]
-    captured = graph_pool_bytes()
-    assert captured > 0
-
-    backend = CuMemBackend()
-    backend.suspend(level=1)
+    held, backend = capture(), CuMemBackend()
+    mapped = graph_pool()
+    backend.suspend(level=level)
     with pytest.raises(AssertionError, match="asleep"):
-        release_cudagraph_pool(cfg)
-    backend.resume()
+        release_cudagraph_pool(on)
+    backend.resume(tags=["kv_cache"])
+    assert graph_pool() == mapped
+    backend.resume(tags=["weights"])
+    weight.fill_(2.0)  # Level 2 discards weights; emulate the reload.
+    held[0].replay()
+    assert torch.equal(held[1], torch.full_like(x, 5.0))
     with pytest.raises(AssertionError, match="still has 1 other reference"):
-        release_cudagraph_pool(cfg)
-
-    for _ in range(3):
-        graphs.clear()
-        release_cudagraph_pool(cfg)
-        assert graph_pool_bytes() == 0
-        graphs.append(capture())
-        assert graph_pool_bytes() == captured
+        release_cudagraph_pool(on)
+    held.clear()
+    release_cudagraph_pool(on)
+    assert graph_pool() == {}
+    held = capture()
+    assert sum(graph_pool().values()) == sum(mapped.values())

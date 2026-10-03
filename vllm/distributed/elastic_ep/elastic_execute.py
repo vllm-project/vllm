@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from torch.distributed import P2POp
 
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.cudagraph_pool import release_cudagraph_pool
 from vllm.compilation.wrapper import reset_compile_wrapper
@@ -445,12 +446,13 @@ class ElasticEPScalingExecutor:
                 if isinstance(attr, CudaGraphManager):
                     attr.release_graphs()
 
-        elif isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
-            wrapper = self.worker.model_runner.model
-            wrapper.concrete_cudagraph_entries = {}
-
-        elif isinstance(self.worker.model_runner.model, UBatchWrapper):
-            self.worker.model_runner.model.clear_graphs()
+        else:
+            # Model Runner V1: the FULL wrapper, the compiled model's PIECEWISE
+            # wrappers, breakable segments and DBO microbatch graphs.
+            CUDAGraphWrapper.clear_all_graphs()
+            BreakableCUDAGraphWrapper.clear_all_graphs()
+            if isinstance(self.worker.model_runner.model, UBatchWrapper):
+                self.worker.model_runner.model.clear_graphs()
 
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):

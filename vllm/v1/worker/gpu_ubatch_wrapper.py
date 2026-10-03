@@ -10,8 +10,8 @@ from typing import Any
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.cudagraph_pool import use_cudagraph_pool
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     DPMetadata,
     create_forward_context,
@@ -20,7 +20,6 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.ubatch_utils import create_sm_control_context
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
@@ -183,19 +182,15 @@ class UBatchWrapper:
                 cudagraph=torch.cuda.CUDAGraph(),
                 ubatch_metadata=ubatch_metadata,
             )
-            if self.graph_pool is not None:
-                set_graph_pool_id(self.graph_pool)
-            else:
-                set_graph_pool_id(current_platform.graph_pool_handle())
-
             # Sync offloader's copy stream before capture.
             # Ensure any pre-capture prefetches from offloader are complete.
             get_offloader().sync_prev_onload()
 
-            with torch.cuda.graph(
-                cudagraph_metadata.cudagraph,
-                stream=compute_stream,
-                pool=self.graph_pool,
+            with (
+                use_cudagraph_pool(self.graph_pool, self.vllm_config) as pool,
+                torch.cuda.graph(
+                    cudagraph_metadata.cudagraph, stream=compute_stream, pool=pool
+                ),
             ):
                 ubatch_metadata[0].context.cpu_wait_event.set()
                 for thread in ubatch_threads:

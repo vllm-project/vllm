@@ -3,6 +3,7 @@
 
 import asyncio
 import math
+import os
 
 import pytest
 import torch
@@ -14,7 +15,12 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 
-from ....utils import create_new_process_for_each_test, multi_gpu_test, requires_fp8
+from ....utils import (
+    create_new_process_for_each_test,
+    multi_gpu_marks,
+    multi_gpu_test,
+    requires_fp8,
+)
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -195,103 +201,109 @@ def test_deep_sleep_lora_tp2(monkeypatch):
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
-def _custom_ar_and_cumem_graph_pool(worker) -> tuple[bool, bool]:
-    from vllm.device_allocator.cumem import CuMemAllocator
+def _cudagraph_bytes(worker, recapture: bool = False):
+    """cudagraph-tag bytes; with recapture, elastic EP's release and recapture
+    first, also returning the bytes right after the release."""
+    from vllm.compilation.cudagraph_pool import release_cudagraph_pool
+
+    def size() -> int:
+        data = cumem.CuMemAllocator.get_instance().pointer_to_data.values()
+        return sum(d.handle[1] for d in data if d.tag == "cudagraph")
+
+    if not recapture:
+        return size()
+    worker.model_runner.cudagraph_manager.release_graphs()
+    release_cudagraph_pool(worker.vllm_config)
+    released = size()
+    worker.model_runner.capture_model()
+    return released, size()
+
+
+def _custom_ar_active(worker) -> bool:
     from vllm.distributed.parallel_state import get_tp_group
 
     ca_comm = get_tp_group().device_communicator.ca_comm
-    tags = {d.tag for d in CuMemAllocator.get_instance().pointer_to_data.values()}
-    return ca_comm is not None and not ca_comm.disabled, "cudagraph" in tags
-
-
-def _cudagraph_tag_bytes(worker) -> int:
-    from vllm.device_allocator.cumem import CuMemAllocator
-
-    data = CuMemAllocator.get_instance().pointer_to_data.values()
-    return sum(d.handle[1] for d in data if d.tag == "cudagraph")
-
-
-def _release_and_recapture(worker) -> tuple[int, int]:
-    """Elastic EP's recapture: drop every graph, release the pool, capture."""
-    from vllm.compilation.cudagraph_pool import release_cudagraph_pool
-
-    worker.model_runner.cudagraph_manager.release_graphs()
-    release_cudagraph_pool(worker.vllm_config)
-    released = _cudagraph_tag_bytes(worker)
-    worker.model_runner.capture_model()
-    return released, _cudagraph_tag_bytes(worker)
+    return ca_comm is not None and not ca_comm.disabled
 
 
 @pytest.mark.parametrize(
-    ("mode", "breakable"),
-    [("FULL", False), ("PIECEWISE", False), ("PIECEWISE", True)],
-    ids=["full", "piecewise", "breakable"],
+    ("runner", "mode", "breakable", "tp", "offload"),
+    [
+        *(
+            (runner, mode, breakable, 1, True)
+            for runner in ("v2", "v1")
+            for mode, breakable in (
+                ("FULL", False),
+                ("PIECEWISE", False),
+                ("PIECEWISE", True),
+            )
+        ),
+        pytest.param(
+            "v2",
+            "FULL_AND_PIECEWISE",
+            False,
+            2,
+            True,
+            marks=multi_gpu_marks(num_gpus=2),
+        ),
+        ("v2", "FULL_AND_PIECEWISE", False, 1, False),
+    ],
+    ids=[
+        *(f"{r}-{m}" for r in ("v2", "v1") for m in ("full", "piecewise", "breakable")),
+        "custom-ar-tp2",
+        "off-by-default",
+    ],
 )
 @create_new_process_for_each_test()
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
-def test_sleep_cudagraph_pool_capture_sites(monkeypatch, mode, breakable):
-    """Each Model Runner V2 capture site (FULL CudaGraphManager, compiled
-    PIECEWISE CUDAGraphWrapper, BreakableCUDAGraphWrapper) captures into the
-    cuMem graph pool, which survives sleep. Releasing the graphs after a wake
-    and recapturing, as elastic EP does, frees the pool and refills it to the
-    same size."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1" if breakable else "0")
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    llm = LLM(
-        "hmellor/tiny-random-LlamaForCausalLM",
-        enable_sleep_mode=True,
-        compilation_config={"cudagraph_mode": mode},
-    )
-    (graph_bytes,) = llm.collective_rpc(_cudagraph_tag_bytes)
-    assert graph_bytes > 0
-    prompt = "How are you?"
-    sampling_params = SamplingParams(temperature=0, max_tokens=10)
-    expected = llm.generate(prompt, sampling_params)[0].outputs[0].text
-    llm.sleep(level=1)
-    llm.wake_up()
-    assert llm.generate(prompt, sampling_params)[0].outputs[0].text == expected
-    for _ in range(2):
-        (sizes,) = llm.collective_rpc(_release_and_recapture)
-        assert sizes == (0, graph_bytes)
-    assert llm.generate(prompt, sampling_params)[0].outputs[0].text == expected
-
-
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
-def test_sleep_cudagraph_custom_allreduce_tp2(monkeypatch):
-    """TP=2 sleep/wake with Model Runner V2 CUDA graphs in cuMem graph pools
-    and the legacy custom allreduce. Capture must not IPC-register cuMem graph
-    buffers (``cudaIpcGetMemHandle`` rejects them and the worker dies)."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    monkeypatch.setenv("VLLM_ALLREDUCE_USE_FLASHINFER", "0")
-    monkeypatch.setenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0")
+def test_sleep_cudagraph_pool(monkeypatch, runner, mode, breakable, tp, offload):
+    """With sleep_mode_offload_cudagraph, each capture site of either runner
+    (FULL, PIECEWISE CUDAGraphWrapper, BreakableCUDAGraphWrapper) captures into
+    the cuMem graph pool, which stays exact across both sleep levels, and NCCL
+    graph registration defaults off; elastic EP's release and recapture empties
+    the pool and refills it. TP=2 forces the legacy custom allreduce, which
+    must not IPC-register cuMem graph buffers. Without the option, nothing
+    changes: no cuMem graph memory and NCCL_GRAPH_REGISTER untouched."""
+    for name, value in [
+        ("VLLM_USE_V2_MODEL_RUNNER", "1" if runner == "v2" else "0"),
+        ("VLLM_USE_BREAKABLE_CUDAGRAPH", "1" if breakable else "0"),
+        ("VLLM_ALLOW_INSECURE_SERIALIZATION", "1"),
+        ("VLLM_ALLREDUCE_USE_FLASHINFER", "0"),
+        ("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"),
+    ]:
+        monkeypatch.setenv(name, value)
     monkeypatch.delenv("NCCL_GRAPH_REGISTER", raising=False)
-    # Needed for collective_rpc to send a callable to the multiproc TP workers.
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-
     llm = LLM(
         "hmellor/tiny-random-LlamaForCausalLM",
         enable_sleep_mode=True,
-        tensor_parallel_size=2,
-        compilation_config={"pass_config": {"fuse_allreduce_rms": False}},
+        sleep_mode_offload_cudagraph=offload,
+        tensor_parallel_size=tp,
+        compilation_config={
+            "cudagraph_mode": mode,
+            "pass_config": {"fuse_allreduce_rms": False},
+        },
     )
-    states = llm.collective_rpc(_custom_ar_and_cumem_graph_pool)
-    assert all(graph_pool for _, graph_pool in states)
-    if not all(custom_ar for custom_ar, _ in states):
+    graph_bytes = llm.collective_rpc(_cudagraph_bytes)
+    assert os.environ.get("NCCL_GRAPH_REGISTER") == ("0" if offload else None)
+    assert all(graph_bytes) if offload else not any(graph_bytes)
+    if not offload:
+        return
+    if tp > 1 and not all(llm.collective_rpc(_custom_ar_active)):
         pytest.skip("Custom allreduce is unavailable on these GPUs")
-    prompt = "How are you?"
-    sampling_params = SamplingParams(temperature=0, max_tokens=10)
-    expected = llm.generate(prompt, sampling_params)[0].outputs[0].text
-
+    prompt, params = "How are you?", SamplingParams(temperature=0, max_tokens=10)
+    expected = llm.generate(prompt, params)[0].outputs[0].text
     for level in (1, 2):
         llm.sleep(level=level)
         llm.wake_up(tags=["weights"])
         if level == 2:
             llm.collective_rpc("reload_weights")
         llm.wake_up(tags=["kv_cache"])
-        output = llm.generate(prompt, sampling_params)
-        assert output[0].outputs[0].text == expected
+        assert llm.generate(prompt, params)[0].outputs[0].text == expected
+    if tp == 1 and runner == "v2":  # Elastic EP's V2 path; V1 drops wrappers.
+        for _ in range(2):
+            rpc = llm.collective_rpc(_cudagraph_bytes, kwargs={"recapture": True})
+            assert rpc == [(0, graph_bytes[0])]
+        assert llm.generate(prompt, params)[0].outputs[0].text == expected
 
 
 @create_new_process_for_each_test()

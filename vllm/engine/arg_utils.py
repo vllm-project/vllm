@@ -769,6 +769,7 @@ class EngineArgs:
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    sleep_mode_offload_cudagraph: bool = ModelConfig.sleep_mode_offload_cudagraph
     sleep_preserve_parameter_names: list[str] = get_field(
         ModelConfig, "sleep_preserve_parameter_names"
     )
@@ -1979,6 +1980,7 @@ class EngineArgs:
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
             enable_cumem_allocator=self.enable_cumem_allocator,
             enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,

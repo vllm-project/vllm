@@ -376,6 +376,12 @@ class ModelConfig:
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    sleep_mode_offload_cudagraph: bool = False
+    """Capture CUDA graphs into a cuMem pool that sleep backs up to CPU and
+    wake restores in place, so sleep also frees graph memory. Costs pinned host
+    memory for the backup and one copy per captured custom allreduce. Takes
+    effect only with ``enable_sleep_mode``, the ``"cumem"`` backend, CUDA and
+    CUDA graphs enabled."""
     enable_nccl_comm_suspend: bool = False
     """Enable releasing NCCL communicator memory during sleep mode
     (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled

@@ -700,18 +700,30 @@ class VllmConfig:
     @property
     def use_cumem_cudagraph_pool(self) -> bool:
         """Whether CUDA graphs are captured into the cuMem pool that sleep
-        mode offloads: Model Runner V2 graphs with the cumem sleep backend on
-        CUDA."""
+        mode offloads: opted in with ``sleep_mode_offload_cudagraph``, with the
+        cumem sleep backend, CUDA graphs on and CUDA."""
+        return self._cumem_cudagraph_pool_blockers() == []
+
+    def _cumem_cudagraph_pool_blockers(self) -> list[str] | None:
+        """None unless opted in; otherwise the unmet requirements."""
         from vllm.platforms import current_platform
 
-        return (
-            self.model_config is not None
-            and self.model_config.enable_sleep_mode
-            and self.model_config.sleep_mode_backend == "cumem"
-            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and current_platform.is_cuda()
-            and self.use_v2_model_runner
-        )
+        model_config = self.model_config
+        if model_config is None or not model_config.sleep_mode_offload_cudagraph:
+            return None
+        checks = [
+            (model_config.enable_sleep_mode, "enable_sleep_mode is off"),
+            (
+                model_config.sleep_mode_backend == "cumem",
+                "the sleep backend is not cumem",
+            ),
+            (
+                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE,
+                "CUDA graphs are off",
+            ),
+            (current_platform.is_cuda(), "the platform is not CUDA"),
+        ]
+        return [reason for ok, reason in checks if not ok]
 
     @property
     def use_v2_model_runner(self) -> bool:
@@ -1275,18 +1287,27 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
-    def _verify_cumem_cudagraph_pool_env(self) -> None:
-        """Keep NCCL graph registration off the offloaded cuMem graph pool: it
-        would pin the pool through sleep and keep stale registrations after
-        wake remaps it, causing hangs or wrong results."""
-        if not self.use_cumem_cudagraph_pool:
+    def _verify_cumem_cudagraph_pool(self) -> None:
+        """Say why an opted-in cuMem graph pool is inactive. When it is active,
+        default NCCL graph registration off: it would pin the pool through
+        sleep and keep stale registrations after wake remaps it, causing hangs
+        or wrong results. An explicit value wins, with a warning."""
+        blockers = self._cumem_cudagraph_pool_blockers()
+        if blockers is None:
+            return
+        if blockers:
+            logger.warning(
+                "sleep_mode_offload_cudagraph is inactive: %s.", ", ".join(blockers)
+            )
             return
         # Workers inherit it (Ray copies NCCL_*) before any communicator init.
-        if os.environ.setdefault("NCCL_GRAPH_REGISTER", "0") != "0":
-            raise ValueError(
-                "Sleep mode offloads Model Runner V2 CUDA graph pools, which "
-                "NCCL graph registration would pin: set NCCL_GRAPH_REGISTER=0 "
-                "or leave it unset."
+        value = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
+        if value != "0":
+            logger.warning(
+                "NCCL_GRAPH_REGISTER=%s is kept, but NCCL graph registration "
+                "pins the CUDA graph pool that sleep offloads and can keep stale "
+                "registrations after wake; set NCCL_GRAPH_REGISTER=0 or unset it.",
+                value,
             )
 
     def _verify_sampling_replay_config(self) -> None:
@@ -2351,7 +2372,7 @@ class VllmConfig:
                 custom_ops.append("+quant_fp8")
 
         self._verify_kv_transfer_compat()
-        self._verify_cumem_cudagraph_pool_env()
+        self._verify_cumem_cudagraph_pool()
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
 
