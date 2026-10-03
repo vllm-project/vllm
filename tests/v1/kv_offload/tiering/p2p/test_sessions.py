@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from concurrent.futures import Future
 
 import numpy as np
 import pytest
@@ -86,6 +87,10 @@ class FakeDataTransport:
         self._poll_failed: list[int] = []
         self._cancel_still_inflight: set[int] = set()
         self._cancel_calls: list[tuple[list[int], str]] = []
+        # When True, add_remote_peer_async parks the registration in
+        # pending_registrations for the test to complete or fail.
+        self.defer_registration = False
+        self.pending_registrations: dict[str, Future[None]] = {}
 
     @property
     def base_addr(self) -> int:
@@ -115,6 +120,25 @@ class FakeDataTransport:
             "num_blocks": num_blocks,
             "block_len": block_len,
         }
+
+    def add_remote_peer_async(
+        self, peer_id, agent_metadata, base_addr, num_blocks, block_len
+    ) -> Future[None]:
+        future: Future[None] = Future()
+        if self.defer_registration:
+            self.pending_registrations[peer_id] = future
+            future.add_done_callback(
+                lambda f: (
+                    f.exception() is None
+                    and self.add_remote_peer(
+                        peer_id, agent_metadata, base_addr, num_blocks, block_len
+                    )
+                )
+            )
+            return future
+        self.add_remote_peer(peer_id, agent_metadata, base_addr, num_blocks, block_len)
+        future.set_result(None)
+        return future
 
     def remove_remote_peer(self, peer_id: str) -> None:
         self._remote_peers.pop(peer_id, None)
@@ -389,6 +413,41 @@ class TestConnectHandshake:
         assert "peer:8000" in transport._remote_peers
         ack = next(m for m in conn._sent if m[TYPE_KEY] == ConnectAckMsg.TYPE)
         assert ack[ConnectAckMsg.PEER_ID] == "local:9000"
+
+    def test_connect_ack_waits_for_peer_registration(self):
+        """ConnectAck is deferred until the transport has registered the peer."""
+        transport = FakeDataTransport()
+        transport.defer_registration = True
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+        assert "peer:8000" not in transport._remote_peers
+        assert session.has_pending_work
+        session.poll()
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+
+        transport.pending_registrations["peer:8000"].set_result(None)
+        session.poll()
+        assert "peer:8000" in transport._remote_peers
+        ack = next(m for m in conn._sent if m[TYPE_KEY] == ConnectAckMsg.TYPE)
+        assert ack[ConnectAckMsg.PEER_ID] == "local:9000"
+        assert not session.has_pending_work
+
+    def test_failed_peer_registration_rejects_peer(self):
+        """A registration error rejects the peer like a validation failure."""
+        transport = FakeDataTransport()
+        transport.defer_registration = True
+        session, conn, _ = _make_session(transport=transport)
+        conn.enqueue(_peer_connect_msg())
+        session.poll()
+        transport.pending_registrations["peer:8000"].set_exception(
+            RuntimeError("agent metadata rejected")
+        )
+        session.poll()
+        assert not session.alive
+        assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+        assert not session.has_pending_work
 
     def test_connect_ack_makes_session_ready(self):
         """Session.ready becomes True after ConnectAckMsg."""

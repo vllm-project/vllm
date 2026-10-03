@@ -147,6 +147,46 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
         return stats
 
 
+class ServeRecordingSecondaryTierManager(MetricsSecondaryTierManager):
+    """Test-only secondary tier that records service sweeps."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.finished_polls = 0
+        self.serve_calls = 0
+
+    def get_finished_jobs(self) -> Iterable[JobResult]:
+        self.finished_polls += 1
+        return ()
+
+    def serve_external_requests(self, parent) -> None:
+        self.serve_calls += 1
+
+
+def test_poll_pending_work_services_tiers_between_steps():
+    """poll_pending_work() collects finished jobs and serves every tier
+    without a scheduler step and without consuming the per-step gate."""
+    mock_region = _mock_mmap_region(5)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=5, mmap_region=mock_region)
+    tier = ServeRecordingSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="recording",
+    )
+    manager = TieringOffloadingManager(primary_tier=primary, secondary_tiers=[tier])
+
+    manager.poll_pending_work()
+    manager.poll_pending_work()
+    assert tier.finished_polls == 2
+    assert tier.serve_calls == 2
+    assert manager._processed_jobs_this_step is False
+
+    ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+    manager.on_schedule_end(ctx)
+    assert tier.finished_polls == 3
+    assert tier.serve_calls == 3
+
+
 def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
     monkeypatch.setitem(
         SecondaryTierFactory._registry,

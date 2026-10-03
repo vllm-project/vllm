@@ -75,6 +75,7 @@ import ctypes
 import hashlib
 import json
 from abc import ABC, abstractmethod
+from concurrent.futures import Future
 from collections.abc import Iterable, Sequence
 from typing import Literal, NamedTuple
 
@@ -178,6 +179,34 @@ class DataTransport(ABC):
 
         """
         ...
+
+    def add_remote_peer_async(
+        self,
+        peer_id: str,
+        agent_metadata: bytes,
+        base_addr: int,
+        num_blocks: int,
+        block_len: int,
+    ) -> Future[None]:
+        """Register a remote peer without blocking the caller.
+
+        Returns a future that completes once the peer is usable by
+        write_blocks(); a failed registration surfaces as the future's
+        exception. This default runs add_remote_peer() inline and returns
+        a completed future. Transports whose registration is slow enough
+        to hold up a scheduling iteration override it to run the work on
+        a worker thread.
+        """
+        future: Future[None] = Future()
+        try:
+            self.add_remote_peer(
+                peer_id, agent_metadata, base_addr, num_blocks, block_len
+            )
+        except Exception as exc:
+            future.set_exception(exc)
+        else:
+            future.set_result(None)
+        return future
 
     @abstractmethod
     def remove_remote_peer(self, peer_id: str) -> None:
