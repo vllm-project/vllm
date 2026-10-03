@@ -237,6 +237,9 @@ class EngineCoreOutput(
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
     aux_output_keys: list[str] | None = None
 
+    # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
+    prompt_token_id_logprobs: torch.Tensor | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

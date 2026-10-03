@@ -40,6 +40,7 @@ from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
+from .logging import LoggingConfig
 from .lora import LoRAConfig
 from .mamba import MambaBackendEnum, MambaConfig
 from .model import ModelConfig
@@ -56,12 +57,12 @@ from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
     from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
-    PretrainedConfig = Any
+    PreTrainedConfig = Any
 
     QuantizationConfig = Any
 
@@ -242,7 +243,7 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
-    """Enable fused QK-norm + RoPE + KV cache update on ROCm with AITER."""
+    """Enable fused QK-norm + RoPE/MRoPE + KV cache update with AITER."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_enabled():
@@ -402,6 +403,8 @@ class VllmConfig:
         default_factory=ObservabilityConfig
     )
     """Observability configuration."""
+    logging_config: LoggingConfig = Field(default_factory=LoggingConfig)
+    """Logging configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
@@ -722,11 +725,23 @@ class VllmConfig:
         if model_config is not None and current_platform.is_rocm():
             architectures = getattr(model_config, "architectures", ())
             if any(arch in ROCM_DEFAULT_MRV1_ARCHITECTURES for arch in architectures):
+                # This default is a speed preference, not a claim that V1 can
+                # serve the config, so it yields where V1 cannot. It yields by
+                # falling through to the checks below, not by selecting V2.
+                v1_unsupported = self._get_v1_model_runner_unsupported_features()
+                if not v1_unsupported:
+                    logger.warning_once(
+                        "Defaulting to V1 model runner on ROCm for model "
+                        "architectures: %s",
+                        ", ".join(architectures),
+                    )
+                    return False
                 logger.warning_once(
-                    "Defaulting to V1 model runner on ROCm for model architectures: %s",
+                    "Skipping the ROCm V1 model runner default for %s: V1 does "
+                    "not support %s.",
                     ", ".join(architectures),
+                    ", ".join(v1_unsupported),
                 )
-                return False
 
         if not HAS_TRITON:
             logger.warning_once(
@@ -745,8 +760,8 @@ class VllmConfig:
 
         return True
 
-    def _is_dflash2_draft(self) -> bool:
-        """Whether the DFlash draft is a DFlash2 one, by the architecture the
+    def _is_dflash_candidate_draft(self) -> bool:
+        """Whether the DFlash draft has a candidate head, by the architecture the
         speculator selects on (v1/worker/gpu/spec_decode/__init__.py)."""
         spec = self.speculative_config
         if spec is None or spec.method != "dflash":
@@ -754,7 +769,11 @@ class VllmConfig:
         draft_config = getattr(spec, "draft_model_config", None)
         if draft_config is None:
             return False
-        return "DFlash2DraftModel" in (draft_config.architectures or [])
+        return bool(
+            {"DFlash2DraftModel", "LiLiCorrDraftModel"}.intersection(
+                draft_config.architectures or []
+            )
+        )
 
     def _dflash_needs_multi_kv_group(self) -> bool:
         """Whether a DFlash draft mixes sliding-window and full attention."""
@@ -776,6 +795,45 @@ class VllmConfig:
         architectures = set(model_config.architectures)
         return bool(architectures & default_breakable_cudagraph_architectures())
 
+    def _uses_breakable_cudagraph_for_batch_invariance(self) -> bool:
+        """Avoid freezing runtime-M tile lookup in compiled forward (#54243).
+        Breakable graphs look up tuned bf16, unquantized qkv/o/gate_up/down tiles
+        at capture; lm_head runs outside compiled forward and does not benefit."""
+        from vllm.model_executor.determinism import batch_invariant_configs as bi
+        from vllm.platforms import current_platform
+
+        model = self.model_config
+        if (
+            not envs.VLLM_BATCH_INVARIANT
+            or model is None
+            or model.enforce_eager
+            or model.dtype != torch.bfloat16
+            or model.quantization is not None
+            or not current_platform.is_cuda()
+            # Sequence parallelism / async TP are torch.compile passes.
+            or self.compilation_config.pass_config.enable_sp
+            or self.compilation_config.pass_config.fuse_gemm_comms
+        ):
+            return False
+        family = bi._get_tuned_matmul_arch_family(
+            current_platform.get_device_capability()
+        )
+        if family is None or family not in bi._BATCH_INVARIANT_MATMUL_TUNED_CONFIGS:
+            return False
+        table = bi._BATCH_INVARIANT_MATMUL_TUNED_CONFIGS[family]
+        parallel = self.parallel_config
+        tp = parallel.tensor_parallel_size
+        hidden = model.get_hidden_size()
+        head = model.get_head_size()
+        heads = model.get_num_attention_heads(parallel)
+        kv_heads = model.get_num_kv_heads(parallel)
+        shapes = [((heads + 2 * kv_heads) * head, hidden), (hidden, heads * head)]
+        intermediate = getattr(model.hf_text_config, "intermediate_size", None)
+        # Per-layer sizes (e.g. Gemma3n) are not modeled.
+        if isinstance(intermediate, int):
+            shapes += [(2 * intermediate // tp, hidden), (hidden, intermediate // tp)]
+        return any(shape in table for shape in shapes)
+
     def _maybe_enable_breakable_cudagraph(self) -> bool:
         if (
             "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
@@ -784,6 +842,16 @@ class VllmConfig:
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
             logger.info_once(
                 "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
+                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
+            )
+        elif (
+            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
+            and envs.VLLM_BATCH_INVARIANT
+            and self._uses_breakable_cudagraph_for_batch_invariance()
+        ):
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            logger.info_once(
+                "VLLM_BATCH_INVARIANT=1: auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
 
@@ -890,7 +958,7 @@ class VllmConfig:
 
     def with_hf_config(
         self,
-        hf_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
         architectures: list[str] | None = None,
     ) -> "VllmConfig":
         if architectures is not None:
@@ -1093,7 +1161,14 @@ class VllmConfig:
         """Reject configurations unsupported by enabled auxiliary outputs."""
         if not self.aux_output_config.enabled:
             return
-        if not self.use_v2_model_runner:
+        from vllm.platforms import current_platform
+
+        # In-tree platforms only wire AuxOutput to MRV2. TPU and out-of-tree
+        # platforms bring their own model runners and validate AuxOutput
+        # support themselves.
+        if not self.use_v2_model_runner and not (
+            current_platform.is_tpu() or current_platform.is_out_of_tree()
+        ):
             raise ValueError(
                 "AuxOutput Connector requires Model Runner V2; set "
                 "VLLM_USE_V2_MODEL_RUNNER=1."
@@ -1175,9 +1250,15 @@ class VllmConfig:
             return
         if not self.use_v2_model_runner:
             raise ValueError("sampling distribution replay requires Model Runner V2")
-        if self.speculative_config is not None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.enable_adaptive_verification
+        ):
             raise ValueError(
-                "sampling distribution replay does not support speculative decoding"
+                "sampling distribution replay with speculative decoding "
+                "requires fixed verification boundaries; disable adaptive "
+                "verification"
             )
         if model_config.is_diffusion:
             raise ValueError(
@@ -1254,13 +1335,6 @@ class VllmConfig:
                     "share of output tokens supplied by accepted drafts.",
                     scope="global",
                 )
-            if watermark_config.deduplicate_contexts != "none":
-                logger.warning_once(
-                    "Context deduplication is not supported with speculative "
-                    "decoding and will not be applied to accepted drafts, "
-                    "rejection-recovery tokens, or bonus tokens.",
-                    scope="global",
-                )
             if watermark_config.algorithm == "dual_key_gumbel" and (
                 watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
             ):
@@ -1280,8 +1354,6 @@ class VllmConfig:
 
     def _resolve_and_verify_engram_config(self) -> None:
         """Resolve defaults and validate n-gram embedding settings."""
-        from vllm.platforms import current_platform
-
         model_config = self.model_config
         speculative_config = self.speculative_config
         # Draft configs inherit the target's communication groups and settings.
@@ -1302,9 +1374,7 @@ class VllmConfig:
                 "Disable --enable-dbo and set --ubatch-size to 0."
             )
         if self.engram_config is None:
-            if not current_platform.is_cuda_alike() or not model_has_engram_layers(
-                model_config
-            ):
+            if not model_has_engram_layers(model_config):
                 return
             self.engram_config = EngramConfig()
         self.engram_config.verify_model_config(model_config)
@@ -1324,6 +1394,19 @@ class VllmConfig:
             return
 
         self._resolve_mm_encoder_only()
+
+        if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
+            # Such an instance publishes encoder embeddings and runs no language
+            # model, so it holds no KV cache for prefix caching to reuse and its
+            # coordinator would have no group to manage. Disable before
+            # `try_verify_and_update_config` so model config hooks (e.g. the
+            # hybrid mamba hook setting `mamba_block_size`) already see prefix
+            # caching as disabled.
+            logger.info(
+                "Disabling prefix caching: this instance runs the "
+                "multi-modal encoder only."
+            )
+            self.cache_config.enable_prefix_caching = False
 
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
@@ -1589,15 +1672,24 @@ class VllmConfig:
             )
 
         if self.model_config is not None and self.model_config.enforce_eager:
-            logger.warning_once(
-                "Enforce eager set, disabling torch.compile, CUDAGraphs, and JIT "
-                "kernel warmup. This is equivalent to setting -cc.mode=none "
-                "-cc.cudagraph_mode=none and "
-                "--kernel_config.enable_jit_warmup=False"
-            )
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            self.kernel_config.enable_jit_warmup = False
+            if self.parallel_config.enable_fault_tolerance:
+                # Keep JIT warmup: in-inference Triton compilation latency
+                # spikes can delay peer-fault detection past its deadline.
+                logger.warning_once(
+                    "Enforce eager set, disabling torch.compile and CUDAGraphs. "
+                    "This is equivalent to setting -cc.mode=none "
+                    "-cc.cudagraph_mode=none"
+                )
+            else:
+                logger.warning_once(
+                    "Enforce eager set, disabling torch.compile, CUDAGraphs, and "
+                    "JIT kernel warmup. This is equivalent to setting "
+                    "-cc.mode=none -cc.cudagraph_mode=none and "
+                    "--kernel_config.enable_jit_warmup=False"
+                )
+                self.kernel_config.enable_jit_warmup = False
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
@@ -1605,6 +1697,26 @@ class VllmConfig:
                 "This is equivalent to setting -cc.mode=none"
             )
             self.compilation_config.mode = CompilationMode.NONE
+
+        # TODO: This is a stopgap that turns sequence parallelism / async TP
+        # off under batch invariance. Make the sequence-parallel reduce-scatter
+        # path batch-invariant instead so they can stay enabled (#56370).
+        # Sequence parallelism / async TP rewrite all_reduce + rms_norm into a
+        # reduce-scatter whose reduction order depends on the batch, so they
+        # are not batch-invariant. Decide this before the breakable-CUDA-graph
+        # default below, which declines to auto-enable when they are on.
+        pass_config = self.compilation_config.pass_config
+        if envs.VLLM_BATCH_INVARIANT and (
+            pass_config.enable_sp or pass_config.fuse_gemm_comms
+        ):
+            logger.warning_once(
+                "Disabling sequence parallelism and async TP "
+                "(pass_config.enable_sp / fuse_gemm_comms) when "
+                "VLLM_BATCH_INVARIANT is enabled: the reduce-scatter path "
+                "is not batch-invariant (see vllm-project/vllm#56370)."
+            )
+            pass_config.enable_sp = False
+            pass_config.fuse_gemm_comms = False
 
         breakable_cudagraph_enabled = self._maybe_enable_breakable_cudagraph()
 
@@ -1693,6 +1805,14 @@ class VllmConfig:
             if self.parallel_config.decode_context_parallel_size > 1:
                 raise ValueError(
                     "HiSparse does not support decode context parallelism."
+                )
+            if not self.scheduler_config.scheduler_reserve_full_isl:
+                # Without it, async loads admitted against free host blocks can
+                # each wait on host pages the others hold, and waiting requests
+                # are never preempted to free them.
+                raise ValueError(
+                    "HiSparse requires --scheduler-reserve-full-isl; remove "
+                    "--no-scheduler-reserve-full-isl."
                 )
             if self.model_config is not None and not hasattr(
                 self.model_config.hf_config, "index_topk"
@@ -1892,11 +2012,15 @@ class VllmConfig:
         # After the platform hook, which has the last word on async scheduling.
         if (
             self.diffusion_config is not None
-            and self.scheduler_config.async_scheduling
             and self.scheduler_config.scheduler_cls is None
         ):
+            scheduler_name = (
+                "DiffusionAsyncScheduler"
+                if self.scheduler_config.async_scheduling
+                else "DiffusionScheduler"
+            )
             self.scheduler_config.scheduler_cls = (
-                "vllm.v1.core.sched.diffusion_scheduler.DiffusionAsyncScheduler"
+                f"vllm.v1.core.sched.diffusion_scheduler.{scheduler_name}"
             )
 
         self._normalize_piecewise_cudagraph_mode(
@@ -1909,6 +2033,7 @@ class VllmConfig:
         self._validate_mm_processor_device()
 
         if self.use_v2_model_runner:
+            self._disable_cudagraphs_for_v2_stock_torch_compile()
             self._validate_v2_model_runner()
         else:
             self._validate_v1_model_runner()
@@ -2073,16 +2198,6 @@ class VllmConfig:
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
         self._verify_aux_output_compatibility()
-
-        if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
-            # Such an instance publishes encoder embeddings and runs no language
-            # model, so it holds no KV cache for prefix caching to reuse and its
-            # coordinator would have no group to manage.
-            logger.info(
-                "Disabling prefix caching: this instance runs the "
-                "multi-modal encoder only."
-            )
-            self.cache_config.enable_prefix_caching = False
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
@@ -2923,9 +3038,6 @@ class VllmConfig:
         unsupported: list[str] = []
         speculative_config = self.speculative_config
 
-        if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
-            unsupported.append("stock torch.compile")
-
         if (
             self.compilation_config.pass_config.enable_sp
             and self.parallel_config.tensor_parallel_size > 1
@@ -2945,8 +3057,6 @@ class VllmConfig:
                 # https://github.com/vllm-project/vllm/pull/40704
                 "ngram",
                 "ngram_gpu",
-                # https://github.com/vllm-project/vllm/pull/43091
-                "draft_model",
                 "suffix",
                 "medusa",
                 "mlp_speculator",
@@ -2965,12 +3075,6 @@ class VllmConfig:
 
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
-
-        if self.parallel_config.enable_elastic_ep:
-            unsupported.append("elastic expert parallelism")
-
-        if self.cache_config.mamba_cache_mode == "all":
-            unsupported.append("mamba cache mode 'all'")
 
         return unsupported
 
@@ -3006,11 +3110,11 @@ class VllmConfig:
         if self._dflash_needs_multi_kv_group():
             unsupported.append("mixed sliding/full dflash drafts")
 
-        # The DFlash2 candidate selector exists only in the V2 speculator. On
+        # DFlash candidate heads exist only in the V2 speculator. On
         # V1 the same checkpoint drafts through DFlashProposer, which never
         # calls it, so the draft would degrade to DFlash1 silently.
-        if self._is_dflash2_draft():
-            unsupported.append("dflash2 drafts")
+        if self._is_dflash_candidate_draft():
+            unsupported.append("DFlash candidate-head drafts")
 
         if self.model_config is not None and self.model_config.is_diffusion:
             unsupported.append("diffusion models")
@@ -3184,6 +3288,28 @@ class VllmConfig:
                 "Enable attribution or use --enforce-eager."
             )
 
+    def _disable_cudagraphs_for_v2_stock_torch_compile(self) -> None:
+        """Run stock torch.compile without CUDA graphs in Model Runner V2.
+
+        V1 never wraps a stock-compiled model in CUDAGraphWrapper, so it runs
+        without CUDA graphs. V2's CUDA graph manager would otherwise capture
+        FULL graphs around the stock-compiled model, so disable them to match.
+        """
+        compilation_config = self.compilation_config
+        if (
+            compilation_config.mode != CompilationMode.STOCK_TORCH_COMPILE
+            or compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        ):
+            return
+        logger.info_once(
+            "CUDA graphs are not supported with stock torch.compile in Model "
+            "Runner V2. Overriding cudagraph_mode %s to NONE.",
+            compilation_config.cudagraph_mode.name,
+        )
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        compilation_config.max_cudagraph_capture_size = 0
+        compilation_config.cudagraph_capture_sizes = []
+
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
         if not HAS_TRITON:
@@ -3320,28 +3446,40 @@ class VllmConfig:
         if not self.cache_config.use_replayssm:
             self.cache_config.use_kda_recoverssm = False
             return self
-        self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
+
+        kda_architectures = (
+            "KimiLinearForCausalLM",
+            "KimiK3ForConditionalGeneration",
+        )
+        is_kda_model = (
+            self.model_config is not None
+            and self.model_config.architecture in kda_architectures
+        )
+        self.cache_config.use_kda_recoverssm = (
+            self.num_speculative_tokens > 0 and is_kda_model
+        )
+        use_mamba_replayssm_spec = (
+            self.num_speculative_tokens > 0 and not self.cache_config.use_kda_recoverssm
+        )
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
                 "--use-replayssm is not supported for architecture "
                 f"{self.model_config.architecture!r}"
             )
+        if (
+            self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            and self.cache_config.replayssm_buffer_len > 16
+        ):
+            raise ValueError(
+                "FlashInfer ReplaySSM requires --replayssm-buffer-len <= 16"
+            )
         if self.cache_config.use_kda_recoverssm:
-            if self.model_config is not None and self.model_config.architecture not in (
-                "KimiLinearForCausalLM",
-                "KimiK3ForConditionalGeneration",
-            ):
-                raise ValueError("RecoverSSM is only supported for Kimi-K3 KDA")
             if self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(
                     "RecoverSSM supports bfloat16/float32 "
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
-                )
-            if self.cache_config.mamba_cache_mode not in ("none", "align"):
-                raise ValueError(
-                    "RecoverSSM supports only none and align Mamba cache modes"
                 )
             if (
                 self.cache_config.mamba_cache_mode == "align"
@@ -3356,11 +3494,25 @@ class VllmConfig:
                 )
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
-        elif self.cache_config.mamba_cache_mode == "all":
-            raise ValueError(
-                "--use-replayssm supports prefix caching only in align mode; "
-                "pass --mamba-cache-mode align"
-            )
+        elif use_mamba_replayssm_spec:
+            if self.cache_config.mamba_cache_mode != "none":
+                raise ValueError(
+                    "FlashInfer ReplaySSM speculative decoding requires "
+                    "--mamba-cache-mode none"
+                )
+            query_len = 1 + self.num_speculative_tokens
+            if self.cache_config.replayssm_buffer_len < query_len:
+                raise ValueError(
+                    "FlashInfer ReplaySSM speculative decoding requires "
+                    "--replayssm-buffer-len >= 1 + num_speculative_tokens "
+                    f"({query_len}); got "
+                    f"{self.cache_config.replayssm_buffer_len}"
+                )
+            if self.mamba_config.backend != MambaBackendEnum.FLASHINFER:
+                raise ValueError(
+                    "Mamba2 ReplaySSM speculative decoding requires "
+                    "--mamba-backend flashinfer"
+                )
         elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
             if self.cache_config.mamba_cache_mode == "align":
                 raise ValueError(

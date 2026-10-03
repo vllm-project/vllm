@@ -15,7 +15,7 @@ from typing import Any
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_from_args, init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
@@ -51,6 +51,9 @@ async def build_async_engine_client(
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    from ..cli_args import propagate_flash_late_interaction
+
+    propagate_flash_late_interaction(args, engine_args)
     if client_config:
         engine_args._api_process_count = client_config.get("client_count", 1)
         engine_args._api_process_rank = client_config.get("client_index", 0)
@@ -216,6 +219,7 @@ def main():
     )
     parser = make_arg_parser(parser)
     args = parser.parse_args()
+    configure_logging_from_args(args)
     validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))

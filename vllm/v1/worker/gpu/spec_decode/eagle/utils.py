@@ -13,10 +13,14 @@ from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 
 def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
-    """Share when the draft has no own copy, or its copy matches the target."""
-    if not getattr(eagle, flag, False) or draft is None:
+    """Share unless the draft declares its own copy that differs from the target.
+
+    A draft that declares its own copy but has no top-level one (e.g. MTP
+    heads stored per layer) keeps it.
+    """
+    if not getattr(eagle, flag, False):
         return True
-    if target is None:
+    if draft is None or target is None:
         return False
     # torch.equal on GPU allocates a bool mask the size of the input.
     # Use the faster GPU path when there is plenty of headroom;

@@ -95,6 +95,14 @@ pub(crate) fn validate_vocab_range(
         )?;
     }
 
+    if let Some(token_ids) = params.prompt_logprob_token_ids.as_deref() {
+        validate_param(
+            "prompt_logprob_token_ids",
+            token_ids.iter().copied(),
+            limits.model_vocab_size,
+        )?;
+    }
+
     if let Some(bad_words_token_ids) = params.bad_words_token_ids.as_deref() {
         validate_param(
             "bad_words",
