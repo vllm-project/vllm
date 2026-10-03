@@ -9,12 +9,15 @@ longer needs an empty-span masking pass).
 """
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
 import vllm.utils.gpu_sync_debug as gsd
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
+    MLACommonMetadataBuilder,
     build_mla_chunked_context_metadata,
     init_mla_context_partial,
     reorg_kvcache,
@@ -353,3 +356,58 @@ def test_chunked_context_metadata_owns_context_lengths():
     context_lens.zero_()
     assert metadata is not None
     assert metadata.context_lens.tolist() == [16, 32]
+
+
+def _workspace_config(index_topk: int = 2048):
+    config = MagicMock()
+    config.model_config.max_model_len = 32768
+    config.model_config.hf_text_config.index_topk = index_topk
+    config.model_config.hf_config.index_topk = index_topk
+    config.scheduler_config.max_num_seqs = 8
+    config.cache_config.block_size = 4352
+    config.parallel_config.decode_context_parallel_size = 1
+    return config
+
+
+def _layer_with_backend(builder_cls, config):
+    layer = object.__new__(MLAAttention)
+    layer._vllm_config = config
+    layer._chunked_prefill_workspace_size = None
+    layer.attn_backend = SimpleNamespace(get_builder_cls=lambda: builder_cls)
+    return layer
+
+
+def test_profile_workspace_follows_sparse_backend_cap():
+    """A sparse backend must not profile the dense 64K workspace.
+
+    `_project_kv` on a sparse builder can never see more than
+    `max_num_seqs * index_topk` context rows, so reserving the dense
+    heuristic's rows during the profile run only steals KV cache space.
+    """
+    config = _workspace_config()
+
+    class SparseBuilder(SparseMLACommonMetadataBuilder):
+        pass
+
+    layer = _layer_with_backend(SparseBuilder, config)
+
+    assert layer.chunked_prefill_workspace_size == 8 * 2048
+    assert (
+        SparseMLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(config)
+        == 8 * 2048
+    )
+
+
+def test_profile_workspace_keeps_dense_sizing():
+    """Dense builders, and builders without the hook, keep the dense sizing."""
+    config = _workspace_config()
+    dense = MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(config)
+
+    class BuilderWithoutHook:
+        pass
+
+    for builder_cls in (MLACommonMetadataBuilder, BuilderWithoutHook):
+        layer = _layer_with_backend(builder_cls, config)
+        assert layer.chunked_prefill_workspace_size == dense
+
+    assert dense > 8 * 2048
