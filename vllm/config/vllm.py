@@ -3189,7 +3189,7 @@ class VllmConfig:
 
         # DSpark is implemented only by the V2 GPU model runner.
         if self.speculative_config:
-            if self.speculative_config.use_uno():
+            if self.speculative_config.method == "uno":
                 unsupported.append("Uno speculative decoding")
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
