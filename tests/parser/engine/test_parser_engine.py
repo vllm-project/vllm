@@ -2053,8 +2053,8 @@ class TestTruncatedToolOpenerStreamParity:
         assert content == streamed == "Checking the weather. "
 
     def test_content_around_unpromoted_tool_block_stays_ordered(self, mock_request):
-        """Text surrounding a complete-but-unparsable tool block keeps its
-        original order in the non-streaming path, matching streaming."""
+        """A wrapper with prose instead of a function header remains literal
+        text in both paths, including the surrounding content."""
         chunks = ["A ", "<tool_call>", "garbage", "</tool_call>", " B"]
         text = "".join(chunks)
 
@@ -2064,7 +2064,7 @@ class TestTruncatedToolOpenerStreamParity:
         streamed = self._stream_content(mock_request, chunks)
 
         assert not tool_calls
-        assert content == streamed == "A  B"
+        assert content == streamed == text
 
     def test_complete_tool_call_still_promoted(self, mock_request):
         """Sanity check: a complete tool call still parses in the
