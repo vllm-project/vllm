@@ -42,7 +42,7 @@ from .modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
     parallel_launch_with_config,
 )
-from .utils import check_accuracy
+from .utils import check_accuracy, make_test_weights
 
 has_any_multi_gpu_package = (
     has_deep_ep() or has_deep_gemm() or has_flashinfer_cutlass_fused_moe()
@@ -689,6 +689,303 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
         False,
         dispatch_policy,
     )
+
+
+# --- 4b: hidden_dim_unpadded/intermediate_size_per_partition_unpadded matrix -
+
+# K/N intentionally unaligned to AITER's 64/128 granularity (unlike the
+# shared mk_objects.py defaults) so hidden_pad/intermediate_pad are forced.
+_PADDING_E = 8
+_PADDING_M = 16
+_PADDING_TOPK = 2
+_PADDING_K_UNPADDED = 896  # 7 * 128
+_PADDING_K_PADDED = 1024  # +128
+_PADDING_N_UNPADDED = 384  # 3 * 128
+_PADDING_N_PADDED = 512  # +128
+# hidden_pad = (K_padded - hidden_dim_unpadded) // 128 * 128 (rocm_aiter_moe.py)
+_PADDING_HIDDEN_PAD_EXPECTED = 128
+# intermediate_pad = (N_padded - intermediate_size_per_partition_unpadded)
+#   // 64 * 64 * (2 if tp_size == 1 else 1) (rocm_aiter_moe.py); tp_size==1 here.
+_PADDING_INTERMEDIATE_PAD_EXPECTED = 256
+
+# {no padding, hidden-only, intermediate-only, both} -> (pad_hidden, pad_intermediate)
+_PADDING_MODES: dict[str, tuple[bool, bool]] = {
+    "none": (False, False),
+    "hidden": (True, False),
+    "intermediate": (False, True),
+    "both": (True, True),
+}
+
+# unquantized + the 4 fp8 configs AiterExperts supports (excludes MXFP4,
+# stubbed below pending MI350/gfx950, and MK_QUANT_CONFIGS[1], unsupported).
+_PADDING_QUANT_CONFIGS = [
+    MK_QUANT_CONFIGS[0],  # unquantized
+    MK_QUANT_CONFIGS[2],  # fp8 channel weights / per-token activations
+    MK_QUANT_CONFIGS[3],  # fp8 per-tensor weights / per-tensor activations
+    MK_QUANT_CONFIGS[4],  # fp8 per-tensor weights / per-token activations
+    MK_QUANT_CONFIGS[5],  # fp8 128x128-block weights / 128-block activations
+]
+_PADDING_QUANT_IDS = [
+    "unquantized",
+    "fp8_channel_token",
+    "fp8_tensor_tensor",
+    "fp8_tensor_token",
+    "fp8_block_token",
+]
+
+
+def _slice_gate_up_rows(t: torch.Tensor, real_per_half: int) -> torch.Tensor:
+    """Slice a (E, 2*padded_per_half, ...) tensor's dim=1 down to the real
+    gate/up halves of `real_per_half` size each."""
+    padded_per_half = t.shape[1] // 2
+    return torch.cat(
+        [
+            t[:, :real_per_half],
+            t[:, padded_per_half : padded_per_half + real_per_half],
+        ],
+        dim=1,
+    )
+
+
+def _slice_unpadded_weights(
+    weights: WeightTensors,
+    quant_config: TestMoEQuantConfig | None,
+    k_unpadded: int,
+    n_unpadded: int,
+) -> WeightTensors:
+    """Derive the unpadded sub-block of a padded WeightTensors: same values,
+    restricted to the region hidden_pad/intermediate_pad keeps.
+
+    Scale-shape choice (per_out_ch) must match _make_padding_matrix_weights()."""
+    block_shape = quant_config.block_shape if quant_config is not None else None
+    per_out_ch = quant_config is not None and quant_config.per_out_ch_quant
+
+    w1 = _slice_gate_up_rows(weights.w1[:, :, :k_unpadded], n_unpadded)
+    w2 = weights.w2[:, :k_unpadded, :n_unpadded]
+
+    if weights.w1_scale is None:
+        w1_scale = w2_scale = None
+    elif weights.w2_scale is None:
+        raise AssertionError("w1_scale and w2_scale must both be set or both None")
+    elif block_shape is not None:
+        block_n, block_k = block_shape
+        assert n_unpadded % block_n == 0 and k_unpadded % block_k == 0
+        n_scale, k_scale = n_unpadded // block_n, k_unpadded // block_k
+        w1_scale = _slice_gate_up_rows(weights.w1_scale, n_scale)[..., :k_scale]
+        w2_scale = weights.w2_scale[:, :k_scale, :n_scale]
+    elif per_out_ch:
+        w1_scale = _slice_gate_up_rows(weights.w1_scale, n_unpadded)
+        w2_scale = weights.w2_scale[:, :k_unpadded, :]
+    else:
+        # Per-tensor scale: shape (E, 1, 1), independent of K/N -- reuse as-is.
+        w1_scale = weights.w1_scale
+        w2_scale = weights.w2_scale
+
+    return WeightTensors(w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale)
+
+
+def _make_padding_matrix_weights(config: Config) -> WeightTensors:
+    """Like WeightTensors.make(), but scales weights by
+    config.is_per_out_ch_quant instead of is_per_act_token_quant.
+
+    WeightTensors.make() ties weight-scale shape to activation quant, so
+    fp8_tensor_token would get per-channel scales despite being a per-tensor
+    weight scheme. Scoped here rather than fixing WeightTensors.make(),
+    which other tests depend on."""
+    (_, w1, w1_scale, w1_gs), (_, w2, w2_scale, w2_gs) = make_test_weights(
+        e=config.E,
+        n=config.N,
+        k=config.K,
+        in_dtype=config.dtype,
+        quant_dtype=config.quant_dtype,
+        block_shape=config.quant_block_shape,
+        per_out_ch_quant=config.is_per_out_ch_quant,
+    )
+    return WeightTensors(
+        w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale, w1_gs=w1_gs, w2_gs=w2_gs
+    )
+
+
+def _slice_unpadded_rank_tensors(
+    rank_tensors: RankTensors, k_unpadded: int
+) -> RankTensors:
+    return RankTensors(
+        hidden_states=rank_tensors.hidden_states[:, :k_unpadded].contiguous(),
+        hidden_states_scale=rank_tensors.hidden_states_scale,
+        topk_weights=rank_tensors.topk_weights,
+        topk_ids=rank_tensors.topk_ids,
+        expert_map=rank_tensors.expert_map,
+    )
+
+
+def _aiter_padding_matrix_worker(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    padded_config: Config,
+    padded_weights: WeightTensors,
+    verbose: bool,
+    hidden_pad_expected: int,
+    intermediate_pad_expected: int,
+):
+    device = torch.device(f"cuda:{pgi.local_rank}")
+    init_workspace_manager(device)
+    set_random_seed(pgi.rank)
+
+    weights = copy.deepcopy(padded_weights)
+    weights.to_current_device()
+
+    rank_tensors = RankTensors.make(padded_config, pgi)
+
+    with mock.patch.object(
+        rocm_aiter_ops, "fused_moe", wraps=rocm_aiter_ops.fused_moe
+    ) as fused_moe_mock:
+        mk_out = run_modular_kernel(
+            pgi, vllm_config, padded_config, weights, rank_tensors
+        )
+
+    assert fused_moe_mock.call_count > 0, (
+        "Expected AiterExperts.apply() to call rocm_aiter_ops.fused_moe."
+    )
+    for call in fused_moe_mock.call_args_list:
+        assert call.kwargs["hidden_pad"] == hidden_pad_expected, (
+            f"AiterExperts.apply() forwarded hidden_pad="
+            f"{call.kwargs['hidden_pad']}, expected {hidden_pad_expected}."
+        )
+        assert call.kwargs["intermediate_pad"] == intermediate_pad_expected, (
+            f"AiterExperts.apply() forwarded intermediate_pad="
+            f"{call.kwargs['intermediate_pad']}, expected "
+            f"{intermediate_pad_expected}."
+        )
+
+    # AiterExperts.apply() never slices its own output -- the buffer stays
+    # raw (padded) width; only the caller-sliced unpadded prefix is checked.
+    assert mk_out.shape[-1] == padded_config.K, (
+        f"AiterExperts output width {mk_out.shape[-1]} != raw hidden_dim "
+        f"{padded_config.K}."
+    )
+    mk_out = mk_out[..., :_PADDING_K_UNPADDED]
+    # Only the real slice is checked: beyond it is unspecified/reused memory.
+    assert torch.isfinite(mk_out).all(), (
+        "AiterExperts output must not contain NaN/Inf in the real "
+        "hidden_dim_unpadded-wide output slice."
+    )
+
+    unpadded_weights = _slice_unpadded_weights(
+        weights,
+        padded_config.quant_config,
+        _PADDING_K_UNPADDED,
+        _PADDING_N_UNPADDED,
+    )
+    unpadded_rank_tensors = _slice_unpadded_rank_tensors(
+        rank_tensors, _PADDING_K_UNPADDED
+    )
+
+    with set_current_vllm_config(vllm_config):
+        ref_out = reference_moe_impl(
+            padded_config, unpadded_weights, unpadded_rank_tensors
+        )
+
+    # ref_out's magnitude here (~1e-3-1e-2) is below atol=3e-2, so a zeroed-out
+    # mk_out would still pass check_accuracy below -- guard against that.
+    ref_scale = ref_out.abs().mean()
+    mk_scale = mk_out.abs().mean()
+    assert mk_scale > 0.5 * ref_scale, (
+        f"AiterExperts output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
+        f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
+    )
+
+    # Lenient check for every scheme, including unquantized: a strict
+    # assert_close(atol=rtol=3e-2) spuriously fails ~0.1-0.2% of elements
+    # on MI300 even for unquantized AiterExperts (confirmed on hardware).
+    check_accuracy(ref_out, mk_out, atol=3e-2, rtol=3e-2, percent=0.9)
+
+
+@require_aiter_moe
+@pytest.mark.parametrize("quant_config", _PADDING_QUANT_CONFIGS, ids=_PADDING_QUANT_IDS)
+@pytest.mark.parametrize("mode", list(_PADDING_MODES))
+def test_aiter_moe_padding_matrix(mode: str, quant_config: TestMoEQuantConfig | None):
+    """See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
+
+    Exercises AiterExperts's hidden_pad/intermediate_pad (rocm_aiter_moe.py)
+    across {no padding, hidden-only, intermediate-only, both} x the
+    unquantized + 4 fp8 quant schemes it supports. Compares against an
+    unpadded reference and verifies the hidden_pad/intermediate_pad
+    AiterExperts.apply() forwards to rocm_aiter_ops.fused_moe.
+    """
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+
+    pad_hidden, pad_intermediate = _PADDING_MODES[mode]
+
+    if (
+        quant_config is not None
+        and quant_config.block_shape is not None
+        and not pad_hidden
+    ):
+        pytest.skip(
+            "AITER's block-quantized (128x128) CK GEMM kernel does not "
+            f"support the raw (unpadded) hidden_dim={_PADDING_K_UNPADDED} "
+            "shape on this hardware -- it raises 'wrong! device_gemm with "
+            "the specified compilation parameters does not support this "
+            "GEMM problem'. Only hidden_pad-forcing modes (raw "
+            f"hidden_dim={_PADDING_K_PADDED}) are exercised for this quant "
+            "scheme."
+        )
+
+    k = _PADDING_K_PADDED if pad_hidden else _PADDING_K_UNPADDED
+    n = _PADDING_N_PADDED if pad_intermediate else _PADDING_N_UNPADDED
+
+    config = Config(
+        Ms=_PADDING_M,
+        K=k,
+        N=n,
+        E=_PADDING_E,
+        topks=_PADDING_TOPK,
+        dtype=torch.bfloat16,
+        quant_config=quant_config,
+        prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
+        fused_experts_type=AiterExperts,
+        world_size=1,
+        hidden_dim_unpadded=_PADDING_K_UNPADDED if pad_hidden else None,
+        intermediate_size_per_partition_unpadded=(
+            _PADDING_N_UNPADDED if pad_intermediate else None
+        ),
+    )
+    assert config.is_valid()[0]
+    assert config.fe_supports_quant_scheme(), (
+        f"AiterExperts does not support quant scheme {quant_config}."
+    )
+
+    weights = _make_padding_matrix_weights(config)
+    vllm_config, env_dict = config.make_env_data()
+
+    hidden_pad_expected = _PADDING_HIDDEN_PAD_EXPECTED if pad_hidden else 0
+    intermediate_pad_expected = (
+        _PADDING_INTERMEDIATE_PAD_EXPECTED if pad_intermediate else 0
+    )
+
+    parallel_launch_with_config(
+        config.world_size,
+        _aiter_padding_matrix_worker,
+        vllm_config,
+        env_dict,
+        config,
+        weights,
+        False,
+        hidden_pad_expected,
+        intermediate_pad_expected,
+    )
+
+
+@pytest.mark.skip(
+    reason="MXFP4 AiterExperts padding requires MI350/gfx950 hardware. "
+    'See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").'
+)
+def test_aiter_moe_padding_matrix_mxfp4():
+    """Stub for the {no padding, hidden-only, intermediate-only, both} MXFP4
+    padding matrix once MI350/gfx950 hardware is available in CI."""
 
 
 if __name__ == "__main__":

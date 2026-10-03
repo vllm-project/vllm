@@ -1698,6 +1698,7 @@ def test_kv_connector_stats_failure_grouping():
     stats.record_failed_handshake()
     stats.record_failed_notification()
     stats.record_kv_expired_req()
+    stats.record_notification_after_expiry()
     assert not stats.is_empty()
 
     # No successful transfers: latency stats are zero but the failure
@@ -1706,6 +1707,7 @@ def test_kv_connector_stats_failure_grouping():
     assert reduced["Num successful transfers"] == 0
     assert reduced["Num failed transfers"] == 3
     assert reduced["Num KV expired reqs"] == 1
+    assert reduced["Num notifs after expiry"] == 1
 
 
 def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
@@ -1750,6 +1752,7 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
     stats.record_failed_handshake()
     stats.record_failed_notification()
     stats.record_kv_expired_req()
+    stats.record_notification_after_expiry()
     prom.observe(stats.data, engine_idx=0)
 
     def counter_value(name: str) -> float:
@@ -1761,6 +1764,33 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
 
     assert counter_value("vllm:nixl_num_failed_transfers_total") == 3.0
     assert counter_value("vllm:nixl_num_kv_expired_reqs_total") == 1.0
+    assert counter_value("vllm:nixl_num_notifications_after_expiry_total") == 1.0
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_notification_after_expiry_is_counted(default_vllm_config, dist_init):
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+    worker._reqs_to_process.add("known")
+    worker._reqs_to_send["known"] = time.perf_counter() + 10
+    worker.nixl_wrapper.get_new_notifs = MagicMock(
+        return_value={"decode-agent": [b"known:1", b"unknown:1"]}
+    )
+
+    assert worker._get_new_notifs() == {"known"}
+
+    stats = connector.get_kv_connector_stats()
+    assert isinstance(stats, NixlKVConnectorStats)
+    assert stats.data["num_notifications_after_expiry"] == [1]
 
 
 def test_multi_kv_connector_stats_aggregation():
