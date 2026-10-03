@@ -5,7 +5,7 @@
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
@@ -68,16 +68,64 @@ class TieringOffloadingMetrics:
     PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
 
 
-@dataclass
-class TransferJob:
-    """Metadata for an in-flight async transfer job."""
+class TransferJob(ABC):
+    """Handle to an async transfer between the primary tier and a secondary tier.
 
-    job_id: JobId
-    keys: Collection[OffloadKey]
-    chunk_ids: np.ndarray
-    is_promotion: bool
-    req_context: ReqContext
-    submit_time: float = field(default_factory=time.monotonic)
+    A job is either materialized (its keys/chunk_ids are fixed at construction)
+    or deferred (they are acquired on the first get()).
+    Cascade jobs and promotion jobs for tiers that do not request deferred
+    allocation are always materialized at construction.
+    Only promotion jobs for tiers that do (supports_deferred_promotion_allocation)
+    are deferred and must call get() before reading keys/chunk_ids;
+    """
+
+    def __init__(self, job_id: JobId, req_context: ReqContext, is_promotion: bool):
+        self.job_id = job_id
+        self.req_context = req_context
+        self.is_promotion = is_promotion
+        self.submit_time = time.monotonic()
+
+    @abstractmethod
+    def get(self) -> tuple[Collection[OffloadKey], np.ndarray] | None:
+        """Materialize transfer keys and chunk-ids, if not already materialized.
+
+        Callers that may hold a deferred job, a promotion job for a tier
+        requesting deferred allocation, must call this before reading
+        keys/chunk_ids. All other jobs are materialized, and this simply
+        returns their pre-set claim.
+
+        Idempotent. On a deferred job the first call acquires the
+        primary-tier resources, which may yield fewer keys than were
+        requested; the result -- including failure -- is memoized.
+
+        Returns:
+            The keys to transfer and their primary chunk ids, or None if
+            nothing could be acquired.
+
+        """
+
+    @abstractmethod
+    def is_materialized(self) -> bool:
+        """Return True if the transfer keys are chunk_ids are known at
+        this point in time.
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def keys(self) -> Collection[OffloadKey]:
+        """Return transfer keys if already acquired and acquisition passed.
+        Raise ValueError otherwise.
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def chunk_ids(self) -> np.ndarray:
+        """Return transfer chunk_ids if already acquired and acquisition passed.
+        Raise ValueError otherwise.
+        """
+        pass
 
 
 @dataclass
@@ -289,6 +337,15 @@ class SecondaryTierManager(ABC):
 
         """
         pass
+
+    def supports_deferred_promotion_allocation(self) -> bool:
+        """Whether this tier requests deferring CPU block allocation.
+
+        A tier returning True receives promotion jobs whose primary slots are
+        acquired lazily; it must call transfer_job.get() for a just-in-time
+        cpu blocks allocation.
+        """
+        return False
 
     def has_pending_work(self) -> bool:
         """Whether this tier needs the engine to keep stepping.

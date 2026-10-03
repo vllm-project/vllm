@@ -576,6 +576,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
+        assert job_metadata.get() is not None, "Cannot materialize load job"
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
         block_ids = job_metadata.chunk_ids

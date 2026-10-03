@@ -159,6 +159,16 @@ class CPUOffloadingManager(OffloadingManager):
             req_context.set_state(state)
         return state
 
+    def _is_request_cache_access_finished(self, req_context: ReqContext) -> bool:
+        """Return True iff the RequestCacheAccess is marked finished."""
+        state = req_context.get_state(_RequestCacheAccess)
+        return (
+            state is not None
+            and state.owner is self
+            and state.cache_generation == self._cache_generation
+            and state.finished
+        )
+
     def _record_request_cache_access(
         self,
         keys: Iterable[OffloadKey],
@@ -182,6 +192,15 @@ class CPUOffloadingManager(OffloadingManager):
         state.reused_keys.update(
             key for key in reused_keys if key not in state.inserted_keys
         )
+
+    def _extra_eviction_protected(self) -> set[OffloadKey]:
+        """Additional keys to exclude from eviction candidates.
+
+        Called during prepare_store() eviction. Override in subclasses to
+        protect keys that must not be evicted (e.g. scheduler HIT keys
+        awaiting prepare_load()).
+        """
+        return set()
 
     # --- OffloadingManager interface ---
 
@@ -326,6 +345,7 @@ class CPUOffloadingManager(OffloadingManager):
             # Chunks from the original input are excluded from eviction candidates:
             # a chunk that was already stored must remain in the cache after this call.
             protected = set(keys)
+            protected.update(self._extra_eviction_protected())
             evicted = self._policy.evict(num_chunks_to_evict, protected)
             if evicted is None:
                 return None

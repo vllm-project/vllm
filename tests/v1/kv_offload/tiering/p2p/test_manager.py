@@ -30,7 +30,11 @@ from vllm.v1.kv_offload.tiering.base import (
     TieringOffloadingMetrics,
     TransferJob,
 )
-from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+from vllm.v1.kv_offload.tiering.manager import (
+    CascadeTransferJob,
+    PromotionTransferJob,
+    TieringOffloadingManager,
+)
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _RECONNECT_MAX_BACKOFF_S,
@@ -108,11 +112,10 @@ def _job_metadata(
         keys = [OffloadKey(b"key1")]
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
-    return TransferJob(
+    return CascadeTransferJob(
         job_id=job_id,
         keys=keys,
         chunk_ids=np.array(chunk_ids),
-        is_promotion=False,
         req_context=_req_context(kv_params),
     )
 
@@ -560,12 +563,16 @@ class TestPromotionLatency:
             secondary_tiers=[p2p_tier],
             tier_poll_interval_s=0.0,
         )
-        job = TransferJob(
+        job = PromotionTransferJob(
             job_id=42,
             keys=[OffloadKey(b"key1")],
             chunk_ids=np.array([0]),
-            is_promotion=True,
             req_context=_req_context(_remote_prefiller_kv_params()),
+        )
+        # Hand-built job: simulate the allocation-side chunk-count recording
+        # that _promotion_allocation performs for real promotions.
+        tiering_manager._metrics.safe_counter_update(
+            0, TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC, 1
         )
         tiering_manager._register_job(job, tier_idx=0)
 
