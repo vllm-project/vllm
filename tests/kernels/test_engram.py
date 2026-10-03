@@ -761,7 +761,8 @@ def test_engram_lookup_matches_torch(cpu_offload, background, packed, num_tokens
 @pytest.mark.parametrize("use_thp", [False, True])
 @pytest.mark.parametrize("register_fails", [False, True])
 def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails, use_thp):
-    """Huge-page tables and their pinned fallback both give exact lookup rows."""
+    """Registered tables (small or huge pages) and their pinned fallback all give
+    exact lookup rows; only huge pages skip the sorted lookup."""
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
     if register_fails:
@@ -777,8 +778,9 @@ def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails, use_thp
     same_storage = layer.weight.untyped_storage().data_ptr() == (
         layer.weight_scale_inv.untyped_storage().data_ptr()
     )
-    registered = (use_thp or current_platform.is_rocm()) and not register_fails
-    assert same_storage == registered
+    assert same_storage != register_fails
+    huge_pages = use_thp or current_platform.is_rocm()
+    assert (layer._packed is not None) == (huge_pages and not register_fails)
     layer.weight.data.fill_(2)
     layer.weight_scale_inv.data.fill_(127)
     ids = torch.tensor(
