@@ -7,9 +7,15 @@ from unittest.mock import MagicMock, call
 import pytest
 
 from vllm import LLM
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.engine.arg_utils import EngineArgs
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
+from vllm.v1.outputs import RequestOutput
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
@@ -264,3 +270,86 @@ def test_skip_tokenizer_initialization(model: str):
     assert len(completions) > 0
     assert completions[0].text == ""
     assert completions[0].token_ids
+
+
+@pytest.mark.parametrize(
+    "output_kind",
+    [
+        RequestOutputKind.CUMULATIVE,
+        RequestOutputKind.DELTA,
+        RequestOutputKind.FINAL_ONLY,
+    ],
+)
+def test_parallel_sampling_llm_engine_output_kinds(
+    output_kind: RequestOutputKind,
+) -> None:
+    """LLMEngine.add_request()/step() with parallel sampling (n>1) yields n
+    unique completions for every RequestOutputKind.
+
+    Regression guard for https://github.com/vllm-project/vllm/issues/21948:
+    the LLMEngine + CUMULATIVE combination was reported broken, and the
+    LLMEngine add_request()/step() path had no explicit parallel-sampling
+    coverage at all. Each entry point x output_kind combination must be
+    exercised explicitly.
+    """
+    engine_args = EngineArgs(
+        model=MODEL,
+        dtype=DTYPE,
+        max_model_len=128,
+        enforce_eager=True,
+        gpu_memory_utilization=0.5,
+    )
+    engine = LLMEngine.from_engine_args(engine_args)
+    try:
+        n = 2
+        max_tokens = 8
+        engine.add_request(
+            "request-0",
+            "Hello, my name is",
+            SamplingParams(
+                max_tokens=max_tokens,
+                n=n,
+                output_kind=output_kind,
+                ignore_eos=True,
+                temperature=0.5,
+                seed=33,
+            ),
+        )
+        outputs: list[RequestOutput] = []
+        while engine.has_unfinished_requests():
+            outputs.extend(engine.step())
+
+        # Collect per-completion token-length histories across all steps.
+        per_seq: dict[int, list[int]] = {i: [] for i in range(n)}
+        finished: set[int] = set()
+        for out in outputs:
+            for comp in out.outputs:
+                per_seq[comp.index].append(len(comp.token_ids))
+                if comp.finished:
+                    finished.add(comp.index)
+
+        # Every one of the n parallel completions must finish.
+        assert finished == set(range(n)), (
+            f"{output_kind}: expected all {n} completions to finish, got {finished}"
+        )
+        # Every completion must reach the requested length.
+        for i in range(n):
+            lens = per_seq[i]
+            # DELTA reports per-step token deltas; CUMULATIVE/FINAL_ONLY
+            # report cumulative snapshots / the full final sequence.
+            total = sum(lens) if output_kind == RequestOutputKind.DELTA else lens[-1]
+            assert total == max_tokens, (
+                f"{output_kind}: completion {i} must reach {max_tokens} "
+                f"tokens, got {lens}"
+            )
+        # CUMULATIVE snapshots must be monotone non-decreasing.
+        if output_kind == RequestOutputKind.CUMULATIVE:
+            for i in range(n):
+                lens = per_seq[i]
+                assert lens == sorted(lens), (
+                    f"CUMULATIVE: snapshot lengths for completion {i} "
+                    f"must be monotone non-decreasing, got {lens}"
+                )
+    finally:
+        # Best-effort cleanup; LLMEngine has no public shutdown().
+        engine.engine_core.shutdown()
