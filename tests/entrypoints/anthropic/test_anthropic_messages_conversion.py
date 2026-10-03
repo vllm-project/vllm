@@ -1749,6 +1749,70 @@ class TestToolUseStopReason:
         assert msg_deltas[0]["delta"]["stop_reason"] == expected
 
 
+class TestContextWindowStopReason:
+    """A length stop that filled the context window reports
+    ``model_context_window_exceeded``, as Anthropic does for Claude 4.5+, so
+    clients can tell it apart from hitting their own ``max_tokens``.
+    """
+
+    @pytest.mark.parametrize(
+        ("prompt_tokens", "max_model_len", "expected"),
+        [
+            (90, 100, "model_context_window_exceeded"),
+            (50, 100, "max_tokens"),
+            (90, None, "max_tokens"),
+        ],
+    )
+    def test_non_streaming(self, prompt_tokens, max_model_len, expected):
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hello"),
+                    finish_reason="length",
+                )
+            ],
+            usage=UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=10,
+                total_tokens=prompt_tokens + 10,
+            ),
+        )
+
+        result = _make_full_converter().messages_full_converter(response, max_model_len)
+
+        assert result.stop_reason == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("prompt_tokens", "expected"),
+        [(90, "model_context_window_exceeded"), (50, "max_tokens")],
+    )
+    async def test_streaming(self, prompt_tokens, expected):
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(content="hi"))
+            yield _make_stream_chunk(finish_reason="length")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=10,
+                    total_tokens=prompt_tokens + 10,
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        events = _parse_sse_events(
+            [e async for e in converter.message_stream_converter(sse_input(), 100)]
+        )
+
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert msg_deltas[0]["delta"]["stop_reason"] == expected
+
+
 # ======================================================================
 # Client-caused errors are 4xx, not 500 (Issue #52088)
 # ======================================================================
