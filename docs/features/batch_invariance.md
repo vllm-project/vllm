@@ -135,6 +135,7 @@ Batch invariance has been tested and verified on the following models:
 - **Granite 3.1 (Dense)**: `ibm-granite/granite-3.1-2b-instruct`, `ibm-granite/granite-3.1-8b-instruct`
 - **EXAONE 4.0 series**: `LGAI-EXAONE/EXAONE-4.0-1.2B`, `LGAI-EXAONE/EXAONE-4.0.1-32B`, `LGAI-EXAONE/EXAONE-4.0-32B`
 - **OLMo 2**: `allenai/OLMo-2-0425-1B-Instruct`
+- **ERNIE 4.5**: `baidu/ERNIE-4.5-0.3B-PT`
 - **SmolLM2**: `HuggingFaceTB/SmolLM2-1.7B-Instruct`
 - **PLaMo3**: `pfnet/plamo-3-nict-2b-base`
 
@@ -146,10 +147,14 @@ When batch invariance is enabled, vLLM:
 
 1. Uses deterministic kernel implementations for attention and other operations
 2. Ensures consistent numerical behavior across different batch sizes
-3. Disables certain optimizations that may introduce non-determinism (such as custom all-reduce operations in tensor parallel mode, and sequence parallelism / async TP, whose reduce-scatter path is not batch-invariant)
-4. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
+3. Disables certain optimizations that may introduce non-determinism (such as sequence parallelism / async TP, whose reduce-scatter path is not batch-invariant)
+4. Under tensor parallelism, keeps custom all-reduce on with a fixed reduction order (the 1-stage kernel is pinned, and large inputs are reduced in fixed-size chunks), and disables FlashInfer, AITER and QuickReduce all-reduce
+5. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out
    (not applied when sequence parallelism / async TP are enabled, since those are `torch.compile` passes).
+
+!!! warning
+    Batch invariance under tensor parallelism is not yet supported for all-reduces whose size isn't a multiple of 16 bytes, for example a hidden size that isn't a multiple of 8 in fp16/bf16. Such tensors can switch between NCCL and custom all-reduce depending on batch size. All validated models meet this requirement.
 
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.

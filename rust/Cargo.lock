@@ -5964,17 +5964,23 @@ dependencies = [
 name = "vllm-parser"
 version = "0.1.0"
 dependencies = [
+ "auto_impl",
  "criterion",
  "easy-ext",
+ "educe",
  "expect-test",
  "futures",
  "openai-protocol",
+ "regex-automata",
+ "regex-syntax",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_with",
  "thiserror 2.0.18",
  "thiserror-ext",
  "tool-parser",
+ "tracing",
  "vllm-tokenizer",
  "winnow",
  "xgrammar-structural-tag",
