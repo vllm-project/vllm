@@ -653,14 +653,14 @@ class Platform:
             for candidate in candidates:
                 if all(b.supports_block_size(candidate) for b in backend_classes):
                     return candidate
-        raise ValueError(
-            "The attention backends share no supported KV cache block size ("
-            + "; ".join(
-                f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}"
-                for b in backend_classes
+            raise ValueError(
+                "The attention backends share no supported KV cache block size ("
+                + "; ".join(
+                    f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}"
+                    for b in backend_classes
+                )
+                + ")."
             )
-            + ")."
-        )
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
