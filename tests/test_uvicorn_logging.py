@@ -248,7 +248,6 @@ class TestCreateUvicornLogConfig:
 
         assert config["filters"]["access_log_filter"]["excluded_paths"] == []
 
-
 class TestIntegration:
     """Integration tests for the access log filter."""
 

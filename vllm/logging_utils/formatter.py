@@ -4,9 +4,26 @@
 import logging
 from pathlib import Path
 
+from pythonjsonlogger import jsonlogger
+
 JSON_FORMAT = (
     "%(asctime)s %(levelname)s %(name)s %(processName)s %(process)d %(message)s"
 )
+
+
+class TraceJSONFormatter(jsonlogger.JsonFormatter):
+    """Inject active OpenTelemetry trace context into JSON logs."""
+
+    def add_fields(self, log_record, record, message_dict):
+        super().add_fields(log_record, record, message_dict)
+        try:
+            from opentelemetry import trace
+        except ImportError:
+            return
+        context = trace.get_current_span().get_span_context()
+        if context.is_valid:
+            log_record["trace_id"] = format(context.trace_id, "032x")
+            log_record["span_id"] = format(context.span_id, "016x")
 
 
 class NewLineFormatter(logging.Formatter):

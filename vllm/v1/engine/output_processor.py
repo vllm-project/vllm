@@ -25,6 +25,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
     SpanAttributes,
     SpanKind,
+    activate_span,
     extract_trace_context,
     instrument_manual,
 )
@@ -200,6 +201,7 @@ class RequestState:
         self.input_chunk_queue: deque[StreamingUpdate] | None = (
             deque() if stream_input else None
         )
+        self.trace_span: Any = None
 
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
@@ -561,6 +563,8 @@ class OutputProcessor:
         for request_id in internal_req_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
+                if req_state.trace_span is not None:
+                    req_state.trace_span.end()
                 self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
                 # Produce final abort output.
@@ -596,12 +600,12 @@ class OutputProcessor:
         parent_req: ParentRequest | None = None,
         request_index: int = 0,
         queue: RequestOutputCollector | None = None,
-    ) -> None:
+    ) -> RequestState:
         request_id = request.request_id
         req_state = self.request_states.get(request_id)
         if req_state is not None:
             self._update_streaming_request_state(req_state, request, prompt)
-            return
+            return req_state
 
         req_state = RequestState.from_new_request(
             tokenizer=self.tokenizer,
@@ -614,12 +618,21 @@ class OutputProcessor:
             stream_interval=self.stream_interval,
         )
         self.request_states[request_id] = req_state
+        if self.tracing_enabled:
+            req_state.trace_span = instrument_manual(
+                span_name="llm_request",
+                start_time=int(request.arrival_time * 1e9),
+                context=extract_trace_context(request.trace_headers),
+                kind=SpanKind.SERVER,
+                end_span=False,
+            )
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
 
         # Track the external_req_id -> [internal_req_id, ...] mapping
         self.external_req_ids[req_state.external_req_id].append(request_id)
         self._update_admission_stats()
+        return req_state
 
     def _update_streaming_request_state(
         self, req_state: RequestState, request: EngineCoreRequest, prompt: str | None
@@ -792,7 +805,7 @@ class OutputProcessor:
                         req_state, finish_reason, iteration_stats
                     )
                     if self.tracing_enabled:
-                        self.do_tracing(engine_core_output, req_state, iteration_stats)
+                        self.do_tracing(req_state, iteration_stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
@@ -823,16 +836,17 @@ class OutputProcessor:
 
     def do_tracing(
         self,
-        engine_core_output: EngineCoreOutput,
         req_state: RequestState,
         iteration_stats: IterationStats | None,
     ) -> None:
         assert req_state.stats is not None
         assert iteration_stats is not None
 
+        span = req_state.trace_span
+        if span is None:
+            return
+
         metrics = req_state.stats
-        arrival_time_ns = int(metrics.arrival_time * 1e9)
-        trace_context = extract_trace_context(engine_core_output.trace_headers)
         prompt_length = length_from_prompt_token_ids_or_embeds(
             req_state.prompt_token_ids, req_state.prompt_embeds
         )
@@ -875,13 +889,9 @@ class OutputProcessor:
         if req_state.n:
             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
 
-        instrument_manual(
-            span_name="llm_request",
-            start_time=arrival_time_ns,
-            attributes=attributes,
-            context=trace_context,
-            kind=SpanKind.SERVER,
-        )
+        with activate_span(span):
+            span.set_attributes(attributes)
+        span.end()
 
     def _update_stats_from_output(
         self,
