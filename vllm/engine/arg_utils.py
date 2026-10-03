@@ -1008,6 +1008,10 @@ class EngineArgs:
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
         )
         model_group.add_argument(
+            "--sleep-mode-offload-cudagraph",
+            **model_kwargs["sleep_mode_offload_cudagraph"],
+        )
+        model_group.add_argument(
             "--sleep-preserve-parameter-names",
             **model_kwargs["sleep_preserve_parameter_names"],
         )

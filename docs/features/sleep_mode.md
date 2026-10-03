@@ -114,6 +114,8 @@ says why.
 llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, sleep_mode_offload_cudagraph=True)
 ```
 
+or `vllm serve <model> --enable-sleep-mode --sleep-mode-offload-cudagraph`.
+
 The cost is pinned host memory for the pool's backup, also at level 2, and one
 extra copy per captured custom allreduce (about 3% decode latency at batch
 size 1). `NCCL_GRAPH_REGISTER` defaults to `0`, since NCCL graph registration
