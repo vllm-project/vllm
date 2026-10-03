@@ -638,6 +638,10 @@ class ParserEngine(Parser):
     def reasoning_end_token_ids(self) -> frozenset[int]:
         return self._reasoning_end_token_ids
 
+    @property
+    def inclusive_reasoning_end_token_ids(self) -> frozenset[int]:
+        return self._reasoning_end_token_ids - {self._reasoning_end_token_id}
+
     def find_reasoning_end_offset(self, token_ids: Sequence[int]) -> int | None:
         end_ids = self._reasoning_end_token_ids
         if not end_ids:

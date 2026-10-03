@@ -11,6 +11,7 @@ from vllm.config import DeviceConfig, StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.structured_outputs import StructuredOutputsBackend
+from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -47,6 +48,8 @@ class FlowCase:
 
 
 class MockReasoner:
+    inclusive_reasoning_end_token_ids: frozenset[int] = frozenset()
+
     def __init__(self, tokenizer, marker: int | None = None):
         self.marker = marker
 
@@ -514,3 +517,96 @@ def test_outlines_termination(tokenizer):
     assert grammar.validate_tokens([eos]) == []
     assert grammar.accept_tokens(request.request_id, [one, eos, one])
     assert grammar.is_terminated()
+
+
+class MockEngineReasoner(ParserEngineReasoningAdapter):
+    """Ends reasoning on the close tag `marker` or on `inclusive_marker`,
+    which is kept as content."""
+
+    def __init__(self, tokenizer, marker: int, inclusive_marker: int):
+        self.marker = marker
+        self.inclusive_marker = inclusive_marker
+
+    @property
+    def reasoning_end_token_ids(self):
+        return frozenset({self.marker, self.inclusive_marker})
+
+    @property
+    def inclusive_reasoning_end_token_ids(self):
+        return frozenset({self.inclusive_marker})
+
+    def find_reasoning_end_offset(self, token_ids):
+        ends = self.reasoning_end_token_ids
+        return next((i for i, t in enumerate(token_ids) if t in ends), len(token_ids))
+
+
+def _build_inclusive_harness(tokenizer, backend, inclusive_marker: str = "{"):
+    manager, request = _build_harness(
+        tokenizer,
+        backend,
+        reasoning_ended=False,
+        reasoning_parser_kwargs={
+            "marker": _single_token(tokenizer, THINK_END),
+            "inclusive_marker": _single_token(tokenizer, inclusive_marker),
+        },
+    )
+    manager.reasoner_cls = MockEngineReasoner
+    grammar = request.structured_output_request.grammar  # type: ignore[union-attr]
+    return manager, request, grammar
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    ("raw_drafts", "expected_validated", "expected_row_pattern", "terminated"),
+    [
+        pytest.param(
+            (" ", "{", "}", EOS, " "),
+            (" ", "{", "}", EOS),
+            "UUCCUU",
+            True,
+            id="inclusive",
+        ),
+        pytest.param(("{", "}"), None, "UCC", False, id="inclusive_first"),
+        pytest.param((" ", " ", "{"), None, "UUUC", False, id="inclusive_last"),
+        pytest.param((" ", "z", "{", "}"), None, "UUCCC", False, id="not_accepted"),
+    ],
+)
+def test_inclusive_reasoning_end_token(
+    tokenizer,
+    backend: StructuredOutputsBackend,
+    raw_drafts: tuple[str, ...],
+    expected_validated: tuple[str, ...] | None,
+    expected_row_pattern: str,
+    terminated: bool,
+):
+    """The inclusive end token ("{", like GLM's `<tool_call>`) is sampled
+    unconstrained but fed to the grammar. One the grammar rejects ("z") is
+    skipped like a close tag."""
+    inclusive_marker = "z" if "z" in raw_drafts else "{"
+    manager, request, grammar = _build_inclusive_harness(
+        tokenizer, backend, inclusive_marker
+    )
+    validated = raw_drafts if expected_validated is None else expected_validated
+    _run_real_flow(
+        manager,
+        request,
+        raw_drafts=_to_token_ids(tokenizer, raw_drafts),
+        expected_validated=_to_token_ids(tokenizer, validated),
+        expected_row_pattern=expected_row_pattern,
+        expected_reasoning=True,
+        expect_terminated=terminated,
+    )
+    assert grammar.validate_tokens([_single_token(tokenizer, "{")]) == []
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_inclusive_reasoning_end_token_no_drafts(
+    tokenizer, backend: StructuredOutputsBackend
+):
+    """Without drafts the inclusive end token is committed alone."""
+    manager, request, grammar = _build_inclusive_harness(tokenizer, backend)
+    open_brace = _single_token(tokenizer, "{")
+    request.append_output_token_ids([open_brace])
+    assert manager.accept_tokens(request, [open_brace])
+    close_brace = _single_token(tokenizer, "}")
+    assert grammar.validate_tokens([close_brace]) == [close_brace]
