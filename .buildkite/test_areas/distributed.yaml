@@ -364,12 +364,16 @@ steps:
   - tests/distributed/test_events
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
+  - vllm/model_executor/layers/logits_processor.py
+  - vllm/model_executor/layers/vocab_parallel_argmax.py
+  - tests/distributed/test_vocab_parallel_argmax.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
+  - pytest -v -s distributed/test_vocab_parallel_argmax.py
   # test multi-node TP with multiproc executor (simulated on single node)
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
   mirror:
