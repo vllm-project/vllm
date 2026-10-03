@@ -32,6 +32,7 @@ def _rms_norm_add_rms_norm_kernel(
     HAS_WEIGHT_RESIDUAL: tl.constexpr,
     WEIGHT_IS_FP32: tl.constexpr,
     WEIGHT_RESIDUAL_IS_FP32: tl.constexpr,
+    ROUND_RESIDUAL_BEFORE_NORM: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -64,6 +65,8 @@ def _rms_norm_add_rms_norm_kernel(
         summed.to(OUT_DTYPE),
         mask=mask,
     )
+    if ROUND_RESIDUAL_BEFORE_NORM:
+        summed = summed.to(OUT_DTYPE).to(tl.float32)
     summed = tl.where(mask, summed, 0.0)
     variance = tl.sum(summed * summed, axis=0) / hidden_size
     out = summed * (1.0 / tl.sqrt(variance + epsilon))
@@ -76,11 +79,15 @@ def _rms_norm_add_rms_norm_kernel(
     tl.store(out_ptr + row * x_row_stride + offsets, out.to(OUT_DTYPE), mask=mask)
 
 
-_TL_DTYPES = {
-    torch.bfloat16: tl.bfloat16,
-    torch.float16: tl.float16,
-    torch.float32: tl.float32,
-}
+_TL_DTYPES = (
+    {
+        torch.bfloat16: tl.bfloat16,
+        torch.float16: tl.float16,
+        torch.float32: tl.float32,
+    }
+    if HAS_TRITON
+    else {}
+)
 
 
 def _weight_ok(x: Tensor, weight: Tensor | None) -> bool:
@@ -88,6 +95,7 @@ def _weight_ok(x: Tensor, weight: Tensor | None) -> bool:
         weight.ndim == 1
         and weight.numel() == x.shape[-1]
         and weight.dtype in (x.dtype, torch.float32)
+        and weight.device == x.device
         and weight.is_contiguous()
     )
 
@@ -98,11 +106,13 @@ def _supports_rms_norm_add_rms_norm(
     weight: Tensor | None,
     weight_residual: Tensor | None,
     epsilon: float,
+    round_residual_before_norm: bool = False,
 ) -> bool:
-    del epsilon
+    del epsilon, round_residual_before_norm
     return (
         x.device.type == "cuda"
         and x.dtype in _SUPPORTED_DTYPES
+        and x_residual.device == x.device
         and x_residual.dtype == x.dtype
         and x.ndim >= 1
         and x.shape == x_residual.shape
@@ -121,6 +131,7 @@ def _rms_norm_add_rms_norm_triton_op(
     weight: Tensor | None,
     weight_residual: Tensor | None,
     epsilon: float,
+    round_residual_before_norm: bool = False,
 ) -> tuple[Tensor, Tensor]:
     hidden_size = x.shape[-1]
     out = torch.empty_like(x)
@@ -154,6 +165,7 @@ def _rms_norm_add_rms_norm_triton_op(
         WEIGHT_RESIDUAL_IS_FP32=(
             weight_residual is not None and weight_residual.dtype == torch.float32
         ),
+        ROUND_RESIDUAL_BEFORE_NORM=round_residual_before_norm,
         OUT_DTYPE=_TL_DTYPES[x.dtype],
         BLOCK_SIZE=block_size,
         num_warps=num_warps,
@@ -172,7 +184,13 @@ def rms_norm_add_rms_norm_triton(
     weight: Tensor | None,
     weight_residual: Tensor | None,
     epsilon: float,
+    round_residual_before_norm: bool = False,
 ) -> tuple[Tensor, Tensor]:
     return _rms_norm_add_rms_norm_triton_op(
-        x, x_residual, weight, weight_residual, epsilon
+        x,
+        x_residual,
+        weight,
+        weight_residual,
+        epsilon,
+        round_residual_before_norm,
     )

@@ -6,6 +6,9 @@ Compares, per boundary, the two-op sequence (rms_norm + fused_add_rms_norm)
 against the single rms_norm_add_rms_norm op for each registered provider.
 Timings are taken from CUDA-graph replays so that launch overhead, which is
 what the fusion removes at decode batch sizes, is included.
+
+Pass --round-residual-before-norm to benchmark the Gemma4 residual rounding
+boundary, where the low-precision residual sum feeds the second norm.
 """
 
 import torch
@@ -50,6 +53,7 @@ def main(
     dtype: torch.dtype,
     seed: int = 0,
     num_iters: int = 200,
+    round_residual_before_norm: bool = False,
 ) -> None:
     set_random_seed(seed)
     torch.set_default_device("cuda")
@@ -64,13 +68,19 @@ def main(
 
     def two_ops(providers: list[str]):
         def run():
-            with (
-                ir.ops.rms_norm.set_priority(providers),
-                ir.ops.fused_add_rms_norm.set_priority(providers),
-            ):
-                for i in range(BOUNDARIES_PER_GRAPH):
-                    h = ir.ops.rms_norm(xs[i], weight, epsilon)
-                    ir.ops.fused_add_rms_norm(h, rs[i], weight_residual, epsilon)
+            with ir.ops.rms_norm.set_priority(providers):
+                if round_residual_before_norm:
+                    for i in range(BOUNDARIES_PER_GRAPH):
+                        h = ir.ops.rms_norm(xs[i], weight, epsilon)
+                        residual_i = h + rs[i]
+                        ir.ops.rms_norm(residual_i, weight_residual, epsilon)
+                else:
+                    with ir.ops.fused_add_rms_norm.set_priority(providers):
+                        for i in range(BOUNDARIES_PER_GRAPH):
+                            h = ir.ops.rms_norm(xs[i], weight, epsilon)
+                            ir.ops.fused_add_rms_norm(
+                                h, rs[i], weight_residual, epsilon
+                            )
 
         return run
 
@@ -79,7 +89,12 @@ def main(
             with ir.ops.rms_norm_add_rms_norm.set_priority(providers):
                 for i in range(BOUNDARIES_PER_GRAPH):
                     ir.ops.rms_norm_add_rms_norm(
-                        xs[i], rs[i], weight, weight_residual, epsilon
+                        xs[i],
+                        rs[i],
+                        weight,
+                        weight_residual,
+                        epsilon,
+                        round_residual_before_norm,
                     )
 
         return run
@@ -90,10 +105,19 @@ def main(
         rms_native = ir.ops.rms_norm.impls["native"].impl_fn
         add_native = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
 
-        def boundary(x_i, r_i):
-            return add_native(
-                rms_native(x_i, weight, epsilon), r_i, weight_residual, epsilon
-            )
+        if round_residual_before_norm:
+
+            def boundary(x_i, r_i):
+                h = rms_native(x_i, weight, epsilon)
+                residual_i = h + r_i
+                return rms_native(residual_i, weight_residual, epsilon), residual_i
+
+        else:
+
+            def boundary(x_i, r_i):
+                return add_native(
+                    rms_native(x_i, weight, epsilon), r_i, weight_residual, epsilon
+                )
 
         boundary_c = torch.compile(boundary, dynamic=False)
         boundary_c(xs[0], rs[0])
@@ -104,20 +128,23 @@ def main(
 
         return run
 
-    rows = [
-        ("rms_norm + fused_add_rms_norm [native, torch.compile]", two_ops_compiled())
-    ]
+    two_op_label = (
+        "post_norm + rounded residual add + pre_norm"
+        if round_residual_before_norm
+        else "rms_norm + fused_add_rms_norm"
+    )
+    rows = [(f"{two_op_label} [native, torch.compile]", two_ops_compiled())]
     for provider, impl in ir.ops.rms_norm.impls.items():
         if impl.supported and impl.supports_args(x, weight, epsilon):
             rows.append(
                 (
-                    f"rms_norm + fused_add_rms_norm [{provider}, eager]",
+                    f"{two_op_label} [{provider}, eager]",
                     two_ops([provider, "native"]),
                 )
             )
     for provider, impl in ir.ops.rms_norm_add_rms_norm.impls.items():
         if impl.supported and impl.supports_args(
-            x, residual, weight, weight_residual, epsilon
+            x, residual, weight, weight_residual, epsilon, round_residual_before_norm
         ):
             rows.append(
                 (
@@ -126,7 +153,10 @@ def main(
                 )
             )
 
-    print(f"num_tokens={num_tokens} hidden_size={hidden_size} dtype={dtype}")
+    print(
+        f"num_tokens={num_tokens} hidden_size={hidden_size} dtype={dtype} "
+        f"round_residual_before_norm={round_residual_before_norm}"
+    )
     for name, fn in rows:
         print(f"  {name:58s} {_graph_time_us(fn, num_iters):8.3f} us / boundary")
 
@@ -142,6 +172,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-iters", type=int, default=200)
+    parser.add_argument(
+        "--round-residual-before-norm",
+        action="store_true",
+        help="round the residual sum to the input dtype before the second norm",
+    )
     args = parser.parse_args()
     print(args)
 
@@ -151,4 +186,5 @@ if __name__ == "__main__":
         dtype=STR_DTYPE_TO_TORCH_DTYPE[args.dtype],
         seed=args.seed,
         num_iters=args.num_iters,
+        round_residual_before_norm=args.round_residual_before_norm,
     )

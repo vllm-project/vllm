@@ -87,6 +87,7 @@ def rms_norm_add_rms_norm(
     weight: Tensor | None,
     weight_residual: Tensor | None,
     epsilon: float,
+    round_residual_before_norm: bool = False,
 ) -> tuple[Tensor, Tensor]:
     """Post-norm, residual add and pre-norm as one op.
 
@@ -97,11 +98,14 @@ def rms_norm_add_rms_norm(
         x_residual = x_norm + x_residual
         return rms_norm(x_residual, weight_residual), x_residual
 
-    Semantics are exactly those of `rms_norm` followed by `fused_add_rms_norm`
-    with the same epsilon; the fused implementations save one kernel launch
-    and one round trip of the hidden state through memory per boundary.
+    By default, semantics match `rms_norm` followed by `fused_add_rms_norm`
+    with the same epsilon. Set `round_residual_before_norm` for architectures
+    that round the residual sum to the activation dtype before the second norm.
     """
     x = rms_norm(x, weight, epsilon)
+    if round_residual_before_norm:
+        x_residual = (x + x_residual).to(x.dtype)
+        return rms_norm(x_residual, weight_residual, epsilon), x_residual
     return fused_add_rms_norm(x, x_residual, weight_residual, epsilon)
 
 

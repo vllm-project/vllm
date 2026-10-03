@@ -325,6 +325,7 @@ class Gemma4MTPDecoderLayer(nn.Module):
             self.pre_feedforward_layernorm,
             hidden_states,
             residual,
+            round_residual_before_norm=True,
         )
         hidden_states = self.mlp(hidden_states)
 

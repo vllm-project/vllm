@@ -55,22 +55,86 @@ def test_native_is_the_composition():
     torch.testing.assert_close(res_none, res_ones)
 
 
+def test_native_rounds_residual_before_second_norm():
+    x = torch.tensor([[1.0, 1.0]], dtype=torch.bfloat16)
+    x_residual = torch.tensor([[-0.25, 0.01171875]], dtype=torch.bfloat16)
+    weight = torch.ones(2, dtype=torch.bfloat16)
+    epsilon = 1e-6
+
+    out, residual_out = native(
+        x,
+        x_residual,
+        weight,
+        weight,
+        epsilon,
+        round_residual_before_norm=True,
+    )
+    post_norm = rms_norm_native(x, weight, epsilon)
+    expected_residual = post_norm + x_residual
+    expected_out = rms_norm_native(expected_residual, weight, epsilon)
+    unrounded_out, _ = native(x, x_residual, weight, weight, epsilon)
+
+    torch.testing.assert_close(residual_out, expected_residual, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(out, expected_out, rtol=0.0, atol=0.0)
+    assert not torch.equal(out, unrounded_out)
+
+
+def test_layer_helper_rounded_fallback_matches_module_sequence():
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.layernorm import (
+        GemmaRMSNorm,
+        rms_norm_add_rms_norm,
+    )
+
+    with set_current_vllm_config(VllmConfig()):
+        post_norm = GemmaRMSNorm(2, eps=1e-6)
+        pre_norm = GemmaRMSNorm(2, eps=1e-5)
+        x = torch.tensor([[1.0, 1.0]], dtype=torch.bfloat16)
+        residual = torch.tensor([[-0.25, 0.01171875]], dtype=torch.bfloat16)
+
+        post_out = post_norm(x)
+        expected_residual = post_out + residual
+        expected_out = pre_norm(expected_residual)
+        out, residual_out = rms_norm_add_rms_norm(
+            post_norm,
+            pre_norm,
+            x,
+            residual,
+            round_residual_before_norm=True,
+        )
+
+    torch.testing.assert_close(out, expected_out, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(residual_out, expected_residual, rtol=0.0, atol=0.0)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("n_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", COMMON_HIDDEN_SIZES)
 @pytest.mark.parametrize("epsilon", [1e-6, 1e-5])
 @pytest.mark.skipif(not IS_GPGPU_DEVICE, reason="Kernels need a GPU")
 class TestRMSNormAddRMSNorm:
+    @pytest.mark.parametrize("round_residual_before_norm", [False, True])
     @pytest.mark.parametrize("provider", supported_providers(OP))
-    def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
+    def test_impls(
+        self,
+        dtype,
+        n_tokens,
+        hidden_size,
+        epsilon,
+        provider,
+        round_residual_before_norm,
+    ):
         set_random_seed(0)
         impl = OP.impls[provider]
-        args = OP.generate_inputs(
-            num_tokens=n_tokens,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            epsilon=epsilon,
-            device=DEVICE,
+        args = (
+            *OP.generate_inputs(
+                num_tokens=n_tokens,
+                hidden_size=hidden_size,
+                dtype=dtype,
+                epsilon=epsilon,
+                device=DEVICE,
+            ),
+            round_residual_before_norm,
         )
         if not impl.supports_args(*args):
             pytest.skip(f"{provider} does not support args")
@@ -136,6 +200,9 @@ def test_triton_supports_args():
     assert impl.supports_args(x.view(2, 2, 64), r.view(2, 2, 64), w, w, 1e-6)
     # residual dtype must match
     assert not impl.supports_args(x, r.float(), w, w, 1e-6)
+    # Inputs and weights on another device are left to the native provider.
+    assert not impl.supports_args(x, r.cpu(), w, w, 1e-6)
+    assert not impl.supports_args(x, r, w.cpu(), w, 1e-6)
     # weights must be 1-D of hidden size, in x's dtype or fp32
     assert not impl.supports_args(x, r, w.half(), w, 1e-6)
     assert not impl.supports_args(x, r, w[:32], w, 1e-6)
@@ -148,8 +215,9 @@ def test_triton_supports_args():
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton impl is CUDA-only")
 @pytest.mark.parametrize("gemma", [False, True])
-def test_layer_helper_matches_module_sequence(gemma):
-    """rms_norm_add_rms_norm(post, pre, x, r) == pre(post(x), r) on the modules."""
+@pytest.mark.parametrize("round_residual_before_norm", [False, True])
+def test_layer_helper_matches_module_sequence(gemma, round_residual_before_norm):
+    """The helper preserves each architecture's residual rounding boundary."""
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.layernorm import (
         GemmaRMSNorm,
@@ -173,7 +241,54 @@ def test_layer_helper_matches_module_sequence(gemma):
         x = torch.randn(16, hidden, dtype=torch.bfloat16, device=DEVICE)
         r = torch.randn(16, hidden, dtype=torch.bfloat16, device=DEVICE) * 4
 
-        ref_out, ref_res = pre(post(x.clone()), r.clone())
+        post_out = post(x.clone())
+        if round_residual_before_norm:
+            ref_res = post_out + r.clone()
+            ref_out = pre(ref_res)
+        else:
+            ref_out, ref_res = pre(post_out, r.clone())
         with OP.set_priority(["triton", "native"]):
-            out, res = rms_norm_add_rms_norm(post, pre, x.clone(), r.clone())
+            out, res = rms_norm_add_rms_norm(
+                post,
+                pre,
+                x.clone(),
+                r.clone(),
+                round_residual_before_norm=round_residual_before_norm,
+            )
         assert_close(OP, (out, res), (ref_out, ref_res))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton impl is CUDA-only")
+@pytest.mark.parametrize("round_residual_before_norm", [False, True])
+@pytest.mark.parametrize("n_tokens", [1, 16])
+def test_compiled_op_specializations(n_tokens, round_residual_before_norm):
+    """Compile each residual rounding mode at decode and short-prefill shapes."""
+    set_random_seed(0)
+    hidden_size = 5376
+    x = torch.randn(n_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn_like(x)
+    weight = torch.randn(hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    weight_residual = torch.randn_like(weight)
+
+    def boundary(x_i, residual_i):
+        return OP(
+            x_i,
+            residual_i,
+            weight,
+            weight_residual,
+            1e-6,
+            round_residual_before_norm=round_residual_before_norm,
+        )
+
+    with OP.set_priority(["triton", "native"]):
+        compiled = torch.compile(boundary, dynamic=False)
+        actual = compiled(x, residual)
+    expected = native(
+        x,
+        residual,
+        weight,
+        weight_residual,
+        1e-6,
+        round_residual_before_norm,
+    )
+    assert_close(OP, actual, expected)
