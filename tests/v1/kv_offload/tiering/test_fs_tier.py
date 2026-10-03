@@ -604,6 +604,33 @@ def test_failed_load_corrects_verdict_and_removes_corrupt_file(
     assert lookup_and_wait(tier, [key(1)], ctx=fresh) == [LookupResult.MISS]
 
 
+def test_failed_load_after_abort_does_not_break_newer_probe(fs_tier):
+    """A promotion for request A fails after A was aborted and request B
+    re-probed the same key. The failure must not flip B's in-flight probe:
+    B's next lookup drains its own result (MISS: the file is gone) instead of
+    asserting on the scheduler thread."""
+    tier, _ = fs_tier
+    k = key(1)
+    tier.submit_store(make_job(1, [k], [0]))
+    assert all(r.success for r in drain(tier))
+    ctx_a, ctx_b = ReqContext(req_id="A"), ReqContext(req_id="B")
+    assert lookup_and_wait(tier, [k], ctx=ctx_a) == [LookupResult.HIT]
+
+    os.remove(tier.file_mapper.get_file_name(k))
+    tier.submit_load(make_job(2, [k], [1], is_promotion=True))
+    tier.on_request_finished(ctx_a)
+
+    assert tier.lookup(k, ctx_b) == LookupResult.RETRY
+    tier.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=()))
+    deadline = time.monotonic() + 1.0
+    while tier._lookup_manager._pending_results.empty():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+    assert [r.success for r in drain(tier)] == [False]
+    assert tier.lookup(k, ctx_b) == LookupResult.MISS
+
+
 @pytest.mark.parametrize("use_c_ext", [True, False])
 def test_batched_partial_load_failure_keeps_loaded_blocks(
     fs_tier, monkeypatch, use_c_ext
