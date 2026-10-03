@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -16,10 +17,14 @@ from openai.types.responses.response_reasoning_item import (
     Summary,
 )
 
+from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
+    build_response_output_items,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
+    construct_tool_dicts,
     should_continue_final_message,
 )
 from vllm.exceptions import VLLMValidationError
@@ -903,3 +908,121 @@ class TestConstructInputMessagesInstructionsLeak:
         assert len(msgs) == 2
         assert msgs[0] == {"role": "system", "content": "be helpful"}
         assert msgs[1] == {"role": "user", "content": "hello"}
+
+
+class TestClientToolSearch:
+    """Client-executed tool search, in the shapes Codex sends."""
+
+    TOOL_SEARCH = {
+        "type": "tool_search",
+        "execution": "client",
+        "description": "Search deferred tools.",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    }
+    CALL = {
+        "type": "tool_search_call",
+        "id": "tsc_1",
+        "call_id": "call_ts1",
+        "execution": "client",
+        "status": "completed",
+        "arguments": {"query": "pull request diff"},
+    }
+    OUTPUT = {
+        "type": "tool_search_output",
+        "id": "tso_1",
+        "call_id": "call_ts1",
+        "execution": "client",
+        "status": "completed",
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "mcp__github",
+                "description": "GitHub.",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_pr_diff",
+                        "description": "Fetch a pull request diff.",
+                        "defer_loading": True,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"pr_number": {"type": "integer"}},
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    def _request(self, **overrides):
+        body = {
+            "model": "m",
+            "input": [
+                {"role": "user", "content": "diff of PR 1"},
+                self.CALL,
+                self.OUTPUT,
+            ],
+            "tools": [self.TOOL_SEARCH],
+        }
+        body.update(overrides)
+        return ResponsesRequest.model_validate(body)
+
+    def test_model_tools_expose_search_and_loaded_tools(self):
+        request = self._request()
+        names = [
+            d["function"]["name"]
+            for d in construct_tool_dicts(request.model_tools, request.tool_choice)
+        ]
+        assert names == ["tool_search", "mcp__github__get_pr_diff"]
+        # The echoed request tools are untouched.
+        assert [t.type for t in request.tools] == ["tool_search"]
+
+    def test_server_tool_search_is_not_exposed(self):
+        request = self._request(tools=[{**self.TOOL_SEARCH, "execution": "server"}])
+        assert not request.client_tool_search
+        assert construct_tool_dicts(request.model_tools, request.tool_choice) == []
+
+    def test_search_items_become_tool_call_and_result(self):
+        messages = construct_input_messages(request_input=self._request().input)
+        call, result = messages[-2:]
+        assert call["tool_calls"][0]["id"] == "call_ts1"
+        assert call["tool_calls"][0]["function"]["name"] == "tool_search"
+        assert json.loads(call["tool_calls"][0]["function"]["arguments"]) == {
+            "query": "pull request diff"
+        }
+        assert result["role"] == "tool"
+        assert result["tool_call_id"] == "call_ts1"
+        assert json.loads(result["content"])["loaded_tools"][0]["name"] == (
+            "mcp__github__get_pr_diff"
+        )
+
+    def test_output_items_map_search_and_loaded_calls(self):
+        request = self._request()
+        outputs = build_response_output_items(
+            reasoning=None,
+            content=None,
+            tool_calls=[
+                FunctionCall(id="c1", name="tool_search", arguments='{"query": "x"}'),
+                FunctionCall(
+                    id="c2",
+                    name="mcp__github__get_pr_diff",
+                    arguments='{"pr_number": 1}',
+                ),
+            ],
+            tools=request.model_tools,
+            client_tool_search=request.client_tool_search,
+        )
+        search, call = outputs
+        assert search.type == "tool_search_call"
+        assert search.execution == "client"
+        assert search.call_id == "c1"
+        assert search.arguments == {"query": "x"}
+        assert (call.type, call.namespace, call.name) == (
+            "function_call",
+            "mcp__github",
+            "get_pr_diff",
+        )
