@@ -73,8 +73,8 @@ def test_tail_worker_uses_scheduler_zero_draft_batch(monkeypatch):
     runner.req_states.num_computed_tokens_np = np.array([4095], dtype=np.int32)
     runner.req_states.num_computed_tokens.gpu = torch.tensor([4095])
 
-    def copy_to_cpu(values, *, device=None, out=None):
-        tensor = torch.as_tensor(values)
+    def copy_to_cpu(values, *, device=None, dtype=None, out=None):
+        tensor = torch.as_tensor(values, dtype=dtype)
         return tensor.clone() if out is None else out.copy_(tensor)
 
     def prepare_positions(indices, starts, computed, positions, seq_lens):
@@ -113,6 +113,7 @@ def test_tail_worker_uses_scheduler_zero_draft_batch(monkeypatch):
         followup,
         batch_state,
         BatchExecutionDescriptor(CUDAGraphMode.NONE, 1, 1, uniform_tokens),
+        num_active_loras=0,
     )
     assert isinstance(batch, InputBatch) and batch is not state.input_batch
     assert batch.num_scheduled_tokens.tolist() == [1]

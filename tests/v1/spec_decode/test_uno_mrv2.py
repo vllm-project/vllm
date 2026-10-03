@@ -1246,6 +1246,7 @@ def test_uno_warmup_executes_native_verification_s4(
     states.apply_temperature = lambda *_: None
     sampler = object.__new__(Sampler)
     sampler.use_flashinfer = use_flashinfer
+    sampler.use_xpu_sampler = False
     sampler.compute_nans = False
     sampler.logprobs_mode = "raw_logprobs"
     sampler.use_fp64_gumbel = False
@@ -1788,6 +1789,7 @@ def test_uno_mode_branch_matches_production_sampler(
 
     subject = object.__new__(sampler_module.Sampler)
     subject.use_flashinfer = use_flashinfer
+    subject.use_xpu_sampler = False
     subject.logprobs_mode = logprobs_mode
     subject.use_fp64_gumbel = False
     params = [mode.sampling_params(i) for i in range(mode.min_num_reqs)]
@@ -1830,6 +1832,7 @@ def test_uno_mode_branch_matches_production_sampler(
         torch.zeros(len(params), dtype=torch.int64),
         torch.zeros(len(params), dtype=torch.int64),
         torch.zeros(len(params), dtype=torch.int64),
+        np.zeros(len(params), dtype=np.int64),
         return_logprobs=mode.logprobs is not None,
     )
 
@@ -2015,11 +2018,6 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
 
     monkeypatch.setattr(model_runner_module, "AsyncOutput", FakeAsyncOutput)
     monkeypatch.setattr(
-        model_runner_module.pcp,
-        "maybe_restore_pcp_for_sampling",
-        lambda _manager, hidden_states, input_batch: (hidden_states, input_batch),
-    )
-    monkeypatch.setattr(
         model_runner_module,
         "use_workspace_lane",
         lambda _lane: nullcontext(),
@@ -2040,7 +2038,6 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
         dp_sync=None,
         finished_req_ids=set(),
         ec_connector_output=None,
-        routed_experts=None,
         cudagraph_stats=None,
         skip_speculator_proposal=False,
         zero_next_draft_req_ids=frozenset(),
@@ -2048,6 +2045,8 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
     runner.is_last_pp_rank = True
     runner.pcp_manager = None
     runner.pp_handler = None
+    runner.use_pp = False
+    runner.aux_output_connector = None
     runner.check_ep_fault = False
     runner.main_stream = object()
     runner.output_copy_stream = object()
@@ -2056,7 +2055,8 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
     runner.model = SimpleNamespace(compute_logits=object())
     runner.model_state = SimpleNamespace()
     runner.prompt_logprobs_worker = SimpleNamespace(
-        compute_prompt_logprobs=lambda *_args: {}
+        compute_prompt_logprobs=lambda *_args: {},
+        compute_prompt_token_id_logprobs=lambda *_args: {},
     )
     runner.sampler = SimpleNamespace(
         sampling_states=SimpleNamespace(
