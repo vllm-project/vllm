@@ -227,7 +227,9 @@ def _custom_ar_active(worker) -> bool:
     ids=["full", "piecewise", "breakable", "custom-ar-tp2", "off-by-default"],
 )
 @create_new_process_for_each_test()
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="cuMem CUDA graph pool"
+)
 def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
     """Each capture site uses the pool, exact across sleeps; TP=2 needs
     unregistered custom AR; off changes nothing."""

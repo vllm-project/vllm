@@ -11,6 +11,8 @@ the fused allreduce+RMSNorm path share a single AITER instance with its IPC buff
 import torch
 from torch.distributed import ProcessGroup
 
+from vllm.config import get_current_vllm_config_or_none
+from vllm.device_allocator import cumem_cudagraph_pool_enabled
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -38,7 +40,12 @@ class AiterCustomAllreduce:
         if max_size is None:
             max_size = self.MAX_SIZE
 
-        self._impl = _AiterCustomAllreduce(group, device, max_size=max_size)
+        kwargs = {}
+        config = get_current_vllm_config_or_none()
+        if config is not None and cumem_cudagraph_pool_enabled(config):
+            # cuMem graph buffers cannot be hipIpc-exported; capture copies them in.
+            kwargs["enable_register_for_capturing"] = False
+        self._impl = _AiterCustomAllreduce(group, device, max_size=max_size, **kwargs)
 
     @property
     def aiter_ca(self):
