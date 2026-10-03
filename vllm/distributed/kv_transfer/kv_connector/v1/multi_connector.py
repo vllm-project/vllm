@@ -157,19 +157,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     @classmethod
     def all_children_support_hma(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         """Return True only if every configured child connector supports HMA."""
-        children = cls._child_kv_transfer_configs(kv_transfer_config)
-        return bool(children) and all(
-            KVConnectorFactory.supports_hma_config(c) for c in children
+        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
         )
-
-    @staticmethod
-    def _child_kv_transfer_configs(
-        kv_transfer_config: "KVTransferConfig",
-    ) -> list[KVTransferConfig]:
-        return [
-            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
-            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
-        ]
+        if not connectors_config:
+            return False
+        for conn_config in connectors_config:
+            child_config = KVTransferConfig(
+                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+            )
+            if not KVConnectorFactory.supports_hma_config(child_config):
+                return False
+        return True
 
     def __init__(
         self,
@@ -224,7 +223,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
-        children = cls._child_kv_transfer_configs(kv_transfer_config)
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
         return bool(children) and all(
             KVConnectorFactory.get_connector_class(c).supports_sleep_mode(c)
             for c in children
