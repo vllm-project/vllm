@@ -100,11 +100,13 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
     def get_context():
         assert thread_state() == (initial_threads, user_threads, None)
         return SimpleNamespace(
+            Pipe=connection.Pipe,
+            get_start_method=lambda: "spawn",
             Process=lambda **kwargs: SimpleNamespace(
                 name=kwargs["name"],
                 exitcode=1 if fail_start else None,
                 start=start_process,
-            )
+            ),
         )
 
     monkeypatch.setattr(engine_utils, "get_mp_context", get_context)
@@ -167,6 +169,7 @@ def test_engine_core_process_shutdown_timeout(
     manager._request_shutdown_timeout = request_timeout
     manager.manager_stopped = Event()
     manager.processes = [object()]
+    manager._death_writers = []
     detach_results = iter((object(), None))
     manager._finalizer = SimpleNamespace(detach=lambda: next(detach_results))
 
