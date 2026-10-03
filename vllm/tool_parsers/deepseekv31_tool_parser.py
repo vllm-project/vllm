@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
+from vllm.tool_parsers.deepseek_streaming_state import DeepSeekStreamingTokenState
 
 logger = init_logger(__name__)
 
@@ -74,6 +75,12 @@ class DeepSeekV31ToolParser(ToolParser):
                 "DeepSeek-V3.1 Tool parser could not locate tool call "
                 "start/end tokens in the tokenizer!"
             )
+
+        self.streaming_token_state = DeepSeekStreamingTokenState(
+            self.tool_calls_start_token_id,
+            self.tool_call_start_token_id,
+            self.tool_call_end_token_id,
+        )
 
     def extract_tool_calls(
         self,
@@ -131,8 +138,10 @@ class DeepSeekV31ToolParser(ToolParser):
     ) -> DeltaMessage | None:
         logger.debug("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)
-        # check to see if we should be streaming a tool call - is there a
-        if self.tool_calls_start_token_id not in current_token_ids:
+        token_counts = self.streaming_token_state.update(
+            previous_token_ids, current_token_ids, delta_token_ids
+        )
+        if token_counts is None:
             logger.debug("No tool call tokens found!")
             return DeltaMessage(content=delta_text)
         delta_text = delta_text.replace(self.tool_calls_start_token, "").replace(
@@ -141,14 +150,12 @@ class DeepSeekV31ToolParser(ToolParser):
         try:
             # figure out where we are in the parsing by counting tool call
             # start & end tags
-            prev_tool_start_count = previous_token_ids.count(
-                self.tool_call_start_token_id
-            )
-            prev_tool_end_count = previous_token_ids.count(self.tool_call_end_token_id)
-            cur_tool_start_count = current_token_ids.count(
-                self.tool_call_start_token_id
-            )
-            cur_tool_end_count = current_token_ids.count(self.tool_call_end_token_id)
+            (
+                prev_tool_start_count,
+                prev_tool_end_count,
+                cur_tool_start_count,
+                cur_tool_end_count,
+            ) = token_counts
             tool_call_portion = None
             text_portion = None
 
