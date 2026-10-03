@@ -212,6 +212,34 @@ def test_deferred_receive_cadence_fifo_and_flush():
 
 
 @pytest.mark.parametrize(
+    ("kwargs", "is_cuda", "expected_delay"),
+    [
+        ({}, True, 0),
+        ({"async_scheduling": False}, True, 0),
+        ({"async_scheduling": True}, True, 3),
+        ({"async_scheduling": True}, False, 0),
+    ],
+)
+def test_constructor_preserves_immediate_receives_for_legacy_callers(
+    monkeypatch, kwargs, is_cuda, expected_delay
+):
+    """Ascend's existing three-argument constructor must remain valid."""
+    group = Mock(is_last_rank=False, last_rank=3, world_size=4)
+    monkeypatch.setattr(pp_utils, "get_pp_group", lambda: group)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda _: Mock())
+    monkeypatch.setattr(torch.cuda, "Stream", lambda _: Mock())
+    monkeypatch.setattr(pp_utils.current_platform, "is_cuda", lambda: is_cuda)
+    monkeypatch.setattr(pp_utils.current_platform, "is_xpu", lambda: False)
+
+    handler = PPHandler(8, 0, torch.device("cpu"), **kwargs)
+    handler.enable_deferred_collectives(
+        jit_warmup_complete=True, runtime_device_syncs=False
+    )
+
+    assert handler.recv_launch_delay == expected_delay
+
+
+@pytest.mark.parametrize(
     (
         "deferred_delay",
         "jit_warmup_complete",

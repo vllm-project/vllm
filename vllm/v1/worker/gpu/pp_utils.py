@@ -86,7 +86,7 @@ class PPHandler:
         max_num_reqs: int,
         num_speculative_steps: int,
         device: torch.device,
-        async_scheduling: bool | None,
+        async_scheduling: bool | None = False,
     ):
         assert async_scheduling is not None, "async scheduling must be resolved"
         pp_group = get_pp_group()
