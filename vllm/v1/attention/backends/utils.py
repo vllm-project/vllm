@@ -321,6 +321,20 @@ def resolve_kv_cache_layout(
                 f"a block-outer KV cache layout; supported sets: {supported_layouts}."
             )
 
+    if any(
+        isinstance(spec, AttentionSpec) and spec.kv_quant_mode.is_nvfp4
+        for spec in kv_cache_specs
+    ):
+        # NVFP4 packs each page as [K_data | K_scale | V_data | V_scale].
+        candidates = [
+            m for m in candidates if m.is_block_compact and m.is_block_contiguous
+        ]
+        if not candidates:
+            raise ValueError(
+                "NVFP4 KV cache needs a block-compact head-major layout, but "
+                f"none is in every supported set: {supported_layouts}."
+            )
+
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
         layout = _layout_from_name(requested)
         if layout not in candidates:

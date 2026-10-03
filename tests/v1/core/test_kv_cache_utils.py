@@ -1806,6 +1806,31 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+@pytest.mark.parametrize(
+    "kv_quant_mode,expected",
+    [(KVQuantMode.NONE, KVCacheLayout.LBNHC), (KVQuantMode.NVFP4, KVCacheLayout.LBHNC)],
+)
+def test_nvfp4_kv_cache_resolves_head_major_layout(
+    monkeypatch, kv_quant_mode, expected
+):
+    """NVFP4 pages are [K_data | K_scale | V_data | V_scale]; token-major
+    layouts interleave K and V rows and cannot hold them."""
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.cache_config.kv_cache_layout = None
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.uint8,
+        kv_quant_mode=kv_quant_mode,
+    )
+    supported = [["LBNHC", "LBHNC", "BLNHC", "BLHNC"]]
+    assert resolve_kv_cache_layout(config, supported, [spec]) == expected
+
+
 @pytest.mark.parametrize("sliding_window", [None, 256])
 @pytest.mark.parametrize("disable_hybrid", [False, True])
 @pytest.mark.parametrize("pcp_size", [1, 4])
