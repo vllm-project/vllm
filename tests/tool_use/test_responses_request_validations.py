@@ -123,7 +123,16 @@ def test_responses_request_named_tool_choice_namespace_validation():
     ns_tool = {
         "type": "namespace",
         "name": "math",
-        "tools": [{"name": "add"}, {"name": "subtract"}],
+        "description": "Math operations",
+        "tools": [
+            {
+                "type": "function",
+                "name": name,
+                "parameters": {"type": "object", "properties": {}},
+                "strict": False,
+            }
+            for name in ("add", "subtract")
+        ],
     }
     req1 = ResponsesRequest.model_validate(
         {
