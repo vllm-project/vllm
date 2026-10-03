@@ -35,6 +35,12 @@ vllm serve <hybrid-model> \
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
+## Prefix caching with CPU offload
+
+When `SimpleCPUOffloadConnector` is configured directly, a reusable prefix can contain interleaved GPU and CPU cache blocks. GPU blocks are reused in place, and only CPU-resident blocks are loaded into newly allocated GPU blocks. If both pools contain a required block, the GPU copy is preferred.
+
+CPU loads use complete aligned blocks and finish before generation resumes. If the GPU cannot accommodate the complete matched prefix, the request waits for capacity. This lookup is enabled automatically with prefix caching; `MultiConnector` and HiSparse configurations with separate host pools retain their existing lookup behavior.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:
