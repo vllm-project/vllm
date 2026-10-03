@@ -128,6 +128,11 @@ def _mock_base_model_load(monkeypatch):
         "_validate_local_argmax_reduction",
         lambda self: None,
     )
+    monkeypatch.setattr(
+        DraftModelSpeculator,
+        "_maybe_init_draft_vocab",
+        lambda self, target_model: None,
+    )
 
 
 def _make_speculator(

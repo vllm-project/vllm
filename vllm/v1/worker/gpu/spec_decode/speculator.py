@@ -35,6 +35,8 @@ from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
+from vllm.v1.worker.gpu.spec_decode.draft_vocab import DraftVocab, make_draft_vocab
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -102,6 +104,10 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
+    # draft_token_map hooks into sample_draft(), so only speculators that
+    # sample every draft token there can support it.
+    supports_draft_token_map: bool = False
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device
@@ -207,6 +213,8 @@ class DraftModelSpeculator(BaseSpeculator):
         self.supports_mm_inputs = False
         self.pcp_manager: PCPManager | None = None
 
+        self.draft_vocab: DraftVocab | None = None
+
     @abstractmethod
     def load_draft_model(
         self, target_model: nn.Module, target_attn_layer_names: set[str]
@@ -222,6 +230,7 @@ class DraftModelSpeculator(BaseSpeculator):
         )
 
         self.model = self.load_draft_model(target_model, target_attn_layer_names)
+        self._maybe_init_draft_vocab(target_model)
         self._validate_local_argmax_reduction()
 
         all_attn_layers = get_layers_from_vllm_config(
@@ -385,6 +394,31 @@ class DraftModelSpeculator(BaseSpeculator):
         """
         return vllm_config.model_config.head_dtype, 0.0
 
+    def _maybe_init_draft_vocab(self, target_model: nn.Module) -> None:
+        token_map = self.speculative_config.draft_token_map
+        if token_map is None:
+            return
+        if not self.supports_draft_token_map:
+            raise ValueError(
+                f"draft_token_map is not supported by {type(self).__name__}."
+            )
+        target_language_model = (
+            target_model.get_language_model()
+            if hasattr(target_model, "get_language_model")
+            else target_model
+        )
+        target_lm_head = get_target_lm_head(target_model, target_language_model)
+        if target_lm_head is None:
+            raise ValueError("draft_token_map requires the target lm_head.")
+        self.draft_vocab = make_draft_vocab(
+            token_map,
+            self.vllm_config.model_config,
+            self.model,
+            target_lm_head,
+            self.speculative_config.draft_token_map_dynamic_rows,
+            self.speculative_config.draft_token_map_dynamic_rank,
+        )
+
     def _validate_local_argmax_reduction(self) -> None:
         if not self.use_local_argmax_reduction:
             return
@@ -425,10 +459,21 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_logits: torch.Tensor | None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        if draft_logits is None and self.use_local_argmax_reduction:
-            return self.get_draft_top_tokens(hidden_states, spec_step_idx)
+        draft_vocab = self.draft_vocab
+        if (
+            draft_logits is None
+            and self.use_local_argmax_reduction
+            and (draft_vocab is None or draft_vocab.dynamic is None)
+        ):
+            top = self.get_draft_top_tokens(hidden_states, spec_step_idx)
+            return top if draft_vocab is None else draft_vocab.col_to_target[top]
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
+        if draft_vocab is not None:
+            logits = draft_vocab.restrict(logits)
+            if draft_logits is not None:
+                # Rejection sampling reads the proposal over the full vocab.
+                logits = draft_vocab.scatter(logits, self.vocab_size)
         if draft_logits is not None:
             sampler = (
                 gumbel_sample
@@ -449,6 +494,8 @@ class DraftModelSpeculator(BaseSpeculator):
             )
         else:
             sampled = logits.argmax(dim=-1)
+            if draft_vocab is not None:
+                sampled = draft_vocab.to_target(sampled)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
 
