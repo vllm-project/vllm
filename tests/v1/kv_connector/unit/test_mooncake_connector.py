@@ -1549,6 +1549,40 @@ async def test_kv_producer(monkeypatch):
         prefill_worker.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("local_block_ids", "expected_finished"),
+    [
+        ([], set()),
+        ([[]], set()),
+        ([[100]], {"d-req-1"}),
+    ],
+)
+def test_pull_completion_requires_local_blocks(
+    local_block_ids: list[list[int]],
+    expected_finished: set[str],
+):
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.shutdown = MagicMock()
+    worker.finished_recving_reqs = set()
+    pull_meta = PullReqMeta(
+        d_req_id="d-req-1",
+        transfer_id="xfer-req-1",
+        local_block_ids=local_block_ids,
+        remote_engine_id="p-engine",
+        remote_bootstrap_addr="http://bootstrap:33333",
+        pull_tasks_count=1,
+    )
+    response = MooncakeXferResponse(
+        status=MooncakeXferResponseStatus.FINISH,
+        ok_reqs=["d-req-1"],
+    )
+
+    worker.process_pulling_result(response, {"d-req-1": pull_meta})
+
+    assert pull_meta.pull_tasks_count == 0
+    assert worker.finished_recving_reqs == expected_finished
+
+
 @pytest.mark.asyncio
 async def test_kv_consumuer(monkeypatch):
     """Simulates a Consumer Worker (Decoder) initiating a pull from a Producer.
