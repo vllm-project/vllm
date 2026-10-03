@@ -424,35 +424,30 @@ def convert_to_unquantized_kernel_format(
         if layer is None:
             raise ValueError(
                 "MoonEP weight conversion requires the layer module to stash "
-                "the [E+B] weight layout on"
+                "the expert weight views on"
             )
-        # MoonEP addresses expert weights by global [E+B] row and needs one
-        # contiguous tensor per projection (gate / up / down). The layer's
-        # w13_weight becomes the gate tensor and w2_weight the down tensor;
-        # the up tensor and the full layout are stashed on the layer for
-        # the kernel wiring in _setup_kernel.
-        from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (
-            MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
-            gather_moonep_weight_layout,
+        # MoonEP consumes one contiguous [2 * epn] compute view per
+        # projection (gate / up / down): this rank's experts followed by its
+        # prefetch slots. The layer's w13_weight becomes the gate view and
+        # w2_weight the down view; the up view and the full set are stashed
+        # on the layer for the kernel wiring in _setup_kernel.
+        from vllm.model_executor.layers.fused_moe.all2all_utils import (
+            get_ep_all2all_manager,
         )
 
-        if getattr(layer, "_moonep_weight_layout", None) is not None:
+        if getattr(layer, "_moonep_expert_weights", None) is not None:
             # On a reload the layer parameters were already replaced by the
-            # converted [E+B] gate/down tensors, so the source-format weights
-            # this conversion needs are gone (and the unregistered up
-            # projection cannot be recovered from them at all). Tracked in
-            # RFC #52095.
+            # [2 * epn] gate/down views, so the source-format weights this
+            # conversion needs are gone (and the unregistered up projection
+            # cannot be recovered from them at all). Tracked in RFC #52095.
             raise NotImplementedError(
                 "MoonEP does not support in-place weight reloads yet"
             )
-        layout = gather_moonep_weight_layout(
-            w13_weight,
-            w2_weight,
-            num_global_experts=moe_config.num_experts,
-            num_prefetch_slots=MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
+        weights = get_ep_all2all_manager().expert_weight_pools.build_expert_weights(
+            w13_weight, w2_weight
         )
-        layer._moonep_weight_layout = layout
-        return layout.full_gate_weight, layout.full_down_weight
+        layer._moonep_expert_weights = weights
+        return weights.gate, weights.down
 
     if unquantized_backend == UnquantizedMoeBackend.AITER:
         _zero_intermediate_padding(moe_config, w13_weight, w2_weight)

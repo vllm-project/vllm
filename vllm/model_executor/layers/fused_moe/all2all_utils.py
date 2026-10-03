@@ -118,7 +118,6 @@ if current_platform.is_cuda_alike():
         )
     if has_moonep():
         from .prepare_finalize.moonep import (
-            MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
             MOONEP_DEFAULT_NUM_SMS,
             MOONEP_DEFAULT_TOKEN_PADDING,
             MoonEPPrepareAndFinalize,
@@ -310,13 +309,12 @@ def maybe_make_prepare_finalize(
             token_hidden_size=moe.hidden_dim,
             num_topk=moe.experts_per_token,
             num_global_experts=moe.num_experts,
-            num_prefetch_slots=MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
             token_padding=MOONEP_DEFAULT_TOKEN_PADDING,
             num_sms=MOONEP_DEFAULT_NUM_SMS,
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 
-        # The [E+B] weight layout is picked up from the experts (their
+        # The expert weight views are picked up from the experts (their
         # process_weights_after_loading hook) once the layer has loaded and
         # converted its weights.
         prepare_finalize = MoonEPPrepareAndFinalize(
