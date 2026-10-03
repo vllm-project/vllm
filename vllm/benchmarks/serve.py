@@ -40,6 +40,7 @@ from typing import Any, Literal
 
 import aiohttp
 import numpy as np
+from prometheus_client.parser import text_string_to_metric_families
 from tqdm.asyncio import tqdm
 
 from vllm.benchmarks.datasets import SampleRequest, add_dataset_parser, get_samples
@@ -212,36 +213,28 @@ async def fetch_spec_decode_metrics(
             accepted_per_pos: dict[int, int] = {}
             found_spec_decode = False
 
-            for line in text.split("\n"):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                if line.startswith("vllm:spec_decode"):
-                    # Extract metric name (before labels) to avoid matching
-                    # substrings inside label values.
-                    parts = line.split(None, 1)
-                    metric_name = parts[0].split("{")[0]
-                    if not metric_name.endswith("_total"):
+            for family in text_string_to_metric_families(text):
+                for sample in family.samples:
+                    metric_name = sample.name
+                    if not metric_name.startswith(
+                        "vllm:spec_decode"
+                    ) or not metric_name.endswith("_total"):
                         continue
                     found_spec_decode = True
                     with contextlib.suppress(ValueError):
+                        value = int(sample.value)
                         if "num_drafts" in metric_name:
-                            num_drafts += int(float(parts[-1]))
+                            num_drafts += value
                         elif "num_draft_tokens" in metric_name:
-                            num_draft_tokens += int(float(parts[-1]))
+                            num_draft_tokens += value
                         elif "num_accepted_tokens_per_pos" in metric_name:
-                            pos_label = 'position="'
-                            if pos_label in line:
-                                start = line.index(pos_label) + len(pos_label)
-                                end = line.index('"', start)
-                                pos = int(line[start:end])
-                                val = int(float(parts[-1]))
+                            if "position" in sample.labels:
+                                pos = int(sample.labels["position"])
                                 accepted_per_pos[pos] = (
-                                    accepted_per_pos.get(pos, 0) + val
+                                    accepted_per_pos.get(pos, 0) + value
                                 )
                         elif "num_accepted_tokens" in metric_name:
-                            num_accepted_tokens += int(float(parts[-1]))
+                            num_accepted_tokens += value
 
             if not found_spec_decode:
                 return None
@@ -252,7 +245,7 @@ async def fetch_spec_decode_metrics(
                 num_accepted_tokens=num_accepted_tokens,
                 accepted_per_pos=accepted_per_pos,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         return None
 
 
@@ -285,26 +278,22 @@ async def fetch_diffusion_metrics(
             num_committed_tokens = 0
             found_diffusion = False
 
-            for line in text.split("\n"):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                if line.startswith("vllm:diffusion"):
-                    # Extract metric name (before labels) to avoid matching
-                    # substrings inside label values.
-                    parts = line.split(None, 1)
-                    metric_name = parts[0].split("{")[0]
-                    if not metric_name.endswith("_total"):
+            for family in text_string_to_metric_families(text):
+                for sample in family.samples:
+                    metric_name = sample.name
+                    if not metric_name.startswith(
+                        "vllm:diffusion"
+                    ) or not metric_name.endswith("_total"):
                         continue
                     found_diffusion = True
                     with contextlib.suppress(ValueError):
+                        value = int(sample.value)
                         if "num_denoising_steps" in metric_name:
-                            num_denoising_steps += int(float(parts[-1]))
+                            num_denoising_steps += value
                         elif "num_canvas_positions" in metric_name:
-                            num_canvas_positions += int(float(parts[-1]))
+                            num_canvas_positions += value
                         elif "num_committed_tokens" in metric_name:
-                            num_committed_tokens += int(float(parts[-1]))
+                            num_committed_tokens += value
 
             if not found_diffusion:
                 return None
@@ -314,7 +303,7 @@ async def fetch_diffusion_metrics(
                 num_canvas_positions=num_canvas_positions,
                 num_committed_tokens=num_committed_tokens,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         return None
 
 
