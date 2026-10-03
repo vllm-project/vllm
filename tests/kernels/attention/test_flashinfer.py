@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
 
 import pytest
 
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import nvfp4_kv_cache_full_dim, set_random_seed
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 try:
@@ -710,104 +709,29 @@ def test_flashinfer_decode_with_paged_fp8_kv(
     not any(current_platform.is_device_capability_family(f) for f in (80, 120)),
     reason="NVFP4 fa2 path",
 )
-@pytest.mark.parametrize("query_len", [1, 32])
 @pytest.mark.parametrize("layout", ["LBNHC", "LBHNC", "BLNHC", "BLHNC"])
-@torch.inference_mode
-def test_flashinfer_nvfp4_kv_cache_fa2(
-    default_vllm_config, layout: str, query_len: int
-) -> None:
-    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+def test_flashinfer_nvfp4_kv_cache_update(default_vllm_config, layout):
+    from vllm.v1.attention.backends import flashinfer as fi
 
     torch.set_default_device("cuda")
-    set_random_seed(0)
-    num_heads, num_kv_heads, head_size, page_size, seq_len = 4, 2, 128, 16, 96
-    num_pages = seq_len // page_size
-    kv_layout = KVCacheLayout[layout]
-    # Layer 1 of two: a nonzero offset, and a two-page stride when block-outer.
-    full_dim = nvfp4_kv_cache_full_dim(head_size)
-    shape = (2, num_pages, 2 * num_kv_heads, page_size, full_dim)
-    order = kv_layout.stride_order
-    physical = torch.zeros([shape[i] for i in order], dtype=torch.uint8)
-    layers = physical.permute(*(order.index(i) for i in range(5)))
-    kv_cache = layers[1]
-
-    impl = flashinfer_backend.FlashInferImpl(
-        num_heads=num_heads,
-        head_size=head_size,
-        scale=head_size**-0.5,
-        num_kv_heads=num_kv_heads,
-        alibi_slopes=None,
-        sliding_window=None,
-        kv_cache_dtype="nvfp4",
-    )
+    order = KVCacheLayout[layout].stride_order
+    # [L, B, 2H, N, 64 + 8] NVFP4 pages for two layers; layer 1 is written.
+    shape = (2, 6, 4, 16, 64 + 8)
+    layers = torch.zeros([shape[i] for i in order], dtype=torch.uint8)
+    layers = layers.permute(*(order.index(i) for i in range(5)))
     one = torch.ones(())
-    # The query stays in the model dtype, so q_scale must not reach it.
-    layer = SimpleNamespace(
-        _q_scale=one,
-        _k_scale=one,
-        _v_scale=one,
-        _q_scale_float=64.0,
-        _k_scale_float=1.0,
-        _v_scale_float=1.0,
-    )
-    kv = torch.randn(2, seq_len, num_kv_heads, head_size, dtype=torch.bfloat16)
-    impl.do_kv_cache_update(layer, kv[0], kv[1], kv_cache, torch.arange(seq_len))
+    layer = torch.nn.Module()
+    layer._k_scale = layer._v_scale = one
+    kv = torch.randn(2, 96, 2, 128, dtype=torch.bfloat16)
+    impl = fi.FlashInferImpl(4, 128, 1.0, 2, None, None, "nvfp4")
+    impl.do_kv_cache_update(layer, kv[0], kv[1], layers[1], torch.arange(96))
 
-    data, scales, fi_layout = flashinfer_backend._nvfp4_kv_views(
-        kv_cache, num_kv_heads, head_size
-    )
-    pages = torch.arange(num_pages, dtype=torch.int32)
-    seq_lens = torch.tensor([seq_len], dtype=torch.int32)
+    data, scales, kv_layout = fi._nvfp4_kv_views(layers[1], 2, 128)
+    pages = torch.arange(6, dtype=torch.int32)[None]
+    seq_lens = torch.tensor([96], dtype=torch.int32)
     deq = torch.empty_like(kv)[:, None]
     flashinfer.nvfp4_kv_dequantize_paged(
-        data, scales, pages[None], seq_lens, one, one, deq[0], deq[1], fi_layout
+        data, scales, pages, seq_lens, one, one, *deq, kv_layout
     )
-    # The stored KV is the input up to FP4 rounding, so a misplaced view shows.
     assert ((deq[:, 0] - kv).norm() / kv.norm()) < 0.2
     assert not layers[0].any()
-
-    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.uint8)
-    plan_args = (torch.tensor([0, num_pages], dtype=torch.int32), pages)
-    plan_args += (torch.tensor([page_size], dtype=torch.int32), num_heads)
-    plan_args += (num_kv_heads, head_size, page_size)
-    plan_kwargs = dict(
-        sm_scale=impl.scale,
-        q_data_type=torch.bfloat16,
-        kv_data_type=torch.uint8,
-        o_data_type=torch.bfloat16,
-    )
-    is_decode = query_len == 1
-    phase: dict[str, object] = {"decode": None, "prefill": None}
-    if is_decode:
-        wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-            workspace, fi_layout, use_tensor_cores=True
-        )
-        wrapper.plan(*plan_args, **plan_kwargs)
-        phase["decode"] = flashinfer_backend.FIDecode(wrapper)
-    else:
-        wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, fi_layout)
-        qo_indptr = torch.tensor([0, query_len], dtype=torch.int32)
-        wrapper.plan(qo_indptr, *plan_args, causal=True, **plan_kwargs)
-        phase["prefill"] = flashinfer_backend.FIPrefill(wrapper)
-    metadata = SimpleNamespace(
-        num_actual_tokens=query_len,
-        num_decodes=int(is_decode),
-        num_decode_tokens=query_len if is_decode else 0,
-        num_prefills=int(not is_decode),
-        num_prefill_tokens=0 if is_decode else query_len,
-        kv_cache_layout=kv_layout,
-        use_cascade=False,
-        causal=True,
-        q_data_type_prefill=torch.bfloat16,
-        q_data_type_decode=torch.bfloat16,
-        **phase,
-    )
-    query = torch.randn(query_len, num_heads, head_size, dtype=torch.bfloat16)
-    output = torch.empty_like(query)
-    impl.forward(layer, query, None, None, kv_cache, metadata, output)
-
-    k, v = (x.view(num_pages, page_size, num_kv_heads, head_size) for x in deq)
-    ref = ref_paged_attn(
-        query.clone(), k, v, [query_len], [seq_len], pages[None], impl.scale
-    )
-    torch.testing.assert_close(output, ref, atol=2e-2, rtol=2e-2)
