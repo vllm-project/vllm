@@ -224,7 +224,6 @@ class AsyncLookupManager(ABC):
             state = self._lookup_state.get(key)
             if state is not None and state.phase is LookupPhase.RESOLVED:
                 state.result = False
-                state.phase = LookupPhase.RESOLVED
 
     def cleanup(self, req_id: str) -> None:
         """Release request references, retaining in-flight lookups.
