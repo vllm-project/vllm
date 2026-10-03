@@ -267,7 +267,8 @@ class CudaGraphManager:
         # to capture graphs for all possible values during decode.
         speculative_config = self.vllm_config.speculative_config
         if (
-            speculative_config
+            self.decode_query_len > 1
+            and speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
         ):
             # decode_query_len = num_speculative_steps + num_new_sampled_tokens
