@@ -547,11 +547,13 @@ class DeepseekV41ModelState(DefaultModelState):
             for groups in attn_groups:
                 replay_groups = []
                 for group in groups:
-                    replay_group = replace(group, metadata_builders=[])
+                    replay_group = replace(
+                        group, metadata_builders=[], kernel_block_table=None
+                    )
                     replay_group.create_metadata_builders(
                         self.vllm_config,
                         self.device,
-                        group.metadata_builders[0].kernel_block_size,
+                        group.kernel_block_size,
                     )
                     replay_groups.append(replay_group)
                 self._replay_attn_groups.append(replay_groups)
