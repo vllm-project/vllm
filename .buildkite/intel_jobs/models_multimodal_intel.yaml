@@ -51,31 +51,8 @@ steps:
       pytest -v -s models/multimodal/generation/test_mm_prefix_lm.py -m core_model &&
       pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model'
 
-- label: "Multi-Modal Models (Standard) 3: qwen2_vl"
+- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl"
   key: multi-modal-models-standard-3-llava-qwen2-vl
-  timeout_in_minutes: 65
-  device: intel_gpu
-  agent_tags:
-    label: debug
-    gpu: 1+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
-  env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
-    VLLM_TEST_DEVICE: "xpu"
-  source_file_dependencies:
-  - vllm/
-  - tests/models/multimodal
-  commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model'
-
-- label: "Multi-Modal Core Models (Llava + Gemma Audio)"
-  key: multi-modal-core-models-llava-qwen2-vl-gemma-audio
   timeout_in_minutes: 125
   device: intel_gpu
   agent_tags:
