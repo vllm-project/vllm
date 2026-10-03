@@ -42,6 +42,7 @@ def test_failed_receive_completion_honors_failure_policy(policy):
     request = create_request(num_tokens=3 * scheduler.block_size)
     scheduler.add_request(request)
     scheduler.connector = Mock()
+    scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
     scheduler.connector.get_num_new_matched_tokens.side_effect = [
         (2 * scheduler.block_size, True),
         (0, False),
@@ -103,6 +104,7 @@ def test_async_load_failure(
     }
 
     scheduler.connector = Mock()
+    scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
     )
@@ -332,6 +334,7 @@ def test_async_progressive_load_failure(
     }
 
     scheduler.connector = Mock()
+    scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
     )

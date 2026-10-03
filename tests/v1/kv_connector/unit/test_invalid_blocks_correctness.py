@@ -327,6 +327,7 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     recompute_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, True)
     )
+    recompute_scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
     recompute_scheduler.connector.request_finished.return_value = (False, None)
     recompute_scheduler.connector.take_events.return_value = ()
 

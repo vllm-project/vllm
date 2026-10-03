@@ -192,6 +192,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        skip_zeroing_group_ids: tuple[int, ...] = (),
     ):
         ret = original_allocate_slots_fn(
             self,
@@ -206,6 +207,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             full_sequence_must_fit,
             reserved_blocks,
             has_scheduled_reqs,
+            skip_zeroing_group_ids,
         )
         if cur_step_action is not None:
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[
