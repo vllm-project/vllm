@@ -94,10 +94,13 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
       - tile min > running min  → keep running values
     """
     tile_min = tl.min(tl.where(above_mask, data, sentinel))
-    tile_eq = above_mask & (tl.abs(data - tile_min) < 1e-9)
+    # Bit-exact tie group: an absolute band merges distinct values at small
+    # magnitudes (1e-9 around a 1e-6 prob spans ~1000 distinct fp32 values),
+    # which then get trimmed by position instead of by value.
+    tile_eq = above_mask & (data == tile_min)
     tile_cnt = tl.sum(tile_eq)
     is_new = tile_min < min_larger
-    is_same = tl.abs(tile_min - min_larger) < 1e-9
+    is_same = tile_min == min_larger
     num_min_larger = tl.where(is_new, tile_cnt, num_min_larger + tile_cnt * is_same)
     min_larger = tl.minimum(min_larger, tile_min)
     return min_larger, num_min_larger
@@ -140,6 +143,13 @@ def _topk_topp_kernel(
         prob_ref = 0.0
         prob_sum_exp = 0.0
         num_seen = tl.zeros((), dtype=tl.uint32)
+        # Combined top-k+top-p also masks in probability space, with this
+        # extra logit-space test replaying the top-k survivor selection.
+        topk_mask_pivot = -float("inf")
+        topk_mask_dup_logit = 0.0
+        topk_mask_num_dup = tl.zeros((), dtype=tl.uint32)
+        topk_mask_num_keep = tl.zeros((), dtype=tl.uint32)
+        num_kept_k = tl.zeros((), dtype=tl.uint32)
 
         max_logit = -float("inf")
         min_logit = float("inf")
@@ -427,7 +437,7 @@ def _topk_topp_kernel(
                                 # Duplicate logit handling for Top-k
                                 if num_keep < num_duplicate_logit:
                                     duplicate_mask = (
-                                        tl.abs(probs_blk - duplicate_logit) < 1e-9
+                                        probs_blk == duplicate_logit
                                     )
                                     duplicate_count = (
                                         tl.cumsum(duplicate_mask) + num_kept
@@ -449,6 +459,15 @@ def _topk_topp_kernel(
                                 probs_blk = probs_blk - max_logit
                                 probs_blk = tl.exp(probs_blk)
                                 sum_exp_logits += tl.sum(probs_blk)
+                                # Keep the masked exp values so the fourth
+                                # pass divides only survivors; storing raw
+                                # outlier probs here would let trimmed
+                                # non-survivors pollute the pivot search.
+                                tl.store(
+                                    BUFFER_ROW + offs_n,
+                                    probs_blk,
+                                    mask=mask_n_2,
+                                )
 
                             # Fourth pass: Calculate BUFFER and get outliers
                             for i in range(0, search_iters):
@@ -460,11 +479,8 @@ def _topk_topp_kernel(
                                 probs_blk = tl.load(
                                     BUFFER_ROW + offs_n,
                                     mask=mask_n_2,
-                                    other=-float("inf"),
+                                    other=0.0,
                                 )
-
-                                probs_blk = probs_blk - max_logit
-                                probs_blk = tl.exp(probs_blk)
                                 probs_blk = probs_blk / sum_exp_logits
                                 tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n_2)
                         else:
@@ -484,7 +500,7 @@ def _topk_topp_kernel(
 
                                 # Duplicate logit handling for Top-k
                                 duplicate_mask = (
-                                    tl.abs(probs_blk - duplicate_logit) < 1e-9
+                                    probs_blk == duplicate_logit
                                 )
                                 duplicate_count = tl.cumsum(duplicate_mask) + num_kept
                                 duplicate_keep_mask = (
@@ -628,9 +644,23 @@ def _topk_topp_kernel(
                                 found_pivot = 1
 
                         if p_pivot > 0.0:
-                            duplicate_logit = (
-                                tl.log(min_larger_prob * sum_exp_logits) + max_logit
-                            )
+                            # Replay the top-k survivor selection in the
+                            # sixth pass; save the logit-space boundary
+                            # before the p tie group reuses these registers.
+                            topk_mask_pivot = k_pivot
+                            topk_mask_dup_logit = duplicate_logit
+                            topk_mask_num_dup = num_duplicate_logit
+                            topk_mask_num_keep = num_keep
+                            # Mask in probability space (sixth pass), like
+                            # standalone top-p: recomputing
+                            # exp(logit - max_logit) / sum_exp_logits per
+                            # token uses the same fp ops as the buffer pass,
+                            # so no prob->logit round-trip can drop a
+                            # boundary token below p.
+                            prob_pivot = p_pivot
+                            prob_min_larger = min_larger_prob
+                            prob_ref = max_logit
+                            prob_sum_exp = sum_exp_logits
                             num_duplicate_logit = num_min_larger
                             # Clamp in float before the cast so a coarse
                             # fallback pivot can never wrap the counter.
@@ -641,9 +671,7 @@ def _topk_topp_kernel(
                                 ),
                                 tl.uint32,
                             )
-
-                            # Top-k + Top-p path
-                            final_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
+                            topp_prob_mask = 1
                         # else: no pivot reached p even with every top-k
                         # survivor kept; keep the top-k boundary as-is.
 
@@ -1027,14 +1055,14 @@ def _topk_topp_kernel(
                     prob_ref = max_sample
                     prob_sum_exp = sum_exp_logits
                     num_duplicate_logit = num_min_larger
-                    # The denominator is the largest member mass of the 1e-9
-                    # tie band, so trimmed mass can never exceed
-                    # (p_pivots_sum - p); the clamp stops a coarse fallback
-                    # pivot from wrapping the counter.
+                    # Every member of the bit-exact tie group has mass
+                    # exactly min_larger_prob, so trimmed mass can never
+                    # exceed (p_pivots_sum - p); the clamp stops a coarse
+                    # fallback pivot from wrapping the counter.
                     num_keep = num_duplicate_logit - tl.cast(
                         tl.minimum(
                             (p_pivots_sum - p)
-                            / (tl.cast(min_larger_prob, tl.float64) + 1e-9),
+                            / tl.cast(min_larger_prob, tl.float64),
                             tl.cast(num_min_larger, tl.float64),
                         ),
                         tl.uint32,
@@ -1045,25 +1073,42 @@ def _topk_topp_kernel(
 
         # Sixth pass: Apply mask and store final output.
         if topp_prob_mask == 1:
-            # Standalone top-p masks in probability space, recomputing
+            # Mask in probability space, recomputing
             # exp(logit - prob_ref) / prob_sum_exp per token with the same
             # fp ops as the buffer pass, so the kept set is exactly the
-            # search's above-set.
+            # search's above-set. The combined top-k+top-p path adds a
+            # logit-space membership test replaying the survivor selection
+            # (topk_mask_pivot stays -inf for standalone top-p, where every
+            # token is a member).
             for i in range(0, NUM_TILES):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                 mask_n = offs_n < VOCAB_SIZE
                 logits_blk = tl.load(
                     LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
                 )
+                keep_mask = (logits_blk > topk_mask_pivot) & mask_n
+
+                # Top-k boundary tie trim (logit space, bit-exact group).
+                if topk_mask_num_keep < topk_mask_num_dup:
+                    topk_dup_mask = keep_mask & (
+                        logits_blk == topk_mask_dup_logit
+                    )
+                    topk_dup_count = tl.cumsum(topk_dup_mask) + num_kept_k
+                    topk_dup_keep_mask = (
+                        topk_dup_count <= topk_mask_num_keep
+                    ) & topk_dup_mask
+                    num_kept_k += tl.sum(topk_dup_mask)
+                    keep_mask = keep_mask & (
+                        ~topk_dup_mask | topk_dup_keep_mask
+                    )
+
                 probs_blk = tl.exp(logits_blk - prob_ref) / prob_sum_exp
                 probs_blk = tl.where(mask_n, probs_blk, 0.0)
-                keep_mask = (probs_blk > prob_pivot) & mask_n
+                keep_mask = keep_mask & (probs_blk > prob_pivot)
 
                 # Duplicate handling within the min-prob tie group
                 if num_keep < num_duplicate_logit:
-                    duplicate_mask = keep_mask & (
-                        tl.abs(probs_blk - prob_min_larger) < 1e-9
-                    )
+                    duplicate_mask = keep_mask & (probs_blk == prob_min_larger)
                     duplicate_count = tl.cumsum(duplicate_mask) + num_seen
                     # Remove only members past num_keep up to the counted
                     # group size, so an undercounted group is never
@@ -1094,7 +1139,7 @@ def _topk_topp_kernel(
                 # Duplicate logit handling
                 if num_keep < num_duplicate_logit:
                     duplicate_mask = keep_mask & (
-                        tl.abs(logits_blk - duplicate_logit) < 1e-9
+                        logits_blk == duplicate_logit
                     )
                     duplicate_count = tl.cumsum(duplicate_mask) + num_seen
                     # Same capped removal as the probability-space path.

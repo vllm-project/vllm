@@ -526,6 +526,60 @@ class TestTritonTopkTopp:
         # ceil(0.9 * 1024 / 1) = 922 tokens of a uniform row reach p = 0.9
         assert (kept == 922).all()
 
+    def test_topk_topp_near_flat_boundary_does_not_drop_below_p(self):
+        """Regression: the combined top-k+top-p mask converted the winning
+        probability pivot back to a logit cut, and the round trip could
+        leave a boundary survivor below that cut, so kept mass landed
+        under p (24 tokens at 0.480427 for p = 0.5 where 25 reach it). The
+        mask now stays in probability space and replays the top-k survivor
+        selection, so the kept set is exactly the search's above-set."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        rng = np.random.default_rng(59804)
+        row = rng.normal(0, 1, 1024)
+        idx = rng.choice(1024, 50, replace=False)
+        row[idx] = 20.0 + rng.normal(0, 1e-3, 50)
+        row = row.astype(np.float32)
+        k = torch.tensor([50] * 4, dtype=torch.int32)
+        p = torch.full((4,), 0.5, dtype=torch.float32)
+        logits = torch.from_numpy(np.tile(row, (4, 1)).copy()).to(DEVICE_TYPE)
+
+        out = apply_top_k_top_p_triton(logits, k=k, p=p)
+        keep = torch.isfinite(out[0]).cpu().numpy()
+
+        # fp64 reference restricted to (and renormalized over) the top-50
+        # set, matching the kernel's top-p-after-top-k convention.
+        q = np.exp(row.astype(np.float64) - row.max())
+        cutoff = np.sort(q)[::-1][49]
+        q[q < cutoff] = 0.0
+        q /= q.sum()
+        n_exact = int(np.searchsorted(np.cumsum(np.sort(q)[::-1]), 0.5) + 1)
+
+        assert q[keep].sum() >= 0.5 - 1e-4
+        assert keep.sum() <= n_exact * 1.1
+        assert q[keep].min() >= q[~keep].max() * (1 - 1e-6)
+
+    def test_topp_boundary_ties_do_not_break_prefix(self):
+        """Regression: the min-prob tie band had an absolute 1e-9 width,
+        which spans hundreds of distinct fp32 probabilities around 1e-5,
+        so the trim removed band members by position and could keep a
+        lower-probability token while dropping a higher one. Tie groups
+        are now bit-exact, so trimmed members are interchangeable."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        row = np.random.default_rng(3).normal(0, 1, 32768).astype(np.float32)
+        p = float(np.float32(0.9))
+        logits = torch.from_numpy(np.tile(row, (128, 1)).copy()).to(DEVICE_TYPE)
+
+        out = apply_top_k_top_p_triton(
+            logits, k=None, p=torch.full((128,), p, dtype=torch.float32)
+        )
+        keep = torch.isfinite(out[0]).cpu().numpy()
+
+        _, q = self._exact_topp(row, p)
+        assert q[keep].min() >= q[~keep].max() * (1 - 1e-6)
+        assert q[keep].sum() >= p - 1e-4
+
     def test_large_batch(self):
         """Test with a large batch size."""
         batch_size, vocab_size = 512, 32000
