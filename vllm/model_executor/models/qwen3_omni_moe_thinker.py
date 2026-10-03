@@ -2260,10 +2260,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 )
                 st_idx += text_len
 
-            bos_pos = np.broadcast_to(np.array([st_idx]), (3, 1))
-            llm_pos_ids_list.append(bos_pos)
-            st_idx += 1
-
             if modality == "audio":
                 audio_tokens = self._compute_audio_token_count(
                     data["audio_feature_length"]
@@ -2276,7 +2272,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
                 eos_pos = np.broadcast_to(np.array([st_idx]), (3, 1))
                 llm_pos_ids_list.append(eos_pos)
-                st = offset + 1 + audio_tokens + 1
+                st = offset + audio_tokens + 1
 
             elif modality == "image":
                 grid_t = data["grid_t"]
@@ -2294,7 +2290,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
                 eos_pos = np.broadcast_to(np.array([st_idx]), (3, 1))
                 llm_pos_ids_list.append(eos_pos)
-                st = offset + 1 + image_len + 1
+                st = offset + image_len + 1
 
             elif modality == "video":
                 grid_t = data["grid_t"]
@@ -2313,7 +2309,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
                     eos_pos = np.broadcast_to(np.array([st_idx]), (3, 1))
                     llm_pos_ids_list.append(eos_pos)
-                    st = offset + 1 + video_len + 1
+                    st = offset + video_len + 1
                 else:
                     audio_bos_pos = np.broadcast_to(np.array([st_idx - 1]), (3, 1))
                     llm_pos_ids_list.append(audio_bos_pos)
@@ -2330,7 +2326,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     audio_len = self._compute_audio_token_count(
                         data["audio_feature_length"]
                     )
-                    st = offset + 2 + video_len + audio_len + 2
+                    st = offset + 1 + video_len + audio_len + 2
 
         if st < seq_len:
             st_idx = int(llm_pos_ids_list[-1].max()) + 1 if llm_pos_ids_list else 0
