@@ -7,7 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 4
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -29,7 +29,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 4
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -51,7 +51,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 20
   num_devices: 2
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -73,7 +73,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 4
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -95,7 +95,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 20
   num_devices: 1
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:

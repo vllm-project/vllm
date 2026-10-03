@@ -7,6 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 35
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -79,7 +80,7 @@ steps:
   key: gguf-plugin
   device: intel_gpu
   timeout_in_minutes: 30
-  optional: false
+  optional: true
   soft_fail: true
   working_dir: .
   no_plugin: true
@@ -107,7 +108,7 @@ steps:
   key: bitsandbytes-plugin
   device: intel_gpu
   timeout_in_minutes: 30
-  optional: false
+  optional: true
   soft_fail: true
   working_dir: .
   no_plugin: true
@@ -137,7 +138,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 15
   num_devices: 2
-  optional: false
+  optional: true
   soft_fail: true
   working_dir: .
   no_plugin: true

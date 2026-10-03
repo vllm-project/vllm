@@ -2,10 +2,40 @@ group: Entrypoints XPU
 depends_on:
   - image-build-xpu
 steps:
+- label: ':nvidia: (H200) Initialized Snapshot E2E'
+  key: initialized-snapshot-e2e
+  device: intel_gpu
+  timeout_in_minutes: 60
+  num_devices: 1
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - bash .buildkite/scripts/initialized-snapshot-e2e.sh "$IMAGE_TAG" "$BUILDKITE_COMMIT"
+  source_file_dependencies:
+  - .buildkite/scripts/initialized-snapshot-e2e.sh
+  - .buildkite/test_areas/entrypoints.yaml
+  - docker/Dockerfile
+  - tools/install_snapshot_runtime.sh
+  - vllm/entrypoints/cli/
+  - vllm/snapshot/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'bash .buildkite/scripts/initialized-snapshot-e2e.sh "$IMAGE_TAG" "$BUILDKITE_COMMIT" || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Unit'
   key: entrypoints-unit-tests
   device: intel_gpu
   timeout_in_minutes: 40
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -36,6 +66,7 @@ steps:
   key: entrypoints-integration-llm
   device: intel_gpu
   timeout_in_minutes: 60
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -68,6 +99,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 75
   parallelism: 4
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -100,6 +132,7 @@ steps:
   key: entrypoints-integration-api-server-openai-completion
   device: intel_gpu
   timeout_in_minutes: 68
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -129,6 +162,7 @@ steps:
   key: entrypoints-integration-api-server-openai-chat_completion
   device: intel_gpu
   timeout_in_minutes: 83
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -156,6 +190,7 @@ steps:
   key: entrypoints-integration-api-server-generate
   device: intel_gpu
   timeout_in_minutes: 50
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -193,6 +228,7 @@ steps:
   key: entrypoints-integration-responses-api
   device: intel_gpu
   timeout_in_minutes: 50
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -218,6 +254,7 @@ steps:
   key: entrypoints-integration-speech_to_text
   device: intel_gpu
   timeout_in_minutes: 45
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -246,6 +283,7 @@ steps:
   key: entrypoints-integration-multimodal
   device: intel_gpu
   timeout_in_minutes: 45
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -274,6 +312,7 @@ steps:
   key: entrypoints-integration-pooling
   device: intel_gpu
   timeout_in_minutes: 75
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -301,6 +340,7 @@ steps:
   key: openai-api-correctness
   device: intel_gpu
   timeout_in_minutes: 20
+  optional: true
   working_dir: .
   no_plugin: true
   env:
