@@ -407,7 +407,7 @@ def _fwd_kernel_ep_gather(
 
         tl.store(
             output_tensor
-            + cur_token * output_tensor_stride0
+            + cur_token.to(tl.int64) * output_tensor_stride0
             + cur_block * BLOCK_D
             + off_d,
             accumulator.to(output_tensor.dtype.element_ty),
