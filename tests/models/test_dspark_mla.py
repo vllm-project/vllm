@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -335,3 +336,19 @@ def test_dsv4_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
     assert torch.equal(calls[1][1], stacked_output.view(2, 3, 4)[:, 2] + 2)
     assert calls[0][3] is slot_mappings[0]
     assert calls[1][3] is slot_mappings[2]
+
+
+def test_k3_dspark_precompute_does_not_build_metadata_lazily():
+    """The hook builds the fused context-KV metadata; a model whose hook never
+    ran must fail here, not silently build on first use."""
+    model = object.__new__(K3DSparkModel)
+    nn.Module.__init__(model)
+    model._build_fused_context_kv_metadata = Mock()
+    model._precompute_fused_context_kv = Mock(
+        side_effect=lambda *a, **k: model._num_context_layers
+    )
+
+    with pytest.raises(AttributeError):
+        model.precompute_and_store_context_kv(Mock(), Mock(), None)
+
+    model._build_fused_context_kv_metadata.assert_not_called()

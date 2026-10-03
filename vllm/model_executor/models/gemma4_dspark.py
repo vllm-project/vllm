@@ -12,7 +12,11 @@ from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -197,6 +201,12 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         assert all(a.use_k_eq_v for a in layers_attn), (
             "Gemma4 DSpark fused precompute assumes uniform attention_k_eq_v layers"
         )
+        for attn in layers_attn:
+            if not isinstance(attn.k_proj.quant_method, UnquantizedLinearMethod):
+                raise NotImplementedError(
+                    "Gemma4 DSpark fused context-KV precompute requires unquantized "
+                    f"k_proj; got {type(attn.k_proj.quant_method).__name__}."
+                )
         self._build_context_kv_buffers(layers_attn, attn0.k_proj.bias is not None)
         self._rope_head_size = attn0.rotary_emb.head_size
         self._rope_cos_sin_cache = attn0.rotary_emb.cos_sin_cache
@@ -310,5 +320,4 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
                     p = params[name]
                     getattr(p, "weight_loader", default_weight_loader)(p, w)
                     loaded.add(name)
-        self.model._build_fused_kv_buffers()
         return loaded

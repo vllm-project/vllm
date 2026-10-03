@@ -332,5 +332,7 @@ class DFlashLagunaForCausalLM(nn.Module, SupportsEagle3):
         loaded_weight_names = loader.load_weights(model_weights.items())
         loaded_weight_names.add("lm_head.weight")
         loaded_weight_names.add("model.embed_tokens.weight")
-        self.model._build_fused_kv_buffers()
         return loaded_weight_names
+
+    def process_weights_after_loading(self) -> None:
+        self.model._build_fused_kv_buffers()

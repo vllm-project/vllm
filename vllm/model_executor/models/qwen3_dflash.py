@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -496,6 +497,16 @@ class DFlashQwen3Model(nn.Module):
         attn0 = layers_attn[0]
         has_bias = attn0.qkv_proj.bias is not None
 
+        # The fused buffer slices raw weight rows and feeds them to F.linear,
+        # so it is only defined for an unquantized projection; a quantized one
+        # has been repacked by its own post-load hook before this runs.
+        for attn in layers_attn:
+            if not isinstance(attn.qkv_proj.quant_method, UnquantizedLinearMethod):
+                raise NotImplementedError(
+                    "DFlash fused context-KV precompute requires unquantized "
+                    f"qkv_proj; got {type(attn.qkv_proj.quant_method).__name__}."
+                )
+
         self._build_context_kv_buffers(layers_attn, has_bias)
 
         # RoPE parameters
@@ -597,13 +608,6 @@ class DFlashQwen3Model(nn.Module):
         When context_slot_mapping is None (e.g. during dummy_run) only
         the computation runs, and no K/V is written to cache.
         """
-        if not hasattr(self, "_num_attn_layers"):
-            logger.warning_once(
-                "DFlash buffer initialization was skipped. If dummy weights are not "
-                "in use, this may indicate an error in weight loading."
-            )
-            self._build_fused_kv_buffers()
-
         num_ctx = context_states.shape[0]
         L = self._num_attn_layers
         kv = self._kv_size
@@ -844,6 +848,8 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
+
+    def process_weights_after_loading(self) -> None:
         self.model._build_fused_kv_buffers()
 
     def _read_mask_embedding(self) -> torch.Tensor | None:

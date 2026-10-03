@@ -207,8 +207,6 @@ class K3DSparkModel(nn.Module):
         context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None = None,
     ) -> None:
         """Project target-derived context into each draft layer's latent cache."""
-        if not hasattr(self, "_num_context_layers"):
-            self._build_fused_context_kv_metadata()
         self._precompute_fused_context_kv(
             context_states, context_positions, context_slot_mapping
         )
