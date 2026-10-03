@@ -230,6 +230,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 self.max_num_reqs, dtype=torch.int32, device=device
             )
             self._replay_attn_groups: list[list[AttentionGroup]] | None = None
+            self._cut_attn_groups: list[list[AttentionGroup]] | None = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -416,7 +417,7 @@ class DeepseekV41ModelState(DefaultModelState):
         replays if any does."""
         layers = self.decoder_replay_layers
         assert layers is not None
-        layers.rows = layers.forward_context = None
+        layers.rows = layers.forward_context = layers.cut_forward_context = None
         if cudagraph_mode != CUDAGraphMode.NONE:
             return
 
@@ -461,6 +462,24 @@ class DeepseekV41ModelState(DefaultModelState):
             slot_mapping=build_slot_mappings_by_layer(
                 kept_slot_mappings, kv_cache_config
             ),
+        )
+        # The cut layer's query side reads the window KV the cut layer wrote for
+        # every row: only its sliding-window metadata differs, keeping the
+        # encoder-side window starts.
+        cut_attn_metadata = super().prepare_attn(
+            kept_batch,
+            CUDAGraphMode.NONE,
+            block_tables,
+            kept_slot_mappings,
+            self._cut_groups(attn_groups),
+            kv_cache_config,
+            model_specific_attn_metadata=ReplayAttnMetadata(replay_start),
+        )
+        layers.cut_forward_context = create_forward_context(
+            attn_metadata | cut_attn_metadata,
+            self.vllm_config,
+            dp_metadata=dp_metadata,
+            slot_mapping=layers.forward_context.slot_mapping,
         )
 
     def _kept_input_batch(
@@ -543,16 +562,44 @@ class DeepseekV41ModelState(DefaultModelState):
         microbatch's: a builder keeps the metadata it built, and the runner's
         hold the batch's."""
         if self._replay_attn_groups is None:
-            self._replay_attn_groups = []
-            for groups in attn_groups:
-                replay_groups = []
-                for group in groups:
-                    replay_group = replace(group, metadata_builders=[])
-                    replay_group.create_metadata_builders(
-                        self.vllm_config,
-                        self.device,
-                        group.metadata_builders[0].kernel_block_size,
-                    )
-                    replay_groups.append(replay_group)
-                self._replay_attn_groups.append(replay_groups)
+            self._replay_attn_groups = self._fresh_groups(attn_groups)
         return self._replay_attn_groups
+
+    def _cut_groups(
+        self, attn_groups: list[list[AttentionGroup]]
+    ) -> list[list[AttentionGroup]]:
+        """The sliding-window attention groups, with builders of their own
+        again, as the cut layer's query-side metadata lives alongside the
+        replay layers'."""
+        if self._cut_attn_groups is None:
+            self._cut_attn_groups = self._fresh_groups(
+                [
+                    [
+                        group
+                        for group in groups
+                        if isinstance(
+                            group.metadata_builders[0],
+                            DeepseekSparseSWAMetadataBuilder,
+                        )
+                    ]
+                    for groups in attn_groups
+                ]
+            )
+        return self._cut_attn_groups
+
+    def _fresh_groups(
+        self, attn_groups: list[list[AttentionGroup]]
+    ) -> list[list[AttentionGroup]]:
+        fresh = []
+        for groups in attn_groups:
+            copies = []
+            for group in groups:
+                copy = replace(group, metadata_builders=[])
+                copy.create_metadata_builders(
+                    self.vllm_config,
+                    self.device,
+                    group.metadata_builders[0].kernel_block_size,
+                )
+                copies.append(copy)
+            fresh.append(copies)
+        return fresh

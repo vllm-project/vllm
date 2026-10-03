@@ -520,7 +520,6 @@ def _check_dummy_hash_model_forward(
     model.layers = [Decoder(engram=engram)]
     model.start_layer = 0
     model.end_layer = 1
-    model.decoder_replay_start = model.end_layer
     model.decoder_replay_layers = None
     model.aux_hidden_state_layers = ()
     metadata = (

@@ -57,7 +57,9 @@ def state(monkeypatch):
     cfg.scheduler_config.max_num_batched_tokens = 1024
     cfg.parallel_config.data_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
-    layers = SimpleNamespace(window=WINDOW, rows=None, forward_context=None)
+    layers = SimpleNamespace(
+        window=WINDOW, rows=None, forward_context=None, cut_forward_context=None
+    )
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     builds: list = []
 
@@ -118,7 +120,8 @@ def _slot_mappings(num_tokens: int) -> torch.Tensor:
 
 
 def _prepare(state, batch, cg_mode):
-    """Runs prepare_attn; returns the replay batch and the replay build's inputs."""
+    """Runs prepare_attn; returns the replay batch (with the cut layer's build)
+    and the replay build's inputs."""
     state.prepare_attn(
         batch,
         cg_mode,
@@ -129,11 +132,14 @@ def _prepare(state, batch, cg_mode):
     )
     layers = state.decoder_replay_layers
     if layers.rows is None:
-        assert layers.forward_context is None
+        assert layers.forward_context is None and layers.cut_forward_context is None
         return None, None
     return SimpleNamespace(
-        rows=layers.rows, forward_context=layers.forward_context
-    ), state.builds[-1]
+        rows=layers.rows,
+        forward_context=layers.forward_context,
+        cut_forward_context=layers.cut_forward_context,
+        cut_build=state.builds[-1],
+    ), state.builds[-2]
 
 
 def test_replay_batch_keeps_each_request_window(state):
@@ -158,6 +164,14 @@ def test_replay_batch_keeps_each_request_window(state):
     assert context.attn_metadata == {"swa": build.attn_metadata}
     assert torch.equal(context.slot_mapping["mla"], _slot_mappings(401)[1, rows])
     assert context.dp_metadata is None and context.is_padding is None
+    # The cut layer's query side runs on the same rows with the encoder-side
+    # window starts, its sliding-window metadata over the replay layers'.
+    cut = replay.cut_build
+    assert cut.batch is sub and cut.cg_mode == CUDAGraphMode.NONE
+    assert cut.replay_start.tolist() == [0, 0, 50]
+    cut_context = replay.cut_forward_context
+    assert cut_context.attn_metadata == {"swa": cut.attn_metadata}
+    assert cut_context.slot_mapping is context.slot_mapping
 
 
 def test_replay_batch_keeps_device_decode_boundaries(state):
