@@ -20,10 +20,6 @@ _MEM_ACCESS_FLAGS_PROT_READWRITE = 3
 _MEM_ALLOCATION_COMP_NONE = 0
 _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED = 110
 
-# Earlier HIP runtimes fail hipMemSetAccess once a reservation holds several
-# allocations (ROCm/rocm-systems#2516, fixed by #2451).
-_HIP_MEM_SET_ACCESS_FIXED_IN = (7, 12)
-
 DevicePtr = ctypes.c_ulonglong
 MemHandle = ctypes.c_ulonglong
 _Context = ctypes.c_void_p
@@ -102,13 +98,15 @@ class VmmDriver:
         self._configure_signatures()
 
     def _load_library(self) -> ctypes.CDLL:
+        # Prefer the copy already in the process, e.g. the HIP runtime a ROCm
+        # torch wheel bundles: loading one by name could add a second runtime.
+        if path := _find_loaded_library(self._lib_search_name):
+            return ctypes.CDLL(path)
         for name in self._lib_candidates:
             try:
                 return ctypes.CDLL(name)
             except OSError:
                 continue
-        if path := _find_loaded_library(self._lib_search_name):
-            return ctypes.CDLL(path)
         raise RuntimeError(
             f"Could not load {self._lib_candidates[0]}. The GPU driver "
             "library is required for VMM-backed tensors."
@@ -157,7 +155,7 @@ class VmmDriver:
     def error_string(self, code: int) -> str:
         raise NotImplementedError
 
-    def unusable_runtime_reason(self) -> str | None:
+    def unusable_runtime_reason(self, device_index: int) -> str | None:
         """Why this driver's runtime cannot back a growable allocation, if so."""
         return None
 
@@ -312,8 +310,8 @@ class HipVmmDriver(VmmDriver):
 
     dlpack_device_type = 10  # kDLROCM
     _lib_candidates = (
-        "libamdhip64.so",
         "libamdhip64.so.7",
+        "libamdhip64.so",
         "libamdhip64.so.6",
         "libamdhip64.so.5",
     )
@@ -356,18 +354,15 @@ class HipVmmDriver(VmmDriver):
         self._check(self._lib.hipRuntimeGetVersion(ctypes.byref(version)))
         return divmod(version.value // 100000, 100)
 
-    def unusable_runtime_reason(self) -> str | None:
-        version = self.runtime_version()
-        if version >= _HIP_MEM_SET_ACCESS_FIXED_IN:
+    def unusable_runtime_reason(self, device_index: int) -> str | None:
+        if not _set_access_fails_within_reservation(self, device_index):
             return None
-        major, minor = version
+        major, minor = self.runtime_version()
         return (
-            f"the HIP runtime is {major}.{minor}, which rejects "
-            "hipMemSetAccess for a validly mapped range once several "
-            "allocations share a virtual-address reservation "
-            "(ROCm/rocm-systems#2516, fixed by ROCm/rocm-systems#2451 in "
-            f"ROCm {_HIP_MEM_SET_ACCESS_FIXED_IN[0]}."
-            f"{_HIP_MEM_SET_ACCESS_FIXED_IN[1]})"
+            f"the HIP runtime ({major}.{minor}) rejects hipMemSetAccess for an "
+            "allocation that is not the first in its virtual-address "
+            "reservation (ROCm/rocm-systems#2516, fixed by "
+            "ROCm/rocm-systems#2451 in TheRock 7.12 and later)"
         )
 
     def error_string(self, code: int) -> str:
@@ -383,6 +378,43 @@ class HipVmmDriver(VmmDriver):
             self._check(self._lib.hipSetDevice(device_index))
 
 
+def _set_access_fails_within_reservation(driver: VmmDriver, device_index: int) -> bool:
+    """Whether set-access rejects one of two allocations mapped side by side in
+    a reservation, as HIP runtimes before ROCm/rocm-systems#2451 do.
+
+    Those check the requested size against the reservation's allocations
+    counted from the first in their list rather than from the target. With
+    sizes of one and two granules, one of the two calls fails whichever comes
+    first in that list, so the check does not depend on allocation order.
+    """
+    granularity = driver.granularity(device_index)
+    sizes = (granularity, 2 * granularity)
+    base = driver.reserve(sum(sizes))
+    mapped: list[tuple[int, int, int]] = []
+    try:
+        ptr = base
+        for size in sizes:
+            handle = driver.create(size, device_index)
+            try:
+                driver.map(ptr, size, handle)
+            except RuntimeError:
+                driver.release(handle)
+                raise
+            mapped.append((ptr, size, handle))
+            ptr += size
+        try:
+            for ptr, size, _ in mapped:
+                driver.set_access(ptr, size, device_index)
+        except RuntimeError:
+            return True
+        return False
+    finally:
+        for ptr, size, handle in mapped:
+            driver.unmap(ptr, size)
+            driver.release(handle)
+        driver.free_reserved(base, sum(sizes))
+
+
 @cache
 def get_vmm_driver() -> VmmDriver:
     import torch
@@ -396,9 +428,9 @@ def get_vmm_driver() -> VmmDriver:
 def vmm_unavailable_reason() -> str | None:
     """Why VMM cannot be used on the current device, or None if it can.
 
-    Checks library load, entry points, known defective runtimes, and one
-    reserve/create/map/set-access/unmap/release round trip of a single granule.
-    Covers WSL2 and non-CUDA/ROCm builds.
+    Checks library load, entry points, known runtime defects (by probing), and
+    one reserve/create/map/set-access/unmap/release round trip of a single
+    granule. Covers WSL2 and non-CUDA/ROCm builds.
     """
     try:
         import torch
@@ -408,10 +440,7 @@ def vmm_unavailable_reason() -> str | None:
         driver = get_vmm_driver()
         device_index = torch.accelerator.current_device_index()
         driver.ensure_context(device_index)
-        # Known-defective runtimes are rejected by version rather than by
-        # probing: the ROCm defect is order-dependent, so a probe small
-        # enough to be cheap passes on affected runtimes anyway.
-        if reason := driver.unusable_runtime_reason():
+        if reason := driver.unusable_runtime_reason(device_index):
             return reason
         granularity = driver.granularity(device_index)
         ptr = driver.reserve(granularity)
