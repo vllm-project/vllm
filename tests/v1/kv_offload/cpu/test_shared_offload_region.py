@@ -776,6 +776,7 @@ def test_cleanup_unregisters_every_pinned_chunk(iid, monkeypatch):
     cudart.cudaHostUnregister.return_value = MagicMock(value=0)
     monkeypatch.setattr(region_module, "current_platform", MagicMock())
     region_module.current_platform.is_cuda_alike.return_value = True
+    region_module.current_platform.is_xpu.return_value = False
     monkeypatch.setattr(region_module.torch.cuda, "cudart", lambda: cudart)
     r.pinned_addresses = [0x100000, 0x200000, 0x300000]
     r.is_pinned = True
@@ -803,6 +804,7 @@ def host_register(monkeypatch):
     cudart.cudaGetLastError.return_value = 2
     torch_cudart = MagicMock()
     torch_cudart.cudaHostUnregister.return_value = MagicMock(value=0)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
     monkeypatch.setattr(gpu_worker, "MAX_HOST_REGISTER_CHUNK_BYTES", 7 * PAGE_SIZE)
     monkeypatch.setattr(gpu_worker, "CudaRTLibrary", lambda: cudart)

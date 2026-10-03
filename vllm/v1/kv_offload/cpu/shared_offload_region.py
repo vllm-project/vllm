@@ -22,6 +22,16 @@ logger = init_logger(__name__)
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
 
 
+def xpu_host_pointer_arg(
+    ptr: int, op: torch._ops.OpOverloadPacket
+) -> int | torch.Tensor:
+    """Adapt a host address to the installed XPU kernel's pointer schema."""
+    # vllm-xpu-kernels < 0.1.15 expects a uint64 Tensor; 0.1.15+ accepts int.
+    if str(op.default._schema.arguments[0].type) == "Tensor":
+        return torch.tensor([ptr], dtype=torch.uint64)
+    return ptr if ptr < (1 << 63) else ptr - (1 << 64)
+
+
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
     """Spin-wait until the file reaches expected_size (creator truncated it)."""
     deadline = time.monotonic() + timeout
@@ -343,8 +353,16 @@ class SharedOffloadRegion:
 
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
-            if current_platform.is_cuda_alike():
-                base_ptr = self._base.data_ptr()
+            base_ptr = self._base.data_ptr()
+            if current_platform.is_xpu():
+                op = torch.ops._C.xpu_host_unregister
+                if not op(xpu_host_pointer_arg(base_ptr, op)):
+                    logger.warning(
+                        "xpu_host_unregister failed for rank=%d, address=%#x",
+                        self.rank,
+                        base_ptr,
+                    )
+            elif current_platform.is_cuda_alike():
                 addresses = self.pinned_addresses or [base_ptr]
                 for address in reversed(addresses):
                     result = torch.cuda.cudart().cudaHostUnregister(address)
