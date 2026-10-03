@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -761,35 +762,50 @@ def test_async_loads_both_admitted_when_pool_fits():
         assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
-def test_async_load_reserves_blocks_for_promotion_margin():
-    """An async load is not admitted unless the blocks its own promotion will
-    need are still free.
-
-    A parked load is allocated without lookahead slots, but promotion pads it
-    to ``1 + num_spec_tokens`` and asks for the lookahead margin on top. Without
-    reserving that margin, two loads can be admitted that together consume the
-    whole pool; the head then fails ``allocate_slots`` forever while the load
-    behind it is never reached, and with nothing running no block is ever freed.
-
-    req_a (4 blocks) and req_b (3 blocks) exactly fill the 7 usable blocks, so
-    req_b must be held back in WAITING holding no blocks, leaving req_a room to
-    be promoted and run.
-    """
-    vllm_config = create_vllm_config(num_speculative_tokens=3)
-    BLOCK_SIZE = vllm_config.cache_config.block_size
-    scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
+@pytest.mark.parametrize(
+    ("swa_enabled", "block_size", "num_spec_tokens", "num_blocks"),
+    [(False, 16, 3, 8), (True, 16, 3, 17), (True, 64, 31, 40)],
+    ids=["single-group", "multiple-groups", "different-block-sizes"],
+)
+def test_async_load_reserves_blocks_for_promotion_margin(
+    swa_enabled, block_size, num_spec_tokens, num_blocks
+):
+    """Async loads leave enough blocks for promotion in every cache group."""
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        num_speculative_tokens=num_spec_tokens,
+        disable_hybrid_kv_cache_manager=False,
+    )
+    hash_block_size = 16
+    kv_cache_config = make_kv_cache_config(
+        hash_block_size, swa_enabled=swa_enabled, sw_size=4096, num_blocks=num_blocks
+    )
+    full_group = kv_cache_config.kv_cache_groups[0]
+    full_group.kv_cache_spec = replace(full_group.kv_cache_spec, block_size=block_size)
+    if swa_enabled:
+        sliding_group = kv_cache_config.kv_cache_groups[-1]
+        sliding_group.kv_cache_spec = replace(
+            sliding_group.kv_cache_spec,
+            page_size_padded=full_group.kv_cache_spec.page_size_bytes,
+        )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=num_blocks,
+        kv_cache_config=kv_cache_config,
+        hash_block_size=hash_block_size,
+    )
 
     req_a = create_request(
         request_id=1,
-        block_size=BLOCK_SIZE,
-        num_tokens=BLOCK_SIZE * 4,
+        block_size=hash_block_size,
+        num_tokens=block_size * 4,
         do_remote_prefill=True,
         max_tokens=1,
     )
     req_b = create_request(
         request_id=2,
-        block_size=BLOCK_SIZE,
-        num_tokens=BLOCK_SIZE * 3,
+        block_size=hash_block_size,
+        num_tokens=block_size * 3,
         do_remote_prefill=True,
         max_tokens=1,
     )
@@ -800,16 +816,13 @@ def test_async_load_reserves_blocks_for_promotion_margin():
     with patch.object(
         scheduler.connector,
         "get_num_new_matched_tokens",
-        side_effect=[(BLOCK_SIZE * 4, True), (BLOCK_SIZE * 3, True)],
+        side_effect=[(block_size * 4, True), (block_size * 3, True)],
     ):
         scheduler.schedule()
 
     assert req_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert req_b.status == RequestStatus.WAITING
-    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
-        0
-    ].req_to_blocks
-    assert req_b.request_id not in req_to_blocks
+    assert not any(scheduler.kv_cache_manager.get_block_ids(req_b.request_id))
 
     # req_a's load lands: it must be promotable and actually get scheduled.
     scheduler.update_from_output(

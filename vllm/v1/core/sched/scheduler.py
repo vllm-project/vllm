@@ -3073,16 +3073,17 @@ class Scheduler(SchedulerInterface):
         return num_blocks + self._spec_decode_step_blocks()
 
     def _spec_decode_step_blocks(self) -> int:
-        """Number of blocks for the extra KV slots a spec decode step needs.
+        """Return the block reservation for a speculative decode step.
 
-        When using async kv load, scheduler must reserve enough blocks for
-        full sequence + the spec decode step, otherwise request cannot be
-        able to run after the async_load if we are out of kv blocks.
+        Async KV loads must leave enough free blocks to start decoding.
         """
         if not self.num_spec_tokens:
             return 0
-        return cdiv(
-            1 + self.num_spec_tokens + self.num_lookahead_tokens, self.block_size
+        num_tokens = 1 + self.num_spec_tokens + self.num_lookahead_tokens
+        # Each cache group allocates from the shared pool in its own block size.
+        return sum(
+            cdiv(num_tokens, manager.block_size)
+            for manager in self.kv_cache_manager.coordinator.single_type_managers
         )
 
     def _set_kv_fetch_stage(self, request: Request, stage: str | None) -> None:
