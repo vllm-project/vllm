@@ -118,6 +118,46 @@ def test_responses_request_named_tool_choice_not_matching():
         )
 
 
+def test_responses_request_named_tool_choice_namespace_validation():
+    # 1. Valid namespaced tool by simple or qualified name
+    ns_tool = {
+        "type": "namespace",
+        "name": "math",
+        "tools": [{"name": "add"}, {"name": "subtract"}],
+    }
+    req1 = ResponsesRequest.model_validate(
+        {
+            "input": "Hello",
+            "model": "test-model",
+            "tools": [ns_tool],
+            "tool_choice": {"type": "function", "name": "add"},
+        }
+    )
+    assert req1.tool_choice.name == "add"
+
+    req2 = ResponsesRequest.model_validate(
+        {
+            "input": "Hello",
+            "model": "test-model",
+            "tools": [ns_tool],
+            "tool_choice": {"type": "function", "name": "math__add"},
+        }
+    )
+    assert req2.tool_choice.name == "math__add"
+
+    # 2. Malformed namespace tool (tools is None or missing) must NOT bypass validation
+    invalid_ns_tool = {"type": "namespace", "name": "dummy"}
+    with pytest.raises(VLLMValidationError, match="not found in 'tools' parameter"):
+        ResponsesRequest.model_validate(
+            {
+                "input": "Hello",
+                "model": "test-model",
+                "tools": [invalid_ns_tool],
+                "tool_choice": {"type": "function", "name": "nonexistent"},
+            }
+        )
+
+
 def test_responses_request_with_tools_tool_choice_auto():
     request = ResponsesRequest.model_validate(
         {

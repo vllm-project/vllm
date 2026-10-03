@@ -668,19 +668,27 @@ class ResponsesRequest(OpenAIBaseModel):
                         namespace = tool.get("name")
                         namespaced_tools = tool.get("tools")
                         if not isinstance(namespaced_tools, list):
-                            return data
+                            continue
                         for namespaced_tool in namespaced_tools:
                             namespaced_name = (
                                 namespaced_tool.get("name")
                                 if isinstance(namespaced_tool, dict)
                                 else getattr(namespaced_tool, "name", None)
                             )
-                            tool_names.add(namespaced_name)
-                            tool_names.add(f"{namespace}__{namespaced_name}")
+                            if namespaced_name:
+                                tool_names.add(namespaced_name)
+                                if namespace:
+                                    tool_names.add(
+                                        f"{namespace}__{namespaced_name}"
+                                    )
                     else:
-                        tool_names.add(tool.get("name"))
+                        name = tool.get("name")
+                        if name:
+                            tool_names.add(name)
                 else:
-                    tool_names.add(getattr(tool, "name", None))
+                    name = getattr(tool, "name", None)
+                    if name:
+                        tool_names.add(name)
             if not tool_name or tool_name not in tool_names:
                 raise VLLMValidationError(
                     "Tool choice 'function' not found in 'tools' parameter.",
