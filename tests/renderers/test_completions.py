@@ -484,6 +484,47 @@ class TestRenderPrompt:
         assert len(results) == 1
         assert results[0]["prompt_token_ids"] == list(range(50)) + [pad_id] * 50
 
+    def test_padding_without_a_pad_token_is_rejected(self):
+        """A tokenizer with no pad token cannot satisfy `pad_prompt_tokens`.
+
+        `apply_post_tokenization` is documented to raise `VLLMValidationError`
+        when the prompt cannot be made to meet the request, and the two other
+        unpaddable cases already do. Reading `pad_token_id` off the protocol's
+        `-> int` is not enough: HF tokenizers inherit transformers' default of
+        `None` when no pad token is configured.
+        """
+        model_config = MockModelConfig()
+        renderer = HfRenderer(
+            MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+            tokenizer=DummyTokenizer(pad_token_id=None),
+        )
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 10)
+        )
+
+        with pytest.raises(VLLMValidationError, match="no pad token"):
+            renderer.tokenize_prompts(
+                prompts,
+                TokenizeParams(max_total_tokens=100, pad_prompt_tokens=20),
+            )
+
+    def test_missing_pad_token_still_works_without_padding(self):
+        """The guard must only fire for requests that actually pad."""
+        model_config = MockModelConfig()
+        renderer = HfRenderer(
+            MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+            tokenizer=DummyTokenizer(pad_token_id=None),
+        )
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 10)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(max_total_tokens=100),
+        )
+
+        assert results[0]["prompt_token_ids"] == list(range(10))
+
     def test_explicit_side_text_pretokenization_guard(self):
         renderer = _build_renderer(MockModelConfig(), max_chars_per_token=1)
 

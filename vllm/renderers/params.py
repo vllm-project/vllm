@@ -446,6 +446,12 @@ class TokenizeParams:
                 parameter="pad_prompt_tokens",
             )
 
+        if tokenizer.pad_token_id is None:
+            raise VLLMValidationError(
+                "Cannot pad tokens because the tokenizer has no pad token",
+                parameter="pad_prompt_tokens",
+            )
+
         return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
 
     def _truncation_slice(
