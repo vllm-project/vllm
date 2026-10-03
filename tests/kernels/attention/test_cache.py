@@ -360,6 +360,7 @@ def test_reshape_and_cache_flash(
             # data_cache:  [B, N, H, data_dim]  logical view (layout in strides)
             # scale_cache: [B, N, H, scale_dim] logical view (layout in strides)
             # Permute to [B, H, N, dim] for the dequant utility.
+            # K scales are stored linearly, V scales 4x4-swizzled (see kernel).
             data_hnd = data_cache.permute(0, 2, 1, 3)
             scale_hnd = scale_cache.permute(0, 2, 1, 3)
             result_hnd = dequant_nvfp4_kv_cache(
@@ -438,6 +439,125 @@ def test_reshape_and_cache_flash(
     else:
         torch.testing.assert_close(key_cache_compact, cloned_key_cache)
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_reshape_and_cache_nvfp4_physical_hnd_shape(
+    kv_cache_factory_flashinfer,
+    device: str,
+) -> None:
+    """Regression test for #49012.
+
+    The NVFP4 cache-write kernel must handle a physically-shaped HND cache
+    ([num_blocks, num_heads, block_size, dim], as runtime callers allocate)
+    and not only the logical [num_blocks, block_size, num_heads, dim] view
+    that the parametrized test above passes. Reading block_size from dim 1
+    unconditionally picked up num_heads instead; num_heads is deliberately
+    divisible by 4 here because that variant passed the block_size
+    divisibility check and corrupted the cache silently.
+    """
+    if not current_platform.has_device_capability(100):
+        pytest.skip("NVFP4 requires compute capability >= 10.0 (Blackwell).")
+
+    num_tokens = 42
+    num_heads = 8  # % 4 == 0 -> the silent-corruption path
+    head_size = 64
+    block_size = 16  # != num_heads, so the shape is unambiguous
+    num_blocks = 64
+    dtype = torch.bfloat16
+
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    num_slots = block_size * num_blocks
+    slot_mapping_lst = random.sample(range(num_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long, device=device)
+    qkv = torch.randn(num_tokens, 3, num_heads, head_size, dtype=dtype, device=device)
+    _, key, value = qkv.unbind(dim=1)
+
+    key_caches, value_caches = kv_cache_factory_flashinfer(
+        num_blocks,
+        block_size,
+        1,
+        num_heads,
+        head_size,
+        "nvfp4",
+        dtype,
+        device=device,
+        cache_layout="HND",
+    )
+    key_cache, value_cache = key_caches[0], value_caches[0]
+
+    # The factory returns logical [num_blocks, block_size, num_heads, dim]
+    # views over HND storage; runtime HND callers pass the physically-shaped
+    # tensor instead. Un-permute to reproduce the runtime convention while
+    # keeping the same underlying buffer (scale regions stay aliased).
+    key_cache_physical = key_cache.permute(0, 2, 1, 3)
+    value_cache_physical = value_cache.permute(0, 2, 1, 3)
+
+    nvfp4_key_data, key_scale_cache = nvfp4_split_data_scale(key_cache)
+    nvfp4_value_data, value_scale_cache = nvfp4_split_data_scale(value_cache)
+
+    k_scale = (key.abs().amax() / 448.0).to(torch.float32)
+    v_scale = (value.abs().amax() / 448.0).to(torch.float32)
+
+    ops.reshape_and_cache_flash(
+        key,
+        value,
+        key_cache_physical,
+        value_cache_physical,
+        slot_mapping,
+        "nvfp4",
+        k_scale,
+        v_scale,
+    )
+
+    from tests.kernels.quantization.nvfp4_utils import dequant_nvfp4_kv_cache
+
+    def dequant(data_cache, scale_cache, global_scale, swizzled_scales):
+        data_hnd = data_cache.permute(0, 2, 1, 3)
+        scale_hnd = scale_cache.permute(0, 2, 1, 3)
+        result_hnd = dequant_nvfp4_kv_cache(
+            data_hnd,
+            scale_hnd,
+            global_scale,
+            head_size,
+            block_size,
+            swizzled_scales=swizzled_scales,
+        )
+        return result_hnd.permute(0, 2, 1, 3)
+
+    # This dequantizes what the write kernel just wrote, so the layout here
+    # follows the writer, not whichever attention kernel later reads the cache.
+    # reshape_and_cache_flash stores K block scales linearly and V block scales
+    # 4x4-swizzled on every architecture: nvfp4_kv_cache_kernels.cu has no
+    # architecture branch (its only preprocessor conditional is
+    # CVT_FP4_PACK16, a packing variant), and dequant_nvfp4_kv_cache says the
+    # same - "pass False for K and True for V".
+    result_key = dequant(nvfp4_key_data, key_scale_cache, k_scale.item(), False)
+    result_value = dequant(nvfp4_value_data, value_scale_cache, v_scale.item(), True)
+
+    result_key_flat = result_key.reshape(num_slots, num_heads, head_size)
+    result_value_flat = result_value.reshape(num_slots, num_heads, head_size)
+
+    # Elementwise tolerance alone does not pin the scale layout down: a
+    # structurally wrong ordering can stay inside atol=1.5/rtol=0.5 while
+    # every scale lands on the wrong token. Bound relative L2 as well --
+    # normal NVFP4 round-trip loss here is ~0.1, and an independently
+    # measured wrong-layout regime sits at 0.76-0.79 (see #50336, which
+    # adds the same guard to the parametrized test).
+    for name, got, want in (
+        ("key", result_key_flat[slot_mapping], key.float()),
+        ("value", result_value_flat[slot_mapping], value.float()),
+    ):
+        torch.testing.assert_close(got, want, atol=1.5, rtol=0.5)
+        rel_l2 = (
+            torch.linalg.vector_norm(got - want)
+            / torch.linalg.vector_norm(want)
+        ).item()
+        assert rel_l2 < 0.15, f"{name} relative L2 {rel_l2:.4f} exceeds 0.15"
 
 
 @torch.inference_mode()
