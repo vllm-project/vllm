@@ -428,16 +428,15 @@ def test_cumem_with_cudagraph():
 @pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
-def test_cudagraph_pool_sleep_and_release(level):
-    """Routing, backup at both sleep levels, and release: refused while asleep
-    or in use, then a recapture on a new stream starts from an empty pool."""
+def test_cudagraph_pool_sleep(level):
+    """Routing, and the graph pool backed up at both sleep levels and restored
+    in place by any wake."""
     from contextlib import nullcontext
     from types import SimpleNamespace
 
     import vllm.distributed.device_communicators.pynccl_allocator as nccl_alloc
     from vllm.compilation.cudagraph_pool import (
         capture_outside_cumem_pool,
-        release_cudagraph_pool,
         use_cudagraph_pool,
     )
     from vllm.device_allocator.sleep_mode_backend import CuMemBackend
@@ -473,18 +472,9 @@ def test_cudagraph_pool_sleep_and_release(level):
     held, backend = capture(), CuMemBackend()
     mapped = graph_pool()
     backend.suspend(level=level)
-    with pytest.raises(AssertionError, match="asleep"):
-        release_cudagraph_pool(on)
     backend.resume(tags=["kv_cache"])
     assert graph_pool() == mapped
     backend.resume(tags=["weights"])
     weight.fill_(2.0)  # Level 2 discards weights; emulate the reload.
     held[0].replay()
     assert torch.equal(held[1], torch.full_like(x, 5.0))
-    with pytest.raises(AssertionError, match="still has 1 other reference"):
-        release_cudagraph_pool(on)
-    held.clear()
-    release_cudagraph_pool(on)
-    assert graph_pool() == {}
-    held = capture()
-    assert sum(graph_pool().values()) == sum(mapped.values())

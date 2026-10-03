@@ -401,7 +401,6 @@ class CudaGraphManager:
         """
         self.graphs.clear()
         self._graphs_captured = False
-        CUDAGraphWrapper.clear_all_graphs()
         if self.breakable_cg_runner is not None:
             BreakableCUDAGraphWrapper.clear_all_graphs()
 

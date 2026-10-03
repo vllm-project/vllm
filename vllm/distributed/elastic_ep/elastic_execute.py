@@ -13,7 +13,6 @@ import torch.nn as nn
 from torch.distributed import P2POp
 
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
-from vllm.compilation.cudagraph_pool import release_cudagraph_pool
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import ParallelConfig, set_current_vllm_config
 from vllm.distributed import (
@@ -444,7 +443,6 @@ class ElasticEPScalingExecutor:
             for attr in vars(speculator).values() if speculator else ():
                 if isinstance(attr, CudaGraphManager):
                     attr.release_graphs()
-            release_cudagraph_pool(self.worker.vllm_config)
 
         elif isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
             wrapper = self.worker.model_runner.model

@@ -201,22 +201,9 @@ def test_deep_sleep_lora_tp2(monkeypatch):
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
-def _cudagraph_bytes(worker, recapture: bool = False):
-    """cudagraph-tag bytes; with recapture, elastic EP's release and recapture
-    first, also returning the bytes right after the release."""
-    from vllm.compilation.cudagraph_pool import release_cudagraph_pool
-
-    def size() -> int:
-        data = cumem.CuMemAllocator.get_instance().pointer_to_data.values()
-        return sum(d.handle[1] for d in data if d.tag == "cudagraph")
-
-    if not recapture:
-        return size()
-    worker.model_runner.cudagraph_manager.release_graphs()
-    release_cudagraph_pool(worker.vllm_config)
-    released = size()
-    worker.model_runner.capture_model()
-    return released, size()
+def _cudagraph_bytes(worker) -> int:
+    data = cumem.CuMemAllocator.get_instance().pointer_to_data.values()
+    return sum(d.handle[1] for d in data if d.tag == "cudagraph")
 
 
 def _custom_ar_active(worker) -> bool:
@@ -242,8 +229,8 @@ def _custom_ar_active(worker) -> bool:
 @create_new_process_for_each_test()
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
 def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
-    """Each capture site uses the pool, exact across sleeps; elastic recapture
-    refills it; TP=2 needs unregistered custom AR; off changes nothing."""
+    """Each capture site uses the pool, exact across sleeps; TP=2 needs
+    unregistered custom AR; off changes nothing."""
     for name, value in [
         ("VLLM_USE_V2_MODEL_RUNNER", "1"),
         ("VLLM_USE_BREAKABLE_CUDAGRAPH", "1" if breakable else "0"),
@@ -278,11 +265,6 @@ def test_sleep_cudagraph_pool(monkeypatch, mode, breakable, tp, offload):
         if level == 2:
             llm.collective_rpc("reload_weights")
         llm.wake_up(tags=["kv_cache"])
-        assert llm.generate(prompt, params)[0].outputs[0].text == expected
-    if tp == 1:
-        for _ in range(2):
-            rpc = llm.collective_rpc(_cudagraph_bytes, kwargs={"recapture": True})
-            assert rpc == [(0, graph_bytes[0])]
         assert llm.generate(prompt, params)[0].outputs[0].text == expected
 
 

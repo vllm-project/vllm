@@ -701,28 +701,17 @@ class VllmConfig:
     def use_cumem_cudagraph_pool(self) -> bool:
         """Capture CUDA graphs into the cuMem pool that sleep offloads: opted in,
         with sleep mode, the cumem backend, CUDA graphs and CUDA."""
-        return self._cumem_cudagraph_pool_blockers() == []
-
-    def _cumem_cudagraph_pool_blockers(self) -> list[str] | None:
-        """None unless opted in; otherwise the unmet requirements."""
         from vllm.platforms import current_platform
 
         model_config = self.model_config
-        if model_config is None or not model_config.sleep_mode_offload_cudagraph:
-            return None
-        checks = [
-            (model_config.enable_sleep_mode, "enable_sleep_mode is off"),
-            (
-                model_config.sleep_mode_backend == "cumem",
-                "the sleep backend is not cumem",
-            ),
-            (
-                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE,
-                "CUDA graphs are off",
-            ),
-            (current_platform.is_cuda(), "the platform is not CUDA"),
-        ]
-        return [reason for ok, reason in checks if not ok]
+        return (
+            model_config is not None
+            and model_config.sleep_mode_offload_cudagraph
+            and model_config.enable_sleep_mode
+            and model_config.sleep_mode_backend == "cumem"
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and current_platform.is_cuda()
+        )
 
     @property
     def use_v2_model_runner(self) -> bool:
@@ -1289,13 +1278,12 @@ class VllmConfig:
     def _verify_cumem_cudagraph_pool(self) -> None:
         """Warn when an opted-in pool is inactive; when active, default NCCL graph
         registration off, since it would pin the pool through sleep."""
-        blockers = self._cumem_cudagraph_pool_blockers()
-        if blockers is None:
-            return
-        if blockers:
-            logger.warning(
-                "sleep_mode_offload_cudagraph is inactive: %s.", ", ".join(blockers)
-            )
+        if not self.use_cumem_cudagraph_pool:
+            if self.model_config and self.model_config.sleep_mode_offload_cudagraph:
+                logger.warning(
+                    "sleep_mode_offload_cudagraph is inactive: it needs "
+                    "enable_sleep_mode, the cumem backend, CUDA graphs and CUDA."
+                )
             return
         # Workers inherit it (Ray copies NCCL_*) before any communicator init.
         value = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
