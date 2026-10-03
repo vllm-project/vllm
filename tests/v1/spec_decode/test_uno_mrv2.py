@@ -1191,6 +1191,8 @@ def test_uno_warmup_executes_native_verification_s4(
     """
     from vllm.v1.sample.ops import topk_topp_sampler, topk_topp_triton
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
+    from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
     from vllm.v1.worker.gpu.sample.sampler import Sampler
     from vllm.v1.worker.gpu.sample.states import SamplingStates
     from vllm.v1.worker.gpu.spec_decode import rejection_sampler as rejection_module
@@ -1255,15 +1257,15 @@ def test_uno_warmup_executes_native_verification_s4(
     sampler.req_states = SimpleNamespace(
         prefill_len=SimpleNamespace(gpu=torch.zeros(2))
     )
-    for attribute, method in (
-        ("logit_bias_state", "apply_logit_bias"),
-        ("penalties_state", "apply_penalties"),
-        ("bad_words_state", "apply_bad_words"),
-        ("thinking_budget_state", "apply"),
-    ):
-        setattr(sampler, attribute, SimpleNamespace(**{method: lambda *_: None}))
-    sampler.logit_bias_state.use_logit_bias = np.zeros(2, dtype=bool)  # type: ignore[attr-defined]
-    sampler.bad_words_state.num_bad_words = ArrayState([0, 0], np.int32)  # type: ignore[attr-defined]
+    for attribute in ("penalties_state", "thinking_budget_state"):
+        setattr(sampler, attribute, SimpleNamespace(apply=lambda logits, _ctx: logits))
+    logit_bias = object.__new__(LogitBiasState)
+    logit_bias.apply = lambda logits, _ctx: logits  # type: ignore[method-assign]
+    logit_bias.use_logit_bias = np.zeros(2, dtype=bool)
+    bad_words = object.__new__(BadWordsState)
+    bad_words.apply = lambda logits, _ctx: logits  # type: ignore[method-assign]
+    bad_words.num_bad_words = ArrayState([0, 0], np.int32)  # type: ignore[assignment]
+    sampler.logits_processors = [logit_bias, sampler.penalties_state, bad_words]  # type: ignore[list-item]
     sampler.thinking_budget_state.enabled = False
     sampler.penalties_state.use_penalty = np.zeros(2, dtype=bool)
     sampler.penalties_state._new_penalties_reqs = []
@@ -1335,6 +1337,14 @@ def test_uno_warmup_executes_native_verification_s4(
         rejection_module,
         "get_num_sampled_and_rejected",
         lambda num_sampled, *_: (num_sampled, torch.full_like(num_sampled, 8)),
+    )
+    monkeypatch.setattr(
+        rejection_module,
+        "gather_draft_sampled",
+        lambda input_ids, positions, logits_indices, *_: (
+            input_ids[logits_indices],
+            positions[logits_indices],
+        ),
     )
 
     assert runner._warm_up_uno_sampler(
@@ -1660,6 +1670,8 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
 ):
     """Warmup restores persistent state after success or a sampler failure."""
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
+    from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
     from vllm.v1.worker.gpu.spec_decode.uno import UnoSamplerWarmup, UnoSamplingMode
 
     class ArrayState:
@@ -1682,12 +1694,15 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
     )
     flashinfer_calls: list[bool] = []
     triton_top_p_launches: list[bool] = []
+    logit_bias = object.__new__(LogitBiasState)
+    logit_bias.use_logit_bias = np.ones(2, dtype=bool)
+    bad_words = object.__new__(BadWordsState)
+    bad_words.num_bad_words = ArrayState([2, 2])  # type: ignore[assignment]
     sampler = SimpleNamespace(
         use_flashinfer=use_flashinfer,
         needs_logits_processing=np.zeros(2, dtype=bool),
         sampling_states=states,
-        logit_bias_state=SimpleNamespace(use_logit_bias=np.ones(2, dtype=bool)),
-        bad_words_state=SimpleNamespace(num_bad_words=ArrayState([2, 2])),
+        logits_processors=[logit_bias, bad_words],
         thinking_budget_state=SimpleNamespace(
             enabled=True, use_thinking_budget=np.ones(2, dtype=bool)
         ),
@@ -1716,8 +1731,8 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
     runner.device = torch.device("cpu")
 
     def dummy_sampler_run(_hidden, *, num_reqs):
-        assert not sampler.logit_bias_state.use_logit_bias[:num_reqs].any()
-        assert not sampler.bad_words_state.num_bad_words.np[:num_reqs].any()
+        assert not logit_bias.use_logit_bias[:num_reqs].any()
+        assert not bad_words.num_bad_words.np[:num_reqs].any()
         assert not sampler.thinking_budget_state.use_thinking_budget[:num_reqs].any()
         has_filters = (states.top_k.np[:num_reqs] < states.vocab_size).any() or (
             states.top_p.np[:num_reqs] < 1.0
@@ -1766,8 +1781,8 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
     assert states.num_logprobs.tolist() == [-1, -1]
     assert sampler.needs_logits_processing.tolist() == [False, False]
     assert sampler.penalties_state.use_penalty.tolist() == [False, False]
-    assert sampler.logit_bias_state.use_logit_bias.tolist() == [True, True]
-    assert sampler.bad_words_state.num_bad_words.np.tolist() == [2, 2]
+    assert logit_bias.use_logit_bias.tolist() == [True, True]
+    assert bad_words.num_bad_words.np.tolist() == [2, 2]
     assert sampler.thinking_budget_state.use_thinking_budget.tolist() == [True, True]
     if use_flashinfer:
         assert flashinfer_calls == [True]

@@ -27,6 +27,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
+from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.spec_decode.uno import UnoSamplingMode
@@ -64,6 +66,12 @@ def uno_sampler_warmup_state(
     """Install declared request parameters and restore every modified state."""
     assert num_reqs >= mode.min_num_reqs
     states = sampler.sampling_states
+    (logit_bias,) = (
+        p for p in sampler.logits_processors if isinstance(p, LogitBiasState)
+    )
+    (bad_words,) = (
+        p for p in sampler.logits_processors if isinstance(p, BadWordsState)
+    )
     state_arrays = {
         name: getattr(states, name).np
         for name in ("temperature", "top_k", "top_p", "min_p", "seeds")
@@ -72,8 +80,8 @@ def uno_sampler_warmup_state(
         seeds_set=states.seeds_set,
         num_logprobs=states.num_logprobs,
         needs_logits_processing=sampler.needs_logits_processing,
-        use_logit_bias=sampler.logit_bias_state.use_logit_bias,
-        num_bad_words=sampler.bad_words_state.num_bad_words.np,
+        use_logit_bias=logit_bias.use_logit_bias,
+        num_bad_words=bad_words.num_bad_words.np,
     )
     thinking_budget = sampler.thinking_budget_state
     if thinking_budget.enabled:
@@ -126,7 +134,7 @@ def uno_sampler_warmup_state(
             )
         states.apply_staged_writes()
         penalties.apply_staged_writes()
-        sampler.bad_words_state.num_bad_words.copy_to_uva()
+        bad_words.num_bad_words.copy_to_uva()
         yield
     finally:
         for name, array in state_arrays.items():
@@ -135,7 +143,7 @@ def uno_sampler_warmup_state(
             buffer[:num_reqs].copy_(saved_buffer)
         states.apply_staged_writes()
         penalties.apply_staged_writes()
-        sampler.bad_words_state.num_bad_words.copy_to_uva()
+        bad_words.num_bad_words.copy_to_uva()
 
 
 def _reserved_block_count(
