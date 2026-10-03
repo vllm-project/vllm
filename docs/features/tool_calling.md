@@ -504,6 +504,17 @@ Flags: `--tool-call-parser step3p5 --reasoning-parser step3p5 --enable-auto-tool
 
 The parser supports `auto`, `required`, and named tools.
 
+### Kolibri 1 Models (`kolibri1`)
+
+Supported models:
+
+* `Aleph-Alpha/Kolibri-1`
+* `Aleph-Alpha/Kolibri-1-BF16`
+
+Flags: `--tool-call-parser kolibri1 --reasoning-parser kolibri1 --enable-auto-tool-choice`
+
+Kolibri 1 emits Hermes-style `<tool_call>` JSON, so `kolibri1` uses the `hermes` tool parser.
+
 ### Olmo 3 Models (`olmo3`)
 
 Olmo 3 models output tool calls in a format that is very similar to the one expected by the `pythonic` parser (see below), with a few differences. Each tool call is a pythonic string, but the parallel tool calls are newline-delimited, and the calls are wrapped within XML tags as `<function_calls>..</function_calls>`. In addition, the parser also allows JSON boolean and null literals (`true`, `false`, and `null`) in addition to the pythonic ones (`True`, `False`, and `None`).
