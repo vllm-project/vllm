@@ -254,6 +254,7 @@ class LocalSnapshotTools:
         ]
         child_environment = os.environ.copy()
         child_environment.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        child_environment.setdefault("NCCL_IB_DISABLE", "1")
         with (workdir / "child.log").open("wb") as log_file:
             process = subprocess.Popen(
                 command,
@@ -357,6 +358,13 @@ class LocalSnapshotTools:
             if "anon_inode:[io_uring]" in targets:
                 io_uring_pids.append(pid)
             for target in targets:
+                if target.startswith("/dev/infiniband/"):
+                    raise SnapshotCreateError(
+                        "snapshot process has open InfiniBand/RDMA state that "
+                        f"CRIU cannot capture: pid {pid}, {target}. If NCCL owns "
+                        "it, use NCCL_IB_DISABLE=1. Close other RDMA clients "
+                        "before snapshot creation."
+                    )
                 if target.startswith("socket:[") and target.endswith("]"):
                     # Shared descriptors name one holder; any of them locates
                     # the connection for the operator.
@@ -512,10 +520,18 @@ class LocalSnapshotTools:
             os.fsync(output.fileno())
 
     def _link_remap_names(self) -> set[str]:
+        try:
+            entries = tuple(self.shm_dir.iterdir())
+        except OSError as error:
+            raise SnapshotCreateError(
+                f"could not inventory CRIU link remaps in {self.shm_dir}: "
+                f"{_error_detail(error)}"
+            ) from error
         return {
             path.name
-            for path in self.shm_dir.glob("link_remap.*")
-            if path.name.removeprefix("link_remap.").isdigit()
+            for path in entries
+            if path.name.startswith("link_remap.")
+            and path.name.removeprefix("link_remap.").isdigit()
         }
 
     def _capture_link_remaps(self, artifact: Path, names: set[str]) -> None:
@@ -565,7 +581,8 @@ class LocalSnapshotTools:
         try:
             for source in sorted(source_dir.iterdir()):
                 if (
-                    not source.name.removeprefix("link_remap.").isdigit()
+                    not source.name.startswith("link_remap.")
+                    or not source.name.removeprefix("link_remap.").isdigit()
                     or source.is_symlink()
                     or not source.is_file()
                 ):
@@ -662,8 +679,16 @@ class LocalSnapshotTools:
                 workdir,
                 self._link_remap_names() - remaps_before,
             )
-        except BaseException:
-            for name in self._link_remap_names() - remaps_before:
+        except BaseException as primary:
+            try:
+                remaps_after = self._link_remap_names()
+            except BaseException as cleanup_error:
+                raise SnapshotCreateError(
+                    f"snapshot dump failed: {_error_detail(primary)}; "
+                    "remap cleanup inventory failed: "
+                    f"{_error_detail(cleanup_error)}"
+                ) from primary
+            for name in remaps_after - remaps_before:
                 (self.shm_dir / name).unlink(missing_ok=True)
             raise
         self._record_child_log_size(workdir)
@@ -747,6 +772,7 @@ class LocalSnapshotTools:
         prefixes = ("VLLM_", "CUDA_", "NCCL_", "TORCH_", "TRITON_")
         environment = os.environ.copy()
         environment.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        environment.setdefault("NCCL_IB_DISABLE", "1")
         selected = tuple(
             sorted(
                 (key, hashlib.sha256(key.encode() + b"\0" + value.encode()).hexdigest())
