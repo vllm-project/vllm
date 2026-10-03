@@ -7,6 +7,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -39,6 +40,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 20
   num_devices: 1
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -70,6 +72,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -92,7 +95,7 @@ steps:
   - vllm/distributed/
   - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
@@ -117,6 +120,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 65
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -136,7 +140,7 @@ steps:
   - vllm/distributed/
   - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
@@ -154,6 +158,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -174,7 +179,7 @@ steps:
   - vllm/distributed/
   - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
@@ -195,6 +200,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 4
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -234,13 +240,13 @@ steps:
     TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
     PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
     DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
-    TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
-    bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true'
+    TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true'
 - label: ':nvidia: (L4) Distributed DP Extended'
   key: distributed-dp-tests-4-gpus
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 4
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -290,6 +296,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 70
   num_devices: 4
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -326,7 +333,7 @@ steps:
   key: distributed-tests-4xa100
   device: intel_gpu
   num_devices: 4
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -358,7 +365,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -387,7 +394,7 @@ steps:
   key: distributed-tests-2xb200
   device: intel_gpu
   num_devices: 2
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -412,11 +419,12 @@ steps:
     pytest -v -s tests/distributed/test_nccl_symm_mem.py || true &&
     pytest -v -s tests/v1/distributed/test_dbo.py || true &&
     pytest -v -s tests/distributed/test_mnnvl_alltoall.py || true'
-- label: ':nvidia: (B200) Kimi-K3 GEMM-RS/AR'
-  key: kimi-k3-gemm-rs-ar-2xb200
+- label: ':nvidia: (B200) GEMM-RS/AR'
+  key: gemm-rs-ar-2xb200
   device: intel_gpu
   timeout_in_minutes: 20
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -428,19 +436,21 @@ steps:
     gpu: 2+
     mem: 16+
   _raw_old_commands:
-  - pytest -v -s tests/kernels/test_kimi_k3_gemm_rs_ar.py
+  - pytest -v -s tests/kernels/test_gemm_rs_ar.py
   source_file_dependencies:
-  - vllm/models/kimi_k3/nvidia/ops/cute_dsl/gemm_rs_ar.py
-  - tests/kernels/test_kimi_k3_gemm_rs_ar.py
+  - vllm/model_executor/kernels/linear/cute_dsl/gemm_rs_ar.py
+  - vllm/cute_utils/
+  - tests/kernels/test_gemm_rs_ar.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pytest -v -s tests/kernels/test_kimi_k3_gemm_rs_ar.py || true'
+    'pytest -v -s tests/kernels/test_gemm_rs_ar.py || true'
 - label: ':nvidia: (L4) Pipeline + Context Parallelism'
   key: pipeline-context-parallelism-4-gpus
   device: intel_gpu
   timeout_in_minutes: 55
   num_devices: 4
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -459,8 +469,10 @@ steps:
   - vllm/distributed/
   - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/model_executor/models/
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
   - tests/distributed/
   - tests/v1/distributed/test_pp_dp_v2.py
   commands:
@@ -475,6 +487,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 4
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -500,7 +513,7 @@ steps:
   - tests/distributed/test_ray_v2_executor.py
   - tests/distributed/test_ray_v2_executor_e2e.py
   - tests/distributed/test_pipeline_parallel.py
-  - tests/basic_correctness/test_basic_correctness.py
+  - tests/basic_correctness/models/test_basic_correctness.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh

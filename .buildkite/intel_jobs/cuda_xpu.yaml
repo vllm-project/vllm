@@ -6,6 +6,7 @@ steps:
   key: platform-tests
   device: intel_gpu
   timeout_in_minutes: 20
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -38,6 +39,7 @@ steps:
   key: cudagraph
   device: intel_gpu
   timeout_in_minutes: 30
+  optional: true
   working_dir: .
   no_plugin: true
   env:

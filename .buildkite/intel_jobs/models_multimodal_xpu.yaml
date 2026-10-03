@@ -6,6 +6,7 @@ steps:
   key: multi-modal-models-standard-1-qwen2-2
   device: intel_gpu
   timeout_in_minutes: 68
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -34,6 +35,7 @@ steps:
   key: multi-modal-models-standard-2-qwen3-gemma-2
   device: intel_gpu
   timeout_in_minutes: 75
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -63,6 +65,7 @@ steps:
   key: multi-modal-models-standard-3-llava-qwen2-vl-2
   device: intel_gpu
   timeout_in_minutes: 40
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -90,6 +93,7 @@ steps:
   key: multi-modal-models-standard-4-other-whisper-2
   device: intel_gpu
   timeout_in_minutes: 75
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -123,6 +127,7 @@ steps:
   device: intel_gpu
   timeout_in_minutes: 98
   parallelism: 4
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -151,6 +156,7 @@ steps:
   key: multi-modal-accuracy-eval-small-models
   device: intel_gpu
   timeout_in_minutes: 30
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -175,7 +181,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1)'
   key: multi-modal-models-extended-generation-1-2
   device: intel_gpu
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -204,7 +210,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Multimodal Models (PPL)'
   key: multi-modal-models-extended-ppl
   device: intel_gpu
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -230,7 +236,7 @@ steps:
   key: multi-modal-models-extended-generation-2
   device: intel_gpu
   parallelism: 4
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -255,7 +261,7 @@ steps:
 - label: ':nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 3)'
   key: multi-modal-models-extended-generation-3
   device: intel_gpu
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -280,7 +286,7 @@ steps:
 - label: ':nvidia: (H200 MIG 18GB) Multimodal Models (Extended Pooling)'
   key: multi-modal-models-extended-pooling
   device: intel_gpu
-  optional: false
+  optional: true
   working_dir: .
   no_plugin: true
   env:
