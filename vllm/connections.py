@@ -324,6 +324,13 @@ def _async_retry(
 class HTTPConnection:
     """Helper class to send HTTP requests."""
 
+    # HTTP redirect status codes followed manually by get_bytes()/
+    # async_get_bytes() when a redirect_validator is supplied.
+    _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+    # Redirect cap when following redirects manually (matches aiohttp's
+    # default max_redirects).
+    _MAX_REDIRECT_HOPS = 10
+
     def __init__(self, *, reuse_client: bool = True) -> None:
         super().__init__()
 
@@ -407,16 +414,48 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
         max_bytes: int | None = None,
+        redirect_validator: Callable[[str, str], str] | None = None,
     ) -> bytes:
-        with self.get_response(
-            url,
-            stream=True,
-            timeout=timeout,
-            allow_redirects=allow_redirects,
-        ) as r:
-            r.raise_for_status()
+        """Fetch ``url`` and return the response body.
 
-            return _read_response_bytes(r, max_bytes)
+        If ``redirect_validator`` is given, redirects are not followed by
+        the HTTP client. Instead, every redirect hop is resolved manually
+        and passed to the validator, which receives ``(location,
+        current_url)`` and must return the validated absolute target URL
+        (raising to block the hop). This lets callers enforce a security
+        policy (e.g. a domain allowlist) on every URL in the redirect
+        chain, not just the original one.
+        """
+        current_url = url
+        hops_left = self._MAX_REDIRECT_HOPS if redirect_validator is not None else 0
+        while True:
+            with self.get_response(
+                current_url,
+                stream=True,
+                timeout=timeout,
+                allow_redirects=allow_redirects and redirect_validator is None,
+            ) as r:
+                if (
+                    redirect_validator is not None
+                    and r.status_code in self._REDIRECT_STATUSES
+                ):
+                    location = r.headers.get("Location")
+                    if not location:
+                        raise ValueError(
+                            f"Redirect response from {current_url} "
+                            "has no Location header"
+                        )
+                    if hops_left <= 0:
+                        raise requests.exceptions.TooManyRedirects(
+                            f"Exceeded {self._MAX_REDIRECT_HOPS} redirects "
+                            f"while fetching {url}"
+                        )
+                    hops_left -= 1
+                    current_url = redirect_validator(location, current_url)
+                    continue
+                r.raise_for_status()
+
+                return _read_response_bytes(r, max_bytes)
 
     @_async_retry
     async def async_get_bytes(
@@ -426,15 +465,38 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
         max_bytes: int | None = None,
+        redirect_validator: Callable[[str, str], str] | None = None,
     ) -> bytes:
-        async with await self.get_async_response(
-            url,
-            timeout=timeout,
-            allow_redirects=allow_redirects,
-        ) as r:
-            r.raise_for_status()
+        """Async version of :meth:`get_bytes` (same redirect semantics)."""
+        current_url = url
+        hops_left = self._MAX_REDIRECT_HOPS if redirect_validator is not None else 0
+        while True:
+            async with await self.get_async_response(
+                current_url,
+                timeout=timeout,
+                allow_redirects=allow_redirects and redirect_validator is None,
+            ) as r:
+                if (
+                    redirect_validator is not None
+                    and r.status in self._REDIRECT_STATUSES
+                ):
+                    location = r.headers.get("Location")
+                    if not location:
+                        raise ValueError(
+                            f"Redirect response from {current_url} "
+                            "has no Location header"
+                        )
+                    if hops_left <= 0:
+                        raise aiohttp.TooManyRedirects(
+                            f"Exceeded {self._MAX_REDIRECT_HOPS} redirects "
+                            f"while fetching {url}"
+                        )
+                    hops_left -= 1
+                    current_url = redirect_validator(location, current_url)
+                    continue
+                r.raise_for_status()
 
-            return await _async_read_response_bytes(r, max_bytes)
+                return await _async_read_response_bytes(r, max_bytes)
 
     def get_text(self, url: str, *, timeout: float | None = None) -> str:
         with self.get_response(url, timeout=timeout) as r:
