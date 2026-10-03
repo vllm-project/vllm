@@ -147,20 +147,15 @@ class DummyBackend(SleepModeBackend):
 
 
 @pytest.mark.parametrize(
-    ("opted_in", "active", "env", "expected", "warns"),
-    [
-        (True, True, None, "0", False),
-        (True, True, "1", "1", True),
-        (False, False, None, None, False),
-        (True, False, None, None, True),
-    ],
-    ids=["active", "explicit-wins", "not-opted-in", "opted-in-inactive"],
+    ("active", "env", "expected", "warns"),
+    [(True, None, "0", False), (True, "1", "1", True), (False, None, None, False)],
+    ids=["active", "explicit-wins", "inactive"],
 )
-def test_cumem_cudagraph_pool_startup_checks(
-    monkeypatch, opted_in, active, env, expected, warns
+def test_cumem_cudagraph_pool_nccl_graph_register(
+    monkeypatch, active, env, expected, warns
 ):
     """Active: NCCL_GRAPH_REGISTER defaults to 0, an explicit value wins with a
-    warning. Inactive: untouched; opted in but inactive: one warning."""
+    warning. Inactive: untouched."""
     import vllm.config.vllm as config_module
 
     warnings: list[tuple] = []
@@ -168,10 +163,7 @@ def test_cumem_cudagraph_pool_startup_checks(
     monkeypatch.delenv("NCCL_GRAPH_REGISTER", raising=False)
     if env:
         monkeypatch.setenv("NCCL_GRAPH_REGISTER", env)
-    cfg = SimpleNamespace(
-        use_cumem_cudagraph_pool=active,
-        model_config=SimpleNamespace(sleep_mode_offload_cudagraph=opted_in),
-    )
+    cfg = SimpleNamespace(use_cumem_cudagraph_pool=active)
     VllmConfig._verify_cumem_cudagraph_pool(cfg)
     assert os.environ.get("NCCL_GRAPH_REGISTER") == expected
     assert bool(warnings) is warns

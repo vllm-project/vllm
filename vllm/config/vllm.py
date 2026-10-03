@@ -699,8 +699,7 @@ class VllmConfig:
 
     @property
     def use_cumem_cudagraph_pool(self) -> bool:
-        """Capture CUDA graphs into the cuMem pool that sleep offloads: opted in,
-        with sleep mode, the cumem backend, CUDA graphs and CUDA."""
+        """Whether CUDA graphs go to the cuMem pool that sleep offloads."""
         from vllm.platforms import current_platform
 
         model_config = self.model_config
@@ -1276,23 +1275,14 @@ class VllmConfig:
         )
 
     def _verify_cumem_cudagraph_pool(self) -> None:
-        """Warn when an opted-in pool is inactive; when active, default NCCL graph
-        registration off, since it would pin the pool through sleep."""
+        """NCCL graph registration pins the offloaded pool, so default it off."""
         if not self.use_cumem_cudagraph_pool:
-            if self.model_config and self.model_config.sleep_mode_offload_cudagraph:
-                logger.warning(
-                    "sleep_mode_offload_cudagraph is inactive: it needs "
-                    "enable_sleep_mode, the cumem backend, CUDA graphs and CUDA."
-                )
             return
-        # Workers inherit it (Ray copies NCCL_*) before any communicator init.
+        # Set before workers start so that they inherit it.
         value = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
         if value != "0":
             logger.warning(
-                "NCCL_GRAPH_REGISTER=%s is kept, but NCCL graph registration "
-                "pins the CUDA graph pool that sleep offloads and can keep stale "
-                "registrations after wake; set NCCL_GRAPH_REGISTER=0 or unset it.",
-                value,
+                "NCCL_GRAPH_REGISTER=%s pins the CUDA graph pool during sleep.", value
             )
 
     def _verify_sampling_replay_config(self) -> None:

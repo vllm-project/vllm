@@ -107,8 +107,7 @@ By default, CUDA graph memory stays on the GPU while asleep. With
 `sleep_mode_offload_cudagraph=True` (off by default), CUDA graphs are captured
 into a cuMem pool that sleep backs up to CPU memory at both levels and any wake
 restores in place, so graphs are replayed, not recaptured. It needs the default
-`cumem` backend, CUDA and CUDA graphs; otherwise it is inactive and a warning
-says why.
+`cumem` backend, CUDA and CUDA graphs; otherwise it has no effect.
 
 ```python
 llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, sleep_mode_offload_cudagraph=True)
