@@ -525,8 +525,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.kv_page_alignment = 512 if self.kv_mxfp8 else 576
         if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.kv_mxfp8:
             raise ValueError(
-                "nvfp4_ds_mla needs the V4.1 KV records, which FlashMLA "
-                "decodes only on SM100."
+                "nvfp4_ds_mla needs the V4.1 KV records, which only FlashMLA "
+                "on SM100 and FlashInfer on SM120 decode."
             )
 
         swa_bounded_replay = cache_config.swa_bounded_replay

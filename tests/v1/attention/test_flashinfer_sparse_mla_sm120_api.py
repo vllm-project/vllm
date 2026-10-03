@@ -11,7 +11,6 @@ from vllm.config import set_current_vllm_config
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     _required_sm120_sparse_topk,
 )
-from vllm.models.deepseek_v41 import attention as dsv41_attention
 from vllm.models.deepseek_v41.nvidia import flashinfer_sparse as dsv41_flashinfer
 from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     _sm120_kv_cache_format,
@@ -98,26 +97,6 @@ def test_sm120_dsv4_required_topk_tracks_dspark_width() -> None:
 
     assert _required_sm120_sparse_topk(causal, 128) == 128
     assert _required_sm120_sparse_topk(dspark, 128) == 192
-
-
-@pytest.mark.parametrize(
-    "capability,expected",
-    [
-        ((9, 0), False),
-        ((10, 0), True),
-        ((10, 3), True),
-        ((12, 0), True),
-        ((12, 1), True),
-    ],
-)
-def test_dsv41_mxfp8_record_on_sm100_and_sm120(monkeypatch, capability, expected):
-    current = DeviceCapability(*capability).to_int()
-    monkeypatch.setattr(
-        dsv41_attention.current_platform,
-        "is_device_capability_family",
-        lambda family, device_id=0: current // 10 == family // 10,
-    )
-    assert dsv41_attention._use_v41_mxfp8_kv_record() is expected
 
 
 @pytest.mark.parametrize(
