@@ -290,16 +290,55 @@ def test_context_anchor_is_last_committed_normalized_feature():
         anchor_hidden=torch.full((4, 4), 123.0),
         anchor_valid=torch.ones(4, dtype=torch.bool),
     )
-    batch = SimpleNamespace(num_reqs=2, query_start_loc=torch.tensor([0, 2, 6]))
-    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([0, 2]))
+    LiLiCorrSpeculator.prepare_context_anchor(
+        spec, 2, torch.tensor([0, 2, 6]), torch.tensor([0, 2])
+    )
     torch.testing.assert_close(spec.anchor_hidden[:2], norm(hidden[[1, 3]]))
     assert spec.anchor_valid.tolist() == [True, True, False, False]
     assert not spec.anchor_hidden[2:].any()
     # A smaller reordered batch must not retain an old request's anchor.
-    batch = SimpleNamespace(num_reqs=1, query_start_loc=torch.tensor([0, 3]))
-    LiLiCorrSpeculator.prepare_context_anchor(spec, batch, torch.tensor([1]))
+    LiLiCorrSpeculator.prepare_context_anchor(
+        spec, 1, torch.tensor([0, 3]), torch.tensor([1])
+    )
     torch.testing.assert_close(spec.anchor_hidden[0], norm(hidden[1]))
     assert not spec.anchor_hidden[1:].any()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_captured_context_anchor_rereads_fixed_inputs():
+    """The anchor runs in the draft's FULL graph: each replay must re-read its
+    fixed-address inputs and ignore a padded request's stale rejected count."""
+    from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+
+    dev = torch.device("cuda")
+    query_start_loc = torch.zeros(3, dtype=torch.int32, device=dev)
+    spec = SimpleNamespace(
+        hidden_states=torch.randn(8, 2, device=dev),
+        _aux_staging=None,
+        _num_rejected=torch.zeros(2, dtype=torch.int32, device=dev),
+        target_input_buffers=SimpleNamespace(query_start_loc=query_start_loc),
+        model=SimpleNamespace(model=SimpleNamespace(hidden_norm=lambda x: 2 * x)),
+        anchor_hidden=torch.zeros(2, 2, device=dev),
+        anchor_valid=torch.zeros(2, dtype=torch.bool, device=dev),
+        _num_graph_context_tokens=lambda num_reqs: 2 * num_reqs,
+        _precompute_context_kv=lambda start, end: None,
+    )
+    spec.prepare_context_anchor = lambda *args: (
+        LiLiCorrSpeculator.prepare_context_anchor(spec, *args)
+    )
+    DFlashSpeculator._prepare_graph_context(spec, 2)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        DFlashSpeculator._prepare_graph_context(spec, 2)
+    # One live request padded to two; the second case anchors past the 4 graph
+    # rows, on a row stored eagerly before replay.
+    for loc, rejected, row in (([0, 2, 2], [1, 5], 0), ([0, 7, 7], [0, 0], 6)):
+        query_start_loc.copy_(torch.tensor(loc))
+        spec._num_rejected.copy_(torch.tensor(rejected))
+        graph.replay()
+        torch.testing.assert_close(spec.anchor_hidden[0], 2 * spec.hidden_states[row])
+        assert spec.anchor_valid.tolist() == [True, False]
+        assert not spec.anchor_hidden[1].any()
 
 
 @pytest.mark.parametrize("lilicorr", [False, True])
