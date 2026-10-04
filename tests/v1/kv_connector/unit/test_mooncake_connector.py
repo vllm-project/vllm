@@ -4,6 +4,7 @@
 import asyncio
 import contextlib
 import errno
+import queue
 import socket
 import threading
 import time
@@ -33,6 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeXferResponseStatus,
     PullReqMeta,
     SendBlockMeta,
+    SendState,
     TransferRegion,
     _align_transfer_regions,
     _block_ids_for_region,
@@ -48,6 +50,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
+    MooncakeKVConnectorStats,
+)
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -55,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     MLAAttentionSpec,
 )
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
@@ -1105,6 +1112,37 @@ def test_scheduler_request_finished():
     assert "id-1" in scheduler_connector._reqs_not_processed
 
 
+@pytest.mark.parametrize("load_done", [False, True])
+def test_consumer_releases_transfer_finished_mid_load(load_done: bool):
+    """D asks P to drop the transfer of a request that finishes while its KV
+    is still arriving, and only then."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+    connector = create_scheduler(vllm_config).get_kv_connector()
+    request = create_request(request_id=1, do_remote_prefill=True)
+    request.kv_transfer_params.update(
+        transfer_id="xfer-1", remote_engine_id="p", remote_bootstrap_addr="http://p"
+    )
+    connector.connector_scheduler._reqs_need_recv[request.request_id] = (
+        request,
+        [[5, 6]],
+    )
+    request.kv_transfer_params["do_remote_prefill"] = False
+    connector.build_connector_meta(SchedulerOutput.make_empty())
+    if load_done:
+        connector.update_connector_output(
+            KVConnectorOutput(finished_recving={request.request_id})
+        )
+
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert connector.request_finished(request, [5, 6]) == (False, None)
+    pulls = connector.build_connector_meta(SchedulerOutput.make_empty()).reqs_to_recv
+    release = pulls.get("p", {}).get(request.request_id)
+    assert (release is not None) == (not load_done)
+    assert release is None or release.local_block_ids == []
+
+
 @contextlib.contextmanager
 def patch_worker_dependencies():
     """Helper to mock all distributed and network dependencies for Worker tests."""
@@ -1418,16 +1456,22 @@ async def test_kv_producer(monkeypatch):
         origin_sender_loop = prefill_worker.sender_loop
         prefill_worker.sender_loop = asyncio.get_event_loop()
 
-        # A request is finished on Producer and ready to be sent.
         transfer_id = "xfer-req-1"
-        send_meta = SendBlockMeta(
-            p_req_id="p-req-1",
-            transfer_id=transfer_id,
-            local_block_ids=[[10, 11]],
-            ready=asyncio.Event(),
-        )
-        prefill_worker.reqs_need_send[transfer_id] = send_meta
-        send_meta.ready.set()
+
+        def send_request(ready: bool = True) -> None:
+            # A request finished on Producer, ready to be sent unless told not.
+            send_meta = SendBlockMeta(
+                p_req_id="p-req-1",
+                transfer_id=transfer_id,
+                local_block_ids=[[10, 11]],
+                ready=asyncio.Event(),
+                state=SendState.READY if ready else SendState.WAITING,
+            )
+            if ready:
+                send_meta.ready.set()
+            prefill_worker.reqs_need_send[transfer_id] = send_meta
+
+        send_request()
 
         # Remote consumer request metadata
         xfer_meta = _xfer_meta(
@@ -1486,9 +1530,7 @@ async def test_kv_producer(monkeypatch):
             # Consumer only needs 1 block (less than P)
             mock_send_blocks.reset_mock()
             mock_socket.send_multipart.reset_mock()
-            prefill_worker.reqs_need_send[transfer_id] = send_meta
-            send_meta.sent = 0
-            send_meta.ready.set()
+            send_request()
             xfer_meta.req_blocks["d-req-1"] = (transfer_id, [[20]])
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
@@ -1505,9 +1547,7 @@ async def test_kv_producer(monkeypatch):
             # Consumer needs 3 blocks (more than P, error case)
             mock_send_blocks.reset_mock()
             mock_socket.send_multipart.reset_mock()
-            prefill_worker.reqs_need_send[transfer_id] = send_meta
-            send_meta.sent = 0
-            send_meta.ready.set()
+            send_request()
             xfer_meta.req_blocks["d-req-1"] = (transfer_id, [[20, 21, 22]])
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
@@ -1522,9 +1562,7 @@ async def test_kv_producer(monkeypatch):
             # Timeout
             mock_send_blocks.reset_mock()
             mock_socket.send_multipart.reset_mock()
-            prefill_worker.reqs_need_send[transfer_id] = send_meta
-            send_meta.sent = 0
-            send_meta.ready.clear()
+            send_request(ready=False)
             xfer_meta.req_blocks["d-req-1"] = (transfer_id, [[20, 21]])
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
@@ -1541,9 +1579,7 @@ async def test_kv_producer(monkeypatch):
             prefill_worker, "_send_blocks", return_value=123
         ) as mock_send_blocks:
             mock_socket.send_multipart.reset_mock()
-            prefill_worker.reqs_need_send[transfer_id] = send_meta
-            send_meta.sent = 0
-            send_meta.ready.set()
+            send_request()
             xfer_meta.req_blocks["d-req-1"] = (transfer_id, [[20, 21]])
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
@@ -1560,37 +1596,58 @@ async def test_kv_producer(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("local_block_ids", "expected_finished"),
+    ("local_block_ids", "answers", "load_failed"),
     [
-        ([], set()),
-        ([[]], set()),
-        ([[100]], {"d-req-1"}),
+        ([[100]], ["ok"], False),
+        ([[100]], ["ok", "ok"], False),
+        ([[100]], ["err", "ok"], True),
+        ([[100]], ["ok", "err"], True),
+        ([], ["ok"], None),
+        ([[]], ["err"], None),
+    ],
+    ids=[
+        "one-producer",
+        "two-producers",
+        "first-of-two-fails",
+        "last-of-two-fails",
+        "empty-pull",
+        "empty-pull-fails",
     ],
 )
-def test_pull_completion_requires_local_blocks(
-    local_block_ids: list[list[int]],
-    expected_finished: set[str],
+def test_load_ends_once_every_producer_answered(
+    local_block_ids: list[list[int]], answers: list[str], load_failed: bool | None
 ):
+    """A load ends only after all producers answered, since until then one may
+    still write the blocks; any failure fails it; empty pulls report nothing."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.shutdown = MagicMock()
     worker.finished_recving_reqs = set()
+    worker.xfer_stats = MooncakeKVConnectorStats()
+    worker._is_hma_required = False
+    worker._invalid_block_ids = queue.Queue()
     pull_meta = PullReqMeta(
         d_req_id="d-req-1",
         transfer_id="xfer-req-1",
         local_block_ids=local_block_ids,
         remote_engine_id="p-engine",
         remote_bootstrap_addr="http://bootstrap:33333",
-        pull_tasks_count=1,
-    )
-    response = MooncakeXferResponse(
-        status=MooncakeXferResponseStatus.FINISH,
-        ok_reqs=["d-req-1"],
+        pull_tasks_count=len(answers),
     )
 
-    worker.process_pulling_result(response, {"d-req-1": pull_meta})
+    for answer in answers:
+        assert not worker.finished_recving_reqs
+        ok, err = (["d-req-1"], None) if answer == "ok" else (None, ["d-req-1"])
+        response = MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.FINISH, ok_reqs=ok, err_reqs=err
+        )
+        worker.process_pulling_result(response, {"d-req-1": pull_meta})
 
-    assert pull_meta.pull_tasks_count == 0
-    assert worker.finished_recving_reqs == expected_finished
+    invalid = worker.get_block_ids_with_load_errors()
+    if load_failed is None:
+        assert (worker.finished_recving_reqs, invalid) == (set(), set())
+    else:
+        assert worker.finished_recving_reqs == {"d-req-1"}
+        assert invalid == ({100} if load_failed else set())
 
 
 @pytest.mark.asyncio
@@ -1669,43 +1726,185 @@ async def test_kv_consumuer(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_worker_get_finished_timeout(monkeypatch):
-    """Tests the cleanup mechanism for requests."""
+@pytest.mark.parametrize(
+    ("events", "pull_ok", "freed"),
+    [
+        (["claim", "ready", "pull"], True, True),
+        (["claim", "pull", "ready"], True, True),
+        (["claim", "pull", "abort"], False, False),
+        (["abort", "pull"], False, False),
+        (["pull", "expire"], False, False),
+        (["claim", "ready", "expire"], None, True),
+        (["claim", "expire", "pull"], None, False),
+        (["claim", "ready", "release"], None, True),
+        (["claim", "pull", "release", "ready"], False, True),
+        (["release", "claim", "ready", "pull"], False, True),
+        (["claim", "release", "expire", "ready"], None, True),
+        (["claim", "ready", "failing-pull"], None, True),
+        (["claim", "ready", "busy", "pull", "abort", "free"], False, True),
+        (["claim", "ready", "busy", "abort", "pull"], False, True),
+        (["claim", "abort", "neighbor", "busy", "pull"], False, False),
+        (["claim", "ready", "late-resume", "pull"], False, True),
+        (
+            ["claim", "ready", "busy", "short-timeout", "pull", "answered"],
+            False,
+            False,
+        ),
+        (
+            ["claim", "ready", "slow-send", "pull", "writing", "abort", "write-ends"],
+            True,
+            True,
+        ),
+    ],
+    ids=[
+        "ready-then-pull",
+        "pull-waits-for-ready",
+        "abort-wakes-waiting-pull",
+        "pull-after-unclaimed-abort",
+        "unclaimed-pull-expires",
+        "unpulled-kv-expires",
+        "claimed-never-expires",
+        "release-frees-ready-kv",
+        "release-wakes-pull-then-frees-on-ready",
+        "release-before-claim",
+        "release-outlives-expiry-while-claimed",
+        "failed-send-frees-kv",
+        "pull-waiting-for-a-sender-stays-abortable",
+        "aborted-pull-answered-while-senders-are-busy",
+        "aborted-pull-answered-before-its-batch-writes",
+        "pull-resumed-past-its-deadline-never-writes",
+        "pull-times-out-while-senders-are-busy",
+        "abort-frees-only-after-the-write",
+    ],
+)
+async def test_send_state_answers_every_pull_once(monkeypatch, events, pull_ok, freed):
+    """In any order of P's scheduler, D's pulls and releases, and expiry, a pull
+    gets one prompt answer and P frees ready blocks once nothing reads them."""
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "60")
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_producer"
     )
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        prefill_connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            _make_test_kv_cache_config(),
+        worker = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        worker.kv_caches_base_addr = [0x1000]
+        worker.block_len_per_layer = worker.kv_block_len_per_layer = [4096]
+        worker.registered_layer_names = ["model.layers.0.self_attn"]
+        worker.registered_layer_indices = [0]
+        sender_loop, worker.sender_loop = worker.sender_loop, asyncio.get_running_loop()
+        worker._send_slots = asyncio.Semaphore(1)
+        region = _region(
+            0x2000, block_len=4096, row_offset=-1, layer_name="model.layers.0.self_attn"
         )
-        prefill_worker = prefill_connector.connector_worker
+        xfer_meta = _xfer_meta([region], {"d-req": ("tx", [[20, 21]])})
+        release_meta = _xfer_meta([region], {"d-rel": ("tx", [])})
+        sock = AsyncMock(spec=zmq.asyncio.Socket)
+        sock.send_multipart = AsyncMock()
+        pull, freed_reqs = None, set()
+        write_started, write_may_end = threading.Event(), threading.Event()
+        take_sender = worker._send_slots.acquire
 
-        # Add an expired request (expire_time is in the past).
-        prefill_worker.reqs_need_send["tx-expired"] = SendBlockMeta(
-            p_req_id="p-req-expired",
-            transfer_id="tx-expired",
-            local_block_ids=[[1, 2]],
-            ready=MagicMock(),
-            expire_time=time.perf_counter() - 100,
+        async def acquire_then_stall() -> bool:
+            # The sender is free, but the event loop resumes the pull late.
+            await take_sender()
+            now[0] += 61
+            return True
+
+        def slow_write(*_) -> int:
+            write_started.set()
+            write_may_end.wait(5)
+            return 0
+
+        now = [time.perf_counter()]
+        monkeypatch.setattr(mooncake_connector.time, "perf_counter", lambda: now[0])
+
+        def scheduler_meta(blocks=None, aborted=False):
+            meta = MooncakeConnectorMetadata()
+            if blocks is not None:
+                meta.reqs_to_send["p-req"] = ("tx", blocks)
+            if aborted:
+                meta.reqs_not_processed = {"tx"}
+            return meta
+
+        with patch.object(worker, "_send_blocks", return_value=0) as send_blocks:
+            for event in events:
+                if event == "claim":
+                    await worker.record_send_reqs(scheduler_meta(blocks=[]))
+                elif event == "ready":
+                    await worker.record_send_reqs(scheduler_meta(blocks=[[10, 11]]))
+                elif event == "abort":
+                    await worker.record_send_reqs(scheduler_meta(aborted=True))
+                elif event == "slow-send":
+                    send_blocks.side_effect = slow_write
+                elif event == "writing":
+                    loop = asyncio.get_running_loop()
+                    assert await loop.run_in_executor(None, write_started.wait, 5)
+                elif event == "write-ends":
+                    assert not await worker.fetch_finished_sending_reqs()
+                    write_may_end.set()
+                elif event == "busy":
+                    await worker._send_slots.acquire()
+                elif event == "neighbor":
+                    # Another transfer, ready, pulled in the same message.
+                    neighbor = MooncakeConnectorMetadata()
+                    neighbor.reqs_to_send["p-other"] = ("tx2", [[12, 13]])
+                    await worker.record_send_reqs(neighbor)
+                    xfer_meta.req_blocks["d-other"] = ("tx2", [[22, 23]])
+                elif event == "late-resume":
+                    worker._send_slots.acquire = acquire_then_stall
+                elif event == "short-timeout":
+                    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "1")
+                elif event == "answered":
+                    await asyncio.wait([pull], timeout=3)
+                elif event == "free":
+                    worker._send_slots.release()
+                elif event in ("pull", "failing-pull"):
+                    if event == "failing-pull":
+                        send_blocks.side_effect = RuntimeError("transfer engine died")
+                    pull = asyncio.create_task(
+                        worker.send_kv_to_decode(b"d", sock, xfer_meta)
+                    )
+                    await asyncio.sleep(0.01)  # until it waits for P or a sender
+                    if event == "failing-pull":
+                        await asyncio.wait([pull], timeout=1)
+                elif event == "release":
+                    await worker.send_kv_to_decode(b"d", sock, release_meta)
+                elif event == "expire":
+                    now[0] += 61
+                    freed_reqs |= await worker.fetch_finished_sending_reqs()
+                await asyncio.sleep(0)
+            if pull is not None:
+                await asyncio.wait([pull], timeout=1)
+        freed_reqs |= await worker.fetch_finished_sending_reqs()
+
+        decoded = (
+            worker._xfer_resp_decoder.decode(call.args[0][1])
+            for call in sock.send_multipart.call_args_list
         )
-
-        # Add a non-expired request.
-        prefill_worker.reqs_need_send["tx-active"] = SendBlockMeta(
-            p_req_id="p-req-active",
-            transfer_id="tx-active",
-            local_block_ids=[[3, 4]],
-            ready=MagicMock(),
-            expire_time=time.perf_counter() + 100,
-        )
-
-        finished_reqs = await prefill_worker.fetch_finished_sending_reqs()
-
-        assert "p-req-expired" in finished_reqs
-        assert "p-req-active" not in finished_reqs
-        assert "tx-expired" not in prefill_worker.reqs_need_send
-        assert "tx-active" in prefill_worker.reqs_need_send
+        responses = [
+            r for r in decoded if "d-req" in (r.ok_reqs or []) + (r.err_reqs or [])
+        ]
+        if pull_ok is None:
+            assert not responses
+            if pull is not None and not pull.cancel():
+                assert isinstance(pull.exception(), RuntimeError)
+        else:
+            assert len(responses) == 1
+            # A neighbor still being written keeps the pull open.
+            assert responses[0].status == (
+                MooncakeXferResponseStatus.CONTINUE
+                if "neighbor" in events
+                else MooncakeXferResponseStatus.FINISH
+            )
+            ok, err = (["d-req"], None) if pull_ok else (None, ["d-req"])
+            assert (responses[0].ok_reqs, responses[0].err_reqs) == (ok, err)
+        assert freed_reqs == ({"p-req"} if freed else set())
+        if pull is not None:
+            pull.cancel()
+            await asyncio.gather(pull, return_exceptions=True)
+        worker.sender_loop = sender_loop
+        worker.shutdown()
 
 
 @pytest.mark.parametrize(
