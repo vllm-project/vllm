@@ -65,6 +65,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kInt8StaticChannelSym,
     kMxfp4Static,
     kMxfp8Dynamic,
@@ -230,6 +231,9 @@ class OnlineQuantizationConfig(QuantizationConfig):
 
         """
         if spec is None or spec.weight is None:
+            return None
+        # Load-time gfx942 requant, not online conversion. Mxfp4MoEMethod owns it.
+        if spec.weight == kInt4Static32:
             return None
         cls = table.get(spec.weight)
         if cls is None:
