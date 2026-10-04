@@ -24,6 +24,23 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE: bool | None = None
+
+
+def is_aiter_fused_qkv_split_qk_norm_rope_cache_available() -> bool:
+    global _AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE
+    if _AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE is None:
+        try:
+            from aiter.ops.triton.rope.fused_qkv_split_qk_norm_rope_cache import (  # noqa: F401
+                fused_qkv_split_qk_norm_rope_cache,
+            )
+        except (ImportError, ModuleNotFoundError):
+            _AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE = False
+        else:
+            _AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE = True
+    return _AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE
+
+
 # fp8_dtype is not cached.
 # on ROCm the fp8_dtype always calls is_fp8_fnuz
 # which is a host op, so we cache it once here.
