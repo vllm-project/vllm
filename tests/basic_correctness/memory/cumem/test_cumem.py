@@ -423,3 +423,58 @@ def test_cumem_with_cudagraph():
 
     # output content is as expected
     assert torch.allclose(y, x + 1)
+
+
+@pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
+def test_cudagraph_pool_sleep(level):
+    """Routing, and the graph pool backed up at both sleep levels and restored
+    in place by any wake."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    import vllm.distributed.device_communicators.pynccl_allocator as nccl_alloc
+    from vllm.compilation.cudagraph_pool import (
+        capture_outside_cumem_pool,
+        capture_pool,
+    )
+    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+
+    allocator = get_mem_allocator_instance()
+    on, off = (SimpleNamespace(use_cumem_cudagraph_pool=v) for v in (True, False))
+    handle = current_platform.graph_pool_handle()
+    for cfg, ctx in ((off, nullcontext()), (on, capture_outside_cumem_pool())):
+        with ctx, capture_pool(handle, cfg) as used:
+            assert used == handle and allocator.current_tag != "cudagraph"
+    with allocator.use_memory_pool("weights"):
+        weight = torch.full((1 << 20,), 2.0, device=DEVICE_TYPE)
+    x = torch.ones_like(weight)
+
+    def capture() -> list:
+        graph = torch.cuda.CUDAGraph()
+        stream = torch.cuda.Stream()
+        with (
+            capture_pool(handle, on) as pool,
+            torch.cuda.graph(graph, pool=pool, stream=stream),
+        ):
+            assert nccl_alloc._graph_pool_id == pool != handle
+            const = torch.empty_like(x)  # Never written by replay: needs a backup.
+            y = x * weight + const
+        return [graph, y, const.fill_(3.0)]
+
+    def graph_pool() -> dict[int, int]:
+        data = allocator.pointer_to_data.items()
+        return {
+            p: d.handle[1] for p, d in data if d.tag == "cudagraph" and not d.is_asleep
+        }
+
+    held, backend = capture(), CuMemBackend()
+    mapped = graph_pool()
+    backend.suspend(level=level)
+    backend.resume(tags=["kv_cache"])
+    assert graph_pool() == mapped
+    backend.resume(tags=["weights"])
+    weight.fill_(2.0)  # Level 2 discards weights; emulate the reload.
+    held[0].replay()
+    assert torch.equal(held[1], torch.full_like(x, 5.0))

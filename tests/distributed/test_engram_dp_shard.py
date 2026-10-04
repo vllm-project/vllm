@@ -177,7 +177,9 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
     # Supply the resolved Engram settings without constructing a full model.
     vllm_config.engram_config = EngramConfig()
     vllm_config.model_config = SimpleNamespace(
-        architecture="DeepseekV41ForCausalLM", is_moe=True
+        architecture="DeepseekV41ForCausalLM",
+        is_moe=True,
+        sleep_mode_offload_cudagraph=False,
     )
     try:
         init_distributed_environment()
