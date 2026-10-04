@@ -46,6 +46,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# KV-cache scales registered by BaseKVCacheMethod; most checkpoints omit them.
+_KV_CACHE_SCALE_NAMES = ("q_scale", "k_scale", "v_scale", "prob_scale")
+
 
 class DefaultModelLoader(BaseModelLoader):
     """Model loader that can load different file types from disk."""
@@ -496,10 +499,15 @@ class DefaultModelLoader(BaseModelLoader):
             else default_enable_weights_track
         )
         if enable_weights_track:
-            self.track_weights_loading(model, loaded_weights)
+            self.track_weights_loading(
+                model, loaded_weights, quantized=model_config.quantization is not None
+            )
 
     def track_weights_loading(
-        self, model: nn.Module, loaded_weights: set[str] | None
+        self,
+        model: nn.Module,
+        loaded_weights: set[str] | None,
+        quantized: bool = False,
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
         if loaded_weights is not None:
@@ -514,6 +522,15 @@ class DefaultModelLoader(BaseModelLoader):
                 # which can be missing in checkpoints
                 if has_online_quant or has_postprocess_quant:
                     for param_name, _ in module.named_parameters():
+                        # A serialized quantized checkpoint must still carry
+                        # everything except the KV-cache scales.
+                        if (
+                            quantized
+                            and not has_online_quant
+                            and param_name.rsplit(".", 1)[-1]
+                            not in _KV_CACHE_SCALE_NAMES
+                        ):
+                            continue
                         full_name = f"{name}.{param_name}" if name else param_name
                         loaded_weights.add(full_name)
             weights_not_loaded = weights_to_load - loaded_weights
