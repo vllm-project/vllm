@@ -56,6 +56,35 @@ def test_non_diffusion_models_unaffected():
     params.verify(MockModelConfig(), None, None, None)
 
 
+@pytest.mark.parametrize("kwargs", [{"min_p": 0.1}, {"logit_bias": {0: 1.0}}])
+def test_spec_decode_rejects_incompatible_params_without_fallback(
+    monkeypatch, kwargs: dict
+):
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        current_platform,
+        "supports_per_request_spec_decode_fallback",
+        lambda: False,
+    )
+    with pytest.raises(VLLMValidationError, match="not yet supported with speculative"):
+        SamplingParams(**kwargs)._validate_spec_decode(object())
+
+
+@pytest.mark.parametrize("kwargs", [{"min_p": 0.1}, {"logit_bias": {0: 1.0}}])
+def test_spec_decode_accepts_incompatible_params_with_ordinary_fallback(
+    monkeypatch, kwargs: dict
+):
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        current_platform,
+        "supports_per_request_spec_decode_fallback",
+        lambda: True,
+    )
+    SamplingParams(**kwargs)._validate_spec_decode(object())
+
+
 def test_verify_leaves_logits_processors_to_admission():
     """verify() is runner-agnostic; LP validation lives in the admission
     layer, so an unimportable FQCN must not fail verify()."""
