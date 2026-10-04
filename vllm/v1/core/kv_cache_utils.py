@@ -9,7 +9,7 @@ import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from functools import partial
+from functools import partial, reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
@@ -21,7 +21,6 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.hisparse.layout import (
-    get_hisparse_gpu_memory_usage,
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
     get_hisparse_kv_cache_groups,
@@ -502,8 +501,8 @@ def _gen_mm_extra_hash_keys(
 ) -> tuple[list[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
     computation. For multi-modal inputs, the extra keys are
-    (mm_hash, start_offset) that indicate a mm input contained in the
-    block and its starting offset in the block tokens.
+    ("mm", mm_hash, start_offset) tuples that indicate a mm input contained
+    in the block and its starting offset in the block tokens.
 
     Args:
         request: The request object.
@@ -549,7 +548,7 @@ def _gen_mm_extra_hash_keys(
             # relative to the start of the block so prefix-cache keys stay
             # distinct when the same MM item appears at different positions
             # within otherwise-identical placeholder blocks.
-            extra_keys.append((mm_feature.identifier, offset - start_token_idx))
+            extra_keys.append(("mm", mm_feature.identifier, offset - start_token_idx))
 
             if end_token_idx >= offset + length:
                 # If this block contains the end of the current mm input,
@@ -565,25 +564,29 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str, str]]:
     """Generate extra keys related to LoRA for block hash computation.
+
+    The adapter path is included so that re-pointing a LoRA name at a different
+    adapter does not reuse KV computed with the previous one.
 
     Args:
         request: The request object.
 
     Returns:
-        Return LoRA name of the request if it is a LoRA request. Return empty
-        list otherwise.
+        Return the LoRA name and path of the request if it is a LoRA request.
+        Return empty list otherwise.
 
     """
-    if not request.lora_request:
+    lora_request = request.lora_request
+    if not lora_request:
         return []
-    return [request.lora_request.lora_name]
+    return [("lora", lora_request.lora_name, lora_request.lora_path)]
 
 
 def _gen_prompt_embeds_extra_hash_keys(
     request: Request, start_token_idx: int, end_token_idx: int
-) -> list[bytes]:
+) -> list[tuple[str, bytes]]:
     """Generate extra keys related to prompt embeds for block hash computation.
 
     Args:
@@ -605,7 +608,7 @@ def _gen_prompt_embeds_extra_hash_keys(
         # Hash prompt embeds once per block and cache on request
         embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
         request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
-    return [embeds_hash]
+    return [("prompt_embeds", embeds_hash)]
 
 
 def generate_block_hash_extra_keys(
@@ -629,9 +632,11 @@ def generate_block_hash_extra_keys(
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
-    lora_extra_keys: list[str] = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[str] = (
-        [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
+    lora_extra_keys = _gen_lora_extra_hash_keys(request)
+    cache_salt_keys: list[tuple[str, str]] = (
+        [("cache_salt", request.cache_salt)]
+        if (start_token_idx == 0 and request.cache_salt)
+        else []
     )
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
@@ -645,6 +650,35 @@ def generate_block_hash_extra_keys(
         return None, new_start_mm_idx
 
     return tuple(extra_keys), new_start_mm_idx
+
+
+def to_event_extra_keys(
+    extra_keys: Iterable[tuple[Any, ...] | None] | None,
+) -> list[tuple[Any, ...] | None] | None:
+    """Convert block-hash extra keys to the untagged per-block list published
+    in KV events.
+
+    External KV event consumers parse the pre-tagging shapes: bare LoRA names
+    and cache salts, ``(mm_identifier, offset)`` pairs and bare prompt-embeds
+    digests. Events keep that format until consumers handle the tagged keys.
+
+    Args:
+        extra_keys: One entry per block, each as returned by
+            `generate_block_hash_extra_keys`, or None.
+
+    Returns:
+        One untagged entry per block, or None if there are no entries.
+
+    """
+    if not extra_keys:
+        return None
+    event_keys = [
+        None
+        if keys is None
+        else tuple(key[1:] if key[0] == "mm" else key[1] for key in keys)
+        for keys in extra_keys
+    ]
+    return event_keys or None
 
 
 def hash_block_tokens(
@@ -682,12 +716,7 @@ def hash_block_tokens(
 
 def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
     """Return the token span of a cache block under DCP."""
-    layer_specs = iter_layer_specs(spec)
-    if len(layer_specs) > 0 and all(
-        isinstance(layer_spec, AttentionSpec) for layer_spec in layer_specs
-    ):
-        return spec.block_size * dcp_world_size
-    return spec.block_size
+    return spec.block_size * (dcp_world_size if spec.dcp_sharded else 1)
 
 
 def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCacheSpec:
@@ -707,28 +736,6 @@ def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCache
     return replace(spec, block_size=block_size)
 
 
-def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> int:
-    """Return the DCP size that owns this group's block geometry.
-
-    Full-attention KV (including MLA) is sharded across DCP ranks, so prefix
-    hashing and manager ``block_size`` use the process DCP size. Other specs
-    keep replicated per-rank state (Mamba, sliding window, chunked-local) and
-    must keep ``dcp_world_size=1`` even when the process runs with DCP > 1.
-
-    Draft MLA groups on the sharded DSpark path are ``FullAttentionSpec`` /
-    ``MLAAttentionSpec`` and therefore keep the process DCP size. A replicated
-    draft group would need a different spec, not this helper.
-    """
-    if dcp_world_size <= 1:
-        return 1
-    inner = spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        inner = next(iter(spec.kv_cache_specs.values()))
-    if isinstance(inner, FullAttentionSpec):
-        return dcp_world_size
-    return 1
-
-
 def resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -741,7 +748,9 @@ def resolve_kv_cache_block_sizes(
       group's effective block size. Attention groups are scaled by DCP;
       Mamba groups keep their full per-rank state and are not scaled.
     - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
-      is computed. Single group: equals scheduler block size. Multiple groups:
+      is computed. Single group: equals scheduler block size, and any other
+      ``cache_config.prefix_match_unit`` is rejected while block hashing is
+      active. Multiple groups:
       ``cache_config.prefix_match_unit`` override if set, else the GCD of
       group block sizes; every group's block size must be divisible by it.
       Returns the scheduler block size (i.e. disables finer hashing) if block
@@ -752,7 +761,24 @@ def resolve_kv_cache_block_sizes(
     groups = kv_cache_config.kv_cache_groups
 
     if len(groups) <= 1:
+        if groups and not groups[0].kv_cache_spec.dcp_sharded:
+            dcp = 1
         bs = cache_config.block_size * dcp
+        # The Mamba prefill checkpoint builder reads prefix_match_unit directly,
+        # so a value dropped here puts its checkpoints off the scheduler's grid.
+        if (
+            cache_config.prefix_match_unit not in (None, bs)
+            and len(groups) == 1
+            and (
+                cache_config.enable_prefix_caching
+                or vllm_config.kv_transfer_config is not None
+            )
+        ):
+            raise ValueError(
+                f"Invalid prefix_match_unit={cache_config.prefix_match_unit}; "
+                "with a single KV cache group, prefix-cache hits land on the "
+                f"block size ({bs}). Unset it or set it to {bs}."
+            )
         return bs, bs
 
     group_block_sizes = [
@@ -1128,7 +1154,9 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
-    return _get_kv_cache_bytes_per_block(kv_cache_groups)
+    return _get_kv_cache_bytes_per_block(
+        [group for group in kv_cache_groups if not group.host_resident]
+    )
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -1935,18 +1963,21 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         kv_cache_spec: The kv cache spec of each attention layer in the model
 
     """
-    if is_kv_cache_spec_uniform(
-        kv_cache_spec
-    ) or UniformTypeKVCacheSpecs.is_uniform_type(kv_cache_spec):
-        return
-
-    logger.warning(
-        "Hybrid KV cache manager is disabled for this hybrid model, "
-        "This means we do not enable any optimizations for saving KV cache "
-        "memory (e.g., dropping the KV cache outside the sliding window). "
-        "The compute of layers like sliding window is still saved."
-    )
-    kv_cache_spec.update(_promote_local_kv_cache_specs(kv_cache_spec))
+    groups: defaultdict[bool, dict[str, KVCacheSpec]] = defaultdict(dict)
+    for name, spec in kv_cache_spec.items():
+        replicated = isinstance(spec, AttentionSpec) and not spec.dcp_sharded
+        groups[replicated][name] = spec
+    for specs in groups.values():
+        promoted_specs = _promote_local_kv_cache_specs(specs)
+        if promoted_specs == specs:
+            continue
+        logger.warning(
+            "Hybrid KV cache manager is disabled for this hybrid model, "
+            "This means we do not enable any optimizations for saving KV cache "
+            "memory (e.g., dropping the KV cache outside the sliding window). "
+            "The compute of layers like sliding window is still saved."
+        )
+        kv_cache_spec.update(promoted_specs)
 
 
 def _approximate_gcd(values: Sequence[int], *, lower_bound: int | None = None) -> int:
@@ -2276,7 +2307,7 @@ def _ensure_min_page_size(
     scaled: list[KVCacheGroupSpec] = []
     for g in groups:
         s = g.kv_cache_spec
-        kw: dict[str, int] = {"block_size": s.block_size * scale}
+        kw: dict[str, Any] = {"block_size": s.block_size * scale}
         if isinstance(s, (AttentionSpec, MambaSpec)) and s.page_size_padded is not None:
             kw["page_size_padded"] = s.page_size_padded * scale
         scaled.append(KVCacheGroupSpec(g.layer_names, replace(s, **kw)))
@@ -2383,6 +2414,26 @@ def get_kv_cache_groups(
     return groups
 
 
+def _layer_tp_replicas(spec: KVCacheSpec, tp_size: int, dcp_size: int) -> int:
+    if not isinstance(spec, AttentionSpec) or spec.max_tp_shards is None:
+        return 1
+    if spec.dcp_sharded and dcp_size > 1:
+        return 1
+    return max(1, tp_size // spec.max_tp_shards)
+
+
+def kv_cache_groups_tp_replicas(
+    groups: list[KVCacheGroupSpec], tp_size: int, dcp_size: int = 1
+) -> int:
+    """Consecutive TP ranks holding identical KV for every layer."""
+    specs = [spec for g in groups for spec in iter_layer_specs(g.kv_cache_spec)]
+    if not specs:
+        return 1
+    return reduce(
+        math.gcd, (_layer_tp_replicas(s, tp_size, dcp_size) for s in specs), tp_size
+    )
+
+
 def generate_scheduler_kv_cache_config(
     kv_cache_configs: list[KVCacheConfig],
 ) -> KVCacheConfig:
@@ -2450,11 +2501,9 @@ def _max_memory_usage_bytes_from_groups(
     Each group independently claims blocks from the shared pool, so a request consumes
     the sum of the per-group block counts, i.e. ``bytes_per_block * total_blocks``.
     """
+    kv_cache_groups = [group for group in kv_cache_groups if not group.host_resident]
     if not kv_cache_groups:
         return 0
-
-    if vllm_config.attention_config.hisparse_config is not None:
-        return get_hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
 
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         (
@@ -2513,12 +2562,11 @@ def _estimate_max_model_len_from_groups(
         vllm_config.model_config.max_model_len = model_len
         if hisparse_enabled:
             try:
-                config = get_kv_cache_config_from_groups(
+                get_kv_cache_config_from_groups(
                     vllm_config, kv_cache_groups, available_memory
                 )
             except ValueError:
                 return False
-            return get_max_concurrency_for_kv_cache_config(vllm_config, config) >= 1
         return (
             _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
             <= available_memory
@@ -2628,6 +2676,9 @@ def _project_kv_cache_groups_to_worker(
         worker_layer_names = [
             layer_name for layer_name in group.layer_names if layer_name in worker_spec
         ]
+        if len(worker_layer_names) == len(group.layer_names):
+            projected_groups.append(group)
+            continue
         group_spec = group.kv_cache_spec
         if worker_layer_names and isinstance(group_spec, UniformTypeKVCacheSpecs):
             group_spec = UniformTypeKVCacheSpecs(
@@ -2743,9 +2794,6 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
-    if vllm_config.attention_config.hisparse_config is not None:
-        available_memory = [min(available_memory)] * len(available_memory)
-
     # Reserve the null block BlockPool permanently holds back, so auto-fit and
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
@@ -2795,6 +2843,13 @@ def get_kv_cache_configs(
         groups = kv_cache_config.kv_cache_groups
         kv_cache_configs[i] = get_kv_cache_config_from_groups(
             vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
+        )
+
+    for kv_cache_config in kv_cache_configs:
+        kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
+            kv_cache_config.kv_cache_groups,
+            vllm_config.parallel_config.tensor_parallel_size,
+            vllm_config.parallel_config.decode_context_parallel_size,
         )
 
     return kv_cache_configs
