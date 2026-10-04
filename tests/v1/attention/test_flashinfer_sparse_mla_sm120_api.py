@@ -92,3 +92,63 @@ def test_sm120_dsv4_required_topk_tracks_dspark_width() -> None:
 
     assert _required_sm120_sparse_topk(causal, 128) == 128
     assert _required_sm120_sparse_topk(dspark, 128) == 192
+
+
+def test_sm120_workspace_prefill_isolation() -> None:
+    from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
+        DeepseekV4FlashInferSM120Attention,
+        _flashinfer_dsv4_prefill_workspace_by_device,
+        _flashinfer_dsv4_workspace_by_device,
+        _get_flashinfer_dsv4_workspace,
+    )
+
+    device = torch.device("cpu")
+    try:
+        decode_ws = _get_flashinfer_dsv4_workspace(device, is_prefill=False)
+        prefill_ws = _get_flashinfer_dsv4_workspace(device, is_prefill=True)
+
+        assert decode_ws is not prefill_ws
+        assert decode_ws.data_ptr() != prefill_ws.data_ptr()
+        assert (
+            DeepseekV4FlashInferSM120Attention._get_workspace(
+                device, is_prefill=False
+            ).data_ptr()
+            == decode_ws.data_ptr()
+        )
+        assert (
+            DeepseekV4FlashInferSM120Attention._get_workspace(
+                device, is_prefill=True
+            ).data_ptr()
+            == prefill_ws.data_ptr()
+        )
+    finally:
+        _flashinfer_dsv4_workspace_by_device.pop(device, None)
+        _flashinfer_dsv4_prefill_workspace_by_device.pop(device, None)
+
+
+def test_sm120_prefill_extra_sparse_indices_3d_geometry() -> None:
+    num_prefill_tokens = 4092
+    topk = 512
+    extra_sparse_indices = torch.full((num_prefill_tokens, topk), -1, dtype=torch.int32)
+    reshaped = extra_sparse_indices.reshape(num_prefill_tokens, 1, -1)
+    assert reshaped.shape == (num_prefill_tokens, 1, topk)
+
+
+def test_compute_global_topk_indices_and_lens_empty() -> None:
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        compute_global_topk_indices_and_lens,
+    )
+
+    topk_indices = torch.empty((0, 64), dtype=torch.int32)
+    token_to_req = torch.empty((0,), dtype=torch.int32)
+    block_table = torch.zeros((1, 10), dtype=torch.int32)
+    is_valid_token = torch.empty((0,), dtype=torch.bool)
+    global_indices, lens = compute_global_topk_indices_and_lens(
+        topk_indices=topk_indices,
+        token_to_req_indices=token_to_req,
+        block_table=block_table,
+        block_size=64,
+        is_valid_token=is_valid_token,
+    )
+    assert global_indices.shape == (0, 64)
+    assert lens.shape == (0,)
