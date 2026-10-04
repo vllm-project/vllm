@@ -3,6 +3,7 @@
 
 """Tests for the /render endpoints that expose prompt preprocessing."""
 
+import json
 from http import HTTPStatus
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -13,12 +14,62 @@ import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.scale_out.render import api_router
 from vllm.entrypoints.scale_out.render.api_router import router
 from vllm.entrypoints.scale_out.render.serving import ServingRender
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateRequest,
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
+)
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.sampling_params import SamplingParams
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+def test_render_response_serializes_multimodal_data_without_model_dict(
+    monkeypatch, multiple
+):
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model="测试模型",
+        features=MultiModalFeatures(
+            mm_hashes={"image": ["hash"]},
+            mm_placeholders={"image": [PlaceholderRangeInfo(offset=1, length=1)]},
+            kwargs_data={"image": ["abc" * 10000]},
+        ),
+    )
+    result = [request, request] if multiple else request
+    expected = (
+        [request.model_dump(), request.model_dump()]
+        if multiple
+        else request.model_dump()
+    )
+
+    def reject_model_dict(*args, **kwargs):
+        raise AssertionError("render responses must not materialize model dicts")
+
+    monkeypatch.setattr(GenerateRequest, "model_dump", reject_model_dict)
+    response = api_router._render_response(result)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    assert json.loads(response.body) == expected
+
+
+def test_render_response_preserves_error_status():
+    error = ErrorResponse(
+        error=ErrorInfo(message="invalid prompt", type="BadRequestError", code=400)
+    )
+
+    response = api_router._render_response(error)
+
+    assert response.status_code == 400
+    assert json.loads(response.body) == error.model_dump()
 
 
 def _build_responses_serving_render() -> ServingRender:
