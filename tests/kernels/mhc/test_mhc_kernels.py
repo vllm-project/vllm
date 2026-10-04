@@ -1059,6 +1059,7 @@ def test_mhc_pre_batch_invariance(monkeypatch, hidden_size, hc_mult):
                 assert torch.equal(actual[pos : pos + 1], expected), (
                     f"batch invariance broken: num_tokens={num_tokens} pos={pos}"
                 )
+
 @pytest.mark.skipif(
     not HAS_TILELANG_MHC,
     reason="TileLang MHC support required",

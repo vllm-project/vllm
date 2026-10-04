@@ -1259,6 +1259,53 @@ class DeepseekV4DecoderLayer(nn.Module):
         # The default rollout path keeps the fused implementation.
         self.use_fused_mhc = not envs.VLLM_BATCH_INVARIANT
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                _HC_PRENORM_GEMM_TILELANG_KERNEL,
+                _MHC_FUSED_TILELANG_KERNEL,
+                _MHC_POST_TILELANG_KERNEL,
+                _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
+            )
+            from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+            include_pre_gemm_splits = is_deep_gemm_supported()
+            _MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
+                vllm_config,
+                hidden_size=self.hidden_size,
+                hc_mult=self.hc_mult,
+                use_norm_weight=True,
+                include_pre_gemm_splits=include_pre_gemm_splits,
+                include_broadcast_splits=(
+                    get_pp_group().is_first_rank and extract_layer_index(prefix) == 0
+                ),
+                rms_eps=self.rms_norm_eps,
+                hc_pre_eps=self.hc_eps,
+                hc_sinkhorn_eps=self.hc_eps,
+                hc_post_mult_value=self.hc_post_alpha,
+                sinkhorn_repeat=self.hc_sinkhorn_iters,
+                norm_eps=(
+                    self.attn_norm.variance_epsilon,
+                    self.ffn_norm.variance_epsilon,
+                ),
+                broadcast_norm_eps=self.attn_norm.variance_epsilon,
+            )
+            if not include_pre_gemm_splits:
+                _HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
+                    vllm_config,
+                    hidden_size=self.hidden_size,
+                    hc_mult=self.hc_mult,
+                    n_out=self.hc_mult * (2 + self.hc_mult),
+                )
+            _MHC_POST_TILELANG_KERNEL.register_warmup(
+                hidden_size=self.hidden_size,
+                hc_mult=self.hc_mult,
+            )
+            _MHC_FUSED_TILELANG_KERNEL.register_warmup(
+                vllm_config,
+                hidden_size=self.hidden_size,
+                hc_mult=self.hc_mult,
+            )
+
     def _forward_unfused_post_pre(
         self,
         x: torch.Tensor,
@@ -1324,53 +1371,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.ffn(x, input_ids, mega_gate_metadata)
         x = mhc_post_tilelang(x, residual, post, comb)
         return x, None, None, None
-
-        if vllm_config.kernel_config.enable_jit_warmup:
-            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-                _HC_PRENORM_GEMM_TILELANG_KERNEL,
-                _MHC_FUSED_TILELANG_KERNEL,
-                _MHC_POST_TILELANG_KERNEL,
-                _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
-            )
-            from vllm.utils.deep_gemm import is_deep_gemm_supported
-
-            include_pre_gemm_splits = is_deep_gemm_supported()
-            _MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
-                vllm_config,
-                hidden_size=self.hidden_size,
-                hc_mult=self.hc_mult,
-                use_norm_weight=True,
-                include_pre_gemm_splits=include_pre_gemm_splits,
-                include_broadcast_splits=(
-                    get_pp_group().is_first_rank and extract_layer_index(prefix) == 0
-                ),
-                rms_eps=self.rms_norm_eps,
-                hc_pre_eps=self.hc_eps,
-                hc_sinkhorn_eps=self.hc_eps,
-                hc_post_mult_value=self.hc_post_alpha,
-                sinkhorn_repeat=self.hc_sinkhorn_iters,
-                norm_eps=(
-                    self.attn_norm.variance_epsilon,
-                    self.ffn_norm.variance_epsilon,
-                ),
-                broadcast_norm_eps=self.attn_norm.variance_epsilon,
-            )
-            if not include_pre_gemm_splits:
-                _HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
-                    vllm_config,
-                    hidden_size=self.hidden_size,
-                    hc_mult=self.hc_mult,
-                    n_out=self.hc_mult * (2 + self.hc_mult),
-                )
-            _MHC_POST_TILELANG_KERNEL.register_warmup(
-                hidden_size=self.hidden_size,
-                hc_mult=self.hc_mult,
-            )
-            _MHC_FUSED_TILELANG_KERNEL.register_warmup(
-                vllm_config,
-                hidden_size=self.hidden_size,
-                hc_mult=self.hc_mult,
-            )
 
     def forward(
         self,

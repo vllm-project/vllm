@@ -40,7 +40,6 @@ def _hc_prenorm_gemm_outputs(
     use_deep_gemm = is_deep_gemm_supported() or not use_tilelang_fallback
     num_tokens = x.shape[0]
     split_tokens = 1 if envs.VLLM_BATCH_INVARIANT else num_tokens
-    split_tokens = 1 if envs.VLLM_BATCH_INVARIANT else num_tokens
     n_splits = (
         compute_num_split(64, x.shape[1], cdiv(split_tokens, 64))
         if use_deep_gemm
