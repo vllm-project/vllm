@@ -26,6 +26,8 @@ from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
 from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (  # noqa: E402
     _AITER_SWIGLU_ALPHA,
     _AITER_SWIGLU_BETA,
+    _CLAMPED_SILU_ALPHA,
+    _CLAMPED_SILU_BETA,
     AiterMxfp8Experts,
 )
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (  # noqa: E402
@@ -55,8 +57,8 @@ _AITER_MOD = "vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe"
 
 
 def _config(ep_size: int = 1):
-    # AiterMxfp8Experts hardcodes SwiGLU-OAI: match its required activation and
-    # alpha/beta so is_supported_config doesn't reject the config on those grounds.
+    # Default to the SwiGLU-OAI variant so is_supported_config doesn't reject the
+    # config on activation grounds; see _hy4_config for the clamped-SiLU variant.
     cfg = make_dummy_moe_config(
         num_experts=128,
         experts_per_token=4,
@@ -174,3 +176,117 @@ def test_gfx942_picks_emulation():
         backend, experts_cls = select_mxfp8_moe_backend(_config())
     assert backend is Fp8MoeBackend.EMULATION
     assert experts_cls is Mxfp8EmulationTritonExperts
+
+
+def _hy4_config(swiglu_limit: float | None = 10.0):
+    """A Hy4-style config: plain SiLU + a clamp limit, alpha/beta left unset.
+
+    ``HYV4MoEFused`` passes only ``swiglu_limit`` to ``FusedMoEFactory``, so
+    alpha/beta stay None and mean the ``SiluAndMulWithClamp`` identity
+    (alpha=1.0, beta=0.0) -- i.e. ``silu(clamp(gate)) * clamp(up)``.
+    """
+    cfg = make_dummy_moe_config(
+        num_experts=256,
+        experts_per_token=8,
+        hidden_dim=4096,
+        activation=MoEActivation.SILU,
+    )
+    return dataclasses.replace(
+        cfg, swiglu_alpha=None, swiglu_beta=None, swiglu_limit=swiglu_limit
+    )
+
+
+def _supported(cfg):
+    return AiterMxfp8Experts.is_supported_config(
+        AiterMxfp8Experts,
+        cfg,
+        kMxfp8Static,
+        kMxfp8Dynamic,
+        FusedMoEActivationFormat.Standard,
+    )
+
+
+def test_hy4_clamped_silu_is_supported():
+    """Hy4's clamped SwiGLU (silu(clamp(g))*clamp(u)) must be accepted."""
+    with _gfx950(), _aiter_moe_enabled(True):
+        supported, reason = _supported(_hy4_config())
+    assert supported, reason
+
+
+def test_swigluoai_still_supported():
+    """The pre-existing SwiGLU-OAI path must keep working."""
+    with _gfx950(), _aiter_moe_enabled(True):
+        supported, reason = _supported(_config())
+    assert supported, reason
+
+
+def test_hy4_clamped_silu_requires_limit():
+    """Clamped SiLU without a limit is ambiguous -> reject rather than silently
+    running an unclamped activation."""
+    with _gfx950(), _aiter_moe_enabled(True):
+        supported, reason = _supported(_hy4_config(swiglu_limit=None))
+    assert not supported
+    assert "swiglu_limit" in reason
+
+
+def test_swigluoai_without_alpha_beta_rejected():
+    """A SwiGLU-OAI config that never set alpha/beta must be rejected, not
+    silently run as clamped SiLU (which is a different activation)."""
+    cfg = dataclasses.replace(
+        _config(), swiglu_alpha=None, swiglu_beta=None, swiglu_limit=7.0
+    )
+    with _gfx950(), _aiter_moe_enabled(True):
+        supported, reason = _supported(cfg)
+    assert not supported
+    assert "swigluoai_uninterleave" in reason
+
+
+def test_silu_with_oai_alpha_beta_rejected():
+    """Conversely, plain SILU carrying OAI's alpha/beta is not clamped SiLU."""
+    cfg = dataclasses.replace(
+        _hy4_config(), swiglu_alpha=_AITER_SWIGLU_ALPHA, swiglu_beta=_AITER_SWIGLU_BETA
+    )
+    with _gfx950(), _aiter_moe_enabled(True):
+        supported, reason = _supported(cfg)
+    assert not supported
+    assert "silu" in reason
+
+
+def test_unsupported_alpha_beta_rejected():
+    """An alpha/beta pair that is neither SwiGLU-OAI nor clamped SiLU is rejected."""
+    cfg = dataclasses.replace(
+        _hy4_config(), swiglu_alpha=1.234, swiglu_beta=_CLAMPED_SILU_BETA
+    )
+    with _gfx950(), _aiter_moe_enabled(True):
+        supported, reason = _supported(cfg)
+    assert not supported
+    assert "1.234" in reason
+
+
+def test_unsupported_activation_rejected():
+    """An activation outside the supported set is rejected."""
+    cfg = dataclasses.replace(_hy4_config(), activation=MoEActivation.GELU)
+    with _gfx950(), _aiter_moe_enabled(True):
+        supported, reason = _supported(cfg)
+    assert not supported
+    assert "gelu" in reason
+
+
+def test_hy4_selects_aiter_backend():
+    """End to end through the oracle: a Hy4 config auto-picks the FlyDSL backend."""
+    with (
+        patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=True),
+        _aiter_moe_enabled(True),
+    ):
+        backend, experts_cls = select_mxfp8_moe_backend(_hy4_config())
+    assert backend is Fp8MoeBackend.AITER_MXFP8
+    assert experts_cls is AiterMxfp8Experts
+
+
+def test_hy4_falls_back_to_triton_without_aiter():
+    """``_CLAMPED_SILU_ALPHA`` is the documented identity; without aiter the
+    Hy4 config must still resolve to a non-AITER backend."""
+    assert _CLAMPED_SILU_ALPHA == 1.0
+    with patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False):
+        backend, _ = select_mxfp8_moe_backend(_hy4_config())
+    assert backend is not Fp8MoeBackend.AITER_MXFP8
