@@ -132,6 +132,7 @@ class WorkerLoRAManager:
             # correct loading of lora weights. We only need to know about renames for
             # this, so we use get_rename_mapper() to ignore stacking and deletions.
             model = self._adapter_manager.model
+            adapter_converter = getattr(model, "convert_lora_adapter", None)
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
             if hf_to_vllm_mapper is not None:
                 hf_to_vllm_mapper = hf_to_vllm_mapper.get_rename_mapper()
@@ -151,7 +152,13 @@ class WorkerLoRAManager:
                 weights_mapper=hf_to_vllm_mapper,
                 skip_prefixes=lora_skip_prefixes,
                 moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
+                adapter_converter=adapter_converter,
             )
+            if lora.rank > self.lora_config.max_lora_rank:
+                raise ValueError(
+                    f"Converted LoRA rank {lora.rank} exceeds max_lora_rank "
+                    f"{self.lora_config.max_lora_rank}."
+                )
             # Stamp the on-disk MoE layout onto the loaded model so the
             # adapter manager can route 3D-format checkpoints through the
             # 3D->2D conversion when running under the universal 2D wrapper.

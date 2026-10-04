@@ -20,6 +20,7 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.forward_context import get_forward_context
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import (
@@ -43,6 +44,7 @@ from vllm.models.inkling.common.mm_preprocess import (
     inkling_vision_enabled,
 )
 from vllm.models.inkling.common.towers import InklingAudio, InklingVision
+from vllm.models.inkling.lora import convert_inkling_lora
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
@@ -414,6 +416,18 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
     embedding_modules = {
         "lm_head": "output_embeddings",
     }
+
+    def convert_lora_adapter(
+        self,
+        tensors: dict[str, torch.Tensor],
+        helper: PEFTHelper,
+    ) -> tuple[dict[str, torch.Tensor], PEFTHelper]:
+        return convert_inkling_lora(
+            tensors,
+            helper,
+            num_experts=self.config.n_routed_experts,
+            num_shared_experts=self.config.n_shared_experts,
+        )
 
     def _build(
         self,
