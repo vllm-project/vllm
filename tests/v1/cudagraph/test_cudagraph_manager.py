@@ -50,6 +50,7 @@ def _create_vllm_config() -> MagicMock:
     vllm_config.parallel_config = ParallelConfig()
     vllm_config.speculative_config = None
     vllm_config.num_speculative_tokens = 0
+    vllm_config.use_cumem_cudagraph_pool = False
     return vllm_config
 
 
