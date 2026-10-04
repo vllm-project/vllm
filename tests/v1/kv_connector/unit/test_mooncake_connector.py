@@ -2640,10 +2640,21 @@ def test_only_rdma_supports_sleep_mode(protocol: str):
         assert type(connector).supports_sleep_mode(config) is (protocol == "rdma")
 
 
-@pytest.mark.parametrize("ready", [True, False], ids=["ready_to_send", "not_ready"])
-def test_release_waits_for_blocks_ready_to_send(monkeypatch, ready: bool):
-    """Blocks that D may still pull keep their registration: the release waits
-    for them, and fails after the abort timeout without releasing anything."""
+@pytest.mark.parametrize(
+    ("ready", "expired", "sending", "waits"),
+    [
+        (True, False, 0, True),
+        (False, False, 0, False),
+        (True, True, 0, False),
+        (True, True, 1, True),
+    ],
+    ids=["ready_to_send", "not_ready", "expired", "expired_while_sending"],
+)
+def test_release_waits_for_blocks_ready_to_send(
+    monkeypatch, ready: bool, expired: bool, sending: int, waits: bool
+):
+    """Blocks that D may still pull keep their registration until the abort
+    timeout fails the release; expired blocks are freed by get_finished()."""
     monkeypatch.setattr(
         mooncake_connector.envs, "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", 0.2
     )
@@ -2656,6 +2667,8 @@ def test_release_waits_for_blocks_ready_to_send(monkeypatch, ready: bool):
                 transfer_id="xfer-req-1",
                 local_block_ids=[[0]] if ready else [],
                 ready=asyncio.Event(),
+                expire_time=time.perf_counter() - 1 if expired else float("inf"),
+                sending=sending,
             )
             if ready:
                 send_meta.ready.set()
@@ -2663,7 +2676,7 @@ def test_release_waits_for_blocks_ready_to_send(monkeypatch, ready: bool):
 
         asyncio.run_coroutine_threadsafe(add_send_req(), worker.sender_loop).result()
 
-        if ready:
+        if waits:
             with pytest.raises(TimeoutError):
                 connector.release_kv_caches()
             assert worker.engine.registered == expected
@@ -2672,9 +2685,14 @@ def test_release_waits_for_blocks_ready_to_send(monkeypatch, ready: bool):
             assert worker.engine.registered == {}
 
 
-def test_release_waits_for_pending_recv():
-    """Memory that P may still write into keeps its registration until the
-    pull has finished."""
+@pytest.mark.parametrize(
+    ("local_block_ids", "waits"),
+    [([[0]], True), ([[]], False)],
+    ids=["pull", "notify_only"],
+)
+def test_release_waits_for_pull_into_local_blocks(local_block_ids, waits: bool):
+    """Memory that P may still write into keeps its registration until the pull
+    has finished; a notify-only pull writes nothing and does not wait."""
     with mooncake_sleep_worker("kv_consumer") as (connector, expected):
         worker = connector.connector_worker
         worker._remote_agents = {"p-engine": {0: {0: "tcp://producer:1234"}}}
@@ -2692,7 +2710,7 @@ def test_release_waits_for_pending_recv():
         metadata = MooncakeConnectorMetadata()
         metadata.add_new_req(
             "d-req-1",
-            [[0]],
+            local_block_ids,
             {
                 "transfer_id": "xfer-req-1",
                 "remote_engine_id": "p-engine",
@@ -2703,11 +2721,13 @@ def test_release_waits_for_pending_recv():
             worker.start_load_kv(metadata)
             assert pulling.wait(timeout=10)
 
-            releasing = threading.Thread(target=connector.release_kv_caches)
+            releasing = threading.Thread(
+                target=connector.release_kv_caches, daemon=True
+            )
             releasing.start()
-            releasing.join(timeout=0.3)
-            assert releasing.is_alive()
-            assert worker.engine.registered == expected
+            releasing.join(timeout=0.3 if waits else 10)
+            assert releasing.is_alive() is waits
+            assert worker.engine.registered == (expected if waits else {})
 
             worker.receiver_loop.call_soon_threadsafe(release[0].set)
             assert pulled.wait(timeout=10)
@@ -2715,3 +2735,21 @@ def test_release_waits_for_pending_recv():
 
         assert not releasing.is_alive()
         assert worker.engine.registered == {}
+
+
+def test_release_times_out_on_a_wedged_loop(monkeypatch):
+    """A wedged transfer loop fails the release at the deadline, keeping the
+    registration, instead of hanging it."""
+    monkeypatch.setattr(
+        mooncake_connector.envs, "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", 0.2
+    )
+    with mooncake_sleep_worker("kv_producer") as (connector, expected):
+        worker = connector.connector_worker
+        unwedge = threading.Event()
+        worker.sender_loop.call_soon_threadsafe(unwedge.wait, 10)
+        try:
+            with pytest.raises(TimeoutError):
+                connector.release_kv_caches()
+            assert worker.engine.registered == expected
+        finally:
+            unwedge.set()

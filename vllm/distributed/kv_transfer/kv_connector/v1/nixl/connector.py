@@ -62,6 +62,7 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
+    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
         NixlBaseConnectorScheduler,
     )
@@ -140,6 +141,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Class Methods
     ############################################################
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        # Peers keep the KV cache registration that sleep mode makes stale.
+        return False
+
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
         if vllm_config.model_config is None:

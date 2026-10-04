@@ -208,9 +208,9 @@ class KVConnectorBase_V1(ABC):
 
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
-        """Whether the connector survives sleep mode remapping the KV cache;
-        True requires overriding `release_kv_caches` and `restore_kv_caches`."""
-        return False
+        """False if the connector hands KV device memory to a NIC or another process
+        and cannot re-register it after sleep mode remaps the KV cache."""
+        return True
 
     def __init__(
         self,
