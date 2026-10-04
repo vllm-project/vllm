@@ -44,6 +44,8 @@ class _PendingPublication:
     num_pages: int
     retention_interval: int | None
     replay_boundaries: Sequence[int]
+    detached_blocks: list[KVCacheBlock] | None = None
+    num_cached_blocks: int = 0
 
 
 @dataclass
@@ -64,6 +66,8 @@ class _HiSparseRequestState:
     copies_recorded_blocks: int = 0
     pinned_clean: set[int] = field(default_factory=set)
     unpinned_pages: set[int] = field(default_factory=set)
+    # Prefix pages whose GPU copies are adopted after the admitting allocation.
+    pages_to_adopt: int = 0
 
 
 @dataclass
@@ -95,9 +99,12 @@ class HiSparseCoordinator:
         kv_cache_config: KVCacheConfig,
         managers: tuple[SingleTypeKVCacheManager, ...],
         max_model_len: int,
+        *,
+        num_reprefillable_tokens: int,
     ) -> None:
         self.managers = managers
         self.max_model_len = max_model_len
+        self.num_reprefillable_tokens = num_reprefillable_tokens
         groups = kv_cache_config.kv_cache_groups
 
         resident_managers: list[HiSparseResidentManager] = []
@@ -193,7 +200,9 @@ class HiSparseCoordinator:
         state = self._get_request_state(request_id)
         state.valid_pages.update(range(num_host_pages))
         state.ready_prefix_pages = max(num_host_pages, state.ready_prefix_pages)
-        self._adopt_copies(request_id, state, host_blocks[:num_host_pages])
+        # Adopting pins copies out of the free pool, so it must wait until the
+        # allocation admission counted on has run (see update_residency).
+        state.pages_to_adopt = max(state.pages_to_adopt, num_host_pages)
         state.copies_recorded_blocks = max(state.copies_recorded_blocks, num_host_pages)
 
     def take_host_block_copies(self) -> tuple[KVCacheBlockCopy, ...]:
@@ -258,6 +267,7 @@ class HiSparseCoordinator:
                 if manager.adopt_resident_page(request_id, host_idx, block):
                     manager.block_pool.touch([block])
                     state.pinned_clean.add(host_idx)
+                    self.block_table_updates.add(request_id)
 
     def _record_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host blocks for later hits."""
@@ -312,6 +322,19 @@ class HiSparseCoordinator:
             manager.has_hot(request_id) for manager in self.hot_managers
         )
 
+    def _fills_admission_window(self, request_id: str) -> bool:
+        """Whether the request holds the resident pages admission reserved.
+
+        Admission caps a request's resident pages at the in-flight window,
+        assuming older pages move to host; keeping them pinned past it lets a
+        chunked prefill outgrow the pool it was admitted into.
+        """
+        return any(
+            len(manager.req_to_blocks.get(request_id, ()))
+            >= manager.max_admission_blocks_per_request
+            for manager in self.resident_managers
+        )
+
     def _resident_page_blocks(
         self, request_id: str, page_idx: int
     ) -> list[KVCacheBlock] | None:
@@ -343,7 +366,8 @@ class HiSparseCoordinator:
         return True
 
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
-        for page_idx in sorted(state.pinned_clean):
+        # Tail first, so a prefix loses its tail pages before its head.
+        for page_idx in sorted(state.pinned_clean, reverse=True):
             self._unpin_page(request_id, state, page_idx)
 
     def _page_became_clean(
@@ -383,15 +407,24 @@ class HiSparseCoordinator:
 
         A request that can read from host releases every clean sealed page to
         the pool. One that cannot keeps its pages pinned until the shared pool
-        runs low, then asks for a hot region. Pages remain pinned until that region
-        is allocated on a subsequent scheduling pass.
+        runs low, or until it holds the resident pages admission reserved for
+        it, then asks for a hot region. Pages remain pinned until that region is
+        allocated on a subsequent scheduling pass.
         """
         if not self.resident_managers:
             return
         state = self._get_request_state(request_id)
+        if state.pages_to_adopt:
+            assert self.host_manager is not None
+            host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
+            self._adopt_copies(request_id, state, host_blocks[: state.pages_to_adopt])
+            state.pages_to_adopt = 0
         if not self._can_read_from_host(request_id):
             assert self.gpu_pool is not None
-            if self.gpu_pool.get_num_free_blocks() >= self.transition_watermark:
+            if (
+                self.gpu_pool.get_num_free_blocks() >= self.transition_watermark
+                and not self._fills_admission_window(request_id)
+            ):
                 return
             for manager in self.hot_managers:
                 manager.require_hot(request_id)
@@ -401,6 +434,22 @@ class HiSparseCoordinator:
     # ------------------------------------------------------------------
     # Host publication and spills
     # ------------------------------------------------------------------
+
+    def advance_scheduled(self, requests: Iterable[tuple[str, int]]) -> None:
+        """Run the per-step residency work for each scheduled request.
+
+        ``requests`` pairs a request id with the number of tokens computed
+        once the step completes. As in ``KVCacheCoordinator.cache_blocks``, the
+        last ``num_reprefillable_tokens`` are not final yet and are not written
+        back.
+        """
+        if not self.resident_managers:
+            return
+        for request_id, num_tokens in requests:
+            self.plan_prefix_materialization(
+                request_id, max(0, num_tokens - self.num_reprefillable_tokens)
+            )
+            self.update_residency(request_id)
 
     def plan_prefix_materialization(
         self, request_id: str, num_computed_tokens: int
@@ -416,9 +465,8 @@ class HiSparseCoordinator:
         )
         state = self._get_request_state(request_id)
         budget = max(self.max_spill_pages - len(self.spills_to_send), 0)
-        for page_idx in range(num_pages):
-            if page_idx < importing_pages:
-                continue
+        first_page = max(state.ready_prefix_pages, importing_pages)
+        for page_idx in range(first_page, num_pages):
             if budget == 0:
                 break
             if page_idx in state.pending_pages:
@@ -441,47 +489,47 @@ class HiSparseCoordinator:
         *,
         replay_boundaries: Sequence[int],
     ) -> None:
-        """Publish host-source hashes only after their pages are durable."""
+        """Publish host-source hashes of the pages that are already durable."""
         manager = self.host_manager
         if manager is None:
             return
-        num_pages = num_computed_tokens // manager.block_size
         request_id = request.request_id
-        state = self._get_request_state(request_id)
-        if state.ready_prefix_pages >= num_pages:
-            manager.publish_blocks(
-                request,
-                num_computed_tokens,
-                retention_interval=retention_interval,
-                replay_boundaries=replay_boundaries,
-            )
-            self._record_copies(request_id, num_computed_tokens)
-            state.publication = None
-            return
-        state.publication = _PendingPublication(
+        self._get_request_state(request_id).publication = _PendingPublication(
             request=request,
             num_computed_tokens=num_computed_tokens,
-            num_pages=num_pages,
+            num_pages=num_computed_tokens // manager.block_size,
             retention_interval=retention_interval,
             replay_boundaries=replay_boundaries,
         )
+        self._publish_host_blocks_if_ready(request_id)
 
     def _publish_host_blocks_if_ready(self, request_id: str) -> None:
+        """Publish the durable prefix of the pending publication.
+
+        Host writes trail a long prefill by about a chunk, so waiting for the
+        whole computed prefix would publish nothing until the prefill ends, and
+        a prefill preempted before then would recompute from the start.
+        """
         state = self.request_states.get(request_id)
         if state is None:
             return
         publication = state.publication
-        if publication is None or state.ready_prefix_pages < publication.num_pages:
+        if publication is None:
             return
         assert self.host_manager is not None
+        num_tokens = min(
+            publication.num_computed_tokens,
+            state.ready_prefix_pages * self.host_manager.block_size,
+        )
         self.host_manager.publish_blocks(
             publication.request,
-            publication.num_computed_tokens,
+            num_tokens,
             retention_interval=publication.retention_interval,
             replay_boundaries=publication.replay_boundaries,
         )
-        self._record_copies(request_id, publication.num_computed_tokens)
-        state.publication = None
+        self._record_copies(request_id, num_tokens)
+        if state.ready_prefix_pages >= publication.num_pages:
+            state.publication = None
 
     def record_pending_host_import(self, request_id: str, num_tokens: int) -> None:
         """Note a prefix an external load is populating in host pages."""
@@ -660,10 +708,13 @@ class HiSparseCoordinator:
         return command
 
     def has_pending_reclamation(self) -> bool:
-        """Whether an in-flight spill will free GPU blocks on completion."""
+        """Whether an in-flight spill will free GPU or host blocks on completion."""
         return any(
-            pending.page[0] in self.request_states
-            and self._can_read_from_host(pending.page[0])
+            pending.host_block.ref_cnt == 1
+            or (
+                pending.page[0] in self.request_states
+                and self._can_read_from_host(pending.page[0])
+            )
             for pending in self.pending_spills.values()
         )
 
@@ -721,6 +772,10 @@ class HiSparseCoordinator:
                     if pending.restore:
                         self._record_copy(request_id, page_idx, pending.host_block)
                 completed_request_ids.add(request_id)
+            elif pending.request_state.publication is not None:
+                if not pending.restore:
+                    pending.request_state.valid_pages.add(page_idx)
+                self._publish_detached_blocks(pending.request_state)
             assert self.host_manager is not None
             self.host_manager.block_pool.free_blocks([pending.host_block])
         for request_id in completed_request_ids:
@@ -729,17 +784,62 @@ class HiSparseCoordinator:
                 state.ready_prefix_pages += 1
             self._publish_host_blocks_if_ready(request_id)
 
+    def _publish_detached_blocks(self, state: _HiSparseRequestState) -> None:
+        publication = state.publication
+        if publication is None or state.pending_pages:
+            return
+        blocks = publication.detached_blocks
+        if blocks is None:
+            return
+        assert self.host_manager is not None
+        while state.ready_prefix_pages in state.valid_pages:
+            state.ready_prefix_pages += 1
+        # The host group uses full-attention retention. Only sealed pages with
+        # completed copies can outlive the request, including on cancellation.
+        self.host_manager.block_pool.cache_full_blocks(
+            request=publication.request,
+            blocks=blocks,
+            num_cached_blocks=publication.num_cached_blocks,
+            num_full_blocks=min(state.ready_prefix_pages, publication.num_pages),
+            block_size=self.host_manager.block_size,
+            kv_cache_group_id=self.host_manager.kv_cache_group_id,
+        )
+        self.host_manager.block_pool.free_blocks(reversed(blocks))
+        state.publication = None
+
     def free(self, request_id: str) -> None:
         """Detach the request; its clean pages stay readable copies in the pool."""
         self._pending_imports.pop(request_id, None)
         state = self.request_states.pop(request_id, None)
         if state is None:
             return
+        publication = state.publication
+        if (
+            publication is not None
+            and publication.request.is_finished()
+            and state.pending_pages
+        ):
+            assert self.host_manager is not None
+            publication.detached_blocks = self.host_manager.req_to_blocks[request_id][
+                : publication.num_pages
+            ]
+            publication.num_cached_blocks = self.host_manager.num_cached_block.get(
+                request_id, 0
+            )
+            # Completed pages need leases too: another allocation may evict
+            # them before the remaining copies finish and the prefix publishes.
+            self.host_manager.block_pool.touch(publication.detached_blocks)
+        else:
+            # Preemption can cancel a scheduled forward after its spills were
+            # planned, so its copies do not prove that the KV was computed.
+            state.publication = None
         for manager in self.resident_managers:
             blocks = manager.req_to_blocks.get(request_id)
             if not blocks:
                 continue
-            for page_idx, block in enumerate(blocks):
+            # Tail first, so a prefix loses its tail pages before its head.
+            for page_idx in reversed(range(len(blocks))):
+                block = blocks[page_idx]
                 if block.is_null:
                     continue
                 if page_idx in state.unpinned_pages:
@@ -771,7 +871,10 @@ def get_hisparse_coordinator(
             assert isinstance(coordinator, HiSparseCoordinator)
             return coordinator
     coordinator = HiSparseCoordinator(
-        kv_cache_manager.kv_cache_config, managers, kv_cache_manager.max_model_len
+        kv_cache_manager.kv_cache_config,
+        managers,
+        kv_cache_manager.max_model_len,
+        num_reprefillable_tokens=kv_cache_manager.coordinator.num_reprefillable_tokens,
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")

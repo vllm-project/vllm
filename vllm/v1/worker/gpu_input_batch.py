@@ -541,6 +541,7 @@ class InputBatch:
         self.req_output_token_ids[req_index] = None
         self.spec_token_ids[req_index].clear()
         self.block_table.clear_row(req_index)
+        self.req_prompt_embeds.pop(req_index, None)
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -687,12 +688,8 @@ class InputBatch:
         swap_dict_values(self.bad_words_token_ids, i1, i2)
 
         if self.allowed_token_ids_mask_cpu_tensor is not None:
-            (
-                self.allowed_token_ids_mask_cpu_tensor[i1],
-                self.allowed_token_ids_mask_cpu_tensor[i2],
-            ) = (
-                self.allowed_token_ids_mask_cpu_tensor[i2],
-                self.allowed_token_ids_mask_cpu_tensor[i1],
+            self.allowed_token_ids_mask_cpu_tensor[[i1, i2]] = (
+                self.allowed_token_ids_mask_cpu_tensor[[i2, i1]]
             )
 
     def _get_active_token_count(self, req_index: int) -> int:
@@ -820,6 +817,7 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[empty_index] = (
                     self.allowed_token_ids_mask_cpu_tensor[last_req_index]
                 )
+                self.allowed_token_ids_mask_cpu_tensor[last_req_index].fill_(False)
 
             bad_words_token_ids = self.bad_words_token_ids.pop(last_req_index, None)
             if bad_words_token_ids is not None:
