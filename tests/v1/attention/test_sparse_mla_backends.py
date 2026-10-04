@@ -64,12 +64,12 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import current_stream
-from vllm.v1.attention.backends.mla import (
-    flashattn_mla_sparse as flashattn_sparse_module,
-)
 from vllm.v1.attention.backends.mla import index_group as index_group_module
 
 if current_platform.is_cuda():
+    from vllm.v1.attention.backends.mla import (
+        flashattn_mla_sparse as flashattn_sparse_module,
+    )
     from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
         FlashAttnMLASparseImpl,
         FlashAttnMLASparseMetadataBuilder,
