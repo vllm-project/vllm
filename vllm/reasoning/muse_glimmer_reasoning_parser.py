@@ -224,7 +224,10 @@ class MuseGlimmerReasoningParser(ReasoningParser):
                 pos = body_end + len(_EOM if body_end == eom else _EOT)
             else:
                 pos = body_end
-        return "".join(reasoning_parts), "".join(content_parts)
+        # Consecutive to=self blocks are separate thoughts, so join them the
+        # way extract_reasoning does. Concatenating them glued the last word of
+        # one block to the first word of the next.
+        return "\n".join(reasoning_parts), "".join(content_parts)
 
     def get_streaming_fallback_content(
         self,
@@ -252,7 +255,12 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         # there is no closing <|eom|>. Bounded at the next channel header so a
         # real tool call that follows a header-less channel switch is not
         # absorbed into the reasoning field.
-        open_match = _OPEN_REASONING_RE.search(model_output)
+        #
+        # Search the COLLAPSED text, not model_output: collapsing consumes the
+        # <|eom|> that closed each earlier block, so on model_output the only
+        # span without a terminator is the last one and every completed block
+        # before it is dropped.
+        open_match = _OPEN_REASONING_RE.search(collapsed)
         if open_match and open_match.group(1):
             partial = open_match.group(1)
             reasoning = f"{reasoning}\n{partial}" if reasoning else partial
