@@ -318,11 +318,7 @@ class FusedMMInputNorm(CustomOp):
         if pixel_values.dtype != torch.uint8:
             return self.forward_cuda(pixel_values, visual_dtype)
 
-        # XPU kernel only supports the uint8 input that
-        # device-side normalisation guarantees; fail loudly otherwise.
-        assert pixel_values.dtype == torch.uint8, (
-            f"xpu_fused_input_norm requires uint8 input, got {pixel_values.dtype}"
-        )
+        # For uint8 input, falls to xpu_fused_input_norm from xpu kernels
         import vllm._xpu_ops  # noqa: F401
 
         return torch.ops.vllm.xpu_fused_input_norm(
