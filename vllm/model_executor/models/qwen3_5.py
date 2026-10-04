@@ -90,6 +90,7 @@ from .qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
+    mrope_positions_bounded,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -153,10 +154,6 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 reduce_results=not self.use_attn_reduce_scatter_for_moe,
             )
         elif self.layer_type == "full_attention":
-            # A drafter gets the target's positions, so it follows the target.
-            spec = vllm_config.speculative_config
-            target_config = (spec and spec.target_model_config) or model_config
-            mm_config = target_config.multimodal_config
             self.self_attn = Qwen3NextAttention(
                 config,
                 model_config=model_config,
@@ -164,10 +161,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
                 reduce_results=not self.use_attn_reduce_scatter_for_moe,
-                # Video pruning keeps the positions of the tokens it drops.
-                mrope_positions_bounded=not (
-                    mm_config is not None and mm_config.is_multimodal_pruning_enabled()
-                ),
+                mrope_positions_bounded=mrope_positions_bounded(vllm_config),
             )
         else:
             raise ValueError(f"Invalid layer_type {self.layer_type}")
