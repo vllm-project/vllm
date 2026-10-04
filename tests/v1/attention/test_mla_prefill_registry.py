@@ -172,3 +172,20 @@ def test_rocm_aiter_fa_registered():
     # The AITER FA path is the fp16/bf16 generic-varlen prefill path.
     assert backend_cls.supports_dtype(torch.bfloat16)
     assert backend_cls.supports_dtype(torch.float16)
+
+
+def test_rocm_aiter_flydsl_fp8_registered():
+    """ROCM_AITER_FLYDSL_FP8 is a known backend pointing at the FlyDSL class."""
+    assert "ROCM_AITER_FLYDSL_FP8" in MLAPrefillBackendEnum.__members__
+
+    path = MLAPrefillBackendEnum.ROCM_AITER_FLYDSL_FP8.get_path()
+    assert path == (
+        "vllm.v1.attention.backends.mla.prefill.aiter_flydsl_fp8."
+        "AiterFlyDSLFP8PrefillBackend"
+    )
+
+    backend_cls = MLAPrefillBackendEnum.ROCM_AITER_FLYDSL_FP8.get_class()
+    assert backend_cls.get_name() == "ROCM_AITER_FLYDSL_FP8"
+    # The FP8 kernel writes BF16 output only.
+    assert backend_cls.supports_dtype(torch.bfloat16)
+    assert not backend_cls.supports_dtype(torch.float16)

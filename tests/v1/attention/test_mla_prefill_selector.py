@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for MLA prefill backend selector."""
 
+import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -504,6 +506,94 @@ class TestROCmAiterFAPrefillSelection:
             mock_platform.is_rocm.return_value = True
             backend = _auto_select_mla_prefill_backend(capability, selector_config)
             assert backend.get_name() == "FLASH_ATTN"
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Imports vllm.platforms.rocm, whose module init requires a CUDA or "
+    "ROCm torch build; not importable on XPU/CPU/TPU.",
+)
+class TestROCmAiterFlyDSLFP8PrefillSelection:
+    """Tests for the opt-in ROCm AITER FlyDSL FP8 MLA prefill backend."""
+
+    def test_supports_compute_capability_requires_gfx950(self):
+        from vllm.v1.attention.backends.mla.prefill import aiter_flydsl_fp8 as mod
+
+        backend_cls = mod.AiterFlyDSLFP8PrefillBackend
+        capability = MagicMock()
+
+        with patch.object(mod.current_platform, "is_rocm", return_value=False):
+            assert not backend_cls.supports_compute_capability(capability)
+
+        for on_gfx950 in (False, True):
+            with (
+                patch.object(mod.current_platform, "is_rocm", return_value=True),
+                patch("vllm.platforms.rocm.on_gfx950", return_value=on_gfx950),
+            ):
+                assert backend_cls.supports_compute_capability(capability) is on_gfx950
+
+    def test_is_available_requires_flydsl_fp8_attention(self):
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.v1.attention.backends.mla.prefill.aiter_flydsl_fp8 import (
+            AiterFlyDSLFP8PrefillBackend,
+        )
+
+        flydsl = SimpleNamespace(
+            flydsl_flash_attn_fp8_func=MagicMock(),
+            flydsl_flash_attn_fp8_supported=MagicMock(),
+        )
+        with (
+            patch.object(rocm_aiter_ops, "is_enabled", return_value=False),
+            patch.dict(sys.modules, {"aiter.ops.flydsl": flydsl}),
+        ):
+            assert not AiterFlyDSLFP8PrefillBackend.is_available()
+
+        with patch.object(rocm_aiter_ops, "is_enabled", return_value=True):
+            with patch.dict(sys.modules, {"aiter.ops.flydsl": flydsl}):
+                assert AiterFlyDSLFP8PrefillBackend.is_available()
+            # AITER builds without the capability check are not supported.
+            with patch.dict(sys.modules, {"aiter.ops.flydsl": SimpleNamespace()}):
+                assert not AiterFlyDSLFP8PrefillBackend.is_available()
+
+    @pytest.mark.parametrize("supported", [True, False])
+    def test_validate_configuration_defers_to_aiter(self, supported: bool):
+        from vllm.v1.attention.backends.mla.prefill.aiter_flydsl_fp8 import (
+            AiterFlyDSLFP8PrefillBackend,
+        )
+
+        check = MagicMock(return_value=supported)
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
+            ),
+        )
+        with (
+            patch.object(
+                AiterFlyDSLFP8PrefillBackend,
+                "supports_compute_capability",
+                return_value=True,
+            ),
+            patch.object(
+                AiterFlyDSLFP8PrefillBackend, "is_available", return_value=True
+            ),
+            patch.dict(
+                sys.modules,
+                {
+                    "aiter.ops.flydsl": SimpleNamespace(
+                        flydsl_flash_attn_fp8_supported=check
+                    )
+                },
+            ),
+            patch("torch.accelerator.current_device_index", return_value=0),
+        ):
+            reasons = AiterFlyDSLFP8PrefillBackend.validate_configuration(
+                MagicMock(), selector_config
+            )
+
+        assert bool(reasons) is not supported
+        _, num_heads, num_kv_heads, head_dim, head_dim_v = check.call_args.args
+        assert (num_heads, num_kv_heads, head_dim, head_dim_v) == (1, 1, 192, 128)
 
 
 class TestMLAPrefillBackendParsing:
