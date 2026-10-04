@@ -177,6 +177,7 @@ _NIXL = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
         ("MooncakeConnector", {"mooncake_protocol": "rdma"}, True),
         ("MooncakeConnector", {}, True),
         ("MooncakeStoreConnector", {}, False),
+        ("MoRIIOConnector", {}, False),
         ("OffloadingConnector", {}, True),
         ("ExampleConnector", {}, True),
         ("MultiConnector", {"connectors": [_MOONCAKE, _OFFLOADING]}, True),
@@ -189,6 +190,7 @@ _NIXL = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
         "mooncake-rdma",
         "mooncake-default",
         "mooncake-store",
+        "moriio",
         "offloading",
         "example",
         "multi-mooncake-offloading",
@@ -202,7 +204,7 @@ def test_sleep_mode_requires_kv_connector_support(
     """Sleep mode refuses a connector that cannot follow the KV cache remap."""
     refused = enable_sleep_mode and not supported
     with (
-        pytest.raises(ValueError, match="does not support sleep mode")
+        pytest.raises(ValueError, match=f"^{kv_connector} does not support sleep mode")
         if refused
         else contextlib.nullcontext()
     ):
