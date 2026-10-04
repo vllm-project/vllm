@@ -233,10 +233,9 @@ class P2PSession:
         """Flush any aggregated symmetric-P2P lookups for this peer.
 
         Called once per scheduler step from the manager's
-        ``on_schedule_end()``. Send-gating is handled inside the
-        client's ``_send`` callback (queues until ConnectAckMsg).
+        ``on_schedule_end()``. Probes wait for ConnectAckMsg before sending.
         """
-        self._client.flush_pending_lookups()
+        self._client.flush_pending_lookups(send_ready=self._send_ready)
 
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Resolve inbound peer lookups against the tiering manager.
@@ -263,6 +262,19 @@ class P2PSession:
         loads = self._client.collect_results()
         stores = self._server.collect_results()
         self._server.drain_pending_aborts()
+
+        # Drain buffered replies and completed transfers before expiring a peer.
+        expired_lookup = self._client.get_expired_lookup()
+        if expired_lookup is not None:
+            req_id, elapsed = expired_lookup
+            logger.warning(
+                "P2PSession %s: lookup response timed out for kv_request_id=%s "
+                "after %.1fs without progress; disconnecting peer session",
+                self.peer_id,
+                req_id,
+                elapsed,
+            )
+            self._conn.mark_dead()
 
         new_fetch_ids = self._new_fetch_ids
         self._new_fetch_ids = []

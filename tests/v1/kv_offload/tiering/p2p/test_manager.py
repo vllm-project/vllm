@@ -36,6 +36,7 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
     SessionPollResult,
     StoreResult,
 )
+from vllm.v1.kv_offload.tiering.p2p.session.client import _LOOKUP_TIMEOUT_S
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1158,6 +1159,33 @@ def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierM
 
 class TestBidirectionalManager:
     """Two managers each load FROM and serve TO the other over a single peer."""
+
+    def test_unanswered_lookup_falls_back_to_local_prefill(self, lookup_clock):
+        mgr_a, mgr_b = _build_paired_managers()
+        ctx = _req_context(_remote_kv_source_kv_params("B", 2))
+        mgr_a.on_new_request(ctx)
+        for _ in range(3):
+            list(mgr_a.get_finished_jobs())
+            list(mgr_b.get_finished_jobs())
+        assert mgr_a._sessions["B:2"].ready
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
+        mgr_a.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=[]))
+
+        # Stop the server's progress without closing its live connection.
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        assert list(mgr_a.get_finished_jobs()) == []
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
+        lookup_clock.now = _LOOKUP_TIMEOUT_S
+        assert list(mgr_a.get_finished_jobs()) == []
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        assert "B:2" not in mgr_a._sessions
+        assert "B:2" not in mgr_a._data._remote_peers
+
+        # A replacement session must not restart the expired request's probes.
+        mgr_a._sessions["B:2"] = _FakeSession(peer_id="B:2")  # type: ignore[assignment]
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        mgr_a.on_request_finished(ctx)
+        assert "req-1" not in mgr_a._failed_req_ids
 
     def test_both_loads_succeed(self):
         mgr_a, mgr_b = _build_paired_managers()
