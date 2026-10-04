@@ -158,7 +158,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
-        max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
+        max_seq_len = int(seq_lens_cpu_upper_bound.numpy()[:num_reqs].max())
         self.draft_max_seq_len = min(max_seq_len, self.max_model_len)
 
         self._copy_request_inputs(
