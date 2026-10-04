@@ -474,17 +474,77 @@ def test_extract_tool_calls_pre_v11_tokenizer(
     assert extracted_tool_calls.content == expected_content
 
 
-def test_extract_tool_calls_pre_v11_multiple_bot_tokens_raises(
+def test_extract_tool_calls_pre_v11_multiple_bot_tokens_returns_content(
     mistral_pre_v11_tool_parser,
 ):
+    """Two markers is malformed model output, not a server fault.
+
+    This used to raise `ValueError`. `parse()` is called outside any try in
+    `chat_completion_full_generator`, and `Parser.extract_tool_calls`
+    re-raises after recording its metric, so the exception reached the client
+    as a 500. Hand the text back as content instead, which is what the
+    JSON-decode failure path in the same function already does.
+    """
     model_output = (
         '[TOOL_CALLS] [{"name": "add", "arguments":{"a": 1}}]'
         '[TOOL_CALLS] [{"name": "sub", "arguments":{"b": 2}}]'
     )
-    with pytest.raises(ValueError, match="Only one BOT token"):
-        mistral_pre_v11_tool_parser.extract_tool_calls(
-            model_output, request=_DUMMY_REQUEST
-        )
+
+    extracted = mistral_pre_v11_tool_parser.extract_tool_calls(
+        model_output, request=_DUMMY_REQUEST
+    )
+
+    assert not extracted.tools_called
+    assert extracted.tool_calls == []
+    assert extracted.content == model_output
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param('{"name": 1, "arguments": []}', id="object-not-array"),
+        pytest.param("[1, 2, 3]", id="array-of-ints"),
+        pytest.param('["add"]', id="array-of-strings"),
+        pytest.param('[{"arguments": {}}]', id="entry-without-name"),
+        pytest.param('[{"name": 1}]', id="non-string-name"),
+        pytest.param('"add"', id="bare-string"),
+        pytest.param("42", id="bare-number"),
+        pytest.param("null", id="bare-null"),
+    ],
+)
+def test_extract_tool_calls_pre_v11_non_tool_call_json_returns_content(
+    mistral_pre_v11_tool_parser, payload: str
+):
+    """Valid JSON that is not an array of tool calls must not be indexed.
+
+    Each of these used to raise `TypeError` or `KeyError` out of the parser,
+    which surfaced as a 500 rather than as ordinary content.
+    """
+    model_output = f"[TOOL_CALLS]{payload}"
+
+    extracted = mistral_pre_v11_tool_parser.extract_tool_calls(
+        model_output, request=_DUMMY_REQUEST
+    )
+
+    assert not extracted.tools_called
+    assert extracted.tool_calls == []
+    assert extracted.content == model_output
+
+
+def test_extract_tool_calls_pre_v11_well_formed_still_parses(
+    mistral_pre_v11_tool_parser,
+):
+    """The shape check must not reject the format it is guarding."""
+    model_output = '[TOOL_CALLS] [{"name": "add", "arguments": {"a": 1, "b": 2}}]'
+
+    extracted = mistral_pre_v11_tool_parser.extract_tool_calls(
+        model_output, request=_DUMMY_REQUEST
+    )
+
+    assert extracted.tools_called
+    assert len(extracted.tool_calls) == 1
+    assert extracted.tool_calls[0].function.name == "add"
+    assert json.loads(extracted.tool_calls[0].function.arguments) == {"a": 1, "b": 2}
 
 
 def test_extract_tool_calls_pre_v11_regex_fallback(
