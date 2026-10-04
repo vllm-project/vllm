@@ -519,7 +519,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         stats = cast(OffloadingConnectorStats | None, self._kvcr.get_stats())
         if stats is not None:
             # Add the framework namespace only at the vLLM boundary.
-            for metrics in stats.data.values():
+            for metrics in stats.metric_sections():
                 for name in tuple(metrics):
                     metrics[_vllm_metric_name(name)] = metrics.pop(name)
         return stats
