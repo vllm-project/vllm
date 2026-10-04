@@ -61,6 +61,50 @@ def _mamba_chunk_scan_combined_fwd_cpu(
             d = d.squeeze(-1)
         D_1d = d.contiguous()
 
+    if return_intermediate_states and cu_chunk_seqlens is not None:
+        # Mamba prefix caching ('all' mode): the caller
+        # (mamba_mixer2.conv_ssm_forward) expects one state PER CHUNK,
+        # globally indexed by ``cu_chunk_seqlens``, so it can copy
+        # block-boundary snapshots into the paged state cache. Drive the C++
+        # kernel one chunk at a time, threading each sequence's running state
+        # through, and record the post-chunk state. Correctness over speed:
+        # this is the CPU reference path.
+        cu_seq = cu_seqlens.to(torch.int64)
+        cu_chunk = cu_chunk_seqlens.to(torch.int64)
+        num_chunks = cu_chunk.size(0) - 1
+        intermediates = torch.zeros(
+            num_chunks, nheads, headdim, dstate, dtype=torch.float32, device=x.device
+        )
+        seq_ptr = 0
+        for k in range(num_chunks):
+            cs = int(cu_chunk[k].item())
+            ce = int(cu_chunk[k + 1].item())
+            if ce == cs:
+                intermediates[k] = all_states[min(seq_ptr, batch - 1)]
+                continue
+            while seq_ptr + 1 < batch and cs >= int(cu_seq[seq_ptr + 1].item()):
+                seq_ptr += 1
+            running = all_states[seq_ptr : seq_ptr + 1]
+            chunk_cu = torch.tensor([0, ce - cs], dtype=torch.int32, device=x.device)
+            out_view = out[cs:ce]
+            assert out_view.is_contiguous()
+            ops.mamba_chunk_scan_fwd_cpu(
+                out_view,
+                running,
+                x[cs:ce].contiguous(),
+                dt_f[cs:ce].contiguous(),
+                A,
+                B[cs:ce].contiguous(),
+                C[cs:ce].contiguous(),
+                D_1d,
+                z[cs:ce].contiguous() if z is not None else None,
+                chunk_cu,
+            )
+            intermediates[k] = running[0]
+
+        out_dtype = state_dtype if state_dtype is not None else x.dtype
+        return intermediates.to(out_dtype)
+
     ops.mamba_chunk_scan_fwd_cpu(
         out,
         all_states,
