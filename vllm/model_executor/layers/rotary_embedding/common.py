@@ -12,6 +12,8 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from .functional import apply_rotary_emb
+
 logger = init_logger(__name__)
 
 
@@ -147,30 +149,7 @@ class ApplyRotaryEmb(CustomOp):
                              for higher accuracy.
 
         """
-        origin_dtype = x.dtype
-        if enable_fp32_compute:
-            x = x.float()
-
-        cos = cos.unsqueeze(-2).to(x.dtype)
-        sin = sin.unsqueeze(-2).to(x.dtype)
-
-        if is_neox_style:
-            x1, x2 = torch.chunk(x, 2, dim=-1)
-        else:
-            x1 = x[..., ::2]
-            x2 = x[..., 1::2]
-
-        o1 = x1 * cos - x2 * sin
-        o2 = x2 * cos + x1 * sin
-
-        if is_neox_style:
-            output = torch.cat((o1, o2), dim=-1)
-        else:
-            output = torch.stack((o1, o2), dim=-1).flatten(-2)
-
-        if enable_fp32_compute:
-            output = output.to(origin_dtype)
-        return output
+        return apply_rotary_emb(x, cos, sin, is_neox_style, enable_fp32_compute)
 
     def _pre_process(
         self,
