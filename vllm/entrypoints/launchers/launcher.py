@@ -31,6 +31,7 @@ from .utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
+from .utils.sd_notify import sd_notify
 
 logger = init_logger(__name__)
 
@@ -109,6 +110,19 @@ async def serve_http(
     )
     server_task = loop.create_task(server.serve(sockets=[sock] if sock else None))
 
+    async def notify_ready() -> None:
+        # Uvicorn sets `started` once its sockets are bound and the app's
+        # startup hooks have run: only then is the server ready for a
+        # `Type=notify` systemd unit. Give up if it exits before that.
+        while not server.started:
+            if server_task.done():
+                return
+            await asyncio.sleep(0.1)
+        if sd_notify("READY=1"):
+            logger.info("Notified systemd that the server is ready")
+
+    notify_task = loop.create_task(notify_ready())
+
     ssl_cert_refresher = (
         None
         if not enable_ssl_refresh
@@ -179,6 +193,7 @@ async def serve_http(
         return server.shutdown()
     finally:
         shutdown_task.cancel()
+        notify_task.cancel()
         if watchdog_task is not None:
             watchdog_task.cancel()
 
