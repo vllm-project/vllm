@@ -259,6 +259,45 @@ def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
     )
 
 
+@pytest.mark.parametrize(
+    ("children", "supported"),
+    [((True, True), True), ((True, False), False), ((False, True), False)],
+)
+def test_multi_connector_follows_the_kv_cache_mapping_through_every_connector(
+    monkeypatch, mc: MultiConnector, children, supported
+):
+    monkeypatch.setattr(
+        MockConnector,
+        "supports_sleep_mode",
+        classmethod(lambda cls, c: c.kv_connector_extra_config["sleep"]),
+    )
+    child = {
+        "kv_connector": "MockConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",
+    }
+    config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {**child, "kv_connector_extra_config": {"sleep": s}} for s in children
+            ]
+        },
+    )
+    assert MultiConnector.supports_sleep_mode(config) is supported
+
+    for connector in mc._connectors:
+        connector.release_kv_caches = MagicMock()
+        connector.restore_kv_caches = MagicMock()
+
+    mc.release_kv_caches()
+    mc.restore_kv_caches()
+    for connector in mc._connectors:
+        connector.release_kv_caches.assert_called_once_with()
+        connector.restore_kv_caches.assert_called_once_with()
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""

@@ -87,6 +87,7 @@ except ImportError:
     TransferEngine = None
 
 if TYPE_CHECKING:
+    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -800,9 +801,23 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Worker Side Methods
     ############################################################
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        # Only RDMA peers drop a stale remote key (the failed access refreshes it).
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        return extra_config.get("mooncake_protocol", "rdma") == "rdma"
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def release_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.release_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.restore_kv_caches()
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1239,6 +1254,8 @@ class MooncakeConnectorWorker:
         self.region_row_offsets: list[int] = []
         self.opaque_packed_storages: set[int] = set()
         self.seen_base_addresses: list[int] = []
+        self._kv_data_lens: list[int] = []
+        self._kv_released = False
         # Aligned regions depend only on the peer's registered layout.
         # The third item is an error string when alignment cannot proceed.
         self._prepared_transfer_regions: dict[
@@ -2156,6 +2173,7 @@ class MooncakeConnectorWorker:
 
         self.kv_caches_base_addr = region_base_addresses
         self.seen_base_addresses = kv_data_ptrs
+        self._kv_data_lens = kv_data_lens
 
         if not kv_data_ptrs:
             raise RuntimeError("No KV cache tensors were registered with Mooncake.")
@@ -2210,6 +2228,55 @@ class MooncakeConnectorWorker:
                     "Mooncake sender listener did not become ready within "
                     f"{ready_timeout:.0f}s."
                 )
+
+    def release_kv_caches(self) -> None:
+        """Unregister the KV caches once no send or pull uses them; TimeoutError
+        past the abort timeout. Idempotent."""
+        if self._kv_released or not self.seen_base_addresses:
+            return
+        deadline = time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+        while self._transfers_pending():
+            if time.perf_counter() >= deadline:
+                raise TimeoutError("Mooncake KV transfers did not finish in time")
+            time.sleep(0.01)
+        if self.engine.batch_unregister_memory(self.seen_base_addresses) != 0:
+            raise RuntimeError("Mooncake batch memory unregistration failed.")
+        self._kv_released = True
+
+    def restore_kv_caches(self) -> None:
+        """Register the released KV caches again: same addresses, new pages."""
+        if not self._kv_released:
+            return
+        ret_value = self.engine.batch_register_memory(
+            self.seen_base_addresses, self._kv_data_lens
+        )
+        if ret_value != 0:
+            raise RuntimeError("Mooncake batch memory registration failed.")
+        self._kv_released = False
+
+    def _transfers_pending(self) -> bool:
+        pending = []
+        if not self.is_kv_consumer:
+            pending.append(
+                asyncio.run_coroutine_threadsafe(
+                    self._has_pending_sends(), self.sender_loop
+                )
+            )
+        if not self.is_kv_producer:
+            pending.append(
+                asyncio.run_coroutine_threadsafe(
+                    self._has_pending_recvs(), self.receiver_loop
+                )
+            )
+        return any([fut.result() for fut in pending])
+
+    async def _has_pending_sends(self) -> bool:
+        # A ready request is sent as soon as D asks for it.
+        return any(meta.ready.is_set() for meta in self.reqs_need_send.values())
+
+    async def _has_pending_recvs(self) -> bool:
+        # Every other task on the receiver loop belongs to a pull in progress.
+        return len(asyncio.all_tasks()) > 1
 
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:
         finished_recving_reqs = self.finished_recving_reqs

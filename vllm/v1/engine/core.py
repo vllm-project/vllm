@@ -187,26 +187,8 @@ class EngineCore:
 
         self.mm_receiver_cache = engine_receiver_cache_from_config(vllm_config)
 
-        # If a KV connector is initialized for scheduler, we want to collect
-        # handshake metadata from all workers so the connector in the scheduler
-        # will have the full context
         kv_connector = self.scheduler.get_kv_connector()
-        if kv_connector is not None:
-            # Collect and store KV connector xfer metadata from workers
-            # (after KV cache registration)
-            xfer_handshake_metadata = (
-                self.model_executor.get_kv_connector_handshake_metadata()
-            )
-
-            if xfer_handshake_metadata:
-                # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {(pp_rank, tp_rank): metadata}
-                # Merge all worker dicts into a single dict
-                content: dict[tuple[int, int], Any] = {}
-                for worker_dict in xfer_handshake_metadata:
-                    if worker_dict is not None:
-                        content.update(worker_dict)
-                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
+        self._set_kv_connector_handshake_metadata()
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -883,6 +865,25 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
+    def _set_kv_connector_handshake_metadata(self) -> None:
+        """Give the workers' handshake metadata to the scheduler's connector,
+        after KV cache registration: at startup and after a wake-up."""
+        kv_connector = self.scheduler.get_kv_connector()
+        if kv_connector is not None:
+            # Collect and store KV connector xfer metadata from workers
+            # (after KV cache registration)
+            xfer_handshake_metadata = (
+                self.model_executor.get_kv_connector_handshake_metadata()
+            )
+
+            if xfer_handshake_metadata:
+                # Merge the per-worker {(pp_rank, tp_rank): metadata} dicts.
+                content: dict[tuple[int, int], Any] = {}
+                for worker_dict in xfer_handshake_metadata:
+                    if worker_dict is not None:
+                        content.update(worker_dict)
+                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
+
     def _reset_caches(
         self,
         reset_running_requests: bool = True,
@@ -998,6 +999,7 @@ class EngineCore:
 
         if tags is None or tags:
             self.model_executor.wake_up(tags)
+            self._set_kv_connector_handshake_metadata()
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.

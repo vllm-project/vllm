@@ -223,6 +223,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return any(c.requires_kv_delivery for c in self._connectors)
 
     @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
+        return bool(children) and all(
+            KVConnectorFactory.get_connector_class(c).supports_sleep_mode(c)
+            for c in children
+        )
+
+    @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
     ) -> list[tuple[type[KVConnectorBaseType], "VllmConfig"]]:
@@ -251,6 +262,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
+
+    def release_kv_caches(self) -> None:
+        for c in self._connectors:
+            c.release_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        for c in self._connectors:
+            c.restore_kv_caches()
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         for connector in self._connectors:

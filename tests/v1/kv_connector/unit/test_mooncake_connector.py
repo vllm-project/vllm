@@ -202,7 +202,7 @@ class FakeMooncakeWrapper:
     """Mock Mooncake TransferEngine for unit testing environments."""
 
     def __init__(self, *args, **kwargs):
-        pass
+        self.registered: dict[int, int] = {}
 
     def initialize(self, local_hostname, metadata_server, protocol, device_name) -> int:
         return 0
@@ -216,6 +216,16 @@ class FakeMooncakeWrapper:
         return 0
 
     def batch_register_memory(self, buffer_addresses, capacities) -> int:
+        if self.registered.keys() & set(buffer_addresses):
+            return -1
+        self.registered.update(zip(buffer_addresses, capacities))
+        return 0
+
+    def batch_unregister_memory(self, buffer_addresses) -> int:
+        if not self.registered.keys() >= set(buffer_addresses):
+            return -1
+        for buffer_address in buffer_addresses:
+            del self.registered[buffer_address]
         return 0
 
 
@@ -2568,3 +2578,140 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
+@contextlib.contextmanager
+def mooncake_sleep_worker(kv_role: str, protocol: str = "rdma"):
+    """Build a worker with live loops and registered KV caches."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role=kv_role,
+        kv_connector_extra_config={"mooncake_protocol": protocol},
+    )
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+    )
+    layer_names = ["model.layers.0.self_attn", "model.layers.1.self_attn"]
+    raw = torch.zeros(2 * 2 * spec.page_size_bytes, dtype=torch.int8)
+    kv_caches = dict(
+        zip(layer_names, dense_kv_cache_views(raw, spec, 2, 2, KVCacheLayout.LBHNC))
+    )
+
+    async def listener(self, ready_event):
+        ready_event.set()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch.object(MooncakeConnectorWorker, "_mooncake_sender_listener", listener),
+    ):
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        )
+        connector.register_kv_caches(kv_caches)
+        try:
+            yield connector, {raw.data_ptr(): raw.nbytes}
+        finally:
+            connector.connector_worker.shutdown()
+
+
+@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer", "kv_both"])
+def test_sleep_cycle_releases_and_restores_registration(kv_role: str):
+    """Nothing stays registered while the KV caches are unmapped, and waking up
+    registers the same addresses again."""
+    with mooncake_sleep_worker(kv_role) as (connector, expected):
+        engine = connector.connector_worker.engine
+        assert engine.registered == expected
+        connector.restore_kv_caches()  # nothing released: a wake-up without sleep
+        for _ in range(2):
+            connector.release_kv_caches()
+            connector.release_kv_caches()  # idempotent: sleeping after a discard
+            assert engine.registered == {}
+            connector.restore_kv_caches()
+            connector.restore_kv_caches()  # idempotent: a retried wake-up
+            assert engine.registered == expected
+
+
+@pytest.mark.parametrize("protocol", ["rdma", "nvlink"])
+def test_only_rdma_supports_sleep_mode(protocol: str):
+    """Only RDMA peers refresh a stale remote key, through the failed access."""
+    with mooncake_sleep_worker("kv_producer", protocol=protocol) as (connector, _):
+        config = connector._kv_transfer_config
+        assert type(connector).supports_sleep_mode(config) is (protocol == "rdma")
+
+
+@pytest.mark.parametrize("ready", [True, False], ids=["ready_to_send", "not_ready"])
+def test_release_waits_for_blocks_ready_to_send(monkeypatch, ready: bool):
+    """Blocks that D may still pull keep their registration: the release waits
+    for them, and fails after the abort timeout without releasing anything."""
+    monkeypatch.setattr(
+        mooncake_connector.envs, "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", 0.2
+    )
+    with mooncake_sleep_worker("kv_producer") as (connector, expected):
+        worker = connector.connector_worker
+
+        async def add_send_req():
+            send_meta = SendBlockMeta(
+                p_req_id="p-req-1",
+                transfer_id="xfer-req-1",
+                local_block_ids=[[0]] if ready else [],
+                ready=asyncio.Event(),
+            )
+            if ready:
+                send_meta.ready.set()
+            worker.reqs_need_send[send_meta.transfer_id] = send_meta
+
+        asyncio.run_coroutine_threadsafe(add_send_req(), worker.sender_loop).result()
+
+        if ready:
+            with pytest.raises(TimeoutError):
+                connector.release_kv_caches()
+            assert worker.engine.registered == expected
+        else:
+            connector.release_kv_caches()
+            assert worker.engine.registered == {}
+
+
+def test_release_waits_for_pending_recv():
+    """Memory that P may still write into keeps its registration until the
+    pull has finished."""
+    with mooncake_sleep_worker("kv_consumer") as (connector, expected):
+        worker = connector.connector_worker
+        worker._remote_agents = {"p-engine": {0: {0: "tcp://producer:1234"}}}
+        worker._tp_size["p-engine"] = 1
+        pulling = threading.Event()
+        pulled = threading.Event()
+        release: list[asyncio.Event] = []
+
+        async def pull(worker_addr, pull_metas):
+            release.append(asyncio.Event())
+            pulling.set()
+            await release[0].wait()
+            pulled.set()
+
+        metadata = MooncakeConnectorMetadata()
+        metadata.add_new_req(
+            "d-req-1",
+            [[0]],
+            {
+                "transfer_id": "xfer-req-1",
+                "remote_engine_id": "p-engine",
+                "remote_bootstrap_addr": "http://bootstrap:33333",
+            },
+        )
+        with patch.object(worker, "receive_kv_from_single_worker", pull):
+            worker.start_load_kv(metadata)
+            assert pulling.wait(timeout=10)
+
+            releasing = threading.Thread(target=connector.release_kv_caches)
+            releasing.start()
+            releasing.join(timeout=0.3)
+            assert releasing.is_alive()
+            assert worker.engine.registered == expected
+
+            worker.receiver_loop.call_soon_threadsafe(release[0].set)
+            assert pulled.wait(timeout=10)
+            releasing.join(timeout=10)
+
+        assert not releasing.is_alive()
+        assert worker.engine.registered == {}
