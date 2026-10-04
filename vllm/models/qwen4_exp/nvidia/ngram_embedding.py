@@ -159,8 +159,9 @@ class Qwen4ExpPLEFileGatherEmbedding(Qwen4ExpPLEEmbedding):
             for name, shards in self._shards.items():
                 rows = sum(shard.shape[0] for shard in shards.values())
                 if rows != self.org_vocab_size:
+                    plane = "" if name == "weight" else f"{name} "
                     raise ValueError(
-                        f"PLE {name} shards cover {rows} of {self.org_vocab_size} rows"
+                        f"PLE {plane}shards cover {rows} of {self.org_vocab_size} rows"
                     )
                 fds_t, bases = torch.zeros(2, len(shards)).long()
                 for index, shard in shards.items():
