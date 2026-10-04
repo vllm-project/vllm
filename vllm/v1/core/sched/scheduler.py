@@ -1181,8 +1181,15 @@ class Scheduler(SchedulerInterface):
                     )
 
                     if num_new_tokens == 0:
-                        # The request cannot be scheduled.
-                        break
+                        if encoder_inputs_to_schedule is None:
+                            # The request cannot be scheduled.
+                            break
+                        # Encoder work stalled it: requeue it for the next
+                        # pass instead of stopping here, where one stuck
+                        # request would starve every request behind it.
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1872,9 +1879,22 @@ class Scheduler(SchedulerInterface):
                     0, start_pos - (num_computed_tokens + shift_computed_tokens)
                 )
                 break
-            if not self.encoder_cache_manager.can_allocate(
+            can_allocate = self.encoder_cache_manager.can_allocate(
                 request, i, encoder_compute_budget, num_embeds_to_schedule
+            )
+            # When every earlier input of this request is already consumed by
+            # the forward pass, its own references hold the cache slots this
+            # item needs, and nothing else will drop them: release them and
+            # look again.
+            if (
+                not can_allocate
+                and num_computed_tokens + shift_computed_tokens >= start_pos
+                and self._release_consumed_encoder_inputs(request, num_computed_tokens)
             ):
+                can_allocate = self.encoder_cache_manager.can_allocate(
+                    request, i, encoder_compute_budget, num_embeds_to_schedule
+                )
+            if not can_allocate:
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
@@ -2498,6 +2518,24 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free_encoder_input(request, input_id)
         if self.ec_connector is not None:
             self.ec_connector.update_state_after_free(request, input_id)
+
+    def _release_consumed_encoder_inputs(
+        self, request: Request, num_computed_tokens: int
+    ) -> bool:
+        """Drop this request's references to inputs the forward pass consumed.
+
+        Unlike `_free_encoder_inputs` this defers nothing: it runs only where
+        an allocation has already stalled, so the lookahead deferral would be
+        the stall. Returns whether anything was released.
+        """
+        released = False
+        cached_input_ids = self.encoder_cache_manager.get_cached_input_ids(request)
+        for input_id in list(cached_input_ids):
+            position = request.mm_features[input_id].mm_position
+            if position.offset + position.length <= num_computed_tokens:
+                self._free_encoder_input(request, input_id)
+                released = True
+        return released
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(
