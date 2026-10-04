@@ -1375,32 +1375,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
         backend = self.attn_backend.get_name()
-        # SM100 FlashMLA paged kernels also express TMA coordinates in token rows.
-        uses_tma_rows = (
-            backend == "FLASHMLA_SPARSE"
-            and self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
-            and current_platform.is_device_capability_family(100)
-        )
-        # Flat-row readers need blocks whole rows apart; TRT-LLM and SM120 view
-        # the rows as 32/64-row pages.
-        page_rows = {
-            "FLASHINFER_MLA_SPARSE": 32,
-            "FLASHINFER_MLA_SPARSE_SM120": 64,
-        }.get(backend, 1)
-        if (
-            self._uses_flat_kv_cache()
-            or uses_tma_rows
-            or backend
-            in (
-                "FLASH_ATTN_MLA_SPARSE",
-                "FLASHINFER_MLA_SPARSE_SM90",
-                "FLASHINFER_MLA_SPARSE_SM120",
-                "ROCM_AITER_MLA_SPARSE",
-            )
+        # Sparse kernels address the cache in flat rows (FlashMLA's quantized
+        # cache only for SM100 TMA), so blocks must be whole rows apart; TRT-LLM
+        # and SM120 view the rows as 32/64-row pages.
+        if self.attn_backend.is_sparse() and (
+            backend != "FLASHMLA_SPARSE"
+            or self._uses_flat_kv_cache()
+            or current_platform.is_device_capability_family(100)
         ):
+            page_rows = {
+                "FLASHINFER_MLA_SPARSE": 32,
+                "FLASHINFER_MLA_SPARSE_SM120": 64,
+            }.get(backend, 1)
             spec = replace(
-                spec,
-                block_stride_alignment=page_rows * spec.state_content_size_bytes,
+                spec, block_stride_alignment=page_rows * spec.state_content_size_bytes
             )
         return spec
 
