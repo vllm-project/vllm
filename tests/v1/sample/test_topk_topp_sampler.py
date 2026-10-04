@@ -182,7 +182,11 @@ def test_flashinfer_sampler_fallback_when_jit_cannot_target_gpu(monkeypatch):
     import flashinfer.jit.core
     from flashinfer.compilation_context import CompilationContext
 
+    import vllm.utils.flashinfer
     from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sampler_supported
+
+    # Reach the arch probe even on hosts without nvcc or ninja.
+    monkeypatch.setattr(vllm.utils.flashinfer, "has_flashinfer", lambda: True)
 
     def fake_check_cuda_arch():
         raise RuntimeError("FlashInfer requires GPUs with sm75 or higher")
