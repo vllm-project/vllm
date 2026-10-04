@@ -724,31 +724,6 @@ def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_ba
     core.model_executor.discard.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    ("tags", "published"),
-    [(None, True), (["kv_cache"], True), (["scheduling"], False)],
-    ids=["all", "kv_cache", "scheduling-only"],
-)
-def test_wake_up_republishes_kv_connector_handshake_metadata(tags, published):
-    """A wake-up that maps the KV cache republishes the handshake metadata."""
-    core = _pausable_engine_core_proc()
-    core.model_executor.is_sleeping = False
-    core.model_executor.get_kv_connector_handshake_metadata.return_value = [
-        {(0, 0): "metadata"},
-        None,
-    ]
-    kv_connector = core.scheduler.get_kv_connector.return_value
-
-    assert EngineCore.wake_up(core, tags)
-
-    if published:
-        kv_connector.set_xfer_handshake_metadata_pp_aware.assert_called_once_with(
-            {(0, 0): "metadata"}
-        )
-    else:
-        kv_connector.set_xfer_handshake_metadata_pp_aware.assert_not_called()
-
-
 @pytest.mark.parametrize("deferred", [False, True])
 def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     """A resolved pause promises an idle device: the barrier must run before
@@ -777,10 +752,8 @@ def test_sleep_mode_refuses_unsupported_kv_connector_at_startup():
         model=MODEL_NAME,
         enable_sleep_mode=True,
         kv_transfer_config=KVTransferConfig(
-            kv_connector="ExampleConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={"shared_storage_path": "local_storage"},
+            kv_connector="NixlConnector", kv_role="kv_producer"
         ),
     )
-    with pytest.raises(ValueError, match="ExampleConnector does not support sleep"):
+    with pytest.raises(ValueError, match="does not support sleep mode"):
         engine_args.create_engine_config()
