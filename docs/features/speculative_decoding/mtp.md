@@ -80,4 +80,7 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   Model Runner V2). The target still verifies with its own head, so outputs are
   unchanged; only the acceptance length can move. It helps most on
   bandwidth-bound GPUs with a large vocabulary, where the draft lm_head read is a
-  big part of each draft step.
+  big part of each draft step. The copy is extra memory, about one byte (FP8) or
+  0.56 bytes (NVFP4) per lm_head weight, e.g. 0.6 or 0.35 GiB for a
+  248k x 2560 head. It is counted in the model weights, so profiled KV cache
+  sizing accounts for it; with `--kv-cache-memory-bytes` leave room for it.
