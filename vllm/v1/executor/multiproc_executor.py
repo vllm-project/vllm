@@ -609,6 +609,10 @@ class WorkerProc:
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
     ) -> None:
+        # Each in-flight batch can produce both execute_model and sample_tokens
+        # replies before EngineCore drains its oldest future. Keep the output
+        # thread from spinning on a full ring during this normal pipeline window.
+        response_mq_chunks = 2 * vllm_config.max_concurrent_batches
         if vllm_config.parallel_config.nnodes_within_dp == 1:
             # Initialize MessageQueue for receiving SchedulerOutput
             self.rpc_broadcast_mq = MessageQueue.create_from_handle(
@@ -616,7 +620,9 @@ class WorkerProc:
             )
 
             # Initializes a message queue for sending the model output
-            self.worker_response_mq = MessageQueue(1, 1)
+            self.worker_response_mq = MessageQueue(
+                1, 1, max_chunks=max(10, response_mq_chunks)
+            )
             self.peer_response_handles = []
         else:
             # Initialize remote MessageQueue for receiving SchedulerOutput across nodes
@@ -634,7 +640,7 @@ class WorkerProc:
             # that include handles for all ranks
             self.worker_response_mq, self.peer_response_handles = (
                 get_inner_dp_world_group().create_single_reader_mq_broadcasters(
-                    reader_rank_in_group=0
+                    reader_rank_in_group=0, max_chunks=max(6, response_mq_chunks)
                 )
             )
 
