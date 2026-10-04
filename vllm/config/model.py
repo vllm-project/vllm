@@ -379,7 +379,7 @@ class ModelConfig:
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
     sleep_mode_offload_cudagraph: bool = False
-    """Back up CUDA graph memory to CPU during sleep, restored in place on wake.
+    """Release CUDA graph memory during sleep and map it back in place on wake.
     Takes effect with enable_sleep_mode, the cumem backend and CUDA graphs."""
     enable_nccl_comm_suspend: bool = False
     """Enable releasing NCCL communicator memory during sleep mode
