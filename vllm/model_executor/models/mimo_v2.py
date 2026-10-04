@@ -23,6 +23,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
@@ -41,6 +42,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_quantize,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -50,10 +52,20 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.ops.triton_rope_and_cache_diffkv import (
+    triton_rope_and_cache_diffkv,
+)
 
 from .interfaces import (
     EagleModelMixin,
@@ -72,6 +84,80 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def mimo_rope_and_cache(
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    head_size_v: int,
+    value_scale: float,
+    is_neox: bool,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    """Return rotated Q after writing the layer's packed K/V cache."""
+    q_size = num_heads * head_size
+    k_size = num_kv_heads * head_size
+    v_size = num_kv_heads * head_size_v
+    q, k, v = qkv.split([q_size, k_size, v_size], dim=-1)
+    attn_metadata, _, kv_cache, slot_mapping = get_attention_context(
+        _resolve_layer_name(layer_name)
+    )
+    if attn_metadata is None:
+        query, _ = RotaryEmbedding.forward_static(
+            positions,
+            q,
+            None,
+            head_size,
+            cos_sin_cache.shape[-1],
+            cos_sin_cache,
+            is_neox,
+        )
+        return query
+
+    assert slot_mapping is not None, (
+        "MiMo decoder attention requires a per-layer slot mapping."
+    )
+    query = qkv.new_empty((qkv.shape[0], q_size))
+    triton_rope_and_cache_diffkv(
+        q.view(-1, num_heads, head_size),
+        k.view(-1, num_kv_heads, head_size),
+        v.view(-1, num_kv_heads, head_size_v),
+        positions,
+        cos_sin_cache,
+        kv_cache.transpose(1, 2),
+        slot_mapping,
+        value_scale,
+        is_neox,
+        query_out=query.view(-1, num_heads, head_size),
+    )
+    return query
+
+
+def mimo_rope_and_cache_fake(
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    head_size_v: int,
+    value_scale: float,
+    is_neox: bool,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    return qkv.new_empty((qkv.shape[0], num_heads * head_size))
+
+
+direct_register_custom_op(
+    op_name="mimo_rope_and_cache",
+    op_func=mimo_rope_and_cache,
+    fake_impl=mimo_rope_and_cache_fake,
+    mutates_args=[],
+)
 
 
 class MiMoV2MLP(nn.Module):
@@ -337,6 +423,22 @@ class MiMoV2Attention(nn.Module):
             attn_backend=attn_backend,
             head_size_v=self.v_head_dim,
         )
+        self.use_fused_rope_cache = (
+            current_platform.is_cuda()
+            and self.attn.backend
+            in (
+                AttentionBackendEnum.FLASH_ATTN_DIFFKV,
+                AttentionBackendEnum.TRITON_ATTN_DIFFKV,
+            )
+            and self.attn.dtype in (torch.float16, torch.bfloat16)
+            and self.attn.kv_cache_torch_dtype in (torch.float16, torch.bfloat16)
+            and self.attn.query_quant is None
+            and self.attn.attn_type == AttentionType.DECODER
+            and self.attn.impl.dcp_world_size == 1
+            and self.attn.kv_sharing_target_layer_name is None
+            and type(self.rotary_emb) is RotaryEmbedding
+            and not self.rotary_emb.use_flashinfer
+        )
 
     def forward(
         self,
@@ -344,14 +446,26 @@ class MiMoV2Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-
-        # Apply v_scale before attention
-        if self.v_scale is not None:
-            v = v * self.v_scale
-
-        attn_output = self.attn(q, k, v)
+        if self.use_fused_rope_cache and positions.ndim == 1:
+            q = torch.ops.vllm.mimo_rope_and_cache(
+                qkv,
+                positions,
+                self.rotary_emb._match_cos_sin_cache_dtype(qkv),
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.v_head_dim,
+                self.v_scale if self.v_scale is not None else 1.0,
+                self.rotary_emb.is_neox_style,
+                _encode_layer_name(self.attn.layer_name),
+            )
+            attn_output = self.attn(q, None, None)
+        else:
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+            q, k = self.rotary_emb(positions, q, k)
+            if self.v_scale is not None:
+                v = v * self.v_scale
+            attn_output = self.attn(q, k, v)
 
         output, _ = self.o_proj(attn_output)
         return output

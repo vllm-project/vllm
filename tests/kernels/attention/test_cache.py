@@ -440,6 +440,85 @@ def test_reshape_and_cache_flash(
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize(
+    "num_tokens,num_heads,num_kv_heads,block_size,is_neox,value_scale",
+    [(17, 64, 4, 16, True, 0.707), (7, 8, 1, 64, False, 1.0)],
+)
+@torch.inference_mode()
+def test_rope_and_cache_diffkv_preserves_inputs(
+    dtype: torch.dtype,
+    device: str,
+    num_tokens: int,
+    num_heads: int,
+    num_kv_heads: int,
+    block_size: int,
+    is_neox: bool,
+    value_scale: float,
+) -> None:
+    """Partial RoPE must transform padded Q without writing input Q/K/V."""
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash_diffkv,
+    )
+    from vllm.v1.attention.ops.triton_rope_and_cache_diffkv import (
+        triton_rope_and_cache_diffkv,
+    )
+
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    sizes = [num_heads * 192, num_kv_heads * 192, num_kv_heads * 128]
+    # Offset views retain both packed QKV row strides and allocation guards.
+    backing = torch.randn(num_tokens + 2, sum(sizes) + 4, dtype=dtype)
+    original = backing.clone()
+    packed = backing[1:-1, 1 : sum(sizes) + 1]
+    q, k, v = (
+        tensor.view(num_tokens, heads, dim)
+        for tensor, heads, dim in zip(
+            packed.split(sizes, -1),
+            (num_heads, num_kv_heads, num_kv_heads),
+            (192, 192, 128),
+        )
+    )
+    ref_q, ref_k, ref_v = q.clone(), k.clone(), v.clone()
+    angles = torch.randn(256, 32, dtype=torch.float32)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), -1).to(dtype)
+    positions = torch.arange(num_tokens, dtype=torch.int64) * 5 + 7
+    slots = torch.arange(num_tokens - 2, dtype=torch.int64) * 3 % (2 * block_size)
+    slots[1::4] = -1
+    # Logical [blocks, slots, heads, K+V], backed by an offset HND allocation.
+    cache_backing = torch.full((4, num_kv_heads, block_size, 322), -23, dtype=dtype)
+    ref_cache_backing = cache_backing.clone()
+    cache = cache_backing[1:3, :, :, 1:321].transpose(1, 2)
+    ref_cache = ref_cache_backing[1:3, :, :, 1:321].transpose(1, 2)
+
+    ops.rotary_embedding(positions, ref_q, ref_k, 192, cos_sin, is_neox)
+    ref_v = ref_v * value_scale
+    scale = torch.ones((), dtype=torch.float32)
+    triton_reshape_and_cache_flash_diffkv(
+        ref_k, ref_v, ref_cache, slots, "auto", scale, scale
+    )
+    output = torch.empty_like(q)
+    triton_rope_and_cache_diffkv(
+        q,
+        k,
+        v,
+        positions,
+        cos_sin,
+        cache,
+        slots,
+        value_scale,
+        is_neox,
+        query_out=output,
+    )
+    torch.testing.assert_close(output, ref_q, atol=0, rtol=0)
+    torch.testing.assert_close(backing, original, atol=0, rtol=0)
+    # Check whole allocations, including guards and slots excluded from writes.
+    torch.testing.assert_close(cache_backing, ref_cache_backing, atol=0, rtol=0)
+    torch.testing.assert_close(output[..., 64:], q[..., 64:], atol=0, rtol=0)
+
+
 @torch.inference_mode()
 def test_nvfp4_4over6_selects_lower_error_scale(
     kv_cache_factory_flashinfer,
