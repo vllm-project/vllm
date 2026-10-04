@@ -8,7 +8,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import (
     CompilationConfig,
     VllmConfig,
-    get_cached_compilation_config,
     set_current_vllm_config,
 )
 from vllm.model_executor.custom_op import CustomOp, op_registry
@@ -88,7 +87,6 @@ def test_enabled_ops(
             backend=backend, mode=compilation_mode, custom_ops=custom_ops
         )
     )
-    get_cached_compilation_config.cache_clear()
     with set_current_vllm_config(vllm_config):
         assert CustomOp.default_on() == default_on
 
