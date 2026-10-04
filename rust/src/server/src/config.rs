@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -258,6 +259,10 @@ pub struct Config {
     /// Optional maximum number of top log probabilities accepted by the
     /// frontend. `None` delegates to the text layer default.
     pub max_logprobs: Option<i32>,
+    /// Minimum number of newly generated tokens batched into each streamed
+    /// output after the first one. Requests can raise it with their own
+    /// `stream_interval`.
+    pub stream_interval: NonZeroU32,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
