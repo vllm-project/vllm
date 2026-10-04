@@ -68,7 +68,11 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
     elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(
-            content=generator.model_dump(),
+            content=generator.model_dump(
+                exclude={"system_fingerprint"}
+                if generator.system_fingerprint is None
+                else None
+            ),
             headers=metrics_header(metrics_header_format),
         )
 
@@ -105,7 +109,13 @@ async def create_batch_chat_completion(
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    return JSONResponse(content=result.model_dump())
+    return JSONResponse(
+        content=result.model_dump(
+            exclude={"system_fingerprint"}
+            if result.system_fingerprint is None
+            else None
+        )
+    )
 
 
 def attach_router(app: FastAPI):
