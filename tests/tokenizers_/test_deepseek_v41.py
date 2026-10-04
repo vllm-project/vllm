@@ -67,6 +67,8 @@ def test_invalid_effort_is_a_request_error(effort):
     [
         {"thinking": False},
         {"enable_thinking": False},
+        {"thinking": True, "enable_thinking": False},
+        {"enable_thinking": None, "thinking": False},
         {"thinking": True, "reasoning_effort": "none"},
         {"enable_thinking": True, "reasoning_effort": "none"},
     ],
@@ -74,6 +76,21 @@ def test_invalid_effort_is_a_request_error(effort):
 def test_chat_mode_has_closed_thinking_prefix(controls):
     assert render([{"role": "user", "content": "question"}], **controls) == (
         "<｜begin▁of▁sentence｜><｜User｜>question<｜Assistant｜></think>"
+    )
+
+
+@pytest.mark.parametrize(
+    "controls",
+    [
+        {"thinking": False, "enable_thinking": True},
+        {"enable_thinking": None, "thinking": True},
+        {"thinking": None, "enable_thinking": None},
+        {},
+    ],
+)
+def test_canonical_enable_thinking_opens_thinking_prefix(controls):
+    assert render([{"role": "user", "content": "question"}], **controls).endswith(
+        "<｜Assistant｜><think>"
     )
 
 
