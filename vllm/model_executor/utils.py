@@ -33,6 +33,115 @@ def is_weights_pre_processed() -> bool:
     return _weights_pre_processed.get()
 
 
+def register_derived_buffer(layer: torch.nn.Module, name: str) -> None:
+    """Declare a non-persistent buffer whose value is derived from weights.
+
+    The placeholder records the module schema before the first weight load. The
+    first call to :func:`set_derived_buffer` installs storage; subsequent calls
+    update that storage in place so CUDA graph references remain valid.
+    """
+    if name in layer._buffers:
+        raise KeyError(f"Buffer {name!r} is already registered")
+    layer.register_buffer(name, None, persistent=False)
+    names = getattr(layer, "_vllm_derived_buffers", None)
+    if names is None:
+        names = layer._vllm_derived_buffers = set()
+    names.add(name)
+
+
+@torch.no_grad()
+def set_derived_buffer(
+    layer: torch.nn.Module, name: str, value: torch.Tensor
+) -> torch.Tensor:
+    """Set a derived buffer while preserving compatible existing storage."""
+    if name not in getattr(layer, "_vllm_derived_buffers", ()):
+        raise KeyError(f"Derived buffer {name!r} is not registered")
+
+    existing = layer._buffers[name]
+    if existing is None:
+        layer._buffers[name] = value
+        return value
+
+    return copy_derived_buffer(existing, value, name)
+
+
+@torch.no_grad()
+def copy_derived_buffer(
+    existing: torch.Tensor, value: torch.Tensor, name: str
+) -> torch.Tensor:
+    """Commit a derived value to compatible graph-visible storage."""
+    if (
+        existing.shape != value.shape
+        or existing.dtype != value.dtype
+        or existing.device != value.device
+    ):
+        raise RuntimeError(
+            f"Cannot update derived buffer {name!r}: "
+            f"existing={existing.shape}/{existing.dtype}/{existing.device}, "
+            f"new={value.shape}/{value.dtype}/{value.device}. "
+            "CUDA graph recapture or a full model reload is required."
+        )
+
+    existing.copy_(value)
+    return existing
+
+
+def bind_runtime_buffer(
+    owner: torch.nn.Module,
+    consumer: Any,
+    consumer_attr: str,
+    owner_buffer_name: str,
+) -> torch.Tensor | None:
+    """Bind a helper attribute to a buffer owned by a module.
+
+    Binding records ownership only; callers decide how to refresh or reset values.
+    """
+    if owner_buffer_name not in owner._buffers:
+        raise KeyError(f"Owner buffer {owner_buffer_name!r} is not registered")
+    bindings = getattr(consumer, "_vllm_runtime_buffer_bindings", None)
+    if bindings is None:
+        bindings = {}
+        consumer._vllm_runtime_buffer_bindings = bindings
+    bindings[consumer_attr] = owner_buffer_name
+    value = owner._buffers[owner_buffer_name]
+    setattr(consumer, consumer_attr, value)
+    return value
+
+
+def rebind_runtime_buffers(owner: torch.nn.Module, consumer: Any) -> None:
+    """Restore helper aliases after the owner's stable storage is installed."""
+    for attr, name in getattr(consumer, "_vllm_runtime_buffer_bindings", {}).items():
+        if name not in owner._buffers:
+            raise RuntimeError(f"Owner buffer {name!r} disappeared during reload")
+        setattr(consumer, attr, owner._buffers[name])
+
+
+def publish_runtime_buffer(
+    owner: torch.nn.Module,
+    consumer: Any,
+    consumer_attr: str,
+    buffer_name: str,
+    value: torch.Tensor | None,
+    *,
+    derived: bool = False,
+) -> torch.Tensor | None:
+    """Publish module-owned helper storage and bind its alias.
+
+    Derived values update in place; ordinary runtime buffers preserve their
+    existing values. Protocol-specific resets remain the caller's responsibility.
+    """
+    if derived:
+        if buffer_name not in owner._buffers:
+            register_derived_buffer(owner, buffer_name)
+        if value is not None:
+            set_derived_buffer(owner, buffer_name, value)
+    elif buffer_name not in owner._buffers:
+        owner.register_buffer(buffer_name, value, persistent=False)
+    elif owner._buffers[buffer_name] is None and value is not None:
+        owner._buffers[buffer_name] = value
+    return bind_runtime_buffer(owner, consumer, consumer_attr, buffer_name)
+
+
 def set_weight_attrs(
     weight: torch.Tensor,
     weight_attrs: dict[str, Any] | None,
