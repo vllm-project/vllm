@@ -3,6 +3,10 @@
 
 """Tests for KV cache offloading configuration."""
 
+import contextlib
+import json
+import sys
+
 import pytest
 
 from vllm.config import (
@@ -182,6 +186,46 @@ def test_sleep_mode_refuses_unsupported_kv_connector(
             kv_connector=kv_connector,
             kv_connector_extra_config=extra_config,
             enable_sleep_mode=True,
+        )
+
+
+@pytest.mark.parametrize("enable_sleep_mode", [False, True], ids=["awake", "sleep"])
+@pytest.mark.parametrize(
+    ("protocol", "env", "error"),
+    [
+        ("rdma", None, None),
+        ("tcp", None, None),
+        ("nvlink", None, "does not support sleep mode"),
+        ("rdma", "MC_FORCE_MNNVL=1", "does not support sleep mode"),
+        ("rdma", "MC_FORCE_MNNVL=0", "does not support sleep mode"),
+        ("tcp", "MC_INTRANODE_NVLINK=1", "does not support sleep mode"),
+        (None, None, "MOONCAKE_CONFIG_PATH"),
+    ],
+    ids=["rdma", "tcp", "nvlink", "mnnvl", "mnnvl-0", "intranode-nvlink", "no-cfg"],
+)
+def test_sleep_mode_mooncake_store_checks_configured_transport(
+    monkeypatch, tmp_path, protocol, env, error, enable_sleep_mode
+):
+    """MooncakeStoreConnector takes its transport from the Mooncake config file
+    and env, read only with sleep mode and without importing mooncake."""
+    monkeypatch.setitem(sys.modules, "mooncake", None)
+    monkeypatch.delenv("MOONCAKE_CONFIG_PATH", raising=False)
+    for var in ("MC_FORCE_MNNVL", "MC_INTRANODE_NVLINK"):
+        monkeypatch.delenv(var, raising=False)
+    if protocol is not None:
+        (path := tmp_path / "mooncake.json").write_text(
+            json.dumps({"protocol": protocol})
+        )
+        monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(path))
+    if env is not None:
+        monkeypatch.setenv(*env.split("="))
+    with (
+        pytest.raises(ValueError, match=error)
+        if enable_sleep_mode and error
+        else contextlib.nullcontext()
+    ):
+        _build_config(
+            kv_connector="MooncakeStoreConnector", enable_sleep_mode=enable_sleep_mode
         )
 
 
