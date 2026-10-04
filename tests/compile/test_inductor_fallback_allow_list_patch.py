@@ -16,6 +16,9 @@ semantics in isolation and the membership-check fast-path that Inductor's
 optimization without needing a full GPU compile.
 """
 
+import subprocess
+import sys
+import textwrap
 import time
 
 import pytest
@@ -130,6 +133,30 @@ class TestPatchApplication:
         _patch_inductor_fallback_allow_list()
         _patch_inductor_fallback_allow_list()
         assert _lowering.FALLBACK_ALLOW_LIST is first
+
+    def test_patch_survives_find_spec_before_import(self):
+        # The patch is installed lazily by a MetaPathFinder. A bare
+        # ``importlib.util.find_spec`` probe consults that finder without
+        # importing the module; the finder must still be in place for the
+        # real import that follows. Needs a clean interpreter, since this
+        # process has already imported ``torch._inductor.lowering``.
+        code = textwrap.dedent(
+            """
+            import importlib.util
+            import sys
+
+            import vllm  # noqa: F401
+
+            assert "torch._inductor.lowering" not in sys.modules
+            assert importlib.util.find_spec("torch._inductor.lowering")
+            assert "torch._inductor.lowering" not in sys.modules
+
+            import torch._inductor.lowering as lowering
+
+            assert getattr(lowering.FALLBACK_ALLOW_LIST, "_vllm_patched", False)
+            """
+        )
+        subprocess.run([sys.executable, "-c", code], check=True)
 
     def test_real_vllm_ops_in_real_allow_list(self):
         # End-to-end membership check using the live (already-patched) object.
