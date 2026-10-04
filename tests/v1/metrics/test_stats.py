@@ -1,9 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine import (
+    PREEMPTION_REASON_KV_FULL,
+    PREEMPTION_REASON_PRIORITY,
+    EngineCoreEvent,
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
@@ -43,6 +52,55 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
+
+
+def test_iteration_stats_counts_preemptions_by_reason():
+    iteration_stats = IterationStats()
+    events = [
+        EngineCoreEvent.new_event(EngineCoreEventType.QUEUED, 1.0),
+        EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED, 2.0),
+        EngineCoreEvent.new_event(
+            EngineCoreEventType.PREEMPTED, 3.0, PREEMPTION_REASON_KV_FULL
+        ),
+        EngineCoreEvent.new_event(
+            EngineCoreEventType.PREEMPTED, 4.0, PREEMPTION_REASON_PRIORITY
+        ),
+        EngineCoreEvent.new_event(
+            EngineCoreEventType.PREEMPTED, 5.0, PREEMPTION_REASON_KV_FULL
+        ),
+        # A PREEMPTED event without a reason still counts as a preemption.
+        EngineCoreEvent.new_event(EngineCoreEventType.PREEMPTED, 6.0),
+    ]
+    req_stats = RequestStateStats(arrival_time=0.0)
+    iteration_stats.update_from_events(
+        "req", events, False, req_stats, LoRARequestStates(), None
+    )
+    assert iteration_stats.num_preempted_reqs == 4
+    assert req_stats.num_preemptions == 4
+    assert iteration_stats.num_preempted_reqs_by_reason == {
+        PREEMPTION_REASON_KV_FULL: 2,
+        PREEMPTION_REASON_PRIORITY: 1,
+    }
+
+
+def test_engine_core_event_reason_serialization():
+    outputs = EngineCoreOutputs(
+        outputs=[
+            EngineCoreOutput(
+                request_id="req",
+                new_token_ids=[1],
+                events=[
+                    EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED, 1.0),
+                    EngineCoreEvent.new_event(
+                        EngineCoreEventType.PREEMPTED, 2.0, PREEMPTION_REASON_KV_FULL
+                    ),
+                ],
+            )
+        ]
+    )
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(MsgpackEncoder().encode(outputs))
+    events = decoded.outputs[0].events
+    assert [e.reason for e in events] == [None, PREEMPTION_REASON_KV_FULL]
 
 
 def test_compute_iteration_details_includes_encoder_stats():
