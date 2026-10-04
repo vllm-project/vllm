@@ -74,14 +74,16 @@ def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
         value = match.group(2)
         params[name] = _trim_wrapping_newlines(value)
 
-    if partial:
-        remaining = _PARAM_RE.sub("", raw_args)
-        m = _PARTIAL_PARAM_RE.search(remaining)
-        if m:
-            name = m.group(1)
-            value = m.group(2)
-            if name:
-                params[name] = _trim_wrapping_newlines(value)
+    # The model sometimes closes </function> without closing the last
+    # parameter; the trailing value must survive the final conversion too,
+    # not just the streamed partial ones.
+    remaining = _PARAM_RE.sub("", raw_args)
+    m = _PARTIAL_PARAM_RE.search(remaining)
+    if m:
+        name = m.group(1)
+        value = m.group(2)
+        if name:
+            params[name] = _trim_wrapping_newlines(value)
 
     return json.dumps(params, ensure_ascii=False)
 
