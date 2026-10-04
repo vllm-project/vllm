@@ -66,7 +66,11 @@ Implementor contracts
 - close() releases all resources (memory registrations, handles).
   After close(), no other methods may be called.
 
-Threading model: no background threads. All I/O driven by poll().
+Threading model: no background Python threads. All I/O driven by poll(). More
+than one caller thread may drive a transport over its lifetime, but never
+concurrently -- callers serialize themselves (the tiering manager does so with
+its lock). Note that serialization alone is not obviously sufficient for a
+backend that binds state to the thread that created it; see NixlTransport.
 """
 
 from __future__ import annotations

@@ -20,8 +20,11 @@ Architecture
         ├── mark_dead() — signal that the peer is gone
         └── close()     — tear down the connection
 
-Threading model: all I/O is driven by the caller invoking poll().
-No background threads. poll() must be called periodically to:
+Threading model: all I/O is driven by the caller invoking poll(). No background
+threads of its own. More than one caller thread may drive poll() over a
+transport's lifetime, but never concurrently -- callers serialize themselves
+(the tiering manager does so with its lock), because sockets here are not
+thread-safe. poll() must be called periodically to:
   - receive messages (buffered per-connection)
   - accept new inbound peers
   - detect disconnections
