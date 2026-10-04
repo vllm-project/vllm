@@ -76,7 +76,17 @@ class CPUWorker(Worker):
         )
         available_memory = memory_status.available_memory
 
-        if (
+        self.is_encoder_only_pooling = (
+            vllm_config.model_config.runner_type == "pooling"
+            and vllm_config.model_config.attn_type == "encoder_only"
+        )
+        if self.is_encoder_only_pooling:
+            logger.info(
+                "Encoder-only pooling model detected; "
+                "skipping CPU memory reservation for KV cache on node %s.",
+                cpu_core.numa_node,
+            )
+        elif (
             vllm_config.cache_config.kv_cache_memory_bytes is None
             and self.requested_cpu_memory > available_memory
         ):
@@ -214,7 +224,15 @@ class CPUWorker(Worker):
 
         kv_cache_size = None
         msg = None
-        if explicit_kv_cache_size is not None:
+        if self.is_encoder_only_pooling:
+            # Encoder-only pooling models (embeddings, rerankers, classifiers)
+            # do not perform autoregressive generation and do not require a KV cache.
+            kv_cache_size = 0
+            msg = (
+                "Encoder-only pooling model detected; "
+                f"KV cache size set to 0 GiB on node {cpu_core.numa_node}."
+            )
+        elif explicit_kv_cache_size is not None:
             if explicit_kv_cache_size > available_memory:
                 raise ValueError(
                     f"Available memory on node {cpu_core.numa_node} "
@@ -258,7 +276,6 @@ class CPUWorker(Worker):
             )
 
         logger.info(msg)
-
         return kv_cache_size
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
