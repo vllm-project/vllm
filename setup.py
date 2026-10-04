@@ -207,6 +207,21 @@ class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
     did_config: dict[str, bool] = {}
 
+    # Conservative peak memory estimate for a single cc1plus/nvcc compile job.
+    _BYTES_PER_COMPILE_JOB = 2 * 1024**3
+
+    @staticmethod
+    def _available_memory_bytes() -> int | None:
+        # POSIX-only, and not all platforms expose these sysconf names
+        # (e.g. macOS lacks SC_AVPHYS_PAGES), so callers must treat None
+        # as "unknown" and skip memory-based throttling.
+        try:
+            avphys_pages = os.sysconf("SC_AVPHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+        except (ValueError, OSError, AttributeError):
+            return None
+        return avphys_pages * page_size
+
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
     #
@@ -224,6 +239,22 @@ class cmake_build_ext(build_ext):
                 num_jobs = len(os.sched_getaffinity(0))
             except AttributeError:
                 num_jobs = os.cpu_count()
+
+            available_memory = self._available_memory_bytes()
+            if available_memory is not None:
+                memory_limited_jobs = max(
+                    1, available_memory // self._BYTES_PER_COMPILE_JOB
+                )
+                if memory_limited_jobs < num_jobs:
+                    logger.info(
+                        "Limiting build jobs from %d to %d based on "
+                        "available memory (%.1f GiB); set MAX_JOBS to "
+                        "override.",
+                        num_jobs,
+                        memory_limited_jobs,
+                        available_memory / 1024**3,
+                    )
+                    num_jobs = memory_limited_jobs
 
         nvcc_threads = None
         if _is_cuda() and CUDA_HOME is not None:
