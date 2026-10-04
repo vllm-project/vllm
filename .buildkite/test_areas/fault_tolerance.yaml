@@ -23,6 +23,7 @@ steps:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s v1/fault_tolerance/test_engine_core_sentinel.py
   - pytest -v -s v1/fault_tolerance/test_fault_tolerance_e2e.py
   mirror:
     amd:
