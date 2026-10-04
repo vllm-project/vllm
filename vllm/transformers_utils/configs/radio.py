@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Radio vision model configuration."""
+"""Radio vision model configuration"""
 
 from typing import Any
 
@@ -36,6 +36,7 @@ class RadioConfig(PreTrainedConfig):
         norm_type: The normalization type to use.
         layer_norm_eps: The epsilon used by the layer normalization layers.
         initializer_factor: A factor for initializing all weight matrices.
+        layerscale_value: Initial value for the LayerScale ``lambda1`` parameters.
         hidden_act: The non-linear activation function in the encoder.
         cpe_max_size: Maximum image size for position embeddings.
         norm_mean: Mean values for image normalization (RGB channels).
@@ -43,6 +44,8 @@ class RadioConfig(PreTrainedConfig):
         norm_std: Standard deviation values for image normalization
             (RGB channels). Defaults to (0.26862954, 0.26130258, 0.27577711)).
         register_multiple: Number of register tokens to use.
+        cpe_num_registers: Explicit CPE register-token count, used by checkpoints
+            that set ``register_multiple=0`` (e.g. C-RADIOv3) instead.
         teachers: A list of teacher model configurations. Each teacher configuration is
             a dict with keys like "name" and some may have "use_summary".
         cls_token_per_teacher: Whether to use a separate CLS token for each teacher.
@@ -54,6 +57,11 @@ class RadioConfig(PreTrainedConfig):
             dedicated video patch embedder (3*T*P*P -> hidden) separate from the
             image embedder (3*P*P -> hidden). When False, a single embedder with
             input size 3*T*P*P is used for both (images are duplicated T times).
+        num_channels: Number of input image channels (RGB -> 3).
+
+    ``num_cls_tokens``, ``num_registers``, ``summary_idxs`` and ``max_img_size``
+    are derived from the fields above so the model reads a single canonical
+    schema (these were previously computed inside the model).
 
     """
 
@@ -69,15 +77,18 @@ class RadioConfig(PreTrainedConfig):
         norm_type: str = "layer_norm",
         layer_norm_eps: float = 1e-6,
         initializer_factor: float = 1.0,
+        layerscale_value: float = 1.0,
         hidden_act: str = "gelu",
         cpe_max_size: int = 2048,
         norm_mean: tuple[float, float, float] | list = OPENAI_CLIP_MEAN,
         norm_std: tuple[float, float, float] | list = OPENAI_CLIP_STD,
         register_multiple: int | None = None,
+        cpe_num_registers: int | None = None,
         teachers: list[dict[str, Any]] | None = None,
         cls_token_per_teacher: bool = False,
         video_temporal_patch_size: int = 1,
         separate_video_embedder: bool = True,
+        num_channels: int = 3,
         **kwargs,
     ):
         self.model_name = model_name
@@ -94,6 +105,7 @@ class RadioConfig(PreTrainedConfig):
         self.norm_type = norm_type
         self.layer_norm_eps = layer_norm_eps
         self.initializer_factor = initializer_factor
+        self.layerscale_value = layerscale_value
         self.hidden_act = hidden_act
         self.cpe_max_size = cpe_max_size
         self.norm_mean = (
@@ -103,8 +115,35 @@ class RadioConfig(PreTrainedConfig):
             list(norm_std) if isinstance(norm_std, (tuple, list)) else norm_std
         )
         self.register_multiple = register_multiple
+        self.cpe_num_registers = cpe_num_registers
         self.teachers = teachers if teachers is not None else []
         self.cls_token_per_teacher = cls_token_per_teacher
         self.video_temporal_patch_size = video_temporal_patch_size
         self.separate_video_embedder = separate_video_embedder
+        self.num_channels = num_channels
+
+        # Fields derived from the fields above (previously computed inside the
+        # model), so the model consumes a single canonical schema.
+        unique_teachers = {t["name"] for t in self.teachers}
+        self.num_cls_tokens = len(unique_teachers) if self.cls_token_per_teacher else 1
+        if self.register_multiple:
+            self.num_registers = self.register_multiple - (
+                self.num_cls_tokens % self.register_multiple
+            )
+        elif self.cpe_num_registers:
+            # C-RADIOv3 sets register_multiple=0 and carries its register count
+            # in cpe_num_registers; without this the CPE token count is short.
+            self.num_registers = self.cpe_num_registers
+        else:
+            self.num_registers = 0
+        # None (no teachers) means no explicit selection -> keep all class
+        # tokens; a list (possibly empty) gathers exactly those indices.
+        self.summary_idxs = (
+            [i for i, t in enumerate(self.teachers) if t.get("use_summary", True)]
+            if self.teachers
+            else None
+        )
+        self.max_img_size = int(
+            round(self.cpe_max_size / self.patch_size) * self.patch_size
+        )
         super().__init__(**kwargs)
