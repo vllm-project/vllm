@@ -14,7 +14,6 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
@@ -31,7 +30,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backends,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
-    kv_postprocess_layout_on_receive,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -2754,26 +2752,10 @@ class NixlBaseConnectorWorker:
                     "d2h",
                 )
 
-    @cached_property
-    def _attention_kv_caches(self) -> list[torch.Tensor]:
-        """Device KV caches of attention layers (mamba states excluded),
-        as consumed by the receive post-process."""
-        assert self.device_kv_caches, (
-            "_attention_kv_caches accessed before register_kv_caches"
-        )
-        mamba_layers = {
-            name
-            for g, group in enumerate(self.kv_cache_config.transfer_groups)
-            if _is_ssm_spec(self._group_spec_types[g])
-            for name in group.layer_names
-        }
-        kv_caches = self.device_kv_caches
-        return [cache for name, cache in kv_caches.items() if name not in mamba_layers]
-
     def post_process_device_kv_on_receive(
         self,
         block_size_ratio: int,
-        block_ids_list: list[tuple[list[int], int]],
+        block_ids_list: list[tuple[int, list[int], int]],
         convert: bool = True,
     ):
         """Post process device kv cache after receiving from remote.
@@ -2822,9 +2804,11 @@ class NixlBaseConnectorWorker:
                 block_size_ratio,
             )
 
-        attn_caches = self._attention_kv_caches
-        device = attn_caches[0].device
-        for block_ids, covered_sub_blocks in block_ids_list:
+        for group, block_ids, covered_sub_blocks in block_ids_list:
+            attn_caches = [
+                self.device_kv_caches[name]
+                for name in self.kv_cache_config.transfer_groups[group].layer_names
+            ]
             # Blocks the transfer didn't write: the token tail of the last
             # partially covered block, then everything beyond it.
             covered_blocks, sub_blocks_in_last = divmod(
@@ -2834,17 +2818,16 @@ class NixlBaseConnectorWorker:
             has_stale = first_stale < len(block_ids)
             indices = None
             if convert or has_stale:
-                indices = async_tensor_h2d(block_ids, device, torch.long)
+                indices = async_tensor_h2d(block_ids, attn_caches[0].device, torch.long)
 
             if convert:
                 for cache in attn_caches:
-                    if self.enable_permute_local_kv and block_size_ratio > 1:
+                    if self.enable_permute_local_kv:
                         kv_postprocess_blksize_and_layout_on_receive(
                             cache, indices, block_size_ratio
                         )
-                    elif self.enable_permute_local_kv:
-                        kv_postprocess_layout_on_receive(cache, indices)
-                    else:
+                    elif KVCacheLayout[self.kv_cache_layout].is_block_contiguous:
+                        # Token-major blocks get the sub-blocks in token order.
                         kv_postprocess_blksize_on_receive(
                             cache, indices, block_size_ratio
                         )
@@ -2852,10 +2835,10 @@ class NixlBaseConnectorWorker:
             if sub_blocks_in_last:
                 last_block_id = block_ids[covered_blocks]
                 for cache in attn_caches:
-                    # Both post-processed layouts leave tokens on dim 1.
-                    sub_block_tokens = cache.shape[1] // block_size_ratio
+                    # Attention caches are [B, H, N, C]: tokens on dim 2.
+                    sub_block_tokens = cache.shape[2] // block_size_ratio
                     zero_from = sub_blocks_in_last * sub_block_tokens
-                    cache[last_block_id, zero_from:].zero_()
+                    cache[last_block_id, :, zero_from:].zero_()
             if has_stale:
                 assert indices is not None
                 stale_ids = indices[first_stale:]
@@ -3003,7 +2986,7 @@ class NixlBaseConnectorWorker:
                         len(meta.remote.block_ids[g]),
                     )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
-                        (local_group, covered_sub_blocks)
+                        (g, local_group, covered_sub_blocks)
                     )
             # post processing for heterogeneous attention
             if self.enable_heterogeneous_attn_post_process:
