@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnector,
+    MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
     get_moriio_expected_ack_count,
     get_moriio_remote_tp_rank,
@@ -31,6 +32,46 @@ def test_remote_tp_rank_same_tp_maps_to_self():
         2,
         3,
     ]
+
+
+def test_sync_read_partial_prefix_hit_keeps_local_tail():
+    """Pending READs include the local hit but exclude the local tail."""
+    read_scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    read_scheduler.mode = MoRIIOMode.READ
+    read_scheduler._has_mamba = True
+    read_scheduler._attn_group_ids = [0]
+    read_scheduler._mamba_group_ids = [1]
+    read_scheduler._num_ssm_scratch_blocks = 0
+    read_scheduler._ssm_state_slots_are_positional = False
+    read_scheduler._max_decode_tail_blocks = 1
+    read_scheduler.request_id_to_transfer_id = {}
+    read_scheduler.transfer_id_to_request_id = {}
+    read_scheduler._reqs_need_recv = {}
+    read_scheduler._req_kv_params = {}
+    read_scheduler.kv_cache_config = SimpleNamespace(
+        select_transfer_block_ids=lambda block_ids: block_ids,
+    )
+    request = SimpleNamespace(
+        request_id="req",
+        num_prompt_tokens=33,
+        num_computed_tokens=16,
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_engine_id": "prefill",
+            "remote_block_ids": [[70, 80], [900]],
+        },
+    )
+    connector = MoRIIOConnector.__new__(MoRIIOConnector)
+    connector.mode = MoRIIOMode.READ
+    connector.kv_transfer_config = SimpleNamespace(is_kv_consumer=True)
+    connector.connector_scheduler = read_scheduler
+    connector.connector_worker = None
+    # With 16-token blocks, page 7 is a local hit, 8 is a new READ
+    # destination, and 9 holds the locally recomputed final token.
+    blocks = SimpleNamespace(get_block_ids=lambda: ([7, 8, 9], [90]))
+    connector.update_state_after_alloc(request, blocks, num_external_tokens=16)
+    pending = read_scheduler._reqs_need_recv[request.request_id][1][0]
+    assert pending == [7, 8]
 
 
 def test_remote_tp_rank_p4_d8_floor_maps_decode_to_prefill():

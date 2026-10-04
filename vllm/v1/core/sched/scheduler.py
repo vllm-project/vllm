@@ -1227,9 +1227,17 @@ class Scheduler(SchedulerInterface):
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
+                    # Hybrid sync loads also write whole pages out of band.
                     skip_zeroing_group_ids=(
                         self.connector.get_loaded_kv_cache_group_ids(request)
-                        if load_kv_async and self.connector is not None
+                        if self.connector is not None
+                        and (
+                            load_kv_async
+                            or (
+                                self.has_mamba_layers
+                                and num_external_computed_tokens > 0
+                            )
+                        )
                         else ()
                     ),
                     num_encoder_tokens=num_encoder_tokens,
