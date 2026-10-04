@@ -237,18 +237,35 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
 
 
 @pytest.mark.parametrize(
-    "seq_lens,query_lens,draft_tokens,expected_fused_calls",
+    "seq_lens,query_lens,device_query_lens,draft_tokens,expected_fused_calls",
     [
-        pytest.param([128], [SPEC_TOKENS], [NUM_SPEC], 1, id="pure-mtp"),
+        pytest.param([128], [SPEC_TOKENS], None, [NUM_SPEC], 1, id="pure-mtp"),
+        pytest.param(
+            [128, 128, 128],
+            [3, 3, 3],
+            [1, 4, 4],
+            [2, 2, 2],
+            1,
+            id="adaptive-ragged-mtp",
+        ),
+        pytest.param(
+            [128] * 8,
+            [1] * 8,
+            [4, 4, 0, 0, 0, 0, 0, 0],
+            [NUM_SPEC] * 8,
+            1,
+            id="adaptive-padded-ragged-mtp",
+        ),
         pytest.param(
             [128, 96],
             [SPEC_TOKENS, 64],
+            None,
             [NUM_SPEC, -1],
             0,
             id="mixed-mtp-falls-back",
         ),
-        pytest.param([96], [64], [-1], 0, id="pure-prefill"),
-        pytest.param([128], [1], [-1], 0, id="pure-decode"),
+        pytest.param([96], [64], None, [-1], 0, id="pure-prefill"),
+        pytest.param([128], [1], None, [-1], 0, id="pure-decode"),
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
@@ -256,6 +273,7 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
 def test_fused_model_path_matches_reference(
     seq_lens: list[int],
     query_lens: list[int],
+    device_query_lens: list[int] | None,
     draft_tokens: list[int],
     expected_fused_calls: int,
     output_gate_activation: str,
@@ -279,6 +297,17 @@ def test_fused_model_path_matches_reference(
     common = create_common_attn_metadata(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     )
+    if device_query_lens is not None:
+        assert sum(device_query_lens) == sum(query_lens)
+        device_query_start_loc = torch.zeros(
+            len(device_query_lens) + 1, dtype=torch.int32, device=device
+        )
+        torch.cumsum(
+            torch.tensor(device_query_lens, dtype=torch.int32, device=device),
+            dim=0,
+            out=device_query_start_loc[1:],
+        )
+        common = common.replace(query_start_loc=device_query_start_loc)
     common.block_table_tensor.add_(1)
     with set_current_vllm_config(vllm_config):
         metadata = builder.build(
