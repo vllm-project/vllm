@@ -30,7 +30,7 @@ nvidia-cutlass-dsl[cu13]==4.8.0
 quack-kernels==0.6.5  # Required by MSA
 
 # Tokenspeed_MLA for faster mla with spec decode
-tokenspeed-mla==0.1.8; platform_system == "Linux"
+tokenspeed-mla==0.2.15; platform_system == "Linux"
 
 # Humming kernels for quantization gemm
 humming-kernels[cu13]==0.1.16

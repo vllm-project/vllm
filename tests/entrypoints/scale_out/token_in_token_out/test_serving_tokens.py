@@ -318,11 +318,11 @@ async def test_generate_logprobs(client, logprobs_value):
 @pytest.mark.asyncio
 async def test_generate_prompt_token_id_logprobs(client):
     token_ids = [11, 22, 33, 44, 55]
-    candidates = [22, 33, 44, 55]
+    rows = [[33], [44, 100], [55]]
     sampling_params = {
         "max_tokens": 1,
         "prompt_logprobs": 0,
-        "prompt_logprob_token_ids": candidates,
+        "prompt_logprob_token_ids": rows,
         "prompt_logprob_start": 1,
     }
     payload = {
@@ -335,14 +335,13 @@ async def test_generate_prompt_token_id_logprobs(client):
     data = resp.json()
 
     scores = np.load(io.BytesIO(base64.b64decode(data["prompt_token_id_logprobs"])))
-    assert scores.shape == (len(token_ids) - 2, len(candidates))
+    assert scores.shape == (3, 2)
     for row, target in enumerate(token_ids[2:]):
         expected = data["prompt_logprobs"][row + 2][str(target)]["logprob"]
-        assert scores[row, candidates.index(target)] == pytest.approx(
-            expected, abs=1e-3
-        )
+        assert scores[row, 0] == pytest.approx(expected, abs=1e-3)
+    assert np.isneginf(scores[[0, 2], 1]).all()
 
-    stream_only_ids = {"prompt_logprob_token_ids": candidates}
+    stream_only_ids = {"prompt_logprob_token_ids": rows}
     resp = await client.post(
         GEN_ENDPOINT,
         json={**payload, "sampling_params": stream_only_ids, "stream": True},
@@ -350,15 +349,12 @@ async def test_generate_prompt_token_id_logprobs(client):
     assert resp.status_code == 400
     assert "prompt_logprob_token_ids" in resp.text
 
-    past_end = {**sampling_params, "prompt_logprob_start": len(token_ids)}
+    too_few_rows = {**sampling_params, "prompt_logprob_token_ids": rows[:2]}
     resp = await client.post(
-        GEN_ENDPOINT, json={**payload, "sampling_params": past_end}
+        GEN_ENDPOINT, json={**payload, "sampling_params": too_few_rows}
     )
-    resp.raise_for_status()
-    empty = np.load(
-        io.BytesIO(base64.b64decode(resp.json()["prompt_token_id_logprobs"]))
-    )
-    assert empty.shape == (0, len(candidates))
+    assert resp.status_code == 400
+    assert "scored rows" in resp.text
 
 
 @pytest.mark.asyncio
@@ -714,21 +710,23 @@ async def test_text_mode_rejected_when_tokens_only(client):
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
-    reason="output_mode is not supported by the Rust frontend",
+    reason="the Rust frontend does not serve /inference/v1/abort_requests",
 )
-async def test_text_mode_stream_delivers_abort_finish_chunk(
-    client, tokenizer, messages
+@pytest.mark.parametrize("output_mode", ["tokens", "text"])
+async def test_stream_delivers_abort_finish_chunk(
+    client, tokenizer, messages, output_mode
 ):
-    """The final output after an abort has no new token IDs, so it
-    reaches a text stream only because text mode emits finish-only chunks."""
+    """The final output after an abort has no new token IDs, but the
+    stream must still deliver its finish reason."""
     payload = {
         **_text_mode_payload(
             _chat_prompt_token_ids(tokenizer, messages),
             max_tokens=900,
             ignore_eos=True,
         ),
+        "output_mode": output_mode,
         "stream": True,
-        "request_id": "text-abort-e2e",
+        "request_id": f"{output_mode}-abort-e2e",
     }
 
     chunks = []
@@ -740,7 +738,7 @@ async def test_text_mode_stream_delivers_abort_finish_chunk(
                 continue
             chunk = json.loads(line[len("data: ") :])
             chunks.append(chunk)
-            if not aborted and chunk["choices"] and chunk["choices"][0]["text"]:
+            if not aborted and chunk["choices"] and chunk["choices"][0]["token_ids"]:
                 abort = await client.post(
                     ABORT_ENDPOINT,
                     json={"request_ids": [chunk["request_id"]]},
@@ -749,7 +747,7 @@ async def test_text_mode_stream_delivers_abort_finish_chunk(
                 aborted = True
 
     assert aborted
-    assert {chunk["output_mode"] for chunk in chunks} == {"text"}
+    assert {chunk["output_mode"] for chunk in chunks} == {output_mode}
     final_choice = chunks[-1]["choices"][0]
     assert final_choice["finish_reason"] == "abort"
     generated = sum(len(chunk["choices"][0]["token_ids"] or []) for chunk in chunks)
