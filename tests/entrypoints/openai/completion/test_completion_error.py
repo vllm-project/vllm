@@ -2,14 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, cast, get_args, get_origin
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion import api_router
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionRequest,
+    CompletionResponse,
+)
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -933,3 +940,196 @@ def test_non_numeric_logprobs_rejected(field_name):
             max_tokens=10,
             **{field_name: "2"},
         )
+
+
+@pytest.fixture
+def completion_response():
+    return CompletionResponse(
+        model=MODEL_NAME,
+        choices=[
+            dict(
+                index=0,
+                text="中文 🌍",
+                finish_reason="abort",
+                token_ids=[1],
+                logprobs=dict(
+                    tokens=["中文"],
+                    token_logprobs=[-1.2e-7, None, -0.0],
+                    top_logprobs=[{"中文": -1.2e-7}, None, {}],
+                    text_offset=[0],
+                ),
+            ),
+        ],
+        usage=dict(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+
+
+def _completion_client(response, monkeypatch):
+    app = FastAPI()
+    app.state.openai_serving_completion = AsyncMock()
+    app.state.openai_serving_completion.create_completion.return_value = response
+    app.state.enable_server_load_tracking = True
+    monkeypatch.setattr(api_router, "metrics_header", lambda _: {"x-metrics": "ok"})
+    api_router.attach_router(app)
+    return TestClient(app)
+
+
+@pytest.mark.parametrize("logprobs", [True, False])
+def test_completion_json_skips_intermediate_dict(
+    completion_response, monkeypatch, logprobs
+):
+    """Fast rendering preserves values, headers, and load-counter cleanup."""
+    if not logprobs:
+        completion_response.choices[0].logprobs = None
+    expected = completion_response.model_dump()
+    monkeypatch.setattr(
+        CompletionResponse, "model_dump", MagicMock(side_effect=AssertionError)
+    )
+    with _completion_client(completion_response, monkeypatch) as client:
+        result = client.post(
+            "/v1/completions", json={"model": MODEL_NAME, "prompt": "x"}
+        )
+        assert result.status_code == 200
+        assert result.json() == expected
+        assert result.headers["content-type"] == "application/json"
+        assert result.headers["x-metrics"] == "ok"
+        assert int(result.headers["content-length"]) == len(result.content)
+        assert client.app.state.server_load_metrics == 0
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("target", ["sampled", "top", "prompt", "metrics"])
+def test_completion_json_preserves_nonfinite_error(
+    completion_response, monkeypatch, value, target
+):
+    data = completion_response.model_dump()
+    choice = data["choices"][0]
+    if target == "metrics":
+        data["metrics"] = {"time_to_first_token_ms": value}
+    elif target == "prompt":
+        choice["prompt_logprobs"] = [None, {1: {"logprob": value}}]
+    elif target == "top":
+        choice["logprobs"]["top_logprobs"] = [{"x": value}]
+    else:
+        choice["logprobs"]["token_logprobs"] = [value]
+    completion_response = CompletionResponse.model_validate(data)
+    with _completion_client(completion_response, monkeypatch) as client:
+        with pytest.raises(ValueError, match="Out of range float"):
+            client.post("/v1/completions", json={"model": MODEL_NAME, "prompt": "x"})
+        assert client.app.state.server_load_metrics == 0
+
+
+@pytest.mark.parametrize("field", ["kv_transfer_params", "ec_transfer_params"])
+@pytest.mark.parametrize("value", [{"data": [1, "中文"]}, {"data": b"x"}])
+def test_completion_json_preserves_transfer_metadata(
+    completion_response, monkeypatch, field, value
+):
+    setattr(completion_response, field, value)
+    with _completion_client(completion_response, monkeypatch) as client:
+        if isinstance(value["data"], bytes):
+            with pytest.raises(TypeError, match="not JSON serializable"):
+                client.post(
+                    "/v1/completions", json={"model": MODEL_NAME, "prompt": "x"}
+                )
+        else:
+            result = client.post(
+                "/v1/completions", json={"model": MODEL_NAME, "prompt": "x"}
+            )
+            assert result.json() == completion_response.model_dump()
+        assert client.app.state.server_load_metrics == 0
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["response", "choice", "logprobs", "usage", "prompt_details", "completion_details"],
+)
+def test_completion_json_preserves_extra_field_error(
+    completion_response, monkeypatch, target
+):
+    data = completion_response.model_dump()
+    data["usage"]["prompt_tokens_details"] = {}
+    data["usage"]["completion_tokens_details"] = {}
+    completion_response = CompletionResponse.model_validate(data)
+    choice = completion_response.choices[0]
+    model = dict(
+        response=completion_response,
+        choice=choice,
+        logprobs=choice.logprobs,
+        usage=completion_response.usage,
+        prompt_details=completion_response.usage.prompt_tokens_details,
+        completion_details=completion_response.usage.completion_tokens_details,
+    )[target]
+    model.model_extra["custom"] = b"x"
+    with _completion_client(completion_response, monkeypatch) as client:
+        with pytest.raises(TypeError, match="not JSON serializable"):
+            client.post("/v1/completions", json={"model": MODEL_NAME, "prompt": "x"})
+        assert client.app.state.server_load_metrics == 0
+
+
+def test_completion_json_preserves_unicode_error(completion_response, monkeypatch):
+    completion_response.choices[0].text = "\ud800"
+    with _completion_client(completion_response, monkeypatch) as client:
+        with pytest.raises(UnicodeEncodeError):
+            client.post("/v1/completions", json={"model": MODEL_NAME, "prompt": "x"})
+        assert client.app.state.server_load_metrics == 0
+
+
+@pytest.mark.parametrize("mutate_logprobs", [True, False])
+def test_completion_json_preserves_mutated_model(
+    completion_response, monkeypatch, mutate_logprobs
+):
+    choice = completion_response.choices[0]
+    if mutate_logprobs:
+        choice.logprobs.top_logprobs[0]["中文"] = None
+    else:
+        choice.text = 42
+    expected = completion_response.model_dump()
+    with _completion_client(completion_response, monkeypatch) as client:
+        result = client.post(
+            "/v1/completions", json={"model": MODEL_NAME, "prompt": "x"}
+        )
+        assert result.json() == expected
+        assert client.app.state.server_load_metrics == 0
+
+
+def test_completion_json_guard_covers_response_schema():
+    """New float/opaque fields or nested models must extend the render guard."""
+    sensitive = set()
+    models = set()
+
+    def visit(annotation, path):
+        if path in {"metrics", "choices.prompt_logprobs"}:
+            sensitive.add(path)
+            return
+        if (
+            annotation in (str, int, bool, type(None))
+            or get_origin(annotation) is Literal
+        ):
+            return
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            models.add(annotation.__name__)
+            for name, field in cast(type[BaseModel], annotation).model_fields.items():
+                visit(field.annotation, f"{path}.{name}" if path else name)
+        elif args := get_args(annotation):
+            for arg in args:
+                visit(arg, path)
+        else:
+            sensitive.add(path)
+
+    visit(CompletionResponse, "")
+    assert sensitive == {
+        "choices.logprobs.token_logprobs",
+        "choices.logprobs.top_logprobs",
+        "choices.prompt_logprobs",
+        "kv_transfer_params",
+        "ec_transfer_params",
+        "metrics",
+    }
+    assert models == {
+        "CompletionResponse",
+        "CompletionResponseChoice",
+        "CompletionLogProbs",
+        "UsageInfo",
+        "PromptTokenUsageInfo",
+        "CompletionTokenUsageInfo",
+    }
