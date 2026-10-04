@@ -9,7 +9,7 @@ vLLM provides an HTTP server that implements OpenAI's [Completions API](https://
     **not** authenticated — most notably `/invocations`, which exposes the same
     inference capabilities as the `/v1` endpoints. Do not rely on `--api-key`
     alone to secure vLLM. See
-    [API Key Authentication Limitations](../../usage/security.md#api-key-authentication-limitations)
+    [API Key Authentication](../../usage/security.md#api-key-authentication)
     for the full list of protected and unprotected endpoints and recommended
     hardening, such as deploying behind a reverse proxy.
 

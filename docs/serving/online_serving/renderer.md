@@ -74,7 +74,7 @@ multimodal features.
 
 If the server has `--api-key` or `VLLM_API_KEY` configured, add
 `-H "Authorization: Bearer <api-key>"` to the request. See
-[API key authentication limitations](../../usage/security.md#api-key-authentication-limitations)
+[API key authentication](../../usage/security.md#api-key-authentication)
 for the existing authentication boundaries.
 
 For the post processing counterpart that turns generated token IDs back into OpenAI compatible responses, see the [Derenderer APIs](derenderer.md).
