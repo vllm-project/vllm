@@ -5,6 +5,7 @@ import weakref
 from collections import deque
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -45,6 +46,7 @@ def test_worker_rpc_payload_released_before_next_dequeue():
     worker_proc.rank = 0
     worker_proc.worker = SimpleNamespace(consume=lambda payload: payload)
     worker_proc.handle_output = lambda output: None
+    worker_proc._watchdog = SimpleNamespace(feed=lambda: None)
 
     with pytest.raises(_ExitWorkerLoop):
         worker_proc.worker_busy_loop()
@@ -61,6 +63,7 @@ def test_execute_worker_rpc_returns_worker_exception():
     worker_proc.worker = SimpleNamespace(fail=fail)
     outputs: list[Any] = []
     worker_proc.handle_output = outputs.append
+    worker_proc._watchdog = SimpleNamespace(feed=lambda: None)
 
     worker_proc._execute_worker_rpc(("fail", (), {}, None))
 
@@ -93,3 +96,22 @@ def test_take_draft_token_ids_uses_execute_model_timeout(monkeypatch, stalled):
             executor.take_draft_token_ids()
     else:
         assert executor.take_draft_token_ids() is draft
+
+
+def test_execute_worker_rpc_feeds_watchdog():
+    """Verify the watchdog is fed immediately before and after each RPC."""
+
+    def ok():
+        calls.append("rpc")
+
+    worker_proc: Any = WorkerProc.__new__(WorkerProc)
+    worker_proc.rank = 0
+    worker_proc.worker = SimpleNamespace(ok=ok)
+    worker_proc.handle_output = lambda output: None
+    calls: list[str] = []
+    worker_proc._watchdog = MagicMock()
+    worker_proc._watchdog.feed.side_effect = lambda: calls.append("feed")
+
+    worker_proc._execute_worker_rpc(("ok", (), {}, None))
+
+    assert calls == ["feed", "rpc", "feed"]

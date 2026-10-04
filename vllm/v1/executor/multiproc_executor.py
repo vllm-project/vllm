@@ -66,6 +66,7 @@ from vllm.utils.torch_utils import (
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
 )
+from vllm.utils.watch_dog import start_watch_dog
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
@@ -699,6 +700,10 @@ class WorkerProc:
         # (nnodes_within_dp > 1) require distributed groups to be initialized
         self._init_message_queues(input_shm_handle, vllm_config)
 
+        self._watchdog = start_watch_dog(
+            f"worker_{self.rank}", vllm_config.watchdog_config, logger
+        )
+
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
@@ -836,6 +841,7 @@ class WorkerProc:
                 death_pipe.recv()
             except EOFError:
                 logger.info_once("Parent process exited, terminating worker queues")
+                self._watchdog.dump_stack("shutdown")
                 shutdown_requested.set()
                 for mq in queues_to_shutdown:
                     if mq is not None:
@@ -1047,7 +1053,12 @@ class WorkerProc:
             elif isinstance(method, bytes):
                 func = partial(cloudpickle.loads(method), self.worker)
 
+            self._watchdog.feed()
             output = func(*args, **kwargs)
+            # Feed again: the RPC itself may run close to the watchdog
+            # timeout, so the pre-call feed can go stale while the result
+            # is serialized/enqueued in handle_output().
+            self._watchdog.feed()
 
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(output)
