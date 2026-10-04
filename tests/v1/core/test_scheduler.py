@@ -377,6 +377,53 @@ def test_scheduler_publishes_lookahead_blocks_after_step_output():
     assert request.num_publishable_block_hashes == 0
 
 
+def test_finished_request_publishes_block_ending_at_last_sampled_token():
+    """The last sampled token is never computed, but it is the lookahead token
+    of the block ending right before it, whose draft KV the finishing step
+    wrote. That block must be published before the request is freed."""
+    block_size = 2
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_num_batched_tokens=16,
+    )
+    _enable_eagle_prefix_hashing(scheduler)
+    request = Request(
+        request_id="request",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=SamplingParams(max_tokens=2, ignore_eos=True),
+        pooling_params=None,
+        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
+    )
+    scheduler.add_request(request)
+
+    for token_id in (3, 4):
+        scheduler_output = scheduler.schedule()
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[token_id]],
+            ),
+        )
+    assert request.is_finished()
+    # Tokens 0-3 were computed; token 4 is the lookahead of block [2, 4).
+    assert request.num_computed_tokens == 4
+    assert request.num_publishable_block_hashes == 2
+
+    probe = Request(
+        request_id="probe",
+        prompt_token_ids=[0, 1, 2, 3, 4, 5],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
+    )
+    _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
+    assert num_tokens == 4
+
+
 def test_connector_finish_includes_partial_eagle_block(
     monkeypatch: pytest.MonkeyPatch,
 ):

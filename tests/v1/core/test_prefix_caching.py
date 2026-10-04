@@ -5580,6 +5580,77 @@ def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
     assert num_computed_tokens == 3 * block_size
 
 
+def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
+    """Lookahead block hashes need no EAGLE drop, so sparse retention must keep
+    the Mamba state at the prompt's last boundary below ``num_tokens - 1``
+    rather than one alignment unit lower; otherwise a resend can only hit the
+    lower state."""
+    block_size = 32
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba_mtp"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=1,
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+        use_eagle=True,
+        use_lookahead_block_hashes=True,
+    )
+
+    # 129 tokens: the last boundary below the logits token is 128.
+    token_ids = [i for i in range(4) for _ in range(block_size)] + [4]
+    req0 = make_request("0", token_ids, block_size, sha256, use_lookahead_hashes=True)
+    for chunk_end in (32, 64, 96, 128, 129):
+        blocks = manager.allocate_slots(
+            req0,
+            chunk_end - req0.num_computed_tokens,
+            num_lookahead_tokens=1,
+        )
+        assert blocks is not None
+        req0.num_computed_tokens = chunk_end
+        # Lookahead blocks are published from the step's output.
+        req0.mark_lookahead_hashes_publishable(chunk_end, block_size)
+        manager.cache_blocks(req0, chunk_end)
+
+    pool = manager.block_pool
+    for i in range(4):
+        cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
+        if i == 3:
+            assert cached is not None, "mamba state at 128 should be retained"
+        else:
+            assert cached is None, f"mamba hash {i} should not be cached"
+    manager.free(req0)
+
+    req1 = make_request("1", token_ids, block_size, sha256, use_lookahead_hashes=True)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 4 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [4, 4]
+
+
 def test_block_lookup_cache_single_block_per_key():
     cache = BlockHashToBlockMap()
     key0 = BlockHashWithGroupId(b"hash0")
