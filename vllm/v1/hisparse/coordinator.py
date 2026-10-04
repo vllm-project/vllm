@@ -66,6 +66,7 @@ class _HiSparseRequestState:
     copies_recorded_blocks: int = 0
     pinned_clean: set[int] = field(default_factory=set)
     unpinned_pages: set[int] = field(default_factory=set)
+    host_import: bool | None = None
     # Prefix pages whose GPU copies are adopted after the admitting allocation.
     pages_to_adopt: int = 0
 
@@ -188,6 +189,20 @@ class HiSparseCoordinator:
             state = _HiSparseRequestState()
             self.request_states[request_id] = state
         return state
+
+    def prepare_gpu_import(self, request_id: str) -> None:
+        """Land a connector import directly on GPU on the first attempt.
+
+        The scheduler only asks again after the previous allocation failed,
+        so a retry falls back to the host tier.
+        """
+        state = self._get_request_state(request_id)
+        state.host_import = state.host_import is not None
+
+    def imports_to_host(self, request_id: str) -> bool:
+        """Keep legacy connectors on host unless direct landing was requested."""
+        state = self.request_states.get(request_id)
+        return state is None or state.host_import is not False
 
     def commit_computed_blocks(self, request_id: str, num_host_pages: int) -> None:
         """Account for a prefix hit on host pages the request now references."""

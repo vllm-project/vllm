@@ -404,7 +404,6 @@ def _register_overlaid_mla_worker(
     worker.host_buffer_kv_cache_layout = "LBNHC"
     worker._physical_blocks_per_logical_kv_block = 1
     worker._logical_num_blocks = num_blocks
-    worker.region_mem_types = []
     worker.region_group_ids = []
     worker._mixed_mem_types = False
     worker.region_names = []
@@ -425,6 +424,7 @@ def _register_overlaid_mla_worker(
     worker.dcp_size = 1
     worker.pcp_size = 1
     worker.kv_buffer_device = "cuda"
+    worker._hisparse_destination = None
     worker._layer_specs = {name: spec for name in caches}
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,

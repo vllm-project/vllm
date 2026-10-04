@@ -2320,7 +2320,10 @@ class HiSparseSourceManager(FullAttentionManager):
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
     ) -> None:
-        if num_external_computed_tokens <= 0:
+        host_import = self.coordinator is None or self.coordinator.imports_to_host(
+            request_id
+        )
+        if num_external_computed_tokens <= 0 or not host_import:
             return
         # The connector writes these pages; only a successful receive makes
         # them readable, not advancing the request's computed-token count.
@@ -2431,11 +2434,14 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
     ) -> int:
+        host_import = self.coordinator is None or self.coordinator.imports_to_host(
+            request_id
+        )
         assert not new_computed_blocks
         # A hot region is needed to read host-backed history: an external
         # import, a new request resuming a host prefix, or one already asked
         # to transition. Running requests keep their earlier answer.
-        host_import = total_computed_tokens > num_local_computed_tokens
+        host_import = host_import and total_computed_tokens > num_local_computed_tokens
         resumes_host_prefix = (
             num_local_computed_tokens > 0 and request_id not in self.num_cached_block
         )
@@ -2469,7 +2475,11 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
     ) -> None:
-        self.require_hot(request_id)
+        host_import = self.coordinator is None or self.coordinator.imports_to_host(
+            request_id
+        )
+        if host_import:
+            self.require_hot(request_id)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
@@ -2507,9 +2517,12 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
     ) -> int:
+        host_import = self.coordinator is None or self.coordinator.imports_to_host(
+            request_id
+        )
         del num_tokens_main_model
         assert not new_computed_blocks
-        if total_computed_tokens > num_local_computed_tokens:
+        if host_import and total_computed_tokens > num_local_computed_tokens:
             # Keep the last imported page writable, including the last-token
             # replay on a full prompt hit. Only earlier pages stay host-only.
             imported_pages = cdiv(total_computed_tokens, self.block_size)
@@ -2533,7 +2546,15 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         record_for_zeroing: bool = True,
     ) -> None:
         """Reserve a writable final page; earlier imported pages stay on host."""
+        host_import = self.coordinator is None or self.coordinator.imports_to_host(
+            request_id
+        )
         assert num_external_computed_tokens > 0
+        if not host_import:
+            super().allocate_external_computed_blocks(
+                request_id, num_local_computed_tokens, num_external_computed_tokens
+            )
+            return
         num_tokens = num_local_computed_tokens + num_external_computed_tokens
         blocks = self.req_to_blocks[request_id]
         tail_page = (num_tokens - 1) // self.block_size

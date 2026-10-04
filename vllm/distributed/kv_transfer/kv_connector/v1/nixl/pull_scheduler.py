@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import HiSparseResidentSpec, KVCacheGroupRole
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -62,6 +63,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             actual = self._get_remote_prefill_token_count(len(token_ids))
             count = actual - num_computed_tokens
             if count > 0:
+                self._prepare_hisparse_gpu_import(request)
                 return count, True
 
         if (
@@ -100,10 +102,15 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         self.kv_recompute_threshold,
                     )
                     return 0, False
+                self._prepare_hisparse_gpu_import(request)
                 return count, True
 
         # No remote prefill for this request.
         return 0, False
+
+    def _prepare_hisparse_gpu_import(self, request: "Request") -> None:
+        if self.hisparse is not None:
+            self.hisparse.prepare_gpu_import(request.request_id)
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -151,9 +158,22 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         if num_external_tokens > 0
                         else ()
                     )
-                    local_block_ids = self.get_exchange_clipped_blocks(
-                        unhashed_local_block_ids
-                    )
+                    if self.hisparse is not None and self.hisparse.imports_to_host(
+                        request.request_id
+                    ):
+                        source_group_ids = [
+                            group_id
+                            for group_id, group in enumerate(
+                                self.kv_cache_config.kv_cache_groups
+                            )
+                            if group.role is KVCacheGroupRole.HISPARSE_SOURCE
+                        ]
+                        assert len(source_group_ids) == 1
+                        self._hisparse_host_blocks_to_recv[request.request_id] = (
+                            list(unhashed_local_block_ids[source_group_ids[0]])
+                            if unhashed_local_block_ids
+                            else []
+                        )
                     # Blocks covered by the local prefix cache, per KV cache group.
                     # Each count fixes where that group's DCP slice starts, which the
                     # worker needs to line up with the remote's slice.
@@ -163,6 +183,21 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                             for block in group
                         )
                         for group in blocks.blocks
+                    )
+                    if (
+                        self.hisparse is not None
+                        and unhashed_local_block_ids
+                        and not self.hisparse.imports_to_host(request.request_id)
+                    ):
+                        unhashed_local_block_ids, local_num_computed_blocks = (
+                            self._skip_hisparse_resident_prefix(
+                                blocks,
+                                unhashed_local_block_ids,
+                                local_num_computed_blocks,
+                            )
+                        )
+                    local_block_ids = self.get_exchange_clipped_blocks(
+                        unhashed_local_block_ids
                     )
 
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
@@ -187,6 +222,36 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
             params["_remote_blocks_processed"] = True
+
+    def _skip_hisparse_resident_prefix(
+        self,
+        blocks: "KVCacheBlocks",
+        unhashed_block_ids: BlockIds,
+        num_computed_blocks: tuple[int, ...],
+    ) -> tuple[BlockIds, tuple[int, ...]]:
+        """Drop resident pages of the local prefix, including adopted copies.
+
+        Resident pages are never hashed. The indexer's hashed pages give the
+        local hit length; host source pages can outlast it.
+        """
+        groups = self.kv_cache_config.kv_cache_groups
+        (indexer_group_id,) = (
+            group_id
+            for group_id, group in enumerate(groups)
+            if group.role is KVCacheGroupRole.HISPARSE_INDEXER
+        )
+        num_prefix_pages = num_computed_blocks[indexer_group_id]
+        block_ids = list(unhashed_block_ids)
+        computed = list(num_computed_blocks)
+        for group_id, group in enumerate(groups):
+            if isinstance(group.kv_cache_spec, HiSparseResidentSpec):
+                block_ids[group_id] = [
+                    block.block_id
+                    for block in blocks.blocks[group_id][num_prefix_pages:]
+                    if not block.is_null
+                ]
+                computed[group_id] = num_prefix_pages
+        return block_ids, tuple(computed)
 
     def request_finished(
         self,
@@ -272,6 +337,14 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # blocks are always at the start of the list.
             # Here we "unpad" blocks to send the actual remote blocks to be read.
             block_ids = self.get_exchange_clipped_blocks(block_ids)
+            if self.hisparse is not None and any(0 in group for group in block_ids):
+                logger.warning(
+                    "Not exporting KV for %s: HiSparse holds part of it only on "
+                    "the host.",
+                    request.request_id,
+                )
+                self._reqs_need_send.pop(request.request_id)
+                return False, None
 
             remote_num_tokens = request.num_computed_tokens
 
