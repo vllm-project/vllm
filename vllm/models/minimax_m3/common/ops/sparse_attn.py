@@ -326,10 +326,15 @@ def _gqa_sparse_decode_kernel(
     for _ in tl.range(chunk_start_topk, chunk_end_topk):
         blk = tl.load(cur_idx_ptr).to(tl.int32)
         cur_idx_ptr = cur_idx_ptr + stride_tk
-        c = blk * BLOCK_SIZE_K
-        page = tl.load(bt_row + blk).to(tl.int64)
+        # The persistent top-k buffer is shared by decode and prefill. Treat a
+        # stale/sentinel entry as an empty selection instead of indexing the
+        # block table with it during mixed chunked-prefill batches.
+        valid_blk = (blk >= 0) & (blk < num_blocks)
+        safe_blk = tl.where(valid_blk, blk, 0)
+        c = safe_blk * BLOCK_SIZE_K
+        page = tl.load(bt_row + safe_blk).to(tl.int64)
         pos = c + off_n
-        pos_mask = pos < kv_len
+        pos_mask = valid_blk & (pos < kv_len)
         k = tl.load(
             kv_cache_ptr
             + page * stride_kv_blk
@@ -356,9 +361,12 @@ def _gqa_sparse_decode_kernel(
         qk += tl.where(pos_mask[None, :], 0, float("-inf"))
         qk += tl.dot(q, k) * sm_scale_log2e
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
-        p = tl.exp2(qk - m_ij[:, None])
+        # An invalid selection leaves the whole row masked. Avoid -inf - -inf
+        # so it contributes neither softmax mass nor NaNs to the merge.
+        safe_m = tl.where(m_ij == float("-inf"), 0.0, m_ij)
+        p = tl.exp2(qk - safe_m[:, None])
         l_ij = tl.sum(p, axis=1)
-        acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
+        acc_o = acc_o * tl.exp2(m_i - safe_m)[:, None]
         v = tl.load(
             kv_cache_ptr
             + page * stride_kv_blk
@@ -383,7 +391,7 @@ def _gqa_sparse_decode_kernel(
                 v = (v * v_scale[:, None]).to(q.dtype)
         acc_o += tl.dot(p.to(v.dtype), v)
         m_i = m_ij
-        lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
+        lse_i = safe_m + tl.log2(tl.exp2(lse_i - safe_m) + l_ij)
 
     if USE_PDL:
         tl.extra.cuda.gdc_launch_dependents()

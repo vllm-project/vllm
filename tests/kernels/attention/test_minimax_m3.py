@@ -2588,6 +2588,47 @@ def test_decode_sparse_attention_correctness(
     assert error.max().item() < 1.7e-2
 
 
+@pytest.mark.parametrize("invalid_block", [-1, 1 << 20])
+def test_decode_sparse_attention_skips_invalid_block_ids(invalid_block: int):
+    """Mixed batches may expose stale slots in the persistent top-k buffer."""
+    torch.manual_seed(0)
+    decode_query_len = 4
+    seq_lens_list = (257, 384)
+    q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(
+        seq_lens_list, decode_query_len
+    )
+    kv_cache = _allocate_main_kv_via_contract(num_pages, KVCacheLayout.LBNHC)
+    topk_idx[:, :, 1] = invalid_block
+
+    actual = torch.empty_like(q)
+    minimax_m3_sparse_attn_decode(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        seq_lens,
+        NUM_KV_HEADS,
+        SM_SCALE,
+        actual,
+        decode_query_len,
+    )
+
+    q_lens = torch.full(
+        (len(seq_lens_list),), decode_query_len, device="cuda", dtype=torch.int32
+    )
+    expected = _reference_sparse_attn(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        q_lens,
+        seq_lens,
+        seq_lens - q_lens,
+    )
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=1.7e-2)
+
+
 def test_decode_wrong_layout_breaks_parity():
     """Negative (AC-3/AC-5): consuming the physical HND buffer as if it were
     already contiguous-NHD (i.e. skipping the allocator's inverse permute)
