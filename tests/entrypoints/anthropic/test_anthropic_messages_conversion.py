@@ -2135,6 +2135,7 @@ class TestConvertServerTools:
                 {"type": "web_search_20250305", "name": "web_search", "max_uses": 8}
             ],
         )
+        assert request.tools is not None
         assert request.tools[0].input_schema is None
 
     def test_convert_tools_skips_server_tool_keeps_function(self):
