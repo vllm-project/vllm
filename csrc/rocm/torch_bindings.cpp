@@ -51,6 +51,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor scale_a, "
       "          Tensor scale_b, int CuCount) -> ()");
   rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);
+
+  rocm_ops.def(
+      "wvSplitKQBlockScale(Tensor weight, Tensor activation, "
+      "Tensor activation_scale, Tensor weight_scale, Tensor! out, "
+      "int CuCount, bool bpreshuffle) -> ()");
+  rocm_ops.impl("wvSplitKQBlockScale", torch::kCUDA, &wvSplitKQBlockScale);
 #endif  // VLLM_SKIP_SKINNY_GEMMS
 
 #ifdef VLLM_ROCM_GFX1100
