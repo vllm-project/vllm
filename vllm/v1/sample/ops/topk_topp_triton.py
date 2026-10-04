@@ -436,9 +436,7 @@ def _topk_topp_kernel(
 
                                 # Duplicate logit handling for Top-k
                                 if num_keep < num_duplicate_logit:
-                                    duplicate_mask = (
-                                        probs_blk == duplicate_logit
-                                    )
+                                    duplicate_mask = probs_blk == duplicate_logit
                                     duplicate_count = (
                                         tl.cumsum(duplicate_mask) + num_kept
                                     )
@@ -499,9 +497,7 @@ def _topk_topp_kernel(
                                 outlier_mask = (probs_blk > min_logit) & mask_n
 
                                 # Duplicate logit handling for Top-k
-                                duplicate_mask = (
-                                    probs_blk == duplicate_logit
-                                )
+                                duplicate_mask = probs_blk == duplicate_logit
                                 duplicate_count = tl.cumsum(duplicate_mask) + num_kept
                                 duplicate_keep_mask = (
                                     duplicate_count <= num_keep
@@ -1061,8 +1057,7 @@ def _topk_topp_kernel(
                     # fallback pivot from wrapping the counter.
                     num_keep = num_duplicate_logit - tl.cast(
                         tl.minimum(
-                            (p_pivots_sum - p)
-                            / tl.cast(min_larger_prob, tl.float64),
+                            (p_pivots_sum - p) / tl.cast(min_larger_prob, tl.float64),
                             tl.cast(num_min_larger, tl.float64),
                         ),
                         tl.uint32,
@@ -1090,17 +1085,13 @@ def _topk_topp_kernel(
 
                 # Top-k boundary tie trim (logit space, bit-exact group).
                 if topk_mask_num_keep < topk_mask_num_dup:
-                    topk_dup_mask = keep_mask & (
-                        logits_blk == topk_mask_dup_logit
-                    )
+                    topk_dup_mask = keep_mask & (logits_blk == topk_mask_dup_logit)
                     topk_dup_count = tl.cumsum(topk_dup_mask) + num_kept_k
                     topk_dup_keep_mask = (
                         topk_dup_count <= topk_mask_num_keep
                     ) & topk_dup_mask
                     num_kept_k += tl.sum(topk_dup_mask)
-                    keep_mask = keep_mask & (
-                        ~topk_dup_mask | topk_dup_keep_mask
-                    )
+                    keep_mask = keep_mask & (~topk_dup_mask | topk_dup_keep_mask)
 
                 probs_blk = tl.exp(logits_blk - prob_ref) / prob_sum_exp
                 probs_blk = tl.where(mask_n, probs_blk, 0.0)
@@ -1138,9 +1129,7 @@ def _topk_topp_kernel(
 
                 # Duplicate logit handling
                 if num_keep < num_duplicate_logit:
-                    duplicate_mask = keep_mask & (
-                        logits_blk == duplicate_logit
-                    )
+                    duplicate_mask = keep_mask & (logits_blk == duplicate_logit)
                     duplicate_count = tl.cumsum(duplicate_mask) + num_seen
                     # Same capped removal as the probability-space path.
                     duplicate_keep_mask = (
