@@ -33,6 +33,7 @@ from vllm.v1.worker.gpu.sample.watermark import (
     philox_gumbel_sample,
     repeated_context_mask,
 )
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
@@ -1545,6 +1546,65 @@ def test_draft_watermarker_cuda_graph_reads_current_prompt_lens():
     prepare()
     graph.replay()
     assert mask.item()
+
+
+def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
+    class NextTokenWatermarker:
+        context_width = 2
+
+        @staticmethod
+        def sample(logits, contexts, random_sampler=None, skip_mask=None):
+            watermarked = contexts[:, -1] + 1
+            return WatermarkSample(
+                torch.where(skip_mask, random_sampler(logits), watermarked), logits
+            )
+
+    def ordinary_sample(logits, idx_mapping, temperature, seed, pos, **kwargs):
+        assert kwargs["use_fp64"]
+        cache, col = kwargs["logits_cache"], kwargs["logits_cache_col"]
+        cache[idx_mapping, col] = kwargs["logits_cache_source"]
+        return seed[idx_mapping] + pos
+
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.watermarker.gumbel_sample", ordinary_sample
+    )
+    num_reqs, num_steps, vocab_size = 3, 2, 4
+    draft_watermarker = DraftWatermarker(
+        NextTokenWatermarker(),
+        max_num_reqs=8,
+        device=torch.device("cpu"),
+        num_speculative_steps=num_steps,
+        deduplicate_contexts="none",
+        deduplicate_contexts_max_history=None,
+    )
+    # Batch rows hold request slots 2, 0, 1. Slot 0 is greedy and row 2 opted out.
+    draft_watermarker.contexts[:num_reqs] = torch.tensor([[1, 2], [3, 4], [5, 6]])
+    draft_watermarker.enabled[:num_reqs] = torch.tensor([True, True, False])
+    speculator = object.__new__(DFlashSpeculator)
+    speculator.model = SimpleNamespace(
+        compute_logits=lambda hidden_states: hidden_states
+    )
+    speculator.draft_watermarker = draft_watermarker
+    speculator.use_fp64_gumbel = True
+    speculator.acceptance_estimator = None
+    batch_slots = torch.tensor([2, 0, 1])
+    logits = torch.arange(num_reqs * num_steps * vocab_size, dtype=torch.float32)
+    draft_logits = torch.zeros(num_reqs, num_steps, vocab_size)
+
+    sampled = speculator.sample_draft(
+        hidden_states=logits.view(-1, vocab_size),
+        sample_src_positions=torch.arange(num_reqs * num_steps),
+        idx_mapping=batch_slots.repeat_interleave(num_steps),
+        temperature=torch.tensor([0.0, 1.0, 0.5]),
+        seeds=torch.tensor([100, 200, 300]),
+        draft_step=torch.arange(num_steps).repeat(num_reqs),
+        draft_logits=draft_logits,
+    )
+
+    # Row 0 is watermarked in step order: [1, 2] -> 3, then [2, 3] -> 4. The
+    # greedy and opted-out rows keep their ordinary samples, seed + position.
+    assert torch.equal(sampled, torch.tensor([3, 4, 102, 103, 204, 205]))
+    assert torch.equal(draft_logits[batch_slots], logits.view(num_reqs, num_steps, -1))
 
 
 def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
