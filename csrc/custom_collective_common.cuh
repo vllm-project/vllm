@@ -272,7 +272,7 @@ DINLINE void barrier_at_start(const RankSignals& sg, Signal* self_sg,
     // wait until we got true from all ranks
     while (__scoped_atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
                                   __ATOMIC_RELAXED,
-                                  __MEMORY_SCOPE_DEVICE) < flag);
+                                  __MEMORY_SCOPE_SYSTEM) < flag);
   }
   __syncthreads();
   // use one thread to update flag
@@ -289,7 +289,7 @@ DINLINE void barrier_at_start_release(const RankSignals& sg, Signal* self_sg,
                             flag, __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
     while (__scoped_atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
                                   __ATOMIC_ACQUIRE,
-                                  __MEMORY_SCOPE_DEVICE) < flag);
+                                  __MEMORY_SCOPE_SYSTEM) < flag);
   }
   __syncthreads();
   if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
@@ -310,7 +310,7 @@ DINLINE void barrier_at_end(const RankSignals& sg, Signal* self_sg, int rank) {
     while (
         __scoped_atomic_load_n(&self_sg->end[blockIdx.x][threadIdx.x],
                                final_sync ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE,
-                               __MEMORY_SCOPE_DEVICE) < flag);
+                               __MEMORY_SCOPE_SYSTEM) < flag);
   }
   if constexpr (!final_sync) __syncthreads();
   // use one thread to update flag
