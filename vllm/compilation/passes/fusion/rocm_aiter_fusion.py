@@ -31,6 +31,7 @@ from ..vllm_inductor_pass import (
     _fx_view_to_reshape,
     fold_consecutive_reshapes,
     remove_noop_reshapes,
+    reshape_symbolic_dim_to_minus_one,
 )
 from .matcher_utils import (
     MatcherQuantFP8,
@@ -561,6 +562,110 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         )
 
 
+def _aiter_mxfp4_asm_out_dtype(linear: torch.nn.Module | None) -> torch.dtype | None:
+    """Output dtype of ``linear`` if it runs AITER's MXFP4 dynamic-quant GEMM
+    in ASM mode (the ``gemm_with_dynamic_quant(..., True, ...)`` call the
+    gated-norm MXFP4 pattern matches), else None."""
+    if linear is None:
+        return None
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+        AiterMxfp4LinearKernel,
+    )
+
+    quant_method = getattr(linear, "quant_method", None)
+    scheme = getattr(linear, "scheme", None)
+    for kernel in (
+        getattr(quant_method, "kernel", None),
+        getattr(scheme, "ocp_mx_linear", None),
+    ):
+        if isinstance(kernel, AiterMxfp4LinearKernel) and kernel.use_asm_gemm:
+            return kernel.out_dtype
+    return None
+
+
+class AiterRMSNormGatedMxfp4GemmPattern(AiterRMSNormQuantPattern):
+    """Matches RMSNormGated + reshape feeding an MXFP4 dynamic-quant linear
+    (``gemm_with_dynamic_quant``, ``AiterMxfp4LinearKernel`` with
+    ``VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1``), the GDN out_proj with online
+    MXFP4, and replaces it with rocm_aiter_fused_rms_gated_mxfp4_gemm, which
+    quantizes inside the norm kernel at decode.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_fused_rms_gated_mxfp4_gemm_op()
+
+    def __init__(
+        self,
+        epsilon: float,
+        num_heads: int,
+        head_dim: int,
+        activation: str,
+        out_dtype: torch.dtype,
+    ) -> None:
+        self.epsilon = epsilon
+        self.device = torch.device("cuda")
+        self.rmsnorm_gated_matcher = MatcherRMSNormGated(epsilon, activation=activation)
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.activation = activation
+        self.out_dtype = out_dtype
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        hidden_dim = self.num_heads * self.head_dim
+        out_dtype = self.out_dtype
+
+        def pattern(
+            x: torch.Tensor,
+            z: torch.Tensor,
+            norm_weight: torch.Tensor,
+            weight: torch.Tensor,
+            weight_scale: torch.Tensor,
+        ) -> torch.Tensor:
+            normed = self.rmsnorm_gated_matcher(x, z, norm_weight)
+            merged = normed.reshape(-1, hidden_dim)
+            return torch.ops.vllm.gemm_with_dynamic_quant(
+                merged, weight, weight_scale, True, out_dtype
+            )
+
+        def replacement(
+            x: torch.Tensor,
+            z: torch.Tensor,
+            norm_weight: torch.Tensor,
+            weight: torch.Tensor,
+            weight_scale: torch.Tensor,
+        ) -> torch.Tensor:
+            return self.FUSED_OP(
+                x=x.reshape(-1, hidden_dim),
+                z=z.reshape(-1, hidden_dim),
+                norm_weight=norm_weight,
+                epsilon=self.epsilon,
+                activation=self.activation,
+                weight=weight,
+                weight_scale=weight_scale,
+                out_dtype=out_dtype,
+            )
+
+        out_features = 32
+        inputs = [
+            self.empty(2 * self.num_heads, self.head_dim),
+            self.empty(2 * self.num_heads, self.head_dim),
+            self.empty(self.head_dim),
+            torch.empty(
+                out_features, hidden_dim // 2, dtype=torch.uint8, device=self.device
+            ),
+            torch.empty(
+                out_features, hidden_dim // 32, dtype=torch.uint8, device=self.device
+            ),
+        ]
+
+        def trace_fn(*args, **kwargs):
+            gm = pm.fwd_only(*args, **kwargs)
+            _fx_view_to_reshape(gm)
+            fold_consecutive_reshapes(gm)
+            return gm
+
+        pm.register_replacement(pattern, replacement, inputs, trace_fn, pm_pass)
+
+
 class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
     """This pass fuses aiter rms_norm & vllm/aiter quant custom ops
     into a fused rms_norm_quant op.
@@ -586,6 +691,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             GatedDeltaNetAttention,  # type: ignore[type-abstract]
         )
         gated_norm_shapes: set[tuple[int, int]] = set()
+        gated_norm_mxfp4_shapes: set[tuple[float, int, int, str, torch.dtype]] = set()
         for layer in gdn_layers.values():
             num_v_heads = getattr(layer, "num_v_heads", None) or getattr(
                 layer, "num_heads", None
@@ -597,6 +703,23 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             assert num_v_heads is not None and head_v_dim is not None
 
             gated_norm_shapes.add((num_v_heads // layer.tp_size, head_v_dim))
+            out_dtype = _aiter_mxfp4_asm_out_dtype(getattr(layer, "out_proj", None))
+            norm = getattr(layer, "norm", None)
+            if (
+                out_dtype is not None
+                and norm is not None
+                and norm.norm_before_gate
+                and norm.group_size is None
+            ):
+                gated_norm_mxfp4_shapes.add(
+                    (
+                        norm.eps,
+                        num_v_heads // layer.tp_size,
+                        head_v_dim,
+                        norm.activation,
+                        out_dtype,
+                    )
+                )
 
         # RDNA4 uses native quant ops and supports only Triton replacements.
         match_aiter_quant_op = not rocm_aiter_ops.is_rdna_aiter_enabled()
@@ -675,10 +798,34 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                         match_aiter_quant=match_aiter_quant_op,
                     ).register(self.patterns)
 
+        # Fuse RMSNormGated + the MXFP4 activation quant of the next linear
+        # (GDN out_proj with online MXFP4 and the ASM FP4 GEMM), once per
+        # epsilon the layers use.
+        if gated_norm_mxfp4_shapes:
+            for (
+                epsilon,
+                num_heads,
+                head_dim,
+                activation,
+                out_dtype,
+            ) in gated_norm_mxfp4_shapes:
+                if head_dim % 32 != 0:
+                    continue
+                AiterRMSNormGatedMxfp4GemmPattern(
+                    epsilon,
+                    num_heads=num_heads,
+                    head_dim=head_dim,
+                    activation=activation,
+                    out_dtype=out_dtype,
+                ).register(self.patterns)
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
+        # The gated-norm patterns flatten heads with reshape(-1, hidden); GDN
+        # does it with flatten(-2), a reshape to the symbolic token count.
+        reshape_symbolic_dim_to_minus_one(graph)
         self.matched_count = self.patterns.apply(graph)
         logger.debug(
             "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
@@ -693,6 +840,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             DoubleAiterRMSFp8GroupQuantPattern,
             DoubleAiterRMSFp8GroupQuantViewPattern,
             AiterRMSNormGatedFp8GroupQuantPattern,
+            AiterRMSNormGatedMxfp4GemmPattern,
         ]
         return self.hash_source(self, *fusion_patterns)
 
