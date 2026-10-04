@@ -412,3 +412,127 @@ def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     assert tool_parts[0].function.name == "f"
     args_str = "".join(tc.function.arguments or "" for tc in tool_parts)
     assert json.loads(args_str) == {"x": 1}
+
+
+# Reproduction from https://github.com/vllm-project/vllm/issues/45167
+END_TAG_IN_STRING_TEXT = (
+    "<tool_call>\n"
+    '{"name": "edit_file", "arguments": '
+    '{"content": "예시 태그: </tool_call> 포함 한국어 본문"}}\n'
+    "</tool_call>"
+)
+
+
+def test_hermes_parser_non_streaming_end_tag_inside_string(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """A literal </tool_call> in a string argument must not end the tool call."""
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    tool_call = parser.extract_tool_calls(
+        model_output=END_TAG_IN_STRING_TEXT,
+        request=any_chat_request,
+    )
+
+    assert tool_call.tools_called
+    assert tool_call.content is None
+    assert len(tool_call.tool_calls) == 1
+    assert tool_call.tool_calls[0].function.name == "edit_file"
+    args = json.loads(tool_call.tool_calls[0].function.arguments)
+    assert args["content"] == "예시 태그: </tool_call> 포함 한국어 본문"
+
+
+def test_hermes_parser_non_streaming_end_tag_inside_first_of_two_calls(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """A quoted end tag must not swallow the tool call that follows it."""
+    text = (
+        '<tool_call>{"name": "first", '
+        '"arguments": {"q": "a </tool_call> b"}}</tool_call>'
+        '<tool_call>{"name": "second", "arguments": {"q": "c"}}</tool_call>'
+    )
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    tool_call = parser.extract_tool_calls(
+        model_output=text,
+        request=any_chat_request,
+    )
+
+    assert tool_call.tools_called
+    assert [tc.function.name for tc in tool_call.tool_calls] == ["first", "second"]
+    assert json.loads(tool_call.tool_calls[0].function.arguments) == {
+        "q": "a </tool_call> b"
+    }
+    assert json.loads(tool_call.tool_calls[1].function.arguments) == {"q": "c"}
+
+
+def test_hermes_parser_non_streaming_escaped_quote_before_end_tag(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Escaped quotes must not confuse the string tracking of the scanner."""
+    text = (
+        "<tool_call>"
+        '{"name": "say", "arguments": {"text": "say \\"hi\\" </tool_call> done"}}'
+        "</tool_call>"
+    )
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    tool_call = parser.extract_tool_calls(
+        model_output=text,
+        request=any_chat_request,
+    )
+
+    assert tool_call.tools_called
+    assert tool_call.tool_calls[0].function.name == "say"
+    args = json.loads(tool_call.tool_calls[0].function.arguments)
+    assert args["text"] == 'say "hi" </tool_call> done'
+
+
+def test_hermes_parser_streaming_end_tag_inside_string(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """Streaming a quoted end tag must yield the non-streaming tool call."""
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(
+        qwen_tokenizer, parser, any_chat_request, END_TAG_IN_STRING_TEXT
+    )
+
+    tool_calls = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    assert {tc.index for tc in tool_calls} == {0}
+    assert tool_calls[0].function.name == "edit_file"
+    args = json.loads("".join(tc.function.arguments or "" for tc in tool_calls))
+    assert "</tool_call>" in args["content"]
+
+    # Compare against the text the deltas reconstruct: decoding one token at a
+    # time is lossy for multi-byte characters.
+    streamed_text = "".join(
+        qwen_tokenizer.decode([token])
+        for token in qwen_tokenizer.encode(END_TAG_IN_STRING_TEXT)
+    )
+    expected = Hermes2ProToolParser(qwen_tokenizer).extract_tool_calls(
+        model_output=streamed_text,
+        request=any_chat_request,
+    )
+    assert args == json.loads(expected.tool_calls[0].function.arguments)
+
+
+def test_hermes_parser_streaming_start_tag_inside_string(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """A quoted start tag must not open a second tool call while streaming."""
+    text = (
+        "<tool_call>"
+        '{"name": "edit_file", "arguments": '
+        '{"content": "opens <tool_call> and closes </tool_call>"}}'
+        "</tool_call>"
+    )
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(qwen_tokenizer, parser, any_chat_request, text)
+
+    tool_calls = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    assert {tc.index for tc in tool_calls} == {0}
+    assert tool_calls[0].function.name == "edit_file"
+    args = json.loads("".join(tc.function.arguments or "" for tc in tool_calls))
+    assert args["content"] == "opens <tool_call> and closes </tool_call>"
