@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
 
+import torch
+
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
 from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
 from vllm.config.ec_transfer import ECRole
@@ -12,6 +14,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 
 _N = 16
 _BS = 64
@@ -22,12 +25,16 @@ class _Pos:
         self.offset = offset
         self.length = length
 
+    def get_num_embeds(self):
+        return self.length
+
 
 class _Feature:
     def __init__(self, mm_hash, length=1, identifier=None):
         self.mm_hash = mm_hash
         self.identifier = identifier if identifier is not None else mm_hash
         self.mm_position = _Pos(0, length)
+        self.modality = "image"
 
 
 class _Request:
@@ -80,7 +87,7 @@ def _make_scheduler(
 
 def _load_ids(meta) -> list[int]:
     """Transfer ids the scheduler dispatched in this step's metadata."""
-    return [transfer_id for transfer_id, _ in meta.loads.values()]
+    return [transfer_id for transfer_id, _, _ in meta.loads.values()]
 
 
 def _load_blocks(meta, mm_hash: str) -> list[int]:
@@ -90,7 +97,9 @@ def _load_blocks(meta, mm_hash: str) -> list[int]:
 
 def _seed_cached(s: ECCPUScheduler, mm_hash: str, n_blocks: int):
     """Pre-populate a ready cache entry backed by real blocks."""
-    s._cache.alloc(mm_hash, n_blocks)
+    # One embedding per block, so the shape fills the blocks exactly.
+    width = _BS // s._dtype.itemsize
+    s._cache.alloc(mm_hash, n_blocks, (n_blocks, width))
     s._cache.mark_ready(mm_hash)
 
 
@@ -121,6 +130,60 @@ def test_offload_reuse_cycle(monkeypatch):
     assert _load_blocks(meta_c, "h1") == meta_a.saves["h1"]
 
     s.shutdown()
+
+
+def test_omni_allocates_and_reloads_each_modality_shape():
+    """Each modality is saved and reloaded at its own measured width.
+
+    Qwen3-Omni's visual DeepStack output is four times the embedding width
+    while its audio is not; one width for both under- or over-allocates.
+    """
+    cfg = create_ec_vllm_config(encoder_output_widths={"image": 128, "audio": 32})
+    cfg.ec_transfer_config.ec_connector_extra_config["ec_cpu_bytes"] = 4096
+    s = ECCPUScheduler(cfg)
+    req = _Request(
+        [
+            MultiModalFeatureSpec(
+                identifier="image",
+                modality="image",
+                data=None,
+                mm_position=PlaceholderRange(offset=0, length=2),
+            ),
+            MultiModalFeatureSpec(
+                identifier="audio",
+                modality="audio",
+                data=None,
+                mm_position=PlaceholderRange(
+                    offset=2,
+                    length=4,
+                    is_embed=torch.tensor([True, False, True, False]),
+                ),
+            ),
+        ]
+    )
+    try:
+        for index in range(2):
+            s.update_state_after_alloc(req, index)
+        saved = s.build_connector_meta(None)
+        assert len(saved.saves["image"]) == 8
+        assert len(saved.saves["audio"]) == 2
+        s.update_connector_output(_WorkerOutput(saves=["image", "audio"]))
+        for index in range(2):
+            s.update_state_after_alloc(req, index)
+        loaded = s.build_connector_meta(None)
+        assert loaded.loads["image"][2] == (2, 128)
+        assert loaded.loads["audio"][2] == (2, 32)
+
+        s._nixl_enabled = True
+        s._peer_host, s._peer_port = "producer", 1234
+        s._metadata_resolver._cache = {"image": set(), "audio": set()}
+        _, params = s.request_finished(req)
+        assert params["image"]["size_bytes"] == 2 * 128 * 2
+        assert params["image"]["shape"] == [2, 128]
+        assert params["audio"]["size_bytes"] == 2 * 32 * 2
+        assert params["audio"]["shape"] == [2, 32]
+    finally:
+        s.shutdown()
 
 
 def test_has_cache_item_false_when_not_consumer(monkeypatch):
