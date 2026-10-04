@@ -44,6 +44,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.whisper_utils import (
     ISO639_1_SUPPORTED_LANGS,
 )
@@ -51,6 +52,7 @@ from vllm.model_executor.offloader import get_offloader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
@@ -830,6 +832,7 @@ class WhisperForConditionalGeneration(
     supports_segment_timestamp = True
     supports_explicit_language_detection = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
+    supports_tower_connector_lora = True
 
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
@@ -932,6 +935,26 @@ class WhisperForConditionalGeneration(
             return None
 
         raise ValueError("Only audio modality is supported")
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get the module prefix in multimodal models."""
+        return MultiModelKeys.from_string_field(
+            language_model="model.decoder",
+            tower_model=["model.encoder."],
+        )
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        # One encoder position per audio placeholder token and no connector,
+        # so the tower token budget is identity. This also sizes the tower
+        # wrapper from the whole encoder budget, so it must scale with input.
+        return num_mm_embeds, None
 
     @classmethod
     def get_speech_to_text_config(
