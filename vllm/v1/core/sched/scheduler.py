@@ -1597,6 +1597,21 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
+            if (
+                not self.is_encoder_decoder
+                and self.encoder_cache_manager.get_cached_input_ids(request)
+            ):
+                # Local encoding and external loads both deduplicate cache allocation.
+                # Retain each occurrence in the scheduled window before freeing any.
+                lo, hi = get_mm_features_in_window(
+                    request.mm_features,
+                    start=request.num_computed_tokens,
+                    end=request.num_computed_tokens
+                    + num_scheduled_token
+                    + self.num_prefill_lookahead,
+                )
+                for input_id in range(lo, hi):
+                    self.encoder_cache_manager.check_and_update_cache(request, input_id)
             request.num_computed_tokens += num_scheduled_token
             request.num_in_flight_tokens += num_scheduled_token
             if self.defer_block_free:
