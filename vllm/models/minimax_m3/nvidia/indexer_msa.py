@@ -38,6 +38,7 @@ from vllm.models.minimax_m3.common.indexer import (
 from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_decode_score,
 )
+from vllm.models.minimax_m3.nvidia.indexer_decode_cp import get_indexer_decode_cp
 from vllm.models.minimax_m3.nvidia.ops import minimax_m3_index_decode_score_cutedsl
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -261,6 +262,15 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
 
     indexer_backend_cls: ClassVar[type[AttentionBackend]] = MiniMaxM3IndexerMSABackend
 
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        # Opt-in decode context parallelism across the TP ranks
+        # (VLLM_MINIMAX_M3_INDEXER_DECODE_CP=1, see indexer_decode_cp.py);
+        # None keeps the default decode path.
+        self.decode_cp = get_indexer_decode_cp(
+            num_local_heads=self.num_index_heads, max_k_tiles=MAX_K_TILES
+        )
+
     def forward(
         self,
         index_query: torch.Tensor,
@@ -296,6 +306,27 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         # writes by strides). Top-k is deferred to the single unified call below.
         if md.decode is not None:
             d = md.decode
+            cp = self.decode_cp
+            if (
+                cp is not None
+                and md.num_prefills == 0
+                and cp.applies(nd, d.max_decode_query_len)
+            ):
+                # Decode-only batch: split the blocks across the TP ranks and
+                # write the merged top-k straight into buf (same contract as
+                # sparse_topk_select below). The gate depends only on batch
+                # shape, so every TP rank takes the same branch.
+                assert md.topk_num_valid_pages is not None
+                cp.forward(
+                    index_q[:nd],
+                    kv,
+                    d,
+                    md.topk_num_valid_pages[:nd],
+                    buf[:nd],
+                    self.init_blocks,
+                    self.local_blocks,
+                )
+                return None, None
             # max_decode_query_len avoids recompiles across runtime decode sizes.
             # Fall back when the flattened Q tile gets too wide for this kernel.
             decode_score = (
