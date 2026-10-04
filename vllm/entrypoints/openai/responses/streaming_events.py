@@ -202,7 +202,7 @@ def emit_reasoning_delta_events(
     events: list[StreamingResponsesResponse] = []
     if not state.sent_output_item_added:
         state.sent_output_item_added = True
-        state.current_item_id = f"msg_{random_uuid()}"
+        state.current_item_id = f"rs_{random_uuid()}"
         events.append(
             ResponseOutputItemAddedEvent(
                 type="response.output_item.added",
