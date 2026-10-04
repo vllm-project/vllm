@@ -691,6 +691,17 @@ def rocm_fp8_paged_mqa_logits_triton(
 
 
 @functools.lru_cache
+def _flydsl_paged_mqa_logits_kernel():
+    if not _ON_GFX950:
+        return None
+    try:
+        from aiter.ops.flydsl import flydsl_fp8_paged_mqa_logits
+    except ImportError:
+        return None
+    return flydsl_fp8_paged_mqa_logits
+
+
+@functools.lru_cache
 def paged_mqa_logits_module():
     paged_mqa_logits_module_path = None
     if find_spec("aiter.ops.triton.pa_mqa_logits") is not None:
@@ -767,6 +778,39 @@ def rocm_fp8_paged_mqa_logits(
 
     if aiter_paged_mqa_logits_module is not None:
         if _ON_GFX942 or _ON_GFX950:
+            flydsl_fp8_paged_mqa_logits = (
+                _flydsl_paged_mqa_logits_kernel()
+                if block_size == 64 and q_fp8.shape[2] == 32 and next_n <= 8
+                else None
+            )
+            if flydsl_fp8_paged_mqa_logits is not None:
+                (out_logits,) = current_workspace_manager().get_simultaneous(
+                    ((batch_size * next_n, max_model_len), torch.float32),
+                )
+                # The default SplitKV reads context_lens.max() on the host,
+                # which breaks CUDA graph capture; bound it by max_model_len.
+                pages = (max_model_len + block_size - 1) // block_size
+                total_cu = torch.cuda.get_device_properties(
+                    q_fp8.device.index
+                ).multi_processor_count
+                split_kv = max(
+                    1, min(pages, (total_cu * 3 + batch_size - 1) // batch_size)
+                )
+                flydsl_fp8_paged_mqa_logits(
+                    q_fp8,
+                    kv_cache_fp8,
+                    weights,
+                    out_logits,
+                    context_lens[:, -1].contiguous()
+                    if context_lens.dim() == 2
+                    else context_lens,
+                    block_tables,
+                    max_model_len,
+                    Preshuffle=block_size > 1,
+                    KVBlockSize=block_size,
+                    SplitKV=split_kv,
+                )
+                return out_logits
             deepgemm_fp8_paged_mqa_logits = (
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
