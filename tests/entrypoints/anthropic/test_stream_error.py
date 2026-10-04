@@ -19,7 +19,7 @@ from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
     parse_streaming_error_chunk,
 )
-from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 
 
 def _error_chunk(message: str) -> str:
