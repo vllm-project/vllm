@@ -124,6 +124,7 @@ def test_swa_offload_window_covers_unaligned_hit(
         tokens_per_hash=8,
         blocks_per_chunk=4,
         offload_prompt_only=True,
+        max_recompute_pending_tokens=0,
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=False, self_describing_kv_events=False
         ),
@@ -752,6 +753,60 @@ def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
     reduced = _reduce_kv_connector_stats(runner)
     assert reduced[f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_count"] == 1
     assert reduced[f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_sum"] > 0
+
+
+@pytest.mark.parametrize(
+    ("budget_blocks", "expected_loaded", "deferred"),
+    [(2, (0,), False), (1, (), True)],
+)
+def test_recompute_budget_decides_whether_pending_chunks_are_awaited(
+    request_runner, budget_blocks: int, expected_loaded: tuple[int, ...], deferred
+):
+    """With chunks [HIT, HIT_PENDING, HIT], waiting would gain two chunks. A
+    budget covering them loads the ready first chunk at once and recomputes
+    the rest; a smaller budget defers the request as before."""
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+        extra_config_overrides={
+            "max_recompute_pending_tokens": budget_blocks * block_size
+        },
+    )
+    token_ids = [1] * (3 * block_size + 1)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.new_request(token_ids=token_ids)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
+
+    runner.scheduler.reset_prefix_cache()
+    results = iter([LookupResult.HIT, LookupResult.HIT_PENDING, LookupResult.HIT])
+    runner.manager.lookup.side_effect = lambda key, ctx: next(
+        results, LookupResult.MISS
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+    runner.new_request(token_ids=token_ids)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=expected_loaded)
+
+    reduced = _reduce_kv_connector_stats(runner)
+    async_delay_count = reduced.get(
+        f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_count", 0
+    )
+    assert async_delay_count == int(deferred)
+
+
+def test_negative_recompute_budget_is_rejected(request_runner):
+    with pytest.raises(ValueError, match="max_recompute_pending_tokens"):
+        request_runner(
+            block_size=4,
+            num_gpu_blocks=10,
+            async_scheduling=False,
+            extra_config_overrides={"max_recompute_pending_tokens": -1},
+        )
 
 
 def test_max_offload_tokens_zero_does_not_record_pending_lookups(request_runner):
@@ -1576,13 +1631,14 @@ _LOOKUP_REQ.request_id = "req"
 _LOOKUP_GROUP_CONFIG = MagicMock()
 
 
-def _maximal_lookup(sched, keys, start_chunk_idx: int = 0):
+def _maximal_lookup(sched, keys, start_chunk_idx: int = 0, max_recompute: int = 0):
     return sched._maximal_prefix_lookup(
         keys,
         _EMPTY_REQ_CTX,
         _LOOKUP_REQ,
         _LOOKUP_GROUP_CONFIG,
         start_chunk_idx,
+        max_recompute,
     )
 
 
@@ -1751,6 +1807,45 @@ class TestMaximalPrefixLookup:
         # lookup should have been called for blocks 1 and 2 (stops at miss)
         assert sched.manager.lookup.call_count == 2
         sched._events_tracker.record_lookup.assert_not_called()
+
+    def test_short_pending_run_is_cut_before_first_pending(self):
+        """Pending chunks worth at most the recompute budget are not awaited:
+        the hit ends before the first pending chunk, ready hits after it
+        included, so the request recomputes that run instead of waiting."""
+        sched = _make_scheduler_with_lookup(
+            {
+                1: LookupResult.HIT,
+                2: LookupResult.HIT_PENDING,
+                3: LookupResult.HIT,
+                4: LookupResult.HIT_PENDING,
+            }
+        )
+        assert _maximal_lookup(sched, to_keys([1, 2, 3, 4]), 0, max_recompute=3) == 1
+
+    def test_pending_run_over_budget_defers(self):
+        """The budget counts every chunk from the first pending one to the end
+        of the hit, ready or not; one over and the lookup still defers."""
+        sched = _make_scheduler_with_lookup(
+            {
+                1: LookupResult.HIT,
+                2: LookupResult.HIT_PENDING,
+                3: LookupResult.HIT,
+                4: LookupResult.HIT_PENDING,
+            }
+        )
+        assert _maximal_lookup(sched, to_keys([1, 2, 3, 4]), 0, max_recompute=2) is None
+
+    def test_leading_pending_chunk_within_budget_is_a_miss(self):
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT_PENDING})
+        assert _maximal_lookup(sched, to_keys([1]), 0, max_recompute=1) == 0
+
+    def test_retry_defers_regardless_of_budget(self):
+        """RETRY means the chunk's location is unknown, so a recompute budget
+        must not cut the lookup short."""
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT, 2: LookupResult.RETRY}
+        )
+        assert _maximal_lookup(sched, to_keys([1, 2]), 0, max_recompute=10) is None
 
 
 class TestSlidingWindowLookup:
