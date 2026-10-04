@@ -572,6 +572,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.gdn_decode_kernel = "triton"
             self.enable_fused_gdn_spec_decode = False
             self.enable_packed_recurrent_decode = False
+            if current_platform.is_xpu():
+                # forward_xpu calls the native XPU GDN kernel, which still keeps
+                # per-draft states in speculative blocks. The RecoverSSM verify is
+                # in the Triton/FLA core, so route XPU through forward_cuda.
+                self._forward_method = self.forward_cuda
             logger.info_once(
                 "GDN RecoverSSM speculative verify active (spec_query_len %d)",
                 self.num_spec + 1,
