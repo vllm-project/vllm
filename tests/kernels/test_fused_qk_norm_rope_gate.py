@@ -34,6 +34,7 @@ ROPE_CASES = [
 )
 @pytest.mark.parametrize("num_q_heads,num_kv_heads,mrope_section", ROPE_CASES)
 @pytest.mark.parametrize("num_tokens", [1, 4, 37])
+@pytest.mark.parametrize("preallocate_outputs", [False, True])
 @torch.inference_mode()
 def test_fused_qk_norm_rope_gate_matches_reference(
     default_vllm_config,
@@ -41,6 +42,7 @@ def test_fused_qk_norm_rope_gate_matches_reference(
     num_q_heads: int,
     num_kv_heads: int,
     mrope_section: tuple[int, int, int] | None,
+    preallocate_outputs: bool,
 ) -> None:
     device = torch.device("cuda", torch.accelerator.current_device_index())
     torch.set_default_device(device)
@@ -95,6 +97,19 @@ def test_fused_qk_norm_rope_gate_matches_reference(
     q_ref, k_ref = rope.forward_native(positions, q_ref, k_ref)
     assert k_ref is not None
 
+    expected_outputs = None
+    output_kwargs: dict[str, torch.Tensor] = {}
+    if preallocate_outputs:
+        expected_outputs = (
+            torch.empty_like(q_ref),
+            torch.empty_like(k_ref),
+            torch.empty_like(gate_ref),
+        )
+        output_kwargs.update(
+            query_out=expected_outputs[0],
+            key_out=expected_outputs[1],
+            gate_out=expected_outputs[2],
+        )
     q_out, k_out, gate_out = fused_qk_rmsnorm_rope_gate(
         q_gate,
         k,
@@ -109,7 +124,12 @@ def test_fused_qk_norm_rope_gate_matches_reference(
         ROTARY_DIM,
         mrope_section=mrope_section,
         norm_beta=1.0,
+        **output_kwargs,
     )
+    if expected_outputs is not None:
+        assert q_out is expected_outputs[0]
+        assert k_out is expected_outputs[1]
+        assert gate_out is expected_outputs[2]
 
     # The built-in reference performs RoPE in BF16, while the fused kernel
     # promotes the BF16-normalized values to FP32 for RoPE before storing BF16.
