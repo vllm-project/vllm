@@ -3095,6 +3095,7 @@ class VllmConfig:
                 # https://github.com/vllm-project/vllm/pull/40704
                 "ngram",
                 "ngram_gpu",
+                "ngram_hint",
                 "suffix",
                 "medusa",
                 "mlp_speculator",
