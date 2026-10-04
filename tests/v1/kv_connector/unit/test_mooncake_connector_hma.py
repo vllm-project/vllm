@@ -30,7 +30,12 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from .test_mooncake_connector import FakeMooncakeWrapper, patch_worker_dependencies
-from .utils import create_request, create_vllm_config, make_kv_cache_config
+from .utils import (
+    create_request,
+    create_vllm_config,
+    make_kv_cache_config,
+    maybe_update_block_size,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -224,12 +229,11 @@ def test_metadata_hma_block_ids():
 async def test_build_transfer_params_multi_group_trimming(monkeypatch):
     """_build_transfer_params trims per-group blocks when local > remote."""
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    block_size = maybe_update_block_size(16)
     vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
+        kv_connector="MooncakeConnector", kv_role="kv_producer", block_size=block_size
     )
-    kv_cache_config = make_kv_cache_config(
-        block_size=vllm_config.cache_config.block_size, swa_enabled=True
-    )
+    kv_cache_config = make_kv_cache_config(block_size=block_size, swa_enabled=True)
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         connector = MooncakeConnector(
@@ -320,12 +324,11 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
 async def test_build_transfer_params_group_count_mismatch(monkeypatch):
     """_build_transfer_params reports an error when group counts differ."""
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    block_size = maybe_update_block_size(16)
     vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
+        kv_connector="MooncakeConnector", kv_role="kv_producer", block_size=block_size
     )
-    kv_cache_config = make_kv_cache_config(
-        block_size=vllm_config.cache_config.block_size, swa_enabled=True
-    )
+    kv_cache_config = make_kv_cache_config(block_size=block_size, swa_enabled=True)
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         connector = MooncakeConnector(
@@ -449,7 +452,7 @@ def test_request_finished_with_hma_groups():
 def _make_kv_consumer_worker(
     swa_enabled: bool = False, kv_cache_config: KVCacheConfig | None = None
 ):
-    block_size = 16
+    block_size = maybe_update_block_size(16)
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_consumer",
@@ -495,6 +498,7 @@ def test_worker_is_hma_required(swa_enabled, expected_is_hma):
 def test_worker_is_hma_required_multiple_full_attention_groups():
     """Two full-attention groups with different block sizes also select
     request-level failure reporting, matching the scheduler."""
+    block_size = maybe_update_block_size(16)
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
         kv_cache_tensors=[],
@@ -502,13 +506,19 @@ def test_worker_is_hma_required_multiple_full_attention_groups():
             KVCacheGroupSpec(
                 ["layer0"],
                 FullAttentionSpec(
-                    block_size=16, num_kv_heads=4, head_size=16, dtype=torch.float16
+                    block_size=block_size,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
                 ),
             ),
             KVCacheGroupSpec(
                 ["layer1"],
                 FullAttentionSpec(
-                    block_size=32, num_kv_heads=4, head_size=16, dtype=torch.float16
+                    block_size=2 * block_size,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
                 ),
             ),
         ],
