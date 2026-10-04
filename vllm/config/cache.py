@@ -264,6 +264,18 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+    kv_pipeline_parallel_size: int = Field(default=1, ge=1)
+    """Number of ranks across which KV cache layers are partitioned in
+    KV-PP (LayerSplit). When 1 (default), KV-PP is disabled and all ranks
+    maintain full layer KV cache. When > 1, persistent layer ownership is
+    partitioned across the group ranks, and scratch buffers are used during
+    layer execution."""
+
+    @property
+    def is_kv_pp_enabled(self) -> bool:
+        """Whether KV pipeline parallelism (LayerSplit) is enabled."""
+        return self.kv_pipeline_parallel_size > 1
+
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
