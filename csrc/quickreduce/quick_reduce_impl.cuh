@@ -701,6 +701,10 @@ struct CodecQ8 : public CodecBase {
   }
 };
 
+// Largest finite value representable in fp16; bf16 inputs are saturated to it
+// before the narrowing conversion below.
+static constexpr float kFp16Max = 65504.0f;
+
 // Twoshot All Reduce
 template <typename T, class Codec, bool cast_bf2half>
 struct AllReduceTwoshot {
@@ -738,6 +742,18 @@ struct AllReduceTwoshot {
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
           float2 f = __bfloat1622float2(bf_buf[j]);
+          // bf16 spans the fp32 exponent range, fp16 stops at 65504. Without
+          // clamping, __float22half2_rn turns any larger activation into inf,
+          // which then propagates through the reduction and poisons the whole
+          // line. Saturate instead, matching how the fp8 paths handle out of
+          // range inputs.
+          //
+          // NaN is left alone: fminf/fmaxf return the non-NaN operand, so a
+          // bare clamp would silently turn NaN into -kFp16Max and hide a
+          // diverging model behind a plausible-looking value. Only finite
+          // overflow is what this guards against.
+          f.x = isnan(f.x) ? f.x : fminf(fmaxf(f.x, -kFp16Max), kFp16Max);
+          f.y = isnan(f.y) ? f.y : fminf(fmaxf(f.y, -kFp16Max), kFp16Max);
           half_buf[j] = __float22half2_rn(f);
         }
         tA[i] = *reinterpret_cast<const int32x4_t*>(half_buf);
