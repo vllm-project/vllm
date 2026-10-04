@@ -214,6 +214,11 @@ class Request:
 
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
+        # Highest token position whose recomputation was made necessary by a
+        # preemption. Scheduled positions below this frontier are repeated
+        # executions; prefix-cache hits are not scheduled and therefore do not
+        # contribute.
+        self.recompute_token_frontier = 0
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
