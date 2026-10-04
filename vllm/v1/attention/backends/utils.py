@@ -320,6 +320,16 @@ def resolve_kv_cache_layout(
                 "DCP with a replicated draft and mixed KV page sizes requires "
                 f"a block-outer KV cache layout; supported sets: {supported_layouts}."
             )
+    quant_config = getattr(vllm_config, "quant_config", None)
+    prefer_block_outer = (
+        vllm_config.model_config is not None
+        and vllm_config.model_config.is_hybrid
+        and quant_config is not None
+        and quant_config.has_layerwise_kv_cache()
+        and len(hnc_shapes) > 1
+    )
+    if prefer_block_outer:
+        candidates.sort(key=lambda layout: not layout.is_block_outermost)
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
         layout = _layout_from_name(requested)
