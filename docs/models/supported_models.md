@@ -727,6 +727,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-4.0-1b-speech`, `ibm-granite/granite-speech-3.3-2b`, etc. | ✅︎ | ✅︎ |
 | `GraniteSpeechPlusForConditionalGeneration` | Granite Speech Plus | `ibm-granite/granite-speech-4.1-2b-plus` | ✅︎ | ✅︎ |
 | `MossTranscribeDiarizeForConditionalGeneration` | MOSS-Transcribe-Diarize | `OpenMOSS-Team/MOSS-Transcribe-Diarize` | | ✅︎ |
+| `Nemotron3_5AsrForRNNT` | Nemotron 3.5 ASR | `nvidia/nemotron-3.5-asr-streaming-0.6b` | | |
 | `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | `Qwen/Qwen3-ASR-1.7B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3OmniMoeThinkerForConditionalGeneration` | Qwen3-Omni | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, etc. | | ✅︎ |
 | `VoxtralForConditionalGeneration` | Voxtral (Mistral format) | `mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-Small-24B-2507`, etc. | ✅︎ | ✅︎ |
@@ -734,6 +735,14 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
+
+!!! note
+    `Nemotron3_5AsrForRNNT` uses greedy transcription with one complete audio clip
+    per request. It requires Model Runner V2, `--enforce-eager`, TP=1 and PP=1.
+    Audio length is bounded by encoder capacity and `--max-model-len`.
+    Quantization, speculative decoding, beam search and token-masking constraints
+    are unsupported. Alternative-token logprobs are unavailable; chosen-token
+    scores are synthetic and must not be used as model confidence.
 
 #### Realtime Transcription
 
