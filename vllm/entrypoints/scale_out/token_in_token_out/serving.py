@@ -425,6 +425,7 @@ class ServingTokens(GenerateBaseServing):
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
+                aux_output_keys=output.aux_output_keys,
                 sampling_mask=sampling_mask,
             )
             if text_mode:
@@ -596,6 +597,7 @@ class ServingTokens(GenerateBaseServing):
                         token_ids=as_list(delta_token_ids),
                         routed_experts=routed_experts_b64,
                         sampling_mask=sampling_mask,
+                        aux_output_keys=output.aux_output_keys,
                     )
                     chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
                     if text_mode:

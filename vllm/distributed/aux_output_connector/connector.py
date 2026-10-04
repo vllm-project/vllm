@@ -5,12 +5,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 if TYPE_CHECKING:
+    from vllm.distributed.aux_output_connector.mooncake import MooncakeOutputPublisher
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.request import Request
 
@@ -33,23 +34,28 @@ class AuxOutputConnectorMetadata:
     requests: dict[str, int]
     block_hashes: dict[str, PackedBlockHashes]
     finished_requests: tuple[str, ...]
+    # First remote prefill: key containing the unaligned execution boundary.
+    remote_tails: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class AuxRequestOutput:
     token_start: int
     rows: np.ndarray
+    block_keys: list[str] | None = None
 
 
 class AuxOutputSchedulerConnector:
-    """Build worker metadata without owning auxiliary output payloads or stores."""
+    """Build worker metadata and finalize backend-specific request outputs."""
 
-    def __init__(self) -> None:
+    def __init__(self, hash_block_size: int) -> None:
+        self._hash_block_size = hash_block_size
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
         # Terminal events are delivered with the next connector metadata.
         self._finished_requests: dict[str, PackedBlockHashes | None] = {}
         self._generation = 0
+        self._mooncake_output: MooncakeOutputPublisher | None = None
 
     def build_connector_meta(
         self,
@@ -59,9 +65,30 @@ class AuxOutputSchedulerConnector:
         """Build one step's incremental worker metadata."""
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
+        remote_tails = {}
         for request_id in scheduler_output.num_scheduled_tokens:
+            is_new = request_id not in self._sent_hash_counts
             num_sent = self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
+            stats = request.prefill_stats
+            if (
+                is_new
+                and request.num_preemptions == 0
+                and stats is not None
+                and stats.num_external_cached_tokens
+            ):
+                params = request.kv_transfer_params or {}
+                prefix = params.get("aux_output_prefix")
+                if prefix is None or prefix["block_size"] != self._hash_block_size:
+                    raise ValueError(
+                        "Remote KV reuse requires aux_output_prefix with matching "
+                        "R3 block_size and ordered keys covering the uncropped prompt"
+                    )
+                start = request.num_computed_tokens
+                if start % self._hash_block_size:
+                    remote_tails[request_id] = prefix["keys"][
+                        start // self._hash_block_size
+                    ]
             packed = self._pack_new_hashes(request.block_hashes, num_sent)
             if packed is not None:
                 block_hashes_by_request[request_id] = packed
@@ -96,13 +123,14 @@ class AuxOutputSchedulerConnector:
             scheduled_requests,
             block_hashes_by_request,
             finished_requests,
+            remote_tails,
         )
 
     def take_output(
         self,
         request: Request,
         output: dict[str, AuxRequestOutput] | None,
-    ) -> np.ndarray | None:
+    ) -> np.ndarray | list[str] | None:
         """Return the accepted R3 rows for one scheduled request."""
         request_id = request.request_id
         assert output is not None and request_id in output, (
@@ -110,6 +138,16 @@ class AuxOutputSchedulerConnector:
         )
         request_output = output[request_id]
         token_end = request.num_tokens - 1
+        if request_output.block_keys is not None:
+            from vllm.distributed.aux_output_connector.mooncake import (
+                MooncakeOutputPublisher,
+            )
+
+            if self._mooncake_output is None:
+                self._mooncake_output = MooncakeOutputPublisher(
+                    request_output, self._hash_block_size
+                )
+            return self._mooncake_output.take_output(request, request_output)
         local_end = token_end - request_output.token_start
         if local_end < 0:
             assert not request.is_finished(), (
@@ -131,6 +169,8 @@ class AuxOutputSchedulerConnector:
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
         request_id = request.request_id
+        if request.is_finished() and self._mooncake_output is not None:
+            self._mooncake_output.discard(request_id)
         num_sent = self._sent_hash_counts.pop(request_id, None)
         if num_sent is None:
             return
@@ -138,6 +178,10 @@ class AuxOutputSchedulerConnector:
         self._finished_requests[request_id] = self._pack_new_hashes(
             request.block_hashes, num_sent
         )
+
+    def close(self) -> None:
+        if self._mooncake_output is not None:
+            self._mooncake_output.close()
 
     @staticmethod
     def _pack_new_hashes(

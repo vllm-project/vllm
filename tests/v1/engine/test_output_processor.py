@@ -42,6 +42,49 @@ from vllm.v1.engine.output_processor import (
 )
 from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 from vllm.v1.outputs import SamplingMaskLists
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+
+def test_aux_output_keys_preserve_existing_output_wire_positions():
+    mask = SamplingMaskLists(np.array([3, 7], dtype=np.int32))
+    # Existing wire positions: sampling mask is field 15, spec metrics field 16.
+    legacy_output = ["request", [3], *([None] * 11), 0, None, mask, None]
+    decoded = MsgpackDecoder(EngineCoreOutput).decode(
+        MsgpackEncoder().encode(legacy_output)
+    )
+    np.testing.assert_array_equal(decoded.new_sampling_mask.token_ids, mask.token_ids)
+    assert decoded.aux_output_keys is None
+
+
+def test_terminal_aux_output_keys_survive_ipc_and_output_processing():
+    processor = OutputProcessor(None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request",
+        external_req_id="request",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        sampling_params=SamplingParams(detokenize=False),
+        pooling_params=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    processor.add_request(request, None)
+    keys = ["prefix-block", "request-tail"]
+    wire_output = EngineCoreOutput(
+        request_id="request",
+        new_token_ids=[3],
+        finish_reason=FinishReason.LENGTH,
+        aux_output_keys=keys,
+    )
+    decoded = MsgpackDecoder(EngineCoreOutput).decode(
+        MsgpackEncoder().encode(wire_output)
+    )
+    result = processor.process_outputs([decoded]).request_outputs[0]
+    assert result.finished
+    assert result.outputs[0].aux_output_keys == keys
+    assert result.outputs[0].routed_experts is None
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])
@@ -52,6 +95,7 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
     accumulated.append({1: Logprob(logprob=-0.5, rank=1)})
 
     state = RequestState.__new__(RequestState)
+    state.aux_output_keys = None
     state.detokenizer = MagicMock()
     state.detokenizer.get_next_output_text.return_value = ""
     state.logprobs_processor = MagicMock()
@@ -71,6 +115,7 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
 
 def test_completion_output_preserves_each_sampling_mask_position() -> None:
     state = RequestState.__new__(RequestState)
+    state.aux_output_keys = None
     state.detokenizer = MagicMock()
     state.detokenizer.get_next_output_text.return_value = ""
     state.logprobs_processor = MagicMock()
@@ -1337,10 +1382,12 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
 
 
 @pytest.mark.asyncio
-async def test_request_output_collector():
+@pytest.mark.parametrize("keys_only", [False, True])
+async def test_request_output_collector(keys_only):
     NUM_REQS = 3
     TEXT = "a"
     routed_experts = np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
+    aux_output_keys = ["prefix-block", "request-tail"] if keys_only else None
 
     def make_outputs() -> list[RequestOutput]:
         return [
@@ -1357,8 +1404,13 @@ async def test_request_output_collector():
                         cumulative_logprob=(idx + 1 * 1.0),
                         logprobs=[{"a": idx, "b": idx}],
                         routed_experts=(
-                            routed_experts if idx == NUM_REQS - 1 else None
+                            routed_experts
+                            if idx == NUM_REQS - 1 and not keys_only
+                            else None
                         ),
+                        aux_output_keys=aux_output_keys
+                        if idx == NUM_REQS - 1
+                        else None,
                         finish_reason="length" if (idx == NUM_REQS - 1) else None,
                     )
                 ],
@@ -1411,7 +1463,11 @@ async def test_request_output_collector():
 
     assert output.finished
     assert output.outputs[0].finish_reason == "length"
-    np.testing.assert_array_equal(output.outputs[0].routed_experts, routed_experts)
+    assert output.outputs[0].aux_output_keys == aux_output_keys
+    if keys_only:
+        assert output.outputs[0].routed_experts is None
+    else:
+        np.testing.assert_array_equal(output.outputs[0].routed_experts, routed_experts)
     # Text, token_ids, and logprobs should get merged.
     assert output.outputs[0].text == TEXT * num_to_put
     for tok_0, tok_1 in zip(output.outputs[0].token_ids, list(range(num_to_put))):
@@ -1586,6 +1642,7 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
 @pytest.mark.parametrize("output_kind", list(RequestOutputKind))
 def test_sampling_masks_follow_output_kind(output_kind):
     state = RequestState.__new__(RequestState)
+    state.aux_output_keys = None
     state.detokenizer = MagicMock()
     state.detokenizer.get_next_output_text.return_value = ""
     state.logprobs_processor = MagicMock()
