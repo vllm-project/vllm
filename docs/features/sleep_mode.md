@@ -190,4 +190,6 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 
 ## Limitation
 
+A KV connector must declare `supports_sleep_mode`: it releases what it set up on the KV cache memory (such as transport registrations) before the memory is unmapped and sets it up again once it is mapped back. With any other connector, sleep mode is refused at startup.
+
 On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.
