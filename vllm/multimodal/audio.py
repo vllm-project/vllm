@@ -144,9 +144,9 @@ def normalize_audio(
 
     num_channels = audio.shape[0]
 
-    # No reduction needed if already at target
+    # Mono output must be 1D even when no channel reduction is needed.
     if num_channels == spec.target_channels:
-        return audio
+        return audio[0] if spec.target_channels == 1 else audio
 
     # Cannot expand channels
     if num_channels < spec.target_channels:

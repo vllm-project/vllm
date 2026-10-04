@@ -230,6 +230,38 @@ class TestNormalizeAudio:
         assert result.ndim == 1
         torch.testing.assert_close(result, mono)
 
+    @pytest.mark.parametrize("backend", ["numpy", "torch"])
+    @pytest.mark.parametrize("shape", [(1, 8), (8, 1), (1, 1)])
+    @pytest.mark.parametrize("reduction", list(ChannelReduction))
+    def test_single_channel_2d_mono(self, backend, shape, reduction):
+        """Both loader layouts must preserve samples and produce 1D mono."""
+        samples = np.arange(np.prod(shape), dtype=np.float32)
+        audio = samples.reshape(shape)
+        if backend == "torch":
+            audio = torch.from_numpy(audio)
+        spec = AudioSpec(target_channels=1, channel_reduction=reduction)
+
+        result = normalize_audio(audio, spec)
+
+        assert result.shape == (samples.size,)
+        assert len(result) == samples.size
+        assert result.dtype == audio.dtype
+        if backend == "numpy":
+            np.testing.assert_array_equal(result, samples)
+        else:
+            assert result.device == audio.device
+            torch.testing.assert_close(result, torch.from_numpy(samples))
+
+    @pytest.mark.parametrize("backend", ["numpy", "torch"])
+    def test_matching_stereo_target_keeps_channel_axis(self, backend):
+        """Only mono targets should drop the channel axis."""
+        audio = np.arange(16, dtype=np.float32).reshape(2, 8)
+        if backend == "torch":
+            audio = torch.from_numpy(audio)
+        result = normalize_audio(audio, AudioSpec(target_channels=2))
+        assert result is audio
+        assert result.shape == (2, 8)
+
     def test_first_channel_reduction(self):
         """FIRST reduction should take only the first channel."""
         spec = AudioSpec(target_channels=1, channel_reduction=ChannelReduction.FIRST)
