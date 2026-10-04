@@ -169,7 +169,7 @@ class FilterbankFeatures(nn.Module):
             else:
                 self._nb_max_fft_bin = int((nb_max_freq / sample_rate) * n_fft)
 
-        # log_zero_guard_value is the the small we want to use, we support
+        # log_zero_guard_value is the small value we want to use, we support
         # an actual number, or "tiny", or "eps"
         self.log_zero_guard_type = log_zero_guard_type
 
