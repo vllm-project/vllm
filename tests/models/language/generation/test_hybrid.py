@@ -41,6 +41,7 @@ HYBRID_MODELS = [
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
     "tiny-random/qwen3-next-moe",
+    "RWB/BerryLM-OS-tiny-random",
 ]
 
 FULL_CUDA_GRAPH_MODELS = [
