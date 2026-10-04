@@ -1,0 +1,88 @@
+name: Refresh compiled requirements
+
+on:
+  schedule:
+    # Monday 07:00 UTC. One PR for every compiled test and docs lock.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: refresh-compiled-requirements
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    if: github.repository == 'vllm-project/vllm'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.12"
+      - name: Upgrade compiled requirement locks
+        run: >-
+          uv run --no-project --with pyyaml --python 3.12
+          python tools/refresh_compiled_requirements.py
+      - name: Open one pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            requirements/docs.txt
+            requirements/test/cpu.txt
+            requirements/test/cuda.txt
+            requirements/test/rocm.txt
+            requirements/test/xpu.txt
+          )
+          if git diff --quiet -- "${files[@]}"; then
+            echo "Compiled requirements are already current."
+            exit 0
+          fi
+
+          branch="requirements/refresh-compiled"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "${branch}"
+          git add -- "${files[@]}"
+          git commit -m "Refresh compiled requirement locks"
+
+          # Replace the bot branch with one commit on current main so the open
+          # PR stays a single review, instead of stacking weekly diffs.
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null; then
+            git fetch origin "${branch}"
+            git push --force-with-lease="refs/heads/${branch}:refs/remotes/origin/${branch}" \
+              origin "HEAD:${branch}"
+          else
+            git push --set-upstream origin "HEAD:${branch}"
+          fi
+
+          existing="$(gh pr list --head "${branch}" --state open \
+            --json number --jq '.[0].number // empty')"
+          if [ -n "${existing}" ]; then
+            echo "Updated PR #${existing}."
+            exit 0
+          fi
+          gh pr create \
+            --base main \
+            --head "${branch}" \
+            --label dependencies \
+            --title "Refresh compiled requirement locks" \
+            --body "$(cat <<'EOF'
+          ## Summary
+          - Regenerates requirements/test/{cuda,cpu,rocm,xpu}.txt and requirements/docs.txt with the pre-commit uv pip compile commands plus --upgrade.
+          - Source pins and upper bounds are unchanged, including the setuptools ceilings.
+
+          ## Test plan
+          - [ ] Confirm the diff does not edit requirements/*.in, requirements/common.txt, or other hand-written requirement files.
+          - [ ] CI pre-commit pip-compile hooks leave these locks unchanged.
+          EOF
+          )"
