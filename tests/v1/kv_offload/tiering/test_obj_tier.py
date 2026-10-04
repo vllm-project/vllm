@@ -533,6 +533,26 @@ class TestMockObjTierFailures:
         assert not tier._transfers
         assert list(tier.get_finished_jobs()) == []
 
+    def test_telemetry_failure_does_not_lose_successful_transfer(self, monkeypatch):
+        """Telemetry is optional, so a raise must not fail a completed store."""
+        tier, agent = _make_tier(num_blocks=4)
+        monkeypatch.setattr(
+            agent,
+            "get_xfer_telemetry",
+            MagicMock(side_effect=RuntimeError("nixlNoTelemetryError")),
+        )
+
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = list(tier.get_finished_jobs())
+
+        assert len(results) == 1
+        assert results[0].job_id == 1
+        assert results[0].success
+        # Only the timing is lost.
+        assert results[0].transfer_time is None
+        assert not tier._transfers
+        assert list(tier.get_finished_jobs()) == []
+
     def test_xfer_cleanup_retry_finalizes_parent_job_and_primary_pin(self, monkeypatch):
         num_blocks = 4
         tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)

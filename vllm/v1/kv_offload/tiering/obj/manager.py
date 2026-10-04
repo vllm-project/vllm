@@ -334,8 +334,18 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
             transfer_time = None
             if success:
-                telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
-                transfer_time = telemetry.xferDuration / 1e6
+                # Telemetry is optional: some NIXL builds are compiled without
+                # it and raise here. A metrics failure must not fail a transfer
+                # that already completed.
+                try:
+                    telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
+                except Exception:
+                    logger.warning_once(
+                        "NIXL transfer telemetry is unavailable; offload "
+                        "transfer timings will be omitted."
+                    )
+                else:
+                    transfer_time = telemetry.xferDuration / 1e6
 
             try:
                 self._agent.release_xfer_handle(entry.xfer_handle)
