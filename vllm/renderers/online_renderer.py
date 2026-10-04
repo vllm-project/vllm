@@ -185,6 +185,14 @@ class OnlineRenderer:
             is_harmony=self.use_harmony,
             tokenizer=renderer.tokenizer,
         )
+        tokenizer = renderer.tokenizer
+        tool_parser_cls = (
+            self.parser.tool_parser_cls if self.parser is not None else None
+        )
+        if tool_parser_cls is not None and tokenizer is not None:
+            # Constructors validate tokenizer-specific parser requirements, so
+            # fail at startup instead of on every request.
+            tool_parser_cls(tokenizer)
 
         self.chat_template = chat_template
         self.chat_template_content_format: ChatTemplateContentFormatOption = (
