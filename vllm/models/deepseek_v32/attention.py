@@ -47,6 +47,20 @@ if TYPE_CHECKING:
     )
 
 
+def reuses_previous_topk(
+    config: DeepseekV2Config | DeepseekV3Config, layer_id: int
+) -> bool:
+    """Whether a layer reuses the previous layer's top-k instead of indexing."""
+    index_topk_freq = getattr(config, "index_topk_freq", 1)
+    index_topk_pattern = getattr(config, "index_topk_pattern", None)
+    index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+    if index_topk_pattern is None:
+        return max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
+    if 0 <= layer_id < len(index_topk_pattern):
+        return index_topk_pattern[layer_id] == "S"
+    return False
+
+
 class DeepseekV32Indexer(nn.Module):
     indexer_cache_cls = DeepseekV32IndexerCache
 
@@ -164,17 +178,7 @@ class DeepseekV32Attention(MLAAttention):
             scaling = scaling * mscale * mscale
 
         layer_id = extract_layer_index(prefix)
-        index_topk_freq = getattr(config, "index_topk_freq", 1)
-        index_topk_pattern = getattr(config, "index_topk_pattern", None)
-        index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
-        if index_topk_pattern is None:
-            skip_topk = (
-                max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
-            )
-        elif 0 <= layer_id < len(index_topk_pattern):
-            skip_topk = index_topk_pattern[layer_id] == "S"
-        else:
-            skip_topk = False
+        skip_topk = reuses_previous_topk(config, layer_id)
 
         num_hidden_layers = getattr(config, "num_hidden_layers", None)
         is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers
