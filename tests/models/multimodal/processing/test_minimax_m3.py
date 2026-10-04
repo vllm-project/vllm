@@ -136,3 +136,85 @@ def test_video_volumetric_cap_raises():
             max_long_side_pixel=1008,
             return_tensors="pt",
         )
+
+
+def test_smart_resize_rejects_inverted_pixel_budget():
+    with pytest.raises(ValueError, match="min_pixels must be less than or equal"):
+        smart_resize(
+            224,
+            224,
+            factor=28,
+            min_pixels=100_000_000,
+            max_pixels=768 * 28 * 28,
+        )
+
+
+def test_smart_resize_rejects_non_positive_pixel_budget():
+    with pytest.raises(ValueError, match="must be positive"):
+        smart_resize(224, 224, factor=28, min_pixels=0, max_pixels=1000)
+    with pytest.raises(ValueError, match="must be positive"):
+        smart_resize(224, 224, factor=28, min_pixels=100, max_pixels=-1)
+
+
+def test_smart_resize_area_path_honors_max_total_pixels():
+    with pytest.raises(ValueError, match="max_total_pixels"):
+        smart_resize(
+            5000,
+            5000,
+            factor=28,
+            min_pixels=4 * 28 * 28,
+            max_pixels=10**12,
+            max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
+        )
+
+
+@pytest.mark.parametrize(
+    "processor_kwargs",
+    [
+        {"min_pixels": 100_000_000},
+        {"min_pixels": 100_000_000, "max_pixels": 100_000_000},
+    ],
+)
+def test_video_preprocess_rejects_inverted_min_pixels(
+    monkeypatch: pytest.MonkeyPatch, processor_kwargs: dict[str, int]
+):
+    proc = MiniMaxM3VLVideoProcessor()
+
+    def _must_not_resize(*args, **kwargs):
+        raise AssertionError("resize must not run for over-budget geometry")
+
+    monkeypatch.setattr(proc, "resize", _must_not_resize)
+    video = torch.zeros((4, 3, 224, 224), dtype=torch.uint8)
+    with pytest.raises(ValueError, match="min_pixels must be less than or equal"):
+        proc.preprocess(
+            videos=[video],
+            do_resize=True,
+            return_tensors="pt",
+            **processor_kwargs,
+        )
+
+
+def test_image_preprocess_does_not_raise_max_pixels_ceiling():
+    proc = MiniMaxM3VLImageProcessor()
+    image = torch.randint(0, 255, (3, 256, 256), dtype=torch.uint8)
+    baseline = proc.preprocess([image], do_resize=True, return_tensors="pt")
+    oversized = proc.preprocess(
+        [image], do_resize=True, max_pixels=10**12, return_tensors="pt"
+    )
+    assert torch.equal(baseline["image_grid_thw"], oversized["image_grid_thw"])
+
+
+def test_video_area_resize_enforces_volumetric_cap(monkeypatch: pytest.MonkeyPatch):
+    proc = MiniMaxM3VLVideoProcessor()
+    monkeypatch.setattr(
+        "vllm.transformers_utils.processors.minimax_m3.smart_resize",
+        lambda *args, **kwargs: (10_024, 10_024),
+    )
+
+    def _must_not_resize(*args, **kwargs):
+        raise AssertionError("resize must not run for over-budget geometry")
+
+    monkeypatch.setattr(proc, "resize", _must_not_resize)
+    video = torch.zeros((4, 3, 28, 28), dtype=torch.uint8)
+    with pytest.raises(ValueError, match="max_total_pixels"):
+        proc.preprocess(videos=[video], do_resize=True, return_tensors="pt")
