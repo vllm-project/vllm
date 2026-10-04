@@ -72,7 +72,13 @@ def suppress_stdout():
         yield
         return
 
-    stdout_fd = sys.stdout.fileno()
+    # Derive the fd from the original stdout rather than the (possibly
+    # redirected) `sys.stdout`. `sys.stdout` may have no fd at all (e.g. when
+    # wrapped by `contextlib.redirect_stdout(io.StringIO())` or in a Jupyter
+    # kernel), and it may point at stderr (e.g. `sys.stdout = sys.stderr`),
+    # which would silently discard error messages. C libraries always write to
+    # the real stdout fd, so that is what we must suppress.
+    stdout_fd = sys.__stdout__.fileno()
     stdout_dup = os.dup(stdout_fd)
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
 
