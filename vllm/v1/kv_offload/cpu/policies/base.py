@@ -3,6 +3,7 @@
 import ctypes
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
+from collections.abc import Set as AbstractSet
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
@@ -45,12 +46,25 @@ class ChunkStatus(ctypes.Structure):
         return self.ref_cnt >= 0
 
 
+# How many deprioritized chunks a policy walks past before taking one anyway.
+# Beyond this the search costs more than the recomputation it saves; a cache
+# smaller than the budget is still searched exhaustively.
+DEPRIORITIZED_SCAN_BUDGET = 256
+
+
 class CachePolicy(ABC):
     """Encapsulates both chunk organization (data structures) and replacement
     decisions (which chunk to evict). LRU and ARC differ in both dimensions —
     ARC's ghost lists and target_t1_size live at the intersection of storage
     and eviction, so they cannot be separated cleanly.
     """
+
+    # Set by a policy that honors evict()'s deprioritized argument. A policy
+    # that leaves this False is never passed one, so an out-of-tree policy
+    # written against the two-argument evict() keeps working; declaring
+    # support is the policy's statement that it takes those chunks last
+    # within the budget, which a signature cannot express.
+    supports_deprioritized_eviction: bool = False
 
     def __init__(self, cache_capacity: int) -> None:
         self.cache_capacity = cache_capacity
@@ -114,9 +128,19 @@ class CachePolicy(ABC):
 
     @abstractmethod
     def evict(
-        self, n: int, protected: set[OffloadKey]
+        self,
+        n: int,
+        protected: set[OffloadKey],
+        deprioritized: AbstractSet[OffloadKey] = frozenset(),
     ) -> list[tuple[OffloadKey, ChunkStatus]] | None:
         """Evict exactly n chunks, skipping any in protected.
+
+        Chunks in deprioritized are taken only after the other eligible
+        chunks the policy walks past, so a caller can express "prefer to keep
+        these" without making them unevictable. The preference is bounded: a
+        policy gives up looking for a better victim after
+        DEPRIORITIZED_SCAN_BUDGET deprioritized chunks, so a cache made
+        entirely of them does not turn every store into a full scan.
 
         Returns a list of (key, chunk) for the evicted chunks,
         or None if n evictions cannot be satisfied. The operation is atomic:

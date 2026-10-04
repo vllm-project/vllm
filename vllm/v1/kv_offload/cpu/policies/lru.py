@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import heapq
 from collections.abc import Iterable, Sequence
+from collections.abc import Set as AbstractSet
 
 from typing_extensions import override
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.cpu.policies.base import (
+    DEPRIORITIZED_SCAN_BUDGET,
     CachePolicy,
     ChunkStatus,
     order_request_keys,
@@ -25,6 +27,8 @@ class LRUCachePolicy(CachePolicy):
      - First time the key is added (store).
      - A request-scoped access.
     """
+
+    supports_deprioritized_eviction = True
 
     def __init__(self, cache_capacity: int):
         super().__init__(cache_capacity)
@@ -113,7 +117,10 @@ class LRUCachePolicy(CachePolicy):
 
     @override
     def evict(
-        self, n: int, protected: set[OffloadKey]
+        self,
+        n: int,
+        protected: set[OffloadKey],
+        deprioritized: AbstractSet[OffloadKey] = frozenset(),
     ) -> list[tuple[OffloadKey, ChunkStatus]] | None:
         if n == 0:
             return []
@@ -121,7 +128,15 @@ class LRUCachePolicy(CachePolicy):
         selected: list[tuple[tuple[int, OffloadKey], ChunkStatus]] = []
         selected_keys: set[OffloadKey] = set()
         deferred: list[tuple[int, OffloadKey]] = []
+        last_resort: list[tuple[int, OffloadKey]] = []
+        # Lazy duplicates of one key must all be pushed back, but only distinct
+        # keys count against the budget: otherwise a heap full of duplicates
+        # exhausts it while eligible victims are still waiting behind them.
+        last_resort_keys: set[OffloadKey] = set()
+        budget = max(n, DEPRIORITIZED_SCAN_BUDGET)
         while self._heap and len(selected) < n:
+            if len(last_resort_keys) >= budget:
+                break
             entry = heapq.heappop(self._heap)
             if not self._is_current(entry):
                 continue
@@ -133,6 +148,25 @@ class LRUCachePolicy(CachePolicy):
             if key in protected:
                 deferred.append(entry)
                 continue
+            if key in deprioritized:
+                last_resort.append(entry)
+                last_resort_keys.add(key)
+                continue
+            chunk = self.chunks[key]
+            assert chunk.ref_cnt == 0
+            selected.append((entry, chunk))
+            selected_keys.add(key)
+
+        # last_resort is already in LRU order: take from it only once every
+        # other candidate is exhausted.
+        taken = 0
+        for entry in last_resort:
+            if len(selected) >= n:
+                break
+            taken += 1
+            key = entry[1]
+            if key in selected_keys:
+                continue
             chunk = self.chunks[key]
             assert chunk.ref_cnt == 0
             selected.append((entry, chunk))
@@ -143,9 +177,15 @@ class LRUCachePolicy(CachePolicy):
                 heapq.heappush(self._heap, entry)
             for entry in deferred:
                 heapq.heappush(self._heap, entry)
+            # last_resort[:taken] is already covered by the selected loop above
+            # (or was a stale duplicate, which the main loop drops as well).
+            for entry in last_resort[taken:]:
+                heapq.heappush(self._heap, entry)
             return None
 
         for entry in deferred:
+            heapq.heappush(self._heap, entry)
+        for entry in last_resort[taken:]:
             heapq.heappush(self._heap, entry)
 
         candidates: list[tuple[OffloadKey, ChunkStatus]] = []
