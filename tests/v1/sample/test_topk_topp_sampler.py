@@ -526,6 +526,68 @@ class TestTritonTopkTopp:
         # ceil(0.9 * 1024 / 1) = 922 tokens of a uniform row reach p = 0.9
         assert (kept == 922).all()
 
+    def test_topp_ulp_dense_tails_keep_exact_count(self):
+        """Regression: the 1e-6 relative collapse threshold stopped the
+        pivot search ~8-16 ulps above the boundary on ulp-dense tails, and
+        the best-pivot fallback then kept every token in between (e.g. 517
+        kept where 513 reach p; 201 where 129 reach it). The search now
+        converges to a 1-ulp bracket and resolves the boundary exactly.
+        Tolerances cover fp32-vs-fp64 exp noise near the boundary, not the
+        old over-keep."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        def flat_tail(vocab, d, jit, seed):
+            rng = np.random.default_rng(seed)
+            row = rng.normal(0, jit, vocab)
+            row[rng.integers(vocab)] = np.log(d / (1 - d) * (vocab - 1))
+            return row.astype(np.float32), 0.75
+
+        def near_tie(vocab, block, ulps, seed, x0=-2.5):
+            rng = np.random.default_rng(seed)
+            row = (x0 - 1.0 - rng.exponential(1.0, vocab)).astype(np.float32)
+            pos = rng.permutation(vocab)
+            row[pos[:1]] = np.float32(x0 + 0.5 + float(rng.exponential(1.0)))
+            blk = pos[1 : block + 1]
+            row[blk] = np.float32(x0) + rng.integers(-ulps, ulps + 1, block) * (
+                np.spacing(np.float32(x0))
+            )
+            q = np.exp(row.astype(np.float64) - row.max())
+            q /= q.sum()
+            p = float(np.float32(q[pos[:1]].sum() + 0.5 * q[blk].sum()))
+            return row, p
+
+        def ulp_pairs(vocab, seed, ulps=3, x0=-2.5):
+            rng = np.random.default_rng(seed)
+            row = (x0 - 1.0 - rng.exponential(1.0, vocab)).astype(np.float32)
+            pos = rng.permutation(vocab)
+            v = np.float32(x0) + rng.integers(-ulps, ulps + 1, vocab // 2) * (
+                np.spacing(np.float32(x0))
+            )
+            row[pos[0::2]] = v
+            row[pos[1::2]] = v
+            return row, 0.9
+
+        cases = [
+            ("flat tail V=1024", *flat_tail(1024, 0.5, 1e-4, 1), 2),
+            ("flat tail V=32768", *flat_tail(32768, 0.5, 1e-4, 0), 2),
+            ("near-tie V=32768", *near_tie(32768, 256, 2, 2), 4),
+            ("ulp pairs V=151936", *ulp_pairs(151936, 0), 2),
+        ]
+        for name, row, p, tol in cases:
+            p = float(np.float32(p))
+            logits = torch.from_numpy(np.tile(row, (4, 1)).copy()).to(DEVICE_TYPE)
+            out = apply_top_k_top_p_triton(
+                logits, k=None, p=torch.full((4,), p, dtype=torch.float32)
+            )
+            keep = torch.isfinite(out[0]).cpu().numpy()
+
+            exact, q = self._exact_topp(row, p)
+            kept = int(keep.sum())
+            assert abs(kept - exact) <= tol, (
+                f"{name}: kept {kept}, exact {exact} (old search over-kept)"
+            )
+            assert q[keep].sum() >= p - 1e-4, f"{name}: kept mass below p"
+
     def test_topk_topp_near_flat_boundary_does_not_drop_below_p(self):
         """Regression: the combined top-k+top-p mask converted the winning
         probability pivot back to a logit cut, and the round trip could

@@ -106,6 +106,71 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
     return min_larger, num_min_larger
 
 
+@triton.jit
+def _bit_midpoint(lo, hi):
+    """Midpoint of two non-negative floats in bit space.
+
+    Bit patterns of non-negative floats order the same way as the values,
+    so the result is strictly interior whenever hi is more than 1 ulp above
+    lo, at any scale (denormals and a zero lo included). Used when the
+    value-space heuristic pivot stops making progress.
+    """
+    lo_bits = lo.to(tl.uint32, bitcast=True).to(tl.uint64)
+    hi_bits = hi.to(tl.uint32, bitcast=True).to(tl.uint64)
+    return ((lo_bits + hi_bits) // 2).to(tl.uint32).to(tl.float32, bitcast=True)
+
+
+@triton.jit
+def _mass_ge_stats(BUFFER_ROW, limit, num_tiles, theta, BLOCK: tl.constexpr):
+    """One fused pass over the prob buffer: mass of {v >= theta}, the
+    smallest value in that set, and its bit-exact occurrence count."""
+    acc = tl.zeros((), dtype=tl.float64)
+    min_larger = 1.0
+    num_min_larger = tl.zeros((), dtype=tl.uint32)
+    for i in range(0, num_tiles):
+        offs_n = i * BLOCK + tl.arange(0, BLOCK)
+        mask_n = offs_n < limit
+        probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n, other=0.0)
+        above = (probs_blk >= theta) & mask_n
+        acc += tl.sum(probs_blk * above)
+        min_larger, num_min_larger = _update_min_larger_stats(
+            probs_blk, above, min_larger, num_min_larger, 1.0
+        )
+    return acc, min_larger, num_min_larger
+
+
+@triton.jit
+def _stalled_topp_boundary(
+    BUFFER_ROW, limit, num_tiles, min_range, max_range, p, BLOCK: tl.constexpr
+):
+    """Resolve the top-p boundary once the pivot search stalls.
+
+    The search invariant is mass(> min_range) >= p > mass(> max_range).
+    When no interior pivot exists the bracket is ~1 ulp wide, so the
+    boundary value is the smallest prob whose >= group reaches p: try
+    max_range's group first, then min_range's. The returned pivot sits one
+    ulp below the boundary value, so the strict `>` keep-mask keeps exactly
+    {v >= boundary} and the duplicate trim runs unchanged. masked=0 (keep
+    the whole row) only remains for NaN/degenerate input.
+    """
+    acc, min_larger, num_min_larger = _mass_ge_stats(
+        BUFFER_ROW, limit, num_tiles, max_range, BLOCK
+    )
+    if acc < p:
+        acc, min_larger, num_min_larger = _mass_ge_stats(
+            BUFFER_ROW, limit, num_tiles, min_range, BLOCK
+        )
+    masked = 0
+    p_pivot = 0.0
+    if acc >= p and num_min_larger > 0:
+        # min_larger > 0, so one bit below it is the next float toward 0.
+        p_pivot = (min_larger.to(tl.uint32, bitcast=True) - 1).to(
+            tl.float32, bitcast=True
+        )
+        masked = 1
+    return p_pivot, min_larger, num_min_larger, acc, masked
+
+
 @triton.jit(do_not_specialize_on_alignment=["BATCH_SIZE"])
 def _topk_topp_kernel(
     LOGITS,
@@ -553,10 +618,7 @@ def _topk_topp_kernel(
                         min_larger_prob = 1.0
                         num_min_larger = tl.zeros((), dtype=tl.uint32)
                         p_pivots_sum = tl.zeros((), dtype=tl.float64)
-                        best_pivot = 0.0
-                        best_mass = tl.zeros((), dtype=tl.float64)
-                        best_min_larger = 1.0
-                        best_num_min = tl.zeros((), dtype=tl.uint32)
+                        topp_mask = 0
 
                         # Fifth passes: Search for p_pivot
                         found_pivot = 0
@@ -570,76 +632,97 @@ def _topk_topp_kernel(
                                 p_pivot_0 = tl.sqrt(min_range * max_range)
                             else:
                                 p_pivot_0 = (max_range - min_range) * 0.5 + min_range
-                            p_pivots_sum_0 = tl.zeros((), dtype=tl.float64)
-                            min_larger_0 = 1.0
-                            num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
-
-                            # Single fused pass: compute p_pivots_sum,
-                            # min_larger, and num_min_larger together.
-                            # See _update_min_larger_stats for the
-                            # tile-level merge logic.
-                            for i in range(0, search_iters):
-                                offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
-                                    0, BLOCK_SIZE_TRUNC
+                            if (p_pivot_0 == min_range) | (p_pivot_0 == max_range):
+                                # Heuristic exhausted near float resolution:
+                                # bisect in bit space instead, which always
+                                # makes progress down to a 1-ulp bracket.
+                                p_pivot_0 = _bit_midpoint(min_range, max_range)
+                            if (p_pivot_0 == min_range) | (p_pivot_0 == max_range):
+                                (
+                                    p_pivot,
+                                    min_larger_prob,
+                                    num_min_larger,
+                                    p_pivots_sum,
+                                    topp_mask,
+                                ) = _stalled_topp_boundary(
+                                    BUFFER_ROW,
+                                    search_range,
+                                    search_iters,
+                                    min_range,
+                                    max_range,
+                                    p,
+                                    BLOCK_SIZE_TRUNC,
                                 )
-                                mask_n_2 = offs_n < search_range
-                                probs_blk = tl.load(
-                                    BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0
-                                )
+                                found_pivot = 1
+                            else:
+                                p_pivots_sum_0 = tl.zeros((), dtype=tl.float64)
+                                min_larger_0 = 1.0
+                                num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
 
-                                above_0 = probs_blk > p_pivot_0
-                                p_pivots_sum_0 += tl.sum(probs_blk * above_0)
-
-                                min_larger_0, num_min_larger_0 = (
-                                    _update_min_larger_stats(
-                                        probs_blk,
-                                        above_0,
-                                        min_larger_0,
-                                        num_min_larger_0,
-                                        1.0,
+                                # Single fused pass: compute p_pivots_sum,
+                                # min_larger, and num_min_larger together.
+                                # See _update_min_larger_stats for the
+                                # tile-level merge logic.
+                                for i in range(0, search_iters):
+                                    offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
+                                        0, BLOCK_SIZE_TRUNC
                                     )
-                                )
+                                    mask_n_2 = offs_n < search_range
+                                    probs_blk = tl.load(
+                                        BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0
+                                    )
 
-                            # Check if the pivot satisfies termination condition
-                            if p_pivots_sum_0 >= p and (
-                                p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p
-                            ):
-                                p_pivot = p_pivot_0
-                                min_larger_prob = min_larger_0
-                                num_min_larger = num_min_larger_0
-                                p_pivots_sum = p_pivots_sum_0
-                                found_pivot = 1
+                                    above_0 = probs_blk > p_pivot_0
+                                    p_pivots_sum_0 += tl.sum(probs_blk * above_0)
 
-                            # Track the tightest pivot that still reaches p,
-                            # so a failed search falls back to the safe side.
-                            if p_pivots_sum_0 >= p and p_pivot_0 > best_pivot:
-                                best_pivot = p_pivot_0
-                                best_mass = p_pivots_sum_0
-                                best_min_larger = min_larger_0
-                                best_num_min = num_min_larger_0
+                                    min_larger_0, num_min_larger_0 = (
+                                        _update_min_larger_stats(
+                                            probs_blk,
+                                            above_0,
+                                            min_larger_0,
+                                            num_min_larger_0,
+                                            1.0,
+                                        )
+                                    )
 
-                            # Update range
-                            if p_pivots_sum_0 > p:
-                                min_range = p_pivot_0
-                            elif p_pivots_sum_0 < p:
-                                max_range = p_pivot_0
+                                # Check if the pivot satisfies termination condition
+                                if p_pivots_sum_0 >= p and (
+                                    p_pivots_sum_0 - (min_larger_0 * num_min_larger_0)
+                                    < p
+                                ):
+                                    p_pivot = p_pivot_0
+                                    min_larger_prob = min_larger_0
+                                    num_min_larger = num_min_larger_0
+                                    p_pivots_sum = p_pivots_sum_0
+                                    topp_mask = 1
+                                    found_pivot = 1
 
-                            num_iters += 1
-                            if (max_range - min_range) <= tl.maximum(
-                                min_range * 1e-6, 1e-30
-                            ) or num_iters >= 32:
-                                if best_pivot > 0.0:
-                                    p_pivot = best_pivot
-                                    min_larger_prob = best_min_larger
-                                    num_min_larger = best_num_min
-                                    p_pivots_sum = best_mass
-                                else:
-                                    # No pivot reached p even with every
-                                    # candidate kept; signal no-masking.
-                                    p_pivot = 0.0
-                                found_pivot = 1
+                                # Update range
+                                if p_pivots_sum_0 > p:
+                                    min_range = p_pivot_0
+                                elif p_pivots_sum_0 < p:
+                                    max_range = p_pivot_0
 
-                        if p_pivot > 0.0:
+                                num_iters += 1
+                                if num_iters >= 48 and found_pivot == 0:
+                                    (
+                                        p_pivot,
+                                        min_larger_prob,
+                                        num_min_larger,
+                                        p_pivots_sum,
+                                        topp_mask,
+                                    ) = _stalled_topp_boundary(
+                                        BUFFER_ROW,
+                                        search_range,
+                                        search_iters,
+                                        min_range,
+                                        max_range,
+                                        p,
+                                        BLOCK_SIZE_TRUNC,
+                                    )
+                                    found_pivot = 1
+
+                        if topp_mask == 1:
                             # Replay the top-k survivor selection in the
                             # sixth pass; save the logit-space boundary
                             # before the p tie group reuses these registers.
@@ -769,10 +852,6 @@ def _topk_topp_kernel(
                 min_larger_prob = 1.0
                 num_min_larger = tl.zeros((), dtype=tl.uint32)
                 p_pivots_sum = tl.zeros((), dtype=tl.float64)
-                best_pivot = 0.0
-                best_mass = tl.zeros((), dtype=tl.float64)
-                best_min_larger = 1.0
-                best_num_min = tl.zeros((), dtype=tl.uint32)
                 topp_mask = 0
 
                 # Third pass: Search for p_pivot
@@ -794,119 +873,96 @@ def _topk_topp_kernel(
                             p_pivot_0 = tl.sqrt(min_range * max_range)
                         else:
                             p_pivot_0 = (max_range - min_range) * 0.5 + min_range
-                        p_pivots_sum_0 = tl.zeros((), dtype=tl.float64)
-                        min_larger_0 = 1.0
-                        num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
-
-                        # Single fused pass: compute p_pivots_sum,
-                        # min_larger, and num_min_larger together.
-                        # See _update_min_larger_stats for the
-                        # tile-level merge logic.
-                        for i in range(0, search_iters):
-                            offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
-                                0, BLOCK_SIZE_TRUNC
+                        if (p_pivot_0 == min_range) | (p_pivot_0 == max_range):
+                            # Heuristic exhausted near float resolution:
+                            # bisect in bit space instead, which always
+                            # makes progress down to a 1-ulp bracket.
+                            p_pivot_0 = _bit_midpoint(min_range, max_range)
+                        if (p_pivot_0 == min_range) | (p_pivot_0 == max_range):
+                            (
+                                p_pivot,
+                                min_larger_prob,
+                                num_min_larger,
+                                p_pivots_sum,
+                                topp_mask,
+                            ) = _stalled_topp_boundary(
+                                BUFFER_ROW,
+                                search_range,
+                                search_iters,
+                                min_range,
+                                max_range,
+                                p,
+                                BLOCK_SIZE_TRUNC,
                             )
-                            mask_n_2 = offs_n < search_range
-                            probs_blk = tl.load(
-                                BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0
-                            )
-
-                            above_0 = probs_blk > p_pivot_0
-                            p_pivots_sum_0 += tl.sum(probs_blk * above_0)
-
-                            min_larger_0, num_min_larger_0 = _update_min_larger_stats(
-                                probs_blk,
-                                above_0,
-                                min_larger_0,
-                                num_min_larger_0,
-                                1.0,
-                            )
-
-                        # Check if the pivot satisfies termination condition
-                        if (
-                            p_pivots_sum_0 >= p
-                            and p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p
-                        ):
-                            p_pivot = p_pivot_0
-                            min_larger_prob = min_larger_0
-                            num_min_larger = num_min_larger_0
-                            p_pivots_sum = p_pivots_sum_0
-                            topp_mask = 1
                             found_pivot = 1
+                        else:
+                            p_pivots_sum_0 = tl.zeros((), dtype=tl.float64)
+                            min_larger_0 = 1.0
+                            num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
 
-                        # Track the tightest pivot that still reaches p, so a
-                        # failed search can fall back to the safe side.
-                        if p_pivots_sum_0 >= p and p_pivot_0 > best_pivot:
-                            best_pivot = p_pivot_0
-                            best_mass = p_pivots_sum_0
-                            best_min_larger = min_larger_0
-                            best_num_min = num_min_larger_0
+                            # Single fused pass: compute p_pivots_sum,
+                            # min_larger, and num_min_larger together.
+                            # See _update_min_larger_stats for the
+                            # tile-level merge logic.
+                            for i in range(0, search_iters):
+                                offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
+                                    0, BLOCK_SIZE_TRUNC
+                                )
+                                mask_n_2 = offs_n < search_range
+                                probs_blk = tl.load(
+                                    BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0
+                                )
 
-                        # Update range
-                        if p_pivots_sum_0 > p:
-                            min_range = p_pivot_0
-                        elif p_pivots_sum_0 < p:
-                            max_range = p_pivot_0
+                                above_0 = probs_blk > p_pivot_0
+                                p_pivots_sum_0 += tl.sum(probs_blk * above_0)
 
-                        num_iters += 1
-                        if (max_range - min_range) <= tl.maximum(
-                            min_range * 1e-6, 1e-30
-                        ) or num_iters >= 32:
-                            if best_pivot > 0.0:
-                                p_pivot = best_pivot
-                                min_larger_prob = best_min_larger
-                                num_min_larger = best_num_min
-                                p_pivots_sum = best_mass
+                                min_larger_0, num_min_larger_0 = (
+                                    _update_min_larger_stats(
+                                        probs_blk,
+                                        above_0,
+                                        min_larger_0,
+                                        num_min_larger_0,
+                                        1.0,
+                                    )
+                                )
+
+                            # Check if the pivot satisfies termination condition
+                            if (
+                                p_pivots_sum_0 >= p
+                                and p_pivots_sum_0 - (min_larger_0 * num_min_larger_0)
+                                < p
+                            ):
+                                p_pivot = p_pivot_0
+                                min_larger_prob = min_larger_0
+                                num_min_larger = num_min_larger_0
+                                p_pivots_sum = p_pivots_sum_0
                                 topp_mask = 1
-                            else:
-                                # No evaluated pivot reached p: the boundary
-                                # sits at or below the smallest candidate
-                                # prob (flat row, or p needs the min-prob
-                                # token). Evaluate the zero pivot so the
-                                # sixth pass can still trim duplicates of the
-                                # min-prob group instead of keeping the
-                                # whole row.
-                                p_pivots_sum_0 = tl.zeros((), dtype=tl.float64)
-                                min_larger_0 = 1.0
-                                num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
-                                for i in range(0, search_iters):
-                                    offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
-                                        0, BLOCK_SIZE_TRUNC
-                                    )
-                                    mask_n_2 = offs_n < search_range
-                                    probs_blk = tl.load(
-                                        BUFFER_ROW + offs_n,
-                                        mask=mask_n_2,
-                                        other=0.0,
-                                    )
+                                found_pivot = 1
 
-                                    above_0 = probs_blk > 0.0
-                                    p_pivots_sum_0 += tl.sum(probs_blk * above_0)
+                            # Update range
+                            if p_pivots_sum_0 > p:
+                                min_range = p_pivot_0
+                            elif p_pivots_sum_0 < p:
+                                max_range = p_pivot_0
 
-                                    min_larger_0, num_min_larger_0 = (
-                                        _update_min_larger_stats(
-                                            probs_blk,
-                                            above_0,
-                                            min_larger_0,
-                                            num_min_larger_0,
-                                            1.0,
-                                        )
-                                    )
-                                if (
-                                    p_pivots_sum_0 == p_pivots_sum_0
-                                    and p_pivots_sum_0 < float("inf")
-                                    and min_larger_0 < 1.0
-                                    and num_min_larger_0 > 0
-                                ):
-                                    p_pivot = 0.0
-                                    min_larger_prob = min_larger_0
-                                    num_min_larger = num_min_larger_0
-                                    p_pivots_sum = p_pivots_sum_0
-                                    topp_mask = 1
-                                else:
-                                    # Degenerate row (NaN/empty); keep all.
-                                    p_pivot = 0.0
-                            found_pivot = 1
+                            num_iters += 1
+                            if num_iters >= 48 and found_pivot == 0:
+                                (
+                                    p_pivot,
+                                    min_larger_prob,
+                                    num_min_larger,
+                                    p_pivots_sum,
+                                    topp_mask,
+                                ) = _stalled_topp_boundary(
+                                    BUFFER_ROW,
+                                    search_range,
+                                    search_iters,
+                                    min_range,
+                                    max_range,
+                                    p,
+                                    BLOCK_SIZE_TRUNC,
+                                )
+                                found_pivot = 1
                 else:
                     # Re-populate the buffer with full softmax probabilities
                     for i in range(0, NUM_TILES):
@@ -930,115 +986,94 @@ def _topk_topp_kernel(
                             p_pivot_0 = tl.sqrt(min_range * max_range)
                         else:
                             p_pivot_0 = (max_range - min_range) * 0.5 + min_range
-                        p_pivots_sum_0 = tl.zeros((), dtype=tl.float64)
-                        min_larger_0 = 1.0
-                        num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
-
-                        # Single fused pass: compute p_pivots_sum,
-                        # min_larger, and num_min_larger together.
-                        # See _update_min_larger_stats for the
-                        # tile-level merge logic.
-                        for i in range(0, NUM_TILES):
-                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                            mask_n = offs_n < VOCAB_SIZE
-                            probs_blk = tl.load(
-                                BUFFER_ROW + offs_n, mask=mask_n, other=0.0
+                        if (p_pivot_0 == min_range) | (p_pivot_0 == max_range):
+                            # Heuristic exhausted near float resolution:
+                            # bisect in bit space instead, which always
+                            # makes progress down to a 1-ulp bracket.
+                            p_pivot_0 = _bit_midpoint(min_range, max_range)
+                        if (p_pivot_0 == min_range) | (p_pivot_0 == max_range):
+                            (
+                                p_pivot,
+                                min_larger_prob,
+                                num_min_larger,
+                                p_pivots_sum,
+                                topp_mask,
+                            ) = _stalled_topp_boundary(
+                                BUFFER_ROW,
+                                VOCAB_SIZE,
+                                NUM_TILES,
+                                min_range,
+                                max_range,
+                                p,
+                                BLOCK_SIZE,
                             )
-
-                            above_0 = probs_blk > p_pivot_0
-                            p_pivots_sum_0 += tl.sum(probs_blk * above_0)
-
-                            min_larger_0, num_min_larger_0 = _update_min_larger_stats(
-                                probs_blk,
-                                above_0,
-                                min_larger_0,
-                                num_min_larger_0,
-                                1.0,
-                            )
-
-                        # Check if the pivot satisfies termination condition
-                        if (
-                            p_pivots_sum_0 >= p
-                            and p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p
-                        ):
-                            p_pivot = p_pivot_0
-                            min_larger_prob = min_larger_0
-                            num_min_larger = num_min_larger_0
-                            p_pivots_sum = p_pivots_sum_0
-                            topp_mask = 1
                             found_pivot = 1
+                        else:
+                            p_pivots_sum_0 = tl.zeros((), dtype=tl.float64)
+                            min_larger_0 = 1.0
+                            num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
 
-                        # Track the tightest pivot that still reaches p, so a
-                        # failed search can fall back to the safe side.
-                        if p_pivots_sum_0 >= p and p_pivot_0 > best_pivot:
-                            best_pivot = p_pivot_0
-                            best_mass = p_pivots_sum_0
-                            best_min_larger = min_larger_0
-                            best_num_min = num_min_larger_0
+                            # Single fused pass: compute p_pivots_sum,
+                            # min_larger, and num_min_larger together.
+                            # See _update_min_larger_stats for the
+                            # tile-level merge logic.
+                            for i in range(0, NUM_TILES):
+                                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                                mask_n = offs_n < VOCAB_SIZE
+                                probs_blk = tl.load(
+                                    BUFFER_ROW + offs_n, mask=mask_n, other=0.0
+                                )
 
-                        # Update range
-                        if p_pivots_sum_0 > p:
-                            min_range = p_pivot_0
-                        elif p_pivots_sum_0 < p:
-                            max_range = p_pivot_0
+                                above_0 = probs_blk > p_pivot_0
+                                p_pivots_sum_0 += tl.sum(probs_blk * above_0)
 
-                        num_iters += 1
-                        if (max_range - min_range) <= tl.maximum(
-                            min_range * 1e-6, 1e-30
-                        ) or num_iters >= 32:
-                            if best_pivot > 0.0:
-                                p_pivot = best_pivot
-                                min_larger_prob = best_min_larger
-                                num_min_larger = best_num_min
-                                p_pivots_sum = best_mass
+                                min_larger_0, num_min_larger_0 = (
+                                    _update_min_larger_stats(
+                                        probs_blk,
+                                        above_0,
+                                        min_larger_0,
+                                        num_min_larger_0,
+                                        1.0,
+                                    )
+                                )
+
+                            # Check if the pivot satisfies termination condition
+                            if (
+                                p_pivots_sum_0 >= p
+                                and p_pivots_sum_0 - (min_larger_0 * num_min_larger_0)
+                                < p
+                            ):
+                                p_pivot = p_pivot_0
+                                min_larger_prob = min_larger_0
+                                num_min_larger = num_min_larger_0
+                                p_pivots_sum = p_pivots_sum_0
                                 topp_mask = 1
-                            else:
-                                # No evaluated pivot reached p: the boundary
-                                # sits at or below the smallest candidate
-                                # prob (flat row, or p needs the min-prob
-                                # token). Evaluate the zero pivot so the
-                                # sixth pass can still trim duplicates of the
-                                # min-prob group instead of keeping the
-                                # whole row.
-                                p_pivots_sum_0 = tl.zeros((), dtype=tl.float64)
-                                min_larger_0 = 1.0
-                                num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
-                                for i in range(0, NUM_TILES):
-                                    offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                                    mask_n = offs_n < VOCAB_SIZE
-                                    probs_blk = tl.load(
-                                        BUFFER_ROW + offs_n,
-                                        mask=mask_n,
-                                        other=0.0,
-                                    )
+                                found_pivot = 1
 
-                                    above_0 = probs_blk > 0.0
-                                    p_pivots_sum_0 += tl.sum(probs_blk * above_0)
+                            # Update range
+                            if p_pivots_sum_0 > p:
+                                min_range = p_pivot_0
+                            elif p_pivots_sum_0 < p:
+                                max_range = p_pivot_0
 
-                                    min_larger_0, num_min_larger_0 = (
-                                        _update_min_larger_stats(
-                                            probs_blk,
-                                            above_0,
-                                            min_larger_0,
-                                            num_min_larger_0,
-                                            1.0,
-                                        )
-                                    )
-                                if (
-                                    p_pivots_sum_0 == p_pivots_sum_0
-                                    and p_pivots_sum_0 < float("inf")
-                                    and min_larger_0 < 1.0
-                                    and num_min_larger_0 > 0
-                                ):
-                                    p_pivot = 0.0
-                                    min_larger_prob = min_larger_0
-                                    num_min_larger = num_min_larger_0
-                                    p_pivots_sum = p_pivots_sum_0
-                                    topp_mask = 1
-                                else:
-                                    # Degenerate row (NaN/empty); keep all.
-                                    p_pivot = 0.0
-                            found_pivot = 1
+                            num_iters += 1
+                            if num_iters >= 48 and found_pivot == 0:
+                                (
+                                    p_pivot,
+                                    min_larger_prob,
+                                    num_min_larger,
+                                    p_pivots_sum,
+                                    topp_mask,
+                                ) = _stalled_topp_boundary(
+                                    BUFFER_ROW,
+                                    VOCAB_SIZE,
+                                    NUM_TILES,
+                                    min_range,
+                                    max_range,
+                                    p,
+                                    BLOCK_SIZE,
+                                )
+                                found_pivot = 1
 
                 if topp_mask == 1:
                     # Mask in probability space (sixth pass): recomputing
