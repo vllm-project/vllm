@@ -217,9 +217,11 @@ class StagedWriteTensor:
             self._staged_write_chunks.append(self._staged_write_contents)
             self._staged_write_chunks.append(np.frombuffer(x, dtype=np.int32))
             self._staged_write_contents = []
+            self._staged_write_len += len(x)
         else:
+            n = len(self._staged_write_contents)
             self._staged_write_contents.extend(x)
-        self._staged_write_len += len(x)
+            self._staged_write_len += len(self._staged_write_contents) - n
         self._staged_write_cu_lens.append(self._staged_write_len)
 
     def stage_write_elem(self, index: int, x: int) -> None:

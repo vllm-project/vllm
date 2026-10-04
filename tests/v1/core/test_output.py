@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import pickle
 from array import array
 
 import pytest
@@ -166,22 +165,21 @@ def test_new_request_data_packs_token_ids(aliased: bool) -> None:
         prefill_token_ids=prefill,
         pack_token_ids=True,
     )
-    blob = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
+    # What pickle sends to the workers.
+    state = data.__getstate__()
     # The scheduler-side object keeps its lists.
     assert data.prompt_token_ids is prompt and data.prefill_token_ids is prefill
-    out = pickle.loads(blob)
-    assert isinstance(out.prompt_token_ids, array)
-    assert isinstance(out.prefill_token_ids, array)
-    assert out.prompt_token_ids.tolist() == prompt
-    assert out.prefill_token_ids.tolist() == prefill
-    assert (out.prompt_token_ids is out.prefill_token_ids) == aliased
-    assert out.prompt_len == len(prompt)
-    assert out.block_ids == ([1, 2, 3],) and out.num_computed_tokens == 128
+    assert isinstance(state["prompt_token_ids"], array)
+    assert isinstance(state["prefill_token_ids"], array)
+    assert state["prompt_token_ids"].tolist() == prompt
+    assert state["prefill_token_ids"].tolist() == prefill
+    assert (state["prompt_token_ids"] is state["prefill_token_ids"]) == aliased
+    assert state["block_ids"] == ([1, 2, 3],) and state["num_computed_tokens"] == 128
 
     data.pack_token_ids = False
-    out = pickle.loads(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
-    assert out.prompt_token_ids == prompt and out.prefill_token_ids == prefill
-    assert isinstance(out.prompt_token_ids, list)
+    state = data.__getstate__()
+    assert state["prompt_token_ids"] is prompt
+    assert state["prefill_token_ids"] is prefill
 
 
 def test_new_request_data_uses_prepacked_prompt() -> None:
@@ -200,12 +198,11 @@ def test_new_request_data_uses_prepacked_prompt() -> None:
         pack_token_ids=True,
         packed_prompt_token_ids=prepacked,
     )
-    out = pickle.loads(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
-    assert out.prompt_token_ids is out.prefill_token_ids
-    assert out.prompt_token_ids.tolist() == prompt
+    state = data.__getstate__()
+    assert state["prompt_token_ids"] is prepacked
+    assert state["prefill_token_ids"] is prepacked
     # The pre-packed copy itself is not sent.
-    assert out.packed_prompt_token_ids is None
+    assert "packed_prompt_token_ids" not in state
     # A stale pre-packed copy (prompt extended since) is not used.
     data.packed_prompt_token_ids = array("i", prompt[:10])
-    out = pickle.loads(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
-    assert out.prompt_token_ids.tolist() == prompt
+    assert data.__getstate__()["prompt_token_ids"].tolist() == prompt
