@@ -41,6 +41,8 @@ from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
+    register_derived_buffer,
+    set_derived_buffer,
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
@@ -294,7 +296,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
         # Lazily-built merged q|k|v conv weight (built on first forward, after
         # weights are loaded). See _forward.
-        self._merged_conv_weight: torch.Tensor | None = None
+        register_derived_buffer(self, "_merged_conv_weight")
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -448,6 +450,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             )
         return out, final_state
 
+    def _refresh_derived_buffers(self) -> None:
+        weights = [
+            m.weight.detach().view(m.weight.size(0), m.weight.size(2))
+            for m in (self.q_conv1d, self.k_conv1d, self.v_conv1d)
+        ]
+        set_derived_buffer(self, "_merged_conv_weight", torch.cat(weights).contiguous())
+
+    def post_weights_reload(self) -> None:
+        self._refresh_derived_buffers()
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -551,17 +563,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # 1D conv is independent per channel, so concatenating q/k/v along the
         # channel dim and running a single causal_conv1d is bit-identical to
         # three calls. The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
+        # cached in stable storage and refreshed on reload. conv_state is
         # already stored as the merged q|k|v state, so it is used directly.
         if self._merged_conv_weight is None:
-
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = torch.cat(
-                [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                dim=0,
-            ).contiguous()
+            self._refresh_derived_buffers()
         conv_weights = self._merged_conv_weight
         conv_bias = self.q_conv1d.bias
 
