@@ -2,22 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Question types for structured decisions.
 
-A question type turns a request's criteria into options, picks the label the
-model answers with for each option, and builds the answer from the label
+A question type turns a request's criteria into options, writes the question
+for the model with a label per option, and builds the answer from the label
 probabilities.
 """
 
-import hashlib
-import json
 import math
-import random
+import string
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
 
 class StructuredDecisionError(ValueError):
     """An invalid request. Returned as a 400."""
+
+
+#: Label candidates, in the order options take them: A to Z, then AA, AB, ...
+LABELS = tuple(string.ascii_uppercase) + tuple(
+    a + b for a in string.ascii_uppercase for b in string.ascii_uppercase
+)
 
 
 @dataclass(frozen=True)
@@ -49,10 +54,22 @@ class QuestionType(ABC):
         ``question.labels[i]`` among the labels, and the list sums to 1.
         ``label_mass`` is the labels' total probability over the vocabulary."""
 
-    def labels(self, options: list[Option], alphabet: list[str]) -> list[str]:
-        """The label the model answers with for each option. ``alphabet`` holds
-        at least one label per option, shuffled for this question."""
-        return alphabet[: len(options)]
+    def labels(self, options: list[Option], pool: Sequence[str]) -> list[str]:
+        """The label the model answers with for each option, taken in order
+        from ``pool``: the candidates that are one token for this model."""
+        return list(pool[: len(options)])
+
+    def prompt(self, question: Question) -> str:
+        """The question as the model reads it, after the state."""
+        lines = [f"Question: {question.instructions}"] if question.instructions else []
+        for label, o in zip(question.labels, question.options):
+            lines.append(
+                f"{label}: {o.name} - {o.description}"
+                if o.description
+                else f"{label}: {o.name}"
+            )
+        lines.append("Answer with the letter of one option only.")
+        return "\n".join(lines)
 
 
 QUESTION_TYPES: dict[str, QuestionType] = {}
@@ -79,18 +96,11 @@ def build_question(
     type_name: str,
     instructions: Any,
     criteria: Any,
-    alphabet: tuple[str, ...],
     max_options: int,
-    seed: int | None = None,
+    pool: Sequence[str] = LABELS,
 ) -> Question:
-    """Labels come from ``alphabet``, shuffled with a seed from ``seed`` and
-    the question's content, so a repeated question gets the same labels and
-    prompt. Single letters are used first, and two-letter labels only for
-    options past the 26th."""
-    if not qid or ":" in qid or "\n" in qid:
-        raise StructuredDecisionError(
-            f"question id {qid!r} must be non-empty, without ':' or a newline"
-        )
+    if not qid:
+        raise StructuredDecisionError("question ids must be non-empty")
     qtype = get_question_type(type_name)
     options = qtype.parse_options(qid, criteria)
     if not options:
@@ -98,34 +108,19 @@ def build_question(
     names = [o.name for o in options]
     if len(set(names)) != len(names):
         raise StructuredDecisionError(f"question {qid!r}: duplicate option names")
-    limit = min(len(alphabet), max_options)
+    limit = min(max_options, len(pool))
     if len(options) > limit:
         raise StructuredDecisionError(
             f"question {qid!r}: at most {limit} options for this model"
         )
     if not isinstance(instructions, str):
         instructions = "" if instructions is None else str(instructions)
-    content = [
-        seed,
-        qid,
-        type_name,
-        instructions,
-        [(o.name, o.description) for o in options],
-    ]
-    digest = hashlib.sha256(json.dumps(content).encode()).digest()
-    rng = random.Random(digest)
-    shuffled = []
-    for size in sorted({len(label) for label in alphabet}):
-        tier = [label for label in alphabet if len(label) == size]
-        rng.shuffle(tier)
-        shuffled += tier
-    labels = qtype.labels(options, shuffled)
     return Question(
         id=qid,
         type=qtype,
         instructions=instructions,
         options=tuple(options),
-        labels=tuple(labels),
+        labels=tuple(qtype.labels(options, pool)),
     )
 
 

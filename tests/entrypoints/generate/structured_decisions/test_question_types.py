@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import string
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -15,46 +15,35 @@ from vllm.entrypoints.generate.structured_decisions.question_types import (
     register_question_type,
 )
 
-LETTERS = tuple(string.ascii_uppercase)
 
-
-def choice(qid="bucket", criteria=None, instructions="Which team?"):
+def choice(qid="bucket", criteria=None, instructions="Which team?", max_options=128):
     return build_question(
         qid,
         "choice",
         instructions,
         criteria or {"billing": "money", "outage": None, "other": None},
-        LETTERS,
-        128,
+        max_options,
     )
 
 
-def test_choice_labels_and_options():
+def test_choice_labels_follow_option_order():
     q = choice()
-    assert len(set(q.labels)) == 3 and set(q.labels) <= set(LETTERS)
-    assert choice().labels == q.labels
-    assert choice(instructions="Which queue?").labels != q.labels
-    seeded = build_question(
-        "bucket",
-        "choice",
-        "Which team?",
-        {"billing": "money", "outage": None, "other": None},
-        LETTERS,
-        128,
-        seed=7,
-    )
-    assert seeded.labels != q.labels
-    wide = build_question(
-        "q",
-        "choice",
-        "",
-        {str(i): None for i in range(30)},
-        LETTERS + ("AA", "AB", "AC", "AD"),
-        128,
-    )
-    assert set(wide.labels[:26]) == set(LETTERS)
+    assert q.labels == ("A", "B", "C")
     assert [a.name for a in q.options] == ["billing", "outage", "other"]
     assert q.options[0].description == "money"
+    wide = choice(criteria={str(i): None for i in range(30)})
+    assert wide.labels[25:] == ("Z", "AA", "AB", "AC", "AD")
+
+
+def test_choice_prompt():
+    q = choice()
+    assert q.type.prompt(q) == (
+        "Question: Which team?\n"
+        "A: billing - money\n"
+        "B: outage\n"
+        "C: other\n"
+        "Answer with the letter of one option only."
+    )
 
 
 def test_choice_answer_shape():
@@ -71,27 +60,32 @@ def test_choice_answer_shape():
 @pytest.mark.parametrize(
     "qid,type_name,criteria,match",
     [
-        ("a:b", "choice", {"x": None, "y": None}, "without ':'"),
         ("", "choice", {"x": None, "y": None}, "non-empty"),
         ("q", "nope", {"x": None, "y": None}, "unknown question type"),
         ("q", "choice", ["x", "y"], "must map option names"),
-        ("q", "choice", {str(i): None for i in range(27)}, "at most 26"),
     ],
 )
 def test_build_question_rejects(qid, type_name, criteria, match):
     with pytest.raises(StructuredDecisionError, match=match):
-        build_question(qid, type_name, "", criteria, LETTERS, 128)
+        build_question(qid, type_name, "", criteria, 128)
 
 
 def test_one_option_choice():
-    q = build_question("q", "choice", "", {"only": None}, LETTERS, 128)
-    assert len(q.labels) == 1
+    q = choice(criteria={"only": None})
+    assert q.labels == ("A",)
     assert q.type.answer(q, [1.0], 0.4)["confidence"] == 0.4
 
 
-def test_option_limit_is_the_smaller_cap():
+def test_option_limit():
     with pytest.raises(StructuredDecisionError, match="at most 2 options"):
-        build_question("q", "choice", "", {"x": None, "y": None, "z": None}, LETTERS, 2)
+        choice(criteria={"x": None, "y": None, "z": None}, max_options=2)
+
+
+def test_labels_come_from_the_pool_in_order():
+    q = build_question("q", "choice", "", dict.fromkeys("xyz"), 128, ("A", "C", "D"))
+    assert q.labels == ("A", "C", "D")
+    with pytest.raises(StructuredDecisionError, match="at most 2 options"):
+        build_question("q", "choice", "", dict.fromkeys("xyz"), 128, ("A", "C"))
 
 
 def test_registered_type_plugs_in():
@@ -101,7 +95,7 @@ def test_registered_type_plugs_in():
         def parse_options(self, qid: str, criteria: Any) -> list[Option]:
             return [Option("yes"), Option("no")]
 
-        def labels(self, options: list[Option], alphabet: list[str]) -> list[str]:
+        def labels(self, options: list[Option], pool: Sequence[str]) -> list[str]:
             return ["yes", "no"]
 
         def answer(
@@ -111,7 +105,7 @@ def test_registered_type_plugs_in():
 
     register_question_type(BinaryQuestion)
     try:
-        q = build_question("ok", "test_binary", "Is it fine?", None, LETTERS, 128)
+        q = build_question("ok", "test_binary", "Is it fine?", None, 128)
         assert q.labels == ("yes", "no")
         assert q.type.answer(q, [0.9, 0.1], 1.0) == {"type": "test_binary", "yes": 0.9}
         with pytest.raises(ValueError, match="already registered"):

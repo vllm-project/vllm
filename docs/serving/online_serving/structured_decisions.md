@@ -12,21 +12,20 @@ since `label_mass` needs log probabilities.
 ## How it works
 
 1. Each question is one read. The user message is the state, followed by the
-   question and its allowed answers, each with a single-token label such as
-   `K`.
-2. The assistant reply is prefilled up to the question's label (`id:`), and
-   the read generates one token.
+   question and its options, labeled `A`, `B`, `C`, ... in order, and
+   "Answer with the letter of one option only."
+2. The read is the reply's first token. Each label must be one token there,
+   or the request returns 400.
 3. The read returns the logprobs of that question's label tokens. Softmax over
    the labels gives the answer's probabilities.
+
+Thinking is off unless `chat_template_kwargs` turns it on.
 
 This endpoint does not serve diffusion models yet.
 
 Every read of a request starts with the state, so with
 `--enable-prefix-caching` the state is prefilled once and each further
-question prefills only its own text and answer prefix, then reads one token.
-Each read sees only its own question. With every question in one prompt, later
-questions lost accuracy: on Qwen3-0.6B, 81% at the first question and 60% at
-the fourth.
+question prefills only its own text, then reads one token.
 
 ## Question types
 
@@ -34,8 +33,7 @@ the fourth.
 | --- | --- | --- |
 | `choice` | map of option name to a description or `null` | `choice`, `probabilities` by option name, `confidence` |
 
-A choice has at least one option. A question id is a non-empty string made of any
-characters except `:` and newline.
+A choice has at least one option. A question id is a non-empty string.
 
 ## Example
 
@@ -90,21 +88,15 @@ whole vocabulary: its share of the labels times `label_mass`.
 
 ## Labels
 
-At startup the server tries each label from `A` to `ZZ` in the answer format
-(`id: label`) and keeps those that are one token. The label's
-token can include a leading space or the colon before it. The server groups
-the labels by the rest of that token's text and keeps the largest group, so
-every label is tokenized the same way. A question takes single letters first
-and two-letter labels only when it has more options than letters. Labels are
-shuffled with a seed from a hash of the question, so the first option is not
-always `A`, and a repeated question gets the same prompt.
+Options are labeled `A` to `Z` in the order the request lists them, then `AA`,
+`AB`, ... past 26 options.
 
 ## Limits
 
 | limit | value |
 | --- | --- |
 | questions per request | 64 |
-| options per `choice` | the number of labels the server keeps, at most 128 |
+| options per `choice` | 128 |
 
 ## Request fields
 
@@ -114,7 +106,6 @@ always `A`, and a repeated question gets the same prompt.
 | `questions` | question id to `{type, instructions, criteria}`, asked in this order |
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
-| `seed` | optional, changes each question's label shuffle. Averaging answers over several seeds reduces label bias. |
 
 A question with any field other than `type`, `instructions` and `criteria` is
 rejected with a 400.

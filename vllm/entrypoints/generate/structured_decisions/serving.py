@@ -11,7 +11,6 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
-from vllm.tokenizers import TokenizerLike
 
 from .protocol import (
     DecisionUsage,
@@ -21,7 +20,6 @@ from .protocol import (
 )
 from .question_types import Question, StructuredDecisionError, build_question
 from .strategies import DecisionLimits, ReadStrategy
-from .templates import DEFAULT_DECISION_TEMPLATE, DecisionTemplate
 
 logger = init_logger(__name__)
 
@@ -33,7 +31,7 @@ def state_text(state: Any) -> str:
 def parse_questions(
     request: StructuredDecisionRequest,
     limits: DecisionLimits,
-    alphabet: tuple[str, ...],
+    pool: tuple[str, ...],
 ) -> list[Question]:
     if not request.questions:
         raise StructuredDecisionError("questions: needs at least one question")
@@ -53,9 +51,8 @@ def parse_questions(
                 spec.type,
                 spec.instructions,
                 spec.criteria,
-                alphabet,
                 limits.max_options,
-                request.seed,
+                pool,
             )
         )
     return questions
@@ -75,10 +72,6 @@ class ServingStructuredDecisions(BaseServing):
         )
         self.strategy = strategy
         self.limits = strategy.limits()
-        self.template = DecisionTemplate(DEFAULT_DECISION_TEMPLATE)
-
-    def _tokenizer(self) -> TokenizerLike:
-        return self.strategy.context.online_renderer.renderer.get_tokenizer()
 
     async def create_decision(
         self,
@@ -94,14 +87,12 @@ class ServingStructuredDecisions(BaseServing):
         base_id = self._base_request_id(raw_request, default=request.request_id)
         request_id = f"decision-{base_id}"
         try:
-            questions = parse_questions(
-                request, self.limits, self.template.label_alphabet(self._tokenizer())
-            )
+            pool = await self.strategy.label_pool(request.chat_template_kwargs)
+            questions = parse_questions(request, self.limits, pool)
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
             engine_client.check_admission(len(questions))
             reads = await self.strategy.read(
                 questions,
-                self.template,
                 request.instructions,
                 state_text(request.state),
                 request_id=request_id,

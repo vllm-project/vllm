@@ -30,11 +30,6 @@ class StructuredDecisionRequest(OpenAIBaseModel):
         default=None, description="Context placed ahead of the questions."
     )
     chat_template_kwargs: dict[str, Any] | None = None
-    seed: int | None = Field(
-        default=None,
-        description="Changes which label each option gets. Averaging answers "
-        "over several seeds reduces label bias.",
-    )
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
     request_id: str = Field(default_factory=random_uuid)
 
@@ -65,8 +60,9 @@ class StructuredDecisionResponse(OpenAIBaseModel):
 
 class ReadPromptRequest(OpenAIBaseModel):
     """Chat options for one read's prompt: the state and the question in the
-    user turn, then the assistant turn, ending just before the question's
-    label."""
+    user turn, ending at the generation prompt so the label is the reply's
+    first token. Thinking is off unless the request turns it on, or the label
+    would follow a thought rather than start the reply."""
 
     chat_template_kwargs: dict[str, Any] | None = None
 
@@ -79,8 +75,8 @@ class ReadPromptRequest(OpenAIBaseModel):
             chat_template=default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(
-                self.chat_template_kwargs,
-                dict(add_generation_prompt=False, continue_final_message=True),
+                merge_kwargs({"enable_thinking": False}, self.chat_template_kwargs),
+                dict(add_generation_prompt=True, continue_final_message=False),
             ),
         )
 

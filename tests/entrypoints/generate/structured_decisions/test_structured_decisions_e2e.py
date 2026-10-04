@@ -96,8 +96,7 @@ def test_one_option_choice(server):
 
 def test_one_option_coin_flip(server):
     # A fair coin with only "heads" allowed. The answer is forced, so its
-    # confidence must come from the model: Qwen3-0.6B writes "heads" instead
-    # of the label, and label_mass stays near 0.
+    # confidence must come from the model's probability of the label.
     response = post(
         server,
         {
@@ -114,11 +113,8 @@ def test_one_option_coin_flip(server):
     assert coin["confidence"] == pytest.approx(
         body["diagnostics"]["coin"]["label_mass"]
     )
-    assert coin["confidence"] < 0.5
 
 
-# Qwen3-0.6B gets a single read of these wrong for some label shuffles, so
-# each case averages 16 seeds.
 @pytest.mark.parametrize(
     "state,questions,expected",
     [
@@ -146,25 +142,47 @@ def test_one_option_coin_flip(server):
         ),
     ],
 )
-def test_answers_averaged_over_seeds(server, state, questions, expected):
-    totals: dict[str, dict[str, float]] = {}
-    for seed in range(16):
-        response = post(
-            server,
-            {
-                "model": MODEL_NAME,
-                "state": state,
-                "questions": questions,
-                "seed": seed,
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
-        )
-        assert response.status_code == 200, response.text
-        for qid, answer in response.json()["answers"].items():
-            for name, p in answer["probabilities"].items():
-                totals.setdefault(qid, {}).setdefault(name, 0.0)
-                totals[qid][name] += p
-    assert {qid: max(t, key=lambda n: t[n]) for qid, t in totals.items()} == expected
+def test_single_read_answers(server, state, questions, expected):
+    response = post(
+        server,
+        {
+            "model": MODEL_NAME,
+            "state": state,
+            "questions": questions,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+    assert response.status_code == 200, response.text
+    answers = response.json()["answers"]
+    assert {qid: a["choice"] for qid, a in answers.items()} == expected
+
+
+def test_many_options(server):
+    response = post(
+        server,
+        {
+            "model": MODEL_NAME,
+            "state": "Pick option 77.",
+            "questions": {"n": choice("Which option?", *map(str, range(100)))},
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert len(response.json()["answers"]["n"]["probabilities"]) == 100
+
+
+def test_thinking_is_refused(server):
+    response = post(
+        server,
+        {
+            "model": MODEL_NAME,
+            "state": "x",
+            "questions": {"q": choice("Which?", "a", "b")},
+            "chat_template_kwargs": {"enable_thinking": True},
+        },
+    )
+    assert response.status_code == 400
+    assert "thinking must be off" in response.json()["error"]["message"]
 
 
 @pytest.mark.parametrize(
