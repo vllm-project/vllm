@@ -810,12 +810,16 @@ def host_register(monkeypatch):
     return cudart, torch_cudart
 
 
-def test_pin_mmap_region_registers_row_aligned_chunks(iid, host_register):
+@pytest.mark.parametrize("worker_slot_only", [False, True])
+def test_pin_mmap_region_registers_row_aligned_chunks(
+    iid, host_register, worker_slot_only
+):
     """Chunks end on row boundaries: 3-page rows under a 7-page cap register
-    as 6 + 6 + 3 pages, where a raw byte cap would give 7 + 7 + 1."""
+    as 6 + 6 + 3 pages, where a raw byte cap would give 7 + 7 + 1. A slot
+    spanning the whole row registers the same way."""
     cudart, torch_cudart = host_register
     with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
-        gpu_worker.pin_mmap_region(region)
+        gpu_worker.pin_mmap_region(region, worker_slot_only=worker_slot_only)
         base = region._base.data_ptr()
         assert cudart.mock_calls == [
             call.cudaHostRegister(base, 6 * PAGE_SIZE),
@@ -829,6 +833,28 @@ def test_pin_mmap_region_registers_row_aligned_chunks(iid, host_register):
         call(base + 6 * PAGE_SIZE),
         call(base),
     ]
+
+
+def test_pin_mmap_region_worker_slot_only_registers_own_slots(iid, host_register):
+    """Rank 1's 1.5-page slot in 4-page rows registers pages [1, 3) of each row."""
+    cudart, _ = host_register
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=3,
+        rank=1,
+        kv_bytes_per_chunk=4 * PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE + PAGE_SIZE // 2,
+    )
+    try:
+        gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+        base = region._base.data_ptr() + PAGE_SIZE
+        assert cudart.mock_calls == [
+            call.cudaHostRegister(base + row * 4 * PAGE_SIZE, 2 * PAGE_SIZE)
+            for row in range(3)
+        ]
+    finally:
+        region.cleanup()
+        _cleanup_file(region.mmap_path)
 
 
 @pytest.mark.parametrize("fail_at", [0, 1, 2])
