@@ -763,6 +763,15 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.touch.assert_called_once_with(chunks, _CTX)
         self.secondary_tier2.touch.assert_called_once_with(chunks, _CTX)
 
+    def test_record_access_propagates_to_primary_tier(self, manager_setup):
+        """GPU-local accesses are recorded by the primary tier without pinning."""
+        chunks = to_keys(range(3))
+        self.primary_tier.record_access = MagicMock()
+
+        self.manager.record_access(chunks, _CTX)
+
+        self.primary_tier.record_access.assert_called_once_with(chunks, _CTX)
+
     def test_request_order_survives_late_cascade_completion(self, manager_setup):
         """Cascade completion must not replace request order with I/O order."""
         chunks = to_keys(range(5))

@@ -1248,6 +1248,30 @@ def test_touch_forwards_req_context_to_policy(monkeypatch):
     assert received[0][1] is ctx
 
 
+@pytest.mark.parametrize("cache_policy", ["lru", "arc"])
+def test_record_access_refreshes_ready_residents_without_pinning(cache_policy):
+    """GPU-local hits update recency without creating load protections."""
+    manager = make_cpu_manager(num_chunks=3, cache_policy=cache_policy)
+    keys = to_keys([1, 2, 3])
+
+    seed_ctx = make_req_context("seed")
+    assert manager.prepare_store(keys, seed_ctx) is not None
+    manager.complete_store(keys, seed_ctx)
+    manager.on_request_finished(seed_ctx)
+
+    access_ctx = make_req_context("gpu-prefix")
+    manager.on_new_request(access_ctx)
+    manager.record_access([keys[0], keys[1], to_key(999)], access_ctx)
+
+    assert manager._policy.get(keys[0]).ref_cnt == 0
+    assert manager._policy.get(keys[1]).ref_cnt == 0
+    manager.on_request_finished(access_ctx)
+
+    output = manager.prepare_store([to_key(4)], make_req_context("evict"))
+    assert output is not None
+    assert output.evicted_keys == [keys[2]]
+
+
 @pytest.mark.parametrize("finish_before_completion", [False, True])
 def test_request_finish_orders_lru_prefix_independent_of_store_completion(
     finish_before_completion: bool,

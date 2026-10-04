@@ -228,6 +228,19 @@ class CPUOffloadingManager(OffloadingManager):
         self._policy.touch(keys, req_context)
 
     @override
+    def record_access(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> None:
+        ready_keys = [
+            key
+            for key in keys
+            if (chunk := self._policy.get(key)) is not None and chunk.is_ready
+        ]
+        self._record_request_cache_access(
+            ready_keys, req_context, reused_keys=ready_keys
+        )
+
+    @override
     def complete_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> None:
