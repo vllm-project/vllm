@@ -320,7 +320,7 @@ async def _handle_completions(api: str, request: Request):
         prefill_client_info, prefill_dp_rank = get_next_client(request.app, "prefill")
 
         # Send request to prefill service
-        asyncio.create_task(
+        prefill_task = asyncio.create_task(
             send_request_to_service(
                 prefill_client_info, prefill_dp_rank, api, req_data, request_id
             )
@@ -330,6 +330,15 @@ async def _handle_completions(api: str, request: Request):
 
         # Stream response from decode service
         async def generate_stream():
+            # Decode would wait for KV that a failed prefill never sends.
+            stream_task = asyncio.current_task()
+
+            def cancel_on_failure(task: asyncio.Task) -> None:
+                if not task.cancelled() and (exc := task.exception()):
+                    print(f"Prefill of {request_id} failed, aborting decode: {exc!r}")
+                    stream_task.cancel()
+
+            prefill_task.add_done_callback(cancel_on_failure)
             async for chunk in stream_service_response(
                 prefill_client_info,
                 prefill_dp_rank,
