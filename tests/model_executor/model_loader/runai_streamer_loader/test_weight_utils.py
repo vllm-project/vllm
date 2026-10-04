@@ -14,7 +14,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
 
+from .conftest import requires_runai
 
+
+@requires_runai
 def test_runai_safetensors_weights_iterator_clones_reused_buffers(
     tmp_path, monkeypatch
 ):
@@ -36,6 +39,7 @@ def test_runai_safetensors_weights_iterator_clones_reused_buffers(
         assert torch.equal(actual_tensors[name], expected_tensor)
 
 
+@requires_runai
 def test_runai_model_loader():
     with tempfile.TemporaryDirectory() as tmpdir:
         huggingface_hub.constants.HF_HUB_OFFLINE = False

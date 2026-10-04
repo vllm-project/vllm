@@ -34,6 +34,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: |
+            requirements/**/*.in
             requirements/**/*.txt
             pyproject.toml
           python-version: '3.12'
@@ -42,6 +43,12 @@ jobs:
         run: |
           uv venv
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Verify test dependency resolution
+        run: |
+          uv pip install --dry-run \
+            -r requirements/test/cuda.in \
+            --index-strategy unsafe-best-match
 
       - name: Install dependencies and build vLLM
         run: |
@@ -54,6 +61,12 @@ jobs:
       - name: Verify installation
         run: |
           python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
+
+      - name: Run platform-independent RunAI loader tests
+        run: |
+          uv pip install pytest pytest-asyncio tblib
+          .venv/bin/python -m pytest -q -ra \
+            tests/model_executor/model_loader/runai_streamer_loader
 
       - name: Smoke test vllm serve
         run: |
