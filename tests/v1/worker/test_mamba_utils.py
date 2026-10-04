@@ -2770,3 +2770,299 @@ class TestPostprocessMambaFusedKernel:
             atol=0,
             msg="DS num_accepted_tokens result is wrong",
         )
+
+
+# -----------------------------------------------------------------------------
+# compute_aligned_state_indices: the aligned physical state-id kernel
+# -----------------------------------------------------------------------------
+# Block ids below are unique per (group, block-table row, column), so a launch
+# that reads the wrong row or the wrong column shows up in the output.
+_ALIGNED_NUM_GROUPS = 2
+_ALIGNED_NUM_SPEC_BLOCKS = 2
+_ALIGNED_NUM_STATE_SLOTS = 1 + _ALIGNED_NUM_SPEC_BLOCKS
+_ALIGNED_MAX_BLOCKS_PER_REQ = 12
+# Pre-fill for the persistent output buffer: no real block id can take this
+# value, so a row that still holds it was never written.
+_UNWRITTEN = -7
+
+
+def _aligned_block_id(group: int, row: int, col: int) -> int:
+    """A unique, non-zero block id per (group, block-table row, column)."""
+    return 1 + group * 10_000 + row * 100 + col
+
+
+def _make_aligned_kv_cache_config(cfg: _TestConfig) -> KVCacheConfig:
+    """A multi-group align-mode config. `1 + num_speculative_blocks` is the
+    number of state slots per request, i.e. the width of the kernel's output."""
+    spec = MambaSpec(
+        block_size=cfg.block_size,
+        shapes=((cfg.conv_width, cfg.conv_inner_dim), (cfg.temporal_state_dim,)),
+        dtypes=(cfg.dtype, cfg.dtype),
+        mamba_type=MambaAttentionBackendEnum.MAMBA2,
+        mamba_cache_mode="align",
+        num_speculative_blocks=_ALIGNED_NUM_SPEC_BLOCKS,
+    )
+    return KVCacheConfig(
+        num_blocks=cfg.num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=[f"layer_{g}"], kv_cache_spec=spec)
+            for g in range(_ALIGNED_NUM_GROUPS)
+        ],
+    )
+
+
+def _make_aligned_forward_context(
+    cfg: _TestConfig, device: torch.device
+) -> dict[str, Any]:
+    return {
+        f"layer_{g}": _make_mock_attention(
+            torch.zeros(
+                cfg.num_blocks,
+                cfg.conv_width,
+                cfg.conv_inner_dim,
+                dtype=cfg.dtype,
+                device=device,
+            ),
+            torch.zeros(
+                cfg.num_blocks,
+                cfg.temporal_state_dim,
+                dtype=cfg.dtype,
+                device=device,
+            ),
+        )
+        for g in range(_ALIGNED_NUM_GROUPS)
+    }
+
+
+def _make_aligned_block_tables(
+    cfg: _TestConfig, device: torch.device
+) -> list[torch.Tensor]:
+    """One persistent block table per mamba group, filled with marker ids."""
+    return [
+        torch.tensor(
+            [
+                [
+                    _aligned_block_id(g, row, col)
+                    for col in range(_ALIGNED_MAX_BLOCKS_PER_REQ)
+                ]
+                for row in range(cfg.max_num_reqs)
+            ],
+            dtype=torch.int32,
+            device=device,
+        )
+        for g in range(_ALIGNED_NUM_GROUPS)
+    ]
+
+
+def _make_aligned_ctx(
+    cfg: _TestConfig,
+    device: torch.device,
+    block_tables: list[torch.Tensor] | None = None,
+) -> tuple[MambaSpecDecodeGPUContext, list[torch.Tensor]]:
+    """Build the context through the production `create` +
+    `initialize_from_forward_context` path, so the block-table pointer capture
+    the kernel indexes through is the real one.
+
+    The block tables are returned with the context because
+    `initialize_from_forward_context` keeps only their raw `data_ptr`s: a
+    caller that drops them lets the allocator hand that memory to the next
+    tensor it makes, and the launch then reads whatever landed there.
+    """
+    if block_tables is None:
+        block_tables = _make_aligned_block_tables(cfg, device)
+    kv_cache_config = _make_aligned_kv_cache_config(cfg)
+    ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+    ctx.initialize_from_forward_context(
+        kv_cache_config,
+        _make_aligned_forward_context(cfg, device),
+        _COPY_FUNCS,
+        block_tables,
+    )
+    assert ctx.aligned_state_indices is not None
+    assert ctx.aligned_state_indices.shape == (
+        _ALIGNED_NUM_GROUPS,
+        cfg.max_num_reqs,
+        _ALIGNED_NUM_STATE_SLOTS,
+    )
+    return ctx, block_tables
+
+
+def _aligned_oracle(seq_lens: list[int], block_size: int) -> torch.Tensor:
+    """expected[g, row, s] == block_table[g][row, first_state_slot + s]."""
+    return torch.tensor(
+        [
+            [
+                [
+                    _aligned_block_id(g, row, max((seq_len - 1) // block_size, 0) + s)
+                    for s in range(_ALIGNED_NUM_STATE_SLOTS)
+                ]
+                for row, seq_len in enumerate(seq_lens)
+            ]
+            for g in range(_ALIGNED_NUM_GROUPS)
+        ],
+        dtype=torch.int32,
+    )
+
+
+def _run_aligned(
+    ctx: MambaSpecDecodeGPUContext,
+    seq_lens: list[int],
+    num_reqs: int,
+    cfg: _TestConfig,
+    device: torch.device,
+) -> torch.Tensor:
+    """Reset the persistent output buffer, then launch for `num_reqs` rows."""
+    seq_lens_gpu = torch.zeros(cfg.max_num_reqs, dtype=torch.int32, device=device)
+    seq_lens_gpu[: len(seq_lens)] = torch.tensor(seq_lens, dtype=torch.int32)
+    assert ctx.aligned_state_indices is not None
+    ctx.aligned_state_indices.fill_(_UNWRITTEN)
+    return ctx.compute_aligned_state_indices(seq_lens_gpu[:num_reqs], num_reqs)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+class TestAlignedStateIndicesKernel:
+    """Tests for get_aligned_state_indices_multi_group_kernel, the launch
+    behind `MambaSpecDecodeGPUContext.compute_aligned_state_indices`. The
+    aligned-index builders (Kimi K3 / KDA) consume its output as physical
+    mamba state-block ids, so a wrong row is a wrong recurrent state.
+
+    Pure index comparisons against a CPU oracle: no model, no cache
+    allocation, a few hundred KB of GPU memory.
+    """
+
+    @pytest.fixture
+    def device(self):
+        return torch.device("cuda:0")
+
+    @pytest.fixture
+    def cfg(self):
+        return _TestConfig()
+
+    def test_matches_cpu_oracle(self, cfg, device):
+        """Output row `r` takes row `r` of the bound block table, starting at
+        the slot holding the sequence's last written block
+        (`(seq_len - 1) // block_size`, floored at 0), for every mamba group
+        in one launch.
+
+        The lengths cover both sides of a block boundary and a length below
+        it, where the floor keeps the first slot at 0.
+        """
+        ctx, _tables = _make_aligned_ctx(cfg, device)
+        seq_lens = [1, 16, 17, 32, 80, 100]
+
+        out = _run_aligned(ctx, seq_lens, len(seq_lens), cfg, device)
+
+        torch.testing.assert_close(
+            out.cpu(),
+            _aligned_oracle(seq_lens, cfg.block_size),
+            rtol=0,
+            atol=0,
+            msg="aligned state indices did not match the CPU oracle",
+        )
+
+    def test_rows_past_num_reqs_are_untouched(self, cfg, device):
+        """`num_reqs` bounds the launch. The method returns a prefix view of a
+        PERSISTENT buffer, so rows past the prefix keep whatever an earlier
+        step left there; a launch that wrote them would hand a stale row to a
+        later, longer batch. `num_reqs == 0` must write nothing at all.
+        """
+        ctx, _tables = _make_aligned_ctx(cfg, device)
+        seq_lens = [17, 33, 48]
+        num_reqs = len(seq_lens)
+
+        out = _run_aligned(ctx, seq_lens, num_reqs, cfg, device)
+
+        assert ctx.aligned_state_indices is not None
+        assert out.shape == (
+            _ALIGNED_NUM_GROUPS,
+            num_reqs,
+            _ALIGNED_NUM_STATE_SLOTS,
+        )
+        assert (ctx.aligned_state_indices[:, num_reqs:] == _UNWRITTEN).all(), (
+            "the launch wrote rows past num_reqs"
+        )
+
+        empty = _run_aligned(ctx, seq_lens, 0, cfg, device)
+        assert empty.numel() == 0
+        assert (ctx.aligned_state_indices == _UNWRITTEN).all(), (
+            "num_reqs == 0 still wrote to the output buffer"
+        )
+
+    def test_cuda_graph_replay_matches_eager(self, cfg, device):
+        """Capture the launch, then replay it after rewriting `seq_lens` IN
+        PLACE. The replay must be bytewise identical to an eager launch over
+        the same buffer: the kernel's addressing may depend only on its
+        pointer arguments and on the runtime `num_requests` scalar, which is
+        in `do_not_specialize`.
+
+        This is a property of the kernel, not a claim about the runner, which
+        launches it from `prepare_attn`, outside any captured region.
+        """
+        ctx, _tables = _make_aligned_ctx(cfg, device)
+        num_reqs = 5
+        seq_lens_gpu = torch.zeros(cfg.max_num_reqs, dtype=torch.int32, device=device)
+        seq_lens_gpu[:num_reqs] = torch.tensor([17, 1, 48, 33, 80], dtype=torch.int32)
+
+        warmup = torch.cuda.Stream()
+        warmup.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup):
+            for _ in range(3):
+                ctx.compute_aligned_state_indices(seq_lens_gpu[:num_reqs], num_reqs)
+        torch.cuda.current_stream().wait_stream(warmup)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            ctx.compute_aligned_state_indices(seq_lens_gpu[:num_reqs], num_reqs)
+
+        # A later step: different lengths, same buffer.
+        new_seq_lens = [64, 20, 96, 5, 49]
+        seq_lens_gpu[:num_reqs] = torch.tensor(new_seq_lens, dtype=torch.int32)
+
+        assert ctx.aligned_state_indices is not None
+        ctx.aligned_state_indices.fill_(_UNWRITTEN)
+        graph.replay()
+        torch.accelerator.synchronize()
+        replayed = ctx.aligned_state_indices[:, :num_reqs].clone()
+
+        ctx.aligned_state_indices.fill_(_UNWRITTEN)
+        eager = ctx.compute_aligned_state_indices(
+            seq_lens_gpu[:num_reqs], num_reqs
+        ).clone()
+
+        torch.testing.assert_close(replayed, eager, rtol=0, atol=0)
+        torch.testing.assert_close(
+            replayed.cpu(),
+            _aligned_oracle(new_seq_lens, cfg.block_size),
+            rtol=0,
+            atol=0,
+            msg="replayed indices did not match the CPU oracle",
+        )
+
+    def test_block_table_binding_is_first_writer_wins(self, cfg, device):
+        """`initialize_from_forward_context` captures the block tables' raw
+        `data_ptr`s once and is idempotent, so the FIRST caller decides which
+        tables every later launch reads. `MambaHybridModelState` reaches it
+        from two places -- `preprocess_state` and `prepare_attn` -- with two
+        different table sets, so that ordering is load-bearing.
+        """
+        tables = _make_aligned_block_tables(cfg, device)
+        zeroed = [torch.zeros_like(t) for t in tables]
+        ctx, _bound = _make_aligned_ctx(cfg, device, zeroed)  # first writer
+        first_ptrs = ctx.block_table_ptrs.clone()
+
+        ctx.initialize_from_forward_context(
+            _make_aligned_kv_cache_config(cfg),
+            _make_aligned_forward_context(cfg, device),
+            _COPY_FUNCS,
+            tables,
+        )
+
+        assert torch.equal(ctx.block_table_ptrs, first_ptrs), (
+            "a second initialize_from_forward_context rebound the tables"
+        )
+        assert ctx.block_table_ptrs.tolist() != [
+            _reinterpret_u64_as_i64(t.data_ptr()) for t in tables
+        ]
+        # And the launch reads the first-bound tables, not the later ones.
+        out = _run_aligned(ctx, [17, 33, 48], 3, cfg, device)
+        assert (out == 0).all(), "expected the zeroed first-bound tables"
