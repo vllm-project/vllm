@@ -35,6 +35,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
 )
+from vllm.v1.attention.ops.dcp import copy_rows_
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (
     merge_mla_segments_triton,
 )
@@ -1761,13 +1762,19 @@ class AiterMLAHelper:
         if m % num_heads == 0:
             return q.repeat_interleave(m // num_heads, dim=1)
         # Non-divisor head counts cannot be padded by repeat_interleave. Tile
-        # the query heads and slice to exactly m. MLA attention is independent
-        # per query head over the shared KV, so padding heads cannot affect
-        # heads [0:num_heads]; they are sliced back off the output.
-        reps = -(-m // num_heads)  # ceil(m / num_heads)
-        # Slicing a tiled tensor yields a non-contiguous view. The asm decode
-        # reads q as packed [tokens, m, head_dim], so materialize it.
-        return q.repeat(1, reps, 1)[:, :m, :].contiguous()
+        # the query heads up to exactly m. MLA attention is independent per
+        # query head over the shared KV, so padding heads cannot affect heads
+        # [0:num_heads]; they are sliced back off the output. Writing the
+        # packed [tokens, m, head_dim] buffer directly avoids materializing
+        # ceil(m / num_heads) full copies and then a second contiguous copy.
+        padded = q.new_empty((q.shape[0], m, q.shape[2]))
+        copy_rows_(padded[:, :num_heads], q)
+        filled = num_heads
+        while filled < m:
+            n = min(filled, m - filled)
+            copy_rows_(padded[:, filled : filled + n], padded[:, :n])
+            filled += n
+        return padded
 
     @staticmethod
     def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:

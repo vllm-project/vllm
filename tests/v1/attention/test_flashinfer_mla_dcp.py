@@ -15,17 +15,32 @@ requires_flashinfer_mla = pytest.mark.skipif(
 )
 
 
-def test_mla_dcp_gathered_query_reserves_backend_head_storage():
-    from vllm.v1.attention.ops.dcp import reserve_query_head_storage
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("padded_num_heads", [None, 128])
+def test_mla_dcp_gathered_query_is_token_major(dtype, padded_num_heads):
+    from vllm.v1.attention.ops.dcp import MLADCPManager
 
-    query = torch.randn(3, 24, 576, dtype=torch.bfloat16)
+    shards = [torch.randn(3, 6, 576).to(dtype) for _ in range(4)]
 
-    padded = reserve_query_head_storage(query, 128)
+    class _Group:
+        world_size = len(shards)
 
-    assert padded.shape == query.shape
-    assert padded.stride() == query.stride()
-    assert padded.untyped_storage().nbytes() >= 3 * 128 * 576 * 2
-    assert torch.equal(padded, query)
+        def all_gather(self, query, dim):
+            assert dim == 0
+            return torch.cat(shards, dim=0)
+
+    manager = object.__new__(MLADCPManager)
+    manager.group = _Group()
+    manager.padded_num_heads = padded_num_heads
+
+    gathered = manager._gather_query(shards[0])
+
+    expected = torch.cat(shards, dim=1)
+    assert gathered.shape == expected.shape
+    assert gathered.is_contiguous()
+    assert torch.equal(gathered.view(torch.uint8), expected.view(torch.uint8))
+    heads = padded_num_heads or expected.shape[1]
+    assert gathered.untyped_storage().nbytes() >= 3 * heads * 576 * dtype.itemsize
 
 
 @requires_flashinfer_mla
