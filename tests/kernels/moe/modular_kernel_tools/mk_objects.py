@@ -258,8 +258,7 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         standard_format,
         nvfp4_types + fp8_types,
         blocked_quantization_support=True,
-        backend=None,
-        force_multigpu=True,
+        backend="flashinfer_nvlink_two_sided",
         supports_apply_weight_on_input=False,
     )
 
@@ -286,7 +285,7 @@ if (
     register_prepare_and_finalize(
         FlashInferNVLinkOneSidedPrepareAndFinalize,
         standard_format,
-        nvfp4_types,
+        nvfp4_types + fp8_types,
         blocked_quantization_support=False,
         backend="flashinfer_nvlink_one_sided",
         supports_apply_weight_on_input=False,
