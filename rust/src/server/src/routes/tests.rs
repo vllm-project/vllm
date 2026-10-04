@@ -1769,6 +1769,48 @@ async fn api_key_auth_allows_unguarded_route_without_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn api_key_auth_rejects_missing_token_on_tokenize() {
+    // Regression test: `/tokenize` renders arbitrary text through the chat
+    // template and was reachable without a token because the old allowlist
+    // only guarded "/v1", "/v2" and "/inference" prefixes.
+    let (mut app, _engine_task) = test_app_with_api_keys(vec!["secret".to_string()]).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/tokenize")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn api_key_auth_rejects_missing_token_on_metrics() {
+    // Regression test: "/metrics" was unreachable by GUARDED_PREFIXES and
+    // leaked server-internal metrics without a token.
+    let (mut app, _engine_task) = test_app_with_api_keys(vec!["secret".to_string()]).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn cors_default_simple_request_allows_any_origin() {
     let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
     let response = app
