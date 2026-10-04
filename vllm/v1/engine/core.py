@@ -74,6 +74,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.cache_only import validate_dsv41_cache_only_request
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -1055,6 +1056,12 @@ class EngineCore:
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.
+        if self.vllm_config.is_dsv41_encoder_only_prefill:
+            validate_dsv41_cache_only_request(
+                request.sampling_params,
+                request.pooling_params,
+                bool(request.mm_features),
+            )
         if self.mm_receiver_cache is not None and request.mm_features:
             request.mm_features = self.mm_receiver_cache.get_and_update_features(
                 request.mm_features
