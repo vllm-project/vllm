@@ -44,8 +44,9 @@ _FP8_DTYPES = (
     {
         "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
         "BLOCK_SIZE_H": lambda args: triton.next_power_of_2(args["gqa_group_size"]),
-        "BLOCK_SIZE_QH": lambda args: args["BLOCK_SIZE_Q"]
-        * triton.next_power_of_2(args["gqa_group_size"]),
+        "BLOCK_SIZE_QH": lambda args: (
+            args["BLOCK_SIZE_Q"] * triton.next_power_of_2(args["gqa_group_size"])
+        ),
     }
 )
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
@@ -644,6 +645,120 @@ def minimax_m3_sparse_attn_decode(
     # launch_pdl was specified but unrecognised"). Only pass it when PDL is
     # actually supported -- on ROCm use_pdl is always False, so it's omitted.
     pdl_launch = {"launch_pdl": True} if use_pdl else {}
+    # A single physical page needs no partial-output workspace or merge launch.
+    if (
+        current_platform.is_cuda()
+        and (
+            current_platform.is_device_capability((10, 3))
+            or current_platform.is_device_capability((12, 0))
+        )
+        and block_table.shape[1] == 1
+        and 0 < total_q * num_kv_heads <= 32
+        and gqa_group_size == 16
+        and head_dim == 128
+        and max_topk >= 1
+        and q.dtype == torch.bfloat16
+        and kv_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+        and q.is_contiguous()
+        and kv_cache.is_contiguous()
+        and output.is_contiguous()
+        and kv_cache.shape[1:] == (num_kv_heads, 128, 256)
+    ):
+        from .sparse_decode_paged import _single_page_decode
+
+        _single_page_decode[(total_q * num_kv_heads, 2)](
+            q,
+            kv_cache,
+            topk_idx,
+            block_table,
+            seq_lens,
+            k_scale_arg,
+            v_scale_arg,
+            output,
+            num_kv_heads,
+            decode_query_len,
+            block_table.stride(0),
+            *topk_idx.stride(),
+            stride_ks_h,
+            stride_ks_t,
+            stride_vs_h,
+            stride_vs_t,
+            1,
+            128,
+            64,
+            sm_scale,
+            kv_scale_mode,
+            use_fp8,
+            use_pdl,
+            num_warps=8 if use_fp8 else 4,
+            num_stages=1,
+            **pdl_launch,
+        )
+        return
+    # Bound work by page-table capacity without reading graph inputs on the CPU.
+    if (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability((12, 0))
+        and gqa_group_size == 16
+        and head_dim == 128
+        and max_topk == 16
+        and block_table.shape[1] > 0
+        and total_q > 0
+        and q.dtype == torch.bfloat16
+        and kv_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+        and (use_fp8 or total_q * num_kv_heads <= 16)
+        and q.is_contiguous()
+        and kv_cache.is_contiguous()
+        and output.is_contiguous()
+        and kv_cache.shape[1:] == (num_kv_heads, 128, 256)
+    ):
+        from .sparse_decode_paged import _merge_page_splits, _page_split_decode
+
+        groups = total_q * num_kv_heads
+        tile = 64 if groups <= (32 if use_fp8 else 4) else 128
+        splits = min(max_topk, block_table.shape[1]) * (128 // tile)
+        partial = torch.empty((groups, splits, 16, 128), dtype=q.dtype, device=q.device)
+        lse = torch.empty((groups, splits, 16), dtype=torch.float32, device=q.device)
+        _page_split_decode[(groups, splits)](
+            q,
+            kv_cache,
+            topk_idx,
+            block_table,
+            seq_lens,
+            k_scale_arg,
+            v_scale_arg,
+            partial,
+            lse,
+            num_kv_heads,
+            decode_query_len,
+            block_table.stride(0),
+            *topk_idx.stride(),
+            stride_ks_h,
+            stride_ks_t,
+            stride_vs_h,
+            stride_vs_t,
+            tile,
+            splits,
+            sm_scale,
+            kv_scale_mode,
+            use_fp8,
+            use_pdl,
+            num_warps=4,
+            num_stages=1,
+            **pdl_launch,
+        )
+        _merge_page_splits[(groups, 16)](
+            partial,
+            lse,
+            output,
+            splits,
+            triton.next_power_of_2(splits),
+            128,
+            use_pdl,
+            num_warps=4,
+            **pdl_launch,
+        )
+        return
     # split-K over the selected blocks; chunk count is shape-constant (cuda graph).
     TARGET_GRID = 256
     target = max(1, min(max_topk, TARGET_GRID // max(1, total_q * num_kv_heads)))
