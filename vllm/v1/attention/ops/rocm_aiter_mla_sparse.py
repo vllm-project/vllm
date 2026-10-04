@@ -1117,6 +1117,11 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
 ) -> torch.Tensor:
+    if candidate_blocks is not None:
+        raise NotImplementedError(
+            "Two-level candidate block selection is not implemented for the "
+            "ROCm sparse attention indexer."
+        )
     from vllm._aiter_ops import rocm_aiter_ops
 
     # careful! this will be None in dummy run
@@ -4078,6 +4083,7 @@ def rocm_sparse_attn_prefill(
     output: torch.Tensor,
     ragged_indices: torch.Tensor | None = None,
     ragged_indptr: torch.Tensor | None = None,
+    allow_aiter_opus: bool = True,
 ) -> None:
     assert kv.ndim == 3 and kv.shape[1] == 1, (
         f"ROCm Triton sparse prefill expects kv=[skv,1,d], got {kv.shape}"
@@ -4088,9 +4094,12 @@ def rocm_sparse_attn_prefill(
         rope_head_dim,
         "rocm_sparse_attn_prefill",
     )
+    # OPUS is an AITER ASM kernel whose KV addressing width has not been
+    # verified, so callers that require int64 row offsets opt out of it.
     opus_attn_sink = None if attn_sink is None else attn_sink[: q.shape[1]]
     if (
-        _can_use_aiter_sparse_prefill_opus(q, kv.squeeze(1), opus_attn_sink, output)
+        allow_aiter_opus
+        and _can_use_aiter_sparse_prefill_opus(q, kv.squeeze(1), opus_attn_sink, output)
         and _get_aiter_sparse_prefill_opus() is not None
     ):
         if ragged_indices is None or ragged_indptr is None:
