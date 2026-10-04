@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Weight-only quantized copy of the target lm_head for drafting."""
 
+from types import SimpleNamespace
+
 import torch
 import torch.nn as nn
 
@@ -10,10 +12,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
-    marlin_pad_qweight,
-    marlin_pad_scales,
-    marlin_padded_nk,
-    marlin_permute_scales,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear,
@@ -22,9 +20,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
-    fp8_fused_exponent_bias_into_scales,
     is_fp8_marlin_supported,
-    pack_fp8_to_int32,
+    prepare_fp8_layer_for_marlin,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
@@ -59,35 +56,6 @@ def quantize_nvfp4(
         codes |= (x < 0).to(torch.uint8) << 3
         packed[rows] = codes[:, 0::2] | (codes[:, 1::2] << 4)
     return packed, scales, global_scale
-
-
-class MarlinDraftLMHeadMethod:
-    def __init__(self, quantization: str):
-        self.quantization = quantization
-
-    def apply(
-        self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        if self.quantization == "nvfp4":
-            return apply_fp4_marlin_linear(
-                x,
-                layer.weight,
-                layer.weight_scale,
-                layer.weight_global_scale,
-                layer.workspace,
-                layer.output_size_per_partition,
-                layer.input_size_per_partition,
-                bias,
-            )
-        return apply_fp8_marlin_linear(
-            x,
-            layer.weight,
-            layer.weight_scale,
-            layer.workspace,
-            layer.output_size_per_partition,
-            layer.input_size_per_partition,
-            bias,
-        )
 
 
 class QuantizedDraftLMHead(nn.Module):
@@ -126,7 +94,9 @@ class QuantizedDraftLMHead(nn.Module):
         self.org_vocab_size = lm_head.org_vocab_size
         self.output_size_per_partition, self.input_size_per_partition = weight.shape
         self.params_dtype = weight.dtype
-        self.quant_method = MarlinDraftLMHeadMethod(quantization)
+        self.quantization = quantization
+        # LogitsProcessor projects through lm_head.quant_method.apply().
+        self.quant_method = SimpleNamespace(apply=self._project)
         if quantization == "nvfp4":
             packed, scales, global_scale = quantize_nvfp4(weight)
             self.weight = nn.Parameter(packed, requires_grad=False)
@@ -134,7 +104,11 @@ class QuantizedDraftLMHead(nn.Module):
             self.weight_global_scale = nn.Parameter(global_scale, requires_grad=False)
             prepare_fp4_layer_for_marlin(self)
         else:
-            self._prepare_fp8(weight)
+            qweight, scale = ops.scaled_fp8_quant(weight, use_per_token_if_dynamic=True)
+            self.weight = nn.Parameter(qweight, requires_grad=False)
+            self.weight_scale = nn.Parameter(scale, requires_grad=False)
+            self.orig_dtype = weight.dtype
+            prepare_fp8_layer_for_marlin(self, size_k_first=False)
         # Buffers keep the copy out of the drafter's parameters (weight loading
         # and reloading) and out of its state dict.
         for name, param in list(self.named_parameters(recurse=False)):
@@ -149,27 +123,26 @@ class QuantizedDraftLMHead(nn.Module):
             *weight.shape,
         )
 
-    def _prepare_fp8(self, weight: torch.Tensor) -> None:
-        size_n, size_k = weight.shape
-        qweight, scale = ops.scaled_fp8_quant(weight, use_per_token_if_dynamic=True)
-        padded_n, padded_k = marlin_padded_nk(size_n, size_k)
-        qweight = pack_fp8_to_int32(qweight, size_k_first=False).T.contiguous()
-        qweight = marlin_pad_qweight(qweight, size_n, size_k, padded_n, padded_k)
-        self.weight = nn.Parameter(
-            ops.gptq_marlin_repack(
-                b_q_weight=qweight, size_k=padded_k, size_n=padded_n, num_bits=8
-            ),
-            requires_grad=False,
-        )
-        scale = marlin_pad_scales(
-            scale.to(weight.dtype).view(1, size_n),
-            size_n,
-            size_k,
-            padded_n,
-            padded_k,
-            group_size=-1,
-        )
-        scale = marlin_permute_scales(scale, padded_k, padded_n, group_size=-1)
-        self.weight_scale = nn.Parameter(
-            fp8_fused_exponent_bias_into_scales(scale), requires_grad=False
+    def _project(
+        self, layer: nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if self.quantization == "nvfp4":
+            return apply_fp4_marlin_linear(
+                x,
+                layer.weight,
+                layer.weight_scale,
+                layer.weight_global_scale,
+                layer.workspace,
+                layer.output_size_per_partition,
+                layer.input_size_per_partition,
+                bias,
+            )
+        return apply_fp8_marlin_linear(
+            x,
+            layer.weight,
+            layer.weight_scale,
+            layer.workspace,
+            layer.output_size_per_partition,
+            layer.input_size_per_partition,
+            bias,
         )
