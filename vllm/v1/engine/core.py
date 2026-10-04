@@ -2039,7 +2039,12 @@ class EngineCoreProc(EngineCore):
         self, req_ids: list[str], client_index: int, finish_reason: FinishReason
     ) -> None:
         outputs = [
-            EngineCoreOutput(req_id, [], finish_reason=finish_reason)
+            EngineCoreOutput(
+                req_id,
+                [],
+                finish_reason=finish_reason,
+                weight_version=self._weight_version,
+            )
             for req_id in req_ids
         ]
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)

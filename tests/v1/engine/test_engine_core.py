@@ -701,6 +701,17 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     return core
 
 
+def test_abort_output_carries_committed_weight_version():
+    core = _pausable_engine_core_proc()
+    core._weight_version = "2"
+    core.output_queue = MagicMock()
+
+    core._send_abort_outputs_to_client(["request-0"], 0)
+
+    _, outputs = core.output_queue.put_nowait.call_args.args[0]
+    assert outputs.outputs[0].weight_version == "2"
+
+
 @pytest.mark.parametrize(
     "pause_state,has_requests,has_batches",
     [
