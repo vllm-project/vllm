@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
+import regex as re
 import torch
 from torch import nn
 
@@ -70,6 +72,8 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
+
+_EXPERT_SUB_RE = re.compile(r"experts\.(\d+)\.([^.]+)\.")
 
 
 class KimiMLP(nn.Module):
@@ -900,6 +904,22 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             )
         else:
             expert_params_mapping = []
+
+        # Pre-index expert_params_mapping to eliminate O(N_keys * N_experts) string scan
+        expert_2d_dict: dict[tuple[int, str], list[tuple[str, str, int, str]]] = (
+            defaultdict(list)
+        )
+        for item in expert_params_mapping:
+            param_name, weight_name, expert_id, shard_id = item
+            m = _EXPERT_SUB_RE.search(weight_name)
+            if m is not None:
+                eid = int(m.group(1))
+                proj = m.group(2)
+                expert_2d_dict[(eid, proj)].append(item)
+
+        for items in expert_2d_dict.values():
+            items.sort(key=lambda x: len(x[1]), reverse=True)
+
         params_dict = dict(self.named_parameters())
         # Under the MXFP4 quant interface the routed experts register unpacked
         # params (``w13_weight``), while the compressed-tensors checkpoint names
@@ -948,28 +968,38 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for (
-                    expert_param_name,
-                    expert_weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in expert_params_mapping:
-                    if expert_weight_name not in name:
-                        continue
-                    name = name.replace(expert_weight_name, expert_param_name)
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        expert_id=expert_id,
-                        shard_id=expert_shard_id,
-                    )
-                    break
-                else:
+                matched_expert = False
+                if "experts." in name:
+                    m = _EXPERT_SUB_RE.search(name)
+                    if m is not None:
+                        candidates = expert_2d_dict.get((int(m.group(1)), m.group(2)))
+                        if candidates:
+                            for (
+                                expert_param_name,
+                                expert_weight_name,
+                                expert_id,
+                                expert_shard_id,
+                            ) in candidates:
+                                if expert_weight_name not in name:
+                                    continue
+                                name_mapped = name.replace(
+                                    expert_weight_name, expert_param_name
+                                )
+                                if is_pp_missing_parameter(name_mapped, self):
+                                    continue
+                                name = name_mapped
+                                param = params_dict[name]
+                                weight_loader = param.weight_loader
+                                weight_loader(
+                                    param,
+                                    loaded_weight,
+                                    name,
+                                    expert_id=expert_id,
+                                    shard_id=expert_shard_id,
+                                )
+                                matched_expert = True
+                                break
+                if not matched_expert:
                     # Skip loading extra bias for GPTQ models.
                     if (
                         name.endswith(".bias")
