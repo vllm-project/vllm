@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
 
 
 def test_remote_tp_rank_same_tp_maps_to_self():
@@ -34,11 +35,17 @@ def test_remote_tp_rank_same_tp_maps_to_self():
     ]
 
 
-def test_sync_read_partial_prefix_hit_keeps_local_tail():
-    """Pending READs include the local hit but exclude the local tail."""
+@pytest.mark.parametrize("external_tokens", [0, 16])
+@pytest.mark.parametrize("has_mamba", [False, True])
+@pytest.mark.parametrize("zero_ids", [None, [], [8], [8, 9, 90, 91]])
+def test_sync_read_partial_prefix_hit_keeps_local_tail(
+    external_tokens, has_mamba, zero_ids
+):
+    """Only this step's hybrid READ attention pages skip zeroing."""
     read_scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     read_scheduler.mode = MoRIIOMode.READ
-    read_scheduler._has_mamba = True
+    read_scheduler._has_mamba = has_mamba
+    read_scheduler._is_hma_required = False
     read_scheduler._attn_group_ids = [0]
     read_scheduler._mamba_group_ids = [1]
     read_scheduler._num_ssm_scratch_blocks = 0
@@ -47,17 +54,23 @@ def test_sync_read_partial_prefix_hit_keeps_local_tail():
     read_scheduler.request_id_to_transfer_id = {}
     read_scheduler.transfer_id_to_request_id = {}
     read_scheduler._reqs_need_recv = {}
+    read_scheduler._reqs_need_save = {}
+    read_scheduler._reqs_need_send = {}
     read_scheduler._req_kv_params = {}
     read_scheduler.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[None, None],
         select_transfer_block_ids=lambda block_ids: block_ids,
     )
     request = SimpleNamespace(
         request_id="req",
         num_prompt_tokens=33,
-        num_computed_tokens=16,
+        num_computed_tokens=32 - external_tokens,
         kv_transfer_params={
             "do_remote_prefill": True,
             "remote_engine_id": "prefill",
+            "remote_host": "127.0.0.1",
+            "remote_handshake_port": 6000,
+            "remote_notify_port": 6001,
             "remote_block_ids": [[70, 80], [900]],
         },
     )
@@ -69,9 +82,25 @@ def test_sync_read_partial_prefix_hit_keeps_local_tail():
     # With 16-token blocks, page 7 is a local hit, 8 is a new READ
     # destination, and 9 holds the locally recomputed final token.
     blocks = SimpleNamespace(get_block_ids=lambda: ([7, 8, 9], [90]))
-    connector.update_state_after_alloc(request, blocks, num_external_tokens=16)
+    connector.update_state_after_alloc(request, blocks, external_tokens)
     pending = read_scheduler._reqs_need_recv[request.request_id][1][0]
-    assert pending == [7, 8]
+    assert pending == ([7, 8] if external_tokens else [])
+
+    output = SchedulerOutput.make_empty()
+    output.new_block_ids_to_zero = None if zero_ids is None else list(zero_ids)
+    meta = connector.build_connector_meta(output)
+    assert meta.reqs_to_recv[request.request_id].local_block_ids[0] == pending
+    if zero_ids and has_mamba and external_tokens:
+        assert output.new_block_ids_to_zero == zero_ids[1:]
+    else:
+        assert output.new_block_ids_to_zero == zero_ids
+
+    # The same page can be reused for local work on a later step.
+    output = SchedulerOutput.make_empty()
+    output.new_block_ids_to_zero = [8, 9]
+    meta = connector.build_connector_meta(output)
+    assert not meta.reqs_to_recv
+    assert output.new_block_ids_to_zero == [8, 9]
 
 
 def test_remote_tp_rank_p4_d8_floor_maps_decode_to_prefill():

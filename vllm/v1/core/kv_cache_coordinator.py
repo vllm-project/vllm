@@ -253,7 +253,7 @@ class KVCacheCoordinator(ABC):
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
             skip_zeroing_group_ids: Groups whose external-token blocks are
-                written by a KV load and must not be zeroed.
+                written by an async load and must not be zeroed.
 
         """
         # A running request is already tracked in num_cached_block and won't

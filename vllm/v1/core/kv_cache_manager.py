@@ -415,7 +415,7 @@ class KVCacheManager:
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
             skip_zeroing_group_ids: Groups whose external-token blocks will be
-                written by a KV load and must not be zeroed concurrently.
+                written by an async load and must not be zeroed concurrently.
 
         Blocks layout:
         ```

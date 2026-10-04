@@ -2567,66 +2567,6 @@ def test_has_sync_kv_loads(
     assert output.has_sync_kv_loads is expected_has_sync_loads
 
 
-@pytest.mark.parametrize(
-    "local_hit_tokens,external_tokens,replay_tokens",
-    [
-        (0, 0, 0),
-        (16, 0, 0),
-        (0, 16, 0),
-        (16, 16, 0),
-        (0, 17, 0),
-        (16, 17, 0),
-        (0, 32, 16),
-        (16, 16, 16),
-    ],
-)
-@pytest.mark.parametrize("has_mamba", [False, True])
-@pytest.mark.skip_global_cleanup
-def test_sync_kv_load_only_skips_zeroing_loaded_range(
-    local_hit_tokens: int,
-    external_tokens: int,
-    replay_tokens: int,
-    has_mamba: bool,
-    tmp_path,
-):
-    """Loaded pages skip zeroing; local hits and the unfilled tail stay intact."""
-    (tmp_path / "config.json").write_text(
-        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
-    )
-    scheduler = create_scheduler(
-        model=str(tmp_path),
-        skip_tokenizer_init=True,
-        use_kv_connector=mock_kv(matched_tokens=external_tokens, is_async=False),
-        enable_prefix_caching=True,
-        block_size=16,
-    )
-    scheduler.has_mamba_layers = has_mamba
-    scheduler.needs_kv_cache_zeroing = True
-    scheduler.prefix_replay_tokens = replay_tokens
-    # Full-attention pages also require zeroing in a mixed-precision pool.
-    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
-    manager._record_new_block_ids = True
-    cache = scheduler.kv_cache_manager
-    seed, request = create_requests(
-        num_requests=2, num_tokens=64, block_size=16, same_prompt=True
-    )
-    if local_hit_tokens:
-        cache.allocate_slots(seed, local_hit_tokens)
-        cache.cache_blocks(seed, local_hit_tokens)
-        cache.free(seed)
-        cache.take_new_block_ids()
-    scheduler.add_request(request)
-
-    output = scheduler.schedule()
-    blocks = list(cache.get_blocks(request.request_id).get_block_ids()[0])
-    loaded_end = local_hit_tokens + external_tokens
-    assert output.num_scheduled_tokens[request.request_id] == (
-        64 - loaded_end + replay_tokens
-    )
-    zero_start = loaded_end if has_mamba else local_hit_tokens
-    assert output.new_block_ids_to_zero == blocks[(zero_start + 15) // 16 :]
-
-
 def test_kv_connector_honors_skip_reading_prefix_cache():
     """A request that must score every prompt row takes no external hit."""
     BLOCK_SIZE = 16

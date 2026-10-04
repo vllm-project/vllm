@@ -1222,6 +1222,7 @@ class MoRIIOConnectorScheduler:
                         del self._reqs_need_pending_save[req_id]
 
         # Loop through scheduled reqs and convert to ReqMeta.
+        read_dst_block_ids: set[int] = set()
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
             meta.add_new_req(
@@ -1229,6 +1230,18 @@ class MoRIIOConnectorScheduler:
                 local_block_ids=block_ids,
                 kv_transfer_params=kv_params,
             )
+            if self.mode == MoRIIOMode.READ and self._has_mamba:
+                # Hybrid READ metadata puts the aligned attention pages first.
+                read_dst_block_ids.update(block_ids[0])
+
+        if scheduler_output.new_block_ids_to_zero and read_dst_block_ids:
+            # Host-submitted READs overwrite whole attention pages and can race
+            # zeroing on the compute stream.
+            scheduler_output.new_block_ids_to_zero = [
+                b
+                for b in scheduler_output.new_block_ids_to_zero
+                if b not in read_dst_block_ids
+            ]
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
