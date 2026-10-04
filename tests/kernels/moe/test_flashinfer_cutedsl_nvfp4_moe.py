@@ -40,11 +40,11 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    has_flashinfer_cutedsl_moe_nvfp4,
     quantize_nvfp4_per_token_input,
 )
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutedsl_moe_nvfp4
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
