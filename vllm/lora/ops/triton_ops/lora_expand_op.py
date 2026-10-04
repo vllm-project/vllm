@@ -275,7 +275,8 @@ def _lora_expand(
         use_gdc,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
-        num_stages=NUM_STAGES,
+        # Keep dependent input loads after gdc_wait on this Triton version.
+        num_stages=1 if use_gdc else NUM_STAGES,
         launch_pdl=use_gdc,
     )
 
