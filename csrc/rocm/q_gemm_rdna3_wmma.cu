@@ -2375,16 +2375,14 @@ __global__ void gemm_q4_wmma_kernel_128x128(const T*, const uint32_t*,
 // columns x 8 K of one packed row) gives a lane its column of all four tiles.
 // Per 16-K step the low half of the wave loads packed row 2s and the high
 // half row 2s + 1; a permlanex16 swaps the halves, so every lane has the 16 K
-// of its four columns. The nibbles become raw magic halves (1024 + q, exact
-// in fp16) and feed the MT 16-row tiles of A; per 32-K group a WMMA against
-// ones gives sum_k(a) per row in the same layout, and scale and zero are
-// folded in fp32 per column:
-//   c += s * acc - s * (1024 + zero) * sum_k(a)
-// With two row tiles the kernel is WMMA-bound, so the zero is subtracted from
-// the magic halves instead (exact in fp16) and the sum_k(a) WMMA goes away.
-// Three and four row tiles do not fit the registers of a per-group fold, so
-// the scale goes into B too: one fp16 rounding of (q - zero) * s per weight,
-// as any fp16 dequant, and acc accumulates the whole K part.
+// of its four columns. The nibbles become magic halves (1024 + q) and the
+// zero is subtracted from them, exact in fp16, so B holds q - zero and feeds
+// the MT 16-row tiles of A. The kernel is WMMA-bound: one subtraction per two
+// weights is cheaper than a WMMA against ones for sum_k(a), and the per-group
+// fold in fp32 is just c += s * acc. Rows get the same arithmetic whatever the
+// tile count. Three and four row tiles do not fit the registers of that fold,
+// so the scale goes into B too: one fp16 rounding of (q - zero) * s per
+// weight, as any fp16 dequant, and acc accumulates the whole K part.
 // The 8 waves of a block split K in 8 contiguous parts and meet in LDS.
 // ===========================================================================
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
@@ -2393,25 +2391,30 @@ __device__ __forceinline__ uint32_t d16_xhalf(uint32_t v) {
                                       false);
 }
 typedef _Float16 d16_h2 __attribute__((ext_vector_type(2)));
-// 8 packed nibbles of one column (K 0..7) -> 8 magic halves in K order.
+// 8 packed nibbles of one column (K 0..7) -> 8 magic halves in K order. The
+// odd pairs keep their nibbles in bits 4-7 (1024 + 16q, still exact), which
+// saves two shifts; the zero subtraction scales them back by 1/16.
 __device__ __forceinline__ void d16_magic(uint32_t w, uint32_t* h) {
+  const uint32_t w8 = w >> 8;
   h[0] = (w & 0x000F000Fu) | 0x64006400u;
-  h[1] = ((w >> 4) & 0x000F000Fu) | 0x64006400u;
-  h[2] = ((w >> 8) & 0x000F000Fu) | 0x64006400u;
-  h[3] = ((w >> 12) & 0x000F000Fu) | 0x64006400u;
+  h[1] = (w & 0x00F000F0u) | 0x64006400u;
+  h[2] = (w8 & 0x000F000Fu) | 0x64006400u;
+  h[3] = (w8 & 0x00F000F0u) | 0x64006400u;
 }
 
 template <typename T, int MT>
-__global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
-    const T* __restrict__ a, const uint32_t* __restrict__ b_q,
-    const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
-    T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset) {
+__global__ void __launch_bounds__(256)
+    gemm_q4_wmma_kernel_dec16(const T* __restrict__ a,
+                              const uint32_t* __restrict__ b_q,
+                              const uint32_t* __restrict__ b_qzeros,
+                              const T* __restrict__ b_scales, T* __restrict__ c,
+                              const int size_m, const int size_n,
+                              const int size_k, const int groups,
+                              const int zero_offset) {
   // 16-K steps in flight: two fit the fold every 2 steps of group-32 weights;
-  // four row tiles only have the registers for one.
-  constexpr int PF = MT >= 4 ? 1 : 2;
+  // two and four row tiles are faster with one (fewer registers).
+  constexpr int PF = (MT == 2 || MT >= 4) ? 1 : 2;
   constexpr bool SCALE_IN_B = MT >= 3;
-  constexpr bool ZERO_IN_B = MT >= 2;
   const int tid = threadIdx.x, lane = tid & 31;
   const int wave = __builtin_amdgcn_readfirstlane(tid >> 5);
   const int lane_lo = lane & 15, lane_hi = lane >> 4;
@@ -2447,8 +2450,8 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
   // Group data: scales of the 4 columns (8 bytes) and their zero nibbles.
   const uint32_t* zp = b_qzeros + n0 / 8;
   const int zsh = (n0 & 7) * 4;
-  d16_h2 zb[4], sb[4];
-  auto group_sz = [&](int g, float (&s)[4], float (&zz)[4]) {
+  d16_h2 zb[4], zb16[4], sb[4];
+  auto group_sz = [&](int g, float (&s)[4]) {
     const uint2 sv = *(const uint2*)(b_scales + (long)g * size_n + n0);
     const uint32_t zw = zp[(long)g * (size_n / 8)] >> zsh;
     const T* sh = reinterpret_cast<const T*>(&sv);
@@ -2457,29 +2460,25 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
       const float z =
           1024.0f + (float)(((zw >> (4 * t)) & 0xF) + (uint32_t)zero_offset);
       s[t] = (float)sh[t];
-      zz[t] = -s[t] * z;
       zb[t] = d16_h2{(_Float16)z, (_Float16)z};
+      zb16[t] = zb[t] - d16_h2{(_Float16)960.0f, (_Float16)960.0f};
       sb[t] = d16_h2{(_Float16)s[t], (_Float16)s[t]};
     }
   };
 
-  v16fp16 ones;
-  #pragma unroll
-  for (int i = 0; i < 16; ++i) ones[i] = (_Float16)1.0f;
-  v8fp32 cacc[MT][4], acc[MT][4], sa[MT];
+  v8fp32 cacc[MT][4], acc[MT][4];
   #pragma unroll
   for (int mt = 0; mt < MT; ++mt) {
   #pragma unroll
     for (int t = 0; t < 4; ++t)
       for (int i = 0; i < 8; ++i) cacc[mt][t][i] = acc[mt][t][i] = 0.0f;
-    for (int i = 0; i < 8; ++i) sa[mt][i] = 0.0f;
   }
 
   #pragma unroll
   for (int p = 0; p < PF; ++p)
     if (p < nst) load(p, p);
-  float gs_s[4], gs_z[4];
-  group_sz(k0 / gs, gs_s, gs_z);
+  float gs_s[4];
+  group_sz(k0 / gs, gs_s);
 
   for (int s0 = 0; s0 < nst; s0 += PF) {
   #pragma unroll
@@ -2498,15 +2497,16 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
           uint32_t h[8];
           d16_magic(lane_hi ? o : mine[t], &h[0]);
           d16_magic(lane_hi ? mine[t] : o, &h[4]);
-          if constexpr (ZERO_IN_B) {
   #pragma unroll
-            for (int i = 0; i < 8; ++i) {
-              d16_h2 x;
-              __builtin_memcpy(&x, &h[i], 4);
+          for (int i = 0; i < 8; ++i) {
+            d16_h2 x;
+            __builtin_memcpy(&x, &h[i], 4);
+            if (i & 1)
+              x = x * d16_h2{(_Float16)0.0625f, (_Float16)0.0625f} - zb16[t];
+            else
               x -= zb[t];
-              if constexpr (SCALE_IN_B) x *= sb[t];
-              __builtin_memcpy(&h[i], &x, 4);
-            }
+            if constexpr (SCALE_IN_B) x *= sb[t];
+            __builtin_memcpy(&h[i], &x, 4);
           }
           v16fp16 bf;
           __builtin_memcpy(&bf, h, sizeof(bf));
@@ -2514,15 +2514,10 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
           for (int mt = 0; mt < MT; ++mt)
             acc[mt][t] = wmma_mma(af[mt], bf, acc[mt][t]);
         }
-        if constexpr (!ZERO_IN_B)
-  #pragma unroll
-          for (int mt = 0; mt < MT; ++mt)
-            sa[mt] = wmma_mma(af[mt], ones, sa[mt]);
-        // End of a group: fold it with its scale and zero.
+        // End of a group: fold it with its scale.
         const int k_next = k0 + 16 * (st + 1);
         if constexpr (SCALE_IN_B) {
-          if ((k_next % gs) == 0 && st + 1 < nst)
-            group_sz(k_next / gs, gs_s, gs_z);
+          if ((k_next % gs) == 0 && st + 1 < nst) group_sz(k_next / gs, gs_s);
         } else if ((k_next % gs) == 0 || st + 1 == nst) {
   #pragma unroll
           for (int mt = 0; mt < MT; ++mt) {
@@ -2530,15 +2525,12 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
             for (int t = 0; t < 4; ++t) {
   #pragma unroll
               for (int i = 0; i < 8; ++i) {
-                cacc[mt][t][i] += ZERO_IN_B ? gs_s[t] * acc[mt][t][i]
-                                            : gs_s[t] * acc[mt][t][i] +
-                                                  gs_z[t] * sa[mt][i];
+                cacc[mt][t][i] += gs_s[t] * acc[mt][t][i];
                 acc[mt][t][i] = 0.0f;
               }
             }
-            for (int i = 0; i < 8; ++i) sa[mt][i] = 0.0f;
           }
-          if (st + 1 < nst) group_sz(k_next / gs, gs_s, gs_z);
+          if (st + 1 < nst) group_sz(k_next / gs, gs_s);
         }
       }
     }
@@ -2552,7 +2544,8 @@ __global__ void __launch_bounds__(256) gemm_q4_wmma_kernel_dec16(
     for (int t = 0; t < 4; ++t)
   #pragma unroll
       for (int i = 0; i < 8; ++i)
-        sRed[wave][lane][8 * t + i] = SCALE_IN_B ? acc[mt][t][i] : cacc[mt][t][i];
+        sRed[wave][lane][8 * t + i] =
+            SCALE_IN_B ? acc[mt][t][i] : cacc[mt][t][i];
     __syncthreads();
     if (wave < 4) {
       const int t = wave;
