@@ -5,6 +5,7 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -401,14 +402,24 @@ def _run_flashinfer_bf16_autotune_dummy_run(
         )
 
 
-def _all_ranks_have_file(path: Path, group) -> bool:
-    """True iff every rank in ``group`` has ``path`` (its own copy) on disk."""
-    have = path.exists()
+def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
+    """Identify a saved autotune file by its FlashInfer metadata and size."""
+    try:
+        configs = json.loads(path.read_text())
+        metadata = configs.pop("_metadata", None)
+    except (OSError, ValueError, AttributeError):
+        return None
+    return json.dumps(metadata, sort_keys=True), len(configs)
+
+
+def _all_ranks_have_matching_cache(path: Path, group) -> bool:
+    """True iff every rank in ``group`` has its own, mutually consistent file."""
+    fingerprint = _autotune_cache_fingerprint(path)
     if group.world_size == 1:
-        return have
-    gathered: list[bool | None] = [None] * group.world_size
-    torch.distributed.all_gather_object(gathered, have, group=group.cpu_group)
-    return all(gathered)
+        return fingerprint is not None
+    gathered: list[tuple[str, int] | None] = [None] * group.world_size
+    torch.distributed.all_gather_object(gathered, fingerprint, group=group.cpu_group)
+    return fingerprint is not None and all(f == fingerprint for f in gathered)
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
@@ -428,7 +439,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
     (``MoERunner.get_cache_key_extras``), so one rank's file only hits on that
     rank. A rank with a cache hit skips the per-tactic reduce the others block
-    in, so ranks load only if every rank in the tuning group has a file.
+    in, so ranks load only if every rank in the tuning group has a matching file.
     """
     from flashinfer.autotuner import AutoTuner, set_autotune_process_group
 
@@ -468,7 +479,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    if _all_ranks_have_file(cache_path, tune_group):
+    if _all_ranks_have_matching_cache(cache_path, tune_group):
         tuner.load_configs(str(cache_path))
 
     group = tune_group.cpu_group if tune_group.world_size > 1 else None

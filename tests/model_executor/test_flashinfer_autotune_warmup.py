@@ -152,7 +152,10 @@ class _AutotuneGroup:
         self.record(("all_gather",))
         out[:] = self.run.gathered.setdefault(
             self.ranks,
-            [self.run.cache_path(rank).exists() for rank in self.ranks],
+            [
+                warmup._autotune_cache_fingerprint(self.run.cache_path(rank))
+                for rank in self.ranks
+            ],
         )
 
     def barrier(self):
@@ -324,3 +327,14 @@ def test_pp1_tunes_world_group_and_saves_per_rank(autotune_run):
         (rank, run.cache_path(rank)) for rank in range(4)
     ]
     assert all(groups == [(0, 1, 2, 3)] for groups in run.profile_groups.values())
+
+
+def test_mismatched_rank_caches_are_ignored_by_every_rank(autotune_run):
+    """One rank loading while others tune deadlocks the per-tactic reduce."""
+    cold = autotune_run(pp=1, tp=4).execute()
+    stale = cold.cache_path(2)
+    stale.write_text(json.dumps({**json.loads(stale.read_text()), "old_gemm": 0}))
+    rerun = autotune_run(pp=1, tp=4).execute()
+    rerun.assert_collectives_match()
+    assert all(tuner.loaded is None for tuner in rerun.tuners.values())
+    assert set(rerun.profile_groups) == {0, 1, 2, 3}
