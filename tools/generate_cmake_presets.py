@@ -7,13 +7,44 @@ import os
 import sys
 from shutil import which
 
-try:
-    # Try to get CUDA_HOME from PyTorch installation, which is the
-    # most reliable source of truth for vLLM's build.
-    from torch.utils.cpp_extension import CUDA_HOME
-except ImportError:
-    print("Warning: PyTorch not found. Falling back to CUDA_HOME environment variable.")
-    CUDA_HOME = os.environ.get("CUDA_HOME")
+
+def detect_target_device():
+    """Detect the target device backend and the GPU toolchain path."""
+    try:
+        # Try to get CUDA_HOME/ROCM_HOME from PyTorch installation, which is the
+        # most reliable source of truth for vLLM's build.
+        import torch
+        from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
+
+        # project setup.py find hip before cuda
+        if torch.version.hip is not None:
+            print("Detected ROCm via PyTorch")
+            return "rocm", ROCM_HOME
+        if torch.version.cuda is not None:
+            print("Detected CUDA via PyTorch")
+            return "cuda", CUDA_HOME
+    except ImportError:
+        print("Warning: PyTorch not found. Falling back to environment variables.")
+
+    cuda_home = os.environ.get("CUDA_HOME")
+    if cuda_home and os.path.isdir(cuda_home):
+        print("Detected CUDA via environment variable CUDA_HOME")
+        return "cuda", cuda_home
+
+    for rocm_var in ("ROCM_PATH", "ROCM_HOME"):
+        rocm_home = os.environ.get(rocm_var)
+        if rocm_home and os.path.isdir(rocm_home):
+            print(f"Detected ROCm via environment variable {rocm_var}")
+            return "rocm", rocm_home
+
+    target_device_prompt = (
+        "Could not automatically detect the target device. "
+        "Please enter 'cuda' or 'rocm': "
+    )
+    target_device = input(target_device_prompt).strip().lower()
+    if target_device not in ("cuda", "rocm"):
+        raise ValueError(f"Unsupported target device: '{target_device}'.")
+    return target_device, None
 
 
 def get_python_executable():
@@ -26,17 +57,14 @@ def get_cpu_cores():
     return multiprocessing.cpu_count()
 
 
-def generate_presets(output_path="CMakeUserPresets.json", force_overwrite=False):
-    """Generates the CMakeUserPresets.json file."""
-    print("Attempting to detect your system configuration...")
-
-    # Detect NVCC
+def get_nvcc_path(detected_toolchain_home):
+    """Find the nvcc compiler for CUDA builds."""
     nvcc_path = None
-    if CUDA_HOME:
-        prospective_path = os.path.join(CUDA_HOME, "bin", "nvcc")
+    if detected_toolchain_home:
+        prospective_path = os.path.join(detected_toolchain_home, "bin", "nvcc")
         if os.path.exists(prospective_path):
             nvcc_path = prospective_path
-            print(f"Found nvcc via torch.utils.cpp_extension.CUDA_HOME: {nvcc_path}")
+            print(f"Found nvcc via auto detect: {nvcc_path}")
 
     if not nvcc_path:
         nvcc_path = which("nvcc")
@@ -49,7 +77,38 @@ def generate_presets(output_path="CMakeUserPresets.json", force_overwrite=False)
             "path to nvcc (e.g., /usr/local/cuda/bin/nvcc): "
         )
         nvcc_path = nvcc_path_input.strip()
-    print(f"Using NVCC path: {nvcc_path}")
+    return nvcc_path
+
+
+def get_rocm_path(detected_toolchain_home):
+    """Find the ROCm installation prefix for ROCm builds."""
+    if detected_toolchain_home:
+        print(f"Found ROCm via auto detect: {detected_toolchain_home}")
+        return detected_toolchain_home
+    if os.path.isdir("/opt/rocm"):
+        print("Found ROCm at the default location: /opt/rocm")
+        return "/opt/rocm"
+    rocm_path_input = input(
+        "Could not automatically find ROCm. Please provide the full path "
+        "to your ROCm installation (e.g., /opt/rocm): "
+    )
+    return rocm_path_input.strip()
+
+
+def generate_presets(output_path="CMakeUserPresets.json", force_overwrite=False):
+    """Generates the CMakeUserPresets.json file."""
+    print("Attempting to detect your system configuration...")
+
+    # Detect target device
+    target_device, detected_toolchain_home = detect_target_device()
+
+    # Detect the GPU toolchain
+    if target_device == "cuda":
+        nvcc_path = get_nvcc_path(detected_toolchain_home)
+        print(f"Using NVCC path: {nvcc_path}")
+    else:
+        rocm_path = get_rocm_path(detected_toolchain_home)
+        print(f"Using ROCm path: {rocm_path}")
 
     # Detect Python executable
     python_executable = get_python_executable()
@@ -72,12 +131,16 @@ def generate_presets(output_path="CMakeUserPresets.json", force_overwrite=False)
 
     # Get CPU cores
     cpu_cores = get_cpu_cores()
-    nvcc_threads = min(4, cpu_cores)
-    cmake_jobs = max(1, cpu_cores // nvcc_threads)
-    print(
-        f"Detected {cpu_cores} CPU cores. "
-        f"Setting NVCC_THREADS={nvcc_threads} and CMake jobs={cmake_jobs}."
-    )
+    if target_device == "cuda":
+        nvcc_threads = min(4, cpu_cores)
+        cmake_jobs = max(1, cpu_cores // nvcc_threads)
+        print(
+            f"Detected {cpu_cores} CPU cores. "
+            f"Setting NVCC_THREADS={nvcc_threads} and CMake jobs={cmake_jobs}."
+        )
+    else:
+        cmake_jobs = cpu_cores
+        print(f"Detected {cpu_cores} CPU cores. Setting CMake jobs={cmake_jobs}.")
 
     # Get vLLM project root (assuming this script is in vllm/tools/)
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -93,22 +156,28 @@ def generate_presets(output_path="CMakeUserPresets.json", force_overwrite=False)
         )
 
     cache_variables = {
-        "CMAKE_CUDA_COMPILER": nvcc_path,
         "CMAKE_BUILD_TYPE": "Release",
         "VLLM_PYTHON_EXECUTABLE": python_executable,
         "CMAKE_INSTALL_PREFIX": "${sourceDir}",
-        "CMAKE_CUDA_FLAGS": "",
-        "NVCC_THREADS": str(nvcc_threads),
     }
+    if target_device == "cuda":
+        cache_variables["CMAKE_CUDA_COMPILER"] = nvcc_path
+        cache_variables["CMAKE_CUDA_FLAGS"] = ""
+        cache_variables["NVCC_THREADS"] = str(nvcc_threads)
+    else:
+        cache_variables["VLLM_TARGET_DEVICE"] = "rocm"
+        cache_variables["ROCM_PATH"] = rocm_path
+        cache_variables["CMAKE_HIP_FLAGS"] = ""
 
     # Detect compiler cache
+    gpu_lang = "CUDA" if target_device == "cuda" else "HIP"
     if which("sccache"):
         print("Using sccache for compiler caching.")
-        for launcher in ("C", "CXX", "CUDA", "HIP"):
+        for launcher in ("C", "CXX", gpu_lang):
             cache_variables[f"CMAKE_{launcher}_COMPILER_LAUNCHER"] = "sccache"
     elif which("ccache"):
         print("Using ccache for compiler caching.")
-        for launcher in ("C", "CXX", "CUDA", "HIP"):
+        for launcher in ("C", "CXX", gpu_lang):
             cache_variables[f"CMAKE_{launcher}_COMPILER_LAUNCHER"] = "ccache"
     else:
         print("No compiler cache ('ccache' or 'sccache') found.")
