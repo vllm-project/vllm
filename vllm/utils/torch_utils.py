@@ -7,6 +7,7 @@ import random
 import sys
 import threading
 from collections.abc import Callable, Collection, Sequence
+from functools import cache
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -101,6 +102,13 @@ def token_ids_to_tensor(
     """CPU tensor of token ids. A TokenBuffer is copied as one block rather than
     read token by token; the copy keeps the buffer resizable."""
     return torch.tensor(np.asarray(token_ids), dtype=dtype)
+
+
+@cache
+def _confidential_compute_enabled() -> bool:
+    from vllm.platforms import current_platform
+
+    return current_platform.is_confidential_compute()
 
 
 def is_meta_module(module: torch.nn.Module) -> bool:
@@ -740,6 +748,18 @@ def async_tensor_h2d(
     else:
         t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
     assert t.is_cpu
+
+    # Under Confidential Computing a pinned H2D on the compute stream blocks
+    # the host on the in-flight forward; route it through the idle prep
+    # stream instead (see vllm.v1.conf_compute_utils).
+    if _confidential_compute_enabled():
+        from vllm.v1.conf_compute_utils import staged_h2d
+
+        if out is not None and out.is_cuda:
+            assert out.dtype == dtype
+            return staged_h2d(t.to(dtype), out=out)
+        if out is None and device is not None and torch.device(device).type == "cuda":
+            return staged_h2d(t if dtype is None else t.to(dtype), device=device)
 
     if out is not None:
         assert out.dtype == dtype
