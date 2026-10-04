@@ -201,12 +201,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
             logits = logits[:, self.sharded_to_full_mapping_gpu]
 
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_logits(
-            logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked, 1.0
-        )
+        if not self.should_skip_lora(for_logits=True):
+            lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_logits(
+                logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked, 1.0
+            )
 
-        if not current_platform.can_update_inplace():
-            logits = lora_output
+            if not current_platform.can_update_inplace():
+                logits = lora_output
 
         # Remove paddings in vocab (if any).
         logits = logits[:, : self.base_layer.vocab_size]

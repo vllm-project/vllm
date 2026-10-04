@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, Any, overload
 
 import torch
 import torch.nn as nn
@@ -15,6 +15,11 @@ if TYPE_CHECKING:
 
 
 class BaseLayerWithLoRA(nn.Module):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._enabled_lora_slots: set[int] = set()
+        self._runtime_lora_skip_enabled = False
+
     def __getattr__(self, name):
         d = self.__dict__
         if name in d.get("_parameters", ()):
@@ -96,6 +101,34 @@ class BaseLayerWithLoRA(nn.Module):
         punica_wrapper,
     ):
         self.punica_wrapper: PunicaWrapperBase = punica_wrapper
+
+    def set_runtime_lora_skip_enabled(self, enabled: bool) -> None:
+        self._runtime_lora_skip_enabled = enabled
+
+    def set_lora_slot(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+    ) -> None:
+        self.set_lora(index, lora_a, lora_b)
+        self._enabled_lora_slots.add(index)
+
+    def reset_lora_slot(self, index: int) -> None:
+        self.reset_lora(index)
+        self._enabled_lora_slots.discard(index)
+
+    def has_active_lora(self, *, for_logits: bool = False) -> bool:
+        return self.punica_wrapper.has_active_lora(
+            self._enabled_lora_slots, for_logits=for_logits
+        )
+
+    def should_skip_lora(self, *, for_logits: bool = False) -> bool:
+        return (
+            self._runtime_lora_skip_enabled
+            and not torch.compiler.is_compiling()
+            and not self.has_active_lora(for_logits=for_logits)
+        )
 
     @classmethod
     def can_replace_layer(
