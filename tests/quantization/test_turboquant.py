@@ -92,6 +92,20 @@ class TestTurboQuantConfig:
         with pytest.raises(ValueError, match="Unknown TurboQuant"):
             TurboQuantConfig.from_cache_dtype("turboquant_invalid", head_dim=128)
 
+    def test_auto_state_layer_dtype_raises_actionable(self):
+        # gh-53334 obs-1: a layer whose cache dtype resolves to "auto" (e.g. a
+        # linear-attention / state layer in a hybrid model) must fail with a
+        # clear, actionable message that names the real cause, instead of the
+        # generic, confusing "Unknown TurboQuant cache dtype: 'auto'.".
+        with pytest.raises(ValueError) as exc_info:
+            TurboQuantConfig.from_cache_dtype("auto", head_dim=128)
+        msg = str(exc_info.value)
+        assert "Unknown TurboQuant" not in msg, (
+            "'auto' must not be reported as an unknown preset; it means the "
+            "layer is not TurboQuant-compressible (state/auto-dtype)."
+        )
+        assert "auto" in msg and "layer" in msg
+
     # ---- Per-preset concrete value checks (table-driven) ----
 
     @pytest.mark.parametrize("preset", ALL_PRESETS)
