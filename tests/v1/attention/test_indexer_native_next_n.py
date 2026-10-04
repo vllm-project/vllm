@@ -7,11 +7,22 @@ asserts both that the architecture implements the requested `next_n` and that
 the schedule metadata was sized for the matching slot count.
 """
 
-import pytest
+from dataclasses import replace
+from types import SimpleNamespace
 
+import pytest
+import torch
+
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import _paged_mqa_logits_schedule_slots
 from vllm.v1.attention.backends.mla import indexer
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.worker.block_table import get_block_table_width
 
 NUM_SMS = 114  # H100 PCIe
 
@@ -73,3 +84,54 @@ def test_multicast_is_sm90_only(monkeypatch, family):
     _set_arch(monkeypatch, family)
     for next_n in (1, 2, 3, 4):
         assert _paged_mqa_logits_schedule_slots(NUM_SMS, next_n) == NUM_SMS
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("use_flattening", [False, True])
+def test_padded_spec_decode_request_gets_zero_context_length(use_flattening):
+    """A FULL-CUDA-graph replay pads the batch with requests whose seq_len is
+    0. With next_n > 1 the per-token context length of such a request's first
+    row is seq_len - next_n + 1 and would be negative without the clamp from
+    #51538; the top-k kernels consume it as uint32 (#51593). Cover the native
+    (B, next_n) path and the flattened uniform-decode kernel path."""
+    device = torch.device("cuda")
+    next_n, block_size, ctx = 2, 64, 300
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        max_model_len=1024,
+        block_size=block_size,
+    )
+    vllm_config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=next_n - 1, enable_adaptive_verification=False
+    )
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+    )
+    block_table_width = get_block_table_width(
+        kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024), block_size
+    )
+    builder = indexer.DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["dummy"],
+        vllm_config=vllm_config,
+        device=device,
+        block_table_width=block_table_width,
+    )
+    builder.use_flattening = use_flattening
+    builder.supports_varlen = False
+
+    # Three live requests plus one CUDA-graph padding request (seq_len 0).
+    batch = BatchSpec(seq_lens=[ctx, ctx, ctx, 0], query_lens=[next_n] * 4)
+    common = create_common_attn_metadata(batch, block_size, device)
+    common = replace(
+        common,
+        block_table_tensor=torch.zeros(
+            (4, block_table_width), dtype=torch.int32, device=device
+        ),
+    )
+
+    md = builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+    assert md.num_decodes == 4 and md.decode is not None
+    lens = md.decode.seq_lens.reshape(-1).tolist()
+    assert lens == [ctx - 1, ctx] * 3 + [0, 0], lens
