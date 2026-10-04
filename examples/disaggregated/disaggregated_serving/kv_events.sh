@@ -47,7 +47,7 @@ wait_for_server 8100
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-python3 "$SCRIPT_DIR/kv_events_subscriber.py" &
+python3 "$SCRIPT_DIR/../../features/kv_events/kv_events_subscriber.py" &
 sleep 1
 
 # serve two example requests
