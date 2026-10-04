@@ -86,6 +86,7 @@ except ImportError:
     TransferEngine = None
 
 if TYPE_CHECKING:
+    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -797,9 +798,23 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Worker Side Methods
     ############################################################
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        # Only RDMA peers drop a stale remote key (the failed access refreshes it).
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        return extra_config.get("mooncake_protocol", "rdma") == "rdma"
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def release_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.release_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.register_kv_caches(self.connector_worker.device_kv_caches)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1208,7 +1223,7 @@ class MooncakeConnectorWorker:
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
-        self.side_channel_port: int = 0  # we will bind it in register_kv_caches()
+        self.side_channel_port: int = 0  # bound by the sender listener
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -1327,6 +1342,10 @@ class MooncakeConnectorWorker:
         self._encoder = msgspec.msgpack.Encoder()
         self._xfer_meta_decoder = msgspec.msgpack.Decoder(MooncakeXferMetadata)
         self._xfer_resp_decoder = msgspec.msgpack.Decoder(MooncakeXferResponse)
+
+        # No need to launch server for D node.
+        if not self.is_kv_consumer:
+            self._start_sender_listener()
 
     def _sync_block_size_with_kernel(self) -> None:
         # When speculative decoding (e.g. Eagle) is enabled, the main model
@@ -1476,6 +1495,42 @@ class MooncakeConnectorWorker:
             except Exception as e:
                 logger.error("Error in _sender_worker: %s", e)
 
+    def _resolve_transfer_regions(
+        self, meta: MooncakeXferMetadata
+    ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
+        """Align the local and remote regions, or return why they cannot be."""
+        if _pp_mismatch_hides_packed_layers(
+            self.pp_size,
+            meta.remote_pp_size,
+            local_has_opaque_row=bool(self.opaque_packed_storages),
+            remote_row_offsets=meta.registered_row_offsets,
+            remote_kv_block_lens=meta.kv_block_lens,
+            remote_block_lens=meta.block_lens,
+        ):
+            msg = (
+                "Mooncake non-page-contiguous packed regions keep only the "
+                "first layer name, so they cannot be aligned across PP sizes "
+                f"{self.pp_size} and {meta.remote_pp_size}."
+            )
+            logger.error(msg)
+            return [], [], msg
+        local_regions, remote_regions, prep_err = self._prepare_transfer_regions(meta)
+        if prep_err is not None:
+            return [], [], prep_err
+        validation_err = _validate_asymmetric_region_lengths(
+            local_regions=local_regions,
+            remote_regions=remote_regions,
+            local_tp_size=self.tp_size,
+            remote_tp_size=meta.remote_tp_size,
+            producer_cache_replicated=self._producer_cache_is_replicated(),
+            total_num_kv_heads=(
+                None
+                if self.use_mla or self.kv_cache_config.has_mamba_layers
+                else self.transfer_topo.total_num_kv_heads
+            ),
+        )
+        return local_regions, remote_regions, validation_err
+
     async def send_kv_to_decode(
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
     ):
@@ -1492,53 +1547,6 @@ class MooncakeConnectorWorker:
             response = MooncakeXferResponse(
                 status=MooncakeXferResponseStatus.ERROR,
                 err_msg=msg,
-            )
-            await sock.send_multipart((identity, self._encoder.encode(response)))
-            return
-        if _pp_mismatch_hides_packed_layers(
-            self.pp_size,
-            meta.remote_pp_size,
-            local_has_opaque_row=bool(self.opaque_packed_storages),
-            remote_row_offsets=meta.registered_row_offsets,
-            remote_kv_block_lens=meta.kv_block_lens,
-            remote_block_lens=meta.block_lens,
-        ):
-            msg = (
-                "Mooncake non-page-contiguous packed regions keep only the "
-                "first layer name, so they cannot be aligned across PP sizes "
-                f"{self.pp_size} and {meta.remote_pp_size}."
-            )
-            logger.error(msg)
-            response = MooncakeXferResponse(
-                status=MooncakeXferResponseStatus.ERROR,
-                err_msg=msg,
-            )
-            await sock.send_multipart((identity, self._encoder.encode(response)))
-            return
-        local_regions, remote_regions, prep_err = self._prepare_transfer_regions(meta)
-        if prep_err is not None:
-            response = MooncakeXferResponse(
-                status=MooncakeXferResponseStatus.ERROR,
-                err_msg=prep_err,
-            )
-            await sock.send_multipart((identity, self._encoder.encode(response)))
-            return
-        validation_err = _validate_asymmetric_region_lengths(
-            local_regions=local_regions,
-            remote_regions=remote_regions,
-            local_tp_size=self.tp_size,
-            remote_tp_size=meta.remote_tp_size,
-            producer_cache_replicated=self._producer_cache_is_replicated(),
-            total_num_kv_heads=(
-                None
-                if self.use_mla or self.kv_cache_config.has_mamba_layers
-                else self.transfer_topo.total_num_kv_heads
-            ),
-        )
-        if validation_err is not None:
-            response = MooncakeXferResponse(
-                status=MooncakeXferResponseStatus.ERROR,
-                err_msg=validation_err,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
@@ -1565,6 +1573,8 @@ class MooncakeConnectorWorker:
             for d_req_id, send_meta in pending_reqs.items()
         ]
 
+        local_regions: list[TransferRegion] | None = None
+        remote_regions: list[TransferRegion] = []
         while wait_tasks:
             done, pending = await asyncio.wait(
                 wait_tasks,
@@ -1586,6 +1596,22 @@ class MooncakeConnectorWorker:
                 )
                 await sock.send_multipart((identity, self._encoder.encode(response)))
                 break
+
+            if local_regions is None:
+                # A ready request implies a complete registration of the layout.
+                local_regions, remote_regions, err = self._resolve_transfer_regions(
+                    meta
+                )
+                if err is not None:
+                    for task in pending:
+                        task.cancel()
+                    response = MooncakeXferResponse(
+                        status=MooncakeXferResponseStatus.ERROR, err_msg=err
+                    )
+                    await sock.send_multipart(
+                        (identity, self._encoder.encode(response))
+                    )
+                    return
 
             wait_tasks = list(pending)
             response_status = (
@@ -1956,6 +1982,8 @@ class MooncakeConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in mooncake."""
+        if self.seen_base_addresses:
+            return  # Still registered (a retried wake-up).
         logger.info("Registering KV_Caches. use_mla: %s", self.use_mla)
 
         kv_data_ptrs: list[int] = []
@@ -2135,7 +2163,6 @@ class MooncakeConnectorWorker:
                 self.region_row_offsets.append(-1)
 
         self.kv_caches_base_addr = region_base_addresses
-        self.seen_base_addresses = kv_data_ptrs
 
         if not kv_data_ptrs:
             raise RuntimeError("No KV cache tensors were registered with Mooncake.")
@@ -2155,6 +2182,7 @@ class MooncakeConnectorWorker:
         ret_value = self.engine.batch_register_memory(kv_data_ptrs, kv_data_lens)
         if ret_value != 0:
             raise RuntimeError("Mooncake batch memory registration failed.")
+        self.seen_base_addresses = kv_data_ptrs
 
         self.device_kv_caches = kv_caches
         logger.debug(
@@ -2163,10 +2191,48 @@ class MooncakeConnectorWorker:
             self.kv_block_len_per_layer,
         )
 
-        # No need to launch server for D node.
-        if self.is_kv_consumer:
+    def release_kv_caches(self) -> None:
+        """Drop the Mooncake registration of the KV caches once no send or pull uses
+        them; TimeoutError past the abort timeout. Idempotent."""
+        if not self.seen_base_addresses:
             return
+        deadline = time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+        while self._transfers_pending():
+            if time.perf_counter() >= deadline:
+                raise TimeoutError("Mooncake KV transfers did not finish in time")
+            time.sleep(0.01)
 
+        ret_value = self.engine.batch_unregister_memory(self.seen_base_addresses)
+        if ret_value != 0:
+            raise RuntimeError("Mooncake batch memory unregistration failed.")
+        self.seen_base_addresses = []
+
+    def _transfers_pending(self) -> bool:
+        pending = []
+        if not self.is_kv_consumer:
+            pending.append(
+                asyncio.run_coroutine_threadsafe(
+                    self._has_pending_sends(), self.sender_loop
+                )
+            )
+        if not self.is_kv_producer:
+            pending.append(
+                asyncio.run_coroutine_threadsafe(
+                    self._has_pending_recvs(), self.receiver_loop
+                )
+            )
+        return any([fut.result() for fut in pending])
+
+    async def _has_pending_sends(self) -> bool:
+        # A ready request is sent as soon as D asks for it.
+        return any(meta.ready.is_set() for meta in self.reqs_need_send.values())
+
+    async def _has_pending_recvs(self) -> bool:
+        # Every other task on the receiver loop belongs to a pull in progress.
+        return len(asyncio.all_tasks()) > 1
+
+    def _start_sender_listener(self) -> None:
+        """Serve the transfer requests of D for the lifetime of the worker."""
         # httpx applies the timeout to each phase (connect, read, write, pool)
         # rather than to the whole request, so budget for all four.
         register_timeout = envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
