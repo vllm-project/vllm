@@ -481,10 +481,8 @@ class MooncakeStoreScheduler:
             assert NULL_BLOCK_ID not in block_ids, (
                 "A null block cannot back a boundary-state offload"
             )
-            # Every allocated block is referenced, not just the ones covering
-            # this job's token range: a rank resumes from its own last
-            # successful offset, which lags the scheduler's whenever a save was
-            # skipped or failed, so it may read anywhere below the range.
+            # Each rank may retry from an earlier offset after a skipped or
+            # failed save, so retain all available attention source blocks.
             block_ids.extend(
                 block_id
                 for group_id, group in enumerate(req_meta.block_ids)

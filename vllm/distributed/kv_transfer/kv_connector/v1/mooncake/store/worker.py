@@ -44,20 +44,22 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
     MooncakeStoreCoordinator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
-    AttentionStoreLayout,
     BlobBlockHashes,
     ChunkedTokenDatabase,
-    HeadMajorStoreLayout,
-    KeyMetadata,
-    MambaStoreLayout,
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
-    PoolKey,
     ReqMeta,
+    TailKeyBoundary,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+    AttentionStoreLayout,
+    HeadMajorStoreLayout,
+    KeyMetadata,
+    MambaStoreLayout,
+    PoolKey,
     StoreLayout,
     StoreShardId,
-    TailKeyBoundary,
     TokenMajorStoreLayout,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # noqa: E501
@@ -105,7 +107,7 @@ _T = TypeVar("_T")
 class _StoreGroupPlan:
     layer_specs: tuple[KVCacheSpec, ...]
     local_block_size: int
-    local_tp_size: int
+    logical_tp_size: int
     store_shard_count: int
     tp_rank: int
     layout_cls: type[StoreLayout]
@@ -1974,7 +1976,7 @@ class MooncakeStoreWorker:
                     group_metadata,
                     plan.local_block_size,
                     hash_block_size,
-                    local_tp_size=plan.local_tp_size,
+                    local_tp_size=plan.logical_tp_size,
                     store_tp_size=plan.store_shard_count,
                     tp_rank=plan.tp_rank,
                     layer_specs=cast(tuple[AttentionSpec, ...], plan.layer_specs),
@@ -1985,7 +1987,7 @@ class MooncakeStoreWorker:
                     group_metadata,
                     plan.local_block_size,
                     hash_block_size,
-                    local_tp_size=plan.local_tp_size,
+                    local_tp_size=plan.logical_tp_size,
                     store_tp_size=plan.store_shard_count,
                     tp_rank=plan.tp_rank,
                     layer_specs=cast(tuple[MambaSpec, ...], plan.layer_specs),
@@ -2032,7 +2034,7 @@ class MooncakeStoreWorker:
             return _StoreGroupPlan(
                 layer_specs=layer_specs,
                 local_block_size=group.kv_cache_spec.block_size,
-                local_tp_size=logical_tp_size,
+                logical_tp_size=logical_tp_size,
                 store_shard_count=store_shard_count,
                 tp_rank=self.tp_rank // replication_factor,
                 layout_cls=attention_layout_cls,
@@ -2055,7 +2057,7 @@ class MooncakeStoreWorker:
         return _StoreGroupPlan(
             layer_specs=layer_specs,
             local_block_size=group.kv_cache_spec.block_size,
-            local_tp_size=self.tp_size,
+            logical_tp_size=self.tp_size,
             store_shard_count=requested_store_tp_size,
             tp_rank=self.tp_rank,
             layout_cls=MambaStoreLayout,

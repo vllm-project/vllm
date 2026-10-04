@@ -204,7 +204,10 @@ Incremental offloads wait for a common reusable hybrid prefix boundary.
 Attention entries retain their TP-independent Store chunk size, while Mamba
 and GDN entries are complete state snapshots. Lookup exposes a prefix after
 all cache groups required at that boundary are present. Each Attention page
-requires every Store chunk covering its reusable tokens, across all Store shards.
+requires every Store chunk covering its reusable tokens, across all Store
+shards. Partial-tail checkpoints use the core's exact state-block handoff and
+matching Attention KV. Store jobs hold references to their source blocks until
+all workers finish the transfer.
 
 Attention groups are planned from their per-layer cache specs, including specs
 wrapped by `UniformTypeKVCacheSpecs`. The Store TP and global head-slot count

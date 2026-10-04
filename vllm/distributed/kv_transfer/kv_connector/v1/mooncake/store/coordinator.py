@@ -174,12 +174,12 @@ class MooncakeStoreCoordinator:
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[bool], ...], int]:
         """Returns ``(load_mask_per_group, hit_length)``. ``mask[g][i]`` is True iff
-        group ``g`` populates chunk ``i`` locally (e.g. SWA and Mamba tail-only);
+        group ``g`` populates physical block ``i`` (e.g. SWA and Mamba tail-only);
         recv-side callers skip False slots.
 
         ``apply_eagle`` controls whether the per-spec ``use_eagle`` last-block
         pop is applied. Lookup callers want it (the drafter requires recomputing
-        the last block); per-chunk mask callers must not, because ``token_len``
+        the last block); load-mask callers must not, because ``token_len``
         already reflects the eagle-pruned hit length and a second pop would
         leave the trailing block unloaded.
         """
@@ -198,7 +198,7 @@ class MooncakeStoreCoordinator:
         token_len: int,
     ) -> tuple[list[bool], ...]:
         """Per-group load masks: ``mask[g][i]`` is True iff group ``g``'s
-        spec would populate chunk ``i`` locally at length ``token_len``
+        spec would populate physical block ``i`` at length ``token_len``
         (e.g. SWA / Mamba tail-only).
         """
         # ``apply_eagle=False`` because ``token_len`` is already the
@@ -223,21 +223,14 @@ class MooncakeStoreCoordinator:
     ) -> tuple[list[bool] | None, ...]:
         """Per-group store masks for the suffix starting at ``start_token``.
 
-        ``mask[g][i]`` is True iff the i-th chunk of group ``g`` *after*
+        ``mask[g][i]`` is True iff the i-th physical block of group ``g`` *after*
         ``start_token`` should be written to the store so a future cache hit
         can consume it. ``None`` is the all-True sentinel for the suffix.
 
         Reuses the engine's ``SingleTypeKVCacheManager.reachable_block_mask``
         so the store retains exactly the blocks the local prefix cache would.
 
-        Mamba groups are always all-False: the normal save resolves blocks
-        positionally from the connector's append-only block-ID snapshot, but
-        an align-mode mamba block table is not append-only (interior state
-        blocks are nulled/freed, and speculative decoding relocates the spec
-        blocks in place), so a positional read may hit a null, freed, or live
-        speculative-state block and persist wrong bytes under a valid prefix
-        hash. Mamba state is persisted only through the connector-pinned exact
-        block hand-off path
+        Mamba groups are all-False. Their exact checkpoint blocks arrive through
         (``SchedulerOutput.kv_connector_block_state.boundary_state_offloads``).
         """
         return self._reachable_masks(
@@ -254,7 +247,7 @@ class MooncakeStoreCoordinator:
     ) -> tuple[list[bool] | None, ...]:
         """Per-group lookup masks.
 
-        ``mask[g][i]`` is True iff chunk ``i`` of group ``g`` should be
+        ``mask[g][i]`` is True iff physical block ``i`` of group ``g`` should be
         looked up as an aligned hit boundary. ``None`` is the all-True
         sentinel.
         """
@@ -286,10 +279,10 @@ class MooncakeStoreCoordinator:
         masks: list[list[bool] | None] = []
         for g_idx, g in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(g.kv_cache_spec)
-            end_chunk = aligned_token_len // spec.block_size
-            start_chunk = min(end_chunk, max(0, cdiv(start_token, spec.block_size)))
+            end_block = aligned_token_len // spec.block_size
+            start_block = min(end_block, max(0, cdiv(start_token, spec.block_size)))
             if exclude_mamba and isinstance(spec, MambaSpec):
-                masks.append([False] * (end_chunk - start_chunk))
+                masks.append([False] * (end_block - start_block))
                 continue
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
@@ -298,20 +291,20 @@ class MooncakeStoreCoordinator:
                 () if num_prompt_tokens is None else (num_prompt_tokens - 1,)
             )
             mask = manager_cls.reachable_block_mask(
-                start_block=start_chunk,
-                end_block=end_chunk,
+                start_block=start_block,
+                end_block=end_block,
                 alignment_tokens=self.lcm_block_size,
                 kv_cache_spec=spec,
                 use_eagle=use_eagle,
                 retention_interval=retention_interval,
                 reachable_boundaries=reachable_boundaries,
                 # ``spec`` is already DCP-resolved (worker.py applies
-                # resolve_dcp_kv_cache_spec) and ``end_chunk`` is indexed in
+                # resolve_dcp_kv_cache_spec) and ``end_block`` is indexed in
                 # that scaled block size, so the mask must not scale again.
                 dcp_world_size=1,
             )
             if mask is not None:
-                assert len(mask) == end_chunk - start_chunk
+                assert len(mask) == end_block - start_block
             masks.append(mask)
         return tuple(masks)
 

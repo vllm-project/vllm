@@ -28,19 +28,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     BlobBlockHashes,
     ChunkedTokenDatabase,
-    HeadMajorStoreLayout,
-    KeyMetadata,
     LoadSpec,
-    MambaStoreLayout,
     MooncakeLookupResult,
-    PoolKey,
-    RankLocalStoreLayout,
     ReqMeta,
     RequestTracker,
     TailKeyBoundary,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+    HeadMajorStoreLayout,
+    KeyMetadata,
+    MambaStoreLayout,
+    PoolKey,
+    RankLocalStoreLayout,
     TokenMajorStoreLayout,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
@@ -180,7 +182,7 @@ def _make_store_sending_thread(
     if coord is None:
         coord = _default_send_coord()
     if token_databases is None:
-        db = ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+        db = ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), chunk_size=16)
         db.set_kv_caches_base_addr([0x1000])
         db.set_block_len([256])
         token_databases = [db]
@@ -212,7 +214,7 @@ def _make_store_recving_thread(
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
     token_database = ChunkedTokenDatabase(
-        KeyMetadata("test-model", 0, 0, 0, 0), block_size=16
+        KeyMetadata("test-model", 0, 0, 0, 0), chunk_size=16
     )
     token_database.set_kv_caches_base_addr([0x1000])
     token_database.set_block_len([256])
@@ -855,7 +857,7 @@ def test_store_sending_thread_records_mooncake_metrics():
 def test_process_tokens_uses_mask_num_as_start_chunk():
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
-        block_size=32,
+        chunk_size=32,
         hash_block_size=8,
     )
     block_hashes = _RecordingBlockHashes([bytes([i]) for i in range(16)])
@@ -875,7 +877,7 @@ def test_process_tokens_uses_mask_num_as_start_chunk():
 def test_process_tokens_applies_chunk_mask_before_hash_access():
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
-        block_size=32,
+        chunk_size=32,
         hash_block_size=8,
     )
     block_hashes = _RecordingBlockHashes([bytes([i]) for i in range(16)])
@@ -896,7 +898,7 @@ def test_process_tokens_applies_chunk_mask_before_hash_access():
 def test_process_tokens_applies_stride_before_hash_access():
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
-        block_size=32,
+        chunk_size=32,
         hash_block_size=8,
     )
     block_hashes = _RecordingBlockHashes([bytes([i]) for i in range(16)])
@@ -1053,7 +1055,7 @@ def _make_partial_tail_send_thread(
     )
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
-        block_size=4,
+        chunk_size=4,
         hash_block_size=4,
     )
     db.set_kv_caches_base_addr([0x1000])
@@ -1061,7 +1063,7 @@ def _make_partial_tail_send_thread(
     # Group 1 models the mamba "align" group the hand-offs reference.
     db_mamba = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-        block_size=16,
+        chunk_size=16,
         hash_block_size=4,
     )
     db_mamba.set_kv_caches_base_addr([0x2000])
@@ -1171,13 +1173,13 @@ def test_store_sending_thread_skips_null_sparse_group_blocks():
 
     db_full = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-        block_size=16,
+        chunk_size=16,
     )
     db_full.set_kv_caches_base_addr([0x1000])
     db_full.set_block_len([256])
     db_sparse = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-        block_size=16,
+        chunk_size=16,
     )
     db_sparse.set_kv_caches_base_addr([0x2000])
     db_sparse.set_block_len([512])
@@ -1239,7 +1241,7 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
     def make_db(group_id: int, block_size: int, base_addr: int):
         db = ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
-            block_size=block_size,
+            chunk_size=block_size,
             hash_block_size=4,
         )
         db.set_kv_caches_base_addr([base_addr])
@@ -1360,12 +1362,12 @@ def test_normal_save_excludes_mamba_group_and_null_blocks():
         hash_block_size=16,
     )
     db_full = ChunkedTokenDatabase(
-        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), chunk_size=16
     )
     db_full.set_kv_caches_base_addr([0x1000])
     db_full.set_block_len([256])
     db_mamba = ChunkedTokenDatabase(
-        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1), block_size=16
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1), chunk_size=16
     )
     db_mamba.set_kv_caches_base_addr([0x2000])
     db_mamba.set_block_len([256])
@@ -1532,13 +1534,13 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
 
     db_full = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-        block_size=16,
+        chunk_size=16,
     )
     db_full.set_kv_caches_base_addr([0x1000])
     db_full.set_block_len([256])
     db_masked = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-        block_size=16,
+        chunk_size=16,
     )
     db_masked.set_kv_caches_base_addr([0x2000])
     db_masked.set_block_len([256])
@@ -1606,7 +1608,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
 
     db0 = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-        block_size=16,
+        chunk_size=16,
     )
     db0.set_kv_caches_base_addr([0x1000])
     db0.set_block_len([256])
@@ -1614,7 +1616,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
 
     db1 = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-        block_size=16,
+        chunk_size=16,
     )
     db1.set_kv_caches_base_addr([0x2000])
     db1.set_block_len([512])
@@ -1992,7 +1994,7 @@ def test_store_sending_thread_group_id_excludes_physical_sharding():
             pp_rank=0,
             group_id=0,
         ),
-        block_size=16,
+        chunk_size=16,
     )
     db.set_kv_caches_base_addr([0x1000])
     db.set_block_len([256])
@@ -2023,7 +2025,7 @@ def test_store_sending_thread_multiple_segments_share_logical_group_id():
     store.batch_is_exist.return_value = [0, 0]
     store.batch_put_from_multi_buffers.return_value = [512, 512]
     replicate_config = SimpleNamespace(group_ids=None)
-    db = ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+    db = ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), chunk_size=16)
     db.set_kv_caches_base_addr([0x1000, 0x2000])
     db.set_block_len([256, 256])
     thread = _make_store_sending_thread(
@@ -2069,7 +2071,7 @@ def test_store_sending_thread_group_ids_share_across_kv_cache_groups():
     for group_id, base_addr in enumerate([0x1000, 0x3000]):
         db = ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
-            block_size=16,
+            chunk_size=16,
         )
         db.set_kv_caches_base_addr([base_addr])
         db.set_block_len([256])
@@ -2453,7 +2455,7 @@ def test_worker_init_excludes_nonprefix_cache_groups(monkeypatch):
     assert [
         group.kv_cache_spec.block_size for group in store_worker._kv_cache_groups
     ] == [800, 800]
-    assert [db.block_size for db in store_worker.token_dbs] == [800, 800]
+    assert [db.chunk_size for db in store_worker.token_dbs] == [800, 800]
 
 
 def _make_two_full_attention_groups_kv_cache_config():
@@ -3079,7 +3081,7 @@ def test_worker_scales_uniform_attention_group_under_dcp(tmp_path, monkeypatch):
     assert scaled_spec.block_size == 64
     assert all(spec.block_size == 64 for spec in scaled_spec.kv_cache_specs.values())
     assert w.coord.attention_groups[0].spec.block_size == 64
-    assert w.token_dbs[0].block_size == 64
+    assert w.token_dbs[0].chunk_size == 64
 
 
 @pytest.mark.parametrize("dcp_size", [1, 4])
@@ -3388,13 +3390,13 @@ def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(failure):
     layout.register_kv_caches([tensor], num_blocks=3)
     full_db = ChunkedTokenDatabase(
         metadata,
-        block_size=4,
+        chunk_size=4,
         hash_block_size=4,
         store_layout=layout,
     )
     mamba_db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-        block_size=8,
+        chunk_size=8,
         hash_block_size=4,
     )
     mamba_db.set_kv_caches_base_addr([0x2000])
@@ -3534,7 +3536,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
     )
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-        block_size=64,
+        chunk_size=64,
         hash_block_size=64,
     )
     db.set_kv_caches_base_addr([0x1000])
@@ -3600,14 +3602,14 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
     db_full = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-        block_size=32,
+        chunk_size=32,
         hash_block_size=8,
     )
     db_full.set_kv_caches_base_addr([0x1000])
     db_full.set_block_len([512])
     db_swa = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-        block_size=8,
+        chunk_size=8,
         hash_block_size=8,
     )
     db_swa.set_kv_caches_base_addr([0x2000])
@@ -3675,14 +3677,14 @@ def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
 
     db_full = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-        block_size=32,
+        chunk_size=32,
         hash_block_size=8,
     )
     db_full.set_kv_caches_base_addr([0x1000])
     db_full.set_block_len([512])
     db_swa = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-        block_size=8,
+        chunk_size=8,
         hash_block_size=8,
     )
     db_swa.set_kv_caches_base_addr([0x2000])
@@ -3745,14 +3747,14 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
 
     db_full = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-        block_size=32,
+        chunk_size=32,
         hash_block_size=8,
     )
     db_full.set_kv_caches_base_addr([0x1000])
     db_full.set_block_len([512])
     db_swa = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-        block_size=8,
+        chunk_size=8,
         hash_block_size=8,
     )
     db_swa.set_kv_caches_base_addr([0x2000])
@@ -3983,7 +3985,7 @@ def _make_bare_worker(
     worker.token_dbs = [
         ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-            block_size=block_size,
+            chunk_size=block_size,
             hash_block_size=block_size,
         )
     ]
@@ -4026,7 +4028,7 @@ def test_lookup_key_prefixes_cover_store_tp_shards():
     worker.token_dbs = [
         ChunkedTokenDatabase(
             metadata,
-            block_size=16,
+            chunk_size=16,
             store_layout=HeadMajorStoreLayout(
                 metadata,
                 block_size=16,
@@ -4090,10 +4092,10 @@ def test_lookup_key_prefixes_expand_tp_sharded_groups_per_rank():
     ]
     worker.token_dbs = [
         ChunkedTokenDatabase(
-            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), chunk_size=16
         ),
         ChunkedTokenDatabase(
-            KeyMetadata("test-model", 1, 0, 0, 0, group_id=1), block_size=16
+            KeyMetadata("test-model", 1, 0, 0, 0, group_id=1), chunk_size=16
         ),
     ]
     _refresh_group_tp_replication_factors(worker)
@@ -4133,7 +4135,7 @@ def test_group_tp_replication_factors_mixed_mla_gqa_mamba():
     ]
     worker.token_dbs = [
         ChunkedTokenDatabase(
-            KeyMetadata("test-model", 0, 0, 0, 0, group_id=g_idx), block_size=16
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=g_idx), chunk_size=16
         )
         for g_idx in range(3)
     ]
@@ -4325,10 +4327,10 @@ def test_lookup_rejects_boundary_missing_one_mamba_shard():
     ]
     worker.token_dbs = [
         ChunkedTokenDatabase(
-            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), chunk_size=16
         ),
         ChunkedTokenDatabase(
-            KeyMetadata("test-model", 1, 0, 0, 0, group_id=1), block_size=16
+            KeyMetadata("test-model", 1, 0, 0, 0, group_id=1), chunk_size=16
         ),
     ]
     worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
@@ -4375,7 +4377,7 @@ def test_lookup_requires_all_attention_chunks_in_page(
     worker.token_dbs = [
         ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
-            block_size=chunk_size,
+            chunk_size=chunk_size,
             hash_block_size=4,
         )
         for group_id, chunk_size in enumerate((4, mamba_block_size))
@@ -4446,7 +4448,7 @@ def test_lookup_partial_tail_uses_hash_alignment():
     worker.token_dbs = [
         ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
-            block_size=16,
+            chunk_size=16,
             hash_block_size=4,
         )
         for group_id in range(2)
@@ -4514,7 +4516,7 @@ def test_lookup_skips_tail_key_for_empty_chunked_local_window():
     worker.token_dbs = [
         ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
-            block_size=16,
+            chunk_size=16,
             hash_block_size=16,
         )
         for group_id in range(2)
@@ -4556,7 +4558,7 @@ def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
     worker.token_dbs = [
         ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
-            block_size=16,
+            chunk_size=16,
             hash_block_size=4,
         )
         for group_id in range(2)
@@ -4626,7 +4628,7 @@ def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
     worker.token_dbs = [
         ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
-            block_size=16,
+            chunk_size=16,
             hash_block_size=4,
         )
         for group_id in range(2)
@@ -4735,12 +4737,12 @@ def test_lookup_checks_all_potential_swa_hit_boundaries():
     worker.token_dbs = [
         ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-            block_size=32,
+            chunk_size=32,
             hash_block_size=8,
         ),
         ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-            block_size=8,
+            chunk_size=8,
             hash_block_size=8,
         ),
     ]
@@ -4796,12 +4798,12 @@ def test_lookup_applies_swa_mask_before_accessing_hashes():
     worker.token_dbs = [
         ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
-            block_size=32,
+            chunk_size=32,
             hash_block_size=8,
         ),
         ChunkedTokenDatabase(
             KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
-            block_size=8,
+            chunk_size=8,
             hash_block_size=8,
         ),
     ]
@@ -5000,7 +5002,7 @@ def test_register_kv_caches_uses_transfer_group_memory_domain():
     worker._kv_cache_config = config
     worker._kv_cache_groups = list(config.transfer_groups)
     worker.token_dbs = [
-        ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+        ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), chunk_size=16)
     ]
     source = torch.zeros(host_num_blocks, page_size, dtype=torch.uint8)
     indexer = torch.zeros(gpu_num_blocks, page_size, dtype=torch.uint8)
