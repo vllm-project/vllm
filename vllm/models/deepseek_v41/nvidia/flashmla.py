@@ -17,6 +17,11 @@ from vllm.models.deepseek_v41.nvidia.ops.o_proj import (
     dsv41_o_proj,
     register_dsv41_o_proj_warmup,
 )
+from vllm.models.deepseek_v41.nvidia.ops.small_head_sparse_decode import (
+    small_head_decode_enabled,
+    small_head_decode_supported,
+    small_head_sparse_decode,
+)
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
@@ -59,6 +64,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             self._o_proj_block_size
         )
         register_dsv41_o_proj_warmup(self)
+        # Prefill still runs FlashMLA at the padded head count; only decode
+        # reads the real heads, so Q/output buffers keep their padded shape.
+        self._use_small_head_decode = small_head_decode_enabled(self.n_local_heads)
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return dsv41_o_proj(self, attn_out, positions)
@@ -196,6 +204,30 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
+
+        if self._use_small_head_decode:
+            assert swa_indices is not None
+            max_keys = swa_indices.shape[-1]
+            if topk_indices is not None:
+                max_keys += topk_indices.shape[-1]
+            use_small_head = small_head_decode_supported(num_decode_tokens, max_keys)
+        else:
+            use_small_head = False
+        if use_small_head:
+            small_head_sparse_decode(
+                q=q,
+                swa_cache=self.swa_cache_layer.kv_cache,
+                swa_indices=swa_indices,
+                swa_lens=swa_lens,
+                extra_cache=None if swa_only else kv_cache,
+                extra_indices=topk_indices,
+                extra_lens=topk_lens,
+                attn_sink=self.attn_sink,
+                sm_scale=self.scale,
+                out=output,
+                num_heads=self.n_local_heads,
+            )
+            return
 
         # We treat queries in the same seq as different queries
         # and later we only attend by generated indices.
