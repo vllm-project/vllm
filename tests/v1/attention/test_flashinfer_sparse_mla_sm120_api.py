@@ -4,11 +4,16 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     _required_sm120_sparse_topk,
+)
+from vllm.models.deepseek_v41.nvidia import flashinfer_sparse as dsv41_flashinfer
+from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
+    _sm120_kv_cache_format,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils import flashinfer as fi_utils
@@ -92,3 +97,37 @@ def test_sm120_dsv4_required_topk_tracks_dspark_width() -> None:
 
     assert _required_sm120_sparse_topk(causal, 128) == 128
     assert _required_sm120_sparse_topk(dspark, 128) == 192
+
+
+@pytest.mark.parametrize(
+    "kv_cache_dtype,kv_mxfp8,has_compressed_cache,expected",
+    [
+        ("fp8_ds_mla", True, True, "fp8_dsv41"),
+        ("fp8_ds_mla", True, False, "fp8_dsv41"),
+        ("nvfp4_ds_mla", True, True, "fp8_dsv41_fp4_ca"),
+        # Sliding-window-only calls read just the MXFP8 record.
+        ("nvfp4_ds_mla", True, False, "fp8_dsv41"),
+        ("fp8_ds_mla", False, True, "fp8"),
+    ],
+)
+def test_sm120_dsv41_kernel_follows_kv_caches(
+    kv_cache_dtype, kv_mxfp8, has_compressed_cache, expected
+):
+    assert (
+        _sm120_kv_cache_format(kv_cache_dtype, kv_mxfp8, has_compressed_cache)
+        == expected
+    )
+
+
+@pytest.mark.parametrize("major,expected", [(10, False), (12, True)])
+def test_dsv41_flashinfer_accepts_nvfp4_cache_only_on_sm120(
+    monkeypatch, major, expected
+):
+    monkeypatch.setattr(
+        dsv41_flashinfer.current_platform,
+        "is_device_capability_family",
+        lambda family, device_id=0: family // 10 == major,
+    )
+    backend = dsv41_flashinfer.DeepseekV4FlashInferMLASparseBackend
+    assert backend.supports_kv_cache_dtype("nvfp4_ds_mla") is expected
+    assert backend.supports_kv_cache_dtype("fp8_ds_mla")
