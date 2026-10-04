@@ -148,6 +148,16 @@ class StreamingParserEngine:
         self._token_id_terminal_names: frozenset[str] = frozenset(
             resolved_token_ids.values()
         )
+        self._text_fallback_token_id_terminals: frozenset[str] = frozenset()
+        self._reasoning_end_token_terminals = frozenset(
+            terminal
+            for (state, terminal), transition in config.transitions.items()
+            if state == ParserState.REASONING
+            and EventType.REASONING_END in transition.events
+            and transition.next_state not in self._TOOL_STATES
+            and terminal in config.token_id_terminals
+            and terminal in self._token_id_terminal_names
+        )
 
         self._lexer = IncrementalLexer(lexer_shape, content_terminal=CONTENT_TERMINAL)
 
@@ -205,6 +215,10 @@ class StreamingParserEngine:
         """
         self.state = (
             initial_state if initial_state is not None else self.config.initial_state
+        )
+        self._required_tool_choice_text_fallback_ready = (
+            not self._reasoning_end_token_terminals
+            or (self.state != ParserState.REASONING and not self.skip_reasoning_parsing)
         )
         self.tool_index = -1
         self._ever_had_token_ids = False
@@ -275,6 +289,8 @@ class StreamingParserEngine:
         for item in items:
             if isinstance(item, PreLexedTerminal):
                 events.extend(self._process_lex_tokens(self._lexer.flush()))
+                if item.terminal in self._reasoning_end_token_terminals:
+                    self._required_tool_choice_text_fallback_ready = True
                 events.extend(self._on_terminal(item.terminal, item.text))
             elif isinstance(item, TextChunk):
                 if not item.text and item.token_count:
@@ -356,15 +372,30 @@ class StreamingParserEngine:
 
     def _process_lex_tokens(self, tokens: list[LexToken]) -> list[SemanticEvent]:
         events: list[SemanticEvent] = []
-        strict = self._token_id_terminal_names if self._ever_had_token_ids else None
         for tok in tokens:
-            if tok.terminal == CONTENT_TERMINAL or (strict and tok.terminal in strict):
+            # Text fallbacks remain disabled until a special reasoning-end
+            # token has crossed the stream boundary.
+            strict_token_terminal = (
+                self._ever_had_token_ids
+                and tok.terminal in self._token_id_terminal_names
+                and (
+                    tok.terminal not in self._text_fallback_token_id_terminals
+                    or not self._required_tool_choice_text_fallback_ready
+                )
+            )
+            if tok.terminal == CONTENT_TERMINAL or strict_token_terminal:
                 events.extend(self._on_content(tok.value, tok.token_count))
             else:
                 events.extend(
                     self._on_terminal(tok.terminal, tok.value, tok.token_count)
                 )
         return events
+
+    def set_text_fallback_token_id_terminals(
+        self, terminal_names: frozenset[str]
+    ) -> None:
+        """Allow selected token-ID terminals to match their text spellings."""
+        self._text_fallback_token_id_terminals = terminal_names
 
     _TOOL_STATES = frozenset(
         {

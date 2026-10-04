@@ -424,10 +424,24 @@ class ParserEngine(Parser):
         tools = getattr(request, "tools", None)
         if tools:
             self._tools = tools
-        if not self.skip_tool_parsing and not self._suppress_tool_calls:
-            tool_choice = getattr(request, "tool_choice", None)
-            if tool_choice == "none" and tools:
-                self._suppress_tool_calls = True
+        tool_choice = getattr(request, "tool_choice", None)
+        # Required-tool grammars may use alternate textual spellings for
+        # token-ID markers; the engine limits this fallback to post-reasoning.
+        text_fallback_terminals = (
+            self.parser_engine_config.required_tool_choice_text_fallback_terminals
+            if tool_choice == "required"
+            and not self.skip_tool_parsing
+            and not self._suppress_tool_calls
+            else frozenset()
+        )
+        self._engine.set_text_fallback_token_id_terminals(text_fallback_terminals)
+        if (
+            not self.skip_tool_parsing
+            and not self._suppress_tool_calls
+            and tool_choice == "none"
+            and tools
+        ):
+            self._suppress_tool_calls = True
 
     def _strip_content_whitespace(
         self,
