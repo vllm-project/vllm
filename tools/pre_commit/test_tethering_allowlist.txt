@@ -30,7 +30,6 @@ tests/distributed/test_expert_placement.py  # multi-GPU expert placement; no dir
 tests/distributed/test_file_store.py  # no distributed.yaml job collects this path
 tests/distributed/test_flashinfer_pcie_ipc_all_reduce.py  # multi-GPU PCIe IPC all-reduce (#53576); no job
 tests/distributed/test_kimi_linear_context_parallel.py  # multi-GPU context parallel; no dir-level pytest job
-tests/distributed/test_kv_cache_events.py  # needs multi-proc KV-events setup; no job
 tests/distributed/test_kvlayout.py  # no distributed.yaml job collects this path
 tests/distributed/test_mq_connect_ip.py  # no distributed.yaml job collects this path
 tests/distributed/test_pipeline_partition.py  # no distributed.yaml job collects this path
