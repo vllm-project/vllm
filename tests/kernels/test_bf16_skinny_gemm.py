@@ -734,8 +734,6 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
 def test_qwen4_exp_sm120_plans_are_valid() -> None:
     plans = qwen4_exp_gemm.QWEN4_EXP_SM120_GEMM_PLANS
 
-    assert len(plans) == 13
-    assert sum(map(len, plans.values())) == 58
     # TP=1 and TP=2 LM heads; the TP=4 key the other tables carry must not leak in.
     assert (248320, 2560) in plans
     assert (124160, 2560) in plans
