@@ -69,7 +69,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec, run_on_rank0
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
@@ -462,6 +462,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 calibrate_load_path=bool(
                     self.extra_config.get("calibrate_load_path", False)
                 ),
+                run_calibration=run_on_rank0,
             )
         except Exception:
             worker_mmap.cleanup()

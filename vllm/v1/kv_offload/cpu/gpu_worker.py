@@ -3,7 +3,7 @@
 import functools
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -55,17 +55,12 @@ def _copy_sizes(
     return sizes
 
 
-def _resolve_min_n(
-    copy_size: int,
-    chunk: int,
-    calibration: tuple[torch.Tensor, torch.device] | None,
+def _measure_min_n(
+    copy_size: int, chunk: int, host: torch.Tensor, device: torch.device
 ) -> int | None:
-    """Batch size from which Triton is used for this copy size (None: never).
-    Measured on this machine when calibration is on, the defaults otherwise."""
+    """Measured batch size from which Triton is used for this copy size
+    (None: never). Falls back to the default if it can't be measured."""
     default = default_min_n(copy_size)
-    if calibration is None:
-        return default
-    host, device = calibration
     t0 = time.perf_counter()
     try:
         ratios = measure_load_paths(copy_size, chunk, host, device)
@@ -119,40 +114,74 @@ def _reduce_min_n(min_n_by_size: dict[int, int | None]) -> int | None:
     return reduced
 
 
-def _select_swap_blocks_fn(
+def _triton_load_plan(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]],
     gpu_to_cpu: bool,
-    host_memory_is_pinned: bool = True,
-    canonical_layout: bool = False,
-    calibration: tuple[torch.Tensor, torch.device] | None = None,
-):
-    """Resolve the swap_blocks function for a handler at init time.
-
-    ``calibration`` is the (pinned CPU tensor, GPU device) pair to measure the
-    DMA/Triton crossover on; None keeps the tuned defaults."""
+    host_memory_is_pinned: bool,
+    canonical_layout: bool,
+) -> tuple[list[int], int] | None:
+    """The distinct copy sizes and the kernel chunk if the Triton path can
+    serve this handler, else None."""
     # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
     # The Triton kernel dereferences CPU pointers on the GPU, which is only
     # valid for pinned host memory.
     if gpu_to_cpu or not host_memory_is_pinned:
-        return ops.swap_blocks_batch
+        return None
     # Fall back to the C++ DMA path on platforms where Triton isn't usable
     # (e.g. ROCm host mappings) or where GPU kernels cannot directly
     # dereference CPU pointers (XPU lacks CUDA's unified virtual address space,
     # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
     if not HAS_TRITON or current_platform.is_xpu() or current_platform.is_rocm():
-        return ops.swap_blocks_batch
+        return None
     sizes = _copy_sizes(layer_refs_per_group, canonical_layout)
     # The Triton kernel copies whole 8-byte words per descriptor.
     if not sizes or any(s % 8 for s in sizes):
-        return ops.swap_blocks_batch
+        return None
     # The chunk still follows the page: sizing it to 512-byte fragments was
     # slower than the page-sized chunk.
     page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
     chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
-    # Triton wins from some batch size on, which depends on the copy size.
-    min_n = _reduce_min_n(
-        {s: _resolve_min_n(s, chunk, calibration) for s in sorted(set(sizes))}
+    return sorted(set(sizes)), chunk
+
+
+def measure_load_min_n(
+    layer_refs_per_group: list[list[CanonicalKVCacheRef]],
+    host_memory_is_pinned: bool,
+    canonical_layout: bool,
+    host: torch.Tensor,
+    device: torch.device,
+) -> dict[int, int | None]:
+    """Measure the DMA/Triton crossover for each copy size of a load handler
+    on this GPU, reading from ``host`` (the pinned CPU tensor loads read)."""
+    plan = _triton_load_plan(
+        layer_refs_per_group, False, host_memory_is_pinned, canonical_layout
     )
+    if plan is None:
+        return {}
+    sizes, chunk = plan
+    return {s: _measure_min_n(s, chunk, host, device) for s in sizes}
+
+
+def _select_swap_blocks_fn(
+    layer_refs_per_group: list[list[CanonicalKVCacheRef]],
+    gpu_to_cpu: bool,
+    host_memory_is_pinned: bool = True,
+    canonical_layout: bool = False,
+    calibrated_min_n: dict[int, int | None] | None = None,
+):
+    """Resolve the swap_blocks function for a handler at init time.
+
+    ``calibrated_min_n`` maps copy sizes to measured crossovers (see
+    measure_load_min_n); sizes missing from it keep the tuned defaults."""
+    plan = _triton_load_plan(
+        layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned, canonical_layout
+    )
+    if plan is None:
+        return ops.swap_blocks_batch
+    sizes, chunk = plan
+    measured = calibrated_min_n or {}
+    # Triton wins from some batch size on, which depends on the copy size.
+    min_n = _reduce_min_n({s: measured.get(s, default_min_n(s)) for s in sizes})
     if min_n is None:
         return ops.swap_blocks_batch
     return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk, min_n=min_n)
@@ -392,7 +421,7 @@ class SingleDirectionOffloadingHandler:
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
         host_memory_is_pinned: bool = True,
-        calibrate_load_path: bool = False,
+        calibrated_min_n: dict[int, int | None] | None = None,
     ):
         """Initialize a SingleDirectionOffloadingHandler.
 
@@ -409,8 +438,8 @@ class SingleDirectionOffloadingHandler:
                 described by the refs' mappings.
             host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
                 kernels may dereference them directly.
-            calibrate_load_path: if True, time the DMA and Triton load paths
-                here and use the measured crossover instead of the defaults.
+            calibrated_min_n: measured DMA/Triton crossover per copy size
+                (see measure_load_min_n), used instead of the defaults.
 
         """
         assert len(gpu_tensors) == len(cpu_tensors)
@@ -452,11 +481,7 @@ class SingleDirectionOffloadingHandler:
             gpu_to_cpu,
             host_memory_is_pinned,
             canonical_layout=canonical_layout,
-            calibration=(
-                (max(cpu_tensors, key=torch.Tensor.numel), gpu_tensors[0].device)
-                if calibrate_load_path and not gpu_to_cpu
-                else None
-            ),
+            calibrated_min_n=calibrated_min_n,
         )
 
         # GPU blocks may be smaller
@@ -912,7 +937,15 @@ class CPUOffloadingWorker(OffloadingWorker):
         mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
         calibrate_load_path: bool = False,
+        run_calibration: Callable[
+            [Callable[[], dict[int, int | None]]], dict[int, int | None]
+        ]
+        | None = None,
     ):
+        """``run_calibration`` runs the load path calibration on one worker
+        and returns its result on every worker, so ranks sharing a PCIe link
+        don't measure at the same time and all use the same crossover. None
+        calibrates on this worker. Unused unless ``calibrate_load_path``."""
         assert not canonical_layout or mmap_region is not None
         # The caller owns mmap_region until this constructor returns. After a
         # successful construction, the worker is the sole owner and releases
@@ -977,6 +1010,22 @@ class CPUOffloadingWorker(OffloadingWorker):
             host_memory_is_pinned=host_memory_is_pinned,
         )
 
+        calibrated_min_n = None
+        if calibrate_load_path:
+
+            def calibrate() -> dict[int, int | None]:
+                return measure_load_min_n(
+                    kv_caches.group_data_refs,
+                    host_memory_is_pinned,
+                    canonical_layout,
+                    max(cpu_tensors, key=torch.Tensor.numel),
+                    gpu_tensors[0].device,
+                )
+
+            calibrated_min_n = (
+                run_calibration(calibrate) if run_calibration else calibrate()
+            )
+
         self._load_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
@@ -985,7 +1034,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_to_cpu=False,
             canonical_layout=canonical_layout,
             host_memory_is_pinned=host_memory_is_pinned,
-            calibrate_load_path=calibrate_load_path,
+            calibrated_min_n=calibrated_min_n,
         )
 
     def submit_store(

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
 from typing_extensions import override
@@ -23,22 +24,37 @@ from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
+if TYPE_CHECKING:
+    from vllm.distributed.parallel_state import GroupCoordinator
 
-def _all_workers_barrier() -> None:
-    """Block until every worker rank has reached this point (gloo cpu group).
+T = TypeVar("T")
 
-    A superset of the node-local mmap openers suffices: once the barrier
-    releases, every worker sharing the region file has mapped it."""
+
+def _all_workers_group() -> "GroupCoordinator":
     from vllm.distributed.parallel_state import (
         get_inner_dp_world_group,
         get_world_group,
     )
 
     try:
-        group = get_inner_dp_world_group()
+        return get_inner_dp_world_group()
     except AssertionError:
-        group = get_world_group()
-    group.barrier()
+        return get_world_group()
+
+
+def _all_workers_barrier() -> None:
+    """Block until every worker rank has reached this point (gloo cpu group).
+
+    A superset of the node-local mmap openers suffices: once the barrier
+    releases, every worker sharing the region file has mapped it."""
+    _all_workers_group().barrier()
+
+
+def run_on_rank0(fn: Callable[[], T]) -> T:
+    """Run ``fn`` on rank 0 while the other workers wait, and return its
+    result on every worker."""
+    group = _all_workers_group()
+    return group.broadcast_object(fn() if group.rank_in_group == 0 else None)
 
 
 class CPUOffloadingSpec(OffloadingSpec):
@@ -193,6 +209,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 calibrate_load_path=bool(
                     self.extra_config.get("calibrate_load_path", False)
                 ),
+                run_calibration=run_on_rank0,
             )
         except Exception:
             if mmap_region is not None:

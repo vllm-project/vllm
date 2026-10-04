@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import logging
 import random
 import time
@@ -23,6 +24,7 @@ from vllm.v1.kv_offload.base import (
     TransferResult,
 )
 from vllm.v1.kv_offload.cpu import gpu_worker
+from vllm.v1.kv_offload.cpu import spec as cpu_spec
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -122,6 +124,15 @@ def test_canonical_load_path_requires_aligned_fragments(cuda_like_platform) -> N
     assert canonical is ops.swap_blocks_batch
 
 
+def _calibrated_fn(refs: list[list[CanonicalKVCacheRef]]):
+    """The load selector fed by a calibration measured on this worker."""
+    host, device = torch.zeros(1, dtype=torch.int8), torch.device("cpu")
+    min_n = gpu_worker.measure_load_min_n(refs, True, False, host, device)
+    return gpu_worker._select_swap_blocks_fn(
+        refs, gpu_to_cpu=False, calibrated_min_n=min_n
+    )
+
+
 def test_calibrated_load_path_uses_measured_min_n(
     cuda_like_platform, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -130,25 +141,25 @@ def test_calibrated_load_path_uses_measured_min_n(
     page = 32 * 1024
     assert page >= THRESHOLD_BYTES
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page)]]
-    calibration = (torch.zeros(1, dtype=torch.int8), torch.device("cpu"))
     measured = {"ratios": [3.0, 1.5, 0.75, 0.5, 0.3]}
     monkeypatch.setattr(
         gpu_worker, "measure_load_paths", lambda *args: measured["ratios"]
     )
 
     default = gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False)
-    calibrated = gpu_worker._select_swap_blocks_fn(
-        refs, gpu_to_cpu=False, calibration=calibration
-    )
+    calibrated = _calibrated_fn(refs)
 
     assert default is ops.swap_blocks_batch
     assert calibrated.keywords["min_n"] == 64
 
     # Triton never wins: stay on DMA.
     measured["ratios"] = [3.0, 1.5, 1.4, 1.3, 1.2]
+    assert _calibrated_fn(refs) is ops.swap_blocks_batch
+
+    # A size the calibration didn't cover keeps its default.
     assert (
         gpu_worker._select_swap_blocks_fn(
-            refs, gpu_to_cpu=False, calibration=calibration
+            refs, gpu_to_cpu=False, calibrated_min_n={4096: 16}
         )
         is ops.swap_blocks_batch
     )
@@ -180,17 +191,42 @@ def test_calibration_failure_keeps_defaults(
     cuda_like_platform, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=4096)]]
-    calibration = (torch.zeros(1, dtype=torch.int8), torch.device("cpu"))
 
     def boom(*args):
         raise RuntimeError("no batch memcpy")
 
     for measure in (boom, lambda *args: None):
         monkeypatch.setattr(gpu_worker, "measure_load_paths", measure)
-        fn = gpu_worker._select_swap_blocks_fn(
-            refs, gpu_to_cpu=False, calibration=calibration
-        )
-        assert fn.keywords["min_n"] == MIN_N
+        assert _calibrated_fn(refs).keywords["min_n"] == MIN_N
+
+
+def test_calibration_runs_on_rank0_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rank 0 measures while the others wait, so ranks sharing a PCIe link
+    don't measure at the same time, and every rank gets rank 0's result."""
+    sent: list[object] = []
+
+    class FakeGroup:
+        def __init__(self, rank: int):
+            self.rank_in_group = rank
+
+        def broadcast_object(self, obj=None, src=0):
+            if self.rank_in_group == src:
+                sent.append(obj)
+                return obj
+            return sent[0]
+
+    measured_on: list[int] = []
+
+    def measure(rank: int) -> dict[int, int | None]:
+        measured_on.append(rank)
+        return {65536: 128}
+
+    for rank in (0, 1):
+        group = FakeGroup(rank)
+        monkeypatch.setattr(cpu_spec, "_all_workers_group", lambda g=group: g)
+        assert cpu_spec.run_on_rank0(functools.partial(measure, rank)) == {65536: 128}
+
+    assert measured_on == [0]
 
 
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
