@@ -456,6 +456,15 @@ def create_composite_attention_backend(
             )
 
         @classmethod
+        def supports_mixed_causal(cls):
+            # The routing is not causality-aware, so either variant may receive
+            # the whole batch and must handle the per-request flags itself.
+            return all(
+                backend.supports_mixed_causal()
+                for backend in (general_backend, causal_backend)
+            )
+
+        @classmethod
         def supports_pcp(cls):
             return False
 

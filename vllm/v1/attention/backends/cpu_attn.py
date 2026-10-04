@@ -83,6 +83,11 @@ class CPUAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_mixed_causal(cls) -> bool:
+        # Per-request flags are forwarded to the CPU kernel as `dynamic_causal`.
+        return True
+
+    @classmethod
     def supports_sliding_window(cls) -> bool:
         return True
 
