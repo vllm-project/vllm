@@ -575,14 +575,25 @@ class BenchmarkTensors:
             self.lora_weights_lst[i] = to_device(self.lora_weights_lst[i])
 
         # LoRA meta
+        cpu_meta_fields = {
+            "no_lora_flag_cpu",
+            "num_active_loras_cpu",
+            "default_num_active_loras_cpu",
+            "max_tokens_per_lora_cpu",
+        }
+
         for field_name in LoRAKernelMeta.__dataclass_fields__:
             field = getattr(self.lora_kernel_meta, field_name)
-            assert isinstance(field, torch.Tensor)
-            setattr(
-                self.lora_kernel_meta,
-                field_name,
-                to_device(field) if field_name != "no_lora_flag_cpu" else field,
-            )
+
+            if not isinstance(field, torch.Tensor):
+                continue
+
+            if field_name not in cpu_meta_fields:
+                setattr(
+                    self.lora_kernel_meta,
+                    field_name,
+                    to_device(field),
+                )
 
     def metadata(self, ctx: BenchmarkContext, op_type: OpType) -> tuple[int, int, int]:
         """Return num_seqs, num_tokens and max_seq_len."""
@@ -718,6 +729,8 @@ class BenchmarkTensors:
             "lora_ids": self.lora_kernel_meta.active_lora_ids,
             "scaling": 1.0,
             "no_lora_flag_cpu": self.lora_kernel_meta.no_lora_flag_cpu,
+            "num_active_loras": self.lora_kernel_meta.num_active_loras_cpu,
+            "max_tokens_per_lora": self.lora_kernel_meta.max_tokens_per_lora_cpu,
         }
 
     def as_lora_expand_kwargs(
@@ -761,6 +774,8 @@ class BenchmarkTensors:
             "offset_start": 0,
             "add_inputs": add_inputs,
             "no_lora_flag_cpu": self.lora_kernel_meta.no_lora_flag_cpu,
+            "num_active_loras": self.lora_kernel_meta.num_active_loras_cpu,
+            "max_tokens_per_lora": self.lora_kernel_meta.max_tokens_per_lora_cpu,
         }
 
     def as_fused_moe_lora_shrink_kwargs(
@@ -935,7 +950,7 @@ class BenchmarkTensors:
         raise ValueError(f"Unrecognized optype {self}")
 
     def test_correctness(
-        self, op_type: OpType, expand_fn_add_inputs: bool | None
+        self, ctx: BenchmarkContext, op_type: OpType, expand_fn_add_inputs: bool | None
     ) -> bool:
         """Test correctness of op_type implementation against a grouped gemm
         reference implementation.
@@ -945,7 +960,7 @@ class BenchmarkTensors:
         ref_output = self.output.clone()
 
         self.output.zero_()
-        op_type.bench_fn()(**self.bench_fn_kwargs(op_type, expand_fn_add_inputs))
+        op_type.bench_fn()(**self.bench_fn_kwargs(ctx, op_type, expand_fn_add_inputs))
 
         op_type.run_ref_group_gemm(
             ref_output,
