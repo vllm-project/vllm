@@ -2052,7 +2052,7 @@ class rocm_aiter_ops:
     @staticmethod
     def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
         """Given an activation type as a string, returns the corresponding aiter ActivationType enum.
-        Supported activation types: "no", "none", "silu", "gelu", "swiglu".
+        Supported activation types: "no", "none", "silu", "gelu", "swiglu", "relu2".
         Returns None if the mapping fails.
 
         Args:
@@ -2079,6 +2079,7 @@ class rocm_aiter_ops:
             "gelu": ActivationType.Gelu,
             "swiglu": ActivationType.Swiglu,
             "situ": getattr(ActivationType, "Situv2", None),
+            "relu2": getattr(ActivationType, "Relu2", None),
         }
         return mapping.get(name)
 
