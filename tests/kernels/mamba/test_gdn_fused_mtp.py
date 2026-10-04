@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import types
 from typing import cast
 from unittest.mock import patch
@@ -32,6 +33,7 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa:
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
     MambaStateShapeCalculator,
+    is_conv_state_dim_first,
 )
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (  # noqa: E402
     rmsnorm_fn,
@@ -42,6 +44,9 @@ from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import (  # noqa: E402
+    compute_num_decode_draft_tokens,
+)
 
 NUM_SPEC = 3
 SPEC_TOKENS = NUM_SPEC + 1
@@ -249,6 +254,11 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
         ),
         pytest.param([96], [64], [-1], 0, id="pure-prefill"),
         pytest.param([128], [1], [-1], 0, id="pure-decode"),
+        pytest.param([64, 64], [12, 12], None, 0, id="oversized-dummy-batch"),
+        pytest.param([128, 64], [1, 12], None, 0, id="zero-draft-with-dummy"),
+        pytest.param(
+            [128, 64], [SPEC_TOKENS, 12], None, 0, id="verify-boundary-with-dummy"
+        ),
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
@@ -256,7 +266,7 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
 def test_fused_model_path_matches_reference(
     seq_lens: list[int],
     query_lens: list[int],
-    draft_tokens: list[int],
+    draft_tokens: list[int] | None,
     expected_fused_calls: int,
     output_gate_activation: str,
 ) -> None:
@@ -280,6 +290,17 @@ def test_fused_model_path_matches_reference(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     )
     common.block_table_tensor.add_(1)
+    if draft_tokens is None:
+        draft_tokens = compute_num_decode_draft_tokens(
+            num_padded_reqs=batch.batch_size,
+            num_scheduled_tokens=torch.tensor(query_lens, dtype=torch.int32).numpy(),
+            num_draft_tokens_per_req=None,
+            is_prefilling=torch.zeros(batch.batch_size, dtype=torch.bool).numpy(),
+            max_decode_query_len=SPEC_TOKENS,
+        ).tolist()
+        assert draft_tokens == [
+            0 if length <= SPEC_TOKENS else -1 for length in query_lens
+        ]
     with set_current_vllm_config(vllm_config):
         metadata = builder.build(
             common_prefix_len=0,
@@ -389,4 +410,174 @@ def test_fused_model_path_matches_reference(
         reference_layer.kv_cache[1],
         atol=3e-2,
         rtol=3e-2,
+    )
+
+
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_zero_draft_decode_uses_the_accepted_recurrent_state(
+    state_dtype: torch.dtype,
+) -> None:
+    """A zero-draft V2 decode must preserve each row's accepted-state offset."""
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    vllm_config = _make_vllm_config()
+    builder = GDNAttentionMetadataBuilder(
+        kv_cache_spec=MambaSpec(
+            block_size=BLOCK_SIZE,
+            shapes=((16, 64),),
+            dtypes=(torch.float16,),
+            num_speculative_blocks=NUM_SPEC,
+        ),
+        layer_names=[PREFIX],
+        vllm_config=vllm_config,
+        device=device,
+    )
+    accepted = torch.tensor([3, 1], dtype=torch.int32, device=device)
+    batch = BatchSpec(seq_lens=[65, 65], query_lens=[1, 1])
+    common = create_common_attn_metadata(
+        batch,
+        BLOCK_SIZE,
+        device,
+        arange_block_indices=True,
+    )
+    common.block_table_tensor.add_(1)
+    with set_current_vllm_config(vllm_config):
+        metadata = builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=common,
+            num_accepted_tokens=accepted,
+            num_decode_draft_tokens_cpu=torch.zeros(2, dtype=torch.int32),
+        )
+
+    state_indices = metadata.spec_state_indices_tensor
+    assert state_indices is not None
+    assert metadata.num_accepted_tokens is not None
+    destination = state_indices[:, 0]
+    source = state_indices.gather(
+        1,
+        accepted.sub(1).unsqueeze(1),
+    ).squeeze(1)
+    pool_size = int(state_indices.max().item()) + 1
+    conv_state_shape, temporal_state_shape = (
+        MambaStateShapeCalculator.gated_delta_net_state_shape(
+            1,
+            H,
+            HV,
+            K,
+            V,
+            CONV_KERNEL,
+            NUM_SPEC,
+        )
+    )
+    conv_state = 0.05 * torch.randn(
+        pool_size,
+        *conv_state_shape,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    ssm_state = 0.01 * torch.randn(
+        pool_size,
+        *temporal_state_shape,
+        dtype=state_dtype,
+        device=device,
+    )
+    conv_state_reference = conv_state.clone()
+    ssm_state_reference = ssm_state.clone()
+    ssm_state_reference[destination] = ssm_state[source]
+    conv_state_view = (
+        conv_state if is_conv_state_dim_first() else conv_state.transpose(-1, -2)
+    )
+    conv_state_reference_view = (
+        conv_state_reference
+        if is_conv_state_dim_first()
+        else conv_state_reference.transpose(-1, -2)
+    )
+    for row, num_accepted in enumerate(accepted.tolist()):
+        offset = num_accepted - 1
+        conv_state_reference_view[destination[row], :, : CONV_KERNEL - 1] = (
+            conv_state_view[
+                destination[row],
+                :,
+                offset : offset + CONV_KERNEL - 1,
+            ]
+        )
+
+    reference_metadata = dataclasses.replace(
+        metadata,
+        num_decodes=2,
+        num_decode_tokens=2,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        spec_query_start_loc=None,
+        non_spec_query_start_loc=metadata.spec_query_start_loc,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=destination,
+        spec_sequence_masks=None,
+        spec_token_indx=None,
+        non_spec_token_indx=None,
+        num_accepted_tokens=None,
+    )
+    a_log = 0.1 * torch.randn(HV, dtype=torch.float32, device=device)
+    dt_bias = 0.1 * torch.randn(HV, dtype=torch.float32, device=device)
+    conv_weight = 0.1 * torch.randn(
+        CONV_DIM,
+        1,
+        CONV_KERNEL,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    norm_weight = torch.randn(V, dtype=torch.float32, device=device)
+    mixed_qkv = 0.1 * torch.randn(
+        2,
+        CONV_DIM,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    b = 0.1 * torch.randn(2, HV, dtype=torch.bfloat16, device=device)
+    a = 0.1 * torch.randn_like(b)
+    outputs = []
+    layers = []
+    for current_conv_state, current_ssm_state, current_metadata in (
+        (conv_state, ssm_state, metadata),
+        (conv_state_reference, ssm_state_reference, reference_metadata),
+    ):
+        layer = _build_layer(
+            vllm_config,
+            current_conv_state,
+            current_ssm_state,
+            a_log,
+            dt_bias,
+            conv_weight,
+            norm_weight,
+            "silu",
+        )
+        output = torch.zeros(2, HV, V, dtype=torch.bfloat16, device=device)
+        context = types.SimpleNamespace(attn_metadata={PREFIX: current_metadata})
+        with patch.object(
+            qwen_gdn_linear_attn,
+            "get_forward_context",
+            return_value=context,
+        ):
+            layer._forward_core(
+                mixed_qkv=mixed_qkv.clone(),
+                b=b.clone(),
+                a=a.clone(),
+                core_attn_out=output,
+            )
+        outputs.append(output)
+        layers.append(layer)
+
+    torch.testing.assert_close(outputs[0], outputs[1], rtol=1e-2, atol=1e-3)
+    torch.testing.assert_close(
+        layers[0].kv_cache[0][destination],
+        layers[1].kv_cache[0][destination],
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        layers[0].kv_cache[1][destination],
+        layers[1].kv_cache[1][destination],
+        rtol=1e-2,
+        atol=1e-3,
     )
