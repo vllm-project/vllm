@@ -215,6 +215,10 @@ class TieringMetricsTracker:
                 else TieringOffloadingMetrics.CASCADE_JOB_FAILURES
             )
             self._stats.increase_counter(failure_metric, labelvalues=labelvalues)
+            if completed_job.checksum_failed:
+                self._stats.increase_counter(
+                    TieringOffloadingMetrics.CHECKSUM_FAILURES, labelvalues=labelvalues
+                )
             if transfer_job.is_promotion and completed_job.successful_keys:
                 completed_key_count = len(completed_job.successful_keys)
             else:
