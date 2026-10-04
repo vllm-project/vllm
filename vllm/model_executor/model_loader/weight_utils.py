@@ -96,6 +96,13 @@ def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
     hash_name = hashlib.sha256(model_name.encode()).hexdigest()
     # add hash to avoid conflict with old users' lock files
     lock_file_name = hash_name + model_name + ".lock"
+    # Most filesystems cap a single path component at 255 bytes even though the
+    # full path may be far longer, and a local checkpoint path flattened into
+    # the name blows past that (`OSError: [Errno 36] File name too long`).
+    # The digest already identifies the model, so fall back to it alone and
+    # keep the historical name for ordinary model ids.
+    if len(os.fsencode(lock_file_name)) > 255:
+        lock_file_name = hash_name + ".lock"
     # mode 0o666 is required for the filelock to be shared across users
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name), mode=0o666)
     return lock
