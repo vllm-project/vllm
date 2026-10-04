@@ -96,6 +96,11 @@ def make_eep_staged_quant_method(
         allow_new_interface=True,
         use_monolithic=quant_method.is_monolithic,
         all2all_manager=all2all_manager,
+        input_dtype=(
+            moe_config.in_dtype
+            if moe_kernel.fused_experts.expects_unquantized_inputs
+            else None
+        ),
     )
     assert prepare_finalize is not None
     assert isinstance(prepare_finalize, FusedMoEPrepareAndFinalizeModular)
