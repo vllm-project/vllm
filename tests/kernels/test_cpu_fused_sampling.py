@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import tracemalloc
-
 import pytest
 import torch
 
@@ -11,7 +9,7 @@ from vllm.platforms import current_platform
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-import vllm._C  # noqa: F401, E402
+current_platform.import_kernels()
 
 VOCAB_SIZES = [32000, 49152, 128256]
 BATCH_SIZES = [1, 4, 16]
@@ -42,79 +40,132 @@ class TestGreedyArgmax:
         torch.testing.assert_close(result, expected)
 
 
-class TestFusedGumbelArgmax:
-    @pytest.mark.parametrize("vocab_size", VOCAB_SIZES)
-    def test_distribution_chi_squared(self, vocab_size: int):
-        """Verify sampling distribution via chi-squared goodness of fit."""
-        small_vocab = min(vocab_size, 100)
-        logits = torch.randn(1, small_vocab, dtype=torch.float32)
-        probs = logits.softmax(dim=-1).squeeze(0)
+class TestBucketedRejectionSampling:
+    def test_small_support_distribution(self):
+        from scipy.stats import chisquare
 
-        n_samples = 100_000
-        counts = torch.zeros(small_vocab)
-        for trial in range(n_samples):
-            seed = torch.tensor([trial * 7 + 13], dtype=torch.long)
-            tile = logits.expand(1, -1).contiguous()
-            idx = torch.ops._C.fused_gumbel_argmax(tile, seed)
-            counts[idx.item()] += 1
+        logits = torch.tensor([0.0, -0.2, -0.7, -1.5, -3.0, -float("inf")])
+        n_samples = 20_000
+        generator = torch.Generator().manual_seed(432)
+        seeds = torch.empty(n_samples, dtype=torch.int64).random_(
+            -(2**63), None, generator=generator
+        )
+        tokens = torch.ops._C.bucketed_rejection_sample(
+            logits.expand(n_samples, -1), seeds
+        )
+        counts = torch.bincount(tokens, minlength=logits.numel()).double()
+        probs = logits.double().softmax(-1)
+        assert counts[-1] == 0
+        _, p_value = chisquare(counts[:-1].numpy(), (probs[:-1] * n_samples).numpy())
+        assert p_value > 1e-7
 
-        expected = probs * n_samples
-        mask = expected > 5
-        chi2 = ((counts[mask] - expected[mask]) ** 2 / expected[mask]).sum()
-        dof = mask.sum().item() - 1
-        from scipy.stats import chi2 as chi2_dist
+    def test_full_vocabulary_zipf_tail_distribution(self):
+        """The old fixed table loses tail mass even with unlimited draws."""
+        from scipy.stats import chisquare
 
-        p_value = 1.0 - chi2_dist.cdf(chi2.item(), dof)
-        assert p_value > 0.001, (
-            f"Chi-squared test failed: chi2={chi2.item():.1f}, "
-            f"dof={dof}, p={p_value:.6f}"
+        vocab_size, batch_size, n_samples = 151_936, 128, 16_384
+        logits = (-1.1 * torch.arange(1, vocab_size + 1).double().log()).float()
+        probs = logits.double().softmax(-1)
+        counts = torch.zeros(vocab_size, dtype=torch.int64)
+        generator = torch.Generator().manual_seed(59786)
+        for _ in range(n_samples // batch_size):
+            seeds = torch.empty(batch_size, dtype=torch.int64).random_(
+                -(2**63), None, generator=generator
+            )
+            tokens = torch.ops._C.bucketed_rejection_sample(
+                logits.expand(batch_size, -1), seeds
+            )
+            counts += torch.bincount(tokens, minlength=vocab_size)
+
+        # Fixed rank groups have enough expected observations for chi-square;
+        # individually rare tokens need not appear in a finite sample.
+        observed = torch.stack([group.sum() for group in counts.tensor_split(32)])
+        expected = torch.stack([group.sum() for group in probs.tensor_split(32)])
+        expected *= n_samples
+        assert expected.min() >= 10
+        _, p_value = chisquare(observed.numpy(), expected.numpy())
+        assert p_value > 1e-7, f"Zipf rank-group p-value: {p_value}"
+
+        # This set has about 5% target mass, versus about 3.3% with the table.
+        tail = probs < 2**-20
+        probability = probs[tail].sum().item()
+        tail_count = counts[tail].sum().item()
+        sigma = (n_samples * probability * (1 - probability)) ** 0.5
+        assert abs(tail_count - n_samples * probability) <= 6 * sigma, (
+            f"tail frequency={tail_count / n_samples}, expected={probability}"
         )
 
-    def test_deterministic_same_seed(self):
-        """Same seed produces same result."""
-        logits = torch.randn(4, 32000, dtype=torch.float32)
-        seeds = torch.tensor([42, 123, 456, 789], dtype=torch.long)
-        r1 = torch.ops._C.fused_gumbel_argmax(logits, seeds)
-        r2 = torch.ops._C.fused_gumbel_argmax(logits, seeds)
-        torch.testing.assert_close(r1, r2)
+    def test_strided_inputs_preserve_row_seed_determinism(self):
+        generator = torch.Generator().manual_seed(723)
+        logits = torch.randn(8, 514, generator=generator)[:, ::2]
+        logits[:, 3::7] = -float("inf")
+        seeds = torch.empty(16, dtype=torch.int64).random_(
+            -(2**63), None, generator=generator
+        )[::2]
+        assert not logits.is_contiguous() and not seeds.is_contiguous()
+        expected = torch.ops._C.bucketed_rejection_sample(
+            logits.contiguous(), seeds.contiguous()
+        )
+        original_threads = torch.get_num_threads()
+        try:
+            for threads in (1, 4):
+                torch.set_num_threads(threads)
+                actual = torch.ops._C.bucketed_rejection_sample(logits, seeds)
+                torch.testing.assert_close(actual, expected)
+                order = torch.tensor([3, 7, 1, 6, 0, 5, 2, 4])
+                actual = torch.ops._C.bucketed_rejection_sample(
+                    logits[order], seeds[order]
+                )
+                torch.testing.assert_close(actual, expected[order])
+        finally:
+            torch.set_num_threads(original_threads)
+        assert torch.isfinite(logits[torch.arange(8), expected]).all()
 
-    def test_different_seeds_differ(self):
-        logits = torch.zeros(16, 50000, dtype=torch.float32)
-        seeds_a = torch.arange(16, dtype=torch.long)
-        seeds_b = torch.arange(16, dtype=torch.long) + 1_000_000
-        r_a = torch.ops._C.fused_gumbel_argmax(logits, seeds_a)
-        r_b = torch.ops._C.fused_gumbel_argmax(logits, seeds_b)
-        assert not torch.equal(r_a, r_b)
+    def test_high_seed_bits_change_streams(self):
+        logits = torch.zeros(128, 97, dtype=torch.float32)
+        seeds = torch.arange(128, dtype=torch.int64) << 40
+        tokens = torch.ops._C.bucketed_rejection_sample(logits, seeds)
+        # All low bits match: the old table returns one token for every row.
+        assert tokens.unique().numel() > 20
+        negative_seeds = seeds ^ -(2**63)
+        negative_tokens = torch.ops._C.bucketed_rejection_sample(logits, negative_seeds)
+        assert (negative_seeds < 0).all()
+        assert (tokens != negative_tokens).sum() > 100
+
+    @pytest.mark.parametrize(
+        "row", [[0.0, float("nan")], [0.0, float("inf")], [-float("inf")] * 2]
+    )
+    @pytest.mark.parametrize("batch_size", [1, 4])
+    def test_invalid_rows_raise(self, row, batch_size):
+        logits = torch.zeros(batch_size, 2)
+        logits[-1] = torch.tensor(row)
+        original_threads = torch.get_num_threads()
+        try:
+            torch.set_num_threads(4)
+            with pytest.raises(RuntimeError):
+                torch.ops._C.bucketed_rejection_sample(
+                    logits, torch.arange(batch_size, dtype=torch.int64)
+                )
+        finally:
+            torch.set_num_threads(original_threads)
+
+    def test_empty_batch_and_single_unmasked_token(self):
+        tokens = torch.ops._C.bucketed_rejection_sample(
+            torch.empty(0, 7), torch.empty(0, dtype=torch.int64)
+        )
+        assert tokens.shape == (0,) and tokens.dtype == torch.int64
+        logits = torch.full((4, 7), -float("inf"))
+        logits[:, 3] = -torch.finfo(torch.float32).max
+        tokens = torch.ops._C.bucketed_rejection_sample(
+            logits, torch.tensor([0, -1, -(2**63), 2**63 - 1])
+        )
+        torch.testing.assert_close(tokens, torch.full((4,), 3))
 
     @pytest.mark.parametrize("vocab_size", VOCAB_SIZES)
     @pytest.mark.parametrize("batch_size", BATCH_SIZES)
     def test_output_in_range(self, vocab_size: int, batch_size: int):
         logits = torch.randn(batch_size, vocab_size, dtype=torch.float32)
         seeds = torch.arange(batch_size, dtype=torch.long)
-        result = torch.ops._C.fused_gumbel_argmax(logits, seeds)
+        result = torch.ops._C.bucketed_rejection_sample(logits, seeds)
         assert result.min() >= 0
         assert result.max() < vocab_size
-
-
-class TestMemory:
-    def test_fused_no_intermediate_allocs(self):
-        """Verify that the fused kernel does not allocate large intermediates."""
-        logits = torch.randn(16, 128256, dtype=torch.float32)
-        seeds = torch.arange(16, dtype=torch.long)
-
-        torch.ops._C.fused_gumbel_argmax(logits, seeds)
-
-        tracemalloc.start()
-        snap_before = tracemalloc.take_snapshot()
-        for _ in range(50):
-            torch.ops._C.fused_gumbel_argmax(logits, seeds)
-        snap_after = tracemalloc.take_snapshot()
-        tracemalloc.stop()
-
-        diff = snap_after.compare_to(snap_before, "lineno")
-        total_new_bytes = sum(s.size_diff for s in diff if s.size_diff > 0)
-        vocab_bytes = 16 * 128256 * 4
-        assert total_new_bytes < vocab_bytes, (
-            f"Fused kernel allocated {total_new_bytes} bytes, "
-            f"expected < {vocab_bytes} (one intermediate tensor)"
-        )

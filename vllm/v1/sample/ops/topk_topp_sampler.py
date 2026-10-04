@@ -319,11 +319,10 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Fused Gumbel-max sampling for CPU.
+        """Sample on CPU using logit buckets and rejection correction.
 
-        Uses a precomputed Gumbel table + single-pass argmax over logits,
-        skipping softmax and intermediate allocations entirely.
-        Falls back to the native path when fp64 Gumbel noise is requested.
+        Draw one seed per row from its request generator, or the global
+        generator for unseeded requests. Keep the fp64 exponential path.
         """
         logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None
@@ -341,14 +340,14 @@ class TopKTopPSampler(nn.Module):
             return sample_with_exponential_noise(probs, q), logits_to_return
 
         batch_size = logits.shape[0]
-        seeds = torch.randint(0, 2**31, (batch_size,), dtype=torch.long)
+        seeds = torch.empty(batch_size, dtype=torch.long, device="cpu")
+        if len(generators) != batch_size:
+            seeds.random_(-(2**63), None)
         for i, gen in generators.items():
-            seeds[i] = torch.randint(
-                0, 2**31, (1,), generator=gen, dtype=torch.long
-            ).item()
+            seeds[i : i + 1].random_(-(2**63), None, generator=gen)
         logits_f32 = logits.to(dtype=torch.float32)
         return (
-            torch.ops._C.fused_gumbel_argmax(logits_f32, seeds),
+            torch.ops._C.bucketed_rejection_sample(logits_f32, seeds),
             logits_to_return,
         )
 
