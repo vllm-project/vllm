@@ -72,7 +72,10 @@ class FusedMoERouter(ABC):
             topk_indices_dtype=topk_indices_dtype,
             input_ids=input_ids,
         )
+        self._record_routing(topk_ids)
+        return topk_weights, topk_ids
 
+    def _record_routing(self, topk_ids: torch.Tensor) -> None:
         # Write routing data for non-monolithic path (Triton, etc.)
         # (set by bind_routing_capture_to_model during capturer init)
         if self._routing_replay_out is not None:
@@ -80,4 +83,32 @@ class FusedMoERouter(ABC):
                 topk_ids.to(torch.int16)
             )
 
-        return topk_weights, topk_ids
+    # A router may own the gate GEMM and route straight from hidden states,
+    # which lets it fuse the GEMM with expert selection. The MoE runner binds
+    # its gate and skips computing router logits when this is supported.
+
+    def bind_gate(self, gate: torch.nn.Module) -> None:  # noqa: B027
+        """Offer the MoE gate to a router that can fuse it into routing.
+
+        A no-op for routers that cannot; the runner keeps the gate GEMM.
+        """
+
+    def can_select_from_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> bool:
+        """Whether select_experts_from_hidden_states can route this batch."""
+        return False
+
+    def select_experts_from_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """select_experts with the gate GEMM computed by the router itself."""
+        raise NotImplementedError

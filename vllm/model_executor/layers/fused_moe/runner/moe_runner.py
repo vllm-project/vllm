@@ -279,6 +279,8 @@ class MoERunner(MoERunnerInterface):
         # in a single launch.
         self._fse_fuse_gate = gate is not None and shared_expert_gate is not None
         self._combined_gate_weight: torch.Tensor | None = None
+        if gate is not None and not self._fse_fuse_gate:
+            router.bind_gate(gate)
 
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
@@ -599,6 +601,7 @@ class MoERunner(MoERunnerInterface):
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
         shared_experts_overlapping: bool = False,
+        route_from_hidden_states: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor | UnfinalizedMoEOutput]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
@@ -609,6 +612,9 @@ class MoERunner(MoERunnerInterface):
         `shared_experts_overlapping` should be True only if using multi-stream
         overlap. Then the shared expert was already launched in a separate
         stream, so the results only have to be awaited here.
+
+        `route_from_hidden_states` means the router computes the gate itself
+        and `router_logits` is unused (see `_can_route_from_hidden_states`).
         """
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
@@ -623,12 +629,19 @@ class MoERunner(MoERunnerInterface):
             )
         else:
             # Modular kernels: select experts first, then call routed_experts
-            topk_weights, topk_ids = self.router.select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                topk_indices_dtype=self._quant_method.topk_indices_dtype,
-                input_ids=input_ids,
-            )
+            if route_from_hidden_states:
+                topk_weights, topk_ids = self.router.select_experts_from_hidden_states(
+                    hidden_states,
+                    self._quant_method.topk_indices_dtype,
+                    input_ids=input_ids,
+                )
+            else:
+                topk_weights, topk_ids = self.router.select_experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    topk_indices_dtype=self._quant_method.topk_indices_dtype,
+                    input_ids=input_ids,
+                )
 
             fused_out = self.routed_experts.forward_modular(
                 x=hidden_states,
@@ -799,6 +812,25 @@ class MoERunner(MoERunnerInterface):
             self.moe_config.dp_size > 1 or self.moe_config.is_sequence_parallel
         ) and not self._quant_method.supports_internal_mk
 
+    def _can_route_from_hidden_states(
+        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
+    ) -> bool:
+        """Whether the router can absorb the gate GEMM for this batch.
+
+        Monolithic kernels consume router logits, and naive DP/EP and PCP
+        dispatch move them between ranks, so both keep the gate GEMM.
+        """
+        return (
+            not self.routed_experts.quant_method.is_monolithic
+            and not self.do_naive_dispatch_combine
+            and self.moe_config.pcp_size == 1
+            and self.router.can_select_from_hidden_states(
+                hidden_states,
+                self._quant_method.topk_indices_dtype,
+                input_ids=input_ids,
+            )
+        )
+
     def _maybe_dispatch(
         self,
         hidden_states: torch.Tensor,
@@ -900,12 +932,16 @@ class MoERunner(MoERunnerInterface):
         # If the Runner holds the gate, apply it after the stream sync,
         # so it can run overlapped with the
         # NOTE: in future PR, MoE runner will always hold the gate.
+        route_from_hidden_states = False
         if self.gate is not None:
             if self._fse_fuse_gate:
                 self._maybe_fuse_gate_weights()
                 router_logits = dispatch_unquantized_gemm()(
                     self, hidden_states, self._combined_gate_weight, None
                 )
+            elif self._can_route_from_hidden_states(hidden_states, input_ids):
+                # The router fuses the gate GEMM into expert selection.
+                route_from_hidden_states = True
             else:
                 router_logits, _ = self.gate(hidden_states)
 
@@ -924,6 +960,7 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
                 shared_experts_overlapping=shared_experts_overlapping,
+                route_from_hidden_states=route_from_hidden_states,
             )
 
             return self._maybe_combine(
