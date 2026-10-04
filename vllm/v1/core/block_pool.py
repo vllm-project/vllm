@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
@@ -28,6 +28,9 @@ from vllm.v1.core.kv_cache_utils import (
     to_event_extra_keys,
 )
 from vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_priority import KVCachePriority
 
 logger = init_logger(__name__)
 
@@ -194,6 +197,7 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        self.kv_cache_priority: KVCachePriority | None = None
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -594,6 +598,8 @@ class BlockPool:
         self,
         block: KVCacheBlock,
     ) -> list[BlockHashWithGroupId]:
+        if self.kv_cache_priority is not None:
+            self.kv_cache_priority.forget(block)
         block_hashes: list[BlockHashWithGroupId] = []
         if block.block_hash is not None:
             block_hashes.append(block.block_hash)
@@ -681,7 +687,11 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        ret = (
+            self.free_block_queue.popleft_n(num_blocks)
+            if self.kv_cache_priority is None
+            else self.kv_cache_priority.take_blocks(num_blocks)
+        )
 
         if self._reuse_watchers:
             self._notify_reuse(ret)
@@ -728,6 +738,8 @@ class BlockPool:
             if block.ref_cnt == 0:
                 released.append(block)
         self.free_block_queue.append_n(released)
+        if self.kv_cache_priority is not None:
+            self.kv_cache_priority.on_free(released)
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
@@ -766,6 +778,8 @@ class BlockPool:
             # candidate), so remove it.
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
+                if self.kv_cache_priority is not None:
+                    self.kv_cache_priority.on_touch(block)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -804,6 +818,9 @@ class BlockPool:
         self.free_block_queue.prepend_n(blocks_to_evict_first)
         # Blocks to reuse last are appended to the end of the free queue.
         self.free_block_queue.append_n(blocks_to_evict_last)
+        if self.kv_cache_priority is not None:
+            self.kv_cache_priority.on_free(blocks_to_evict_first, prepend=True)
+            self.kv_cache_priority.on_free(blocks_to_evict_last)
         for pool, blocks in other_pools.items():
             pool.free_blocks(blocks)
 
@@ -849,6 +866,8 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
         self.cached_block_hashes_by_block.clear()
+        if self.kv_cache_priority is not None:
+            self.kv_cache_priority.reset()
         if self._reuse_watchers:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]
