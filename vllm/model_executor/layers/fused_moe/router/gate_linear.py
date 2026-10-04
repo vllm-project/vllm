@@ -4,6 +4,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import (
@@ -37,6 +38,9 @@ class GateLinear(ReplicatedLinear):
 
     A ``quant_config`` that actually quantizes the gate disables every
     specialized tier, leaving plain ``ReplicatedLinear`` behavior.
+
+    ``VLLM_BATCH_INVARIANT`` also disables tiers 1-5: they pick kernels and
+    split-K from the token count and skip the batch-invariant linear path.
     """
 
     # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
@@ -77,8 +81,12 @@ class GateLinear(ReplicatedLinear):
                 input_size,
                 output_size,
             ) in ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES
+        batch_invariant = envs.VLLM_BATCH_INVARIANT
         can_use_specialized_kernels = (
-            current_platform.is_cuda() and (is_hopper or is_blackwell) and not bias
+            current_platform.is_cuda()
+            and (is_hopper or is_blackwell)
+            and not bias
+            and not batch_invariant
         )
 
         # If fp32 compute is required and no specialized kernel is available,
@@ -108,6 +116,7 @@ class GateLinear(ReplicatedLinear):
         # fp32 specialized kernel eligibility (exact dims, fp32 weight)
         self.allow_fp32_router_gemm = (
             self.is_unquantized
+            and not batch_invariant
             and not bias
             and self.weight.dtype == torch.float32
             and (
@@ -121,6 +130,7 @@ class GateLinear(ReplicatedLinear):
         )
         self.allow_bf16x3_router_gemm = (
             self.is_unquantized
+            and not batch_invariant
             and not bias
             and self.weight.dtype == torch.float32
             and current_platform.is_cuda()
@@ -137,8 +147,10 @@ class GateLinear(ReplicatedLinear):
         # (GB10 / DGX Spark), which this tier still covers. See #49921.
         self._router_gemm_no_bias = self.is_unquantized and not bias
         self._router_gemm_cublas_capable = (
-            current_platform.is_cuda() or current_platform.is_rocm()
-        ) and self._router_gemm_no_bias
+            (current_platform.is_cuda() or current_platform.is_rocm())
+            and self._router_gemm_no_bias
+            and not batch_invariant
+        )
         self.allow_cublas_router_gemm = (
             self._router_gemm_cublas_capable
             and self.weight.dtype == torch.bfloat16
@@ -154,6 +166,7 @@ class GateLinear(ReplicatedLinear):
 
         self._rocm_bf16x3_weight_eligible = (
             self._router_gemm_no_bias
+            and not batch_invariant
             and self.weight.dtype == torch.float32
             and bf16x3_router_gemm_rocm.platform_supported()
         )

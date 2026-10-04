@@ -663,6 +663,7 @@ steps:
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+    - pytest -v -s v1/determinism/test_gate_linear_batch_invariant.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   mirror:
@@ -700,6 +701,7 @@ steps:
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+    - pytest -v -s v1/determinism/test_gate_linear_batch_invariant.py
     - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
