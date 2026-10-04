@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import dataclass
 
 from vllm.inputs import (
@@ -151,7 +152,15 @@ def get_beam_search_score(
         seq_len -= 1
 
     # An aborted beam may contain only an EOS prompt token.
-    return cumulative_logprob / (max(seq_len, 1) ** length_penalty)
+    # A large |length_penalty| overflows or underflows the power. Saturate
+    # instead of raising, so the request still returns its beams.
+    try:
+        denominator = max(seq_len, 1) ** length_penalty
+    except OverflowError:
+        denominator = math.inf
+    if denominator == 0.0:
+        return -math.inf if cumulative_logprob < 0 else 0.0
+    return cumulative_logprob / denominator
 
 
 def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):
