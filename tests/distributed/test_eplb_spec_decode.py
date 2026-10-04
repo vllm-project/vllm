@@ -2,11 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import lm_eval
 import pytest
+import torch
 
 from tests.utils import large_gpu_mark
+from vllm.distributed.eplb.eplb_state import EplbState
+from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
 from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.v1.worker.gpu.eplb_utils import (
+    EPLBController,
+    draft_model_supports_eplb,
+)
 
 
 def get_model_args(
@@ -15,14 +25,18 @@ def get_model_args(
     spec_method: str,
     tp_size: int,
     model_max_len: int,
+    num_speculative_tokens: int = 1,
     use_async: bool = True,
 ) -> dict:
     speculative_config = {
         "method": spec_method,
         "model": spec_model_name,
-        "num_speculative_tokens": 1,
+        "num_speculative_tokens": num_speculative_tokens,
         "max_model_len": model_max_len,
     }
+    if spec_method == "dspark":
+        speculative_config["model"] = model_name
+        speculative_config["draft_sample_method"] = "probabilistic"
     eplb_config = {
         "num_redundant_experts": tp_size,
         "window_size": 128,
@@ -42,6 +56,8 @@ def get_model_args(
         "enable_eplb": True,
         "max_model_len": model_max_len,
     }
+    if spec_method == "dspark":
+        model_args["trust_remote_code"] = True
     return model_args
 
 
@@ -51,11 +67,190 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+class FakeEplbState:
+    instances: list[FakeEplbState] = []
+
+    def __init__(self, parallel_config, device: torch.device):
+        self.add_model_calls: list[tuple[object, object, str | None]] = []
+        FakeEplbState.instances.append(self)
+
+    def add_model(
+        self,
+        model: object,
+        model_config: object,
+        *,
+        model_name: str | None = None,
+    ) -> None:
+        self.add_model_calls.append((model, model_config, model_name))
+
+
+def _make_dsv4_dspark_hf_config() -> DeepseekV4Config:
+    return DeepseekV4Config(
+        architectures=["DeepseekV4ForCausalLM"],
+        hidden_size=128,
+        num_hidden_layers=2,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        num_hash_layers=0,
+        n_shared_experts=1,
+        moe_intermediate_size=128,
+        hc_mult=1,
+        hc_eps=1e-5,
+        rms_norm_eps=1e-5,
+        dspark_target_layer_ids=[0],
+        dspark_markov_rank=8,
+        index_topk=4,
+        head_dim=64,
+        num_attention_heads=4,
+        vocab_size=256,
+        n_mtp_layers=2,
+        enable_confidence_head=False,
+        compress_ratios=[1, 1],
+    )
+
+
+@pytest.fixture
+def dspark_vllm_config():
+    hf_config = _make_dsv4_dspark_hf_config()
+    model_config = SimpleNamespace(
+        dtype=torch.bfloat16, hf_config=hf_config, model="dspark"
+    )
+    return SimpleNamespace(
+        model_config=model_config,
+        quant_config=None,
+        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe"),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            tensor_parallel_size=1,
+            data_parallel_size=1,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            enable_elastic_ep=False,
+            eplb_config=SimpleNamespace(num_redundant_experts=4),
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+        speculative_config=SimpleNamespace(
+            method="dspark",
+            draft_model_config=model_config,
+        ),
+    )
+
+
+def _make_moe_topology(
+    *,
+    num_routed_experts: int = 8,
+    num_redundant_experts: int = 4,
+    num_expert_groups: int = 1,
+) -> SimpleNamespace:
+    num_physical_experts = num_routed_experts + num_redundant_experts
+    return SimpleNamespace(
+        num_routed_experts=num_routed_experts,
+        num_redundant_experts=num_redundant_experts,
+        num_physical_experts=num_physical_experts,
+        num_logical_experts=num_routed_experts,
+        num_expert_groups=num_expert_groups,
+    )
+
+
+def test_eplb_state_accepts_matching_dsv4_draft_and_target():
+    draft = _make_moe_topology()
+    target = _make_moe_topology()
+
+    EplbState.assert_confs_equal(draft, target)
+
+
+def test_eplb_state_rejects_mismatched_dsv4_draft_redundant_experts():
+    draft = _make_moe_topology(num_redundant_experts=0)
+    target = _make_moe_topology(num_redundant_experts=4)
+
+    with pytest.raises(RuntimeError, match="mismatch"):
+        EplbState.assert_confs_equal(draft, target)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected"),
+    [
+        ("deepseek_v4", True),
+        ("deepseek_v41", False),
+    ],
+)
+def test_dspark_draft_supports_eplb(
+    dspark_vllm_config, model_type: str, expected: bool
+):
+    draft_model_config = dspark_vllm_config.speculative_config.draft_model_config
+    draft_model_config.hf_config.model_type = model_type
+    assert dspark_draft_supports_eplb(draft_model_config) is expected
+
+
+def test_draft_model_supports_eplb_requires_draft_moe(dspark_vllm_config):
+    assert not draft_model_supports_eplb(
+        dspark_vllm_config.speculative_config,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_type,load_dummy_weights,expected_registered",
+    [
+        ("deepseek_v4", False, True),
+        ("deepseek_v4", True, False),
+        ("deepseek_v41", False, False),
+    ],
+)
+def test_eplb_dspark_draft_registration(
+    dspark_vllm_config,
+    monkeypatch: pytest.MonkeyPatch,
+    model_type,
+    load_dummy_weights: bool,
+    expected_registered: bool,
+):
+    """Register V4 drafts; skip incompatible V4.1 drafts and dummy weights."""
+    FakeEplbState.instances.clear()
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.eplb_utils.EplbState",
+        FakeEplbState,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.eplb_utils.get_mixture_of_experts_model",
+        lambda model: model,
+    )
+
+    draft_model_config = dspark_vllm_config.speculative_config.draft_model_config
+    draft_model_config.hf_config.model_type = model_type
+    draft = SimpleNamespace()
+    controller = EPLBController(dspark_vllm_config.parallel_config, torch.device("cpu"))
+    controller.prepare_load()
+    speculator = SimpleNamespace(model=draft, eplb_state=None)
+
+    def set_eplb_state(state) -> None:
+        speculator.eplb_state = state
+
+    speculator.set_eplb_state = set_eplb_state
+
+    registered = controller.maybe_register_speculator(
+        speculator,
+        dspark_vllm_config.speculative_config,
+        load_dummy_weights=load_dummy_weights,
+    )
+
+    assert registered is expected_registered
+    assert controller.state is not None
+    if expected_registered:
+        assert controller.state.add_model_calls == [
+            (draft, draft_model_config, "dspark (draft)")
+        ]
+        assert speculator.eplb_state is controller.state
+    else:
+        assert controller.state.add_model_calls == []
+        assert speculator.eplb_state is None
+
+
 @pytest.mark.parametrize(
     "model_setup",
     [
         pytest.param(
-            ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86),
+            ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86, 1),
             marks=large_gpu_mark(min_gb=80),
         ),
         pytest.param(
@@ -65,20 +260,42 @@ pytestmark = pytest.mark.skipif(
                 "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
                 4,
                 0.92,
+                1,
             ),
             marks=pytest.mark.skip(reason="Skipping due to CI OOM issues"),
         ),
+        pytest.param(
+            (
+                "dspark",
+                "deepseek-ai/DeepSeek-V4-Flash-DSpark",
+                None,
+                4,
+                0.95,
+                7,
+            ),
+            marks=large_gpu_mark(min_gb=80),
+        ),
     ],
-    ids=["qwen3_next_mtp", "llama4_eagle"],
+    ids=["qwen3_next_mtp", "llama4_eagle", "dsv4_dspark"],
 )
 def test_eplb_spec_decode(
     monkeypatch: pytest.MonkeyPatch,
-    model_setup: tuple[str, str, str, int, float],
+    model_setup: tuple[str, str, str | None, int, float, int],
 ):
     """Test the correctness of EPLB speculative decoding with GSM8K dataset.
-    Applicable to MoE models with mtp or eagle spec decode.
+
+    Applicable to MoE models with mtp, eagle, or dspark spec decode.
     """
-    method, model_name, spec_model_name, tp_size, expected_gsm8k_value = model_setup
+    (
+        method,
+        model_name,
+        spec_model_name,
+        tp_size,
+        expected_gsm8k_value,
+        num_speculative_tokens,
+    ) = model_setup
+    if method == "dspark" and not current_platform.is_device_capability_family(100):
+        pytest.skip("DSV4 DSpark EPLB requires SM100 for MegaMoE")
 
     TASK = "gsm8k"
     FILTER = "exact_match,strict-match"
@@ -90,6 +307,7 @@ def test_eplb_spec_decode(
         spec_method=method,
         tp_size=tp_size,
         model_max_len=4096,
+        num_speculative_tokens=num_speculative_tokens,
     )
 
     results = lm_eval.simple_evaluate(
