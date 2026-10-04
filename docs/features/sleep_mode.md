@@ -188,6 +188,30 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 !!! note
     These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`.
 
+## What stays on the GPU
+
+Sleep releases memory that was allocated through the sleep-mode allocator. Each allocation carries a tag that decides what happens to it:
+
+| Tag | Contents | On sleep |
+| --- | --- | --- |
+| `weights` | Model weights | Level 1: copied to CPU. Level 2: discarded. |
+| `kv_cache` | KV cache | Discarded |
+| `runtime` | Model-runner buffers and state built with the KV cache (block tables, attention metadata) | Copied to CPU at every level |
+| `workspace` | Kernel scratch (`WorkspaceManager`) | Discarded |
+| (default) | CUDA graph memory pool | Discarded |
+
+On wake, every tagged allocation is mapped back at its original address, so captured CUDA graphs stay valid.
+
+Some memory cannot be released without restarting the process:
+
+- **CUDA context, thread stacks and loaded kernels.** Typically about 1 GiB per GPU.
+- **CUDA graph objects held by the driver.** The driver keeps this memory even after the graphs are destroyed. It grows with the number of captured graphs: about 2.5 GiB per GPU for DeepSeek-V4-Flash with TP4 and default capture sizes. Use fewer capture sizes (`max_cudagraph_capture_size`, `cudagraph_capture_sizes`) or `cudagraph_mode=FULL_DECODE_ONLY` to reduce it.
+- **Communication buffers.** These come from NCCL, custom all-reduce, FlashInfer all-reduce and symmetric memory.
+    - `--enable-nccl-comm-suspend` releases the NCCL buffers.
+    - The others stay allocated.
+
+With the sleep-mode allocator on, vLLM sets `NCCL_GRAPH_REGISTER=0` unless you set it yourself. NCCL's graph buffer registration would otherwise hold on to CUDA graph pool memory across sleep.
+
 ## Limitation
 
 On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.
