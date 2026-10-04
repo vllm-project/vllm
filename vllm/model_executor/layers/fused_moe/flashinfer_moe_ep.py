@@ -162,8 +162,8 @@ def flashinfer_moe_ep_unsupported_reasons(
         unsupported.append("EPLB")
     if spec.kernel == "cutedsl" and not has_nvshmem4py():
         unsupported.append(
-            "running without a usable nvshmem4py (nvshmem.core; on CUDA 13: "
-            "pip install nvshmem4py-cu13)"
+            "running without a usable nvshmem4py (nvshmem.core; pip install "
+            "nvshmem4py-cu12 or nvshmem4py-cu13 to match torch's CUDA)"
         )
     return tuple(unsupported)
 
