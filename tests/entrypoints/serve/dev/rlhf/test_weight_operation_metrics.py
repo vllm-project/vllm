@@ -10,7 +10,7 @@ from prometheus_client.multiprocess import MultiProcessCollector
 from prometheus_client.parser import text_string_to_metric_families
 from transformers import AutoModelForCausalLM
 
-from tests.entrypoints.rl.conftest import MODEL_NAME
+from tests.entrypoints.serve.dev.rlhf.conftest import MODEL_NAME
 from tests.utils import RemoteOpenAIServer
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,

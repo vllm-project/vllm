@@ -15,7 +15,6 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from tests.utils import create_new_process_for_each_test
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
@@ -24,6 +23,8 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
     WeightTransferUpdateRequest,
 )
+
+from ...utils import create_new_process_for_each_test
 
 # Use a tiny model for fast testing
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"

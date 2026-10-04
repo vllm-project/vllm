@@ -7,7 +7,7 @@ import numpy as np
 import pybase64 as base64
 import pytest
 
-from tests.utils import RemoteOpenAIServer
+from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "TitanML/tiny-mixtral"
 
