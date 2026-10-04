@@ -340,6 +340,22 @@ class PyNcclCommunicator:
         if stream is None:
             stream = current_stream()
         assert output_tensor.shape[0] == sum(sizes)
+
+        # Safety check: this implementation computes Python-level destination
+        # slice data_ptr()s (dst_slice.data_ptr() below) that get baked into
+        # the CUDA graph at capture time.  At replay those pointers become
+        # stale when per-rank batch sizes differ, causing Xid-31 MMU faults
+        # (bug #59607).  Callers should use CudaCommunicator.all_gatherv()
+        # which switches to a padded uniform ncclAllGather during capture.
+        if torch.cuda.is_current_stream_capturing() and len(set(sizes)) > 1:
+            logger.warning(
+                "all_gatherv() with heterogeneous sizes called during CUDA "
+                "graph capture. This bakes stale data_ptr()s into the graph "
+                "and will cause Xid-31 MMU faults on replay (bug #59607). "
+                "Use CudaCommunicator.all_gatherv() which automatically "
+                "switches to a padded uniform collective during graph capture."
+            )
+
         split_offset = 0
         self.nccl.ncclGroupStart()
         for root, split_size in enumerate(sizes):
@@ -403,6 +419,23 @@ class PyNcclCommunicator:
         )
         if stream is None:
             stream = current_stream()
+
+        # Safety check: this implementation computes Python-level slice
+        # data_ptr()s (chunk.data_ptr() below) and passes them to NCCL.
+        # Those addresses are baked into the CUDA graph at capture time.  At
+        # replay with different per-rank batch sizes those pointers become
+        # stale, causing Xid-31 MMU faults (bug #59607).  Callers should
+        # route through cuda_communicator.reduce_scatterv() which switches to
+        # a padded uniform ncclReduceScatter when inside a graph capture.
+        if torch.cuda.is_current_stream_capturing() and len(set(sizes)) > 1:
+            logger.warning(
+                "reduce_scatterv() with heterogeneous sizes called during "
+                "CUDA graph capture. This bakes stale data_ptr()s into the "
+                "graph and will cause Xid-31 MMU faults on replay (bug "
+                "#59607). Use CudaCommunicator.reduce_scatterv() which "
+                "automatically switches to a padded uniform collective "
+                "during graph capture."
+            )
 
         split_offset = 0
         self.nccl.ncclGroupStart()
