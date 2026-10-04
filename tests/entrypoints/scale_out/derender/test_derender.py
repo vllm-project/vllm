@@ -9,6 +9,7 @@ import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
@@ -677,14 +678,10 @@ async def test_derender_completion_prompt_logprobs_passthrough(client):
     """
     gr1 = await _render_completion(client, "Hello")
     gr2 = await _render_completion(client, "World")
-    plp1 = [
-        None,
-        {str(gr1["token_ids"][0]): {"logprob": -0.5, "rank": 1, "decoded_token": "H"}},
-    ]
-    plp2 = [
-        None,
-        {str(gr2["token_ids"][0]): {"logprob": -0.25, "rank": 2, "decoded_token": "W"}},
-    ]
+    tok = get_tokenizer(MODEL_NAME)
+    # A --tokens-only generate server has no tokenizer: decoded_token is null.
+    plp1 = [None, {str(gr1["token_ids"][0]): {"logprob": -0.5, "rank": 1}}]
+    plp2 = [None, {str(gr2["token_ids"][0]): {"logprob": -0.25, "rank": 2}}]
 
     response = await client.post(
         "/v1/completions/derender",
@@ -703,8 +700,41 @@ async def test_derender_completion_prompt_logprobs_passthrough(client):
     assert response.status_code == 200
     choices = response.json()["choices"]
     assert len(choices) == 2
-    assert choices[0]["prompt_logprobs"] == plp1
-    assert choices[1]["prompt_logprobs"] == plp2
+    for choice, gr, plp in zip(choices, (gr1, gr2), (plp1, plp2)):
+        tid = gr["token_ids"][0]
+        (text,) = convert_ids_list_to_tokens(tok, [tid])
+        entry = choice["prompt_logprobs"][1][str(tid)]
+        assert choice["prompt_logprobs"][0] is None
+        assert entry["decoded_token"] == text
+        assert entry["logprob"] == plp[1][str(tid)]["logprob"]
+        assert entry["rank"] == plp[1][str(tid)]["rank"]
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_prompt_logprobs_decoded_token(client):
+    """Null decoded_token in chat prompt_logprobs is filled; given ones are kept."""
+    gen_req = await _render_chat(client)
+    ids = gen_req["token_ids"][:3]
+    tok = get_tokenizer(MODEL_NAME)
+    plp = [
+        None,
+        {str(ids[0]): {"logprob": -0.5, "rank": 1}},
+        {str(ids[1]): {"logprob": -0.1, "rank": 1, "decoded_token": "kept"}},
+    ]
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(ids, prompt_logprobs=plp),
+        },
+    )
+    assert response.status_code == 200
+    out = response.json()["prompt_logprobs"]
+    assert (
+        out[1][str(ids[0])]["decoded_token"]
+        == (convert_ids_list_to_tokens(tok, [ids[0]])[0])
+    )
+    assert out[2][str(ids[1])]["decoded_token"] == "kept"
 
 
 @pytest.mark.asyncio

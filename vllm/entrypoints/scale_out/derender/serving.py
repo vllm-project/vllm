@@ -197,7 +197,9 @@ class ServingDerender(BaseServing):
             created=int(time.time()),
             choices=choices,
             usage=usage,
-            prompt_logprobs=gen.prompt_logprobs,
+            prompt_logprobs=await self.online_derenderer.resolve_prompt_logprobs(
+                gen.prompt_logprobs
+            ),
             kv_transfer_params=gen.kv_transfer_params,
             metrics=gen.metrics,
         )

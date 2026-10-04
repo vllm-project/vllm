@@ -37,10 +37,12 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
+    convert_ids_list_to_tokens,
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
     get_leading_space_marker,
@@ -111,6 +113,9 @@ class OnlineDerenderer:
         self._detokenize_delta_async = make_async(
             self._detokenize_delta, executor=renderer._executor
         )
+        self._resolve_prompt_logprobs_async = make_async(
+            _resolve_prompt_logprobs, executor=renderer._executor
+        )
         # Replay is O(n) per chunk, so it must not run on the event loop.
         self._derender_chat_stream_parsed_async = make_async(
             self._derender_chat_stream_parsed, executor=renderer._executor
@@ -124,6 +129,13 @@ class OnlineDerenderer:
     ) -> list[ChatCompletionResponseChoice]:
         return await self._derender_chat_async(
             generate_response, chat_request, prompt_token_ids
+        )
+
+    async def resolve_prompt_logprobs(
+        self, prompt_logprobs: PromptLogprobs | None
+    ) -> PromptLogprobs | None:
+        return await self._resolve_prompt_logprobs_async(
+            prompt_logprobs, self.renderer.get_tokenizer()
         )
 
     def _derender_chat(
@@ -724,6 +736,7 @@ class OnlineDerenderer:
             seed_state = _seed_stream_state(
                 tokenizer, seed_ids, skip_special_tokens=skip_special
             )
+            prompt_logprobs = _resolve_prompt_logprobs(gen.prompt_logprobs, tokenizer)
             for choice in gen.choices:
                 if not choice.token_ids:
                     raise ValueError(
@@ -750,7 +763,7 @@ class OnlineDerenderer:
                         text=decoded_text,
                         finish_reason=choice.finish_reason,
                         logprobs=completion_logprobs,
-                        prompt_logprobs=gen.prompt_logprobs,
+                        prompt_logprobs=prompt_logprobs,
                     )
                 )
                 total_completion_tokens += len(choice.token_ids)
@@ -992,6 +1005,50 @@ def _correct_decoded_token(
         return full_decoded[common_len:]
 
     return ""
+
+
+def _resolve_prompt_logprobs(
+    prompt_logprobs: PromptLogprobs | None, tokenizer: TokenizerLike
+) -> PromptLogprobs | None:
+    """Fill missing ``decoded_token`` values in prompt logprobs.
+
+    A ``--tokens-only`` generate server has no tokenizer, so it returns
+    ``decoded_token=None``. Mirrors LogprobsProcessor._update_prompt_logprobs
+    in v1/engine/logprobs.py: decode each token id, then fix U+FFFD using the
+    preceding prompt tokens (the first entry of each earlier position).
+    """
+    if prompt_logprobs is None:
+        return None
+
+    missing = [
+        tid
+        for entry in prompt_logprobs
+        if entry is not None
+        for tid, lp in entry.items()
+        if lp.decoded_token is None
+    ]
+    if not missing:
+        return prompt_logprobs
+    decoded = dict(zip(missing, convert_ids_list_to_tokens(tokenizer, missing)))
+
+    resolved: PromptLogprobs = []
+    context_token_ids: list[int] = []
+    for entry in prompt_logprobs:
+        if entry is None:
+            resolved.append(None)
+            continue
+        new_entry: dict[int, Logprob] = {}
+        for tid, lp in entry.items():
+            if lp.decoded_token is None:
+                text = decoded[tid]
+                if text.endswith("\ufffd"):
+                    text = _correct_decoded_token(tid, context_token_ids, tokenizer)
+                lp = Logprob(lp.logprob, lp.rank, text)
+            new_entry[tid] = lp
+        resolved.append(new_entry)
+        # The prompt token is always inserted first by the engine.
+        context_token_ids.append(next(iter(entry)))
+    return resolved
 
 
 def _resolve_logprobs(
