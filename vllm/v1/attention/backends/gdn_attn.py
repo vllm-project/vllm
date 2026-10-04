@@ -621,6 +621,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         """Re-gather this group's state indices. The other fields are
         batch-level and stay shared with ``metadata``."""
         m = metadata
+        checkpoint = (
+            m.checkpoint.regather_state_indices(blk_table)
+            if m.checkpoint is not None
+            else None
+        )
         if self.vllm_config.cache_config.mamba_cache_mode == "align":
             assert self.mamba_aligned_state_indices is not None
             blk_table = self.mamba_aligned_state_indices
@@ -662,6 +667,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_state_indices_tensor=spec_indices,
             non_spec_state_indices_tensor=non_spec_indices,
             prefill_state_indices=prefill_indices,
+            checkpoint=checkpoint,
         )
 
     def build_for_cudagraph_capture(

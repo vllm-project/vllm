@@ -669,6 +669,7 @@ class DeepseekV32IndexerMetadata:
 
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
+    positions: torch.Tensor | None = None
 
 
 @triton.jit(do_not_specialize=["num_reqs", "num_actual_tokens", "num_tokens"])
@@ -758,6 +759,7 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
 
     _cudagraph_support = AttentionCGSupport.ALWAYS
     supports_update_block_table = False
+    supports_draft_decode_metadata_update = True
     reorder_batch_threshold = None
 
     def __init__(
@@ -807,6 +809,21 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
+            positions=positions,
+        )
+
+    def update_draft_decode_metadata(
+        self,
+        metadata: DeepseekV32IndexerMetadata,
+    ) -> None:
+        assert metadata.positions is not None
+        slot_mapping = metadata.slot_mapping[: metadata.num_decode_tokens]
+        slot_mapping.div_(self.kv_cache_spec.block_size, rounding_mode="floor")
+        slot_mapping.mul_(self.kv_cache_spec.block_size)
+        slot_mapping.add_(
+            metadata.positions[: metadata.num_decode_tokens].remainder(
+                self.kv_cache_spec.block_size
+            )
         )
 
 
@@ -1016,6 +1033,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
         self.indexer_decode_block_table_buffer: torch.Tensor | None = None
         self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
+        # DCP not supported yet
+        self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
 
     def _dcp_localize_decode_seq_lens(
         self,
@@ -1298,17 +1317,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         slot_mapping = common_attn_metadata.slot_mapping
         block_table = common_attn_metadata.block_table_tensor
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.decode_threshold,
-                require_uniform=not (self.use_flattening or self.supports_varlen),
-                treat_short_extends_as_decodes=not self.use_pcp,
-            )
-        )
-
-        assert num_decodes + num_prefills == num_reqs
-        assert num_decode_tokens + num_prefill_tokens == num_tokens
 
         compressed_slot_mapping = slot_mapping
         indexer_block_table = block_table
@@ -1346,6 +1354,34 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.compressed_slot_mapping_buffer[:padded_num_tokens],
                     dim=0,
                 )
+
+        # PCP decode sharding keeps a zero-token placeholder on ranks that own
+        # no request in a step so collectives retain a uniform rank shape. Do
+        # not turn that placeholder into a zero-length indexer decode request.
+        if num_tokens == 0:
+            return DeepseekV32IndexerMetadata(
+                seq_lens=seq_lens,
+                max_seq_len=common_attn_metadata.max_seq_len,
+                slot_mapping=compressed_slot_mapping,
+                num_decodes=0,
+                num_decode_tokens=0,
+                num_prefills=0,
+                num_prefill_tokens=0,
+                prefill=None,
+                decode=None,
+            )
+
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.decode_threshold,
+                require_uniform=not (self.use_flattening or self.supports_varlen),
+                treat_short_extends_as_decodes=not self.use_pcp,
+            )
+        )
+
+        assert num_decodes + num_prefills == num_reqs
+        assert num_decode_tokens + num_prefill_tokens == num_tokens
 
         prefill_metadata = None
         if num_prefills > 0:
@@ -1650,6 +1686,50 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         return attn_metadata
+
+    def update_draft_decode_metadata(
+        self,
+        metadata: DeepseekV32IndexerMetadata,
+    ) -> None:
+        decode = metadata.decode
+        if decode is None or metadata.num_decode_tokens == 0:
+            return
+
+        assert metadata.num_prefills == 0
+        assert metadata.num_decodes == metadata.num_decode_tokens
+        assert decode.seq_lens.numel() == metadata.num_decode_tokens
+        assert self.dcp_world_size == 1
+
+        if self.compress_ratio > 1:
+            get_compressed_slot_mapping(
+                metadata.num_decode_tokens,
+                self.arange_buffer[: metadata.num_decode_tokens],
+                self.arange_buffer[: metadata.num_decode_tokens + 1],
+                metadata.seq_lens,
+                decode.block_table,
+                self.kv_cache_spec.num_states,
+                self.compress_ratio,
+                out=metadata.slot_mapping,
+            )
+            torch.div(
+                metadata.seq_lens,
+                self.compress_ratio,
+                rounding_mode="floor",
+                out=decode.seq_lens.view(-1),
+            )
+        else:
+            decode.seq_lens.view(-1).copy_(metadata.seq_lens)
+        decode.decode_lens.fill_(1)
+
+        if current_platform.is_cuda() and has_deep_gemm():
+            schedule_metadata = get_paged_mqa_logits_metadata(
+                decode.seq_lens,
+                self.kv_cache_spec.num_states,
+                self.num_sms,
+                indices=decode.indices,
+            )
+            assert schedule_metadata.shape == decode.schedule_metadata.shape
+            decode.schedule_metadata.copy_(schedule_metadata)
 
 
 def build_prefill_chunk_metadata(
