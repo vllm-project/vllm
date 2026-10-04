@@ -3,6 +3,7 @@
 
 from collections.abc import Callable
 from itertools import product
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -191,3 +192,101 @@ def test_rope_module_cache(default_vllm_config):
         )
         # check if cache take effect
         assert id(rope) == rope_setting_id_map[str(setting)]
+
+
+@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.half])
+@pytest.mark.parametrize("use_key", USE_KEY)
+@torch.inference_mode()
+def test_deepseek_scaling_rotary_embedding_cuda_kernel(
+    default_vllm_config,
+    is_neox_style: bool,
+    dtype: torch.dtype,
+    use_key: bool,
+) -> None:
+    """The fused-kernel path of DeepseekScalingRotaryEmbedding must match
+    forward_native (it previously fell back to eager without FlashInfer).
+
+    float32 compares the two directly. For half dtypes the kernel computes
+    in fp32 while the reference rounds through the half dtype, so both are
+    compared against an fp32-reference ground truth instead, asserting the
+    kernel is at least as accurate as the eager fallback it replaces.
+    """
+    import vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope as dsr
+
+    set_random_seed(0)
+    torch.set_default_device("cuda")
+
+    # DeepSeek-V2 rope_scaling: qk_rope_head_dim=64, YaRN factor 40.
+    kwargs: dict = dict(
+        head_size=64,
+        rotary_dim=64,
+        max_position_embeddings=4096,
+        base=10000,
+        is_neox_style=is_neox_style,
+        scaling_factor=40.0,
+        extrapolation_factor=1,
+        attn_factor=1,
+        beta_fast=32,
+        beta_slow=1,
+        mscale=0.707,
+        mscale_all_dim=0.707,
+    )
+
+    def make_rope(rope_dtype: torch.dtype) -> dsr.DeepseekScalingRotaryEmbedding:
+        # Force the ops.rotary_embedding branch: without FlashInfer the
+        # cos/sin cache is kept in the model dtype, matching a
+        # FlashInfer-less deployment.
+        with patch.object(dsr, "has_flashinfer", lambda: False):
+            rope = dsr.DeepseekScalingRotaryEmbedding(dtype=rope_dtype, **kwargs)
+        assert not rope.use_flashinfer
+        return rope
+
+    num_tokens, num_heads, num_kv_heads = 64, 16, 1
+    positions = torch.randint(0, int(4096 * 40) - 1, (num_tokens,))
+    query32 = torch.randn(num_tokens, num_heads, 64, dtype=torch.float32)
+    key32 = (
+        torch.randn(num_tokens, num_kv_heads, 64, dtype=torch.float32)
+        if use_key
+        else None
+    )
+
+    rope = make_rope(dtype)
+    query = query32.to(dtype)
+    key = key32.to(dtype) if key32 is not None else None
+
+    # forward_native asserts key is not None, so feed it a dummy key when
+    # exercising the kernel's key=None support and compare queries only.
+    ref_key_in = key.clone() if key is not None else torch.zeros_like(query[:, :1])
+    ref_query, ref_key = rope.forward_native(positions, query.clone(), ref_key_in)
+    out_query, out_key = rope.forward_cuda(
+        positions, query.clone(), key.clone() if key is not None else None
+    )
+    if not use_key:
+        assert out_key is None
+        ref_key = None
+
+    if dtype == torch.float32:
+        torch.testing.assert_close(out_query, ref_query, atol=1e-5, rtol=1e-5)
+        if use_key:
+            torch.testing.assert_close(out_key, ref_key, atol=1e-5, rtol=1e-5)
+        return
+
+    # Half dtypes: compare both paths against the fp32 ground truth.
+    rope32 = make_rope(torch.float32)
+    truth_key_in = (
+        key32.clone() if key32 is not None else torch.zeros_like(query32[:, :1])
+    )
+    truth_query, truth_key = rope32.forward_native(
+        positions, query32.clone(), truth_key_in
+    )
+
+    kernel_err = (out_query.float() - truth_query).abs().mean()
+    native_err = (ref_query.float() - truth_query).abs().mean()
+    assert kernel_err <= native_err * 1.05, (
+        f"fused kernel mean error {kernel_err} vs native {native_err}"
+    )
+    if out_key is not None and ref_key is not None:
+        kernel_err_k = (out_key.float() - truth_key).abs().mean()
+        native_err_k = (ref_key.float() - truth_key).abs().mean()
+        assert kernel_err_k <= native_err_k * 1.05
