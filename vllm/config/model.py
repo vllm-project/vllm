@@ -111,6 +111,8 @@ LayerBlockType = Literal["attention", "linear_attention", "mamba"]
 _ATTENTION_LAYER_TYPES = frozenset(
     {
         "full_attention",
+        "indexed_attention",
+        # TODO: Delete below once Transformers 5.18.0 is the minimum required version.
         "deepseek_sparse_attention",
         "qwen_sparse_attention",
     }
@@ -123,6 +125,22 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "pooling": ["embed", "classify"],
     "draft": [],
 }
+
+
+def _modelopt_mixed_has_nvfp4(quant_config: dict[str, Any] | None) -> bool:
+    """Whether a ModelOpt MIXED_PRECISION checkpoint quantizes any layer to NVFP4.
+
+    ``W4A16_NVFP4`` is excluded on purpose: it quantizes weights only, so there
+    is no activation quantization for the fusion passes to act on.
+    """
+    layers = (quant_config or {}).get("quantized_layers")
+    if not isinstance(layers, dict):
+        return False
+    return any(
+        isinstance(info, dict) and info.get("quant_algo") == "NVFP4"
+        for info in layers.values()
+    )
+
 
 AttnTypeStr = Literal[
     "decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free", "hybrid"
@@ -360,6 +378,9 @@ class ModelConfig:
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    sleep_mode_offload_cudagraph: bool = False
+    """Back up CUDA graph memory to CPU during sleep, restored in place on wake.
+    Takes effect with enable_sleep_mode, the cumem backend and CUDA graphs."""
     enable_nccl_comm_suspend: bool = False
     """Enable releasing NCCL communicator memory during sleep mode
     (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
@@ -2249,13 +2270,20 @@ class ModelConfig:
         return getattr(self.hf_config, "quantization_config", None) is not None
 
     def is_nvfp4_quantized(self) -> bool:
+        quant_config = self.model_arch_config.quantization_config
+
         # ModelOpt NVFP4 checkpoints resolve to modelopt_fp4 quantization method
         if self.quantization in ("modelopt_fp4",):
             return True
 
+        # A checkpoint mixing NVFP4 with another algorithm declares
+        # quant_algo MIXED_PRECISION and resolves to modelopt_mixed, so the
+        # per-layer algorithms decide.
+        if self.quantization == "modelopt_mixed":
+            return _modelopt_mixed_has_nvfp4(quant_config)
+
         # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
         # in the quantization config
-        quant_config = self.model_arch_config.quantization_config
         return (
             self.quantization == "compressed-tensors"
             and quant_config is not None
