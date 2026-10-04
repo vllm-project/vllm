@@ -579,7 +579,7 @@ class OffloadingConnectorScheduler:
         )
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
-        self.use_eagle_prefix_cache_hashing = False
+        self.use_lookahead_block_hashes = False
 
         full_attention_groups: list[int] = []
         sliding_window_groups: list[int] = []
@@ -669,7 +669,7 @@ class OffloadingConnectorScheduler:
         self, req_status: RequestOffloadState, num_computed_tokens: int
     ) -> int:
         num = min(num_computed_tokens, req_status.req.num_tokens)
-        if self.use_eagle_prefix_cache_hashing:
+        if self.use_lookahead_block_hashes:
             # A successor key is safe to expose only after both target and
             # draft KV have materialized through its boundary.
             num = min(
@@ -817,13 +817,12 @@ class OffloadingConnectorScheduler:
 
                 # A successor-aware hash waits for the token after its boundary.
                 num_keyed_tokens = req_status.req.num_tokens - int(
-                    self.use_eagle_prefix_cache_hashing
+                    self.use_lookahead_block_hashes
                 )
                 assert len(offload_keys) >= num_keyed_tokens // tokens_per_chunk
 
                 apply_eagle_drop = (
-                    group_config.is_eagle_group
-                    and not self.use_eagle_prefix_cache_hashing
+                    group_config.is_eagle_group and not self.use_lookahead_block_hashes
                 )
                 is_eagle_unverified = (
                     apply_eagle_drop and group_idx not in eagle_verified
@@ -1495,7 +1494,7 @@ class OffloadingConnectorScheduler:
             alignment_tokens=self.config.alignment_tokens,
             kv_cache_spec=kv_cache_spec,
             use_eagle=(
-                group_config.is_eagle_group and not self.use_eagle_prefix_cache_hashing
+                group_config.is_eagle_group and not self.use_lookahead_block_hashes
             ),
             retention_interval=self.config.retention_interval,
             reachable_boundaries=reachable_boundaries,
@@ -1526,7 +1525,7 @@ class OffloadingConnectorScheduler:
         scheduler_output: SchedulerOutput,
     ) -> dict[int, TransferJob]:
         blocks_per_chunk = self.config.blocks_per_chunk
-        apply_eagle_drop = not self.use_eagle_prefix_cache_hashing
+        apply_eagle_drop = not self.use_lookahead_block_hashes
         store_jobs: dict[int, TransferJob] = {}
         for req_id in chain(
             scheduler_output.num_scheduled_tokens,

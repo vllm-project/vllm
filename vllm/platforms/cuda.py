@@ -702,7 +702,7 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
-    def supports_eagle_prefix_cache_hashing(cls) -> bool:
+    def supports_lookahead_block_hashes(cls) -> bool:
         return True
 
     @classmethod

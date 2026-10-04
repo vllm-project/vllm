@@ -218,15 +218,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     @property
-    def supports_eagle_prefix_cache_hashing(self) -> bool:
+    def supports_lookahead_block_hashes(self) -> bool:
         return bool(self._connectors) and all(
-            c.supports_eagle_prefix_cache_hashing for c in self._connectors
+            c.supports_lookahead_block_hashes for c in self._connectors
         )
 
-    def set_eagle_prefix_cache_hashing(self, enabled: bool) -> None:
-        super().set_eagle_prefix_cache_hashing(enabled)
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
+        super().set_lookahead_block_hashes(enabled)
         for connector in self._connectors:
-            connector.set_eagle_prefix_cache_hashing(enabled)
+            connector.set_lookahead_block_hashes(enabled)
 
     @property
     def requires_kv_delivery(self) -> bool:

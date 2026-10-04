@@ -3511,7 +3511,7 @@ def _make_bare_worker(
     worker.kv_role = kv_role
     worker.can_put = kv_role in ("kv_producer", "kv_both") or save_decode_cache
     worker._capacity_only = False
-    worker.use_eagle_prefix_cache_hashing = False
+    worker.use_lookahead_block_hashes = False
     worker.block_size = block_size
     worker._is_hma_required = False
     worker.tp_rank = 0

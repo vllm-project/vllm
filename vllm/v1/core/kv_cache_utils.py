@@ -678,12 +678,12 @@ def to_event_extra_keys(
 
 def to_request_event_extra_keys(
     extra_keys: Iterable[tuple[Any, ...] | None] | None,
-    use_eagle_prefix_cache_hashing: bool,
+    use_lookahead_block_hashes: bool,
 ) -> list[tuple[Any, ...] | None] | None:
     """`to_event_extra_keys` for keys from
     `generate_request_block_hash_extra_keys`. EAGLE keys keep the successor
     token and untag the block and successor extra keys."""
-    if not use_eagle_prefix_cache_hashing:
+    if not use_lookahead_block_hashes:
         return to_event_extra_keys(extra_keys)
     if not extra_keys:
         return None
@@ -932,7 +932,7 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
-def get_request_eagle_block_hasher(
+def get_request_lookahead_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
 ) -> Callable[[Request], list[BlockHash]]:
@@ -945,7 +945,7 @@ def get_request_eagle_block_hasher(
     KV events while proving the EAGLE dependency at every block boundary.
     """
 
-    def request_eagle_block_hasher(request: Request) -> list[BlockHash]:
+    def request_lookahead_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * hash_block_size
         num_tokens = request.num_tokens
         new_block_hashes: list[BlockHash] = []
@@ -955,7 +955,7 @@ def get_request_eagle_block_hasher(
         )
 
         while (end_token_idx := start_token_idx + hash_block_size) < num_tokens:
-            extra_keys, curr_mm_idx = generate_eagle_block_hash_extra_keys(
+            extra_keys, curr_mm_idx = generate_lookahead_block_hash_extra_keys(
                 request,
                 start_token_idx,
                 end_token_idx,
@@ -973,10 +973,10 @@ def get_request_eagle_block_hasher(
 
         return new_block_hashes
 
-    return request_eagle_block_hasher
+    return request_lookahead_block_hasher
 
 
-def generate_eagle_block_hash_extra_keys(
+def generate_lookahead_block_hash_extra_keys(
     request: Request,
     start_token_idx: int,
     end_token_idx: int,
@@ -1009,10 +1009,10 @@ def generate_request_block_hash_extra_keys(
     start_token_idx: int,
     end_token_idx: int,
     start_mm_idx: int,
-    use_eagle_prefix_cache_hashing: bool,
+    use_lookahead_block_hashes: bool,
 ) -> tuple[tuple[Any, ...] | None, int]:
-    if use_eagle_prefix_cache_hashing:
-        return generate_eagle_block_hash_extra_keys(
+    if use_lookahead_block_hashes:
+        return generate_lookahead_block_hash_extra_keys(
             request,
             start_token_idx,
             end_token_idx,
@@ -1029,11 +1029,11 @@ def generate_request_block_hash_extra_keys(
 def get_prompt_hash_boundary(
     num_prompt_tokens: int,
     hash_block_size: int,
-    use_eagle_prefix_cache_hashing: bool,
+    use_lookahead_block_hashes: bool,
 ) -> int:
     """Last hash boundary within the prompt. A successor-aware hash also
     needs the token after its boundary."""
-    num_tokens = num_prompt_tokens - int(use_eagle_prefix_cache_hashing)
+    num_tokens = num_prompt_tokens - int(use_lookahead_block_hashes)
     return num_tokens // hash_block_size * hash_block_size
 
 
@@ -1065,7 +1065,7 @@ def get_request_block_hash_event_data(
     extra_keys: list[tuple[Any, ...] | None] = []
     curr_mm_idx = 0
     for unit_start in range(hash_start, hash_end, hash_block_size):
-        unit_extra_keys, curr_mm_idx = generate_eagle_block_hash_extra_keys(
+        unit_extra_keys, curr_mm_idx = generate_lookahead_block_hash_extra_keys(
             request,
             unit_start,
             unit_start + hash_block_size,

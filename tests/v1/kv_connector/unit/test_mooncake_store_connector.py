@@ -207,9 +207,9 @@ def test_scheduler_role_initializes_store_scheduler_only():
     connector.bind_gpu_block_pool(block_pool)
     mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
-    connector.set_eagle_prefix_cache_hashing(True)
-    assert connector.use_eagle_prefix_cache_hashing
-    assert connector.connector_scheduler.use_eagle_prefix_cache_hashing
+    connector.set_lookahead_block_hashes(True)
+    assert connector.use_lookahead_block_hashes
+    assert connector.connector_scheduler.use_lookahead_block_hashes
 
 
 def test_worker_methods_delegate_to_store_worker():
@@ -233,7 +233,7 @@ def test_worker_methods_delegate_to_store_worker():
     worker = mock_worker_cls.return_value
     worker.get_finished.return_value = ({"req-1"}, {"req-2"})
     worker.get_block_ids_with_load_errors.return_value = {3, 4}
-    connector.set_eagle_prefix_cache_hashing(True)
+    connector.set_lookahead_block_hashes(True)
     connector.bind_connector_metadata(metadata)
 
     connector.register_kv_caches(kv_caches)
@@ -243,8 +243,8 @@ def test_worker_methods_delegate_to_store_worker():
     invalid_block_ids = connector.get_block_ids_with_load_errors()
 
     worker.register_kv_caches.assert_called_once_with(kv_caches)
-    assert connector.use_eagle_prefix_cache_hashing
-    assert worker.use_eagle_prefix_cache_hashing
+    assert connector.use_lookahead_block_hashes
+    assert worker.use_lookahead_block_hashes
     worker.start_load_kv.assert_called_once_with(metadata)
     worker.wait_for_save.assert_called_once_with(metadata)
     worker.get_finished.assert_called_once_with(finished_req_ids, metadata)

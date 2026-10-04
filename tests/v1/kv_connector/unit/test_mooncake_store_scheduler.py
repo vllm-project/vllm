@@ -42,7 +42,7 @@ def _make_bare_scheduler(
     scheduler.kv_role = kv_role
     scheduler.save_decode_cache = save_decode_cache
     scheduler.enable_kv_events = False
-    scheduler.use_eagle_prefix_cache_hashing = False
+    scheduler.use_lookahead_block_hashes = False
     scheduler.lookup_async = False
     scheduler.enable_lookup = True
     scheduler.client = SimpleNamespace(discard=lambda req_id: None)
@@ -57,7 +57,7 @@ def _make_bare_scheduler(
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
     scheduler._finished_partial_tail_metas = {}
-    scheduler._finished_eagle_save_metas = {}
+    scheduler._finished_lookahead_save_metas = {}
     scheduler._gpu_block_pool = BlockPool(
         num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
     )
@@ -1553,7 +1553,7 @@ def test_worker_metadata_aggregates_completions_across_ranks():
 
 def test_eagle_materialized_prefix_is_retried_without_new_blocks():
     scheduler = _make_bare_scheduler()
-    scheduler.use_eagle_prefix_cache_hashing = True
+    scheduler.use_lookahead_block_hashes = True
     token_ids = list(range(32))
     request = SimpleNamespace(
         all_token_ids=token_ids,
@@ -1597,7 +1597,7 @@ def test_eagle_finished_request_flushes_materialized_prefix():
     # The last successor hash becomes publishable only once the request has
     # finished, so its save is pinned at finish and emitted on the next step.
     scheduler = _make_bare_scheduler()
-    scheduler.use_eagle_prefix_cache_hashing = True
+    scheduler.use_lookahead_block_hashes = True
     token_ids = list(range(32))
     request = SimpleNamespace(
         request_id="req-0",
@@ -1617,7 +1617,7 @@ def test_eagle_finished_request_flushes_materialized_prefix():
     scheduler._unfinished_requests["req-0"] = (request, ([1, 2],))
     pool = scheduler._gpu_block_pool
 
-    scheduler.register_finished_eagle_save(request, ([1, 2],))
+    scheduler.register_finished_lookahead_save(request, ([1, 2],))
 
     assert pool.blocks[1].ref_cnt == pool.blocks[2].ref_cnt == 1
     out = SimpleNamespace(

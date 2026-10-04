@@ -347,7 +347,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     """Successor-aware hashes need no back-off from the replay boundary."""
     monkeypatch.setattr(
         mamba_checkpoint,
-        "is_eagle_prefix_cache_hashing_enabled",
+        "is_lookahead_block_hashing_enabled",
         lambda *_: successor_hashing,
     )
     device = torch.device("cuda")

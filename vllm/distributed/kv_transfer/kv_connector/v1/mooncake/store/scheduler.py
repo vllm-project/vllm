@@ -70,7 +70,7 @@ class MooncakeStoreScheduler:
             kv_event_config and kv_event_config.enable_kv_cache_events
         )
         self.client = LookupKeyClient(vllm_config)
-        self.use_eagle_prefix_cache_hashing = False
+        self.use_lookahead_block_hashes = False
         self.kv_cache_config = kv_cache_config
         self._store_group_ids = kv_cache_config.prefix_cacheable_group_ids
         # Map scheduler group IDs to store group indices. Groups outside the
@@ -114,13 +114,13 @@ class MooncakeStoreScheduler:
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
         # The final successor hash becomes publishable after the request's last
         # step, so its save is pinned at finish and emitted in the next step.
-        self._finished_eagle_save_metas: dict[str, ReqMeta] = {}
+        self._finished_lookahead_save_metas: dict[str, ReqMeta] = {}
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
 
     def _publishable_hashes(self, request: Request) -> list[BlockHash]:
-        if self.use_eagle_prefix_cache_hashing:
+        if self.use_lookahead_block_hashes:
             return request.block_hashes[: request.num_publishable_block_hashes]
         return request.block_hashes
 
@@ -139,7 +139,7 @@ class MooncakeStoreScheduler:
         load_spec: LoadSpec | None = None,
     ) -> int | None:
         if (
-            not self.use_eagle_prefix_cache_hashing
+            not self.use_lookahead_block_hashes
             or load_spec is not None
             and load_spec.can_load
         ):
@@ -457,9 +457,9 @@ class MooncakeStoreScheduler:
         for req_meta in self._finished_partial_tail_metas.values():
             meta.add_request(req_meta)
         self._finished_partial_tail_metas.clear()
-        for req_meta in self._finished_eagle_save_metas.values():
+        for req_meta in self._finished_lookahead_save_metas.values():
             meta.add_request(req_meta)
-        self._finished_eagle_save_metas.clear()
+        self._finished_lookahead_save_metas.clear()
 
         self._reference_save_blocks(meta)
         return meta
@@ -542,13 +542,13 @@ class MooncakeStoreScheduler:
         pool.touch([pool.blocks[block_id] for block_id in block_ids])
         return True
 
-    def register_finished_eagle_save(
+    def register_finished_lookahead_save(
         self,
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> None:
         """Pin and queue the save of successor hashes published at finish."""
-        if not self.use_eagle_prefix_cache_hashing:
+        if not self.use_lookahead_block_hashes:
             return
         if self.kv_role == "kv_consumer" and not self.save_decode_cache:
             return
@@ -572,7 +572,7 @@ class MooncakeStoreScheduler:
         )
         if req_meta is None or not self._pin_store_job(req_meta):
             return
-        self._finished_eagle_save_metas[request.request_id] = req_meta
+        self._finished_lookahead_save_metas[request.request_id] = req_meta
 
     def register_finished_partial_tail(
         self,

@@ -31,7 +31,7 @@ from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
-    get_request_eagle_block_hasher,
+    get_request_lookahead_block_hasher,
     init_none_hash,
     resolve_kv_cache_block_sizes,
 )
@@ -351,8 +351,8 @@ class RequestRunner:
         init_none_hash(sha256)
         # Mirror EngineCore's choice of hash protocol.
         self._block_hasher = (
-            get_request_eagle_block_hasher(block_size, sha256)
-            if self.scheduler.use_eagle_prefix_cache_hashing
+            get_request_lookahead_block_hasher(block_size, sha256)
+            if self.scheduler.use_lookahead_block_hashes
             else get_request_block_hasher(block_size, sha256)
         )
 
@@ -542,7 +542,7 @@ class RequestRunner:
                 token_id=token_id or 0,
                 kv_connector_worker_meta=worker_meta,
             )
-            if self.scheduler.use_eagle_prefix_cache_hashing:
+            if self.scheduler.use_lookahead_block_hashes:
                 model_runner_output.draft_kv_materialized = True
 
             prev_token_id = token_id

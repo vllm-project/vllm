@@ -145,7 +145,7 @@ def test_eagle_prefix_hashing_capability_is_independent_of_pd_local_apc(
     connector._vllm_config = vllm_config
     connector._kv_transfer_config = vllm_config.kv_transfer_config
 
-    assert connector.supports_eagle_prefix_cache_hashing
+    assert connector.supports_lookahead_block_hashes
 
 
 class FakeNixlWrapper:

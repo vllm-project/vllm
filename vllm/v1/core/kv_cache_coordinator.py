@@ -82,10 +82,10 @@ class KVCacheCoordinator(ABC):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_prefill_lookahead: int = 0,
-        use_eagle_prefix_cache_hashing: bool = False,
+        use_lookahead_block_hashes: bool = False,
     ):
         self.kv_cache_config = kv_cache_config
-        self.use_eagle_prefix_cache_hashing = use_eagle_prefix_cache_hashing
+        self.use_lookahead_block_hashes = use_lookahead_block_hashes
         # The scheduling granularity (LCM of all group block sizes), must be a multiple
         # of the hash_block_size and the block size of each group.
         assert scheduler_block_size % hash_block_size == 0 and all(
@@ -101,7 +101,7 @@ class KVCacheCoordinator(ABC):
             hash_block_size=hash_block_size,
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
-            use_eagle_prefix_cache_hashing=use_eagle_prefix_cache_hashing,
+            use_lookahead_block_hashes=use_lookahead_block_hashes,
         )
 
         # KV cache group indices that get the EAGLE last-block drop.
@@ -151,7 +151,7 @@ class KVCacheCoordinator(ABC):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
         # Match Mamba checkpoints to Eagle's attention replay boundary.
-        if use_eagle and not use_eagle_prefix_cache_hashing:
+        if use_eagle and not use_lookahead_block_hashes:
             for manager in self.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
@@ -338,7 +338,7 @@ class KVCacheCoordinator(ABC):
         finer hash granularity, which would over-estimate the reach.
         """
         # Successor-aware hashes make EAGLE groups match without the drop.
-        if not self.eagle_group_ids or self.use_eagle_prefix_cache_hashing:
+        if not self.eagle_group_ids or self.use_lookahead_block_hashes:
             return (request.num_prompt_tokens - 1,)
         block = self.scheduler_block_size
         resend = (request.num_prompt_tokens - 1) // block * block
@@ -504,7 +504,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
-        use_eagle_prefix_cache_hashing: bool = False,
+        use_lookahead_block_hashes: bool = False,
         num_prefill_lookahead: int = 0,
     ):
         super().__init__(
@@ -519,7 +519,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
-            use_eagle_prefix_cache_hashing=use_eagle_prefix_cache_hashing,
+            use_lookahead_block_hashes=use_lookahead_block_hashes,
             num_prefill_lookahead=num_prefill_lookahead,
         )
         self.num_single_type_manager = len(self.single_type_managers)
@@ -557,7 +557,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
-        use_eagle_prefix_cache_hashing: bool = False,
+        use_lookahead_block_hashes: bool = False,
         num_prefill_lookahead: int = 0,
     ):
         super().__init__(
@@ -572,7 +572,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
-            use_eagle_prefix_cache_hashing=use_eagle_prefix_cache_hashing,
+            use_lookahead_block_hashes=use_lookahead_block_hashes,
             num_prefill_lookahead=num_prefill_lookahead,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
@@ -602,7 +602,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
             drop_eagle_block=(
-                0 in self.eagle_group_ids and not self.use_eagle_prefix_cache_hashing
+                0 in self.eagle_group_ids and not self.use_lookahead_block_hashes
             ),
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
@@ -645,7 +645,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
-        use_eagle_prefix_cache_hashing: bool = False,
+        use_lookahead_block_hashes: bool = False,
         num_prefill_lookahead: int = 0,
         allow_partial_hash_hits: bool = True,
     ):
@@ -661,7 +661,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
-            use_eagle_prefix_cache_hashing=use_eagle_prefix_cache_hashing,
+            use_lookahead_block_hashes=use_lookahead_block_hashes,
             num_prefill_lookahead=num_prefill_lookahead,
         )
         # hash_block_size: the block size used to compute block hashes.
@@ -842,7 +842,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 # Without successor-aware hashes, EAGLE groups match one block
                 # past each aligned boundary and drop it, so make that
                 # lookahead block eligible to be cached.
-                if not self.use_eagle_prefix_cache_hashing:
+                if not self.use_lookahead_block_hashes:
                     num_tokens_to_cache = min(
                         num_finalized_computed_tokens,
                         cached_num_finalized_computed_tokens + manager.block_size,
@@ -921,7 +921,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
                 drop_eagle_block = (
                     use_eagle
-                    and not self.use_eagle_prefix_cache_hashing
+                    and not self.use_lookahead_block_hashes
                     and idx not in eagle_verified
                 )
 
@@ -1022,9 +1022,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 kv_cache_group_ids=group_ids,
                 block_pool=manager.block_pool,
                 kv_cache_spec=spec,
-                drop_eagle_block=(
-                    use_eagle and not self.use_eagle_prefix_cache_hashing
-                ),
+                drop_eagle_block=(use_eagle and not self.use_lookahead_block_hashes),
                 alignment_tokens=self._cache_hit_alignment_tokens,
                 dcp_world_size=manager.dcp_world_size,
                 pcp_world_size=manager.pcp_world_size,
@@ -1048,7 +1046,7 @@ def get_kv_cache_coordinator(
     scheduler_block_size: int,
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
-    use_eagle_prefix_cache_hashing: bool = False,
+    use_lookahead_block_hashes: bool = False,
     num_prefill_lookahead: int = 0,
     allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
@@ -1064,7 +1062,7 @@ def get_kv_cache_coordinator(
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
-            use_eagle_prefix_cache_hashing=use_eagle_prefix_cache_hashing,
+            use_lookahead_block_hashes=use_lookahead_block_hashes,
             num_prefill_lookahead=num_prefill_lookahead,
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
@@ -1080,7 +1078,7 @@ def get_kv_cache_coordinator(
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
-            use_eagle_prefix_cache_hashing=use_eagle_prefix_cache_hashing,
+            use_lookahead_block_hashes=use_lookahead_block_hashes,
             num_prefill_lookahead=num_prefill_lookahead,
         )
     return HybridKVCacheCoordinator(
@@ -1095,7 +1093,7 @@ def get_kv_cache_coordinator(
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
         metrics_collector=metrics_collector,
-        use_eagle_prefix_cache_hashing=use_eagle_prefix_cache_hashing,
+        use_lookahead_block_hashes=use_lookahead_block_hashes,
         num_prefill_lookahead=num_prefill_lookahead,
         allow_partial_hash_hits=allow_partial_hash_hits,
     )

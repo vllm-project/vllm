@@ -228,7 +228,7 @@ class Request:
         self.num_publishable_block_hashes = 0
         # Exact contiguous token frontier covered by those materialized KVs.
         # Unlike the hash count, this preserves sub-block progress.
-        self.num_materialized_eagle_tokens = 0
+        self.num_draft_kv_materialized_tokens = 0
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -304,17 +304,17 @@ class Request:
             return
         num_hashes = max(num_tokens - lookahead_tokens, 0) // hash_block_size
         del self.block_hashes[num_hashes:]
-        self.invalidate_eagle_hash_publication(num_hashes, num_tokens)
+        self.invalidate_lookahead_hash_publication(num_hashes, num_tokens)
 
-    def mark_eagle_hashes_publishable(
+    def mark_lookahead_hashes_publishable(
         self,
         num_tokens: int,
         hash_block_size: int,
     ) -> None:
         """Advance the successor-hash publication fence after worker ACK."""
         acknowledged_tokens = min(self.num_tokens, num_tokens)
-        self.num_materialized_eagle_tokens = max(
-            self.num_materialized_eagle_tokens,
+        self.num_draft_kv_materialized_tokens = max(
+            self.num_draft_kv_materialized_tokens,
             acknowledged_tokens,
         )
         num_hashes = min(
@@ -326,7 +326,7 @@ class Request:
             num_hashes,
         )
 
-    def invalidate_eagle_hash_publication(
+    def invalidate_lookahead_hash_publication(
         self,
         num_hashes: int = 0,
         num_materialized_tokens: int = 0,
@@ -336,8 +336,8 @@ class Request:
             self.num_publishable_block_hashes,
             num_hashes,
         )
-        self.num_materialized_eagle_tokens = min(
-            self.num_materialized_eagle_tokens,
+        self.num_draft_kv_materialized_tokens = min(
+            self.num_draft_kv_materialized_tokens,
             num_materialized_tokens,
         )
 

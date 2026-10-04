@@ -70,13 +70,13 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler
 
     @property
-    def supports_eagle_prefix_cache_hashing(self) -> bool:
+    def supports_lookahead_block_hashes(self) -> bool:
         return True
 
-    def set_eagle_prefix_cache_hashing(self, enabled: bool) -> None:
-        super().set_eagle_prefix_cache_hashing(enabled)
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
+        super().set_lookahead_block_hashes(enabled)
         if self.connector_scheduler is not None:
-            self.connector_scheduler.use_eagle_prefix_cache_hashing = enabled
+            self.connector_scheduler.use_lookahead_block_hashes = enabled
 
     @property
     def requires_kv_delivery(self) -> bool:

@@ -9,7 +9,7 @@ import pytest
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
-    get_request_eagle_block_hasher,
+    get_request_lookahead_block_hasher,
     init_none_hash,
 )
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
@@ -46,10 +46,10 @@ def _make_model_runner_output(
 
 
 def _enable_eagle_prefix_hashing(scheduler: AsyncScheduler) -> None:
-    scheduler.use_eagle_prefix_cache_hashing = True
+    scheduler.use_lookahead_block_hashes = True
     manager = scheduler.kv_cache_manager
-    manager.coordinator.use_eagle_prefix_cache_hashing = True
-    manager.block_pool.use_eagle_prefix_cache_hashing = True
+    manager.coordinator.use_lookahead_block_hashes = True
+    manager.block_pool.use_lookahead_block_hashes = True
 
 
 def test_chunked_prefill_publishes_only_acknowledged_async_steps() -> None:
@@ -72,7 +72,7 @@ def test_chunked_prefill_publishes_only_acknowledged_async_steps() -> None:
             prompt_token_ids=list(range(7)),
             sampling_params=SamplingParams(max_tokens=1),
             pooling_params=None,
-            block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+            block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
         )
 
     request = make_request("request")
@@ -95,7 +95,7 @@ def test_chunked_prefill_publishes_only_acknowledged_async_steps() -> None:
     )
 
     assert request.num_publishable_block_hashes == 1
-    assert request.num_materialized_eagle_tokens == 3
+    assert request.num_draft_kv_materialized_tokens == 3
     probe = make_request("probe")
     _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
     assert num_cached_tokens == 2
@@ -107,7 +107,7 @@ def test_chunked_prefill_publishes_only_acknowledged_async_steps() -> None:
         _make_model_runner_output(second_step, sampled_token_ids=[[]]),
     )
     assert request.num_publishable_block_hashes == 1
-    assert request.num_materialized_eagle_tokens == 3
+    assert request.num_draft_kv_materialized_tokens == 3
     _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
     assert num_cached_tokens == 2
 
@@ -133,7 +133,7 @@ def test_eagle_publication_advances_past_rejected_async_drafts() -> None:
         prompt_token_ids=list(range(8)),
         sampling_params=SamplingParams(max_tokens=16, ignore_eos=True),
         pooling_params=None,
-        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
     )
     scheduler.add_request(request)
 
@@ -153,7 +153,7 @@ def test_eagle_publication_advances_past_rejected_async_drafts() -> None:
 
     committed = request.num_computed_tokens - request.num_in_flight_tokens
     assert committed > len(request.prompt_token_ids)
-    assert request.num_materialized_eagle_tokens == committed
+    assert request.num_draft_kv_materialized_tokens == committed
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])
@@ -447,7 +447,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
-    scheduler.use_eagle_prefix_cache_hashing = False
+    scheduler.use_lookahead_block_hashes = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 
@@ -806,15 +806,15 @@ def test_stale_output_does_not_restore_eagle_materialization():
         block_size=block_size,
         max_num_batched_tokens=32,
     )
-    scheduler.use_eagle_prefix_cache_hashing = True
-    scheduler.kv_cache_manager.coordinator.use_eagle_prefix_cache_hashing = True
-    scheduler.kv_cache_manager.block_pool.use_eagle_prefix_cache_hashing = True
+    scheduler.use_lookahead_block_hashes = True
+    scheduler.kv_cache_manager.coordinator.use_lookahead_block_hashes = True
+    scheduler.kv_cache_manager.block_pool.use_lookahead_block_hashes = True
     request = Request(
         request_id="eagle",
         prompt_token_ids=list(range(9)),
         sampling_params=SamplingParams(max_tokens=4, ignore_eos=True),
         pooling_params=None,
-        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
     )
     scheduler.add_request(request)
 

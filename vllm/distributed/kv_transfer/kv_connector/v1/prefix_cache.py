@@ -13,18 +13,17 @@ if TYPE_CHECKING:
     )
 
 
-def is_eagle_prefix_cache_hashing_enabled(
+def is_lookahead_block_hashing_enabled(
     vllm_config: "VllmConfig",
     kv_connector: "KVConnectorBase_V1 | None" = None,
 ) -> bool:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None or not speculative_config.use_eagle_block_drop():
         return False
-    if not current_platform.supports_eagle_prefix_cache_hashing():
+    if not current_platform.supports_lookahead_block_hashes():
         return False
     if vllm_config.kv_transfer_config is not None:
         return bool(
-            kv_connector is not None
-            and kv_connector.supports_eagle_prefix_cache_hashing
+            kv_connector is not None and kv_connector.supports_lookahead_block_hashes
         )
     return vllm_config.cache_config.enable_prefix_caching

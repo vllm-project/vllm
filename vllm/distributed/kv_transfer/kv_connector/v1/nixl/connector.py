@@ -78,7 +78,7 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
 
     @property
-    def supports_eagle_prefix_cache_hashing(self) -> bool:
+    def supports_lookahead_block_hashes(self) -> bool:
         # Capability must not depend on a node-local APC setting: P and D must
         # select the same protocol when another connector shares hashes.
         return True

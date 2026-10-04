@@ -155,7 +155,7 @@ def test_successor_hashing_still_truncates_remote_decode_prompt():
         KVConnectorRole.SCHEDULER,
         make_hybrid_gdn_kv_cache_config(vllm_config.cache_config.block_size),
     )
-    connector.set_eagle_prefix_cache_hashing(True)
+    connector.set_lookahead_block_hashes(True)
     request = create_request(num_tokens=10, do_remote_decode=True)
     original_tokens = list(request.prompt_token_ids)
 

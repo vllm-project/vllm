@@ -567,7 +567,7 @@ def test_eagle_prefix_hashing_capability_is_independent_of_local_apc(
     vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     connector = object.__new__(MooncakeConnector)
 
-    assert connector.supports_eagle_prefix_cache_hashing
+    assert connector.supports_lookahead_block_hashes
 
 
 def test_prompt_less_than_block_size():

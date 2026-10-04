@@ -31,7 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     prefix_cache as prefix_cache_module,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
-    is_eagle_prefix_cache_hashing_enabled,
+    is_lookahead_block_hashing_enabled,
 )
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -1264,7 +1264,7 @@ def test_request_block_hasher_incremental_append_with_multiple_mm_features(hash_
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp", "dflash", "dspark"])
-def test_eagle_prefix_cache_hashing_supports_all_eagle_methods(method: str):
+def test_lookahead_block_hashes_supports_all_eagle_methods(method: str):
     speculative_config = object.__new__(SpeculativeConfig)
     object.__setattr__(speculative_config, "method", method)
     vllm_config = cast(
@@ -1277,7 +1277,7 @@ def test_eagle_prefix_cache_hashing_supports_all_eagle_methods(method: str):
         ),
     )
 
-    assert is_eagle_prefix_cache_hashing_enabled(vllm_config)
+    assert is_lookahead_block_hashing_enabled(vllm_config)
 
 
 @pytest.mark.parametrize(
@@ -1287,7 +1287,7 @@ def test_eagle_prefix_cache_hashing_supports_all_eagle_methods(method: str):
         {"method": "ngram"},
     ],
 )
-def test_eagle_prefix_cache_hashing_preserves_unsupported_fallbacks(
+def test_lookahead_block_hashes_preserves_unsupported_fallbacks(
     config_override: dict[str, Any],
 ):
     speculative_config = object.__new__(SpeculativeConfig)
@@ -1312,10 +1312,10 @@ def test_eagle_prefix_cache_hashing_preserves_unsupported_fallbacks(
         ),
     )
 
-    assert not is_eagle_prefix_cache_hashing_enabled(vllm_config)
+    assert not is_lookahead_block_hashing_enabled(vllm_config)
 
 
-def test_eagle_prefix_cache_hashing_requires_platform_ack(
+def test_lookahead_block_hashes_requires_platform_ack(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Runners that never acknowledge draft KV would never publish a block."""
@@ -1331,11 +1331,11 @@ def test_eagle_prefix_cache_hashing_requires_platform_ack(
     )
     monkeypatch.setattr(
         prefix_cache_module.current_platform,
-        "supports_eagle_prefix_cache_hashing",
+        "supports_lookahead_block_hashes",
         lambda: False,
     )
 
-    assert not is_eagle_prefix_cache_hashing_enabled(vllm_config)
+    assert not is_lookahead_block_hashing_enabled(vllm_config)
 
 
 @pytest.mark.parametrize(
@@ -1345,7 +1345,7 @@ def test_eagle_prefix_cache_hashing_requires_platform_ack(
         {"enable_kv_cache_events": True},
     ],
 )
-def test_eagle_prefix_cache_hashing_supports_cache_integrations(
+def test_lookahead_block_hashes_supports_cache_integrations(
     config_override: dict[str, Any],
 ):
     speculative_config = object.__new__(SpeculativeConfig)
@@ -1367,14 +1367,14 @@ def test_eagle_prefix_cache_hashing_supports_cache_integrations(
     )
 
     connector = (
-        SimpleNamespace(supports_eagle_prefix_cache_hashing=True)
+        SimpleNamespace(supports_lookahead_block_hashes=True)
         if vllm_config.kv_transfer_config is not None
         else None
     )
-    assert is_eagle_prefix_cache_hashing_enabled(vllm_config, connector)
+    assert is_lookahead_block_hashing_enabled(vllm_config, connector)
 
 
-def test_eagle_prefix_cache_hashing_requires_connector_support():
+def test_lookahead_block_hashes_requires_connector_support():
     speculative_config = object.__new__(SpeculativeConfig)
     object.__setattr__(speculative_config, "method", "mtp")
     vllm_config = cast(
@@ -1385,9 +1385,9 @@ def test_eagle_prefix_cache_hashing_requires_connector_support():
             kv_transfer_config=object(),
         ),
     )
-    connector = SimpleNamespace(supports_eagle_prefix_cache_hashing=False)
+    connector = SimpleNamespace(supports_lookahead_block_hashes=False)
 
-    assert not is_eagle_prefix_cache_hashing_enabled(vllm_config, connector)
+    assert not is_lookahead_block_hashing_enabled(vllm_config, connector)
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

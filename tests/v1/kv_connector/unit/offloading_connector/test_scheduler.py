@@ -3147,7 +3147,7 @@ class TestEagle:
             async_scheduling=False,
             kv_cache_groups=groups,
         )
-        runner.scheduler_connector.set_eagle_prefix_cache_hashing(True)
+        runner.scheduler_connector.set_lookahead_block_hashes(True)
         runner.manager.lookup.return_value = LookupResult.HIT
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -3659,11 +3659,11 @@ class TestEagle:
             blocks_per_chunk=blocks_per_chunk,
         )
         connector = runner.scheduler_connector
-        assert connector.supports_eagle_prefix_cache_hashing
-        connector.set_eagle_prefix_cache_hashing(True)
+        assert connector.supports_lookahead_block_hashes
+        connector.set_lookahead_block_hashes(True)
 
         request = runner.new_request(token_ids=[0] * block_size * 4)
-        request.mark_eagle_hashes_publishable(3 * block_size, block_size)
+        request.mark_lookahead_hashes_publishable(3 * block_size, block_size)
         runner.manager.prepare_store.side_effect = lambda keys, req_context: (
             generate_store_output(keys)
         )

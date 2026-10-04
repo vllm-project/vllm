@@ -47,7 +47,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_block_hash,
     get_group_id,
     get_request_block_hasher,
-    get_request_eagle_block_hasher,
+    get_request_lookahead_block_hasher,
     hash_block_tokens,
     init_none_hash,
     make_block_hash_with_group_id,
@@ -93,7 +93,7 @@ def make_request(
     prompt_logprobs: int | None = None,
     cache_salt: str | None = None,
     lora_request: LoRARequest | None = None,
-    use_eagle_hashes: bool = False,
+    use_lookahead_hashes: bool = False,
     resumable: bool = False,
     session_id: str | None = None,
 ):
@@ -121,8 +121,8 @@ def make_request(
         lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=(
-            get_request_eagle_block_hasher(block_size, hash_fn)
-            if use_eagle_hashes
+            get_request_lookahead_block_hasher(block_size, hash_fn)
+            if use_lookahead_hashes
             else get_request_block_hasher(block_size, hash_fn)
         ),
         resumable=resumable,
@@ -602,11 +602,11 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
         failed_recving_kv_req_ids=set(),
         finished_recving_kv_req_ids={request.request_id},
         prefix_replay_tokens=0,
-        use_eagle_prefix_cache_hashing=False,
+        use_lookahead_block_hashes=False,
     )
     scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
-    scheduler._mark_eagle_hashes_publishable = MethodType(
-        Scheduler._mark_eagle_hashes_publishable, scheduler
+    scheduler._mark_lookahead_hashes_publishable = MethodType(
+        Scheduler._mark_lookahead_hashes_publishable, scheduler
     )
     Scheduler._update_waiting_for_remote_kv(scheduler, request)
     assert request.num_tokens - request.num_computed_tokens == 1
@@ -4157,7 +4157,7 @@ def test_eagle_identical_prompt_hits_last_safe_block():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
-        use_eagle_prefix_cache_hashing=True,
+        use_lookahead_block_hashes=True,
         hash_block_size=block_size,
     )
 
@@ -4168,7 +4168,7 @@ def test_eagle_identical_prompt_hits_last_safe_block():
         token_ids,
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
 
     # Prime the cache
@@ -4176,7 +4176,7 @@ def test_eagle_identical_prompt_hits_last_safe_block():
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
-    req.mark_eagle_hashes_publishable(req.num_tokens, block_size)
+    req.mark_lookahead_hashes_publishable(req.num_tokens, block_size)
     manager.cache_blocks(req, req.num_tokens)
     manager.free(req)
 
@@ -4186,7 +4186,7 @@ def test_eagle_identical_prompt_hits_last_safe_block():
         token_ids,
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
 
@@ -4204,7 +4204,7 @@ def test_eagle_with_partial_blocks():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
-        use_eagle_prefix_cache_hashing=True,
+        use_lookahead_block_hashes=True,
         hash_block_size=block_size,
     )
     # 2 full blocks + 5 tokens (non-divisible length)
@@ -4214,7 +4214,7 @@ def test_eagle_with_partial_blocks():
         token_ids,
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
 
     # Prime the cache
@@ -4222,7 +4222,7 @@ def test_eagle_with_partial_blocks():
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
-    req.mark_eagle_hashes_publishable(req.num_tokens, block_size)
+    req.mark_lookahead_hashes_publishable(req.num_tokens, block_size)
     manager.cache_blocks(req, req.num_tokens)
     manager.free(req)
 
@@ -4232,7 +4232,7 @@ def test_eagle_with_partial_blocks():
         token_ids,
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
     assert len(computed_blocks.blocks[0]) == 2
@@ -4246,7 +4246,7 @@ def test_eagle_successor_token_controls_last_block_hit():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
-        use_eagle_prefix_cache_hashing=True,
+        use_lookahead_block_hashes=True,
         hash_block_size=block_size,
     )
 
@@ -4255,11 +4255,11 @@ def test_eagle_successor_token_controls_last_block_hit():
         [0, 1, 2, 3, 4, 5],
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     computed_blocks, _, _ = manager.get_computed_blocks(first)
     manager.allocate_slots(first, first.num_tokens, 0, computed_blocks)
-    first.mark_eagle_hashes_publishable(first.num_tokens, block_size)
+    first.mark_lookahead_hashes_publishable(first.num_tokens, block_size)
     manager.cache_blocks(first, first.num_tokens)
     manager.free(first)
 
@@ -4268,7 +4268,7 @@ def test_eagle_successor_token_controls_last_block_hit():
         [0, 1, 2, 3, 4, 6],
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     _, num_tokens, _ = manager.get_computed_blocks(same_successor)
     assert num_tokens == 2 * block_size
@@ -4278,7 +4278,7 @@ def test_eagle_successor_token_controls_last_block_hit():
         [0, 1, 2, 3, 7, 6],
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     _, num_tokens, _ = manager.get_computed_blocks(different_successor)
     assert num_tokens == block_size
@@ -4291,7 +4291,7 @@ def test_eagle_blocks_are_published_only_after_draft_materialization():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
-        use_eagle_prefix_cache_hashing=True,
+        use_lookahead_block_hashes=True,
         hash_block_size=block_size,
     )
     first = make_request(
@@ -4299,7 +4299,7 @@ def test_eagle_blocks_are_published_only_after_draft_materialization():
         [0, 1, 2, 3, 4],
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     computed_blocks, _, _ = manager.get_computed_blocks(first)
     manager.allocate_slots(first, first.num_tokens, 0, computed_blocks)
@@ -4309,19 +4309,19 @@ def test_eagle_blocks_are_published_only_after_draft_materialization():
         first.all_token_ids[:],
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     _, num_tokens, _ = manager.get_computed_blocks(before_draft)
     assert num_tokens == 0
 
-    first.mark_eagle_hashes_publishable(first.num_tokens, block_size)
+    first.mark_lookahead_hashes_publishable(first.num_tokens, block_size)
     manager.cache_blocks(first, first.num_tokens)
     after_draft = make_request(
         "after_draft",
         first.all_token_ids[:],
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     _, num_tokens, _ = manager.get_computed_blocks(after_draft)
     assert num_tokens == 2 * block_size
@@ -4334,7 +4334,7 @@ def test_eagle_kv_events_publish_successor_hashes():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
-        use_eagle_prefix_cache_hashing=True,
+        use_lookahead_block_hashes=True,
         hash_block_size=block_size,
         enable_kv_cache_events=True,
     )
@@ -4343,11 +4343,11 @@ def test_eagle_kv_events_publish_successor_hashes():
         [0, 1, 2, 3, 4],
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     computed_blocks, _, _ = manager.get_computed_blocks(request)
     manager.allocate_slots(request, request.num_tokens, 0, computed_blocks)
-    request.mark_eagle_hashes_publishable(request.num_tokens, block_size)
+    request.mark_lookahead_hashes_publishable(request.num_tokens, block_size)
     manager.cache_blocks(request, request.num_tokens)
 
     events = manager.take_events()
@@ -4394,7 +4394,7 @@ def test_eagle_kv_event_reconstructs_hash_with_coarser_cache_block(
         enable_caching=True,
         hash_block_size=hash_block_size,
         enable_kv_cache_events=True,
-        use_eagle_prefix_cache_hashing=True,
+        use_lookahead_block_hashes=True,
     )
     request = make_request(
         "request",
@@ -4403,7 +4403,7 @@ def test_eagle_kv_event_reconstructs_hash_with_coarser_cache_block(
         sha256,
         mm_positions=[PlaceholderRange(offset=3, length=2)],
         mm_hashes=["image"],
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     blocks = pool.get_new_blocks(2)
 
@@ -4455,12 +4455,12 @@ def test_eagle_kv_event_reconstructs_hash_with_coarser_cache_block(
         for unit_start in range(
             block_start, block_start + cache_block_size, hash_block_size
         ):
-            unit_keys, mm_idx = kv_cache_utils.generate_eagle_block_hash_extra_keys(
+            unit_keys, mm_idx = kv_cache_utils.generate_lookahead_block_hash_extra_keys(
                 request, unit_start, unit_start + hash_block_size, mm_idx
             )
             tagged_keys.append(unit_keys)
         assert event.extra_keys == kv_cache_utils.to_request_event_extra_keys(
-            tagged_keys, use_eagle_prefix_cache_hashing=True
+            tagged_keys, use_lookahead_block_hashes=True
         )
 
         if not use_int_hashes:
@@ -4507,14 +4507,14 @@ def test_masked_block_does_not_emit_empty_stored_event():
     assert pool.take_events() == []
 
 
-def test_eagle_hash_is_published_when_successor_arrives():
+def test_lookahead_hash_is_published_when_successor_arrives():
     block_size = 2
     request = make_request(
         "request",
         [0, 1],
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     assert request.block_hashes == []
 
@@ -4533,23 +4533,23 @@ def test_eagle_hash_is_published_when_successor_arrives():
         [0, 1, 2],
         block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     assert request.block_hashes == expected.block_hashes
     assert request.num_publishable_block_hashes == 0
 
-    request.mark_eagle_hashes_publishable(request.num_tokens, block_size)
+    request.mark_lookahead_hashes_publishable(request.num_tokens, block_size)
 
     assert request.num_publishable_block_hashes == len(request.block_hashes)
 
 
-def test_eagle_hashing_supports_resumable_requests():
+def test_lookahead_block_hashes_support_resumable_requests():
     request = make_request(
         "resumable",
         [0, 1, 2],
         2,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
         resumable=True,
     )
 
@@ -4565,7 +4565,7 @@ def test_eagle_hashing_supports_resumable_requests():
         [0, 1, 3],
         2,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     assert request.block_hashes == expected.block_hashes
     assert request.block_hashes != original_hash
@@ -4604,7 +4604,7 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
         max_model_len=8192,
         enable_caching=True,
         use_eagle=True,
-        use_eagle_prefix_cache_hashing=True,
+        use_lookahead_block_hashes=True,
         hash_block_size=hash_block_size,
     )
 
@@ -4613,16 +4613,16 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
         token_ids,
         hash_block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     computed_blocks, num_computed, _ = manager.get_computed_blocks(first)
     manager.allocate_slots(first, 1248, num_computed, computed_blocks)
-    first.mark_eagle_hashes_publishable(first.num_tokens, hash_block_size)
+    first.mark_lookahead_hashes_publishable(first.num_tokens, hash_block_size)
     manager.cache_blocks(first, 1248)
     first.num_computed_tokens = 1248
     manager.new_step_starts()
     manager.allocate_slots(first, 1)
-    first.mark_eagle_hashes_publishable(first.num_tokens, hash_block_size)
+    first.mark_lookahead_hashes_publishable(first.num_tokens, hash_block_size)
     manager.cache_blocks(first, 1249)
     first.num_computed_tokens = 1249
     manager.new_step_starts()
@@ -4633,7 +4633,7 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
         token_ids,
         hash_block_size,
         sha256,
-        use_eagle_hashes=True,
+        use_lookahead_hashes=True,
     )
     _, num_computed, _ = manager.get_computed_blocks(second)
 

@@ -128,7 +128,7 @@ def _split(
     request: Request,
     num_new_tokens: int,
     use_eagle: bool = True,
-    use_eagle_prefix_cache_hashing: bool = False,
+    use_lookahead_block_hashes: bool = False,
     use_eagle_block_drop: bool | None = None,
     partial_hit: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
@@ -141,7 +141,7 @@ def _split(
         block_size=MAMBA_BLOCK_SIZE,
         cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
         use_eagle_block_drop=use_eagle_block_drop,
-        use_eagle_prefix_cache_hashing=use_eagle_prefix_cache_hashing,
+        use_lookahead_block_hashes=use_lookahead_block_hashes,
         max_num_scheduled_tokens=max_num_scheduled_tokens,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         # `prefix_match_unit` finer than the block size (#46384).
@@ -162,7 +162,7 @@ def test_successor_hashing_preserves_last_mamba_cache_boundary() -> None:
 
     assert _split(request, prompt_len) == MAMBA_BLOCK_SIZE
     assert (
-        _split(request, prompt_len, use_eagle_prefix_cache_hashing=True)
+        _split(request, prompt_len, use_lookahead_block_hashes=True)
         == 2 * MAMBA_BLOCK_SIZE
     )
 

@@ -142,10 +142,10 @@ class PrefixHashingTestConnector(KVConnectorBase_V1):
     """Minimal real connector for prefix-hash protocol tests."""
 
     @property
-    def supports_eagle_prefix_cache_hashing(self) -> bool:
+    def supports_lookahead_block_hashes(self) -> bool:
         return bool(
             self._kv_transfer_config.kv_connector_extra_config.get(
-                "supports_eagle_prefix_cache_hashing", False
+                "supports_lookahead_block_hashes", False
             )
         )
 
@@ -196,7 +196,7 @@ def _prefix_hashing_connector_config(supported: bool) -> dict[str, Any]:
         "kv_role": "kv_both",
         "kv_connector_module_path": __name__,
         "kv_connector_extra_config": {
-            "supports_eagle_prefix_cache_hashing": supported,
+            "supports_lookahead_block_hashes": supported,
         },
     }
 
@@ -409,7 +409,7 @@ def test_multi_example_connector_consistency():
     # completion counts queried, and handshake metadata exchanged before the
     # request is enqueued.
     assert storage1_scheduler_events[:8] == [
-        "set_eagle_prefix_cache_hashing False",
+        "set_lookahead_block_hashes False",
         "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
@@ -421,7 +421,7 @@ def test_multi_example_connector_consistency():
     # Prefix-hash mode is propagated before the connector is initialized. Layer
     # hooks run before the deferred load starts after the forward pass.
     expected_worker_prefix = [
-        "set_eagle_prefix_cache_hashing False",
+        "set_lookahead_block_hashes False",
         "get_mem_pool_context",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
@@ -438,7 +438,7 @@ def test_multi_example_connector_consistency():
             "save_kv_layer"
         )
     assert storage2_scheduler_events[:8] == [
-        "set_eagle_prefix_cache_hashing False",
+        "set_lookahead_block_hashes False",
         "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
@@ -1085,7 +1085,7 @@ def test_factory_configures_eagle_prefix_hashing(supported: bool):
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
     )
 
-    assert connector.use_eagle_prefix_cache_hashing is supported
+    assert connector.use_lookahead_block_hashes is supported
 
 
 @pytest.mark.parametrize(
@@ -1115,10 +1115,9 @@ def test_factory_configures_multi_connector_eagle_prefix_hashing(
     )
 
     assert isinstance(connector, MultiConnector)
-    assert connector.use_eagle_prefix_cache_hashing is expected
+    assert connector.use_lookahead_block_hashes is expected
     assert all(
-        child.use_eagle_prefix_cache_hashing is expected
-        for child in connector._connectors
+        child.use_lookahead_block_hashes is expected for child in connector._connectors
     )
 
 
@@ -1126,11 +1125,11 @@ def test_multi_connector_propagates_eagle_prefix_hashing(mc: MultiConnector):
     for connector in mc._connectors:
         connector.reset_mock()
 
-    mc.set_eagle_prefix_cache_hashing(True)
+    mc.set_lookahead_block_hashes(True)
 
-    assert mc.use_eagle_prefix_cache_hashing
+    assert mc.use_lookahead_block_hashes
     for connector in mc._connectors:
-        connector.set_eagle_prefix_cache_hashing.assert_called_once_with(True)
+        connector.set_lookahead_block_hashes.assert_called_once_with(True)
 
 
 def test_multi_connector_worker_metadata(mc):

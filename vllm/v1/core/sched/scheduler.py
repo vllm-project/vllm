@@ -27,7 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
-    is_eagle_prefix_cache_hashing_enabled,
+    is_lookahead_block_hashing_enabled,
 )
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -314,7 +314,7 @@ class Scheduler(SchedulerInterface):
                     "acceptance rates."
                 )
 
-        self.use_eagle_prefix_cache_hashing = is_eagle_prefix_cache_hashing_enabled(
+        self.use_lookahead_block_hashes = is_lookahead_block_hashing_enabled(
             vllm_config, self.connector
         )
 
@@ -328,7 +328,7 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle_block_drop,
-            use_eagle_prefix_cache_hashing=self.use_eagle_prefix_cache_hashing,
+            use_lookahead_block_hashes=self.use_lookahead_block_hashes,
             num_prefill_lookahead=self.num_prefill_lookahead,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -459,7 +459,7 @@ class Scheduler(SchedulerInterface):
         # successor-aware hashing, EAGLE prunes the last FullAttn match, so
         # back off one block to avoid a Mamba cache miss.
         last_cache_position = request.num_tokens - request.num_tokens % block_size
-        if self.use_eagle_block_drop and not self.use_eagle_prefix_cache_hashing:
+        if self.use_eagle_block_drop and not self.use_lookahead_block_hashes:
             last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
@@ -467,7 +467,7 @@ class Scheduler(SchedulerInterface):
             prefill_end,
             self.hash_block_size,
             drop_eagle_block=(
-                self.use_eagle_block_drop and not self.use_eagle_prefix_cache_hashing
+                self.use_eagle_block_drop and not self.use_lookahead_block_hashes
             ),
         )
         use_internal_checkpoint = (
@@ -503,7 +503,7 @@ class Scheduler(SchedulerInterface):
             get_prompt_hash_boundary(
                 request.num_prompt_tokens,
                 self.hash_block_size,
-                self.use_eagle_prefix_cache_hashing,
+                self.use_lookahead_block_hashes,
             )
             if self.mamba_partial_cache_hit and not use_internal_checkpoint
             else 0
@@ -511,7 +511,7 @@ class Scheduler(SchedulerInterface):
         if (
             tail_boundary
             and self.use_eagle_block_drop
-            and not self.use_eagle_prefix_cache_hashing
+            and not self.use_lookahead_block_hashes
         ):
             # Eagle matches one hash unit past the candidate and drops it, so
             # nothing proves the prompt's own last hash boundary. Materialize
@@ -1580,7 +1580,7 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
-        request.invalidate_eagle_hash_publication()
+        request.invalidate_lookahead_hash_publication()
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
@@ -1655,7 +1655,7 @@ class Scheduler(SchedulerInterface):
         session.truncate_block_hashes(
             num_computed_tokens,
             self.hash_block_size,
-            lookahead_tokens=int(self.use_eagle_prefix_cache_hashing),
+            lookahead_tokens=int(self.use_lookahead_block_hashes),
         )
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
@@ -1999,13 +1999,13 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids, bitmask, num_acceptable_drafts
         )
 
-    def _mark_eagle_hashes_publishable(
+    def _mark_lookahead_hashes_publishable(
         self,
         request: Request,
         num_tokens: int,
     ) -> None:
-        if self.use_eagle_prefix_cache_hashing:
-            request.mark_eagle_hashes_publishable(
+        if self.use_lookahead_block_hashes:
+            request.mark_lookahead_hashes_publishable(
                 num_tokens,
                 self.hash_block_size,
             )
@@ -2032,7 +2032,7 @@ class Scheduler(SchedulerInterface):
                 req.req_id: req.num_computed_tokens
                 for req in scheduler_output.scheduled_new_reqs
             }
-            if self.use_eagle_prefix_cache_hashing
+            if self.use_lookahead_block_hashes
             else {}
         )
 
@@ -2095,10 +2095,10 @@ class Scheduler(SchedulerInterface):
 
             if (
                 not output_is_stale
-                and self.use_eagle_prefix_cache_hashing
+                and self.use_lookahead_block_hashes
                 and (prefix_tokens := publishable_prefix_tokens.get(req_id, 0))
             ):
-                self._mark_eagle_hashes_publishable(request, prefix_tokens)
+                self._mark_lookahead_hashes_publishable(request, prefix_tokens)
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
@@ -2186,19 +2186,19 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             if (
-                self.use_eagle_prefix_cache_hashing
+                self.use_lookahead_block_hashes
                 and status_before_stop == RequestStatus.RUNNING
                 and not output_is_stale
                 and model_runner_output.draft_kv_materialized
             ):
                 # Rejections are already rolled back and later steps are still
                 # in flight, so this is the committed frontier.
-                self._mark_eagle_hashes_publishable(
+                self._mark_lookahead_hashes_publishable(
                     request,
                     request.num_computed_tokens - request.num_in_flight_tokens,
                 )
                 self.kv_cache_manager.cache_blocks(
-                    request, request.num_materialized_eagle_tokens
+                    request, request.num_draft_kv_materialized_tokens
                 )
 
             if new_token_ids and not self.structured_output_manager.accept_tokens(
@@ -3149,7 +3149,7 @@ class Scheduler(SchedulerInterface):
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
                 # Cache any valid computed tokens.
-                self._mark_eagle_hashes_publishable(
+                self._mark_lookahead_hashes_publishable(
                     request,
                     request.num_computed_tokens,
                 )
@@ -3172,7 +3172,7 @@ class Scheduler(SchedulerInterface):
         else:
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
-            self._mark_eagle_hashes_publishable(
+            self._mark_lookahead_hashes_publishable(
                 request,
                 request.num_computed_tokens,
             )
@@ -3352,7 +3352,7 @@ class Scheduler(SchedulerInterface):
                     )
                     request.num_computed_tokens = req_num_computed_tokens
 
-                request.invalidate_eagle_hash_publication(
+                request.invalidate_lookahead_hash_publication(
                     request.num_computed_tokens // self.hash_block_size,
                     request.num_computed_tokens,
                 )

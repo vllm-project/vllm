@@ -162,7 +162,7 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
-        use_eagle_prefix_cache_hashing: bool = False,
+        use_lookahead_block_hashes: bool = False,
         medium: str = MEDIUM_GPU,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
@@ -170,7 +170,7 @@ class BlockPool:
         self.medium = medium
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
-        self.use_eagle_prefix_cache_hashing = use_eagle_prefix_cache_hashing
+        self.use_lookahead_block_hashes = use_lookahead_block_hashes
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx, pool=self) for idx in range(num_gpu_blocks)
@@ -349,7 +349,7 @@ class BlockPool:
                     block_start,
                     block_end,
                     curr_mm_idx,
-                    self.use_eagle_prefix_cache_hashing,
+                    self.use_lookahead_block_hashes,
                 )
                 extra_keys_list.append(extra_keys)
 
@@ -373,10 +373,7 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
     ) -> bool:
-        if (
-            not self.use_eagle_prefix_cache_hashing
-            or block_size == self.hash_block_size
-        ):
+        if not self.use_lookahead_block_hashes or block_size == self.hash_block_size:
             return False
 
         for block_idx in block_indices:
@@ -433,7 +430,7 @@ class BlockPool:
             medium=self.medium,
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=to_request_event_extra_keys(
-                extra_keys_list, self.use_eagle_prefix_cache_hashing
+                extra_keys_list, self.use_lookahead_block_hashes
             ),
             group_idx=kv_cache_group_id,
             hash_block_size=hash_block_size,
@@ -488,7 +485,7 @@ class BlockPool:
                 block_start,
                 block_end,
                 curr_mm_idx,
-                self.use_eagle_prefix_cache_hashing,
+                self.use_lookahead_block_hashes,
             )
             extra_keys_list.append(extra_keys)
 
@@ -626,7 +623,7 @@ class BlockPool:
                 block_start,
                 block_end,
                 curr_mm_idx,
-                self.use_eagle_prefix_cache_hashing,
+                self.use_lookahead_block_hashes,
             )
             self.kv_event_queue.append(
                 BlockStored(
@@ -642,7 +639,7 @@ class BlockPool:
                     if request.lora_request
                     else None,
                     extra_keys=to_request_event_extra_keys(
-                        [extra_keys], self.use_eagle_prefix_cache_hashing
+                        [extra_keys], self.use_lookahead_block_hashes
                     ),
                     group_idx=kv_cache_group_id,
                     session_id=request.session_id,

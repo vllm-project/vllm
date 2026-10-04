@@ -128,7 +128,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
     @property
-    def supports_eagle_prefix_cache_hashing(self) -> bool:
+    def supports_lookahead_block_hashes(self) -> bool:
         return True
 
     @staticmethod
@@ -198,12 +198,12 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
 
-    def set_eagle_prefix_cache_hashing(self, enabled: bool) -> None:
-        super().set_eagle_prefix_cache_hashing(enabled)
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
+        super().set_lookahead_block_hashes(enabled)
         if self.connector_scheduler is not None:
-            self.connector_scheduler.use_eagle_prefix_cache_hashing = enabled
+            self.connector_scheduler.use_lookahead_block_hashes = enabled
         if self.connector_worker is not None:
-            self.connector_worker.use_eagle_prefix_cache_hashing = enabled
+            self.connector_worker.use_lookahead_block_hashes = enabled
 
     def shutdown(self):
         """Release connector resources on teardown.
@@ -279,7 +279,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # An in-flight store job holds its own reference on the blocks it reads,
         # so a finishing request never has to defer freeing them.
         assert self.connector_scheduler is not None
-        self.connector_scheduler.register_finished_eagle_save(request, block_ids)
+        self.connector_scheduler.register_finished_lookahead_save(request, block_ids)
         return False, None
 
     def register_finished_partial_tail(

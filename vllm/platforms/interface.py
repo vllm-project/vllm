@@ -1228,7 +1228,7 @@ class Platform:
         return False
 
     @classmethod
-    def supports_eagle_prefix_cache_hashing(cls) -> bool:
+    def supports_lookahead_block_hashes(cls) -> bool:
         """Whether the platform's model runner reports
         ``ModelRunnerOutput.draft_kv_materialized``, which successor-aware
         EAGLE prefix-cache hashing needs to publish blocks."""

@@ -701,7 +701,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     @property
-    def supports_eagle_prefix_cache_hashing(self) -> bool:
+    def supports_lookahead_block_hashes(self) -> bool:
         # P/D transfers identify physical blocks rather than cache hashes.
         return True
 

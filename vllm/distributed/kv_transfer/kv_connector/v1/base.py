@@ -194,7 +194,7 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
-    def supports_eagle_prefix_cache_hashing(self) -> bool:
+    def supports_lookahead_block_hashes(self) -> bool:
         """Whether this engine can use successor-aware EAGLE cache keys.
 
         Engines sharing a content-addressed cache must make the same choice.
@@ -232,11 +232,11 @@ class KVConnectorBase_V1(ABC):
         self._kv_cache_config = kv_cache_config
         self._kv_cache_manager: KVCacheManager | None = None
         self._role = role
-        self.use_eagle_prefix_cache_hashing = False
+        self.use_lookahead_block_hashes = False
 
-    def set_eagle_prefix_cache_hashing(self, enabled: bool) -> None:
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
         """Configure the engine-wide prefix-cache hash protocol."""
-        self.use_eagle_prefix_cache_hashing = enabled
+        self.use_lookahead_block_hashes = enabled
 
     @property
     def role(self) -> KVConnectorRole:

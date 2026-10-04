@@ -42,7 +42,7 @@ from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
-    get_request_eagle_block_hasher,
+    get_request_lookahead_block_hasher,
     init_none_hash,
 )
 from vllm.v1.core.sched.diffusion_scheduler import (
@@ -81,10 +81,10 @@ pytestmark = pytest.mark.cpu_test
 
 
 def _enable_eagle_prefix_hashing(scheduler: Scheduler) -> None:
-    scheduler.use_eagle_prefix_cache_hashing = True
+    scheduler.use_lookahead_block_hashes = True
     manager = scheduler.kv_cache_manager
-    manager.coordinator.use_eagle_prefix_cache_hashing = True
-    manager.block_pool.use_eagle_prefix_cache_hashing = True
+    manager.coordinator.use_lookahead_block_hashes = True
+    manager.block_pool.use_lookahead_block_hashes = True
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
@@ -330,7 +330,7 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         prompt_token_ids=[0, 1, 2, 3, 4],
         sampling_params=SamplingParams(max_tokens=2),
         pooling_params=None,
-        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
     )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
@@ -340,7 +340,7 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         prompt_token_ids=[0, 1, 2, 3, 4],
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
-        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
     )
     _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(before_ack)
     assert num_tokens == 0
@@ -360,7 +360,7 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         prompt_token_ids=[0, 1, 2, 3, 4],
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
-        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
     )
     _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(after_ack)
     assert num_tokens == 2 * block_size
@@ -370,14 +370,14 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         [request], {block_ids[0]}, {}, evict_blocks=False
     )
     assert request.num_publishable_block_hashes == 0
-    assert request.num_materialized_eagle_tokens == 0
+    assert request.num_draft_kv_materialized_tokens == 0
 
-    request.mark_eagle_hashes_publishable(4, block_size)
-    assert request.num_materialized_eagle_tokens == 4
+    request.mark_lookahead_hashes_publishable(4, block_size)
+    assert request.num_draft_kv_materialized_tokens == 4
     scheduler.running.remove(request)
     scheduler._preempt_request(request, timestamp=0.0)
     assert request.num_publishable_block_hashes == 0
-    assert request.num_materialized_eagle_tokens == 0
+    assert request.num_draft_kv_materialized_tokens == 0
 
 
 def test_scheduler_does_not_publish_eagle_blocks_without_worker_acknowledgement():
@@ -394,7 +394,7 @@ def test_scheduler_does_not_publish_eagle_blocks_without_worker_acknowledgement(
         prompt_token_ids=[0, 1, 2, 3, 4],
         sampling_params=SamplingParams(max_tokens=3),
         pooling_params=None,
-        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
     )
     scheduler.add_request(request)
 
@@ -440,7 +440,7 @@ def test_connector_finish_includes_partial_eagle_block(
         prompt_token_ids=list(range(33)),
         sampling_params=SamplingParams(max_tokens=2),
         pooling_params=None,
-        block_hasher=get_request_eagle_block_hasher(block_size, sha256),
+        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
     )
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
@@ -4157,7 +4157,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
-    scheduler.use_eagle_prefix_cache_hashing = False
+    scheduler.use_lookahead_block_hashes = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 
