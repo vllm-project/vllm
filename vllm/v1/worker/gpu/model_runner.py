@@ -327,6 +327,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
+        # Set by profile_cudagraph_memory(): what the profiling pass kept
+        # allocated outside the graph pool, reserved with the estimate.
+        self.cudagraph_profiling_retained_bytes = 0
 
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
