@@ -692,8 +692,10 @@ def test_kda_spec_decode_correctness(
         pytest.param(True, False, None, True, id="aligned"),
     ],
 )
+@pytest.mark.parametrize("accepted", [(2, 8), (3, 4), (5, 8)])
 @torch.inference_mode()
 def test_kda_recoverssm_verify_and_group_commit(
+    accepted: tuple[int, int],
     monkeypatch: pytest.MonkeyPatch,
     lower_bound: float | None,
     use_request_indices: bool,
@@ -738,7 +740,6 @@ def test_kda_recoverssm_verify_and_group_commit(
     state_indices = torch.tensor(
         [5, 6] if align_mode else [1, 2], dtype=torch.int32, device=DEVICE
     )
-    accepted = [2, 8]
     if use_request_indices:
         global_num_accepted = torch.tensor(
             [0, accepted[0], 0, accepted[1]],
@@ -891,7 +892,9 @@ def test_kda_recoverssm_verify_and_group_commit(
             if align_mode:
                 assert block_table is not None
                 row = request_indices[seq_idx] if use_request_indices else seq_idx
-                final_block = block_table[row, (4 + commit_len) // 8]
+                final_block = block_table[
+                    row, {2: 0, 3: 0, 4: 0, 5: 1, 8: 1}[commit_len]
+                ]
             committed_states[final_block] = committed_state.transpose(-1, -2)
             if align_mode and 4 + commit_len >= 8:
                 _, boundary_state = naive_recurrent_kda(
@@ -944,7 +947,7 @@ def test_kda_recoverssm_verify_and_group_commit(
             if align_mode:
                 assert block_table is not None
                 row = request_indices[seq_idx] if use_request_indices else seq_idx
-                block = block_table[row, (4 + commit_len) // 8]
+                block = block_table[row, {2: 0, 3: 0, 4: 0, 5: 1, 8: 1}[commit_len]]
             source_block = state_indices[seq_idx] if align_mode else block
             if conv_state_dim_first:
                 actual_conv = layer.kv_cache[0][block, :, :history_len]
