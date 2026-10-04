@@ -175,6 +175,12 @@ class RayWorkerProc(WorkerProc):
                 os.environ.setdefault(key, value)
         for key, value in env_vars.items():
             os.environ[key] = value
+        if current_platform.is_rocm():
+            # rocm_aiter_ops snapshots the AITER toggles at import, which in
+            # a Ray actor happens before the driver env above is applied.
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            rocm_aiter_ops.refresh_env_variables()
 
         if assigned_physical_gpu_ids is not None:
             vllm_config = self._init_kwargs["vllm_config"]
