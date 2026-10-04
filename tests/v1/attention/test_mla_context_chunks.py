@@ -18,6 +18,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     build_mla_chunked_context_metadata,
     init_mla_context_partial,
     reorg_kvcache,
+    shift_block_table_to_starts,
 )
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
@@ -181,6 +182,35 @@ def test_continuation_is_confined_to_a_chunks_first_request():
             offset - chunk.token_slice.start
             for offset in query_start_loc[request_start : request_end + 1]
         ]
+
+
+def test_shift_block_table_to_starts_matches_seq_starts():
+    """Shifting a row by ``start // block_size`` is equivalent to ``seq_starts``.
+
+    Gathers without a ``seq_starts`` argument (the nvfp4_ds_mla one) read from a
+    request's first token, so a continuation chunk passes a shifted block table.
+    Token ``t`` of the chunk must land on the same physical slot either way.
+    """
+    context_lens = [2048, 32, 32]
+    metadata = build_chunked_context(context_lens, [3, 5, 7], 1024)
+    assert metadata is not None
+    num_blocks = max(context_lens) // BLOCK_SIZE
+    block_table = torch.randperm(len(context_lens) * num_blocks, dtype=torch.int32)
+    block_table = block_table.view(len(context_lens), num_blocks)
+
+    assert any(c.is_continuation for c in metadata.chunks)
+    for chunk in metadata.chunks:
+        table = block_table[chunk.request_slice]
+        shifted = shift_block_table_to_starts(table, chunk.starts, BLOCK_SIZE)
+        for row, (start, seq_len) in enumerate(
+            zip(chunk.starts.tolist(), chunk.seq_lens.tolist(), strict=True)
+        ):
+            # Block-aligned, so the in-block offset of token t is unchanged.
+            assert start % BLOCK_SIZE == 0
+            tokens = torch.arange(seq_len)
+            expected = table[row, (start + tokens) // BLOCK_SIZE]
+            actual = shifted[row, tokens // BLOCK_SIZE]
+            assert torch.equal(actual, expected)
 
 
 def test_tail_splitting_minimizes_chunks():
