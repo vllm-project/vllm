@@ -11,13 +11,27 @@ from nvfp4_utils import (
 )
 
 from vllm import _custom_ops as ops
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearLayerConfig
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCuteDslNvFp4W4A16LinearKernel,
 )
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    expose_input_quant_key,
+)
+from vllm.model_executor.layers.fusion.relu2_nvfp4_quant import relu_squared_nvfp4_quant
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    pad_nvfp4_activation_for_cutlass,
+    pad_nvfp4_weight_for_cutlass,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
@@ -45,6 +59,139 @@ SHAPES.extend(PAD_SHAPES)
 
 SEEDS = [42]
 CUDA_DEVICES = ["cuda:0"]
+
+
+@pytest.mark.parametrize("shape", [(1, 1344), (17, 5376), (129, 48)])
+@pytest.mark.parametrize("producer", ["relu2", "generic", "silu"])
+@pytest.mark.parametrize("with_bias", [False, True])
+@torch.inference_mode()
+def test_cutedsl_relu2_prequantized_bypasses_quantizer(
+    monkeypatch, shape, producer, with_bias
+):
+    """The CuTe-DSL consumer preserves output and padding without requantizing."""
+    from vllm.model_executor.kernels.linear.nvfp4 import flashinfer as consumer_module
+
+    supported, reason = FlashInferCuteDslNvFp4LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    m, k = shape
+    if producer == "silu" and k % 64:
+        pytest.skip("SiLU producer does not initialize padded K scales")
+    x = torch.randn((m, k), device="cuda", dtype=torch.bfloat16)
+    n = 130  # Exercise output slicing as well as activation K padding.
+    w = torch.randn((n, k), device="cuda", dtype=torch.bfloat16)
+    layer = torch.nn.Module()
+    layer.input_global_scale_inv = torch.tensor(64.0, device="cuda")
+    weight_scale_inv = torch.tensor(512.0, device="cuda")
+    weight, layer.weight_scale = ops.scaled_fp4_quant(w, weight_scale_inv)
+    layer.weight, padding = pad_nvfp4_weight_for_cutlass(weight)
+    layer.input_size_per_partition = k
+    layer.output_size_per_partition = n
+    layer.alpha = 1.0 / (layer.input_global_scale_inv * weight_scale_inv)
+    kernel = FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearLayerConfig())
+    activation = torch.compile(lambda value: torch.square(torch.relu(value)))
+    bias = torch.randn(n, device="cuda", dtype=x.dtype) if with_bias else None
+    if producer == "relu2":
+        expected = kernel.apply_weights(layer, activation(x), bias)
+        qa = relu_squared_nvfp4_quant(x, layer)
+    elif producer == "generic":
+        expected = kernel.apply_weights(layer, x, bias)
+        data, scale = ops.scaled_fp4_quant(
+            x, layer.input_global_scale_inv, backend="flashinfer-cutedsl"
+        )
+        qa = QuantizedActivation(data, scale, x.dtype, x.shape, kNvfp4Dynamic)
+    else:
+        from vllm.model_executor.layers.fusion.fused_act_quant import (
+            _silu_and_mul_nvfp4_dynamic,
+        )
+
+        qa = _silu_and_mul_nvfp4_dynamic(torch.cat((x, x), dim=-1), layer)
+        # Consumer/layout test, not a change to the existing SiLU producer's
+        # numerical contract: compare the exact same valid QAct with direct GEMM.
+        expected = flashinfer_scaled_fp4_mm(
+            pad_nvfp4_activation_for_cutlass(qa.data, padding),
+            layer.weight,
+            qa.scale,
+            layer.weight_scale,
+            layer.alpha,
+            qa.orig_dtype,
+            backend="cute-dsl",
+        )[:, :n].contiguous()
+        if bias is not None:
+            expected = expected + bias
+
+    def reject_requant(*args, **kwargs):
+        raise AssertionError("CuTe-DSL requantized an existing QuantizedActivation")
+
+    monkeypatch.setattr(consumer_module, "scaled_fp4_quant", reject_requant)
+    actual = kernel.apply_weights(layer, qa, bias)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("k", [48, 128])
+@pytest.mark.parametrize(
+    "layout,mode",
+    [
+        ("contiguous", "native"),
+        ("contiguous", "cuda"),
+        ("rank3", "native"),
+        ("rank3", "cuda"),
+        ("strided", "native"),
+    ],
+)
+@torch.inference_mode()
+def test_cutedsl_silu_public_dispatch_preserves_tensor_path(
+    dtype, k, layout, mode, record_property
+):
+    """CuTe keeps the exact preexisting SiLU Tensor path for every layout."""
+    supported, reason = FlashInferCuteDslNvFp4LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    set_random_seed(42)
+    m, n = 17, 64
+    x = torch.randn((m, 2 * k), device="cuda", dtype=dtype)
+    x[:, :7] = torch.tensor([-16, -1, -1 / 256, 0, 1 / 256, 1, 16], device=x.device)
+    if layout == "rank3":
+        x = x.reshape(1, m, 2 * k)
+    elif layout == "strided":
+        storage = torch.full((m, 4 * k), 100, device=x.device, dtype=dtype)
+        storage[:, ::2] = x
+        x = storage[:, ::2]
+    layer = torch.nn.Module()
+    layer.input_global_scale_inv = torch.tensor(
+        64.0, device=x.device, dtype=torch.float32
+    )
+    weight_scale_inv = torch.tensor(512.0, device=x.device, dtype=torch.float32)
+    weight, layer.weight_scale = ops.scaled_fp4_quant(
+        torch.randn((n, k), device=x.device, dtype=dtype), weight_scale_inv
+    )
+    layer.weight, _ = pad_nvfp4_weight_for_cutlass(weight)
+    layer.input_size_per_partition = k
+    layer.output_size_per_partition = n
+    layer.alpha = 1.0 / (layer.input_global_scale_inv * weight_scale_inv)
+    kernel = FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearLayerConfig())
+    expose_input_quant_key(layer, kernel)
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            custom_ops=["all" if mode == "cuda" else "none"]
+        )
+    )
+    with set_current_vllm_config(config):
+        act = SiluAndMul(compile_native=False)
+        activated = act(x)
+        expected = kernel.apply_weights(layer, activated)
+        dispatched = maybe_fused_act_quant(act, x, layer)
+        assert isinstance(dispatched, torch.Tensor)
+        torch.testing.assert_close(dispatched, activated, rtol=0, atol=0)
+        actual = kernel.apply_weights(layer, dispatched)
+    error = actual.float() - expected.float()
+    record_property("max_abs_output_error", error.abs().max().item())
+    record_property(
+        "relative_l2_output_error",
+        (error.norm() / expected.float().norm().clamp_min(1e-12)).item(),
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def get_ref_results(

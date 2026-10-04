@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
@@ -29,6 +31,31 @@ from vllm.utils.flashinfer import (
 )
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
+
+
+def _validate_cutedsl_quantized_activation(
+    qa: QuantizedActivation, layer: torch.nn.Module
+) -> None:
+    """Validate metadata without reading device values or synchronizing.
+
+    As with CUTLASS, the key's convention requires 128x4-swizzled scales.
+    Metadata rejects compact/8x4 scales, but cannot identify an unswizzled
+    buffer deliberately mislabeled with the same shape and key.
+    """
+    assert len(qa.orig_shape) >= 1, "NVFP4 requires an original K dimension"
+    m, k = math.prod(qa.orig_shape[:-1]), qa.orig_shape[-1]
+    assert k > 0 and k % 16 == 0, "NVFP4 requires K divisible by 16"
+    assert k == layer.input_size_per_partition, "NVFP4 input width mismatch"
+    assert qa.orig_dtype in (torch.float16, torch.bfloat16)
+    assert qa.data.dtype == torch.uint8 and qa.data.shape == (m, k // 2), (
+        "NVFP4 data must be an unpadded [M, K/2] packed byte matrix"
+    )
+    assert qa.scale.dtype == torch.float8_e4m3fn and qa.scale.shape == (
+        (m + 127) // 128 * 128,
+        (k // 16 + 3) // 4 * 4,
+    ), "NVFP4 scales must use the padded 128x4 swizzled layout"
+    assert qa.data.is_contiguous() and qa.scale.is_contiguous()
+    assert qa.data.device == qa.scale.device == layer.weight.device
 
 
 class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
@@ -112,6 +139,17 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
 class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cutedsl backend."""
 
+    def input_quant_key(self) -> QuantKey | None:
+        """Consume block16 NVFP4 activations with 128x4 swizzled scales."""
+        return kNvfp4Dynamic
+
+    def input_quant_activation_types(self) -> tuple[type[torch.nn.Module], ...]:
+        from vllm.model_executor.layers.activation import ReLUSquaredActivation
+
+        # Only ReLU2 is validated bit-exact to this backend's Tensor path,
+        # including rounding and padded block scales.
+        return (ReLUSquaredActivation,)
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -137,19 +175,26 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], output_size]
-
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="flashinfer-cutedsl",
-        )
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            _validate_cutedsl_quantized_activation(qa, layer)
+            x_fp4, x_blockscale = qa.data, qa.scale
+            output_dtype = qa.orig_dtype
+            output_shape = [*qa.orig_shape[:-1], output_size]
+        else:
+            assert isinstance(x, torch.Tensor)
+            output_dtype = x.dtype
+            output_shape = [*x.shape[:-1], output_size]
+            x_fp4, x_blockscale = scaled_fp4_quant(
+                x,
+                layer.input_global_scale_inv,
+                is_sf_swizzled_layout=True,
+                backend="flashinfer-cutedsl",
+            )
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(
             x_fp4, nvfp4_weight_padding_bytes(layer)
@@ -179,6 +224,12 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         """This kernel supports dynamic quantization of the input. By
         convention, pre-quantized blockscales must use the swizzled layout."""
         return kNvfp4Dynamic
+
+    def input_quant_activation_types(self) -> tuple[type[torch.nn.Module], ...]:
+        from vllm.model_executor.layers.activation import SiluAndMul
+
+        # Preserve the existing producer; ReLU2 is validated only with CuTe-DSL.
+        return (SiluAndMul,)
 
     @classmethod
     def is_supported(

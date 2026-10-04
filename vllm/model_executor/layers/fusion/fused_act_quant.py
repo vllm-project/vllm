@@ -14,16 +14,23 @@ pass cannot fuse the same boundary again.
 """
 
 from collections.abc import Callable
+from types import FunctionType, MethodType
 
 import torch
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
-    get_input_quant_key,
+    get_fused_act_quant_key,
 )
 from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
     relu_squared_static_fp8_quant,
+)
+from vllm.model_executor.layers.fusion.relu2_nvfp4_quant import (
+    _relu_squared_nvfp4_max_rows,
+    _relu_squared_nvfp4_quant_kernel,
+    relu_squared_nvfp4_quant,
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -170,6 +177,46 @@ def _relu_squared_static_fp8_quant_supported(
     )
 
 
+def _uses_native_relu_squared(act_fn: torch.nn.Module) -> bool:
+    if not isinstance(act_fn, ReLUSquaredActivation):
+        return False
+    forward = act_fn._forward_method
+    if type(forward) is FunctionType:
+        try:
+            # Dynamo handles this direct attribute access when unwrapping a
+            # compiled bound method; getattr(..., default) loses that handling.
+            forward = forward._torchdynamo_inline  # type: ignore[attr-defined]
+        except AttributeError:
+            return False
+    return (
+        type(forward) is MethodType
+        and forward.__func__ is ReLUSquaredActivation.forward_native
+    )
+
+
+def _relu_squared_nvfp4_quant_supported(
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+) -> bool:
+    scale = getattr(linear, "input_global_scale_inv", None)
+    return (
+        # CUDA ReLU2 suppresses NaNs; this producer matches native semantics.
+        _uses_native_relu_squared(act_fn)
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.ndim == 2
+        and x.shape[-1] > 0
+        and x.shape[-1] % 16 == 0
+        and x.shape[0] <= _relu_squared_nvfp4_max_rows(x.shape[-1])
+        and x.is_contiguous()
+        and isinstance(scale, torch.Tensor)
+        and scale.dtype == torch.float32
+        and scale.device == x.device
+        and scale.numel() == 1
+    )
+
+
 # Optional per-entry predicates preserve the unconditional fallback contract
 # for producers whose supported inputs are narrower than their registry key.
 _FUSED_ACT_QUANT_SUPPORT: dict[
@@ -192,6 +239,55 @@ if current_platform.is_cuda_alike():
 if current_platform.is_cuda() and hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant"):
     _FUSED_ACT_QUANT[(SiluAndMul, kNvfp4Dynamic)] = _silu_and_mul_nvfp4_dynamic
 
+if current_platform.is_cuda() and current_platform.is_device_capability_family(100):
+    _RELU2_NVFP4_KEY = (ReLUSquaredActivation, kNvfp4Dynamic)
+    _FUSED_ACT_QUANT[_RELU2_NVFP4_KEY] = relu_squared_nvfp4_quant
+    _FUSED_ACT_QUANT_SUPPORT[_RELU2_NVFP4_KEY] = _relu_squared_nvfp4_quant_supported
+
+
+def _relu_squared_nvfp4_warmup_width(module: torch.nn.Module) -> int | None:
+    act_fn, linear = module.act_fn, module.down_proj
+    key = get_fused_act_quant_key(linear, act_fn)
+    if (
+        key is None
+        or _FUSED_ACT_QUANT.get((type(act_fn), key)) is not relu_squared_nvfp4_quant
+    ):
+        return None
+    k = getattr(linear, "input_size_per_partition", None)
+    scale = getattr(linear, "input_global_scale_inv", None)
+    if (
+        _uses_native_relu_squared(act_fn)
+        and getattr(linear, "params_dtype", None) == torch.bfloat16
+        and isinstance(k, int)
+        and k > 0
+        and k % 16 == 0
+        and isinstance(scale, torch.Tensor)
+        and scale.is_cuda
+        and scale.dtype == torch.float32
+        and scale.numel() == 1
+    ):
+        return k
+    return None
+
+
+def register_relu_squared_nvfp4_quant_warmup(module: torch.nn.Module) -> None:
+    """Defer a Nemotron MLP's producer selection until startup kernel warmup."""
+    config = get_current_vllm_config_or_none()
+    if config is None or not config.kernel_config.enable_jit_warmup:
+        return
+    if (
+        _FUSED_ACT_QUANT.get((ReLUSquaredActivation, kNvfp4Dynamic))
+        is not relu_squared_nvfp4_quant
+    ):
+        return
+    max_tokens = max(
+        config.scheduler_config.max_num_batched_tokens,
+        config.compilation_config.max_cudagraph_capture_size or 0,
+    )
+    _relu_squared_nvfp4_quant_kernel.register_warmup(
+        module=module, max_tokens=max_tokens
+    )
+
 
 def maybe_fused_act_quant(
     act_fn: torch.nn.Module,
@@ -203,7 +299,7 @@ def maybe_fused_act_quant(
     Returns a QuantizedActivation when a fused kernel matches the activation and
     the consumer's effective input quantization key, else the plain activation.
     """
-    key = get_input_quant_key(linear)
+    key = get_fused_act_quant_key(linear, act_fn)
     if key is not None:
         registry_key = (type(act_fn), key)
         producer = _FUSED_ACT_QUANT.get(registry_key)
