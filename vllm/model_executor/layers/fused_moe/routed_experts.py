@@ -20,6 +20,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsSink,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -138,6 +141,8 @@ class RoutedExperts(PluggableLayer):
         self.swiglu_alpha = swiglu_alpha
         self.swiglu_beta = swiglu_beta
         self.e_score_correction_bias = e_score_correction_bias
+        # Set by bind_routed_experts_capturer for monolithic kernels.
+        self.routing_sink: RoutedExpertsSink | None = None
         self.apply_router_weight_on_input = apply_router_weight_on_input
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
@@ -691,7 +696,10 @@ class RoutedExperts(PluggableLayer):
             )
             and is_transposed
         ):
-            loaded_weight = loaded_weight.t().contiguous()
+            # Transpose on the parameter's device: a CPU transpose of the
+            # mmap view reads the file column-wise, which is very slow on
+            # NFS. The contiguous .to() reads it sequentially.
+            loaded_weight = loaded_weight.to(param.device).t().contiguous()
 
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but got {shard_id}.")
