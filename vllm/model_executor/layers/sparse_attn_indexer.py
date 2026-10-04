@@ -904,7 +904,15 @@ class SparseAttnIndexer(CustomOp):
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
         self._cp_kv_cache_interleave_size: int | None = None
-        if current_platform.is_cuda() and not has_deep_gemm():
+        # SM12x (Triton sparse-MLA path): DeepGEMM targets sm90/sm100; the
+        # deepseek_v4_ops fallbacks cover the mqa-logits path there.
+        from vllm.v1.attention.ops.flashmla import _use_triton_sparse_mla
+
+        if (
+            current_platform.is_cuda()
+            and not _use_triton_sparse_mla()
+            and not has_deep_gemm()
+        ):
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
                 "the current vLLM environment."
