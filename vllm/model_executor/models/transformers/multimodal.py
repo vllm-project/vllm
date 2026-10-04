@@ -139,10 +139,9 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def get_max_image_tokens(self) -> int:
         width, height = self.get_image_size_with_most_features()
         processor = self.get_hf_processor()
-        multimodal_config = self.ctx.model_config.get_multimodal_config()
-        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         mm_tokens = processor._get_num_multimodal_tokens(
-            image_sizes=([height, width],), **mm_processor_kwargs
+            image_sizes=([height, width],),
+            **self.ctx.get_modality_mm_kwargs({}, "image"),
         )
         image_tokens = mm_tokens["num_image_tokens"][0]
         return image_tokens
