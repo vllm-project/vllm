@@ -94,6 +94,8 @@ if(FLASH_MLA_ARCHS)
         ${flashmla_SOURCE_DIR}/csrc/kernels/sm90/decode/sparse/instantiations/v4_persistent_h128.cu
         ${flashmla_SOURCE_DIR}/csrc/kernels/sm90/decode/sparse/instantiations/v32_persistent_h64.cu
         ${flashmla_SOURCE_DIR}/csrc/kernels/sm90/decode/sparse/instantiations/v32_persistent_h128.cu
+        ${flashmla_SOURCE_DIR}/csrc/kernels/sm90/decode/sparse/instantiations/v32_persistent_h64_topklen.cu
+        ${flashmla_SOURCE_DIR}/csrc/kernels/sm90/decode/sparse/instantiations/v32_persistent_h128_topklen.cu
 
         # sm90 sparse prefill
         ${flashmla_SOURCE_DIR}/csrc/kernels/sm90/prefill/sparse/instantiations/phase1_k512.cu
