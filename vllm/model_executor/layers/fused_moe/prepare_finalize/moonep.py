@@ -36,7 +36,10 @@ import torch.nn.functional as F
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -215,17 +218,17 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         buffer_pool: "MoonEPBufferPool",
-        max_tokens_per_rank: int,
         num_dispatchers: int,
-        num_global_experts: int,
         weight_layout: MoonEPExpertWeightLayout | None = None,
     ):
-        super().__init__()
+        super().__init__(moe_config, quant_config)
         self.buffer_pool = buffer_pool
-        self.max_tokens_per_rank = max_tokens_per_rank
+        self.max_tokens_per_rank = moe_config.max_num_tokens
         self.num_dispatchers_ = num_dispatchers
-        self.num_global_experts = num_global_experts
+        self.num_global_experts = moe_config.num_experts
         self.weight_layout = weight_layout
         self._fused_experts: Any = None
 

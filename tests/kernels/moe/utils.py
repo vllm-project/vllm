@@ -65,6 +65,8 @@ def make_dummy_moe_config(
     in_dtype: torch.dtype = torch.bfloat16,
     max_num_tokens: int = 512,
     activation: MoEActivation = MoEActivation.SILU,
+    device: torch.device | str | None = None,
+    moe_parallel_config: FusedMoEParallelConfig | None = None,
 ) -> FusedMoEConfig:
     """This is a dummy config for the mk constructor interface
     as most kernels like DeepGEMM, CUTLASSFp4, Triton, MARLIN
@@ -72,6 +74,11 @@ def make_dummy_moe_config(
 
     CUTLASSFp8 needs to set some params for workshapes.
     """
+    if device is None:
+        device = DEVICE
+    if moe_parallel_config is None:
+        moe_parallel_config = FusedMoEParallelConfig.make_no_parallel()
+
     return FusedMoEConfig(
         num_experts=num_experts,
         experts_per_token=experts_per_token,
@@ -81,11 +88,48 @@ def make_dummy_moe_config(
         if num_local_experts is not None
         else num_experts,
         num_logical_experts=num_experts,
-        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        moe_parallel_config=moe_parallel_config,
         activation=activation,
         in_dtype=in_dtype,
-        device=DEVICE,
+        device=device,
         routing_method=RoutingMethodType.TopK,
+        max_num_tokens=max_num_tokens,
+    )
+
+
+def make_test_moe_config(
+    *,
+    ep_rank: int,
+    ep_size: int,
+    device: torch.device | str,
+    num_experts: int,
+    num_local_experts: int,
+    hidden_size: int,
+    max_num_tokens: int,
+    dp_size: int = 1,
+    experts_per_token: int = 1,
+    all2all_backend: str = "deepep_high_throughput",
+) -> FusedMoEConfig:
+    return make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=experts_per_token,
+        hidden_dim=hidden_size,
+        intermediate_size=hidden_size,
+        device=device,
+        moe_parallel_config=FusedMoEParallelConfig(
+            tp_size=1,
+            pcp_size=1,
+            dp_size=dp_size,
+            ep_size=ep_size,
+            tp_rank=0,
+            pcp_rank=0,
+            dp_rank=0,
+            ep_rank=ep_rank,
+            sp_size=1,
+            use_ep=True,
+            all2all_backend=all2all_backend,
+            enable_eplb=False,
+        ),
         max_num_tokens=max_num_tokens,
     )
 
@@ -145,12 +189,20 @@ def batched_moe(
     )
 
     if moe_config is None:
-        moe_config = make_dummy_moe_config()
+        moe_config = make_dummy_moe_config(
+            num_experts=w1.shape[0],
+            num_local_experts=w1.shape[0],
+            experts_per_token=topk_ids.shape[1],
+            hidden_dim=a.shape[1],
+            intermediate_size=w2.shape[2],
+            in_dtype=a.dtype,
+            max_num_tokens=max_num_tokens,
+        )
+    else:
+        max_num_tokens = moe_config.max_num_tokens
 
     fused_experts = FusedMoEKernel(
-        BatchedPrepareAndFinalize(
-            max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
-        ),
+        BatchedPrepareAndFinalize(moe_config, quant_config, num_dispatchers=1),
         BatchedTritonExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
@@ -197,12 +249,10 @@ def naive_batched_moe(
         a1_scale=a1_scale,
         a2_scale=a2_scale,
     )
-    moe_config = make_dummy_moe_config()
+    moe_config = make_dummy_moe_config(max_num_tokens=max_num_tokens)
 
     fused_experts = FusedMoEKernel(
-        BatchedPrepareAndFinalize(
-            max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
-        ),
+        BatchedPrepareAndFinalize(moe_config, quant_config, num_dispatchers=1),
         NaiveBatchedExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
