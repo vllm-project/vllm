@@ -690,6 +690,14 @@ def invoke_fused_moe_wna16_triton_kernel(
     assert B_zp is None or B_zp.ndim == 3
     assert block_shape is not None and block_shape[0] == 0
 
+    group_size = block_shape[1]
+    if group_size == -1:
+        # Channelwise quantization spans the current GEMM's K dimension, which
+        # is different for w1 and w2.
+        group_size = A.size(1)
+        assert B_scale.size(2) == 1
+        assert B_zp is None or B_zp.size(2) == 1
+
     M = A.size(0)
     num_tokens = M * top_k
 
@@ -713,7 +721,7 @@ def invoke_fused_moe_wna16_triton_kernel(
             size_k=A.size(1),
             size_n=B.size(1),
             num_experts=B.size(1),
-            group_size=block_shape[1],
+            group_size=group_size,
             real_top_k=top_k,
             block_size_m=config["BLOCK_SIZE_M"],
         )
@@ -747,7 +755,7 @@ def invoke_fused_moe_wna16_triton_kernel(
         B_zp.stride(2) if B_zp is not None else 0,
         B_zp.stride(1) if B_zp is not None else 0,
         block_k_diviable=A.size(1) % config["BLOCK_SIZE_K"] == 0,
-        group_size=block_shape[1],
+        group_size=group_size,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,

@@ -650,6 +650,60 @@ def test_naive_block_assignment_moe(
         )
 
 
+@pytest.mark.parametrize("size_k", [128, 256])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Channelwise WNA16 MoE uses the CUDA/ROCm Triton backend.",
+)
+def test_wna16_triton_channelwise_group_size(size_k: int):
+    m, n = 3, 128
+    a = torch.randn((m, size_k), device=DEVICE_TYPE, dtype=torch.bfloat16) / 10
+    weight = torch.randn((size_k, n), device=DEVICE_TYPE, dtype=torch.bfloat16) / 10
+    weight_ref, qweight, scales, _ = quantize_weights(
+        weight, scalar_types.uint4b8, -1, zero_points=False
+    )
+    qweight = qweight.T.contiguous().to(torch.uint8)
+    qweight = (qweight[:, 1::2] * 16 + qweight[:, ::2]).unsqueeze(0)
+    scales = scales.T.contiguous().unsqueeze(0)
+
+    block_size_m = 16
+    sorted_token_ids = torch.full(
+        (block_size_m,), m, device=DEVICE_TYPE, dtype=torch.int32
+    )
+    sorted_token_ids[:m] = torch.arange(m, device=DEVICE_TYPE, dtype=torch.int32)
+    output = torch.empty((m, 1, n), device=DEVICE_TYPE, dtype=torch.bfloat16)
+
+    fused_moe_module.invoke_fused_moe_wna16_triton_kernel(
+        A=a,
+        B=qweight,
+        C=output,
+        B_scale=scales,
+        B_zp=None,
+        topk_weights=torch.ones((m, 1), device=DEVICE_TYPE),
+        sorted_token_ids=sorted_token_ids,
+        expert_ids=torch.zeros(1, device=DEVICE_TYPE, dtype=torch.int32),
+        num_tokens_post_padded=torch.tensor(
+            [block_size_m], device=DEVICE_TYPE, dtype=torch.int32
+        ),
+        mul_routed_weight=False,
+        top_k=1,
+        config={
+            "BLOCK_SIZE_M": block_size_m,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1,
+            "num_warps": 4,
+            "num_stages": 2,
+        },
+        compute_type=tl.bfloat16,
+        use_int8_w8a16=False,
+        use_int4_w4a16=True,
+        block_shape=[0, -1],
+    )
+
+    expected = F.linear(a, weight_ref.T)
+    torch.testing.assert_close(output[:, 0], expected, atol=2e-2, rtol=0)
+
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_WN16_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
