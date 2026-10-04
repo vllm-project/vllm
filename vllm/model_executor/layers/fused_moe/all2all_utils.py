@@ -248,6 +248,12 @@ def maybe_make_prepare_finalize(
                 physical_to_global,
                 local_expert_global_ids,
             ) = routing_tables
+        validate_deepep_ll_rdma_buffer_size(
+            num_global_experts=moe.num_experts,
+            token_hidden_size=moe.hidden_dim,
+            num_ep_ranks=all2all_manager.world_size,
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+        )
         all_to_all_args = dict(
             max_num_tokens_per_dp_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,
@@ -438,3 +444,37 @@ def maybe_make_prepare_finalize(
         )
 
     return prepare_finalize
+
+
+MAX_DEEPEP_RDMA_BYTES = (1 << 31) * 16  # 32 GiB (2**35 bytes INT_MAX limit)
+
+
+def validate_deepep_ll_rdma_buffer_size(
+    num_global_experts: int,
+    num_ep_ranks: int,
+    max_num_tokens_per_dp_rank: int,
+    token_hidden_size: int,
+):
+    try:
+        import deep_ep
+
+        rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+            max_num_tokens_per_dp_rank,
+            token_hidden_size,
+            num_ep_ranks,
+            num_global_experts,
+        )
+    except (ImportError, AttributeError):
+        return
+
+    # 32 GiB limit before INT_MAX overflow (num_rdma_bytes / 16 < INT_MAX)
+    MAX_RDMA_BYTES_LIMIT = (2**35) - 16
+
+    if rdma_bytes >= MAX_RDMA_BYTES_LIMIT:
+        raise ValueError(
+            f"DeepEP low-latency RDMA buffer size ({rdma_bytes / (1024**3):.2f} GiB) "
+            f"exceeds the 32 GiB hard limit imposed by INT_MAX index bounds "
+            f"(num_experts={num_global_experts}, "
+            f"max_tokens_per_rank={max_num_tokens_per_dp_rank}). "
+            f"Please reduce max_tokens_per_rank."
+        )
