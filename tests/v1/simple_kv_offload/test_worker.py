@@ -160,19 +160,19 @@ def test_deferred_store_waits_for_draft_forward(monkeypatch):
     try:
         with KVConnectorModelRunnerMixin._get_kv_connector_output(
             output, defer_finalize=True
-        ) as kv_connector_output:
+        ):
             gpu.fill_(17)
         launch.assert_not_called()
         gpu.fill_(91)
-        KVConnectorModelRunnerMixin.finalize_kv_connector(output, kv_connector_output)
+        KVConnectorModelRunnerMixin.finalize_kv_connector()
         assert launch.call_count == 1
-        completion = kv_connector_output.kv_connector_worker_meta
+        completion = None
         deadline = time.monotonic() + 5
         while completion is None and time.monotonic() < deadline:
             connector.get_finished(set())
             completion = connector.build_connector_worker_meta()
             time.sleep(0.001)
-        assert isinstance(completion, SimpleCPUOffloadWorkerMetadata)
+        assert completion is not None
         assert completion.completed_store_events == {0: 1}
         assert torch.equal(cpu[0], gpu[0].cpu())
         assert launch.call_count == 1

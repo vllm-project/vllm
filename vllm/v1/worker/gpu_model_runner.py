@@ -4367,12 +4367,7 @@ class GPUModelRunner(
         # Use persistent buffers for CUDA graphs.
         # When spec decode is enabled, defer connector finalization
         # (wait_for_save + clear metadata) until after draft model runs.
-        runs_drafter_on_this_rank = (
-            self.broadcast_pp_output or get_pp_group().is_last_rank
-        )
-        defer_kv_connector_finalize = (
-            self.speculative_config is not None and runs_drafter_on_this_rank
-        )
+        defer_kv_connector_finalize = self.speculative_config is not None
         # Update the EPLB meta.
         if self.eplb_state is not None:
             self.eplb_state.prepare_forward(
@@ -4708,10 +4703,7 @@ class GPUModelRunner(
         # draft model runs. Deferred from target model forward to allow
         # draft model to also save its KV cache.
         if spec_config is not None:
-            self.finalize_kv_connector(
-                scheduler_output,
-                self.kv_connector_output,
-            )
+            self.finalize_kv_connector()
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()

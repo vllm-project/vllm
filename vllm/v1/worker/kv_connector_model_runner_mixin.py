@@ -50,39 +50,15 @@ class KVConnectorModelRunnerMixin:
         )
 
     @staticmethod
-    def finalize_kv_connector(
-        scheduler_output: "SchedulerOutput",
-        output: KVConnectorOutput | None,
-    ) -> None:
-        """Finalize the KV connector after the draft model forward.
+    def finalize_kv_connector() -> None:
+        """Finalize the KV connector: wait_for_save and clear metadata.
 
-        Call after draft model forward when ``defer_finalize=True`` was used.
+        Call after draft model forward when defer_finalize=True was used.
         """
         if has_kv_transfer_group():
-            assert output is not None
             kv_connector = get_kv_transfer_group()
-            KVConnectorModelRunnerMixin._populate_kv_connector_output(
-                kv_connector,
-                output,
-                scheduler_output.finished_req_ids,
-            )
+            kv_connector.wait_for_save()
             kv_connector.clear_connector_metadata()
-
-    @staticmethod
-    def _populate_kv_connector_output(
-        kv_connector: KVConnectorBase,
-        output: KVConnectorOutput,
-        finished_req_ids: set[str],
-    ) -> None:
-        kv_connector.wait_for_save()
-        transfer_results = kv_connector.get_transfer_results(finished_req_ids)
-        output.finished_sending = transfer_results.finished_sending
-        output.finished_recving = transfer_results.finished_recving
-        output.failed_recving = transfer_results.failed_recving
-        output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
-        output.kv_connector_stats = kv_connector.get_kv_connector_stats()
-        output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
-        output.kv_connector_worker_meta = kv_connector.build_connector_worker_meta()
 
     # This context manager must be used within an active forward context.
     # It encapsulates the entire KV connector lifecycle within execute_model
@@ -113,9 +89,19 @@ class KVConnectorModelRunnerMixin:
             if start_after_forward:
                 kv_connector.start_load_kv(get_forward_context())
             if not defer_finalize:
-                KVConnectorModelRunnerMixin._populate_kv_connector_output(
-                    kv_connector,
-                    output,
-                    scheduler_output.finished_req_ids,
-                )
+                kv_connector.wait_for_save()
+
+            transfer_results = kv_connector.get_transfer_results(
+                scheduler_output.finished_req_ids
+            )
+            output.finished_sending = transfer_results.finished_sending
+            output.finished_recving = transfer_results.finished_recving
+            output.failed_recving = transfer_results.failed_recving
+            output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
+
+            output.kv_connector_stats = kv_connector.get_kv_connector_stats()
+            output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
+            output.kv_connector_worker_meta = kv_connector.build_connector_worker_meta()
+
+            if not defer_finalize:
                 kv_connector.clear_connector_metadata()
