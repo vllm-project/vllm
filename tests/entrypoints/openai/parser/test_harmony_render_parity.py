@@ -19,8 +19,9 @@ Each test:
   3. Asserts that render_for_completion produces identical token sequences.
 """
 
+import pytest
 from openai.types.responses import ResponseFunctionToolCall
-from openai_harmony import Message, Role
+from openai_harmony import Conversation, Message, RenderConversationConfig, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -35,20 +36,35 @@ from vllm.entrypoints.openai.responses.harmony import (
 )
 
 
-def test_render_uses_legacy_tool_call_header():
+@pytest.mark.parametrize(
+    ("recipient", "content_type", "content"),
+    [
+        ("python", "code", "print('hello')"),
+        ("functions.get_weather", "json", '{"city":"Paris"}'),
+    ],
+)
+def test_render_matches_harmony_tool_call_header(
+    recipient: str, content_type: str, content: str
+):
     tool_call = (
-        Message.from_role_and_content(Role.ASSISTANT, "print('hello')")
+        Message.from_role_and_content(Role.ASSISTANT, content)
         .with_channel("commentary")
-        .with_recipient("python")
-        .with_content_type("code")
+        .with_recipient(recipient)
+        .with_content_type(content_type)
     )
 
-    rendered = get_encoding().decode(render_for_completion([tool_call]))
+    expected = get_encoding().render_conversation_for_completion(
+        Conversation.from_messages([tool_call]),
+        Role.ASSISTANT,
+        config=RenderConversationConfig(auto_drop_analysis=False),
+    )
 
+    assert render_for_completion([tool_call]) == expected
+    rendered = get_encoding().decode(expected)
     assert (
-        "<|start|>assistant to=python<|channel|>commentary code<|message|>" in rendered
+        "<|start|>assistant<|channel|>commentary "
+        f"to={recipient} <|constrain|>{content_type}<|message|>" in rendered
     )
-    assert "commentary to=python <|constrain|>code" not in rendered
 
 
 # Use a fixed date so the system message is deterministic across both paths.
