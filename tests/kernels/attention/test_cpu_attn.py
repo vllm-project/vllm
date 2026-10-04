@@ -10,7 +10,7 @@ import torch
 
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_num_threads, set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 from vllm.v1.attention.backends.zentorch_sdpa import (
@@ -604,7 +604,6 @@ def varlen_with_paged_kv(
         dynamic_causal=dynamic_causal_tensor,
         kv_cache_dtype=kv_cache_dtype,
     )
-
     out_with_split = torch.empty_like(query)
     cpu_attention_with_kv_cache(
         query=query,
@@ -1359,6 +1358,39 @@ def test_varlen_with_paged_kv_dynamic_causal(
         isa=isa,
         kv_cache_dtype=kv_cache_dtype,
         dynamic_causal=dynamic_causal,
+    )
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+@pytest.mark.parametrize(
+    ("seq_lens", "num_heads", "head_size", "num_blocks"),
+    [
+        ([(5, 513), (1, 193), (4, 1025)], (32, 4), 128, 64),
+        ([(16, 8192)] * 4, (8, 1), 256, 512),
+    ],
+)
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+@set_default_torch_num_threads(4)
+def test_amx_spec_decode_gqa_correctness(
+    kv_cache_dtype: str,
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    num_blocks: int,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=None,
+        dtype=torch.bfloat16,
+        block_size=32,
+        soft_cap=None,
+        num_blocks=num_blocks,
+        use_alibi=True,
+        use_sink=True,
+        isa="amx",
+        kv_cache_dtype=kv_cache_dtype,
     )
 
 
