@@ -14,7 +14,6 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
@@ -31,7 +30,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backends,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
-    kv_postprocess_layout_on_receive,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -2524,6 +2522,13 @@ class NixlBaseConnectorWorker:
             raise NotImplementedError(
                 "DCP region pulls require matching logical and physical block sizes"
             )
+        # DCP shards tokens across ranks at the logical block size, and reads
+        # pair blocks by logical position.
+        if (self.dcp_size > 1 or remote_dcp_size > 1) and (
+            self.block_size * self._physical_blocks_per_logical_kv_block
+            != nixl_agent_meta.block_size * remote_physical_per_logical
+        ):
+            raise NotImplementedError("DCP requires matching P/D logical block sizes")
         if (
             self._has_mamba
             and remote_physical_per_logical
@@ -2754,26 +2759,10 @@ class NixlBaseConnectorWorker:
                     "d2h",
                 )
 
-    @cached_property
-    def _attention_kv_caches(self) -> list[torch.Tensor]:
-        """Device KV caches of attention layers (mamba states excluded),
-        as consumed by the receive post-process."""
-        assert self.device_kv_caches, (
-            "_attention_kv_caches accessed before register_kv_caches"
-        )
-        mamba_layers = {
-            name
-            for g, group in enumerate(self.kv_cache_config.transfer_groups)
-            if _is_ssm_spec(self._group_spec_types[g])
-            for name in group.layer_names
-        }
-        kv_caches = self.device_kv_caches
-        return [cache for name, cache in kv_caches.items() if name not in mamba_layers]
-
     def post_process_device_kv_on_receive(
         self,
         block_size_ratio: int,
-        block_ids_list: list[tuple[list[int], int]],
+        block_ids_list: list[tuple[int, list[int], int]],
         convert: bool = True,
     ):
         """Post process device kv cache after receiving from remote.
@@ -2822,9 +2811,11 @@ class NixlBaseConnectorWorker:
                 block_size_ratio,
             )
 
-        attn_caches = self._attention_kv_caches
-        device = attn_caches[0].device
-        for block_ids, covered_sub_blocks in block_ids_list:
+        for group, block_ids, covered_sub_blocks in block_ids_list:
+            attn_caches = [
+                self.device_kv_caches[name]
+                for name in self.kv_cache_config.transfer_groups[group].layer_names
+            ]
             # Blocks the transfer didn't write: the token tail of the last
             # partially covered block, then everything beyond it.
             covered_blocks, sub_blocks_in_last = divmod(
@@ -2834,17 +2825,16 @@ class NixlBaseConnectorWorker:
             has_stale = first_stale < len(block_ids)
             indices = None
             if convert or has_stale:
-                indices = async_tensor_h2d(block_ids, device, torch.long)
+                indices = async_tensor_h2d(block_ids, attn_caches[0].device, torch.long)
 
             if convert:
                 for cache in attn_caches:
-                    if self.enable_permute_local_kv and block_size_ratio > 1:
+                    if self.enable_permute_local_kv:
                         kv_postprocess_blksize_and_layout_on_receive(
                             cache, indices, block_size_ratio
                         )
-                    elif self.enable_permute_local_kv:
-                        kv_postprocess_layout_on_receive(cache, indices)
-                    else:
+                    elif KVCacheLayout[self.kv_cache_layout].is_block_contiguous:
+                        # Token-major blocks get the sub-blocks in token order.
                         kv_postprocess_blksize_on_receive(
                             cache, indices, block_size_ratio
                         )
@@ -2852,10 +2842,10 @@ class NixlBaseConnectorWorker:
             if sub_blocks_in_last:
                 last_block_id = block_ids[covered_blocks]
                 for cache in attn_caches:
-                    # Both post-processed layouts leave tokens on dim 1.
-                    sub_block_tokens = cache.shape[1] // block_size_ratio
+                    # Attention caches are [B, H, N, C]: tokens on dim 2.
+                    sub_block_tokens = cache.shape[2] // block_size_ratio
                     zero_from = sub_blocks_in_last * sub_block_tokens
-                    cache[last_block_id, zero_from:].zero_()
+                    cache[last_block_id, :, zero_from:].zero_()
             if has_stale:
                 assert indices is not None
                 stale_ids = indices[first_stale:]
@@ -3002,8 +2992,21 @@ class NixlBaseConnectorWorker:
                         len(local_group) * block_size_ratio,
                         len(meta.remote.block_ids[g]),
                     )
+                    if (
+                        (block_size_ratio > 1 or hetero_ppl)
+                        and meta.remote.num_tokens is not None
+                        and self.dcp_size == remote_info.remote_dcp_size == 1
+                    ):
+                        # The read paired the lists by their last token, so
+                        # the local padding past it went unwritten.
+                        local_padding, _ = self._padding_sub_blocks(
+                            g, meta.remote.num_tokens, block_size_ratio
+                        )
+                        covered_sub_blocks = (
+                            len(local_group) * block_size_ratio - local_padding
+                        )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
-                        (local_group, covered_sub_blocks)
+                        (g, local_group, covered_sub_blocks)
                     )
             # post processing for heterogeneous attention
             if self.enable_heterogeneous_attn_post_process:
@@ -3268,11 +3271,31 @@ class NixlBaseConnectorWorker:
 
         return mapped_2d.flatten().astype(np.int64)
 
+    def _padding_sub_blocks(
+        self,
+        group: int,
+        num_tokens: int,
+        block_size_ratio: int,
+        remote_physical_per_logical: int = 1,
+    ) -> tuple[int, int]:
+        """Remote-block-sized sub-blocks past the last of ``num_tokens`` tokens
+        at the end of the local and the remote block list of transfer group
+        ``group``, as each side allocates whole logical blocks."""
+        local_per_block = self._physical_blocks_per_logical_kv_block * block_size_ratio
+        spec = self.kv_cache_config.transfer_groups[group].kv_cache_spec
+        num_sub_blocks = cdiv(num_tokens, spec.block_size // local_per_block)
+        return (
+            -num_sub_blocks % local_per_block,
+            -num_sub_blocks % remote_physical_per_logical,
+        )
+
     def _map_block_ids_for_block_size_ratio(
         self,
         local_block_ids: BlockIds,
         remote_block_ids: BlockIds,
         block_size_ratio: int,
+        num_tokens: int | None = None,
+        remote_physical_per_logical: int = 1,
     ) -> tuple[BlockIds, BlockIds]:
         """Map attention-group block ids to remote-block granularity.
 
@@ -3286,6 +3309,10 @@ class NixlBaseConnectorWorker:
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         Local (decode) block ids with block_size 16: [1, 2, 3] expand to
         [4, 5, ..., 15], then clip to the first 10 to pair 1:1 with remote.
+
+        Sliding-window clipping and local prefix hits start the two lists at
+        different tokens. Given the request's ``num_tokens``, both lists are
+        cut at its last token instead and paired from there backwards.
         """
         mapped_local: list[list[int]] = []
         mapped_remote: list[list[int]] = []
@@ -3298,7 +3325,16 @@ class NixlBaseConnectorWorker:
             mapped = self.get_mapped_blocks(
                 np.asarray(local_group), block_size_ratio
             ).tolist()
-            if len(mapped) > len(remote_group):
+            if num_tokens is not None:
+                local_padding, remote_padding = self._padding_sub_blocks(
+                    i, num_tokens, block_size_ratio, remote_physical_per_logical
+                )
+                mapped = mapped[: len(mapped) - local_padding]
+                remote_group = remote_group[: len(remote_group) - remote_padding]
+                num_pairs = min(len(mapped), len(remote_group))
+                mapped = mapped[len(mapped) - num_pairs :]
+                remote_group = remote_group[len(remote_group) - num_pairs :]
+            elif len(mapped) > len(remote_group):
                 mapped = mapped[: len(remote_group)]
             mapped_local.append(mapped)
             mapped_remote.append(list(remote_group))
