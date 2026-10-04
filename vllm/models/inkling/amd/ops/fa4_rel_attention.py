@@ -19,8 +19,16 @@ from vllm.models.inkling.amd.ops.rel_attention_decode import (
     inkling_rel_attention_split_kv_decode,
     use_split_kv_decode,
 )
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+# vllm.platforms.rocm queries torch.cuda at import time.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
 
 
 def bucket_max_seqlen_q(max_seqlen_q: int) -> int:
@@ -147,6 +155,7 @@ def _inkling_rel_attention_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_QH: tl.constexpr,
+    Q_TILE_PLAIN_PTR: tl.constexpr,
 ):
     # A program owns BLOCK_Q query positions and every query head sharing one
     # KV head. This makes the QK/PV operations MFMA-friendly on CDNA.
@@ -165,16 +174,34 @@ def _inkling_rel_attention_kernel(
     q_head_start = pid_kh * gqa_group_size
     bt_row = block_table_ptr + pid_b * stride_bt_b
 
-    q_block_ptr = tl.make_block_ptr(
-        base=q_ptr + q_start * stride_q_t + q_head_start * stride_q_h,
-        shape=(q_len, gqa_group_size, head_dim),
-        strides=(stride_q_t, stride_q_h, stride_q_d),
-        offsets=(q_block, 0, 0),
-        block_shape=(BLOCK_Q, BLOCK_H, BLOCK_D),
-        order=(2, 1, 0),
-    )
-    q = tl.load(q_block_ptr, boundary_check=(0, 1, 2), padding_option="zero")
-    q = tl.reshape(q, (BLOCK_QH, BLOCK_D))
+    if Q_TILE_PLAIN_PTR:
+        # triton-xpu 3.8 miscompiles the block-ptr + reshape load below
+        # when BLOCK_Q > 1.
+        qh_rows = tl.arange(0, BLOCK_QH)
+        qh_q = q_block + qh_rows // BLOCK_H
+        qh_h = qh_rows % BLOCK_H
+        qh_d = tl.arange(0, BLOCK_D)
+        q = tl.load(
+            q_ptr
+            + (q_start + qh_q)[:, None].to(tl.int64) * stride_q_t
+            + (q_head_start + qh_h)[:, None] * stride_q_h
+            + qh_d[None, :] * stride_q_d,
+            mask=(qh_q[:, None] < q_len)
+            & (qh_h[:, None] < gqa_group_size)
+            & (qh_d[None, :] < head_dim),
+            other=0.0,
+        )
+    else:
+        q_block_ptr = tl.make_block_ptr(
+            base=q_ptr + q_start * stride_q_t + q_head_start * stride_q_h,
+            shape=(q_len, gqa_group_size, head_dim),
+            strides=(stride_q_t, stride_q_h, stride_q_d),
+            offsets=(q_block, 0, 0),
+            block_shape=(BLOCK_Q, BLOCK_H, BLOCK_D),
+            order=(2, 1, 0),
+        )
+        q = tl.load(q_block_ptr, boundary_check=(0, 1, 2), padding_option="zero")
+        q = tl.reshape(q, (BLOCK_QH, BLOCK_D))
 
     q_rows = q_block + tl.arange(0, BLOCK_Q)
     q_abs = prefix_len + q_rows
@@ -432,6 +459,7 @@ def inkling_fa4_rel_attention(
         window_left=window_size[0],
         BLOCK_Q=block_q,
         BLOCK_K=64,
+        Q_TILE_PLAIN_PTR=current_platform.is_xpu(),
         num_warps=4,
         num_stages=1,
     )
