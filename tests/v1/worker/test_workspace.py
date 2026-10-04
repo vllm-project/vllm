@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 from typing import cast
 from unittest.mock import Mock
 
@@ -10,6 +11,17 @@ import torch
 import vllm.v1.worker.workspace as workspace
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu_worker import _num_workspace_lanes
+
+
+@contextlib.contextmanager
+def _managed_workspace(num_ubatches=1):
+    """A workspace manager that exists only for the duration of one test."""
+    workspace.reset_workspace_manager()
+    workspace.init_workspace_manager(torch.device("cpu"), num_ubatches=num_ubatches)
+    try:
+        yield
+    finally:
+        workspace.reset_workspace_manager()
 
 
 class _SpecConfig:
@@ -187,3 +199,63 @@ def test_persistent_tensor_preserves_contents_and_rejects_changes() -> None:
     assert manager.get_persistent("locks", (8,), torch.int32) is first
     with pytest.raises(AssertionError, match="was not allocated during warmup"):
         manager.get_persistent("new", (8,), torch.int32)
+
+
+def test_ubatch_slots_are_isolated_locked_and_reachable_through_the_override():
+    """A resource created under ``use_workspace_ubatch_id`` has to be cached in
+    that ubatch's slot, or the lookup misses once the manager is locked."""
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_ubatches=2)
+    with workspace.use_workspace_ubatch_id(1):
+        manager.get_persistent_resource("k", lambda: "made-for-ubatch-1")
+    manager.lock()
+    with workspace.use_workspace_ubatch_id(1):
+        assert manager.get_persistent_resource("k", lambda: "x") == "made-for-ubatch-1"
+    # Ubatch 0 never saw it, so a locked lookup there still fails.
+    with workspace.use_workspace_ubatch_id(0), pytest.raises(AssertionError):
+        manager.get_persistent_resource("k", lambda: "x")
+
+    with _managed_workspace(num_ubatches=3):
+        live = workspace.current_workspace_manager()
+        arenas = []
+        for ubatch_id, size in enumerate((1024, 2048, 3072)):
+            with workspace.use_workspace_ubatch_id(ubatch_id):
+                (arena,) = live.get_simultaneous(((size,), torch.uint8))
+            assert arena.numel() == size
+            arenas.append(arena)
+        # Each ubatch got its own allocation, not a view of one shared arena.
+        assert len({a.data_ptr() for a in arenas}) == 3
+
+        # A smaller request reuses that slot rather than shrinking it.
+        with workspace.use_workspace_ubatch_id(0):
+            (reused,) = live.get_simultaneous(((512,), torch.uint8))
+        assert reused.data_ptr() == arenas[0].data_ptr()
+
+        workspace.lock_workspace()
+        with workspace.use_workspace_ubatch_id(1):
+            live.get_simultaneous(((1024,), torch.uint8))
+            with pytest.raises(AssertionError, match="Workspace is locked"):
+                live.get_simultaneous(((4096,), torch.uint8))
+
+
+def test_attention_group_routes_builder_initialization_to_ubatch_slots():
+    from vllm.v1.worker.utils import AttentionGroup
+
+    builders: list = []
+
+    class Builder:
+        requires_block_table_width = False
+
+        def __init__(self, *args):
+            manager = workspace.current_workspace_manager()
+            size = (len(builders) + 1) * 1024
+            (self.workspace,) = manager.get_simultaneous(((size,), torch.uint8))
+            builders.append(self)
+
+    group = AttentionGroup(Mock(get_builder_cls=lambda: Builder), ["l"], object(), 0)
+    with _managed_workspace(num_ubatches=3):
+        group.create_metadata_builders(
+            None, torch.device("cpu"), num_metadata_builders=3
+        )
+        # Each builder took its own slot's arena, sized by its own request.
+        assert [b.workspace.numel() for b in builders] == [1024, 2048, 3072]
+        assert len({b.workspace.data_ptr() for b in builders}) == 3
