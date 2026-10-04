@@ -227,7 +227,7 @@ STATE_LEN = WIDTH - 1
 
 def store_conv_checkpoints(x, conv_state, cu, offsets, rows, state_len) -> None:
     KimiK3ROCmKDAPrefillCheckpointExporter(state_len=state_len).export(
-        MambaPrefillCheckpointMetadata(offsets, rows),
+        MambaPrefillCheckpointMetadata(offsets, rows, offsets.tolist()),
         raw_qkv=x,
         conv_state=conv_state,
         cu_seqlens=cu,
@@ -286,7 +286,7 @@ def test_exporter_stores_conv_window_through_shared_interface() -> None:
     exporter = KimiK3ROCmKDAPrefillCheckpointExporter(state_len=STATE_LEN)
     assert isinstance(exporter, MambaPrefillCheckpointExporter)
     checkpoint = MambaPrefillCheckpointMetadata(
-        _i32([192, 0]), _i32([5, NULL_BLOCK_ID])
+        _i32([192, 0]), _i32([5, NULL_BLOCK_ID]), [192, 0]
     )
 
     exporter.export(checkpoint, raw_qkv=x, conv_state=conv_state, cu_seqlens=cu)
