@@ -31,6 +31,7 @@ from zmq import (  # type: ignore
 )
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.shared_tensor import SharedTensorStore
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -483,11 +484,17 @@ class MessageQueue:
         max_chunk_bytes: int = 1024 * 1024 * 24,
         max_chunks: int = 10,
         connect_ip: str | None = None,
+        shared_tensor_dir: str | None = None,
     ):
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
         else:
             assert len(local_reader_ranks) == n_local_reader
+        self._shared_tensor_store = (
+            SharedTensorStore(shared_tensor_dir, n_local_reader)
+            if shared_tensor_dir and n_local_reader > 1
+            else None
+        )
         self.n_local_reader = n_local_reader
         n_remote_reader = n_reader - n_local_reader
         self.n_remote_reader = n_remote_reader
@@ -652,6 +659,8 @@ class MessageQueue:
         """If this is an idle reader, wakes it up so it can clean up and shut
         down"""
         self.shutting_down = True
+        if self._is_writer and self._shared_tensor_store is not None:
+            self._shared_tensor_store.close()
         if self._spin_condition is not None:
             self._spin_condition.cancel()
 
@@ -831,9 +840,8 @@ class MessageQueue:
                         self._spin_condition.record_read()
                 break
 
-    def enqueue(self, obj, timeout: float | None = None):
-        """Write to message queue with optional timeout (in seconds)"""
-        assert self._is_writer, "Only writers can enqueue"
+    @staticmethod
+    def _serialize(obj, tensor_reducer=None):
         all_buffers: list[SizedBuffer] = [b""]
         total_bytes = 6  # 2 bytes for oob buffer count, 4 for main buffer size
 
@@ -854,7 +862,7 @@ class MessageQueue:
         # registered reducers (e.g. `re.Pattern`); the per-pickler
         # dispatch table would otherwise shadow them.
         dispatch_table = dict(copyreg.dispatch_table)
-        dispatch_table[torch.Tensor] = _reduce_tensor
+        dispatch_table[torch.Tensor] = tensor_reducer or _reduce_tensor
         with io.BytesIO() as bio:
             pickler = pickle.Pickler(
                 bio,
@@ -864,8 +872,43 @@ class MessageQueue:
             pickler.dispatch_table = dispatch_table
             pickler.dump(obj)
             all_buffers[0] = bio.getvalue()
+        return all_buffers, total_bytes + len(all_buffers[0])
+
+    def enqueue(
+        self,
+        obj,
+        timeout: float | None = None,
+        *,
+        shared_tensor_ids: set[int] | None = None,
+    ):
+        """Broadcast; only explicitly selected immutable inputs use local mmap."""
+        assert self._is_writer, "Only writers can enqueue"
+        store = self._shared_tensor_store
+        if store is not None and shared_tensor_ids:
+            shared_paths = []
+
+            def reduce_local(tensor):
+                if id(tensor) in shared_tensor_ids:
+                    reduced = store.reduce_tensor(tensor)
+                    if reduced is not None:
+                        shared_paths.append(reduced[1][0])
+                        return reduced
+                return _reduce_tensor(tensor)
+
+            try:
+                all_buffers, total_bytes = self._serialize(obj, reduce_local)
+                remote_buffers = (
+                    self._serialize(obj)[0] if self.n_remote_reader > 0 else None
+                )
+            except BaseException:
+                # No reader has seen these paths yet.
+                for path in shared_paths:
+                    os.unlink(path)
+                raise
+        else:
+            all_buffers, total_bytes = self._serialize(obj)
         if self.n_local_reader > 0:
-            if total_bytes + len(all_buffers[0]) >= self.buffer.max_chunk_bytes:
+            if total_bytes >= self.buffer.max_chunk_bytes:
                 with self.acquire_write(timeout) as buf:
                     buf[0] = 1  # overflow
                 self.local_socket.send_multipart(all_buffers, copy=False)
@@ -888,6 +931,9 @@ class MessageQueue:
             self._spin_condition.notify()
 
         if self.n_remote_reader > 0:
+            if store is not None and shared_tensor_ids:
+                # File paths are meaningful only in the writer's IPC namespace.
+                all_buffers = remote_buffers
             self.remote_socket.send_multipart(all_buffers, copy=False)
 
     def dequeue(
