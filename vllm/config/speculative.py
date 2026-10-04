@@ -455,6 +455,13 @@ class SpeculativeConfig:
     speculative methods. This is an experimental option for measuring the
     acceptance-rate impact of reusing that block. It does not disable the
     speculative drafter itself."""
+    draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
+    """Weight-only quantization of the drafter's copy of a target lm_head it
+    shares (EAGLE and MTP). "fp8" stores E4M3 rows with one scale per row,
+    "nvfp4" stores E2M1 weights with E4M3 scales per 16 weights; both run on
+    the Marlin kernel. The target still verifies with its own head, so outputs
+    keep the speculative decoding guarantees and only the acceptance length
+    can change. Model Runner V2 only."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -1815,6 +1822,14 @@ class SpeculativeConfig:
                 "num_speculative_tokens must be provided with "
                 "speculative model unless the draft model config contains an "
                 "n_predict parameter."
+            )
+
+        if self.draft_lm_head_quantization is not None and (
+            self.method not in ("eagle", "eagle3", "mtp") or self.use_gemma4_mtp()
+        ):
+            raise ValueError(
+                "draft_lm_head_quantization is not supported for method "
+                f"{self.method!r}."
             )
 
         if self.num_speculative_tokens <= 0:
