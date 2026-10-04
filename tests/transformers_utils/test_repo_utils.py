@@ -4,16 +4,21 @@
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 from huggingface_hub import _CACHED_NO_EXIST
+from huggingface_hub.errors import CachedRepoTreeNotFoundError
+from huggingface_hub.utils import httpx
 
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
+    file_exists,
     get_hf_file_to_dict,
     is_mistral_model_repo,
     list_filtered_repo_files,
+    list_repo_files,
     with_retry,
 )
 
@@ -196,3 +201,39 @@ def test_with_retry_does_not_retry_fatal_errors():
         with_retry(func, "Error", fatal_errors=(FileNotFoundError,))
 
     func.assert_called_once()
+
+
+def test_list_repo_files_uses_cached_tree_when_hub_is_unreachable():
+    """A DNS blip must not fail engine start for a model that is already cached."""
+    tree = [SimpleNamespace(path="config.json"), SimpleNamespace(path="a/b.bin")]
+    with (
+        patch(
+            "vllm.transformers_utils.repo_utils._list_repo_files",
+            MagicMock(side_effect=httpx.ConnectError("name resolution")),
+        ),
+        patch(
+            "vllm.transformers_utils.repo_utils.huggingface_hub.get_cached_repo_tree",
+            MagicMock(return_value=tree),
+        ) as mock_tree,
+    ):
+        assert list_repo_files("org/model", revision="main") == [
+            "config.json",
+            "a/b.bin",
+        ]
+        assert not file_exists("org/model", "hf_quant_config.json", revision="main")
+    assert mock_tree.call_args.kwargs["revision"] == "main"
+
+
+def test_list_repo_files_raises_when_hub_is_unreachable_and_not_cached():
+    with (
+        patch(
+            "vllm.transformers_utils.repo_utils._list_repo_files",
+            MagicMock(side_effect=httpx.ConnectError("name resolution")),
+        ),
+        patch(
+            "vllm.transformers_utils.repo_utils.huggingface_hub.get_cached_repo_tree",
+            MagicMock(side_effect=CachedRepoTreeNotFoundError("not cached")),
+        ),
+        pytest.raises(httpx.ConnectError),
+    ):
+        list_repo_files("org/model")
