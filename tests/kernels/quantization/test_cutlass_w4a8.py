@@ -29,7 +29,8 @@ if not current_platform.is_cuda():
 #  `is_quant_method_supported` conflates kernels with quantization methods
 #  an assumption which is breaking down as quantizations methods can have
 #  have kernels and some kernels support multiple quantization methods.
-IS_SUPPORTED_BY_GPU = current_platform.get_device_capability()[0] >= 9
+capability = current_platform.get_device_capability()
+IS_SUPPORTED_BY_GPU = capability is not None and capability[0] >= 9
 
 MNK_SHAPES = [
     (1, 128, 128),
@@ -300,8 +301,7 @@ def test_w4a8_cuda_graph():
 )
 @pytest.mark.parametrize("shape", MNK_SHAPES)
 def test_convert_packed_uint4b8_to_signed_int4_inplace(shape):
-    """
-    The W4A16 checkpoints encode the weights as int4b8 packed to int32.
+    """The W4A16 checkpoints encode the weights as int4b8 packed to int32.
     The CUTLASS kernels expect signed int4 packed to int32.
     This tests checks that the runtime int4b8 -> signed int4 conversion
     matches the offline conversion step exactly.
