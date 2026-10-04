@@ -123,8 +123,10 @@ class RayDistributedExecutor(Executor):
             self.forward_dag.teardown()
             import ray
 
-            for worker in self.workers:
-                ray.kill(worker)
+            # Avoid starting a new Ray job after the owning driver disconnected.
+            if ray.is_initialized():
+                for worker in self.workers:
+                    ray.kill(worker)
             self.forward_dag = None
 
     def _configure_ray_workers_use_nsight(self, ray_remote_kwargs) -> dict[str, Any]:
