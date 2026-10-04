@@ -114,8 +114,27 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
+            # The divisor must be the MAMBA group's block size, not the
+            # attention/CLI block size: on hybrids they differ (here 1616 vs the
+            # mamba spec), and a resume over a cached prefix then seeds an
+            # out-of-range block_table column, so the fused align pre-copy reads
+            # a garbage block id (illegal memory access on sm_121, silently
+            # wrong state where the read stays mapped) -- vllm#53142.
+            # ``_mamba_spec`` is populated by the first batch's preprocess; until
+            # then fall back to the mamba block size from the cache config, which
+            # is the unit the align block table is laid out in (MambaSpec.block_size
+            # is derived from it). A request admitted before the first preprocess
+            # -- e.g. a prefix restored by a KV connector -- would otherwise seed
+            # with the attention block size, reintroducing the same wrong divisor.
+            mamba_bs = (
+                self._mamba_spec.block_size
+                if self._mamba_spec is not None
+                else (
+                    self.cache_config.mamba_block_size or self.cache_config.block_size
+                )
+            )
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+                (new_req_data.num_computed_tokens - 1) // mamba_bs
             )
 
     def _get_mamba_group_info(
@@ -165,9 +184,9 @@ class MambaHybridModelState(DefaultModelState):
         ctx = self._mamba_ctx
         if not ctx.is_initialized:
             forward_context = self.vllm_config.compilation_config.static_forward_context
-            # block_tables are batch-order slices of the persistent
-            # input_block_tables (stable data_ptr), so the metadata is captured
-            # once here and reused across steps.
+            # ``block_tables`` are the SOURCE per-request-slot tables (stable
+            # data_ptr, req-indexed), so the metadata is captured once here and
+            # reused across steps; the copy kernels index rows by req_idx.
             ctx.initialize_from_forward_context(
                 kv_cache_config,
                 forward_context,
