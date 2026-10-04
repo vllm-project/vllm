@@ -1054,7 +1054,7 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
                 "quantized_layers": {
                     prefix: {"quant_algo": "FP8"},
                     "model.language_model.layers.2.moe.gate_proj": {
-                        "quant_algo": "NVFP4"
+                        "quant_algo": "MXFP8"
                     },
                 },
             }
