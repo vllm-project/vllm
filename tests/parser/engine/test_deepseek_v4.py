@@ -515,6 +515,384 @@ class TestMissingToolCallsWrapper:
         assert result.content is None
 
 
+# ── Empty <tool_calls></tool_calls> block ────────────────────────────
+
+
+class TestEmptyToolCallsBlock:
+    """The model occasionally emits an empty wrapper with no invoke inside.
+    The block carries no call, so it must be skipped without swallowing
+    any surrounding text; otherwise the client sees truncated or empty
+    content together with ``finish_reason=stop``."""
+
+    _EMPTY = DSML_TOOL_START + DSML_TOOL_END
+
+    def test_non_streaming_surrounding_text_preserved(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls("pre\n" + self._EMPTY + "post", mock_request)
+
+        assert result.tools_called is False
+        assert result.content == "pre\npost"
+        assert "DSML" not in result.content
+
+    def test_streaming_surrounding_text_preserved(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        chunks = ["pre\n", DSML_TOOL_START, DSML_TOOL_END, "post"]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_content(results) == "pre\npost"
+        assert collect_function_name(results) is None
+
+    def test_streaming_markers_split_across_deltas(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        results = simulate_tool_streaming(
+            parser, mock_request, list("pre" + self._EMPTY + "post")
+        )
+
+        assert collect_content(results) == "prepost"
+
+    def test_whitespace_only_block_behaves_like_empty(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        text = "pre" + DSML_TOOL_START + "\n" + DSML_TOOL_END + "post"
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.content == "prepost"
+
+    def test_empty_block_before_real_call(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        text = (
+            self._EMPTY
+            + DSML_TOOL_START
+            + f"{DSML_INVOKE_PREFIX}terminal{DSML_INVOKE_NAME_END}\n"
+            + _param("command", "true", "echo hi")
+            + f"\n{DSML_INVOKE_END}"
+            + DSML_TOOL_END
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert [tc.function.name for tc in result.tool_calls] == ["terminal"]
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"command": "echo hi"}
+        assert result.content is None
+
+    def test_empty_block_in_thinking_mode(self, mock_tokenizer):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        chunks = ["plan\n", DSML_TOOL_START, DSML_TOOL_END, "answer"]
+        reasoning, content = simulate_reasoning_streaming(parser, chunks)
+
+        assert reasoning.startswith("plan")
+        assert content == "answer"
+
+    def test_consecutive_empty_blocks(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(
+            self._EMPTY + self._EMPTY + "text", mock_request
+        )
+
+        assert result.tools_called is False
+        assert result.content == "text"
+
+
+# ── Stray DSML closers with no open block ────────────────────────────
+
+
+class TestStrayClosers:
+    """The model sometimes emits bare DSML closing tags with no matching
+    opener (observed right after tool results, e.g. a turn consisting of
+    only ``</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>``).
+    They carry no call and must be absorbed instead of leaking raw markup
+    to the client. Only the tags themselves are absorbed; newlines between
+    them are ordinary text and pass through."""
+
+    _STRAY = f"{_PARAM_CLOSE}\n{DSML_INVOKE_END}\n{DSML_TOOL_END}"
+
+    def test_non_streaming_closers_absorbed(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls("Checking.\n" + self._STRAY, mock_request)
+
+        assert result.tools_called is False
+        assert result.content == "Checking.\n\n\n"
+        assert "DSML" not in result.content
+
+    def test_streaming_closers_absorbed(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        chunks = ["Checking.\n", _PARAM_CLOSE, "\n", DSML_INVOKE_END, DSML_TOOL_END]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_content(results) == "Checking.\n\n"
+        assert collect_function_name(results) is None
+
+    def test_text_around_closers_preserved(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(
+            "pre" + self._STRAY + "post", mock_request
+        )
+
+        assert result.tools_called is False
+        assert result.content == "pre\n\npost"
+
+    def test_closers_split_across_deltas(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        results = simulate_tool_streaming(
+            parser, mock_request, list("pre" + self._STRAY + "post")
+        )
+
+        assert collect_content(results) == "pre\n\npost"
+
+    def test_closers_absorbed_while_reasoning(self, mock_tokenizer):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        chunks = [
+            "Some reasoning.\n",
+            _PARAM_CLOSE,
+            DSML_INVOKE_END,
+            DSML_TOOL_END,
+            "</think>\n",
+            "Answer.",
+        ]
+        reasoning, content = simulate_reasoning_streaming(parser, chunks)
+
+        assert "Some reasoning" in reasoning
+        assert "DSML" not in reasoning
+        assert "Answer" in content
+
+
+# ── Stray DSML parameter openers with no open invoke ─────────────────
+
+
+class TestStrayParamOpeners:
+    """The model sometimes emits a bare ``<｜DSML｜parameter ...>`` opener
+    with no invoke around it (observed right after a tool result). The tag
+    markup must be swallowed so it cannot leak, but the parameter value is
+    ordinary text and stays visible. Malformed fragments that never reach
+    the closing ``">`` drop everything up to the next recognized tag."""
+
+    _STRAY = _param("description", "true", "some value")
+    _OPEN = '<｜DSML｜parameter name="description" string="true">'
+
+    def test_non_streaming_value_preserved(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls("Checking.\n" + self._STRAY, mock_request)
+
+        assert result.tools_called is False
+        assert result.content == "Checking.\nsome value"
+        assert "DSML" not in result.content
+
+    def test_streaming_value_preserved(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        chunks = ["Checking.\n", self._OPEN, "some value", _PARAM_CLOSE]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_content(results) == "Checking.\nsome value"
+        assert collect_function_name(results) is None
+
+    def test_opener_split_across_deltas(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        results = simulate_tool_streaming(
+            parser, mock_request, list("pre" + self._STRAY + "post")
+        )
+
+        assert collect_content(results) == "presome valuepost"
+
+    def test_text_around_stray_param_preserved(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(
+            "pre" + self._STRAY + "post", mock_request
+        )
+
+        assert result.tools_called is False
+        assert result.content == "presome valuepost"
+
+    def test_unterminated_opener_still_surfaces_value(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(
+            "pre" + self._OPEN + "value", mock_request
+        )
+
+        assert result.content == "prevalue"
+
+    def test_malformed_opener_exits_at_next_close_tag(
+        self, mock_tokenizer, mock_request
+    ):
+        # No ``">`` terminating the attribute region: the fragment up to
+        # the next closing tag is dropped, then normal content resumes.
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(
+            'pre<｜DSML｜parameter name="x"' + _PARAM_CLOSE + "post", mock_request
+        )
+
+        assert result.tools_called is False
+        assert result.content == "prepost"
+
+    def test_consecutive_stray_params(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(
+            _param("a", "true", "v1") + _param("b", "true", "v2"), mock_request
+        )
+
+        assert result.tools_called is False
+        assert result.content == "v1v2"
+
+    def test_stray_param_before_real_call(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        text = (
+            self._STRAY
+            + DSML_TOOL_START
+            + f"{DSML_INVOKE_PREFIX}terminal{DSML_INVOKE_NAME_END}\n"
+            + _param("command", "true", "echo hi")
+            + f"\n{DSML_INVOKE_END}"
+            + DSML_TOOL_END
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert [tc.function.name for tc in result.tool_calls] == ["terminal"]
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"command": "echo hi"}
+        assert result.content == "some value"
+
+    def test_stray_param_recovered_by_invoke_prefix(
+        self, mock_tokenizer, mock_request
+    ):
+        # An invoke opener inside the attribute region abandons the stray
+        # fragment and starts a real tool call.
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        text = (
+            '<｜DSML｜parameter name="x"'
+            + f"{DSML_INVOKE_PREFIX}terminal{DSML_INVOKE_NAME_END}"
+            + _param("command", "true", "echo hi")
+            + DSML_INVOKE_END
+            + DSML_TOOL_END
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert [tc.function.name for tc in result.tool_calls] == ["terminal"]
+
+    def test_stray_param_while_reasoning(self, mock_tokenizer):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        chunks = ["plan\n", self._OPEN, "v", _PARAM_CLOSE, "more", "</think>\n", "Answer."]
+        reasoning, content = simulate_reasoning_streaming(parser, chunks)
+
+        assert "plan" in reasoning
+        assert "vmore" in reasoning
+        assert "DSML" not in reasoning
+        assert "Answer" in content
+
+    def test_stray_param_reasoning_closed_by_think_end(self, mock_tokenizer):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        chunks = ["plan\n", self._OPEN, "v", "</think>\n", "Answer."]
+        reasoning, content = simulate_reasoning_streaming(parser, chunks)
+
+        assert "plan" in reasoning
+        assert "DSML" not in reasoning
+        assert "Answer" in content
+
+    def test_param_tag_between_invokes_dropped(self, mock_tokenizer, mock_request):
+        # A parameter tag directly between two invokes is malformed; it is
+        # dropped without disturbing the surrounding parallel calls.
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        text = (
+            DSML_TOOL_START
+            + f"{DSML_INVOKE_PREFIX}f1{DSML_INVOKE_NAME_END}"
+            + _param("a", "true", "1")
+            + DSML_INVOKE_END
+            + self._STRAY
+            + f"{DSML_INVOKE_PREFIX}f2{DSML_INVOKE_NAME_END}"
+            + _param("b", "true", "2")
+            + DSML_INVOKE_END
+            + DSML_TOOL_END
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert [tc.function.name for tc in result.tool_calls] == ["f1", "f2"]
+        assert json.loads(result.tool_calls[0].function.arguments) == {"a": "1"}
+        assert json.loads(result.tool_calls[1].function.arguments) == {"b": "2"}
+
+    def test_reasoning_pass_forwards_call_text_verbatim(
+        self, mock_tokenizer, mock_request
+    ):
+        # Two-pass round trip: the reasoning pass (skip_tool_parsing) must
+        # forward the whole tool block — parameter closers included — so
+        # the tool pass can re-parse it. Absorbing the closers here would
+        # silently corrupt the forwarded arguments.
+        text = (
+            "reasoning text"
+            + DSML_TOOL_START
+            + f"{DSML_INVOKE_PREFIX}terminal{DSML_INVOKE_NAME_END}\n"
+            + _param("command", "true", "echo hi")
+            + f"\n{DSML_INVOKE_END}"
+            + DSML_TOOL_END
+        )
+        first = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        first.skip_tool_parsing = True
+        reasoning, content = first.extract_reasoning(text, mock_request)
+
+        assert reasoning == "reasoning text"
+        assert content == text[len("reasoning text"):]
+
+        second = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = second.extract_tool_calls_from_content(content, mock_request)
+        assert [tc.function.name for tc in result.tool_calls] == ["terminal"]
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"command": "echo hi"}
+
+
 # ── Thinking mode initial state ──────────────────────────────────────
 
 
