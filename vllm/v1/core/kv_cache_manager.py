@@ -14,7 +14,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.kv_cache_utils import KVBlockTail, KVCacheBlock, KVCacheBlockCopy
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -866,6 +866,21 @@ class KVCacheManager:
         for mgr in self.coordinator.single_type_managers:
             ids.extend(mgr.take_new_block_ids())
         return ids
+
+    def get_partial_last_blocks(
+        self, request_id: str, num_tokens: int
+    ) -> list[KVBlockTail]:
+        """Find private partial blocks whose async-loaded tails need zeroing."""
+        tails: list[KVBlockTail] = []
+        for group_id, mgr in enumerate(self.coordinator.single_type_managers):
+            block_index, num_valid_tokens = divmod(num_tokens, mgr.block_size)
+            if not mgr.records_new_block_ids or not num_valid_tokens:
+                continue
+            block = mgr.req_to_blocks[request_id][block_index]
+            # Never modify a previously cached or null block.
+            if block.block_hash is None and not block.is_null:
+                tails.append(KVBlockTail(group_id, block.block_id, num_valid_tokens))
+        return tails
 
     def record_blocks_for_zeroing(self, request_id: str, start_token: int) -> None:
         """Re-record the request's blocks from start_token onwards for

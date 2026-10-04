@@ -34,6 +34,67 @@ def _kv_fetch_stages(scheduler) -> tuple[int, ...]:
     return tuple(scheduler._kv_fetch_counts[s] for s in KV_FETCH_STAGES)
 
 
+@pytest.mark.parametrize("cache_block_size", [16, 32])
+def test_received_last_block_tail_queued_once(monkeypatch, cache_block_size):
+    """NIXL copies whole kernel pages, so a remote prefill's last received
+    block carries the producer's stale page tail past the N received tokens.
+    It is queued for zeroing exactly once, in the step that first schedules
+    the request, with the received token count (before the full-hit N-1
+    recompute adjustment)."""
+    from vllm.v1.core.kv_cache_utils import KVBlockTail
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+
+    monkeypatch.setattr(
+        KVCacheConfig, "needs_kv_cache_zeroing", property(lambda _: True)
+    )
+    vllm_config = create_vllm_config(block_size=cache_block_size)
+    vllm_config.cache_config.mamba_cache_mode = "align"
+    kv_cache_config = make_kv_cache_config(
+        block_size=cache_block_size,
+        mamba_enabled=cache_block_size > 16,
+        mamba_cache_mode="align",
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        kv_cache_config=kv_cache_config,
+        hash_block_size=16,
+    )
+    block_size = 16
+    # A larger cache block exercises partial prefix caching at completion.
+    num_loaded = cache_block_size * 5 // 2
+    # Hybrid NIXL transfers stop one token before the end of the prompt.
+    num_tokens = num_loaded + (cache_block_size > 16)
+    request = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=num_tokens,
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    assert scheduler_output.kv_block_tails_to_zero is None
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+    scheduler_output = scheduler.schedule()
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        finished_recving={request.request_id}
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    scheduler_output = scheduler.schedule()
+
+    assert request.request_id in scheduler_output.num_scheduled_tokens
+    block_ids = scheduler.kv_cache_manager.get_block_ids(request.request_id)[0]
+    assert scheduler_output.kv_block_tails_to_zero == [
+        KVBlockTail(0, block_ids[2], num_loaded % cache_block_size)
+    ]
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([request])
+    )
+    assert scheduler.schedule().kv_block_tails_to_zero is None
+
+
 def test_basic_lifecycle():
     """Test lifecycle of a remote prefill."""
     vllm_config = create_vllm_config()
