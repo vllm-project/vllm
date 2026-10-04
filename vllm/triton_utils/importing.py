@@ -108,6 +108,10 @@ class TritonPlaceholder(types.ModuleType):
         self.jit = self._dummy_decorator("jit")
         self.autotune = self._dummy_decorator("autotune")
         self.heuristics = self._dummy_decorator("heuristics")
+        # Bodies of constexpr_function helpers only run while a kernel is being
+        # compiled, so the dummy decorator is enough: without Triton nothing
+        # compiles, and the module must still import.
+        self.constexpr_function = self._dummy_decorator("constexpr_function")
         self.Config = self._dummy_decorator("Config")
         self.cdiv = cdiv
         self.language = TritonLanguagePlaceholder()
