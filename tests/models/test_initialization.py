@@ -32,7 +32,7 @@ from .registry import (
     HF_EXAMPLE_MODELS,
     HfExampleModels,
 )
-from .utils import dummy_hf_overrides
+from .utils import dummy_hf_overrides, find_unregistered_tensors
 
 logger = init_logger(__name__)
 
@@ -206,7 +206,8 @@ def can_initialize(
         if not model_info.enable_prefix_caching:
             kwargs["enable_prefix_caching"] = False
 
-        LLM(
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        llm = LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
             tokenizer_mode=model_info.tokenizer_mode,
@@ -237,6 +238,10 @@ def can_initialize(
             attention_config=attention_config,
             **kwargs,
         )
+        # Unregistered tensors are invisible to sleep mode, CUDA graph address
+        # checks and weight reload.
+        for unregistered in llm.apply_model(find_unregistered_tensors):
+            assert not unregistered, unregistered
 
 
 @pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)

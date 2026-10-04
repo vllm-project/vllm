@@ -9,7 +9,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _upcast_e8m0_to_fp32,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import dataclass_tensors, replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.b12x import B12xWarmupUnit, reuse_packed_weight_storage
 from vllm.utils.b12x import (
@@ -262,6 +262,10 @@ class B12xTensorFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             getattr(layer, "b12x_tensor_fp8_packed_weight", None),
             packed_weight,
         )
+        for name, tensor in dataclass_tensors(
+            layer.b12x_tensor_fp8_packed_weight, "_b12x_tensor_fp8_packed"
+        ).items():
+            layer.register_buffer(name, tensor, persistent=False)
         weight_name, weight_scale_name, _, _ = self.layer_param_names
         replace_parameter(layer, weight_name, weight.new_empty((0,)))
         replace_parameter(layer, weight_scale_name, weight_scale.new_empty((0,)))

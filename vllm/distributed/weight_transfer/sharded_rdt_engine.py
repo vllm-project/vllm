@@ -1377,6 +1377,7 @@ class ShardedRDTWeightTransferEngine(
         from vllm.model_executor.model_loader.reload.layerwise import (
             LAYERWISE_INFO,
             _copy_and_restore_kernel_tensors,
+            prepare_derived_buffers,
         )
 
         stream = self._quant_stream or self._proc_stream
@@ -1394,6 +1395,7 @@ class ShardedRDTWeightTransferEngine(
                 if isinstance(quant_method, QuantizeMethodBase):
                     if hasattr(layer, "_already_called_process_weights_after_loading"):
                         delattr(layer, "_already_called_process_weights_after_loading")
+                    prepare_derived_buffers(layer, info)
                     quant_method.process_weights_after_loading(layer)
                 # Copy into persistent kernel storage (preserves cudagraph refs).
                 if info.kernel_tensors is not None:

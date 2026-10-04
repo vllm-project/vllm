@@ -89,6 +89,7 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.model_executor.utils import set_derived_buffer
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -337,10 +338,6 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self.activation = activation
         self.activation_beta = activation_beta
         self.activation_linear_beta = activation_linear_beta
-        self.register_buffer("_mega_l1_packed", None, persistent=False)
-        self.register_buffer("_mega_l1_scale", None, persistent=False)
-        self.register_buffer("_mega_l2_packed", None, persistent=False)
-        self.register_buffer("_mega_l2_scale", None, persistent=False)
 
     def synchronize_first_launch(self) -> None:
         ep_group = get_ep_group()
@@ -354,13 +351,12 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
 
     def finalize_weights(self, shared_experts: DeepseekV4MLP | None = None) -> None:
         if self._transformed_l1_weights is not None:
+            self._drop_raw_mega_weights()
             return
 
         # Weight cache IPC engine: the daemon exported the transformed
         # buffers; reuse them zero-copy and drop the raw packed params.
         if self._mega_l1_packed is not None:
-            self._transformed_l1_weights = (self._mega_l1_packed, self._mega_l1_scale)
-            self._transformed_l2_weights = (self._mega_l2_packed, self._mega_l2_scale)
             self._drop_raw_mega_weights()
             return
 
@@ -382,19 +378,15 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             (1, 32),
             self.num_local_experts,
         )
-        self._transformed_l1_weights, self._transformed_l2_weights = (
-            deep_gemm.transform_weights_for_mega_moe(
-                (self.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
-                (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
-                activation=self.activation,
-            )
+        l1_weights, l2_weights = deep_gemm.transform_weights_for_mega_moe(
+            (self.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
+            (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
+            activation=self.activation,
         )
-        l1_packed, l1_scale = self._transformed_l1_weights
-        l2_packed, l2_scale = self._transformed_l2_weights
-        self.register_buffer("_mega_l1_packed", l1_packed, persistent=False)
-        self.register_buffer("_mega_l1_scale", l1_scale, persistent=False)
-        self.register_buffer("_mega_l2_packed", l2_packed, persistent=False)
-        self.register_buffer("_mega_l2_scale", l2_scale, persistent=False)
+        set_derived_buffer(self, "_mega_l1_packed", l1_weights[0])
+        set_derived_buffer(self, "_mega_l1_scale", l1_weights[1])
+        set_derived_buffer(self, "_mega_l2_packed", l2_weights[0])
+        set_derived_buffer(self, "_mega_l2_scale", l2_weights[1])
         self._drop_raw_mega_weights()
 
     def _drop_raw_mega_weights(self) -> None:

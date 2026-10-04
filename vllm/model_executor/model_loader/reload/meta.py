@@ -100,20 +100,29 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
 
     params, buffers = get_layer_params_buffers(layer)
     parameter_storage_ptrs = _parameter_storage_ptrs(layer)
+    captured_buffers: dict[str, torch.Tensor | None] = {
+        name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
+        for name, buffer in buffers.items()
+        if name not in SKIP_TENSORS
+        and not _is_non_persistent_parameter_alias_buffer(
+            layer, name, buffer, parameter_storage_ptrs
+        )
+    }
+    # Include None-placeholder buffers (e.g. derived-state buffers registered
+    # in __init__ and filled later by process_weights_after_loading) so that
+    # restore_layer_on_meta re-registers them after deleting all attributes.
+    for name in layer._buffers:
+        if name not in SKIP_TENSORS and name not in captured_buffers:
+            buf = layer._buffers[name]
+            if buf is None:
+                captured_buffers[name] = None
     return (
         {
             name: sanitize_layer_refs(to_meta_tensor(param), layer)
             for name, param in params.items()
             if name not in SKIP_TENSORS
         },
-        {
-            name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
-            for name, buffer in buffers.items()
-            if name not in SKIP_TENSORS
-            and not _is_non_persistent_parameter_alias_buffer(
-                layer, name, buffer, parameter_storage_ptrs
-            )
-        },
+        captured_buffers,
     )
 
 
@@ -138,7 +147,8 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     for name, buffer in restore_buffers.items():
         if name not in SKIP_TENSORS:
-            buffer = restore_layer_refs(buffer, layer)
+            if buffer is not None:
+                buffer = restore_layer_refs(buffer, layer)
             layer.register_buffer(name, buffer, persistent=name not in non_persistent)
 
 

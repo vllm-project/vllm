@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.utils import dataclass_tensors
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import cdiv
@@ -263,6 +264,11 @@ class FusedMoEQuantConfig:
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"
         )
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        # Includes tensors computed here (e.g. a1_gscale = 1 / a1_scale) and
+        # the storage behind triton_kernels PrecisionConfig scales.
+        return dataclass_tensors(self)
 
     #
     # Convenience accessors for various properties.

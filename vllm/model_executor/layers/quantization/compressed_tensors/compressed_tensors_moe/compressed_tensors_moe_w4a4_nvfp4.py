@@ -30,7 +30,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    replace_parameter,
+    set_derived_buffer,
+    set_weight_attrs,
+)
 
 # NVFP4 backends that have been verified to support EPLB for this quantization recipe.
 _EPLB_SUPPORTED_NVFP4_BACKENDS = frozenset(
@@ -185,6 +189,10 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
+        # Kernel-format activation scales, derived in process_weights_after_loading.
+        layer.register_buffer("w13_input_scale", None, persistent=False)
+        layer.register_buffer("w2_input_scale", None, persistent=False)
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         # NOTE(rob): wN_weight_packed -> wN_weight is because ModularKernelMethod
@@ -242,8 +250,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
-        layer.w13_input_scale = a13_scale
-        layer.w2_input_scale = a2_scale
+        set_derived_buffer(layer, "w13_input_scale", a13_scale)
+        set_derived_buffer(layer, "w2_input_scale", a2_scale)
 
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)

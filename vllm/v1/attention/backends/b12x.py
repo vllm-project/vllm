@@ -849,6 +849,11 @@ class B12xPagedAttentionImpl(AttentionImpl[B12xPagedMetadata]):
         else:
             self.sinks.copy_(source_sinks)
 
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        if self.sinks is None or self.sinks is self._sinks_source:
+            return {}
+        return {"sinks": self.sinks}
+
     def _prepare_fp8_descales(
         self,
         layer: AttentionLayer,

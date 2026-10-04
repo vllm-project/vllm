@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import dataclass_tensors, replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.b12x import B12xWarmupUnit, reuse_packed_weight_storage
 from vllm.utils.b12x import (
@@ -100,6 +100,10 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel):
             getattr(layer, "b12x_mxfp8_packed_weight", None),
             packed_weight,
         )
+        for name, tensor in dataclass_tensors(
+            layer.b12x_mxfp8_packed_weight, "_b12x_mxfp8_packed"
+        ).items():
+            layer.register_buffer(name, tensor, persistent=False)
         replace_parameter(layer, "weight", weight.new_empty((0,)))
         replace_parameter(layer, "weight_scale", weight_scale.new_empty((0,)))
         layer.b12x_warmup_provider = self

@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Static
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.utils import set_derived_buffer
 
 from .nemotron_h import NemotronHMLP
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
@@ -247,12 +248,25 @@ class LiLiCorrHead(nn.Module):
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "anchor_out_head"),
         )
-        self._fused_edge_weight: torch.Tensor | None = None
-        self._fused_edge_bias: torch.Tensor | None = None
-        self._factor_input_splits: tuple[torch.Tensor, ...]
-        self._attn_bias: torch.Tensor | None = None
+        self._fused_edge_weight: torch.Tensor | None
+        self._fused_edge_bias: torch.Tensor | None
+        self._factor_input_self: torch.Tensor
+        self._factor_input_anchor: torch.Tensor
+        self._factor_input_cross: torch.Tensor
+        self._attn_bias: torch.Tensor | None
         self._rank_frac_col: torch.Tensor
         self._is_top1_col: torch.Tensor
+        for name in (
+            "_fused_edge_weight",
+            "_fused_edge_bias",
+            "_factor_input_self",
+            "_factor_input_anchor",
+            "_factor_input_cross",
+            "_attn_bias",
+            "_rank_frac_col",
+            "_is_top1_col",
+        ):
+            self.register_buffer(name, None, persistent=False)
 
     @torch.no_grad()
     def materialize_inference_buffers(
@@ -260,21 +274,27 @@ class LiLiCorrHead(nn.Module):
     ) -> None:
         """Build inference-only views/copies after checkpoint weights are loaded."""
         topk = self.candidate_topk
-        self._attn_bias = self._build_attention_bias(device=device, dtype=dtype)
+        set_derived_buffer(
+            self, "_attn_bias", self._build_attention_bias(device=device, dtype=dtype)
+        )
         # Both projections consume the same candidate features f:
         #   out = W_out @ f + b_out
         #   incoming = W_in @ f + b_in
         # Stack weights and biases to compute both in one linear call. score()
         # splits the result and normalizes the two vectors separately.
-        self._fused_edge_weight = (
-            torch.cat([self.out_head.weight, self.in_head.weight], dim=0)
-            .to(device=device, dtype=dtype)
-            .contiguous()
+        set_derived_buffer(
+            self,
+            "_fused_edge_weight",
+            torch.cat([self.out_head.weight, self.in_head.weight], dim=0).to(
+                device=device, dtype=dtype
+            ),
         )
-        self._fused_edge_bias = (
-            torch.cat([self.out_head.bias, self.in_head.bias], dim=0)
-            .to(device=device, dtype=dtype)
-            .contiguous()
+        set_derived_buffer(
+            self,
+            "_fused_edge_bias",
+            torch.cat([self.out_head.bias, self.in_head.bias], dim=0).to(
+                device=device, dtype=dtype
+            ),
         )
         # For candidate state x and request anchor a, the trained projection is:
         #   W @ concat(x, a, x*a) + b
@@ -284,10 +304,12 @@ class LiLiCorrHead(nn.Module):
         # W_a @ a across candidates, adding the original bias only once.
         weight = self.factor_input_proj.weight
         hdim = self.hidden_size
-        self._factor_input_splits = (
-            weight[:, :hdim].contiguous(),
-            weight[:, hdim : 2 * hdim].contiguous(),
-            weight[:, 2 * hdim :].contiguous(),
+        set_derived_buffer(self, "_factor_input_self", weight[:, :hdim].contiguous())
+        set_derived_buffer(
+            self, "_factor_input_anchor", weight[:, hdim : 2 * hdim].contiguous()
+        )
+        set_derived_buffer(
+            self, "_factor_input_cross", weight[:, 2 * hdim :].contiguous()
         )
         if topk > 1:
             rank_frac = torch.arange(topk, device=device, dtype=torch.float32).view(
@@ -297,8 +319,8 @@ class LiLiCorrHead(nn.Module):
             rank_frac = torch.zeros(1, 1, topk, device=device, dtype=torch.float32)
         is_top1 = torch.zeros(1, 1, topk, device=device, dtype=torch.float32)
         is_top1[..., 0] = 1.0
-        self._rank_frac_col = rank_frac.contiguous()
-        self._is_top1_col = is_top1.contiguous()
+        set_derived_buffer(self, "_rank_frac_col", rank_frac.contiguous())
+        set_derived_buffer(self, "_is_top1_col", is_top1.contiguous())
 
     def _build_attention_bias(
         self, *, device: torch.device, dtype: torch.dtype
@@ -382,11 +404,12 @@ class LiLiCorrHead(nn.Module):
             bsz, n_slots, topk, self.hidden_size
         )
         anchor_state = self.anchor_norm(anchor_state)
-        w_self, w_anchor, w_cross = self._factor_input_splits
         anchor_row = anchor_state[:, None, None, :]
-        pre = F.linear(hidden_states, w_self, self.factor_input_proj.bias)
-        pre = pre + F.linear(anchor_row, w_anchor)
-        pre = pre + F.linear(hidden_states * anchor_row, w_cross)
+        pre = F.linear(
+            hidden_states, self._factor_input_self, self.factor_input_proj.bias
+        )
+        pre = pre + F.linear(anchor_row, self._factor_input_anchor)
+        pre = pre + F.linear(hidden_states * anchor_row, self._factor_input_cross)
         factor_hidden = F.silu(pre)
         edges = F.linear(factor_hidden, self._fused_edge_weight, self._fused_edge_bias)
         out_vec, in_vec = F.normalize(

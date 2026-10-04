@@ -13,6 +13,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
+from vllm.model_executor.utils import register_constant_buffer
 from vllm.transformers_utils.config import (
     try_get_dense_modules,
 )
@@ -61,7 +62,14 @@ def _load_st_projector(model_config: "ModelConfig") -> nn.Module | None:
             layers.append(linear)
             if act_name := layer_config.get("activation_function"):
                 layers.append(get_act_fn(act_name))
-        return nn.Sequential(*layers).to(dtype=model_config.head_dtype)
+        projector = nn.Sequential(*layers).to(dtype=model_config.head_dtype)
+        # Loaded from the ST Dense folders, not the checkpoint: keep the weights
+        # registered but out of strict checkpoint loading.
+        for linear in projector:
+            for name, param in list(linear.named_parameters(recurse=False)):
+                delattr(linear, name)
+                register_constant_buffer(linear, name, param.data)
+        return projector
     except Exception:
         logger.exception("ST projector loading failed")
 

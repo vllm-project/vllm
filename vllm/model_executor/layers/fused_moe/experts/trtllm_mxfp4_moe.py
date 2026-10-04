@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kMxfp8Dynamic,
 )
+from vllm.model_executor.utils import held_tensors
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -116,6 +117,9 @@ class TrtLlmMxfp4ExpertsBase:
                 device=device,
             )
             self.gemm1_clamp_limit = None
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(self, "gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit")
 
     @staticmethod
     def _supports_current_device() -> bool:

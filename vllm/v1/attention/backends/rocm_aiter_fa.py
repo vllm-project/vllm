@@ -920,6 +920,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 "cross-attention."
             )
 
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        if self.alibi_slopes is None:
+            return {}
+        return {"alibi_slopes": self.alibi_slopes}
+
     def _get_kv_cache_descales(
         self,
         layer: AttentionLayer,

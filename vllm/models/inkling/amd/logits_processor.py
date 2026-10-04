@@ -24,6 +24,7 @@ import torch
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.utils import register_constant_buffer
 
 
 class InklingLogitsProcessor(LogitsProcessor):
@@ -57,7 +58,7 @@ class InklingLogitsProcessor(LogitsProcessor):
             soft_cap=soft_cap,
         )
         self.logits_mup_width_multiplier = logits_mup_width_multiplier
-        self._logits_zero: torch.Tensor | None = None
+        register_constant_buffer(self, "_logits_zero", torch.zeros(1))
 
     def forward(
         self,
@@ -120,8 +121,6 @@ class InklingLogitsProcessor(LogitsProcessor):
         assert self.soft_cap is None
         assert self.scale == 1.0
         w = lm_head.weight
-        if self._logits_zero is None:
-            self._logits_zero = w.new_zeros(1)
         logits = torch.addmm(
             self._logits_zero,
             hidden_states,

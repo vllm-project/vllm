@@ -29,6 +29,7 @@ from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
     linear_attention_decode,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.utils import register_constant_buffer
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     RMSNormGated,
     layernorm_fn,
@@ -476,14 +477,19 @@ class BailingMoELinearAttention(LinearAttention):
         # Build slope tensor for linear attention decay
         slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(self.num_heads)
         if self.num_hidden_layers <= 1:
-            self.slope_rate = slope_rate * (1 + 1e-5)
+            slope_rate = slope_rate * (1 + 1e-5)
         else:
-            self.slope_rate = slope_rate * (
+            slope_rate = slope_rate * (
                 1 - self.layer_idx / (self.num_hidden_layers - 1) + 1e-5
             )
-        self.tp_slope = self.slope_rate[
-            self.tp_rank * self.tp_heads : (self.tp_rank + 1) * self.tp_heads
-        ].contiguous()
+        register_constant_buffer(self, "slope_rate", slope_rate)
+        register_constant_buffer(
+            self,
+            "tp_slope",
+            slope_rate[
+                self.tp_rank * self.tp_heads : (self.tp_rank + 1) * self.tp_heads
+            ].contiguous(),
+        )
 
         # Register for compilation
         compilation_config = get_current_vllm_config().compilation_config

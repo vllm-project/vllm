@@ -452,6 +452,9 @@ def convert_to_unquantized_kernel_format(
             num_prefetch_slots=MOONEP_DEFAULT_NUM_PREFETCH_SLOTS,
         )
         layer._moonep_weight_layout = layout
+        layer.register_buffer(
+            "_moonep_full_up_weight", layout.full_up_weight, persistent=False
+        )
         return layout.full_gate_weight, layout.full_down_weight
 
     if unquantized_backend == UnquantizedMoeBackend.AITER:

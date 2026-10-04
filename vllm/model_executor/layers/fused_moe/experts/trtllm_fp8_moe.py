@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.model_executor.utils import held_tensors
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -156,6 +157,9 @@ class TrtLlmFp8ExpertsBase:
             )
         else:
             self.gemm1_clamp_limit = None
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(self, "gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit")
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -374,6 +378,11 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 if moe_config.is_act_and_mul
                 else torch.ones_like(self._g1_alphas) / self.quant_config.a2_scale
             )
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return super().persistent_tensors() | held_tensors(
+            self, "_g1_alphas", "_g2_alphas", "_g1_scale_c"
+        )
 
     @staticmethod
     def _supports_quant_scheme(

@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm.model_executor.parameter import ModelWeightParameter, PackedvLLMParameter
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, set_derived_buffer
 
 
 @pytest.fixture
@@ -281,3 +281,178 @@ def test_replace_parameter_attributes_from_the_layers_own_parameter(
     if param_kind != "plain":
         for public_name in ("output_dim", "input_dim", "packed_dim", "packed_factor"):
             assert getattr(layer.weight, public_name, None) is None
+
+
+def test_set_derived_buffer_requires_registration() -> None:
+    module = torch.nn.Module()
+    with pytest.raises(KeyError):
+        set_derived_buffer(module, "derived", torch.zeros(2))
+
+
+def test_set_derived_buffer_fills_placeholder_then_copies_in_place() -> None:
+    """A derived tensor lands in named_buffers() and keeps its address."""
+    module = torch.nn.Module()
+    module.register_buffer("derived", None, persistent=False)
+
+    set_derived_buffer(module, "derived", torch.ones(2))
+    first = module.derived
+    assert dict(module.named_buffers())["derived"] is first
+    assert "derived" not in module.state_dict()
+
+    set_derived_buffer(module, "derived", torch.full((2,), 3.0))
+    assert module.derived is first
+    assert torch.equal(first, torch.full((2,), 3.0))
+
+    with pytest.raises(ValueError):
+        set_derived_buffer(module, "derived", torch.ones(3))
+    set_derived_buffer(module, "derived", None)
+    assert module.derived is None
+
+
+def test_set_derived_buffer_survives_layerwise_reload() -> None:
+    """None-placeholder buffers must survive restore_layer_on_meta so
+    that set_derived_buffer can fill them after a reload."""
+    from vllm.model_executor.model_loader.reload.meta import (
+        capture_layer_to_meta,
+        restore_layer_on_meta,
+    )
+    from vllm.model_executor.model_loader.reload.types import (
+        LayerReloadingInfo,
+    )
+
+    module = torch.nn.Module()
+    module.register_buffer("derived", None, persistent=False)
+    module.weight = torch.nn.Parameter(torch.ones(4))
+
+    # Capture metadata while the derived buffer is still None
+    info = LayerReloadingInfo(
+        restore_metadata=capture_layer_to_meta(module),
+        restore_device=torch.device("cpu"),
+    )
+
+    # Simulate cold start filling the buffer
+    set_derived_buffer(module, "derived", torch.full((3,), 7.0))
+    assert module.derived is not None
+
+    # Simulate reload: restore_layer_on_meta wipes and re-registers
+    restore_layer_on_meta(module, info)
+
+    # The None placeholder must be back as a registered buffer
+    assert "derived" in module._buffers
+    assert module._buffers["derived"] is None
+
+    # set_derived_buffer must succeed on the restored placeholder
+    set_derived_buffer(module, "derived", torch.full((3,), 9.0))
+    assert torch.equal(module.derived, torch.full((3,), 9.0))
+    assert "derived" in dict(module.named_buffers())
+
+
+def test_derived_state_stays_registered_across_layerwise_reload() -> None:
+    """After a layerwise reload, every registered derived tensor is the one the
+    processed layer uses: set_derived_buffer refills its storage in place, and
+    buffers rebound or held by non-module objects follow the new tensors."""
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+    from vllm.model_executor.model_loader.reload import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+    from vllm.model_executor.utils import (
+        register_constant_buffer,
+        register_held_tensors,
+    )
+
+    class Holder:
+        def __init__(self, tensor: torch.Tensor) -> None:
+            self.tensor = tensor
+
+        def persistent_tensors(self) -> dict[str, torch.Tensor]:
+            return {"tensor": self.tensor}
+
+    class Method(QuantizeMethodBase):
+        def create_weights(self, *args, **kwargs) -> None:
+            pass
+
+        def apply(self, *args, **kwargs) -> torch.Tensor:
+            raise NotImplementedError
+
+        def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+            set_derived_buffer(layer, "derived", layer.weight * 2)
+            layer.register_buffer("rebound", layer.weight * 3, persistent=False)
+            self.holder = Holder(layer.weight * 4)
+
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
+    layer.register_buffer("derived", None, persistent=False)
+    register_constant_buffer(layer, "constant", torch.ones(3))
+    layer.quant_method = Method()
+    model = torch.nn.Sequential(layer)
+    record_metadata_for_reloading(model)
+
+    layer.weight.data.fill_(1.0)
+    layer.quant_method.process_weights_after_loading(layer)
+    register_held_tensors(model)
+    derived = layer.derived
+
+    initialize_layerwise_reload(model)
+    weight = layer.weight
+    weight.weight_loader(weight, torch.full((4,), 5.0))
+    # The constant does not hold back processing until finalize.
+    assert torch.equal(layer.derived, torch.full((4,), 10.0))
+    finalize_layerwise_reload(model, None)
+
+    assert layer.derived is derived
+    assert torch.equal(layer.derived, torch.full((4,), 10.0))
+    assert torch.equal(layer.rebound, torch.full((4,), 15.0))
+    held = layer.quant_method.holder.tensor
+    assert torch.equal(held, torch.full((4,), 20.0))
+    buffers = dict(model.named_buffers())
+    assert buffers["0.rebound"] is layer.rebound
+    assert any(b is held for b in buffers.values())
+
+
+def test_register_held_tensors_views_wrappers_and_rerun() -> None:
+    """Held tensors are deduplicated per view (not per storage), wrapper
+    subclasses are resolved to their inner tensors, and a re-run follows the
+    tensors the holders keep now."""
+    from torch.testing._internal.two_tensor import TwoTensor
+
+    from vllm.model_executor.utils import register_held_tensors
+
+    class Holder:
+        def __init__(self, **tensors: torch.Tensor) -> None:
+            self.tensors = tensors
+
+        def persistent_tensors(self) -> dict[str, torch.Tensor]:
+            return self.tensors
+
+    storage = torch.arange(8.0)
+    module = torch.nn.Module()
+    module.register_parameter(
+        "wrapped",
+        torch.nn.Parameter(
+            TwoTensor(torch.ones(2), torch.zeros(2)), requires_grad=False
+        ),
+    )
+    module.holder = Holder(lo=storage[:4], hi=storage[4:])
+    register_held_tensors(module)
+    assert set(module._buffers) == {"_held_holder_lo", "_held_holder_hi"}
+
+    module.holder.tensors["lo"] = torch.full((4,), 2.0)
+    register_held_tensors(module)
+    assert module._held_holder_lo is module.holder.tensors["lo"]
+    assert set(module._buffers) == {"_held_holder_lo", "_held_holder_hi"}
+
+    # Same offset/shape/stride but another dtype covers other bytes.
+    raw = torch.arange(16, dtype=torch.uint8)
+    module.holder.tensors = {"bytes": raw[:4], "words": raw.view(torch.int32)}
+    register_held_tensors(module)
+    assert set(module._buffers) == {"_held_holder_bytes", "_held_holder_words"}
+
+    # A holder still on meta (model built on meta) keeps the imported buffer.
+    imported = module._held_holder_words
+    module.holder.tensors = {"words": torch.empty(4, dtype=torch.int32, device="meta")}
+    register_held_tensors(module)
+    assert module._held_holder_words is imported

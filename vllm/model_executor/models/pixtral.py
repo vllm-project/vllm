@@ -42,6 +42,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import WeightsMapper
+from vllm.model_executor.utils import register_constant_buffer
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -974,7 +975,17 @@ class VisionTransformer(nn.Module):
 
         head_dim = self.args.hidden_size // self.args.num_attention_heads
         assert head_dim % 2 == 0, "ROPE requires even head_dim"
-        self._freqs_cis: torch.Tensor | None = None
+        device = torch.get_default_device()
+        # Computed on CPU, as before, so the frequencies are bit-identical.
+        with torch.device("cpu"):
+            freqs_cis = precompute_freqs_cis_2d(
+                dim=head_dim,
+                height=self.max_patches_per_side,
+                width=self.max_patches_per_side,
+                theta=self.args.rope_theta,
+            )
+        self.freqs_cis: torch.Tensor
+        register_constant_buffer(self, "freqs_cis", freqs_cis.to(device))
 
     @property
     def max_patches_per_side(self) -> int:
@@ -987,21 +998,6 @@ class VisionTransformer(nn.Module):
     @property
     def dtype(self) -> torch.dtype:
         return next(self.parameters()).dtype
-
-    @property
-    def freqs_cis(self) -> torch.Tensor:
-        if self._freqs_cis is None:
-            self._freqs_cis = precompute_freqs_cis_2d(
-                dim=self.args.hidden_size // self.args.num_attention_heads,
-                height=self.max_patches_per_side,
-                width=self.max_patches_per_side,
-                theta=self.args.rope_theta,
-            )
-
-        if self._freqs_cis.device != self.device:
-            self._freqs_cis = self._freqs_cis.to(device=self.device)
-
-        return self._freqs_cis
 
     def forward(
         self,

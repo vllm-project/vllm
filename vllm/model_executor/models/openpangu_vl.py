@@ -66,6 +66,7 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from vllm.model_executor.utils import register_constant_buffer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -271,11 +272,10 @@ class OpenPanguVisionBlock(nn.Module):
 class OpenPanguVisionRotaryEmbedding(nn.Module):
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
-        self.inv_freq = 1.0 / (
-            theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim)
-        )
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        register_constant_buffer(self, "inv_freq", inv_freq)
         self._seq_len_cached = 0
-        self._freqs_cached = None
+        self.register_buffer("_freqs_cached", None, persistent=False)
 
     def update_freqs_cache(self, seqlen: int) -> None:
         if seqlen > self._seq_len_cached:

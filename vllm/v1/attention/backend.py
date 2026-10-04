@@ -898,6 +898,11 @@ class AttentionImplBase(ABC, Generic[T]):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
 
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        """Tensors this impl keeps across steps (never scratch). They are
+        registered as buffers of the owning attention layer after loading."""
+        return {}
+
     def get_impl_variants(self) -> tuple["AttentionImplBase", ...]:
         return (self,)
 

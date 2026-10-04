@@ -52,7 +52,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
     RowvLLMParameter,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import held_tensors, set_weight_attrs
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -611,6 +611,9 @@ class HummingLinearMethod(LinearMethodBase):
 
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(self, "locks")
 
     def apply(
         self,

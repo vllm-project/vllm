@@ -25,7 +25,7 @@ from vllm.model_executor.layers.fused_moe.oracle.w4a8 import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import held_tensors, replace_parameter, set_weight_attrs
 
 
 class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
@@ -194,6 +194,9 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 group_size=self.group_size,
                 routing_tables=layer._expert_routing_tables(),
             )
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(self, "b_strides1", "b_strides2")
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         return make_w4a8_moe_quant_config(

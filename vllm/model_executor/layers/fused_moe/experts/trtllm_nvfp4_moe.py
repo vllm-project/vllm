@@ -32,7 +32,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4DynamicToken,
     kNvfp4Static,
 )
-from vllm.model_executor.utils import is_weights_pre_processed
+from vllm.model_executor.utils import held_tensors, is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -199,6 +199,17 @@ class TrtLlmNvFp4ExpertsBase:
                 torch.nn.Parameter(self.gemm1_alpha, requires_grad=False),
             )
             self.gemm1_alpha = layer.gemm1_alpha
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        return held_tensors(
+            self,
+            "g1_scale_c",
+            "gemm1_alpha",
+            "gemm1_beta",
+            "gemm1_clamp_limit",
+            "_gemm1_clamp_limit_unfolded",
+            "_gemm1_beta_unfolded",
+        )
 
     @staticmethod
     def _supports_current_device() -> bool:

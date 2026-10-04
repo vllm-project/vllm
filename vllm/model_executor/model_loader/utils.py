@@ -35,7 +35,10 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
 )
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
 from vllm.model_executor.models.interfaces import SupportsQuant
-from vllm.model_executor.utils import is_weights_pre_processed
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    register_held_tensors,
+)
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import release_device_memory_under_pressure
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -140,6 +143,9 @@ def process_weights_after_loading(
     methods skip tensor transforms and must declare
     ``supports_pre_processed_weights``, otherwise this raises ``RuntimeError``.
     """
+    # Circular import: fused_moe imports model utils, which import the loader.
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+
     # Reclaim memory when an explicit lm_head has been
     # loaded, but it is identical to the input embeddings.
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
@@ -199,10 +205,15 @@ def process_weights_after_loading(
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
                 module.process_weights_after_loading(model_config.dtype)
+        elif isinstance(module, MoERunner):
+            with device_loading_context(module, target_device):
+                module.process_weights_after_loading()
 
     # Model-level post-load hook, after the per-layer quant finalize.
     if hasattr(model, "process_weights_after_loading"):
         model.process_weights_after_loading()
+
+    register_held_tensors(model)
 
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`

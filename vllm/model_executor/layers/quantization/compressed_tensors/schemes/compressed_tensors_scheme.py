@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 
 import torch
 
+from vllm.model_executor.utils import held_tensors
+
 __all__ = ["CompressedTensorsScheme"]
 
 
@@ -46,3 +48,7 @@ class CompressedTensorsScheme(ABC):
         needs to occur.
         """
         raise NotImplementedError()
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        """Device tensors held by this scheme's kernels."""
+        return held_tensors(self)

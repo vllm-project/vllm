@@ -85,7 +85,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .attention import Glm5NextMLAAttention
+from .attention import Glm5NextMLAAttention, Indexer
 from .kda import Glm5NextLinearAttention
 from .multimodal import (
     Glm5NextMultiModalProcessor,
@@ -984,6 +984,12 @@ class Glm5NextModel(nn.Module):
         return loaded_params
 
 
+def finalize_derived_weights(model: nn.Module) -> None:
+    for module in model.modules():
+        if isinstance(module, (Indexer, Glm5NextLinearAttention)):
+            module.finalize_weights()
+
+
 class Glm5NextForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
 ):
@@ -1073,6 +1079,9 @@ class Glm5NextForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def process_weights_after_loading(self) -> None:
+        finalize_derived_weights(self)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -1204,6 +1213,9 @@ class Glm5NextForConditionalGeneration(
             moe.n_physical_experts = num_physical_experts
             moe.n_redundant_experts = self.num_redundant_experts
             moe.experts.update_expert_map()
+
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()
 
     def get_encoder_cudagraph_config(self):
         # This vision tower does not produce the absolute position embedding

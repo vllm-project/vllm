@@ -333,6 +333,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         self.attn_type = attn_type
 
         self.sinks = sinks
+        self._sinks_source = sinks
         if self.sinks is not None:
             assert self.sinks.shape[0] == num_heads, (
                 "Sinks must have the same number of heads as the number of "
@@ -344,6 +345,28 @@ class CPUAttentionBackendImpl(AttentionImpl):
             attn_type,
             vllm_config.model_config.dtype,
         )
+
+    # The CPU kernel executes attention sinks natively in bf16. Other dtypes
+    # are cast to fp32 so they are executed in full float precision.
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        source_sinks = self._sinks_source
+        if source_sinks is None or source_sinks.dtype in (
+            torch.bfloat16,
+            torch.float32,
+        ):
+            return
+        if self.sinks is None or self.sinks.dtype != torch.float32:
+            self.sinks = source_sinks.to(torch.float32)
+        else:
+            self.sinks.copy_(source_sinks)
+
+    def persistent_tensors(self) -> dict[str, torch.Tensor]:
+        tensors = {}
+        if self.alibi_slopes is not None:
+            tensors["alibi_slopes"] = self.alibi_slopes
+        if self.sinks is not None and self.sinks is not self._sinks_source:
+            tensors["sinks"] = self.sinks
+        return tensors
 
     def forward(
         self,
@@ -432,15 +455,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 kv_cache_dtype=self.kv_cache_dtype,
             )
 
-        # The CPU kernel executes attention sinks natively in bf16. If the
-        # sinks tensor is anything other than bf16, cast it to fp32 so it is
-        # executed in full float precision (done lazily here, after weights
-        # are loaded, rather than at __init__ time).
-        if self.sinks is not None and self.sinks.dtype not in [
-            torch.bfloat16,
-            torch.float32,
-        ]:
-            self.sinks = self.sinks.to(torch.float32)
         ops.cpu_attention_with_kv_cache(
             query=query[:num_actual_tokens],
             key_cache=key_cache,

@@ -245,6 +245,16 @@ def create_composite_attention_backend(
             for impl in self.get_impl_variants():
                 impl.process_weights_after_loading(act_dtype)
 
+        def persistent_tensors(self) -> dict[str, torch.Tensor]:
+            return {
+                f"{variant}_{name}": tensor
+                for variant, impl in (
+                    ("general", self.general_impl),
+                    ("causal", self.causal_impl),
+                )
+                for name, tensor in impl.persistent_tensors().items()
+            }
+
         def fused_output_quant_supported(self, quant_key):
             return all(
                 impl.fused_output_quant_supported(quant_key)

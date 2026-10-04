@@ -18,6 +18,7 @@ from vllm.model_executor.layers.lightning_attn import (
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.mamba.linear.base import LinearAttention
 from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
+from vllm.model_executor.utils import register_constant_buffer
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
@@ -189,14 +190,19 @@ class MiniMaxText01LinearAttention(LinearAttention):
 
         slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(self.num_heads)
         if self.num_hidden_layers <= 1:
-            self.slope_rate = slope_rate * (1 + 1e-5)
+            slope_rate = slope_rate * (1 + 1e-5)
         else:
-            self.slope_rate = slope_rate * (
+            slope_rate = slope_rate * (
                 1 - self.layer_idx / (self.num_hidden_layers - 1) + 1e-5
             )
-        self.tp_slope = self.slope_rate[
-            self.tp_rank * self.tp_heads : (self.tp_rank + 1) * self.tp_heads
-        ].contiguous()
+        register_constant_buffer(self, "slope_rate", slope_rate)
+        register_constant_buffer(
+            self,
+            "tp_slope",
+            slope_rate[
+                self.tp_rank * self.tp_heads : (self.tp_rank + 1) * self.tp_heads
+            ].contiguous(),
+        )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:

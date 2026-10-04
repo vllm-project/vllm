@@ -50,15 +50,19 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
         """
         batch = layer.bmm_batch_size
         k_blocks, n_blocks = scale_kn.shape
-        layer.bmm_scale = (
+        layer.register_buffer(
+            "bmm_scale",
             scale_kn.reshape(k_blocks, batch, n_blocks // batch)
             .permute(1, 0, 2)
-            .contiguous()
+            .contiguous(),
+            persistent=False,
         )
         w = layer.weight
         n_total, k = w.shape
-        layer.bmm_weight = (
-            w.reshape(batch, n_total // batch, k).permute(0, 2, 1).contiguous()
+        layer.register_buffer(
+            "bmm_weight",
+            w.reshape(batch, n_total // batch, k).permute(0, 2, 1).contiguous(),
+            persistent=False,
         )
 
     def apply_weights(

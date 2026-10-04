@@ -46,6 +46,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExpertsOrder,
 )
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.utils import set_derived_buffer
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
@@ -278,7 +279,7 @@ class MoERunner(MoERunnerInterface):
         # apply routing softmax and shared expert activation (sigmoid)
         # in a single launch.
         self._fse_fuse_gate = gate is not None and shared_expert_gate is not None
-        self._combined_gate_weight: torch.Tensor | None = None
+        self.register_buffer("_combined_gate_weight", None, persistent=False)
 
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
@@ -338,18 +339,14 @@ class MoERunner(MoERunnerInterface):
         if self._shared_experts is not None:
             self._shared_experts._set_moe_config(new_moe_config)
 
-    def _maybe_fuse_gate_weights(self):
-        """Fuse router and shared expert gate weights on first call.
-
-        Cannot be done at __init__ because gate weights are loaded after
-        module construction (via weight_loader). Called once from
-        _forward_impl before the first forward pass.
-        """
-        if self._combined_gate_weight is None:
+    def process_weights_after_loading(self) -> None:
+        """Fuse the router and shared expert gate weights once they are loaded."""
+        if self._fse_fuse_gate:
             assert self.gate is not None and self.shared_expert_gate is not None
-            self._combined_gate_weight = torch.cat(
-                [self.gate.weight, self.shared_expert_gate.weight],
-                dim=0,
+            set_derived_buffer(
+                self,
+                "_combined_gate_weight",
+                torch.cat([self.gate.weight, self.shared_expert_gate.weight], dim=0),
             )
 
     @property
@@ -902,7 +899,6 @@ class MoERunner(MoERunnerInterface):
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
             if self._fse_fuse_gate:
-                self._maybe_fuse_gate_weights()
                 router_logits = dispatch_unquantized_gemm()(
                     self, hidden_states, self._combined_gate_weight, None
                 )

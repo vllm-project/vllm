@@ -421,10 +421,11 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
             )
         ),
     ]
-    model = SimpleNamespace(
-        hidden_norm=SimpleNamespace(weight=nn.Parameter(torch.ones(2))),
-        _rms_norm_eps=1e-6,
-    )
+    model = nn.Module()
+    model.hidden_norm = SimpleNamespace(weight=nn.Parameter(torch.ones(2)))
+    model._rms_norm_eps = 1e-6
+    for name in ("_fused_kv_weight", "_fused_kv_bias", "_k_norm_weights"):
+        model.register_buffer(name, None, persistent=False)
     layers_attn = [
         SimpleNamespace(
             qkv_proj=projection,

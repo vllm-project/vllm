@@ -49,6 +49,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.model_executor.utils import set_derived_buffer
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -213,7 +214,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
-        self.hc_attn_fn_broadcast: torch.Tensor | None = None
+        self.hc_attn_fn_broadcast: torch.Tensor | None
+        self.register_buffer("hc_attn_fn_broadcast", None, persistent=False)
         self.hc_ffn_fn = nn.Parameter(
             torch.empty(
                 (mix_hc, hc_dim),
@@ -879,10 +881,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 .view(-1, layer.hc_mult, layer.hidden_size)
                 .sum(dim=1)
             )
-            if layer.hc_attn_fn_broadcast is None:
-                layer.hc_attn_fn_broadcast = broadcast
-            else:
-                layer.hc_attn_fn_broadcast.copy_(broadcast)
+            set_derived_buffer(layer, "hc_attn_fn_broadcast", broadcast)
 
 
 def _linear_scale_param_name(vllm_config: VllmConfig, expert_dtype: str) -> str:

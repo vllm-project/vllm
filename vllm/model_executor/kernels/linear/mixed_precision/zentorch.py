@@ -157,13 +157,19 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         )
         # The WOQ repack packs 8 int4 per int32, which on little-endian is the
         # same byte stream as s4 [N, K/2]; the kernel takes either view.
-        layer._zentorch_da8w4_packed = (
+        layer.register_buffer(
+            "_zentorch_da8w4_packed",
             torch.ops.zentorch.zentorch_woq_repack_weight.default(
                 weight_unpacked.to(torch.int8).contiguous()
-            ).view(torch.int8)
+            ).view(torch.int8),
+            persistent=False,
         )
         # CT stores scales as [N, G]; DA8W4 wants per-group {G, N}.
-        layer._zentorch_da8w4_scale = weight_scale.t().to(torch.bfloat16).contiguous()
+        layer.register_buffer(
+            "_zentorch_da8w4_scale",
+            weight_scale.t().to(torch.bfloat16).contiguous(),
+            persistent=False,
+        )
 
         for param_name in (self.w_q_name, self.w_s_name):
             param = getattr(layer, param_name, None)
@@ -251,9 +257,11 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
                 zp = (zp.to(torch.int32) + 8).clamp(0, 15)
             zp_tc = zp.to(torch.int8).t().contiguous()
 
-        layer._zentorch_woq_packed = repacked.t()
-        layer._zentorch_woq_scale = weight_scale.t().contiguous()
-        layer._zentorch_woq_zero_point = zp_tc
+        layer.register_buffer("_zentorch_woq_packed", repacked.t(), persistent=False)
+        layer.register_buffer(
+            "_zentorch_woq_scale", weight_scale.t().contiguous(), persistent=False
+        )
+        layer.register_buffer("_zentorch_woq_zero_point", zp_tc, persistent=False)
 
         for param_name in (self.w_q_name, self.w_s_name, self.w_zp_name):
             if param_name is None:

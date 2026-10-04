@@ -796,7 +796,8 @@ class AbsolutePositionalEncoding(nn.Module):
         self.d_model = d_model
         self.xscale = math.sqrt(self.d_model)
         self.dropout = torch.nn.Dropout(p=dropout_rate)
-        self.pe: torch.Tensor | None = None
+        self.pe: torch.Tensor | None
+        self.register_buffer("pe", None, persistent=False)
         self.extend_pe(torch.tensor(0.0).expand(1, max_len))
         self._register_load_state_dict_pre_hook(_pre_hook)
 

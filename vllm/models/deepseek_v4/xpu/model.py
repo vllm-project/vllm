@@ -58,7 +58,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import set_derived_buffer, set_weight_attrs
 from vllm.models.deepseek_v4.xpu.xpu_sparse import DeepseekV4XPUAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -370,8 +370,13 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         set_weight_attrs(self.w2_weight_scale, weight_attrs)
         self.w2_weight_scale.quant_method = "block"
 
-        self._transformed_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None
-        self._transformed_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None
+        for name in (
+            "_mega_l1_packed",
+            "_mega_l1_scale",
+            "_mega_l2_packed",
+            "_mega_l2_scale",
+        ):
+            self.register_buffer(name, None, persistent=False)
 
         # Register in the static forward context so the custom-op wrapper
         # can look up this module by name from within a torch.compile graph.
@@ -379,6 +384,22 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    @property
+    def _transformed_l1_weights(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if self._mega_l1_packed is None:
+            return None
+        return (self._mega_l1_packed, self._mega_l1_scale)
+
+    @property
+    def _transformed_l2_weights(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if self._mega_l2_packed is None:
+            return None
+        return (self._mega_l2_packed, self._mega_l2_scale)
 
     def _map_global_expert_id(self, expert_id: int) -> int:
         if expert_id < self.experts_start_idx or expert_id >= self.experts_end_idx:
@@ -428,6 +449,10 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
     def finalize_weights(self) -> None:
         if self._transformed_l1_weights is not None:
+            self.w13_weight = None
+            self.w13_weight_scale = None
+            self.w2_weight = None
+            self.w2_weight_scale = None
             return
 
         self._check_runtime_supported()
@@ -447,18 +472,21 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             (1, 32),
             self.num_local_experts,
         )
-        self._transformed_l1_weights, self._transformed_l2_weights = (
-            deep_gemm.transform_weights_for_mega_moe(
-                (self.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
-                (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
-            )
+        l1_weights, l2_weights = deep_gemm.transform_weights_for_mega_moe(
+            (self.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
+            (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
         )
-        # Drop the original loader-side parameters: the MegaMoE kernels only
-        # consume the transformed views above. transform_weights_for_mega_moe
-        # allocates a fresh tensor for the L1 weight (see _interleave_l1_weights)
-        # and fresh SF tensors for L1/L2; the L2 weight is the only tensor that
-        # aliases the original storage, and _transformed_l2_weights still holds
-        # it, so the storage stays live after we drop the Parameter.
+        set_derived_buffer(self, "_mega_l1_packed", l1_weights[0])
+        set_derived_buffer(self, "_mega_l1_scale", l1_weights[1])
+        set_derived_buffer(self, "_mega_l2_packed", l2_weights[0])
+        set_derived_buffer(self, "_mega_l2_scale", l2_weights[1])
+        # Drop the original loader-side parameters: the MegaMoE kernels
+        # only consume the buffers above (_transformed_l{1,2}_weights
+        # properties read them). transform_weights_for_mega_moe allocates
+        # a fresh tensor for the L1 weight (see _interleave_l1_weights)
+        # and fresh SF tensors for L1/L2; the L2 weight aliases the
+        # original storage, and _mega_l2_packed holds it, so the storage
+        # stays live after we drop the Parameter.
         self.w13_weight = None
         self.w13_weight_scale = None
         self.w2_weight = None

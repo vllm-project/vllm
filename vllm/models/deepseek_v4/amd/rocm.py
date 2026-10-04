@@ -15,6 +15,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.utils import set_derived_buffer
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
@@ -672,12 +673,18 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         super().__init__(*args, **kwargs)
         self._has_kv_transfer = vllm_config.kv_transfer_config is not None
         # Block scale for the preshuffled weight; None = not preshuffled.
-        self._wqa_wkv_scale: torch.Tensor | None = None
-        self._wo_b_scale: torch.Tensor | None = None
-        self._wo_a_fp8_weight: torch.Tensor | None = None
-        self._wo_a_e8m0_scale: torch.Tensor | None = None
-        self._wo_a_cos_cache: torch.Tensor | None = None
-        self._wo_a_sin_cache: torch.Tensor | None = None
+        self._wqa_wkv_scale: torch.Tensor | None
+        self.register_buffer("_wqa_wkv_scale", None, persistent=False)
+        self._wo_b_scale: torch.Tensor | None
+        self.register_buffer("_wo_b_scale", None, persistent=False)
+        self._wo_a_fp8_weight: torch.Tensor | None
+        self.register_buffer("_wo_a_fp8_weight", None, persistent=False)
+        self._wo_a_e8m0_scale: torch.Tensor | None
+        self.register_buffer("_wo_a_e8m0_scale", None, persistent=False)
+        self._wo_a_cos_cache: torch.Tensor | None
+        self.register_buffer("_wo_a_cos_cache", None, persistent=False)
+        self._wo_a_sin_cache: torch.Tensor | None
+        self.register_buffer("_wo_a_sin_cache", None, persistent=False)
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
@@ -924,8 +931,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             return ws
 
-        self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
-        self._wo_b_scale = _prep(self.wo_b)
+        set_derived_buffer(self, "_wqa_wkv_scale", _prep(self.fused_wqa_wkv))
+        set_derived_buffer(self, "_wo_b_scale", _prep(self.wo_b))
         if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
             self._prepare_fp8_wo_a()
 
@@ -1003,16 +1010,22 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             return
 
-        self._wo_a_fp8_weight = weight.view(groups, out_per_group, in_features)
-        self._wo_a_e8m0_scale = e8m0_scale.view(
-            groups, out_per_group // 128, in_features // 128
+        set_derived_buffer(
+            self,
+            "_wo_a_fp8_weight",
+            weight.view(groups, out_per_group, in_features),
+        )
+        set_derived_buffer(
+            self,
+            "_wo_a_e8m0_scale",
+            e8m0_scale.view(groups, out_per_group // 128, in_features // 128),
         )
         cache = getattr(self.rotary_emb, "cos_sin_cache_bf16", None)
         if cache is None:
             cache = self.rotary_emb.cos_sin_cache.to(dtype=torch.bfloat16)
         cos_cache, sin_cache = cache.chunk(2, dim=-1)
-        self._wo_a_cos_cache = cos_cache.contiguous()
-        self._wo_a_sin_cache = sin_cache.contiguous()
+        set_derived_buffer(self, "_wo_a_cos_cache", cos_cache.contiguous())
+        set_derived_buffer(self, "_wo_a_sin_cache", sin_cache.contiguous())
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         if self._fused_compressor_weight is not None:
@@ -1050,7 +1063,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             main_weight.set_(fused_weight[:main_size])
             indexer_weight.set_(fused_weight[main_size:])
 
-        self._fused_compressor_weight = fused_weight
+        set_derived_buffer(self, "_fused_compressor_weight", fused_weight)
         self._fused_compressor_split_sizes = (main_size, indexer_size)
         return True
 
