@@ -650,6 +650,7 @@ def _cadenced_dp_engine_core(
     core = object.__new__(DPEngineCoreProc)
     core.dp_group = object()
     core.dp_sync_interval = dp_sync_interval
+    core.prefill_release_min_dp_ranks = 0
     core.step_counter = 0
     core.pending_pause = False
     core.ignore_start_dp_wave = False
@@ -740,6 +741,51 @@ def test_paused_dp_rank_ignores_start_wave(paused):
     core._handle_client_request(EngineCoreRequestType.START_DP_WAVE, (3, 1))
 
     assert core.engines_running != paused
+
+
+def test_dp_prefill_gate_counts_ranks_every_step(monkeypatch):
+    """With the DP-global prefill gate on, the ranks with prefill work are
+    counted at the end of every step, not only on dp_sync_interval steps."""
+    core, synced = _cadenced_dp_engine_core(
+        monkeypatch, [(True, False)] * 2, dp_sync_interval=16
+    )
+    core.prefill_release_min_dp_ranks = 2
+    core.scheduler = MagicMock()
+    core.scheduler.has_prefill_work.return_value = True
+    counted: list[int] = []
+
+    def scripted_count(dp_group, flag):
+        assert flag
+        counted.append(core.step_counter)
+        return core.step_counter % 3
+
+    monkeypatch.setattr(ParallelConfig, "count_dp_ranks", staticmethod(scripted_count))
+    for step in range(1, 21):
+        assert DPEngineCoreProc._has_global_unfinished_reqs(core, True)
+        assert core.num_dp_ranks_with_prefill_work == step % 3
+    assert counted == list(range(1, 21))
+    assert synced == [1, 16]
+
+
+@pytest.mark.parametrize(
+    ("min_ranks", "ranks_with_work", "step", "throttle"),
+    [
+        (0, 0, 8, False),  # cadence step
+        (0, 8, 9, True),  # stock: throttle every off-cadence step
+        (4, 0, 8, False),  # cadence step releases whatever the count
+        (4, 3, 9, True),  # too few ranks with prefill work: defer everywhere
+        (4, 4, 9, False),  # enough ranks: release everywhere
+    ],
+)
+def test_dp_prefill_gate_throttle_decision(
+    min_ranks: int, ranks_with_work: int, step: int, throttle: bool
+):
+    core = object.__new__(DPEngineCoreProc)
+    core.prefill_schedule_interval = 4
+    core.prefill_release_min_dp_ranks = min_ranks
+    core.num_dp_ranks_with_prefill_work = ranks_with_work
+    core.step_counter = step
+    assert DPEngineCoreProc._should_throttle_prefills(core) is throttle
 
 
 def _pausable_engine_core_proc() -> EngineCoreProc:

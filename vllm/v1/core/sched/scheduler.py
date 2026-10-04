@@ -399,6 +399,12 @@ class Scheduler(SchedulerInterface):
         # schedule() call including empty ones, so it would expire the hold
         # early; it keeps its own meaning (next_decode_eligible_step).
         self.num_executed_steps = 0
+        # With a DP-global prefill gate the engine core decides every throttled
+        # step from the number of DP ranks with prefill work, so this rank's
+        # capacity-bound flag does not release it on its own.
+        self.prefill_gate_is_dp_global = (
+            self.scheduler_config.prefill_release_min_dp_ranks > 0
+        )
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -666,9 +672,11 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.new_step_starts()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
-        # all prefill compute unless saturated.
+        # all prefill compute unless saturated (or unless the DP-global gate
+        # owns the decision).
         defer_prefills = (
-            throttle_prefills and not self.prefill_capacity_bound
+            throttle_prefills
+            and (self.prefill_gate_is_dp_global or not self.prefill_capacity_bound)
         ) and any(not r.is_prefill_chunk for r in self.running)
 
         # `long_prefill_token_threshold` exists to stop a long prefill from
@@ -2705,6 +2713,12 @@ class Scheduler(SchedulerInterface):
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting) + len(self.kv_holding_waiting)
+
+    def has_prefill_work(self) -> bool:
+        _, num_waiting = self.get_request_counts()
+        if num_waiting > len(self.deferred_waiting):
+            return True
+        return any(r.is_prefill_chunk for r in self.running)
 
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""

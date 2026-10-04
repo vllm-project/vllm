@@ -895,6 +895,13 @@ class ParallelConfig:
         return has_unfinished_global, pause_count == dp_size
 
     @staticmethod
+    def count_dp_ranks(dp_group: ProcessGroup, flag: bool) -> int:
+        """Number of DP ranks for which `flag` is true (SUM all-reduce)."""
+        tensor = torch.tensor([int(flag)], dtype=torch.int32, device="cpu")
+        torch.distributed.all_reduce(tensor, op=ReduceOp.SUM, group=dp_group)
+        return int(tensor.item())
+
+    @staticmethod
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:
         if kv_cache_memory == -1:
             kv_cache_memory = torch.iinfo(torch.int64).max

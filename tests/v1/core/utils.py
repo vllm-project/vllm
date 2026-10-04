@@ -91,6 +91,7 @@ def create_scheduler(
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
+    prefill_release_min_dp_ranks: int = 0,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -141,6 +142,7 @@ def create_scheduler(
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
+        prefill_release_min_dp_ranks=prefill_release_min_dp_ranks,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
