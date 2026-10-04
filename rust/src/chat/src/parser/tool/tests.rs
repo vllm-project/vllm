@@ -97,6 +97,24 @@ fn factory_distinguishes_qwen_tool_formats() {
 }
 
 #[test]
+fn factory_routes_mimo_models_to_qwen3_xml_format() {
+    let factory = ToolParserFactory::new();
+
+    for model in [
+        "XiaomiMiMo/MiMo-7B-RL",
+        "XiaomiMiMo/MiMo-V2-Flash",
+        "XiaomiMiMo/MiMo-V2.5-Pro",
+        "XiaomiMiMo/MiMo-V2.5-Omni",
+    ] {
+        assert_eq!(
+            factory.resolve_name_for_model(model),
+            Some(names::MIMO),
+            "{model}"
+        );
+    }
+}
+
+#[test]
 fn factory_parses_qwen2_5_coder_template_with_hermes() {
     let factory = ToolParserFactory::new();
     let tool_call = r#"<tool_call>
