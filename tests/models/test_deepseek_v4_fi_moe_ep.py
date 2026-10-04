@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+import sys
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -326,6 +329,35 @@ def test_nvfp4_kernel_format_passes_megakernel_weights_through():
         is_act_and_mul=True,
     )
     assert all(out is src for out, src in zip(converted, tensors))
+
+
+def test_deep_gemm_alias_reuses_vendored_submodules(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """FlashInfer's ``from deep_gemm.utils import ...`` must reuse the vendored
+    modules; re-running them under the alias re-initializes DeepGEMM's pybind11
+    ``_C`` ("type ... is already registered")."""
+    pkg = tmp_path / "fake_vllm" / "deep_gemm"
+    (pkg / "utils").mkdir(parents=True)
+    (pkg.parent / "__init__.py").touch()
+    (pkg / "__init__.py").write_text("from . import _C, utils\n")
+    (pkg / "_C.py").write_text("def cast():\n    pass\n")
+    (pkg / "utils" / "__init__.py").write_text("from .._C import cast\n")
+    monkeypatch.syspath_prepend(tmp_path)
+    for name in [n for n in sys.modules if n.partition(".")[0] == "deep_gemm"]:
+        monkeypatch.delitem(sys.modules, name)
+    try:
+        vendored = importlib.import_module("fake_vllm.deep_gemm")
+        monkeypatch.setattr(fi_ep, "_import_deep_gemm", lambda: vendored)
+        fi_ep._expose_deep_gemm_to_flashinfer()
+        utils = importlib.import_module("deep_gemm.utils")
+        c_ext = sys.modules["deep_gemm._C"]
+    finally:
+        for name in list(sys.modules):
+            if name.partition(".")[0] in ("deep_gemm", "fake_vllm"):
+                del sys.modules[name]
+    assert utils is vendored.utils
+    assert c_ext is vendored._C
 
 
 def test_passthrough_all2all_backend_selects_the_pass_through_stages():
