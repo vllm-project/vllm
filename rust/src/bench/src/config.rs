@@ -196,6 +196,7 @@ pub struct BenchConfig {
     pub speed_bench_config: SpeedBenchConfig,
     pub speed_bench_category: Option<String>,
     pub speed_bench_max_input_len: Option<usize>,
+    pub speed_bench_output_len: usize,
     pub hf_split: Option<String>,
     pub hf_subset: Option<String>,
     pub hf_output_len: Option<usize>,
@@ -306,6 +307,14 @@ impl BenchConfig {
                 };
                 extra_body = Some(serde_json::Value::Object(merged));
             }
+        }
+
+        if uses_server_default_temperature(args.backend, extra_body.as_ref()) {
+            tracing::warn!(
+                "vllm-bench does not set temperature==0 (greedy) in requests by default. \
+                 The default will be determined on the server side and can be \
+                 model/API specific. For greedy decoding, include --temperature=0."
+            );
         }
 
         // Parse metadata
@@ -548,13 +557,15 @@ impl BenchConfig {
                 ));
             }
 
-            // Normalize and validate min/max turns. ShareGPT only consumes max_turns
-            // (the loader walks all available turns up to the cap), so the
-            // min/num/max coupling used for synthetic generation does not apply.
-            if args.dataset_name == DatasetName::ShareGpt {
+            // Normalize and validate min/max turns. Conversation datasets only
+            // consume max_turns (the loader walks all available turns up to the
+            // cap), so the min/num/max coupling used for synthetic generation
+            // does not apply.
+            if matches!(args.dataset_name, DatasetName::ShareGpt | DatasetName::Hf) {
                 if args.multi_turn_max_turns == 1 {
                     return Err(BenchError::Config(
-                        "--multi-turn-max-turns must be at least 2 for ShareGPT multi-turn".into(),
+                        "--multi-turn-max-turns must be at least 2 for ShareGPT-format multi-turn"
+                            .into(),
                     ));
                 }
             } else {
@@ -640,6 +651,15 @@ impl BenchConfig {
             ));
         }
 
+        if args.tokenizer_mode != "auto" {
+            tracing::warn!(
+                mode = %args.tokenizer_mode,
+                "--tokenizer-mode is ignored by the Rust client; tokenizer resolution always \
+                 follows the HF tokenizer.json -> tiktoken -> server-side /tokenize fallback \
+                 chain (mistral_common tokenizers are not supported locally)"
+            );
+        }
+
         Ok(BenchConfig {
             backend: args.backend,
             base_url,
@@ -712,7 +732,7 @@ impl BenchConfig {
             multi_turn_min_turns,
             multi_turn_max_turns,
             sharegpt_multi_turn_max_turns: if args.multi_turn
-                && args.dataset_name == DatasetName::ShareGpt
+                && matches!(args.dataset_name, DatasetName::ShareGpt | DatasetName::Hf)
                 && args.multi_turn_max_turns != 0
             {
                 Some(args.multi_turn_max_turns)
@@ -727,6 +747,7 @@ impl BenchConfig {
             speed_bench_config: args.speed_bench_config,
             speed_bench_category: args.speed_bench_category.clone(),
             speed_bench_max_input_len: args.speed_bench_max_input_len,
+            speed_bench_output_len: args.speed_bench_output_len,
             hf_split: args.hf_split.clone(),
             hf_subset: args.hf_subset.clone(),
             hf_output_len: args.hf_output_len,
@@ -849,6 +870,21 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
     }))
 }
 
+/// Whether generation requests leave `temperature` to the server-side default.
+///
+/// Python `vllm bench serve` defaulted to greedy decoding before v0.15, so
+/// results are only comparable with older runs when temperature is set explicitly.
+/// An explicit `"temperature": null` also falls back to the server default.
+fn uses_server_default_temperature(
+    backend: BackendKind,
+    extra_body: Option<&serde_json::Value>,
+) -> bool {
+    !backend.is_pooling()
+        && extra_body
+            .and_then(|b| b.get("temperature"))
+            .is_none_or(serde_json::Value::is_null)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -879,6 +915,58 @@ mod tests {
             "--model",
             "test-model",
         ]
+    }
+
+    #[test]
+    fn test_speed_bench_flags_match_python() {
+        let args = parse_args(vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--speed-bench-dataset-subset",
+            "throughput_8k",
+        ]);
+        assert!(matches!(
+            args.speed_bench_config,
+            crate::cli::SpeedBenchConfig::Throughput8k
+        ));
+        assert_eq!(args.speed_bench_output_len, 4096);
+    }
+
+    /// Temperature left unset is flagged, since older Python versions defaulted to greedy.
+    #[test]
+    fn test_uses_server_default_temperature() {
+        let check = |backend, extra: &[&str]| {
+            let mut argv = vec!["vllm-bench", "--model", "test-model", "--backend", backend];
+            argv.extend_from_slice(extra);
+            let config = BenchConfig::from_args(&parse_args(argv)).unwrap();
+            uses_server_default_temperature(config.backend, config.extra_body.as_ref())
+        };
+
+        assert!(check("openai-chat", &[]));
+        assert!(check("vllm", &["--extra-body", r#"{"top_p": 0.9}"#]));
+        assert!(!check("openai-chat", &["--temperature", "0"]));
+        assert!(!check(
+            "openai",
+            &["--extra-body", r#"{"temperature": 0.6}"#]
+        ));
+        assert!(!check("openai-embeddings", &[]));
+
+        // `"temperature": null` leaves it to the server, and `--extra-body`
+        // overrides `--temperature`, so both cases must still warn.
+        assert!(check(
+            "openai-chat",
+            &["--extra-body", r#"{"temperature": null}"#]
+        ));
+        assert!(check(
+            "openai-chat",
+            &[
+                "--temperature",
+                "0",
+                "--extra-body",
+                r#"{"temperature": null}"#
+            ]
+        ));
     }
 
     #[test]
@@ -1038,6 +1126,30 @@ mod tests {
         let config = BenchConfig::from_args(&args).unwrap();
 
         assert_eq!(config.sharegpt_multi_turn_max_turns, Some(20));
+    }
+
+    #[test]
+    fn test_hf_multi_turn_uses_conversation_turn_cap() {
+        let args = vec![
+            "vllm-bench",
+            "--backend",
+            "openai-chat",
+            "--multi-turn",
+            "--model",
+            "test-model",
+            "--dataset-name",
+            "hf",
+            "--dataset-path",
+            "org/sharegpt-dataset",
+            "--hf-subset",
+            "sharegpt",
+            "--multi-turn-max-turns",
+            "2",
+        ];
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
+
+        assert_eq!(config.sharegpt_multi_turn_max_turns, Some(2));
     }
 
     #[test]

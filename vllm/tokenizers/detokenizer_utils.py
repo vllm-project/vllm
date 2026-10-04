@@ -63,7 +63,7 @@ _CACHED_MARKER_KEY = "_vllm_space_marker_cache"
 _NOT_CACHED = "__not_computed__"
 
 
-def _get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
+def get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
     """Read the space marker from the tokenizer's pre_tokenizer config.
 
     Only Metaspace pre_tokenizers (used by SentencePiece-based models like
@@ -160,7 +160,7 @@ def convert_ids_list_to_tokens(
     """
     if not token_ids:
         return []
-    marker = _get_leading_space_marker(tokenizer)
+    marker = get_leading_space_marker(tokenizer)
     if marker is None:
         return [tokenizer.decode([tid]) or "" for tid in token_ids]
     raw_tokens = tokenizer.convert_ids_to_tokens(token_ids)
@@ -205,6 +205,7 @@ def detokenize_incrementally(
         skip_special_tokens: Whether to skip special tokens.
         spaces_between_special_tokens: Whether to add spaces between special
             tokens.
+
     """
     new_token_id = all_input_ids[-1]
     # This is the first iteration for this sequence

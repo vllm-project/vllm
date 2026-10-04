@@ -13,14 +13,10 @@ from .protocol import TokenizerLike
 
 
 def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
-    """
-    Wraps a tokenizer to use the custom DeepSeek V3.2 chat template encoding.
-    """
+    """Wraps a tokenizer to use the custom DeepSeek V3.2 chat template encoding."""
     dsv32_tokenizer = copy.copy(tokenizer)
 
     added_vocab = tokenizer.get_added_vocab()
-    added_vocab_size = len(added_vocab)
-    tokenizer_vocab_size = tokenizer.vocab_size
 
     class _DeepseekV32Tokenizer(tokenizer.__class__):  # type: ignore
         def apply_chat_template(
@@ -65,10 +61,6 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
         def num_special_tokens_to_add(self) -> int:
             return len(self.encode(""))
-
-        def __len__(self) -> int:
-            # </think> is an added token in DeepseekV32 tokenizer
-            return tokenizer_vocab_size + added_vocab_size
 
         def get_added_vocab(self) -> dict[str, int]:
             return added_vocab.copy()

@@ -287,6 +287,38 @@ def test_store_mask_swa_only_window_around_each_lcm_boundary():
     assert masks[1] == [False, False, False, True, False, False, False, True]
 
 
+def test_store_mask_swa_does_not_double_scale_under_dcp():
+    """The coordinator receives DCP-resolved specs (worker.py applies
+    resolve_dcp_kv_cache_spec) and indexes chunks in that already-scaled block
+    size. So dcp_world_size must NOT further scale reachable_block_mask; the
+    mask must be identical for any dcp_world_size given the same specs.
+
+    Regression: previously the coordinator forwarded its dcp_world_size, which
+    double-scaled the SWA block size and produced a wrong mask when dcp > 1.
+    """
+    full = _full(32)
+    swa = _swa(block_size=8, sliding_window=8)
+    groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
+    scheduler_block_size = lcm(32, 8)
+
+    def make(dcp_world_size):
+        return MooncakeStoreCoordinator(
+            groups,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=8,
+            dcp_world_size=dcp_world_size,
+        )
+
+    mask_dcp1 = make(1).store_mask(64)
+    mask_dcp2 = make(2).store_mask(64)
+
+    # dcp must not change the mask; both match the correct single-block-size
+    # result (chunks ending at 32 and 64 -> blocks 3 and 7).
+    expected = [False, False, False, True, False, False, False, True]
+    assert mask_dcp1[1] == expected
+    assert mask_dcp2[1] == expected
+
+
 def test_store_mask_swa_wider_window_covers_more_blocks_per_lcm():
     """Same hybrid layout but sliding_window=16 (= 2 SWA blocks). Each lcm
     boundary should now span two SWA tail blocks."""
@@ -449,6 +481,27 @@ def test_store_mask_retention_prefix_stable_as_aligned_length_grows():
     assert shorter is not None
     assert longer is not None
     assert longer[: len(shorter)] == shorter
+
+
+def test_store_mask_excludes_mamba_groups_lookup_unaffected():
+    """Align-mode mamba block tables are not append-only (interior states are
+    nulled/freed; speculative blocks relocate), so the positional normal save
+    must never cover mamba chunks — regardless of retention. Lookups still
+    probe mamba boundaries: their keys come from the pinned snapshot/CoW
+    hand-off path instead."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(16)),
+        KVCacheGroupSpec(["L1"], _mamba_align(16)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    masks = coord.store_mask(64)
+    assert masks[0] is None  # full attn stays dense
+    assert masks[1] == [False] * 4
+
+    coord = _make_coord(groups, hash_block_size=16, retention_interval=32)
+    assert coord.store_mask(64)[1] == [False] * 4
+
+    assert coord.lookup_mask(64)[1] is None
 
 
 # ----- Eagle / MTP interaction with load_mask -----

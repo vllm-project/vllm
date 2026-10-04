@@ -16,7 +16,7 @@ def is_eagle_prefix_cache_hashing_enabled(
     kv_connector: "KVConnectorBase_V1 | None" = None,
 ) -> bool:
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or not speculative_config.use_eagle():
+    if speculative_config is None or not speculative_config.use_eagle_block_drop():
         return False
     if vllm_config.kv_transfer_config is not None:
         return bool(

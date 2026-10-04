@@ -13,14 +13,10 @@ from .protocol import TokenizerLike
 
 
 def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
-    """
-    Wraps a tokenizer to use the custom DeepSeek V4 chat template encoding.
-    """
+    """Wraps a tokenizer to use the custom DeepSeek V4 chat template encoding."""
     dsv4_tokenizer = copy.copy(tokenizer)
 
     added_vocab = tokenizer.get_added_vocab()
-    added_vocab_size = len(added_vocab)
-    tokenizer_vocab_size = tokenizer.vocab_size
 
     class _DeepseekV4Tokenizer(tokenizer.__class__):  # type: ignore
         def apply_chat_template(
@@ -39,8 +35,18 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             conversation = kwargs.get("conversation", messages)
             messages = conversation.copy()
             if tools is not None and len(tools) > 0:
-                messages.insert(0, {"role": "system"})
-                messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
+                # Match the Rust renderer: request tools attach to the first
+                # system message; synthesize one only when none exists.
+                system_idx = next(
+                    (i for i, m in enumerate(messages) if m.get("role") == "system"),
+                    None,
+                )
+                if system_idx is None:
+                    messages.insert(0, {"role": "system"})
+                    system_idx = 0
+                else:
+                    messages[system_idx] = copy.copy(messages[system_idx])
+                messages[system_idx]["tools"] = tools  # type: ignore[typeddict-unknown-key]
 
             reasoning_effort = kwargs.get("reasoning_effort")
             if not isinstance(reasoning_effort, str):
@@ -77,9 +83,6 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
         def num_special_tokens_to_add(self) -> int:
             return len(self.encode(""))
-
-        def __len__(self) -> int:
-            return tokenizer_vocab_size + added_vocab_size
 
         def get_added_vocab(self) -> dict[str, int]:
             return added_vocab.copy()

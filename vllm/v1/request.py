@@ -20,7 +20,8 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.metrics.stats import PrefillStats
+from vllm.v1.kv_hints import KvHintsEnvelope
+from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -78,6 +79,7 @@ class Request:
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -142,11 +144,19 @@ class Request:
             prompt_token_ids, prompt_embeds
         )
         self._output_token_ids: list[int] = []
-        self._all_token_ids: list[int] = (
-            self.prompt_token_ids.copy()
-            if self.prompt_token_ids is not None
-            else [0] * self.num_prompt_tokens
-        )
+        if self.prompt_token_ids is None:
+            self._all_token_ids: list[int] = [0] * self.num_prompt_tokens
+        elif self.prompt_is_token_ids is None:
+            self._all_token_ids = self.prompt_token_ids.copy()
+        else:
+            # Mixed-mode prompt: positions covered by prompt_embeds hold a sentinel
+            # special token id that may lie outside the embedding. Zero them, matching
+            # the no-token-ids case above, so embedding gathers over these placeholder
+            # ids stay in bounds; the actual inputs come from prompt_embeds.
+            self._all_token_ids = [
+                t if is_tok else 0
+                for t, is_tok in zip(self.prompt_token_ids, self.prompt_is_token_ids)
+            ]
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
@@ -185,6 +195,7 @@ class Request:
         # trace_headers
         self.trace_headers = trace_headers
         self.session_id = session_id
+        self.kv_hints = kv_hints
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
@@ -193,6 +204,9 @@ class Request:
         # in the (sparse) prefix cache; 0 means none. Set at admission for
         # hybrid/Mamba models when a shared prefix is detected (Marconi-style).
         self.shared_prefix_boundary = 0
+        # DeepSeek-V4.1 only: SWA bounded replay. The request holds no
+        # sliding-window KV below this position; 0 when nothing replays.
+        self.replay_start = 0
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
@@ -203,6 +217,11 @@ class Request:
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
+        # Per-request speculative-decoding acceptance accumulator. Populated by
+        # the scheduler when --per-request-spec-decode-metrics is set (eagerly on
+        # add_request, then observed each verify step); stays None otherwise.
+        self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+
         self.block_hashes: list[BlockHash] = []
         # Leading successor-aware hashes whose target and draft KV are ready
         # for content-addressed publication.
@@ -210,6 +229,9 @@ class Request:
         # Exact contiguous token frontier covered by those materialized KVs.
         # Unlike the hash count, this preserves sub-block progress.
         self.num_materialized_eagle_tokens = 0
+        # Set when a step's draft KV was not written: the frontier cannot pass
+        # this gap until the tokens after it are recomputed.
+        self.eagle_publication_limit: int | None = None
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -250,6 +272,7 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             session_id=request.session_id,
+            kv_hints=request.kv_hints,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
@@ -293,6 +316,7 @@ class Request:
             self.num_materialized_eagle_tokens,
             num_tokens,
         )
+        self._maybe_clear_eagle_publication_limit(num_tokens)
 
     def mark_eagle_hashes_publishable(
         self,
@@ -301,6 +325,8 @@ class Request:
     ) -> None:
         """Advance the successor-hash publication fence after worker ACK."""
         acknowledged_tokens = min(self.num_tokens, num_tokens)
+        if self.eagle_publication_limit is not None:
+            acknowledged_tokens = min(acknowledged_tokens, self.eagle_publication_limit)
         self.num_materialized_eagle_tokens = max(
             self.num_materialized_eagle_tokens,
             acknowledged_tokens,
@@ -328,6 +354,18 @@ class Request:
             self.num_materialized_eagle_tokens,
             num_materialized_tokens,
         )
+        self._maybe_clear_eagle_publication_limit(num_materialized_tokens)
+
+    def freeze_eagle_hash_publication(self) -> None:
+        """Stop the fence at its current position: a step ran without the
+        drafter, so draft KV past it is missing."""
+        self.eagle_publication_limit = self.num_materialized_eagle_tokens
+
+    def _maybe_clear_eagle_publication_limit(self, num_tokens: int) -> None:
+        # Tokens from ``num_tokens`` on are recomputed, filling the gap.
+        limit = self.eagle_publication_limit
+        if limit is not None and num_tokens <= limit:
+            self.eagle_publication_limit = None
 
     @property
     def use_structured_output(self) -> bool:
@@ -397,8 +435,7 @@ class Request:
         return prefill_stats
 
     def __lt__(self, other: "Request") -> bool:
-        """
-        Compare two requests based on priority, arrival time, and request ID.
+        """Compare two requests based on priority, arrival time, and request ID.
         Used in priority scheduling.
         """
         if self.priority != other.priority:

@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Kimi-K2.5 Model Implementation for vLLM.
+"""Kimi-K2.5 Model Implementation for vLLM.
 
 Kimi-K2.5 extends Kimi-K2 with vision support.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
@@ -15,7 +14,7 @@ from torch import nn
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -90,8 +89,7 @@ class MaxImageTokenMeta:
 
 
 class KimiK25MediaPixelInputs(TensorSchema):
-    """
-    Media input schema for K2-VL model.
+    """Media input schema for K2-VL model.
 
     Dimensions:
         - np: Number of patches (flattened from all media items)
@@ -138,9 +136,9 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         # may remap token IDs vs config.json.
         config_token_id = hf_config.media_placeholder_token_id
         resolved_token_id = tokenizer.convert_tokens_to_ids("<|media_pad|>")
+        unk_token_id = getattr(tokenizer, "unk_token_id", None)
         is_valid_resolved = isinstance(resolved_token_id, int) and (
-            tokenizer.unk_token_id is None
-            or resolved_token_id != tokenizer.unk_token_id
+            unk_token_id is None or resolved_token_id != unk_token_id
         )
         if is_valid_resolved and resolved_token_id != config_token_id:
             logger.warning_once(
@@ -167,7 +165,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         )
         self.media_tokens_calculator = image_processor.media_tokens_calculator
 
-    def get_hf_processor(self):
+    def get_hf_processor(self, **kwargs: object):
         return self.hf_processor
 
     def get_hf_config(self):
@@ -193,7 +191,11 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
         )
 
         video_chunk_dummy_item = VisionChunkVideo(
-            type="video_chunk", video_chunk=dummy_videos
+            type="video_chunk",
+            video_chunk=dummy_videos,
+            uuid=None,
+            prompt="",
+            video_idx=0,
         )
         video_chunk_num_tokens = self.info.media_tokens_calculator(
             video_chunk_dummy_item
@@ -206,6 +208,7 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
                 width=MaxImageTokenMeta.width,
                 num_images=1,
             )[0],
+            uuid=None,
         )
         image_num_tokens = self.info.media_tokens_calculator(image_dummy_item)
         # return the larger one
@@ -218,7 +221,7 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         # TODO: Support mm_options for vision_chunk to allow user configuration
         dummy_items = self.get_dummy_mm_items()
@@ -257,17 +260,6 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
             ),
             grid_thws=MultiModalFieldConfig.batched("vision_chunk", keep_on_cpu=True),
         )
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Override to use the text path instead of token path because vision chunk
-        # is not considered
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
     def _get_prompt_updates(
         self,
@@ -390,7 +382,7 @@ class KimiK25ForConditionalGeneration(
         )
         self.media_placeholder: int = self.config.media_placeholder_token_id
 
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig | None):
         if isinstance(quant_config, compressed_tensors.CompressedTensorsConfig):
             return None
         return quant_config
@@ -405,6 +397,7 @@ class KimiK25ForConditionalGeneration(
 
         if isinstance(pixel_values, list):
             pixel_values = torch.cat(pixel_values, dim=0)
+        assert isinstance(pixel_values, torch.Tensor)
 
         if len(pixel_values.shape) == 5 or len(pixel_values.shape) == 3:
             pixel_values = pixel_values.reshape(
@@ -605,6 +598,7 @@ class KimiK25ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> "EncoderCudaGraphCaptureInputs":
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphCaptureInputs
 
@@ -624,7 +618,7 @@ class KimiK25ForConditionalGeneration(
 
         grid_thw_list = [[1, ho * kh, wo * kw] for _ in range(max_batch_size)]
 
-        ps = self.vision_tower.patch_size
+        ps: int | tuple[int, int] = self.vision_tower.patch_size
         if isinstance(ps, int):
             ps = (ps, ps)
         total_patches = max_batch_size * ho * kh * wo * kw

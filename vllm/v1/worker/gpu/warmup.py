@@ -18,7 +18,13 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    CrossAttentionSpec,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -39,6 +45,11 @@ def _reserved_block_count(
     `KVCacheManager.allocate_slots` reserves: the token range plus
     `num_lookahead_tokens`, where the speculator writes the KV of its drafts.
     """
+    if isinstance(kvcache_spec, UniformTypeKVCacheSpecs):
+        kvcache_spec = kvcache_spec.first_spec
+    if isinstance(kvcache_spec, CircularBufferSpec):
+        # Circular caches keep one physical ring block for the request lifetime.
+        return 1
     if isinstance(kvcache_spec, CrossAttentionSpec):
         # Cross-attention blocks cover the encoder sequence only.
         return cdiv(max_encoder_len, kvcache_spec.block_size)
@@ -209,7 +220,32 @@ def warmup_kernels(
     We must call the provided worker's execute_model for pipeline parallel
     coordination.
     """
-    if model_runner.is_encoder_only:
+    # Adaptive costs are calibrated during capture, after this warmup. Exercise
+    # fixed draft counts here, then restore the manager for capture and serving.
+    adaptive_verification = model_runner.adaptive_verification
+    model_runner.adaptive_verification = None
+    rejection_sampler = model_runner.rejection_sampler
+    adaptive_sampling = (
+        rejection_sampler is not None and rejection_sampler.enable_adaptive_verification
+    )
+    if adaptive_sampling:
+        assert rejection_sampler is not None
+        rejection_sampler.enable_adaptive_verification = False
+    try:
+        _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
+    finally:
+        model_runner.adaptive_verification = adaptive_verification
+        if adaptive_sampling:
+            assert rejection_sampler is not None
+            rejection_sampler.enable_adaptive_verification = True
+
+
+def _warmup_kernels(
+    model_runner: GPUModelRunner,
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+    worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+) -> None:
+    if model_runner.vllm_config.is_mm_encoder_only:
         return
 
     num_spec_steps = model_runner.num_speculative_steps
@@ -258,7 +294,11 @@ def warmup_kernels(
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
     )
-    if max_blocks_per_req > 0:
+    block_tables = getattr(model_runner, "block_tables", None)
+    null_blocks = block_tables is not None and (
+        block_tables.redirect_writes_to_null_block
+    )
+    if max_blocks_per_req > 0 and not null_blocks:
         # Reserve block 0 (null block) and ensure we have enough blocks.
         # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
         num_reqs = min(
@@ -414,4 +454,6 @@ def warmup_kernels(
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
+    if model_runner.kv_block_zeroer is not None:
+        model_runner.kv_block_zeroer.zero_block_ids([0])
     torch.accelerator.synchronize()

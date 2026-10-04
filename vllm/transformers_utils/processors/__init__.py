@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Multi-modal processors may be defined in this directory for the following
+"""Multi-modal processors may be defined in this directory for the following
 reasons:
 
 - There is no processing file defined by HF Hub or Transformers library.
@@ -12,12 +11,10 @@ import importlib
 
 __all__ = [
     "BagelProcessor",
-    "CheersProcessor",
     "CohereASRProcessor",
     "Cosmos3EdgeProcessor",
     "DeepseekVLV2Processor",
     "FireRedASR2Processor",
-    "FireRedLIDProcessor",
     "FunASRProcessor",
     "GLM4VProcessor",
     "Granite4VisionProcessor",
@@ -52,12 +49,10 @@ __all__ = [
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "BagelProcessor": "vllm.transformers_utils.processors.bagel",
-    "CheersProcessor": "vllm.transformers_utils.processors.cheers",
     "CohereASRProcessor": "vllm.transformers_utils.processors.cohere_asr",
     "Cosmos3EdgeProcessor": "vllm.transformers_utils.processors.cosmos3_edge",
     "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
     "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
-    "FireRedLIDProcessor": "vllm.transformers_utils.processors.fireredlid",
     "FunASRProcessor": "vllm.transformers_utils.processors.funasr",
     "GLM4VProcessor": "vllm.transformers_utils.processors.glm4v",
     "Granite4VisionProcessor": "vllm.transformers_utils.processors.granite4_vision",

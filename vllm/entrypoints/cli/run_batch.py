@@ -25,7 +25,7 @@ class RunBatchSubcommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        from vllm.entrypoints.openai.run_batch import main as run_batch_main
+        from vllm.entrypoints.launchers.run_batch import main as run_batch_main
 
         logger.info(
             "vLLM batch processing API version %s", importlib.metadata.version("vllm")
@@ -48,7 +48,7 @@ class RunBatchSubcommand(CLISubcommand):
     def subparser_init(
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
-        from vllm.entrypoints.openai.run_batch import make_arg_parser
+        from vllm.entrypoints.launchers.run_batch import make_arg_parser
 
         run_batch_parser = subparsers.add_parser(
             self.name,

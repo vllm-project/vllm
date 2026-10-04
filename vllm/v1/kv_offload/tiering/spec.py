@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-TieringOffloadingSpec: Spec for multi-tier KV cache offloading.
+"""TieringOffloadingSpec: Spec for multi-tier KV cache offloading.
 
 This spec creates a TieringOffloadingManager with a CPU primary tier
 and configurable secondary tiers (e.g., Storage, Network).
 
 Configuration via kv_connector_extra_config:
   - cpu_bytes_to_use: (required) Bytes to allocate for CPU primary tier
-  - block_size: (optional) Block size for offloaded blocks (default: GPU block size)
+  - block_size: (optional) Tokens per offloaded chunk (default: GPU block size)
   - eviction_policy: (optional) Primary tier eviction policy: built-in "lru"/
     "arc", or the name of a policy registered via CachePolicyFactory, or an
     out-of-tree CachePolicy class name paired with cache_policy_module_path
@@ -82,8 +81,7 @@ logger = init_logger(__name__)
 
 
 class TieringOffloadingSpec(CPUOffloadingSpec):
-    """
-    Spec for multi-tier KV cache offloading.
+    """Spec for multi-tier KV cache offloading.
 
     Creates a TieringOffloadingManager with:
     - Primary tier: CPU (LRU or ARC eviction policy)
@@ -105,7 +103,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of blocking time spent in a per-block tier lookup "
+                    "Histogram of blocking time spent in a per-chunk tier lookup "
                     "that resolved as a hit or miss, labeled by tier, in seconds."
                 ),
                 labelnames=("tier",),
@@ -127,7 +125,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of wall-clock time from a per-block tier lookup "
+                    "Histogram of wall-clock time from a per-chunk tier lookup "
                     "first returning retry until that same tier lookup resolves "
                     "as a hit or miss, labeled by tier, in seconds."
                 ),
@@ -191,14 +189,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 labelnames=("tier",),
             )
         )
-        metrics[TieringOffloadingMetrics.BLOCK_QUERIES] = OffloadingCounterMetadata(
+        metrics[TieringOffloadingMetrics.CHUNK_QUERIES] = OffloadingCounterMetadata(
             documentation=(
-                "Number of block lookup queries sent to a tier, labeled by tier."
+                "Number of chunk lookup queries sent to a tier, labeled by tier."
             ),
             labelnames=("tier",),
         )
-        metrics[TieringOffloadingMetrics.BLOCK_HITS] = OffloadingCounterMetadata(
-            documentation="Number of block lookup hits in a tier, labeled by tier.",
+        metrics[TieringOffloadingMetrics.CHUNK_HITS] = OffloadingCounterMetadata(
+            documentation="Number of chunk lookup hits in a tier, labeled by tier.",
             labelnames=("tier",),
         )
         metrics[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES] = (
@@ -249,6 +247,34 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             assert isinstance(tier_config, dict)
             tier_cls = SecondaryTierFactory.get_tier_class(tier_config)
             metrics.update(tier_cls.build_metric_definitions(tier_config))
+
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Exponential moving average of store latency "
+                    "for back-pressure detection, in s/MiB."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of store operations dropped due to "
+                    "back-pressure on a secondary tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of blocks dropped due to back-pressure on a secondary tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+
         return metrics
 
     def __init__(self, config: OffloadingConfig):
@@ -261,8 +287,39 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
 
+        # Backpressure config is merged field-by-field in priority order
+        # (highest first):
+        #   1. Per-tier ``backpressure`` dict in the tier config
+        #   2. Top-level ``backpressure`` in kv_connector_extra_config
+        # Merging per field (rather than per whole dict) means a partial
+        # tier override still inherits missing fields from the top-level
+        # default, so the resolved dict reaching the factory is complete.
+        # Within each tier's resolved dict, tier-type-aware water marks
+        # are filled in last so a bare ``"backpressure": {}`` picks up
+        # sensible thresholds for the storage medium.
+        bp_defaults = self.extra_config.get("backpressure")
+
+        for tier_cfg in self.secondary_tier_configs:
+            tier_override = tier_cfg.get("backpressure")
+            # Overlay from lowest to highest precedence so higher-precedence
+            # fields win while lower-precedence ones fill in the gaps.
+            merged: dict[str, Any] = {}
+            for source in (bp_defaults, tier_override):
+                if source:
+                    merged.update(source)
+            # Only set a resolved dict when at least one source contributed
+            # (or an explicit ``backpressure`` key was present, e.g. ``{}``),
+            # so tiers without any backpressure config stay unconfigured.
+            if merged or "backpressure" in tier_cfg:
+                tier_cfg["backpressure"] = merged
+
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
+
+        # Set by create_worker when canonical_layout is enabled: True when
+        # every layer's canonical bytes are parallelism-agnostic (portable),
+        # False when some layers use the opaque fallback (exact-topology only)
+        self.all_layers_portable: bool | None = None
 
         # engine_id is unique per DP replica (suffixed with _dp{rank} in both
         # the Ray and multiprocessing paths), so it names a per-replica offload
@@ -271,8 +328,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def get_manager(self) -> OffloadingManager:
-        """
-        Get the TieringOffloadingManager.
+        """Get the TieringOffloadingManager.
 
         Creates a TieringOffloadingManager with:
         - Primary tier: CPU (LRU or ARC)
@@ -280,6 +336,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         Returns:
             TieringOffloadingManager instance
+
         """
         if not self._manager:
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
@@ -295,16 +352,16 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 # primary tier can eagerly create a memoryview over _base.
                 scheduler_mmap = SharedOffloadRegion(
                     engine_id=self._engine_id,
-                    num_blocks=self.num_blocks,
+                    num_chunks=self.num_chunks,
                     rank=None,
-                    kv_bytes_per_block=self.kv_bytes_per_chunk,
+                    kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
                 )
                 self._scheduler_mmap = scheduler_mmap
 
                 # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(
-                    num_blocks=self.num_blocks,
+                    num_chunks=self.num_chunks,
                     cache_policy=self.eviction_policy,
                     cache_policy_module_path=self.cache_policy_module_path,
                     enable_events=self.kv_events_config.enable_kv_cache_events,
@@ -362,9 +419,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
             logger.info(
                 "Created TieringOffloadingManager with primary tier "
-                "(%s, %s blocks) and %s secondary tier(s)",
+                "(%s, %s chunks) and %s secondary tier(s)",
                 self.eviction_policy,
-                self.num_blocks,
+                self.num_chunks,
                 len(secondary_tiers),
             )
 
@@ -388,18 +445,59 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             rank = torch.accelerator.current_device_index() % world_size
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
-            num_blocks=self.num_blocks,
+            num_chunks=self.num_chunks,
             rank=rank,
-            kv_bytes_per_block=self.kv_bytes_per_chunk,
+            kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
         try:
+            if self.config.canonical_layout:
+                self._validate_canonical_refs(kv_caches)
             return CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,
-                num_cpu_blocks=self.num_blocks,
+                num_cpu_chunks=self.num_chunks,
                 mmap_region=worker_mmap,
+                canonical_layout=self.config.canonical_layout,
             )
         except Exception:
             worker_mmap.cleanup()
             raise
+
+    def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:
+        """Require a mapping on every ref and record layer portability.
+
+        Fails loudly rather than persist direct-layout bytes under a
+        canonical format identity."""
+        all_refs = [
+            ref for group_refs in kv_caches.group_data_refs for ref in group_refs
+        ]
+        if any(ref.mapping is None for ref in all_refs):
+            raise RuntimeError(
+                "canonical_layout was requested but the KV cache layout "
+                "could not be certified for canonical offload (offload "
+                "workers must be exactly the TP group, and packed / "
+                "cross-layer KV layouts are not supported). Remove "
+                "canonical_layout from kv_connector_extra_config."
+            )
+        self.all_layers_portable = all(
+            ref.mapping is not None and ref.mapping.parallelism_agnostic
+            for ref in all_refs
+        )
+        if self.config.parallel.is_parallelism_agnostic and not (
+            self.all_layers_portable
+        ):
+            # The scheduler-side storage namespace was already collapsed on
+            # the static portability claim; opaque per-topology bytes must
+            # not land in it.
+            raise RuntimeError(
+                "canonical_layout could not certify every layer as "
+                "parallelism-agnostic, but the storage namespace is shared "
+                "across topologies. Remove canonical_layout from "
+                "kv_connector_extra_config or disable parallel-agnostic "
+                "secondary tiers."
+            )
+        logger.info(
+            "Canonical KV layout enabled (all_layers_portable=%s)",
+            self.all_layers_portable,
+        )

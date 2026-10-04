@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
+from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -23,7 +24,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -61,6 +61,7 @@ class TokenspeedMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # The kernel accepts an explicit causal mask, so a non-causal DSpark
     # block can remain fused instead of being flattened to single tokens.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -87,7 +88,7 @@ class TokenspeedMLABackend(MLACommonBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [32, 64]
 
     @staticmethod
@@ -151,13 +152,11 @@ class TokenspeedMLABackend(MLACommonBackend):
                 )
         return None
 
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
-
 
 class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
     # tokenspeed_mla_decode returns LSE in log2 units; its own DCP test merges
     # partial outputs with exp2(lse).
     lse_base_on_e: bool = False
@@ -219,6 +218,9 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._workspace_buffer: torch.Tensor | None = None
         self.softmax_scale: float | None = None
         self.output_scale: float | None = None
+        # NIXL resolves interleaving after model construction; retain the config
+        # rather than caching its initial interleave size.
+        self._parallel_config = get_current_vllm_config().parallel_config
 
         # Pre-JIT BF16 and FP8 prefill kernels here too — decode impl always
         # runs when tokenspeed is selected, prefill backend may not (user can
@@ -289,8 +291,9 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.output_scale = layer._k_scale_float
 
         if self._workspace_buffer is None:
+            # Parallelism can change the runtime query head count.
             self._workspace_buffer = _get_workspace(
-                q.device, self.num_heads, self.kv_lora_rank
+                q.device, q.shape[-2], self.kv_lora_rank
             )
 
         # vLLM kv_c_and_k_pe_cache is already (num_blocks, block_size, head_size).
@@ -313,9 +316,13 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             causal_seqs=causal_seqs if self.dcp_world_size > 1 else None,
             cp_world=self.dcp_world_size,
             cp_rank=self.dcp_rank,
+            cp_interleave_size=self._parallel_config.cp_kv_cache_interleave_size,
         )
         if return_lse:
             o, lse = kernel_out
+            # DCP ranks with no local KV may return undefined outputs (e.g.,
+            # NaNs). The downstream DCP combine path must mask empty
+            # shards and ignore their outputs when merging partial attention.
             lse = lse.view(-1, lse.shape[-1])
         else:
             o, lse = kernel_out, None
