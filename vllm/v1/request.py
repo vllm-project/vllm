@@ -229,9 +229,6 @@ class Request:
         # Exact contiguous token frontier covered by those materialized KVs.
         # Unlike the hash count, this preserves sub-block progress.
         self.num_materialized_eagle_tokens = 0
-        # Set when a step's draft KV was not written: the frontier cannot pass
-        # this gap until the tokens after it are recomputed.
-        self.eagle_publication_limit: int | None = None
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -305,18 +302,9 @@ class Request:
         """Discard hashes whose token dependencies extend past ``num_tokens``."""
         if self._block_hasher is None:
             return
-        num_hashes = max(num_tokens - lookahead_tokens, 0)
-        num_hashes //= hash_block_size
+        num_hashes = max(num_tokens - lookahead_tokens, 0) // hash_block_size
         del self.block_hashes[num_hashes:]
-        self.num_publishable_block_hashes = min(
-            self.num_publishable_block_hashes,
-            num_hashes,
-        )
-        self.num_materialized_eagle_tokens = min(
-            self.num_materialized_eagle_tokens,
-            num_tokens,
-        )
-        self._maybe_clear_eagle_publication_limit(num_tokens)
+        self.invalidate_eagle_hash_publication(num_hashes, num_tokens)
 
     def mark_eagle_hashes_publishable(
         self,
@@ -325,8 +313,6 @@ class Request:
     ) -> None:
         """Advance the successor-hash publication fence after worker ACK."""
         acknowledged_tokens = min(self.num_tokens, num_tokens)
-        if self.eagle_publication_limit is not None:
-            acknowledged_tokens = min(acknowledged_tokens, self.eagle_publication_limit)
         self.num_materialized_eagle_tokens = max(
             self.num_materialized_eagle_tokens,
             acknowledged_tokens,
@@ -354,18 +340,6 @@ class Request:
             self.num_materialized_eagle_tokens,
             num_materialized_tokens,
         )
-        self._maybe_clear_eagle_publication_limit(num_materialized_tokens)
-
-    def freeze_eagle_hash_publication(self) -> None:
-        """Stop the fence at its current position: a step ran without the
-        drafter, so draft KV past it is missing."""
-        self.eagle_publication_limit = self.num_materialized_eagle_tokens
-
-    def _maybe_clear_eagle_publication_limit(self, num_tokens: int) -> None:
-        # Tokens from ``num_tokens`` on are recomputed, filling the gap.
-        limit = self.eagle_publication_limit
-        if limit is not None and num_tokens <= limit:
-            self.eagle_publication_limit = None
 
     @property
     def use_structured_output(self) -> bool:

@@ -543,10 +543,7 @@ class RequestRunner:
                 kv_connector_worker_meta=worker_meta,
             )
             if self.scheduler.use_eagle_prefix_cache_hashing:
-                # The drafter runs on every scheduled request.
-                model_runner_output.draft_kv_materialized_req_ids = set(
-                    model_runner_output.req_ids
-                )
+                model_runner_output.draft_kv_materialized = True
 
             prev_token_id = token_id
             if self.scheduler.running:

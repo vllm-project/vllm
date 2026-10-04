@@ -73,6 +73,7 @@ def _stub(manager, block_size, hash_block_size, *, block_drop=True):
         # The EAGLE adjustments key on the block-drop bit, not plain use_eagle:
         # they exist only to compensate for the drop.
         use_eagle_block_drop=block_drop,
+        use_eagle_prefix_cache_hashing=False,
         hash_block_size=hash_block_size,
         mamba_has_prefill_checkpoint_blocks=False,  # forced False under eagle
         mamba_partial_cache_hit=partial_hit,

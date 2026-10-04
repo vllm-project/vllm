@@ -27,7 +27,7 @@ pytestmark = pytest.mark.cpu_test
 def _make_model_runner_output(
     scheduler_output: SchedulerOutput,
     sampled_token_ids: list[list[int]] | None = None,
-    draft_kv_materialized_req_ids: set[str] | None = None,
+    draft_kv_materialized: bool = False,
 ) -> ModelRunnerOutput:
     req_ids = list(scheduler_output.num_scheduled_tokens.keys())
     return ModelRunnerOutput(
@@ -41,7 +41,7 @@ def _make_model_runner_output(
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
-        draft_kv_materialized_req_ids=draft_kv_materialized_req_ids,
+        draft_kv_materialized=draft_kv_materialized,
     )
 
 
@@ -52,7 +52,7 @@ def _enable_eagle_prefix_hashing(scheduler: AsyncScheduler) -> None:
     manager.block_pool.use_eagle_prefix_cache_hashing = True
 
 
-def test_chunked_prefill_publishes_only_contiguous_acknowledged_async_steps() -> None:
+def test_chunked_prefill_publishes_only_acknowledged_async_steps() -> None:
     block_size = 2
     init_none_hash(sha256)
     scheduler = create_scheduler(
@@ -90,7 +90,7 @@ def test_chunked_prefill_publishes_only_contiguous_acknowledged_async_steps() ->
         _make_model_runner_output(
             first_step,
             sampled_token_ids=[[]],
-            draft_kv_materialized_req_ids={request.request_id},
+            draft_kv_materialized=True,
         ),
     )
 
@@ -105,22 +105,6 @@ def test_chunked_prefill_publishes_only_contiguous_acknowledged_async_steps() ->
     scheduler.update_from_output(
         second_step,
         _make_model_runner_output(second_step, sampled_token_ids=[[]]),
-    )
-    assert request.num_publishable_block_hashes == 1
-    assert request.num_materialized_eagle_tokens == 3
-    _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
-    assert num_cached_tokens == 2
-
-    # A later drafter acknowledgement cannot bridge the missing second chunk.
-    third_step = scheduler.schedule()
-    assert third_step.num_scheduled_tokens[request.request_id] == 1
-    scheduler.update_from_output(
-        third_step,
-        _make_model_runner_output(
-            third_step,
-            sampled_token_ids=[[7]],
-            draft_kv_materialized_req_ids={request.request_id},
-        ),
     )
     assert request.num_publishable_block_hashes == 1
     assert request.num_materialized_eagle_tokens == 3
@@ -162,7 +146,7 @@ def test_eagle_publication_advances_past_rejected_async_drafts() -> None:
             _make_model_runner_output(
                 in_flight,
                 sampled_token_ids=[[token_id]],
-                draft_kv_materialized_req_ids={request.request_id},
+                draft_kv_materialized=True,
             ),
         )
         in_flight = next_step
@@ -170,27 +154,6 @@ def test_eagle_publication_advances_past_rejected_async_drafts() -> None:
     committed = request.num_computed_tokens - request.num_in_flight_tokens
     assert committed > len(request.prompt_token_ids)
     assert request.num_materialized_eagle_tokens == committed
-
-
-def test_eagle_publication_limit_is_cleared_by_recompute() -> None:
-    request = Request(
-        request_id="eagle",
-        prompt_token_ids=list(range(8)),
-        sampling_params=SamplingParams(max_tokens=1),
-        pooling_params=None,
-        block_hasher=get_request_eagle_block_hasher(2, sha256),
-    )
-    request.mark_eagle_hashes_publishable(4, 2)
-    request.freeze_eagle_hash_publication()
-
-    request.mark_eagle_hashes_publishable(8, 2)
-    assert request.num_materialized_eagle_tokens == 4
-
-    # Preemption recomputes from token 0, which fills the gap.
-    request.invalidate_eagle_hash_publication()
-    request.mark_eagle_hashes_publishable(6, 2)
-    assert request.num_materialized_eagle_tokens == 6
-    assert request.num_publishable_block_hashes == 3
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])

@@ -7,6 +7,10 @@ from dataclasses import dataclass, replace
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
+    is_eagle_prefix_cache_hashing_enabled,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -93,6 +97,17 @@ class MambaPrefillCheckpointBuilder:
     def __init__(self, vllm_config: VllmConfig, kv_cache_spec: MambaSpec) -> None:
         self.vllm_config = vllm_config
         self.kv_cache_spec = kv_cache_spec
+        speculative_config = vllm_config.speculative_config
+        # Successor-aware hashes prove the boundary token's draft KV, so the
+        # checkpoint needs no Eagle back-off.
+        self._drop_eagle_block = (
+            speculative_config is not None
+            and speculative_config.use_eagle_block_drop()
+            and not is_eagle_prefix_cache_hashing_enabled(
+                vllm_config,
+                get_kv_transfer_group() if has_kv_transfer_group() else None,
+            )
+        )
 
     def build(
         self,
@@ -109,17 +124,13 @@ class MambaPrefillCheckpointBuilder:
         seq_lens = m.seq_lens_cpu_upper_bound.tolist()
         block_size = self.kv_cache_spec.block_size
         hash_block_size = self.vllm_config.cache_config.prefix_match_unit or block_size
-        speculative_config = self.vllm_config.speculative_config
-        drop_eagle_block = (
-            speculative_config is not None and speculative_config.use_eagle_block_drop()
-        )
         checkpoint_offsets, checkpoint_cols = compute_mamba_prefill_checkpoints(
             [seq_lens[row] for row in request_rows],
             query_lens,
             hash_block_size=hash_block_size,
             mamba_block_size=block_size,
             checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
-            drop_eagle_block=drop_eagle_block,
+            drop_eagle_block=self._drop_eagle_block,
         )
         if not any(checkpoint_offsets):
             return None

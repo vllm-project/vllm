@@ -466,7 +466,9 @@ class Scheduler(SchedulerInterface):
         checkpoint_position = get_mamba_prefill_checkpoint_position(
             prefill_end,
             self.hash_block_size,
-            drop_eagle_block=self.use_eagle_block_drop,
+            drop_eagle_block=(
+                self.use_eagle_block_drop and not self.use_eagle_prefix_cache_hashing
+            ),
         )
         use_internal_checkpoint = (
             self.mamba_has_prefill_checkpoint_blocks
@@ -1652,7 +1654,7 @@ class Scheduler(SchedulerInterface):
         session._output_token_ids.clear()
         session.truncate_block_hashes(
             num_computed_tokens,
-            self.kv_cache_manager.block_pool.hash_block_size,
+            self.hash_block_size,
             lookahead_tokens=int(self.use_eagle_prefix_cache_hashing),
         )
         assert session.prompt_token_ids is not None
@@ -2005,7 +2007,7 @@ class Scheduler(SchedulerInterface):
         if self.use_eagle_prefix_cache_hashing:
             request.mark_eagle_hashes_publishable(
                 num_tokens,
-                self.kv_cache_manager.block_pool.hash_block_size,
+                self.hash_block_size,
             )
 
     def update_from_output(
@@ -2025,11 +2027,6 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
-        # Draft forward may be skipped near its max model length, so only these
-        # requests may publish successor-aware hashes.
-        draft_kv_materialized_req_ids = (
-            model_runner_output.draft_kv_materialized_req_ids or set()
-        )
         publishable_prefix_tokens = (
             {
                 req.req_id: req.num_computed_tokens
@@ -2192,19 +2189,17 @@ class Scheduler(SchedulerInterface):
                 self.use_eagle_prefix_cache_hashing
                 and status_before_stop == RequestStatus.RUNNING
                 and not output_is_stale
+                and model_runner_output.draft_kv_materialized
             ):
-                if req_id in draft_kv_materialized_req_ids:
-                    # Rejections are already rolled back and later steps are
-                    # still in flight, so this is the committed frontier.
-                    self._mark_eagle_hashes_publishable(
-                        request,
-                        request.num_computed_tokens - request.num_in_flight_tokens,
-                    )
-                    self.kv_cache_manager.cache_blocks(
-                        request, request.num_materialized_eagle_tokens
-                    )
-                else:
-                    request.freeze_eagle_hash_publication()
+                # Rejections are already rolled back and later steps are still
+                # in flight, so this is the committed frontier.
+                self._mark_eagle_hashes_publishable(
+                    request,
+                    request.num_computed_tokens - request.num_in_flight_tokens,
+                )
+                self.kv_cache_manager.cache_blocks(
+                    request, request.num_materialized_eagle_tokens
+                )
 
             if new_token_ids and not self.structured_output_manager.accept_tokens(
                 request, new_token_ids
@@ -3358,8 +3353,7 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens = req_num_computed_tokens
 
                 request.invalidate_eagle_hash_publication(
-                    request.num_computed_tokens
-                    // self.kv_cache_manager.block_pool.hash_block_size,
+                    request.num_computed_tokens // self.hash_block_size,
                     request.num_computed_tokens,
                 )
 

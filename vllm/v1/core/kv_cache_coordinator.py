@@ -151,7 +151,7 @@ class KVCacheCoordinator(ABC):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
         # Match Mamba checkpoints to Eagle's attention replay boundary.
-        if use_eagle:
+        if use_eagle and not use_eagle_prefix_cache_hashing:
             for manager in self.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
@@ -337,7 +337,8 @@ class KVCacheCoordinator(ABC):
         resend's hit to 0. The alignment is the scheduler block size, not the
         finer hash granularity, which would over-estimate the reach.
         """
-        if not self.eagle_group_ids:
+        # Successor-aware hashes make EAGLE groups match without the drop.
+        if not self.eagle_group_ids or self.use_eagle_prefix_cache_hashing:
             return (request.num_prompt_tokens - 1,)
         block = self.scheduler_block_size
         resend = (request.num_prompt_tokens - 1) // block * block

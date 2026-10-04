@@ -351,7 +351,7 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
             req_ids=[request.request_id],
             req_id_to_index={request.request_id: 0},
             sampled_token_ids=[[5]],
-            draft_kv_materialized_req_ids={request.request_id},
+            draft_kv_materialized=True,
         ),
     )
 
@@ -450,7 +450,7 @@ def test_connector_finish_includes_partial_eagle_block(
             req_ids=[request.request_id],
             req_id_to_index={request.request_id: 0},
             sampled_token_ids=[[33]],
-            draft_kv_materialized_req_ids={request.request_id},
+            draft_kv_materialized=True,
         ),
     )
     assert request.num_computed_tokens == 33
