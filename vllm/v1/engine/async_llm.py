@@ -3,8 +3,10 @@
 import asyncio
 import os
 import socket
+import threading
 import time
 import warnings
+from collections import deque
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any
@@ -63,6 +65,10 @@ from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
+
+# How long a preflight admission reservation survives if the request never
+# hands over to the output processor (e.g. client disconnects during render).
+_ADMISSION_RESERVATION_TTL_S = 60.0
 
 
 class InputStreamError(Exception):
@@ -162,6 +168,15 @@ class AsyncLLM(EngineClient):
             and "mp_admission_counters" in client_addresses
             else None
         )
+
+        # Slots reserved by the preflight admission check (see
+        # ``check_admission``) for requests that have not yet been rendered
+        # and handed over to the output processor. Each entry is the
+        # monotonic timestamp at which the slot was reserved, so a request
+        # that never hands over (e.g. the client disconnects during render)
+        # stops counting after a short TTL instead of leaking a slot forever.
+        self._admission_reserved: deque[float] = deque()
+        self._admission_lock = threading.Lock()
 
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
@@ -306,6 +321,18 @@ class AsyncLLM(EngineClient):
     def get_num_queued_tokens(self) -> int:
         return self.output_processor.get_num_queued_tokens()
 
+    def _purge_expired_admission_reservations(self) -> None:
+        """Drop preflight reservations whose request never handed over.
+
+        Must be called while holding ``_admission_lock``. A request that
+        reserved a slot at preflight but is then cancelled by the client
+        during (or errors out of) render would otherwise leak the slot
+        forever; age it out after a short TTL instead.
+        """
+        deadline = time.monotonic() - _ADMISSION_RESERVATION_TTL_S
+        while self._admission_reserved and self._admission_reserved[0] < deadline:
+            self._admission_reserved.popleft()
+
     def check_admission(self, n: int = 1, request_id: str | None = None) -> None:
         """Reject the request if it would exceed queue limits.
 
@@ -335,21 +362,52 @@ class AsyncLLM(EngineClient):
         """
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
         if max_num_reqs is not None:
-            current_requests = (
-                self.admission_stats.get_num_requests()
-                if self.admission_stats is not None
-                else self.get_num_unfinished_requests()
-            )
-            if current_requests + n > max_num_reqs:
-                logger.info(
-                    "Request queue full - rejecting request %s "
-                    "(current=%d, n=%d, max=%d).",
-                    request_id,
-                    current_requests,
-                    n,
-                    max_num_reqs,
+            with self._admission_lock:
+                # Drop reservations whose request never handed over (e.g. the
+                # client disconnected during render) so they stop counting.
+                self._purge_expired_admission_reservations()
+                current_requests = (
+                    self.admission_stats.get_num_requests()
+                    if self.admission_stats is not None
+                    else self.get_num_unfinished_requests()
                 )
-                raise QueueOverflowError()
+                reserved = len(self._admission_reserved)
+                if request_id is None:
+                    # Preflight (called before the request is rendered):
+                    # reserve ``n`` slots now so a burst cannot all slip past
+                    # the cap only to be rejected after paying the render cost.
+                    if current_requests + reserved + n > max_num_reqs:
+                        logger.info(
+                            "Request queue full - rejecting preflight %s "
+                            "(current=%d, reserved=%d, n=%d, max=%d).",
+                            request_id,
+                            current_requests,
+                            reserved,
+                            n,
+                            max_num_reqs,
+                        )
+                        raise QueueOverflowError()
+                    now = time.monotonic()
+                    self._admission_reserved.extend(now for _ in range(n))
+                else:
+                    # Hand-over: the request is about to be counted as an
+                    # unfinished request, so consume its preflight reservation
+                    # and let the slot move from ``reserved`` to ``unfinished``
+                    # rather than being double counted.
+                    for _ in range(min(n, reserved)):
+                        self._admission_reserved.popleft()
+                    reserved = len(self._admission_reserved)
+                    if current_requests + reserved + n > max_num_reqs:
+                        logger.info(
+                            "Request queue full - rejecting request %s "
+                            "(current=%d, reserved=%d, n=%d, max=%d).",
+                            request_id,
+                            current_requests,
+                            reserved,
+                            n,
+                            max_num_reqs,
+                        )
+                        raise QueueOverflowError()
 
         max_queued_tokens = self.scheduler_config.max_num_queued_tokens
         if max_queued_tokens is not None:
