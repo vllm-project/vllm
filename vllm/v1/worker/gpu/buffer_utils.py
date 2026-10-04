@@ -211,6 +211,7 @@ class StagedWriteTensor:
             and self.write_contents is not None
         ):
             self._staged_write_chunks.append(self._staged_write_contents)
+            # A view: `x` must stay unchanged until apply_write copies it.
             self._staged_write_chunks.append(np.frombuffer(x, dtype=np.int32))
             self._staged_write_contents = []
             self._staged_write_len += len(x)

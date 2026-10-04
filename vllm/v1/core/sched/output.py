@@ -55,7 +55,7 @@ class NewRequestData:
     prefill_token_ids: list[int] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
-    # Pickle the token-id lists as int32 arrays (v2 model runner).
+    # v2 model runner: workers receive the token-id lists as int32 arrays.
     pack_token_ids: bool = False
     # Request.packed_prompt_token_ids; not pickled.
     packed_prompt_token_ids: array | None = None
