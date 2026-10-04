@@ -8,6 +8,7 @@ Run `pytest tests/kernels/test_moe.py`.
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -35,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    RoutingMethodType,
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
@@ -59,7 +61,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize,
     marlin_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Static,
+    quantize_weights,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.triton_utils import tl
@@ -1395,6 +1400,58 @@ def test_humming_selects_gemm_from_parallelism_and_override(
     moe_config.moe_parallel_config.use_ep = use_ep
 
     assert get_humming_moe_gemm_type(moe_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("model_type", "capability", "all2all_backend", "indexed"),
+    [
+        ("deepseek_v41", 90, None, True),
+        ("deepseek_v41", 90, "allgather_reducescatter", True),
+        ("deepseek_v41", 90, "deepep_high_throughput", False),
+        ("deepseek_v41", 100, None, False),
+        ("deepseek_v4", 90, None, False),
+    ],
+)
+def test_humming_deepseek_v41_hopper_uses_indexed_gemm_with_ep(
+    monkeypatch: pytest.MonkeyPatch,
+    model_type: str,
+    capability: int,
+    all2all_backend: str | None,
+    indexed: bool,
+):
+    pytest.importorskip("humming")
+    import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+
+    monkeypatch.delenv("VLLM_HUMMING_MOE_GEMM_TYPE", raising=False)
+    monkeypatch.setattr(humming.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        humming.current_platform,
+        "is_device_capability",
+        lambda cap, device_id=0: cap == capability,
+    )
+    hf_config = SimpleNamespace(model_type=model_type)
+    monkeypatch.setattr(
+        humming,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config)),
+    )
+    moe_config = make_dummy_moe_config()
+    moe_config.routing_method = RoutingMethodType.DeepseekV4
+    moe_config.moe_parallel_config.use_ep = True
+    if all2all_backend is not None:
+        moe_config.moe_parallel_config.dp_size = 2
+        moe_config.moe_parallel_config.all2all_backend = all2all_backend
+
+    # Goes through the experts class so the weight key reaches the GEMM choice.
+    supported, _ = humming.HummingIndexedExperts.is_supported_config(
+        humming.HummingIndexedExperts,
+        moe_config,
+        kMxfp4Static,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    assert supported == indexed
 
 
 @pytest.mark.parametrize(
