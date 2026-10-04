@@ -481,6 +481,9 @@ Supported models:
 
 Flags: `--tool-call-parser qwen3_xml`
 
+When a custom structured-output grammar includes the reasoning or tool-call
+delimiters, see [Custom grammars and parser boundary tokens](structured_outputs.md#custom-grammars-and-parser-boundary-tokens).
+
 ### MiMo-V2.6 Models (`mimo`)
 
 Supported models:

@@ -216,6 +216,49 @@ See also: [full example](../../examples/features/structured_outputs/README.md)
     To do so, add the following flag when starting the vLLM server: `--structured-outputs-config.enable_in_reasoning=True`.
     See also: [Reasoning Outputs](reasoning_outputs.md) documentation.
 
+### Custom grammars and parser boundary tokens
+
+When a custom grammar includes reasoning or tool-call delimiters, its token
+constraints must agree with the configured parser. For example, the Qwen3
+streaming parser recognizes `<think>`, `</think>`, `<tool_call>`, and
+`</tool_call>` by their dedicated token IDs. A text EBNF literal with the same
+spelling can also accept a sequence of ordinary vocabulary tokens. Identical
+decoded text does not guarantee identical parsing: a tool invocation can remain
+in `reasoning` without producing `tool_calls`.
+
+For the XGrammar backend, use token-level structural-tag elements for these
+boundaries. For example, replace a text-only `</think>` element:
+
+```json
+{"type": "const_string", "value": "</think>"}
+```
+
+with the dedicated-token element:
+
+```json
+{"type": "token", "token": "</think>"}
+```
+
+Both can decode to `</think>`, but only the second requires its dedicated token
+ID. Apply the same replacement to any other Qwen3 parser boundary included in
+the grammar. Compose these elements with the rest of your grammar using a
+structural-tag `sequence`, and pass the complete structure through
+`structured_outputs.structural_tag` or `response_format.type="structural_tag"`.
+A token string is resolved against the configured tokenizer; if you use numeric
+IDs instead, resolve them from that same tokenizer rather than copying IDs from
+another model. See XGrammar's [token-level formats](https://xgrammar.mlc.ai/docs/latest/structural_tag/structural_tag.html#token-level-formats).
+
+Enabling `--structured-outputs-config.enable_in_reasoning=True` determines when
+constraints apply; it does not convert text literals into token-ID constraints.
+This requirement concerns grammars that include the protocol boundaries, not
+JSON schemas that constrain only the final answer or tool arguments.
+
+When diagnosing missing streamed calls, set `return_token_ids=true` and compare
+the emitted boundary IDs with the configured tokenizer's vocabulary. Do not
+infer those IDs by re-encoding the response text: multiple token sequences can
+decode to the same text. Also inspect the full sequence; an ordinary-token
+`</think>` alone does not establish that a call was lost.
+
 ## Experimental Automatic Parsing (OpenAI API)
 
 This section covers the OpenAI beta wrapper over the `client.chat.completions.create()` method that provides richer integrations with Python specific types.
