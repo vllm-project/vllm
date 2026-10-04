@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
+    _expected_m_with_actual_floor,
 )
 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
@@ -39,6 +40,12 @@ from .test_deepgemm import make_block_quant_fp8_weights
 from .utils import make_dummy_moe_config
 
 BLOCK_SIZE = [128, 128]
+
+
+def test_expected_m_covers_skewed_live_expert_count():
+    counts = torch.tensor([58, 7, 0], dtype=torch.int32)
+    assert _expected_m_with_actual_floor(16, counts) == 64
+    assert _expected_m_with_actual_floor(128, counts) == 128
 
 
 @pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
@@ -178,10 +185,10 @@ def test_deepep_ll_selects_batched_deepgemm_in_batch_invariant_mode(
 )
 def test_batched_deepgemm_needle_batch_invariance(workspace_init):
     """A routed token is bitwise stable across companions and expected_m."""
-
     import deep_gemm
+    from vllm.model_executor.determinism.batch_invariant import init_batch_invariance
+
     import vllm.envs as envs
-    from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
     assert BatchedDeepGemmExperts._supports_batch_invariance()
     E, K, N, topk = 8, 128, 256, 2
@@ -259,3 +266,4 @@ def test_batched_deepgemm_needle_batch_invariance(workspace_init):
 
     for actual in variants:
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+

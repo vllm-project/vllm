@@ -497,17 +497,11 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 
-        expected_m = self.estimate_expected_m(
-            global_num_experts=global_num_experts,
-            max_tokens_per_expert=max_num_tokens,
-            topk=topk_ids.size(-1),
-        )
-        # The metadata estimate assumes even expert load. DS4 hash routing can
-        # be substantially skewed, so that estimate may be smaller than the
-        # real masked M and select an invalid DeepGEMM launch shape. Preserve
-        # the estimate for tuning, but never let it understate live expert
-        # rows.
-        expected_m = _expected_m_with_actual_floor(expected_m, expert_num_tokens)
+        # Use the static padded capacity for tuning. Reading the live expert
+        # maximum with .item() synchronizes the CPU and invalidates CUDA Graph
+        # capture; the value only selects a DeepGEMM launch shape and does not
+        # change the masked rows or numerical computation.
+        expected_m = max_num_tokens
         w2_scale_guard = (
             self.w2_scale.clone()
             if os.environ.get("MLITE_VALIDATE_FINITE") == "1"

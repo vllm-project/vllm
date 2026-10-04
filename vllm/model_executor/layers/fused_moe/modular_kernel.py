@@ -271,14 +271,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return False
 
-<<<<<<< HEAD
     def supports_deferred_moe_finalize(self) -> bool:
         """Whether ``finalize`` can be skipped for a deferring consumer.
 
         An implementation opts in only if everything it does in ``finalize``
         -- the top-k reduction, and any combine or reduce-scatter -- is work
         the consumer takes over.
-=======
+        """
+        return False
+
     def supports_rank_synchronous_token_staging(self) -> bool:
         """Whether oversized local token batches may be split safely.
 
@@ -288,10 +289,11 @@ class FusedMoEPrepareAndFinalize(ABC):
         return False
 
     def on_commit(self) -> None:
->>>>>>> 6dda4c2b1 (fix(moe): stage oversized DeepEP low-latency prefills)
         """
-        return False
-
+        Runs after this prepare/finalize has been committed to the active
+        MoE kernel.
+        """
+        return
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
