@@ -16,8 +16,11 @@ from vllm.model_executor.models.qwen3_dflash import (
     _get_dflash_fc_input_size,
     dflash_has_any_non_causal,
 )
+from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
+    remap_cosmos3_edge_aux_layers,
+    set_eagle3_aux_hidden_state_layers,
 )
 
 
@@ -101,6 +104,67 @@ def test_dflash_fc_uses_aux_layer_count():
     )
 
     assert _get_dflash_fc_input_size(vllm_config) == 3 * 4096
+
+
+class _Eagle3Target(SupportsEagle3):
+    def __init__(self, model_type: str):
+        self.config = SimpleNamespace(model_type=model_type)
+        self.applied = None
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.applied = layers
+
+
+def _edge_spec_config():
+    return SimpleNamespace(
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                dflash_config={"target_layer_ids": [1, 7, 13, 19, 25]}
+            )
+        )
+    )
+
+
+def test_cosmos3_edge_declares_eagle3_on_split_backbone():
+    from vllm.model_executor.models.cosmos3_edge import (
+        Cosmos3EdgeForConditionalGeneration,
+        Cosmos3EdgeTextModel,
+    )
+    from vllm.transformers_utils.configs.cosmos3_edge import Cosmos3EdgeConfig
+
+    assert SupportsEagle3 in Cosmos3EdgeForConditionalGeneration.__mro__
+    assert issubclass(Cosmos3EdgeTextModel, EagleModelMixin)
+    config = Cosmos3EdgeConfig()
+    assert config.image_token_index == config.image_token_id == 19
+
+
+def test_set_eagle3_aux_layers_remaps_only_cosmos3_edge():
+    spec_config = _edge_spec_config()
+    edge = _Eagle3Target("cosmos3_edge")
+    qwen = _Eagle3Target("qwen3_vl")
+
+    set_eagle3_aux_hidden_state_layers(edge, spec_config)
+    set_eagle3_aux_hidden_state_layers(qwen, spec_config)
+
+    assert edge.applied == (4, 16, 28, 40, 52)
+    assert qwen.applied == (2, 8, 14, 20, 26)
+
+
+def test_cosmos3_edge_aux_layers_use_split_block_capture():
+    """Edge HF block ids stay in the draft config; runtime ids are 2*(i+1)."""
+    target_layer_ids = [1, 7, 13, 19, 25]
+    vllm_config = _vllm_config(dflash_config={"target_layer_ids": target_layer_ids})
+    qwen_ids = get_eagle3_aux_layers_from_config(vllm_config.speculative_config)
+    assert qwen_ids == (2, 8, 14, 20, 26)
+    assert (
+        remap_cosmos3_edge_aux_layers(
+            qwen_ids, SimpleNamespace(model_type="qwen3_vl")
+        )
+        == qwen_ids
+    )
+    assert remap_cosmos3_edge_aux_layers(
+        qwen_ids, SimpleNamespace(model_type="cosmos3_edge")
+    ) == (4, 16, 28, 40, 52)
 
 
 def test_dflash_target_layers_map_to_post_layer_boundaries():

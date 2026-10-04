@@ -128,6 +128,9 @@ class Cosmos3EdgeConfig(PreTrainedConfig):
         self.vision_config.out_hidden_size = self.projector_config.out_hidden_size
 
         self.image_token_id = image_token_id
+        # DFlash reads this name from the target config. Edge checkpoints
+        # store the image placeholder as image_token_id.
+        self.image_token_index = image_token_id
         self.video_token_id = video_token_id
         self.vision_start_token_id = vision_start_token_id
         self.vision_end_token_id = vision_end_token_id
