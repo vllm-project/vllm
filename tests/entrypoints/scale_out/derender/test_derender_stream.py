@@ -1280,7 +1280,15 @@ class TestDerenderChatStreamParsed:
         assert state.last_tool_call_ids == [first_id]
 
     @pytest.mark.asyncio
-    async def test_finish_reason_rewritten_to_tool_calls(self, parsed_derenderer):
+    @pytest.mark.parametrize(
+        ("engine_finish_reason", "expected_finish_reason"),
+        [("stop", "tool_calls"), ("length", "length")],
+    )
+    async def test_finish_reason_rewritten_to_tool_calls(
+        self, parsed_derenderer, engine_finish_reason, expected_finish_reason
+    ):
+        """A streamed tool call is reported as ``tool_calls`` only at a
+        natural stop; a ``length`` cut must stay visible."""
         chat_request = _chat_request(
             tools=[{"type": "function", "function": {"name": "get_weather"}}],
             tool_choice="auto",
@@ -1288,11 +1296,12 @@ class TestDerenderChatStreamParsed:
         chunk, _ = await parsed_derenderer.derender_chat_stream(
             model=MODEL_NAME,
             generate_chunk=_make_stream_chunk(
-                [_FakeParser.TOOL_START, _FakeParser.TOOL_ARG], finish_reason="stop"
+                [_FakeParser.TOOL_START, _FakeParser.TOOL_ARG],
+                finish_reason=engine_finish_reason,
             ),
             chat_request=chat_request,
         )
-        assert chunk.choices[0].finish_reason == "tool_calls"
+        assert chunk.choices[0].finish_reason == expected_finish_reason
 
     @pytest.mark.asyncio
     async def test_finish_reason_stop_for_named_tool_choice(self, parsed_derenderer):

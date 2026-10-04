@@ -51,6 +51,7 @@ from vllm.entrypoints.openai.responses.context import (
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseIncompleteEvent,
     ResponseRawMessageAndToken,
     ResponsesRequest,
     ResponsesResponse,
@@ -1410,6 +1411,7 @@ def _make_request_output(
     text,
     token_ids,
     metrics: RequestStateStats | None = None,
+    finish_reason: str | None = None,
 ):
     completion = CompletionOutput(
         index=0,
@@ -1417,7 +1419,7 @@ def _make_request_output(
         token_ids=token_ids,
         cumulative_logprob=0.0,
         logprobs=None,
-        finish_reason=None,
+        finish_reason=finish_reason,
         stop_reason=None,
     )
     return RequestOutput(
@@ -1437,10 +1439,11 @@ def _make_simple_context_with_output(
     token_ids,
     response_parser=None,
     metrics: RequestStateStats | None = None,
+    finish_reason: str | None = None,
 ):
     """Create a SimpleContext with a RequestOutput containing the given text."""
     ctx = SimpleContext(response_parser=response_parser)
-    req_output = _make_request_output(text, token_ids, metrics)
+    req_output = _make_request_output(text, token_ids, metrics, finish_reason)
     ctx.append_output(req_output)
     ctx.request_metrics = metrics
     return ctx
@@ -1555,6 +1558,42 @@ async def test_responses_streaming_metrics_only_on_completed_event():
     assert isinstance(events[-1], ResponseCompletedEvent)
     assert events[-1].response.metrics is not None
     assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_truncated_by_length_reports_incomplete():
+    """A max_output_tokens cut must end the stream with ``response.incomplete``
+    and mark the cut item ``incomplete`` in both ``output_item.done`` and the
+    final response (#57998)."""
+    serving = _make_serving_instance()
+    request = ResponsesRequest(input="hi", tools=[], stream=True, store=False)
+    context = _make_simple_context_with_output(
+        "cut mid sen", [10, 20], finish_reason="length"
+    )
+
+    async def one_context():
+        yield context
+
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=2),
+            result_generator=one_context(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    item_done = [e for e in events if e.type == "response.output_item.done"]
+    assert [e.item.status for e in item_done] == ["incomplete"]
+    final = events[-1]
+    assert isinstance(final, ResponseIncompleteEvent)
+    assert final.response.status == "incomplete"
+    assert final.response.incomplete_details.reason == "max_output_tokens"
+    assert [item.status for item in final.response.output] == ["incomplete"]
 
 
 @pytest.mark.asyncio

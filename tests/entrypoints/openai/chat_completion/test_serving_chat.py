@@ -42,6 +42,7 @@ from vllm.entrypoints.openai.models.serving import (
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.tool_calls_utils import resolve_finish_reason
 from vllm.exceptions import QueueOverflowError, VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.logprobs import Logprob
@@ -3041,3 +3042,137 @@ def test_chat_kv_transfer_prompt_token_ids_allows_text_only_parts():
         kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
     )
     assert request.kv_transfer_params == {"prompt_token_ids": [10, 20, 30]}
+
+
+_TOOL_FINISH_REASON_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+]
+_HERMES_TOOL_CALL_TEXT = (
+    '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Tokyo"}}\n</tool_call>'
+)
+
+
+_NAMED_WEATHER_TOOL_CHOICE = {"type": "function", "function": {"name": "get_weather"}}
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "engine_finish_reason", "tool_calls_made", "expected"),
+    [
+        ("auto", "stop", True, "tool_calls"),
+        ("auto", "length", True, "length"),
+        ("auto", "stop", False, "stop"),
+        ("required", "stop", True, "tool_calls"),
+        ("required", "stop", False, "stop"),
+        ("required", "length", True, "length"),
+        (_NAMED_WEATHER_TOOL_CHOICE, "stop", True, "stop"),
+        (_NAMED_WEATHER_TOOL_CHOICE, "length", True, "length"),
+        ("none", "stop", False, "stop"),
+        (None, None, False, "stop"),
+    ],
+)
+def test_resolve_finish_reason(
+    tool_choice, engine_finish_reason, tool_calls_made, expected
+):
+    """``tool_calls`` needs a real call, a natural stop and no forced tool;
+    ``length`` is never hidden behind a parsed call."""
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        tools=_TOOL_FINISH_REASON_TOOLS if tool_choice else None,
+        tool_choice=tool_choice,
+    )
+    assert (
+        resolve_finish_reason(engine_finish_reason, request, tool_calls_made)
+        == expected
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_choice", "text", "engine_finish_reason", "expected_finish_reason"),
+    [
+        ("auto", _HERMES_TOOL_CALL_TEXT, "stop", "tool_calls"),
+        ("auto", _HERMES_TOOL_CALL_TEXT, "length", "length"),
+        ("required", "Hello, how are you?", "stop", "stop"),
+        (_NAMED_WEATHER_TOOL_CHOICE, _HERMES_TOOL_CALL_TEXT, "stop", "stop"),
+    ],
+)
+async def test_non_streaming_finish_reason_matches_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_choice,
+    text: str,
+    engine_finish_reason: str,
+    expected_finish_reason: str,
+):
+    """Non-streaming ``finish_reason`` must agree with ``message.tool_calls``
+    and never hide a ``length`` truncation (#53255, #58228)."""
+    serving_chat = _build_serving_chat(
+        _build_mock_engine(), tool_parser="hermes", enable_auto_tools=True
+    )
+    # Parse required/named calls from the native <tool_call> format regardless
+    # of VLLM_ENFORCE_STRICT_TOOL_CALLING, so one text serves every case.
+    monkeypatch.setattr(
+        serving_chat.parser_cls.tool_parser_cls, "supports_required_and_named", False
+    )
+
+    tokenizer = get_tokenizer(MODEL_NAME)
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        tools=_TOOL_FINISH_REASON_TOOLS,
+        tool_choice=tool_choice,
+    )
+    parser = serving_chat.parser_cls(
+        tokenizer,
+        request.tools,
+        chat_template_kwargs=serving_chat._effective_chat_template_kwargs(request),
+        model_config=serving_chat.model_config,
+    )
+    request_output = RequestOutput(
+        request_id="test-req",
+        prompt="test",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text=text,
+                token_ids=tokenizer.encode(text, add_special_tokens=False),
+                cumulative_logprob=0.0,
+                logprobs=None,
+                finish_reason=engine_finish_reason,
+            )
+        ],
+        finished=True,
+    )
+
+    response = await serving_chat.chat_completion_full_generator(
+        request=request,
+        result_generator=_single_request_output(request_output),
+        request_id="test-req",
+        model_name=MODEL_NAME,
+        conversation=[],
+        tokenizer=tokenizer,
+        request_metadata=RequestResponseMetadata(
+            request_id="test-req", model_name=MODEL_NAME
+        ),
+        parser=parser,
+    )
+
+    assert isinstance(response, ChatCompletionResponse)
+    choice = response.choices[0]
+    assert choice.finish_reason == expected_finish_reason
+    assert bool(choice.message.tool_calls) == (text != "Hello, how are you?"), (
+        "finish_reason must reflect whether tool calls were emitted"
+    )

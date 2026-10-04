@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Literal
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
@@ -50,15 +50,29 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
+def response_item_status(
+    finish_reason: str | None,
+) -> Literal["completed", "incomplete"]:
+    """Status of the output item that ended a generation with ``finish_reason``."""
+    return "incomplete" if finish_reason == "length" else "completed"
+
+
 def build_response_output_items(
     reasoning: str | None,
     content: str | None,
     tool_calls: list[FunctionCall] | None,
     logprobs: list[Logprob] | None = None,
     tools: list[Tool] | None = None,
+    finish_reason: str | None = None,
 ) -> list[ResponseOutputItem]:
+    """Build the output items of one generation.
+
+    Only the last item can have been cut short, so ``finish_reason`` decides
+    that item's status and every earlier item is ``completed``.
+    """
     outputs: list[ResponseOutputItem] = []
     tool_call_name_map = build_responses_tool_call_name_map(tools)
+    last_item_status = response_item_status(finish_reason)
 
     if reasoning:
         outputs.append(
@@ -86,13 +100,14 @@ def build_response_output_items(
                     )
                 ],
                 role="assistant",
-                status="completed",
+                status="completed" if tool_calls else last_item_status,
                 type="message",
             )
         )
 
     if tool_calls:
         for idx, tool_call in enumerate(tool_calls):
+            is_last = idx == len(tool_calls) - 1
             call_name = resolve_responses_tool_call_name(
                 tool_call.name, tool_call_name_map=tool_call_name_map
             )
@@ -102,7 +117,7 @@ def build_response_output_items(
                     call_id=tool_call.id
                     or make_tool_call_id(func_name=tool_call.name, idx=idx),
                     type="function_call",
-                    status="completed",
+                    status=last_item_status if is_last else "completed",
                     name=call_name.name,
                     namespace=call_name.namespace,
                     arguments=tool_call.arguments,

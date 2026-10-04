@@ -53,6 +53,7 @@ from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_includ
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
+    resolve_finish_reason,
 )
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, MultiModalPlaceholders
@@ -486,11 +487,6 @@ class OpenAIServingChat(GenerateBaseServing):
         num_cache_creation_tokens = None
         tools_streamed = [False] * num_choices
 
-        if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
-            tool_choice_function_name = request.tool_choice.function.name
-        else:
-            tool_choice_function_name = None
-
         previous_texts = [""] * num_choices
 
         try:
@@ -763,25 +759,13 @@ class OpenAIServingChat(GenerateBaseServing):
                         self._raise_if_error(output.finish_reason, request_id)
 
                         # Send the finish response for each request.n only once
-                        # In OpenAI's API, when a tool is called, the
-                        # finish_reason is:
-                        # "tool_calls" for "auto" or "required" tool calls,
-                        # and "stop" for named tool calls.
-                        if (
-                            tools_streamed[i]
-                            and not tool_choice_function_name
-                            and output.finish_reason == "stop"
-                        ):
-                            finish_reason_ = "tool_calls"
-                        else:
-                            finish_reason_ = (
-                                output.finish_reason if output.finish_reason else "stop"
-                            )
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=delta_message,
                             logprobs=logprobs,
-                            finish_reason=finish_reason_,
+                            finish_reason=resolve_finish_reason(
+                                output.finish_reason, request, tools_streamed[i]
+                            ),
                             stop_reason=output.stop_reason,
                             token_ids=(
                                 as_list(output.token_ids) if include_token_ids else None
@@ -1014,7 +998,6 @@ class OpenAIServingChat(GenerateBaseServing):
                 tool_calls = []
                 suppress_metadata = False
 
-            auto_tools_called = False
             is_named_tool_choice = (
                 request.tool_choice is not None
                 and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
@@ -1057,7 +1040,6 @@ class OpenAIServingChat(GenerateBaseServing):
                 and self.enable_auto_tools
                 and tool_parser_cls
             ):
-                auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
                     message = self._create_chat_message(
                         role=role,
@@ -1094,15 +1076,6 @@ class OpenAIServingChat(GenerateBaseServing):
             # metadata cached on the reasoning parser.
             message = self._finalize_response_message(message, parser=parser)
 
-            # In OpenAI's API, when a tool is called, the finish_reason is:
-            # "tool_calls" for "auto" or "required" tool calls,
-            # and "stop" for named tool calls.
-            is_finish_reason_tool_calls = auto_tools_called or (
-                request.tool_choice
-                and request.tool_choice == "required"
-                and output.finish_reason == "stop"
-            )
-
             routed_experts_b64 = (
                 numpy2base64(output.routed_experts)
                 if output.routed_experts is not None
@@ -1113,11 +1086,9 @@ class OpenAIServingChat(GenerateBaseServing):
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
-                finish_reason="tool_calls"
-                if is_finish_reason_tool_calls
-                else output.finish_reason
-                if output.finish_reason
-                else "stop",
+                finish_reason=resolve_finish_reason(
+                    output.finish_reason, request, bool(message.tool_calls)
+                ),
                 stop_reason=output.stop_reason,
                 token_ids=(
                     as_list(output.token_ids)
