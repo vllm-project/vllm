@@ -67,9 +67,45 @@ cp -rL --no-preserve=ownership,timestamps "${SCRIPT_DIR}/." "${STAGED_DIR}/"
 chmod -R u+rwX "${STAGED_DIR}" 2>/dev/null || true
 export DISAGG_SCRIPTS_DIR="${STAGED_DIR}"
 echo "[slurm-submit] staged scripts for compute nodes: ${DISAGG_SCRIPTS_DIR}" >&2
+
+# ---- vLLM source overlays --------------------------------------------------
+# The container imports vLLM from the image's dist-packages, so a repo-side fix
+# never reaches a run on its own. Stage the files we need to override next to
+# the scripts; run_xPyD_disagg.slurm bind-mounts them over the image's copies.
+# Staging from the repo (rather than keeping a second copy in this directory)
+# keeps the repo the single source of truth.
+#   prepare_finalize/mori.py, all2all_utils.py and experts/rocm_aiter_moe.py --
+#   under MoRI, MXFP4 is dispatched as packed FP4 with e8m0 scales rather than
+#   FP8-quantized; AITER cannot quantize FP8 input to MXFP4.
+VLLM_REPO_ROOT="${VLLM_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
+_overlay_src="${VLLM_REPO_ROOT}/vllm/model_executor/layers/fused_moe/prepare_finalize/mori.py"
+if [[ -f "${_overlay_src}" ]]; then
+    mkdir -p "${STAGED_DIR}/overlays"
+    cp -L --no-preserve=ownership,timestamps "${_overlay_src}" \
+        "${STAGED_DIR}/overlays/fused_moe_prepare_finalize_mori.py"
+    echo "[slurm-submit] staged vLLM overlay: prepare_finalize/mori.py (MXFP4 FP4 dispatch)" >&2
+fi
+_aiter_src="${VLLM_REPO_ROOT}/vllm/model_executor/layers/fused_moe/experts/rocm_aiter_moe.py"
+if [[ -f "${_aiter_src}" ]]; then
+    mkdir -p "${STAGED_DIR}/overlays"
+    cp -L --no-preserve=ownership,timestamps "${_aiter_src}" \
+        "${STAGED_DIR}/overlays/fused_moe_experts_rocm_aiter_moe.py"
+    echo "[slurm-submit] staged vLLM overlay: experts/rocm_aiter_moe.py (MXFP4 FP4 dispatch)" >&2
+fi
+_a2a_utils_src="${VLLM_REPO_ROOT}/vllm/model_executor/layers/fused_moe/all2all_utils.py"
+if [[ -f "${_a2a_utils_src}" ]]; then
+    mkdir -p "${STAGED_DIR}/overlays"
+    cp -L --no-preserve=ownership,timestamps "${_a2a_utils_src}" \
+        "${STAGED_DIR}/overlays/fused_moe_all2all_utils.py"
+    echo "[slurm-submit] staged vLLM overlay: all2all_utils.py (MXFP4 FP4 dispatch)" >&2
+fi
 export IMAGE MODEL_NAME WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S
 export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE
 export ROUTER_TYPE ROUTER_PORT VLLM_ROUTER_IMAGE
+# Leave the image's own ionic userspace in place instead of mounting the host's.
+export SKIP_IONIC_MOUNTS
+# Bake a different repo.radeon.com ionic userspace channel into the run image.
+export AINIC_SWAP_CHANNEL
 
 # Model selection.
 [[ -n "${MODEL_NAME:-}" ]] && export MODEL_NAME
