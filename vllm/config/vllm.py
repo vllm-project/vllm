@@ -203,13 +203,18 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if rotary embedding custom op is active and
-    use_inductor_graph_partition is enabled.
-    """
-    from vllm._aiter_ops import rocm_aiter_ops
+    """Enable the RoPE + KV-cache fusion on supported GPU platforms."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        platform_supported = rocm_aiter_ops.is_enabled()
+    else:
+        platform_supported = current_platform.is_cuda()
 
     return (
-        rocm_aiter_ops.is_enabled()
+        platform_supported
         and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
         and (
             cfg.compilation_config.use_inductor_graph_partition
