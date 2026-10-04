@@ -1,15 +1,64 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
+import queue
+import threading
+from unittest.mock import MagicMock
+
+import msgspec
 import pytest
 import torch.cuda
 
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
-from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
+from vllm.v1.engine.core import EngineCore, EngineCoreProc, _decode_add_request
+from vllm.v1.serial_utils import MsgpackDecoder
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+
+
+def test_decode_error_does_not_stop_input_processing(
+    caplog: pytest.LogCaptureFixture,
+):
+    """The ADD decoder remains usable after dropping a malformed frame."""
+    malformed_request = msgspec.msgpack.encode(
+        ["bad", [1.5], None, None, None, 0.0, None, None, None]
+    )
+    valid_request = msgspec.msgpack.encode(
+        ["good", [1], None, None, None, 0.0, None, None, None]
+    )
+    decoder = MsgpackDecoder(EngineCoreRequest)
+
+    with caplog.at_level(logging.ERROR, logger="vllm.v1.engine.core"):
+        assert _decode_add_request(decoder, [malformed_request]) is None
+
+    request = _decode_add_request(decoder, [valid_request])
+    assert request is not None
+    assert request.request_id == "good"
+    assert request.prompt_token_ids == [1]
+    assert "Failed to deserialize ADD request" in caplog.text
+
+
+def test_input_socket_thread_failure_is_reported():
+    """An unexpected input-thread failure must reach the engine busy loop."""
+    engine_core = EngineCoreProc.__new__(EngineCoreProc)
+    engine_core.input_queue = queue.Queue()
+    engine_core.process_input_sockets = MagicMock(
+        side_effect=RuntimeError("socket failure")
+    )
+
+    engine_core._run_input_socket_thread([], None, b"engine", threading.Event())
+
+    request_type, request = engine_core.input_queue.get_nowait()
+    assert request_type == EngineCoreRequestType.INPUT_THREAD_FAILED
+    assert request is None
+
+    with pytest.raises(RuntimeError, match="Input socket thread failed"):
+        EngineCoreProc._handle_client_request(
+            engine_core, EngineCoreRequestType.INPUT_THREAD_FAILED, None
+        )
 
 
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):

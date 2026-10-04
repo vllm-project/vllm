@@ -108,6 +108,16 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
+def _decode_add_request(
+    decoder: MsgpackDecoder, data_frames: Sequence[bytestr]
+) -> EngineCoreRequest | None:
+    try:
+        return decoder.decode(data_frames)
+    except Exception:
+        logger.exception("Failed to deserialize ADD request; dropping it.")
+        return None
+
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -1176,7 +1186,7 @@ class EngineCoreProc(EngineCore):
             # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
             ready_event = threading.Event()
             input_thread = threading.Thread(
-                target=self.process_input_sockets,
+                target=self._run_input_socket_thread,
                 args=(
                     addresses.inputs,
                     addresses.coordinator_input,
@@ -1205,6 +1215,23 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
+
+    def _run_input_socket_thread(
+        self,
+        input_addresses: list[str],
+        coord_input_address: str | None,
+        identity: bytes,
+        ready_event: threading.Event,
+    ) -> None:
+        try:
+            self.process_input_sockets(
+                input_addresses, coord_input_address, identity, ready_event
+            )
+        except BaseException:
+            logger.exception("EngineCore input socket thread failed.")
+            self.input_queue.put_nowait(
+                (EngineCoreRequestType.INPUT_THREAD_FAILED, None)
+            )
 
     @contextmanager
     def _perform_handshakes(
@@ -1626,6 +1653,8 @@ class EngineCoreProc(EngineCore):
             self._invoke_utility_method(method_name, get_result, output, enqueue_output)
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
+        elif request_type == EngineCoreRequestType.INPUT_THREAD_FAILED:
+            raise RuntimeError("Input socket thread failed.")
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
@@ -1824,7 +1853,9 @@ class EngineCoreProc(EngineCore):
                     # Deserialize the request data.
                     request: Any
                     if request_type == EngineCoreRequestType.ADD:
-                        req: EngineCoreRequest = add_request_decoder.decode(data_frames)
+                        req = _decode_add_request(add_request_decoder, data_frames)
+                        if req is None:
+                            continue
                         try:
                             request = self.preprocess_add_request(req)
                         except MultiModalCacheMissError as e:
