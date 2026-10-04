@@ -115,3 +115,15 @@ def test_incomplete_peft_pair_fails_closed():
     )
     with pytest.raises(ValueError, match="Incomplete adapter A/B pair"):
         _converter(tensors, helper)
+
+
+def test_unpaired_dense_projection_fails_closed():
+    tensors = {
+        "model.layers.0.mlp.gate_proj.lora_A.weight": torch.ones(2, 5),
+        "model.layers.0.mlp.gate_proj.lora_B.weight": torch.ones(4, 2),
+    }
+    helper = PEFTHelper.from_dict(
+        {"r": 2, "lora_alpha": 4, "target_modules": ["gate_proj"]}
+    )
+    with pytest.raises(ValueError, match="Missing paired Inkling dense projection"):
+        _converter(tensors, helper)

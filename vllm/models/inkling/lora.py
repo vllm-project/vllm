@@ -93,12 +93,13 @@ def convert_inkling_lora(
             emit(f"{parent}.attn.{attention[projection]}", pair)
         elif name.endswith((".mlp.gate_proj", ".mlp.up_proj")):
             parent = name.rsplit(".", 1)[0]
-            gate = (
-                pair
-                if name.endswith(".gate_proj")
-                else pending.pop(parent + ".gate_proj")
+            other = parent + (
+                ".up_proj" if name.endswith(".gate_proj") else ".gate_proj"
             )
-            up = pair if name.endswith(".up_proj") else pending.pop(parent + ".up_proj")
+            if other not in pending:
+                raise ValueError(f"Missing paired Inkling dense projection: {other}")
+            gate = pair if name.endswith(".gate_proj") else pending.pop(other)
+            up = pair if name.endswith(".up_proj") else pending.pop(other)
             emit(parent + ".gate_up_proj", _pack_dense(gate, up))
         elif ".mlp.shared_experts" in name:
             parent, suffix = name.split(".shared_experts", 1)
