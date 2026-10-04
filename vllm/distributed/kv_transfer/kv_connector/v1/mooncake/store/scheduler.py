@@ -591,11 +591,9 @@ class MooncakeStoreScheduler:
             accepted: list[tuple[int, int, int]] = []
             for group_id, block_id, boundary_tokens in entries:
                 is_decode_boundary = boundary_tokens > tracker.prefill_end_tokens
-                if self.kv_role == "kv_consumer":
-                    # Store consumers save decode state only.
-                    if not is_decode_boundary:
-                        continue
-                elif is_decode_boundary and not self.save_decode_cache:
+                if is_decode_boundary and not self.save_decode_cache:
+                    continue
+                if not is_decode_boundary and self.kv_role == "kv_consumer":
                     continue
                 if block_id == NULL_BLOCK_ID:
                     continue

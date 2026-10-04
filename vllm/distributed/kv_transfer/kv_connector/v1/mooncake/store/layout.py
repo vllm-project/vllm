@@ -9,7 +9,7 @@ import hashlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import numpy as np
 import torch
@@ -22,6 +22,7 @@ from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
 def _schema_fingerprint(parts: tuple[object, ...]) -> str:
@@ -307,9 +308,9 @@ class TPShardedStoreLayout(StoreLayout):
             shard_id: PoolKey.build_prefix(metadata, tp_rank=shard_id)
             for shard_id in self.store_shard_ids
         }
-        self._chunk_addr_bases: list[np.ndarray] = []
-        self._chunk_block_strides: list[np.ndarray] = []
-        self._chunk_sizes: list[np.ndarray] = []
+        self._chunk_addr_bases: np.ndarray | list[np.ndarray] = []
+        self._chunk_block_strides: np.ndarray | list[np.ndarray] = []
+        self._chunk_sizes: np.ndarray | list[np.ndarray] = []
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
@@ -343,6 +344,10 @@ class TPShardedStoreLayout(StoreLayout):
             self._chunk_addr_bases.append(np.asarray(bases, dtype=np.uint64))
             self._chunk_block_strides.append(np.asarray(strides, dtype=np.uint64))
             self._chunk_sizes.append(np.asarray(sizes, dtype=np.uint64))
+        if len({chunk.shape for chunk in self._chunk_addr_bases}) == 1:
+            self._chunk_addr_bases = np.stack(self._chunk_addr_bases)
+            self._chunk_block_strides = np.stack(self._chunk_block_strides)
+            self._chunk_sizes = np.stack(self._chunk_sizes)
 
     def prepare_values(
         self,
@@ -356,6 +361,36 @@ class TPShardedStoreLayout(StoreLayout):
             raise ValueError("Each Store chunk must have one shard ID")
 
         first_shard = self.store_shard_ids[0]
+        # Small batches avoid NumPy indexing setup.
+        if len(chunks) > 16 and isinstance(self._chunk_addr_bases, np.ndarray):
+            starts, ends = np.asarray(chunks, dtype=np.int64).T
+            spans = ends - starts
+            if np.any(starts % self.store_chunk_size) or np.any(
+                (spans <= 0) | (spans > self.store_chunk_size)
+            ):
+                raise ValueError("Invalid Store chunk boundary")
+            block_indices, offsets = np.divmod(starts, self.block_size)
+            chunk_indices = offsets // self.store_chunk_size
+            local_shards = np.asarray(shard_ids, dtype=np.int64) - first_shard
+            if np.any((local_shards < 0) | (local_shards >= self.shards_per_rank)):
+                raise ValueError("Store shard is not owned by this TP rank")
+            if np.any(block_indices >= len(block_ids)):
+                raise ValueError("Store chunk has no local cache block")
+            selected_blocks = np.fromiter(
+                (block_ids[index] for index in block_indices.tolist()),
+                dtype=np.uint64,
+                count=len(chunks),
+            )
+            bases = self._chunk_addr_bases[chunk_indices, local_shards]
+            strides = cast(np.ndarray, self._chunk_block_strides)[
+                chunk_indices, local_shards
+            ]
+            batch_sizes = cast(np.ndarray, self._chunk_sizes)[
+                chunk_indices, local_shards
+            ]
+            batch_addrs = bases + selected_blocks[:, None] * strides
+            return batch_addrs.tolist(), batch_sizes.tolist(), selected_blocks.tolist()
+
         addrs: list[list[int]] = []
         sizes: list[list[int]] = []
         selected_block_ids: list[int] = []
@@ -637,6 +672,16 @@ class TokenMajorStoreLayout(AttentionStoreLayout):
                 + head_start * cache.head_stride,
                 self.heads_per_store_shard * cache.content_bytes,
             )
+
+
+ATTENTION_STORE_LAYOUTS: dict[KVCacheLayout, type[AttentionStoreLayout]] = {
+    KVCacheLayout.LBHNC: HeadMajorStoreLayout,
+    KVCacheLayout.LBNHC: TokenMajorStoreLayout,
+    KVCacheLayout.BLHNC: HeadMajorStoreLayout,
+    KVCacheLayout.BLNHC: TokenMajorStoreLayout,
+    KVCacheLayout.LHBNC: HeadMajorStoreLayout,
+    KVCacheLayout.BHLNC: HeadMajorStoreLayout,
+}
 
 
 class MambaStoreLayout(TPShardedStoreLayout):

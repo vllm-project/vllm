@@ -53,8 +53,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+    ATTENTION_STORE_LAYOUTS,
     AttentionStoreLayout,
-    HeadMajorStoreLayout,
     KeyMetadata,
     MambaStoreLayout,
     PoolKey,
@@ -93,7 +93,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     group_kernel_blocks,
 )
-from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from .metrics import MooncakeStoreConnectorStats
 
@@ -159,32 +158,6 @@ def resolve_store_chunk_size(extra_config: dict[str, Any]) -> int | None:
         if type(store_chunk_size) is int and store_chunk_size > 0
         else None
     )
-
-
-def _spec_tp_replication_factor(
-    spec: KVCacheSpec,
-    tp_size: int,
-    num_kv_heads: int,
-    dcp_size: int,
-) -> int:
-    if dcp_size > 1:
-        return 1
-    inner_specs = (
-        tuple(spec.kv_cache_specs.values())
-        if isinstance(spec, UniformTypeKVCacheSpecs)
-        else (spec,)
-    )
-    if any(isinstance(inner, MambaSpec) for inner in inner_specs):
-        return 1
-    factors = [
-        (
-            tp_size
-            if isinstance(inner, (MLAAttentionSpec, SlidingWindowMLASpec))
-            else max(1, tp_size // num_kv_heads)
-        )
-        for inner in inner_specs
-    ]
-    return min(factors, default=1)
 
 
 def _resolve_attention_store_chunk(
@@ -1837,14 +1810,7 @@ class MooncakeStoreWorker:
             self.requested_store_chunk_size = prefix_match_unit
 
         cache_layout = self.cache_config.get_resolved_kv_cache_layout()
-        store_layout_cls: type[AttentionStoreLayout] | None = {
-            KVCacheLayout.LBHNC: HeadMajorStoreLayout,
-            KVCacheLayout.LBNHC: TokenMajorStoreLayout,
-            KVCacheLayout.BLHNC: HeadMajorStoreLayout,
-            KVCacheLayout.BLNHC: TokenMajorStoreLayout,
-            KVCacheLayout.LHBNC: HeadMajorStoreLayout,
-            KVCacheLayout.BHLNC: HeadMajorStoreLayout,
-        }.get(cache_layout)
+        store_layout_cls = ATTENTION_STORE_LAYOUTS.get(cache_layout)
 
         fallback_reason: str | None = None
         if requested_store_tp_size is None:
@@ -2072,12 +2038,24 @@ class MooncakeStoreWorker:
         return torch.cuda.use_mem_pool(self._mem_pool)
 
     def _spec_tp_replication_factor(self, spec: KVCacheSpec) -> int:
-        return _spec_tp_replication_factor(
-            spec,
-            self.tp_size,
-            self.num_kv_head,
-            self.dcp_size,
+        if self.dcp_size > 1:
+            return 1
+        inner_specs = (
+            tuple(spec.kv_cache_specs.values())
+            if isinstance(spec, UniformTypeKVCacheSpecs)
+            else (spec,)
         )
+        if any(isinstance(inner, MambaSpec) for inner in inner_specs):
+            return 1
+        factors = [
+            (
+                self.tp_size
+                if isinstance(inner, (MLAAttentionSpec, SlidingWindowMLASpec))
+                else max(1, self.tp_size // self.num_kv_head)
+            )
+            for inner in inner_specs
+        ]
+        return min(factors, default=1)
 
     def _compute_group_tp_replication_factors(self) -> tuple[int, ...]:
         return tuple(

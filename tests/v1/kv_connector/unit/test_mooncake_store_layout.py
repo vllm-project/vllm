@@ -543,6 +543,48 @@ def test_attention_store_chunk_is_independent_of_k3_local_pages():
     assert len(fingerprints) == 1
 
 
+@pytest.mark.parametrize("layout_cls", [HeadMajorStoreLayout, TokenMajorStoreLayout])
+@pytest.mark.parametrize("chunk_size", [3, 4])
+def test_chunk_descriptors_preserve_order_across_kernel_blocks(layout_cls, chunk_size):
+    cache = torch.empty((3, 3, 4, 4, 4), dtype=torch.float16)
+    if layout_cls is TokenMajorStoreLayout:
+        cache = cache.transpose(2, 3)
+    cache.copy_(torch.arange(cache.numel(), dtype=cache.dtype).reshape(cache.shape))
+    layout = layout_cls(
+        KeyMetadata("test-model", 1, 0, 0, 0),
+        block_size=12,
+        hash_block_size=1,
+        local_tp_size=2,
+        store_tp_size=4,
+        tp_rank=1,
+        layer_specs=_attention_specs(1, 12, 4),
+        store_chunk_size=chunk_size,
+    )
+    layout.register_kv_caches([cache], 3)
+    starts = [12 + chunk_size, 0, 24 + 2 * chunk_size, 12 + chunk_size] * 8
+    shards = [3, 2, 3, 3] * 8
+    chunks = [(start, start + chunk_size) for start in starts]
+    addrs, sizes, blocks = layout.prepare_values(chunks, [2, 0, 1], shards)
+
+    assert blocks == [0, 2, 1, 0] * 8
+    assert layout.prepare_values(chunks[:4], [2, 0, 1], shards[:4]) == (
+        addrs[:4],
+        sizes[:4],
+        blocks[:4],
+    )
+    for start, shard, block, addresses, lengths in zip(
+        starts, shards, blocks, addrs, sizes, strict=True
+    ):
+        logical = cache[block].permute(1, 0, 2, 3).reshape(4, 12, 4)
+        head_start = (shard - 2) * 2
+        offset = start % 12
+        expected = logical[head_start : head_start + 2, offset : offset + chunk_size]
+        if layout_cls is TokenMajorStoreLayout:
+            expected = expected.transpose(0, 1)
+        expected_bytes = expected.contiguous().numpy().tobytes()
+        assert _read_segments(addresses, lengths) == expected_bytes
+
+
 def test_tp_shared_layout_handles_kernel_blocked_compressed_states():
     from vllm.v1.kv_cache_interface import MLAAttentionSpec, group_kernel_blocks
 
