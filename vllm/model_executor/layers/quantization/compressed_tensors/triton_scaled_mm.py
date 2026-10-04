@@ -187,6 +187,13 @@ def triton_scaled_mm(
     use_heuristic=True,
     use_td: bool | None = None,
 ) -> torch.Tensor:
+    # Flatten the leading dims of rank > 2 inputs (e.g. the Whisper encoder's
+    # [batch, seq, hidden] activation) so the 2D kernel can run, then restore
+    # them on the result. See #56024.
+    target_shape = (*input.shape[:-1], weight.shape[1])
+    if input.dim() > 2:
+        input = input.reshape(-1, input.shape[-1])
+
     M, K = input.shape
     N = weight.shape[1]
 
@@ -279,4 +286,4 @@ def triton_scaled_mm(
         B_T=b_t,
     )
 
-    return result.to(out_dtype)
+    return result.to(out_dtype).reshape(*target_shape)
