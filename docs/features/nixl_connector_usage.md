@@ -412,6 +412,35 @@ Support use case: Prefill with `LBHNC` and decode with `LBNHC` with experimental
 
 ## Metrics Reference
 
+### Metrics aggregation
+
+NIXL KV transfer statistics are collected independently by each vLLM
+worker. When multiple workers are used, the statistics are aggregated
+across workers before the `KV Transfer metrics` log line is generated.
+
+Aggregation combines the underlying observations from all workers rather
+than averaging already-reduced per-worker statistics. For example, if two
+workers record 2 and 4 successful transfers respectively, the aggregated
+statistics contain 6 successful transfers.
+
+The average transfer time, average post time, and average number of
+descriptors are calculated from the combined observations across all
+workers. P90 transfer and post times are also calculated from the combined
+observations.
+
+For transfer volume, `Avg MB per transfer` is calculated from the total
+bytes transferred divided by the total number of successful transfers.
+`Throughput (MB/s)` is calculated from the total bytes transferred divided
+by the total transfer duration.
+
+Failure and expiration counts are aggregated as counts across workers.
+Transfer, handshake, and notification failures are grouped together as
+`Num failed transfers`, while KV expiration events are reported
+separately as `Num KV expired reqs`.
+
+These aggregated observations are reduced to the CLI-friendly metrics
+shown in the `KV Transfer metrics` log line.
+
 vLLM periodically logs a `KV Transfer metrics` line summarising NIXL transfer
 activity for the last reporting interval. Example output:
 
