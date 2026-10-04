@@ -109,7 +109,29 @@ def maybe_model_redirect(model: str) -> str:
 
 def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
     with open(path, "rb") as f:
-        length_of_metadata = struct.unpack("<Q", f.read(8))[0]
+        header_length = f.read(8)
+        if len(header_length) != 8:
+            raise ValueError(
+                f"Invalid safetensors file {path}: header length is shorter than "
+                "8 bytes. The checkpoint may be incomplete; please re-download it."
+            )
+        length_of_metadata = struct.unpack("<Q", header_length)[0]
+        remaining_size = os.fstat(f.fileno()).st_size - 8
+        # Validate the untrusted length before using it to size a read.
+        if length_of_metadata > remaining_size:
+            lfs_prefix = b"version https://git-lfs.github.com/spec/v1"
+            f.seek(0)
+            if f.read(len(lfs_prefix)) == lfs_prefix:
+                raise ValueError(
+                    f"Invalid safetensors file {path}: found a Git LFS pointer "
+                    "instead of model weights. Download the checkpoint with "
+                    "'git lfs pull' or a Hugging Face download tool."
+                )
+            raise ValueError(
+                f"Invalid safetensors file {path}: metadata header declares "
+                f"{length_of_metadata} bytes, but only {remaining_size} bytes remain. "
+                "The checkpoint may be incomplete; please re-download it."
+            )
         metadata = json.loads(f.read(length_of_metadata).decode("utf-8"))
         return metadata
 
