@@ -53,6 +53,7 @@ pub struct CollectedGenerateOutput {
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics from the terminal output.
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    pub weight_version: Option<String>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -170,6 +171,7 @@ pub struct GenerateOutput {
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics, present on terminal outputs.
     pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+    pub weight_version: Option<String>,
 }
 
 impl GenerateOutput {
@@ -220,6 +222,7 @@ impl GenerateOutput {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_version: None,
         }
     }
 }
@@ -327,6 +330,7 @@ impl Stream for GenerateOutputStream {
             ec_transfer_params: raw.ec_transfer_params,
             sampling_mask,
             spec_decode_metrics: raw.spec_decode_metrics,
+            weight_version: raw.weight_version,
         };
 
         Poll::Ready(Some(Ok(output)))
@@ -421,6 +425,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         ec_transfer_params: None,
                         sampling_mask,
                         spec_decode_metrics: None,
+                        weight_version: output.weight_version.clone(),
                     });
                 }
 
@@ -435,6 +440,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                     collected.kv_transfer_params = output.kv_transfer_params;
                     collected.ec_transfer_params = output.ec_transfer_params;
                     collected.spec_decode_metrics = output.spec_decode_metrics;
+                    collected.weight_version = output.weight_version;
                     if let Some(mask) = collected.sampling_mask.as_ref()
                         && mask.rows.len() != collected.token_ids.len()
                     {

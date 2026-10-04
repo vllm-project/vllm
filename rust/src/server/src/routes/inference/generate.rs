@@ -170,10 +170,12 @@ async fn generate_chunk_stream(
     let mut prompt_token_ids = None;
     let mut usage = TokenUsage::default();
     let mut spec_decode_metrics = None;
+    let mut weight_version = None;
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
+                weight_version = output.weight_version.clone();
                 if let Some(metrics) = output.spec_decode_metrics {
                     spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(metrics));
                 }
@@ -238,6 +240,7 @@ async fn generate_chunk_stream(
                     mm_placeholders: prompt_token_ids.as_ref().and_then(|_| mm_placeholders.take()),
                     prompt_token_ids,
                     metrics: None,
+                    weight_version: output.weight_version,
                 })
                 .await;
             }
@@ -263,6 +266,7 @@ async fn generate_chunk_stream(
                     speculative_decoding,
                 ),
             }),
+            weight_version,
         })
         .await;
     }
@@ -347,6 +351,7 @@ fn collect_generate(
         metrics: collected.spec_decode_metrics.map(|metrics| PerRequestMetrics {
             speculative_decoding: SpeculativeDecodingMetrics::from(metrics),
         }),
+        weight_version: collected.weight_version,
     })
 }
 
@@ -537,6 +542,7 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
+                weight_version: None,
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
@@ -553,6 +559,7 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
+                weight_version: Some("step-2".to_string()),
             }),
         ]);
 
@@ -583,6 +590,8 @@ mod tests {
         .expect("collect chunks");
 
         assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].weight_version.as_deref(), Some("step-2"));
+        assert_eq!(chunks[1].weight_version.as_deref(), Some("step-2"));
         assert_eq!(chunks[0].prompt_token_ids, Some(vec![11, 22]));
         assert_eq!(chunks[0].mm_placeholders, Some(mm_placeholders));
         assert!(chunks[1].prompt_token_ids.is_none());
@@ -637,6 +646,7 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_version: None,
         }
     }
 
@@ -670,6 +680,19 @@ mod tests {
         let chunks = collect_chunks(vec![output], false, None).await;
 
         assert_eq!(chunks[0].choices[0].sampling_mask, Some(vec![vec![33, 44]]));
+    }
+
+    #[tokio::test]
+    async fn generate_chunk_stream_tracks_weight_updates() {
+        let mut first = stream_output(Some(&[11]), vec![33], None);
+        first.weight_version = Some("step-1".to_string());
+        let mut second = stream_output(None, vec![44], Some(FinishReason::Length));
+        second.weight_version = Some("step-2".to_string());
+
+        let chunks = collect_chunks(vec![first, second], false, None).await;
+
+        assert_eq!(chunks[0].weight_version.as_deref(), Some("step-1"));
+        assert_eq!(chunks[1].weight_version.as_deref(), Some("step-2"));
     }
 
     #[tokio::test]
@@ -811,6 +834,7 @@ mod tests {
                 rows: vec![vec![30, 40]],
             }),
             spec_decode_metrics: None,
+            weight_version: Some("step-2".to_string()),
         };
 
         let response = collect_generate(
@@ -828,6 +852,7 @@ mod tests {
         )
         .expect("response");
 
+        assert_eq!(response.weight_version.as_deref(), Some("step-2"));
         assert!(response.prompt_token_ids.is_none());
         assert!(response.mm_placeholders.is_none());
         assert_eq!(response.choices[0].sampling_mask, Some(vec![vec![30, 40]]));
@@ -865,6 +890,7 @@ mod tests {
             prompt_token_ids: vec![10],
             sampling_mask: None,
             spec_decode_metrics: Some(metrics.clone()),
+            weight_version: None,
         };
 
         let response = collect_generate(
@@ -957,6 +983,7 @@ mod tests {
             prompt_token_ids: vec![10, 20],
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_version: None,
         };
 
         let response = collect_generate(
@@ -992,6 +1019,7 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_version: None,
             prompt_token_ids,
         };
 
