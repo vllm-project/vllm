@@ -5,8 +5,21 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tool_parsers.functiongemma_tool_parser import FunctionGemmaToolParser
+
+WEATHER_CALL_TEXT = (
+    "<start_function_call>call:get_weather{location:<escape>London<escape>}"
+    "<end_function_call>"
+)
+TIME_CALL_TEXT = (
+    "<start_function_call>call:get_time{timezone:<escape>UTC<escape>}"
+    "<end_function_call>"
+)
+WEATHER_CALL = FunctionCall(name="get_weather", arguments='{"location": "London"}')
+TIME_CALL = FunctionCall(name="get_time", arguments='{"timezone": "UTC"}')
 
 
 @pytest.fixture
@@ -41,11 +54,7 @@ class TestExtractToolCalls:
         assert result.content == model_output
 
     def test_single_tool_call(self, parser, mock_request):
-        model_output = (
-            "<start_function_call>call:get_weather{location:<escape>London<escape>}"
-            "<end_function_call>"
-        )
-        result = parser.extract_tool_calls(model_output, mock_request)
+        result = parser.extract_tool_calls(WEATHER_CALL_TEXT, mock_request)
 
         assert result.tools_called is True
         assert len(result.tool_calls) == 1
@@ -80,13 +89,9 @@ class TestExtractToolCalls:
         assert result.content == "Let me check the weather for you."
 
     def test_multiple_tool_calls(self, parser, mock_request):
-        model_output = (
-            "<start_function_call>call:get_weather{location:<escape>London<escape>}"
-            "<end_function_call>"
-            "<start_function_call>call:get_time{timezone:<escape>UTC<escape>}"
-            "<end_function_call>"
+        result = parser.extract_tool_calls(
+            WEATHER_CALL_TEXT + TIME_CALL_TEXT, mock_request
         )
-        result = parser.extract_tool_calls(model_output, mock_request)
 
         assert result.tools_called is True
         assert len(result.tool_calls) == 2
@@ -137,6 +142,69 @@ class TestAdjustRequest:
 
         result = parser.adjust_request(mock_request)
         assert result.skip_special_tokens is True
+
+
+class TestExtractToolCallsStreaming:
+    def test_tool_call_split_across_deltas(self, parser):
+        deltas = [
+            "<start_function_call>",
+            "call:get_weather{",
+            "location:<escape>London<escape>",
+            "}",
+            "<end_function_call>",
+        ]
+        reconstructor = run_tool_extraction_streaming(parser, deltas)
+
+        assert len(reconstructor.tool_calls) == 1
+        assert reconstructor.tool_calls[0].function == WEATHER_CALL
+
+    def test_whole_tool_call_in_single_delta(self, parser):
+        reconstructor = run_tool_extraction_streaming(parser, [WEATHER_CALL_TEXT])
+
+        assert len(reconstructor.tool_calls) == 1
+        assert reconstructor.tool_calls[0].function == WEATHER_CALL
+
+    def test_parallel_tool_calls_in_single_delta(self, parser):
+        reconstructor = run_tool_extraction_streaming(
+            parser,
+            [WEATHER_CALL_TEXT + TIME_CALL_TEXT],
+            assert_one_tool_per_delta=False,
+        )
+
+        assert len(reconstructor.tool_calls) == 2
+        assert reconstructor.tool_calls[0].function == WEATHER_CALL
+        assert reconstructor.tool_calls[1].function == TIME_CALL
+
+    def test_second_tool_call_in_single_delta(self, parser):
+        deltas = [
+            "<start_function_call>",
+            "call:get_weather{",
+            "location:<escape>London<escape>}",
+            "<end_function_call>",
+            TIME_CALL_TEXT,
+        ]
+        reconstructor = run_tool_extraction_streaming(parser, deltas)
+
+        assert len(reconstructor.tool_calls) == 2
+        assert reconstructor.tool_calls[0].function == WEATHER_CALL
+        assert reconstructor.tool_calls[1].function == TIME_CALL
+
+    def test_tool_call_closed_and_next_call_in_same_delta(self, parser):
+        deltas = [
+            "<start_function_call>",
+            "call:get_weather{",
+            "location:<escape>London<escape>}<end_function_call>" + TIME_CALL_TEXT,
+        ]
+        # The last delta both finishes the first call and carries the whole second
+        # one, so a single update has to report both, as other parsers do when
+        # several calls land in one delta.
+        reconstructor = run_tool_extraction_streaming(
+            parser, deltas, assert_one_tool_per_delta=False
+        )
+
+        assert len(reconstructor.tool_calls) == 2
+        assert reconstructor.tool_calls[0].function == WEATHER_CALL
+        assert reconstructor.tool_calls[1].function == TIME_CALL
 
 
 class TestBufferDeltaText:

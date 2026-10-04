@@ -163,6 +163,64 @@ class FunctionGemmaToolParser(ToolParser):
         self.buffered_delta_text = ""
         return combined
 
+    def _start_tool_call(
+        self, func_name: str, arguments: str | None = None
+    ) -> DeltaToolCall:
+        self.current_tool_name_sent = True
+        return DeltaToolCall(
+            index=self.current_tool_id,
+            type="function",
+            id=make_tool_call_id(),
+            function=DeltaFunctionCall(name=func_name, arguments=arguments).model_dump(
+                exclude_none=True
+            ),
+        )
+
+    def _flush_completed_calls(
+        self, current_text: str, end_count: int
+    ) -> list[DeltaToolCall]:
+        """Emit deltas for completed calls, opening any that were never started."""
+        all_calls = self.tool_call_regex.findall(current_text)
+        tool_calls: list[DeltaToolCall] = []
+
+        for index in range(max(self.current_tool_id, 0), end_count):
+            if index >= len(all_calls) or not all_calls[index][0]:
+                continue
+
+            # A call that arrives complete within a single delta never reaches the
+            # branches that open a call, since both need start_count > end_count.
+            if index > self.current_tool_id:
+                self.current_tool_id = index
+                self.current_tool_name_sent = False
+                while len(self.prev_tool_call_arr) <= index:
+                    self.streamed_args_for_tool.append("")
+                    self.prev_tool_call_arr.append({})
+
+            func_name, args_str = all_calls[index][0], all_calls[index][1]
+            args = self._parse_arguments(args_str)
+            self.prev_tool_call_arr[index] = {"name": func_name, "arguments": args}
+
+            args_json = json.dumps(args, ensure_ascii=False) if args else ""
+            prev_streamed = self.streamed_args_for_tool[index]
+            diff = ""
+            if len(args_json) > len(prev_streamed):
+                diff = args_json[len(prev_streamed) :]
+                self.streamed_args_for_tool[index] = args_json
+
+            if not self.current_tool_name_sent:
+                tool_calls.append(self._start_tool_call(func_name, diff or None))
+            elif diff:
+                tool_calls.append(
+                    DeltaToolCall(
+                        index=index,
+                        function=DeltaFunctionCall(arguments=diff).model_dump(
+                            exclude_none=True
+                        ),
+                    )
+                )
+
+        return tool_calls
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -192,12 +250,15 @@ class FunctionGemmaToolParser(ToolParser):
 
             # Starting a new function call
             if start_count > prev_start_count and start_count > end_count:
+                # A delta can close one call and open the next, so flush whatever
+                # finished before the bookkeeping below moves on.
+                tool_calls = self._flush_completed_calls(current_text, end_count)
                 self.current_tool_id += 1
                 self.current_tool_name_sent = False
                 self.streamed_args_for_tool.append("")
                 self.prev_tool_call_arr.append({})
                 logger.debug("Starting new tool call %d", self.current_tool_id)
-                return None
+                return DeltaMessage(tool_calls=tool_calls) if tool_calls else None
 
             # In the middle of a function call
             if start_count > end_count:
@@ -216,22 +277,12 @@ class FunctionGemmaToolParser(ToolParser):
                         )
 
                         if not self.current_tool_name_sent and func_name:
-                            self.current_tool_name_sent = True
                             self.prev_tool_call_arr[self.current_tool_id] = {
                                 "name": func_name,
                                 "arguments": {},
                             }
                             return DeltaMessage(
-                                tool_calls=[
-                                    DeltaToolCall(
-                                        index=self.current_tool_id,
-                                        type="function",
-                                        id=make_tool_call_id(),
-                                        function=DeltaFunctionCall(
-                                            name=func_name
-                                        ).model_dump(exclude_none=True),
-                                    )
-                                ]
+                                tool_calls=[self._start_tool_call(func_name)]
                             )
 
                         if self.current_tool_name_sent and args_part:
@@ -268,41 +319,8 @@ class FunctionGemmaToolParser(ToolParser):
 
             # Function call just ended
             if end_count > prev_end_count:
-                if self.current_tool_id >= 0 and self.current_tool_id < len(
-                    self.prev_tool_call_arr
-                ):
-                    all_calls = self.tool_call_regex.findall(current_text)
-                    args = {}
-                    if self.current_tool_id < len(all_calls):
-                        match = all_calls[self.current_tool_id]
-                        if match[0]:
-                            args_str = match[1]
-                            args = self._parse_arguments(args_str)
-                            self.prev_tool_call_arr[self.current_tool_id][
-                                "arguments"
-                            ] = args
-
-                    if args:
-                        args_json = json.dumps(args, ensure_ascii=False)
-                        prev_streamed = self.streamed_args_for_tool[
-                            self.current_tool_id
-                        ]
-                        if len(args_json) > len(prev_streamed):
-                            diff = args_json[len(prev_streamed) :]
-                            self.streamed_args_for_tool[self.current_tool_id] = (
-                                args_json
-                            )
-                            return DeltaMessage(
-                                tool_calls=[
-                                    DeltaToolCall(
-                                        index=self.current_tool_id,
-                                        function=DeltaFunctionCall(
-                                            arguments=diff
-                                        ).model_dump(exclude_none=True),
-                                    )
-                                ]
-                            )
-                return None
+                tool_calls = self._flush_completed_calls(current_text, end_count)
+                return DeltaMessage(tool_calls=tool_calls) if tool_calls else None
 
             if delta_text:
                 return DeltaMessage(content=delta_text)
