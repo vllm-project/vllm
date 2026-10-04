@@ -234,6 +234,7 @@ class StreamingParserEngine:
         if (
             delta_text
             and not self._lexer.buffer
+            and not self._lexer.pending_token_count
             and not self._scanner._deferred_terminals
             and self._lexer._literal_first_chars.isdisjoint(delta_text)
         ):
@@ -277,18 +278,11 @@ class StreamingParserEngine:
                 events.extend(self._process_lex_tokens(self._lexer.flush()))
                 events.extend(self._on_terminal(item.terminal, item.text))
             elif isinstance(item, TextChunk):
-                if not item.text and item.token_count:
-                    events.extend(
-                        self._emit_for_state("", token_count=item.token_count)
+                events.extend(
+                    self._process_lex_tokens(
+                        self._lexer.feed(item.text, item.token_texts, item.token_count)
                     )
-                else:
-                    events.extend(
-                        self._process_lex_tokens(
-                            self._lexer.feed(
-                                item.text, item.token_texts, item.token_count
-                            )
-                        )
-                    )
+                )
         return events
 
     def finish(self) -> list[SemanticEvent]:
@@ -511,7 +505,7 @@ class StreamingParserEngine:
         return []
 
     def _on_content(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
-        if not text:
+        if not text and not token_count:
             return []
         return self._emit_for_state(text, token_count)
 
