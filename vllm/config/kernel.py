@@ -232,7 +232,7 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
-    enable_rocm_segmented_attn_autotune: bool = True
+    enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 
     # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
