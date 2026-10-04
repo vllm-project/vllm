@@ -149,7 +149,16 @@ class StreamingParserEngine:
             resolved_token_ids.values()
         )
 
-        self._lexer = IncrementalLexer(lexer_shape, content_terminal=CONTENT_TERMINAL)
+        self._fence_terminal = config.fence_terminal or ""
+        self._fence_chars = (
+            frozenset(config.fence_characters) if self._fence_terminal else frozenset()
+        )
+        self._lexer = IncrementalLexer(
+            lexer_shape,
+            content_terminal=CONTENT_TERMINAL,
+            fence_chars=self._fence_chars,
+            fence_terminal=self._fence_terminal,
+        )
 
         self._tool_terminals: frozenset[str] = frozenset(
             terminal
@@ -218,6 +227,12 @@ class StreamingParserEngine:
         self._message_header_buffer = ""
         self._message_header_token_count = 0
         self._in_skipped_tool_span = False
+        self._fence_char: str | None = None
+        self._fence_len = 0
+        self._fence_reasoning = False
+        self._fence_close_candidate = False
+        self._at_line_start = True
+        self._line_indent = 0
         self._reset_args_state()
         self._reset_array_state()
 
@@ -236,6 +251,7 @@ class StreamingParserEngine:
             and not self._lexer.buffer
             and not self._scanner._deferred_terminals
             and self._lexer._literal_first_chars.isdisjoint(delta_text)
+            and self._fence_chars.isdisjoint(delta_text)
         ):
             has_special = False
             for tid in delta_token_ids:
@@ -243,6 +259,8 @@ class StreamingParserEngine:
                     has_special = True
                     break
             if not has_special:
+                self._advance_close_candidate(delta_text)
+                self._track_line(delta_text)
                 events = self._emit_for_state(
                     delta_text, token_count=len(delta_token_ids)
                 )
@@ -255,7 +273,7 @@ class StreamingParserEngine:
             item = scanner_items[0]
             lex_tokens = self._lexer.feed(item.text, item.token_texts, item.token_count)
             if len(lex_tokens) == 1 and lex_tokens[0].terminal == CONTENT_TERMINAL:
-                events = self._emit_for_state(
+                events = self._on_content(
                     lex_tokens[0].value,
                     token_count=lex_tokens[0].token_count,
                 )
@@ -306,6 +324,13 @@ class StreamingParserEngine:
             )
             self._args_buffer = ""
             self._args_safe_end = 0
+
+        # Unterminated fences normalize back to their enclosing state; they
+        # never promote to a tool call.
+        if self._fence_close_candidate:
+            self._close_fence()
+        if self.state in (ParserState.FENCED, ParserState.FENCED_REASONING):
+            self._close_fence()
 
         if self.state in (
             ParserState.TOOL_PREAMBLE,
@@ -409,6 +434,18 @@ class StreamingParserEngine:
     def _on_terminal(
         self, terminal: str, value: str, token_count: int = 0
     ) -> list[SemanticEvent]:
+        if self._fence_terminal and terminal == self._fence_terminal:
+            self._advance_close_candidate(value)
+            return self._handle_fence(value, token_count)
+
+        if self.state == ParserState.FENCED_REASONING:
+            leave = self.config.transitions.get((ParserState.REASONING, terminal))
+            if leave is not None and tuple(leave.events) == (EventType.REASONING_END,):
+                self._close_fence()
+
+        self._advance_close_candidate(value)
+        self._track_line(value)
+
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
 
@@ -513,7 +550,71 @@ class StreamingParserEngine:
     def _on_content(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
         if not text:
             return []
+        self._advance_close_candidate(text)
+        self._track_line(text)
         return self._emit_for_state(text, token_count)
+
+    def _track_line(self, value: str) -> None:
+        """Track whether the stream sits at the start of a line."""
+        for ch in value:
+            if ch == "\n":
+                self._at_line_start = True
+                self._line_indent = 0
+            elif self._at_line_start and ch in " \t":
+                self._line_indent += 1 if ch == " " else 4
+                if self._line_indent > 3:
+                    self._at_line_start = False
+            else:
+                self._at_line_start = False
+
+    def _close_fence(self) -> None:
+        self.state = (
+            ParserState.REASONING if self._fence_reasoning else ParserState.CONTENT
+        )
+        self._fence_char = None
+        self._fence_len = 0
+        self._fence_reasoning = False
+        self._fence_close_candidate = False
+
+    def _advance_close_candidate(self, text: str) -> None:
+        """Confirm a closing fence once the rest of its line is whitespace."""
+        if not self._fence_close_candidate:
+            return
+        for ch in text:
+            if ch == "\n":
+                self._close_fence()
+                return
+            if ch not in " \t\r":
+                self._fence_close_candidate = False
+                return
+
+    def _handle_fence(self, value: str, token_count: int = 0) -> list[SemanticEvent]:
+        char = value[:1]
+        run_len = len(value)
+        at_line_start = self._at_line_start
+        self._track_line(value)
+
+        if self.state in (ParserState.FENCED, ParserState.FENCED_REASONING):
+            if (
+                at_line_start
+                and char == self._fence_char
+                and run_len >= self._fence_len
+            ):
+                self._fence_close_candidate = True
+            return self._emit_for_state(value, token_count)
+
+        # Only the plain text channels open a fence. A run inside a tool
+        # argument or a header is argument/header text, not markup.
+        if at_line_start and run_len >= 3 and self.state in self._PLAIN_STATES:
+            reasoning = self.state == ParserState.REASONING
+            self._fence_char = char
+            self._fence_len = run_len
+            self._fence_reasoning = reasoning
+            self.state = (
+                ParserState.FENCED_REASONING if reasoning else ParserState.FENCED
+            )
+            self._fence_close_candidate = False
+        return self._emit_for_state(value, token_count)
 
     def _apply_transition(
         self,

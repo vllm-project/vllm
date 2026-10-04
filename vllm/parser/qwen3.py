@@ -43,6 +43,7 @@ THINK_END = "</think>"
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 CHATML_TURN_BOUNDARIES = frozenset(("<|im_start|>", "<|im_end|>"))
+FENCE = "```"
 FUNC_PREFIX = "<function="
 FUNC_END = "</function>"
 PARAM_START = "<parameter="
@@ -195,6 +196,11 @@ def qwen3_config(
                 (EventType.TOOL_CALL_START,),
             ),
         },
+        # Fenced code examples are kept out of the tool-call machine by the
+        # engine: it tracks the fence delimiter and opening length so only a
+        # matching run closes the fence.
+        fence_terminal="FENCE",
+        fence_characters=FENCE[0] + "~",
         arg_converter=_qwen3_arg_converter,
         stream_arg_deltas=True,
         strip_trailing_reasoning_whitespace=False,
