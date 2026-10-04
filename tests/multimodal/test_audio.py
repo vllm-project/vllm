@@ -435,7 +435,7 @@ class TestMultiModalDataParserChannelNormalization:
         audio_item = result.get(0)
         assert audio_item.ndim == 1
         assert audio_item.shape == (16000,)
-        assert result.get_audio_length(0) == 16000
+        assert len(audio_item) == 16000
         np.testing.assert_array_equal(audio_item, mono_audio)
 
     def test_parser_with_target_channels_2(self):
