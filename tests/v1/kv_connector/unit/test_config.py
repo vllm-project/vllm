@@ -3,12 +3,107 @@
 
 """Tests for KV cache offloading configuration."""
 
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
 
 from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.fixture
+def dsv41_handoff_config():
+    return SimpleNamespace(
+        uses_dsv41_encoder_only_handoff=True,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MooncakeConnector",
+            kv_role="kv_producer",
+            dsv41_encoder_only_prefill=True,
+        ),
+        model_config=SimpleNamespace(
+            architecture="DeepseekV41ForCausalLM",
+            hf_text_config=SimpleNamespace(
+                sliding_window=128,
+                num_hidden_layers=40,
+                kv_source_layer_ids=(2, 8, 14, 20),
+                index_source_layer_ids=(2, 8, 14, 20, 24, 28, 32, 36),
+            ),
+        ),
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            use_ubatching=False,
+        ),
+        cache_config=SimpleNamespace(swa_bounded_replay=True),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        speculative_config=None,
+    )
+
+
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+@pytest.mark.skip_global_cleanup
+def test_dsv41_encoder_only_handoff_requires_bounded_replay(dsv41_handoff_config, role):
+    config = dsv41_handoff_config
+    config.kv_transfer_config.kv_role = role
+    VllmConfig._verify_dsv41_encoder_only_handoff(cast(VllmConfig, config))
+    config.cache_config.swa_bounded_replay = False
+    with pytest.raises(ValueError, match="requires SWA bounded replay"):
+        VllmConfig._verify_dsv41_encoder_only_handoff(cast(VllmConfig, config))
+
+
+@pytest.mark.skip_global_cleanup
+def test_dsv41_encoder_only_handoff_separates_producer_compile_hash():
+    hashes = [
+        KVTransferConfig(
+            kv_connector="MooncakeConnector",
+            kv_role=role,
+            dsv41_encoder_only_prefill=True,
+        ).compute_hash()
+        for role in ("kv_producer", "kv_consumer")
+    ]
+    assert hashes[0] != hashes[1]
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value", "error"),
+    [
+        (
+            "kv_transfer_config",
+            "kv_connector",
+            "MooncakeStoreConnector",
+            "direct MooncakeConnector",
+        ),
+        ("parallel_config", "pipeline_parallel_size", 2, "requires PP=1"),
+        (
+            "scheduler_config",
+            "async_scheduling",
+            True,
+            "requires --no-async-scheduling",
+        ),
+        (
+            "model_config.hf_text_config",
+            "index_source_layer_ids",
+            (2, 8, 14),
+            "complete Main-KV/Indexer-K sources",
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_dsv41_encoder_only_handoff_rejects_unsupported_config(
+    dsv41_handoff_config, section, field, value, error
+):
+    target = dsv41_handoff_config
+    for name in section.split("."):
+        target = getattr(target, name)
+    setattr(target, field, value)
+    with pytest.raises(ValueError, match=error):
+        VllmConfig._verify_dsv41_encoder_only_handoff(
+            cast(VllmConfig, dsv41_handoff_config)
+        )
 
 
 class _StubLMCacheMPConnector:

@@ -12,6 +12,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
+from vllm.config.kv_transfer import dsv41_encoder_only_boundary_layer
 from vllm.distributed import (
     get_engram_dp_size,
     get_pp_group,
@@ -623,6 +624,52 @@ class DeepseekV4DecoderLayer(nn.Module):
             torch.cuda.current_stream().wait_stream(mhc_stream)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux
 
+    def write_global_cache(
+        self,
+        x: torch.Tensor | MoEOutput,
+        positions: torch.Tensor,
+        pre_mix: torch.Tensor,
+        post_mix: torch.Tensor,
+        res_mix: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the boundary pre-mix and publish global cache state only."""
+        if self.engram is not None:
+            raise RuntimeError("The encoder-only boundary cannot be an Engram layer.")
+
+        mhc_stream = self.mhc_stream
+        if mhc_stream is not None and (
+            in_piecewise_cudagraph()
+            or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+        ):
+            mhc_stream = None
+        residual, post_mix, res_mix, x, _, _ = mhc_shifted_post_pre(
+            x,
+            residual,
+            post_mix,
+            res_mix,
+            self.hc_attn_fn,
+            self.hc_attn_scale,
+            self.hc_attn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+            pre_mix=pre_mix,
+            norm_weight=self.attn_norm.weight,
+            norm_eps=self.attn_norm.variance_epsilon,
+            capture_aux=False,
+            stream=mhc_stream,
+            reduce_results=self.fuse_mhc_all_reduce,
+        )
+        if self.use_sequence_parallel:
+            x = sp_all_gather(x)[: positions.shape[0]]
+        self.attn.write_global_cache(positions, x)
+        if mhc_stream is not None:
+            torch.cuda.current_stream().wait_stream(mhc_stream)
+        return x
+
 
 class DeepseekV4Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -651,6 +698,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_mult = config.hc_mult
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
+        self.encoder_only_prefill = vllm_config.is_dsv41_encoder_only_prefill
+        self.encoder_only_boundary_layer: int | None = None
+        if self.encoder_only_prefill:
+            self.encoder_only_boundary_layer = dsv41_encoder_only_boundary_layer(config)
 
         # Three aux streams: one per non-default input GEMM in
         # DeepseekV4Attention._run_parallel_input_projections
@@ -761,7 +812,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.decoder_replay_start = self.end_layer
         cut = max(config.kv_source_layer_ids)
         if (
-            cut < self.end_layer - 1
+            not self.encoder_only_prefill
+            and cut < self.end_layer - 1
             and self._decoder_replay_supported(vllm_config, cut)
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
         ):
@@ -952,8 +1004,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             pre_mix = intermediate_tensors["pre_mix"]
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
+        first_pass_end = (
+            self.encoder_only_boundary_layer
+            if self.encoder_only_prefill
+            else self.decoder_replay_start
+        )
+        assert first_pass_end is not None
         hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
-            range(self.start_layer, self.decoder_replay_start),
+            range(self.start_layer, first_pass_end),
             hidden_states,
             positions,
             input_ids,
@@ -965,6 +1023,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             engram_hashes,
             engram_mask,
         )
+        if self.encoder_only_prefill:
+            boundary_layer = self.layers[first_pass_end]
+            assert isinstance(boundary_layer, DeepseekV4DecoderLayer)
+            return boundary_layer.write_global_cache(
+                hidden_states,
+                positions,
+                pre_mix,
+                post_mix,
+                res_mix,
+                residual,
+            )
         late_aux: list[torch.Tensor] = []
         if self.decoder_replay_layers is not None:
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
