@@ -272,7 +272,7 @@ IMAGE_TAG_LATEST=${6:-} # only used for main branch, optional
 
 # When TORCH_NIGHTLY=1, build the base CI image against PyTorch nightly so the
 # entire existing pipeline runs on nightly torch (CUDA/GPU lane only). Delegate
-# to the dedicated nightly build (PYTORCH_NIGHTLY=1, CUDA 13.0) and tag it at the
+# to the dedicated nightly build (PYTORCH_NIGHTLY=1, CUDA 13.2) and tag it at the
 # normal IMAGE_TAG that every test step already pulls -- no separate image tag,
 # no duplicate "vLLM Against PyTorch Nightly" pipeline section.
 if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
