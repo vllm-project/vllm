@@ -419,11 +419,10 @@ void direct_dcp_a2a_lse_reduce(
   check_cuda_launch("direct DCP A2A");
   int64_t combine_blocks = num_tokens * heads_per_rank;
   size_t shared_memory_bytes = world_size * sizeof(float);
-  // The SM100 crossover is 512 independent token/head outputs (128 CTAs).
-  // Keep the existing kernel for small workloads and unmeasured devices.
-  bool use_warp_combine = head_dim == 512 && world_size <= 32 &&
-                          combine_blocks >= 512 &&
-                          get_device_prop()->major == 10;
+  // Each peer occupies one lane. Other layouts and unmeasured devices keep
+  // the existing consumer.
+  bool use_warp_combine =
+      head_dim == 512 && world_size <= 32 && get_device_prop()->major == 10;
   auto launch_combine = [&]<typename scalar_t>() {
     if (use_warp_combine) {
       warp_lse_combine_kernel<scalar_t>

@@ -1006,13 +1006,13 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             assert not torch.isnan(actual.float()).any()
             _assert_close(actual, expected, dtype)
 
-        # Exercise both sides of the 512 token/head warp-consumer crossover.
-        crossover = (512 + heads_per_rank - 1) // heads_per_rank
+        # Include partially filled four-head CTAs and larger output grids.
         cases = (
             (1, False),
-            (crossover - 1, True),
-            (crossover, True),
-            (crossover + 1, True),
+            (3, True),
+            (31, True),
+            (32, True),
+            (33, True),
             (128, True),
         )
         for iteration, (num_tokens, padded) in enumerate(cases):
