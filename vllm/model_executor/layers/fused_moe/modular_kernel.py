@@ -1094,6 +1094,14 @@ class FusedMoEKernelModularImpl:
         # time we need cache3, we're done with cache1.
         # Reuse workspace13 for the output since there is only one chunk.
         max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+        if (
+            self.fused_experts.activation_format()
+            == FusedMoEActivationFormat.BatchedExperts
+        ):
+            # Keep the reservation above, but give combine a contiguous view
+            # matching the runtime dispatch shape rather than the static limit.
+            assert M_full <= fused_out_shape[1]
+            fused_out_shape = (fused_out_shape[0], M_full, fused_out_shape[2])
 
         if current_platform.is_cpu():
             # Every CPU FusedMoEExpertsModular kernel reports zero-sized

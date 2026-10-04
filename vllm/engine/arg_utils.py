@@ -553,6 +553,7 @@ class EngineArgs:
     elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
+    dbo_max_num_ubatches: int = ParallelConfig.dbo_max_num_ubatches
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dp_sync_interval: int = ParallelConfig.dp_sync_interval
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
@@ -1275,6 +1276,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--ubatch-size",
             **parallel_kwargs["ubatch_size"],
+        )
+        parallel_group.add_argument(
+            "--dbo-max-num-ubatches", **parallel_kwargs["dbo_max_num_ubatches"]
         )
         parallel_group.add_argument(
             "--enable-elastic-ep", **parallel_kwargs["enable_elastic_ep"]
@@ -2506,6 +2510,7 @@ class EngineArgs:
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
             enable_dbo=self.enable_dbo,
             ubatch_size=self.ubatch_size,
+            dbo_max_num_ubatches=self.dbo_max_num_ubatches,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dp_sync_interval=self.dp_sync_interval,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,

@@ -221,32 +221,48 @@ class CudaGraphManager:
         # Counts above the largest captured case clamp to it.
         return self._lora_dispatch_map.get(num_active_loras, self._max_lora_case)
 
-    def _maybe_ubatch_twin(
+    def _ubatch_variants(
         self, desc: BatchExecutionDescriptor
-    ) -> BatchExecutionDescriptor | None:
-        """Return a microbatched capture candidate when eligible.
+    ) -> list[BatchExecutionDescriptor]:
+        """Return capture candidates for the supported active counts.
 
         Uniform query lengths preserve the captured request split. Use the DP
         dispatch thresholds so all ranks generate the same candidates.
         """
         if self.ubatch_runner is None or desc.cg_mode != CUDAGraphMode.FULL:
-            return None
+            return []
         if desc.num_reqs is None:
-            return None
+            return []
         uniform_token_count, remainder = divmod(desc.num_tokens, desc.num_reqs)
         if remainder or desc.uniform_token_count not in (None, uniform_token_count):
-            return None
+            return []
         parallel_config = self.vllm_config.parallel_config
         num_ubatches = get_num_ubatches(parallel_config)
-        if desc.num_tokens < num_ubatches:
-            return None
+        if desc.num_tokens < num_ubatches and not parallel_config.auto_ubatching:
+            return []
         if not check_ubatch_thresholds(
             parallel_config, desc.num_tokens, uniform_decode=True
         ):
-            return None
-        return replace(
-            desc, num_ubatches=num_ubatches, uniform_token_count=uniform_token_count
+            return []
+        counts = (
+            range(
+                2,
+                max(
+                    2,
+                    min(
+                        num_ubatches,
+                        desc.num_tokens // parallel_config.dbo_decode_token_threshold,
+                    ),
+                )
+                + 1,
+            )
+            if parallel_config.auto_ubatching
+            else (num_ubatches,)
         )
+        return [
+            replace(desc, num_ubatches=k, uniform_token_count=uniform_token_count)
+            for k in counts
+        ]
 
     def _init_candidates(self) -> None:
         """Build priority-ordered candidate lists for each token count."""
@@ -336,11 +352,9 @@ class CudaGraphManager:
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
 
-                    ubatch_desc = self._maybe_ubatch_twin(desc)
-                    if ubatch_desc is not None and (
-                        ubatch_desc not in descs_by_mode[decode_mode]
-                    ):
-                        descs_by_mode[decode_mode].append(ubatch_desc)
+                    for ubatch_desc in self._ubatch_variants(desc):
+                        if ubatch_desc not in descs_by_mode[decode_mode]:
+                            descs_by_mode[decode_mode].append(ubatch_desc)
 
             # recoverSSM cannot capture a dummy query wider than its workspace.
             if mixed_mode and (
@@ -363,9 +377,7 @@ class CudaGraphManager:
                 )
                 descs_by_mode[mixed_mode].append(desc)
 
-                ubatch_desc = self._maybe_ubatch_twin(desc)
-                if ubatch_desc is not None:
-                    descs_by_mode[mixed_mode].append(ubatch_desc)
+                descs_by_mode[mixed_mode].extend(self._ubatch_variants(desc))
 
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
@@ -699,6 +711,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     block_tables.get_dummy_slot_mappings(num_tokens),
                     cg_mode=CUDAGraphMode.FULL,
                     for_capture=True,
+                    num_ubatches=desc.num_ubatches,
                 )
                 # Capture with dummy rows marked as padding.
                 input_buffers.is_padding.fill_(True)

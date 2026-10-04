@@ -15,7 +15,11 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
-from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
+from vllm.v1.worker.ubatch_utils import (
+    check_ubatch_thresholds,
+    get_num_ubatches,
+    is_last_ubatch_empty,
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,82 @@ class DPSyncState:
     # Agreed upper bound on any rank's request count. Holds the padded count when
     # a FULL descriptor imposed one, else the most any rank scheduled.
     num_reqs: int
+
+
+def _select_ubatch_descriptor(
+    manager: CudaGraphManager | None,
+    config: ParallelConfig,
+    token_counts: list[int],
+    num_reqs: int,
+    uniform_token_count: int | None,
+    uniform_decode: bool,
+    num_active_loras: int,
+) -> BatchExecutionDescriptor | None:
+    """Choose one count from the common DP load and captured layouts."""
+    min_tokens, max_tokens = min(token_counts), max(token_counts)
+    threshold = (
+        config.dbo_decode_token_threshold
+        if uniform_decode
+        else config.dbo_prefill_token_threshold
+    )
+    capacity = get_num_ubatches(config)
+    counts = (
+        range(max(2, min(capacity, min_tokens // threshold)), 1, -1)
+        if config.auto_ubatching
+        else (capacity,)
+    )
+    eager = None
+    for k in counts:
+        desc = (
+            manager.dispatch(
+                num_reqs,
+                max_tokens,
+                uniform_token_count,
+                num_active_loras=num_active_loras,
+                num_ubatches=k,
+            )
+            if manager is not None
+            else BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=max_tokens,
+                num_reqs=num_reqs,
+                num_active_loras=num_active_loras,
+                num_ubatches=k,
+            )
+        )
+        can_stage = (
+            manager is not None
+            and manager.ubatch_runner is not None
+            and manager.ubatch_runner.stage_real_tokens
+            and desc.cg_mode == CUDAGraphMode.FULL
+            and uniform_token_count == 1
+            and min_tokens >= k
+        )
+        if is_last_ubatch_empty(min_tokens, desc.num_tokens, k) and not can_stage:
+            if config.auto_ubatching and k > 2:
+                continue
+            desc = replace(
+                desc,
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=max_tokens,
+                num_reqs=num_reqs,
+            )
+        if config.auto_ubatching and k > 2:
+            width = desc.num_tokens // k
+            last_start = width * (k - 1)
+            # A rank stages only when its last region is empty. Other ranks
+            # retain their physical split, which may have a small real tail.
+            smallest = min(
+                n // k if n <= last_start and can_stage else min(width, n - last_start)
+                for n in token_counts
+            )
+            if smallest < threshold:
+                continue
+        if desc.cg_mode == CUDAGraphMode.FULL or not config.auto_ubatching:
+            return desc
+        if eager is None:
+            eager = desc
+    return eager
 
 
 def sync_cudagraph_and_dp_padding(
@@ -111,32 +191,18 @@ def sync_cudagraph_and_dp_padding(
             int(num_tokens_across_dp.min()),
             uniform_decode=uniform_decode_across_dp,
         ):
-            # Expert all-to-all requires every rank to split and pad equally.
-            # Empty microbatches run as dummy batches.
-            ubatch_num_tokens = int(num_tokens_across_dp.max())
-            num_ubatches = get_num_ubatches(parallel_config)
+            ubatch_desc = _select_ubatch_descriptor(
+                cudagraph_manager,
+                parallel_config,
+                num_tokens_across_dp.tolist(),
+                int(num_reqs_across_dp.max()),
+                synced_uniform_token_count,
+                bool(uniform_decode_across_dp),
+                num_active_loras,
+            )
+        else:
             ubatch_desc = None
-            if cudagraph_manager is not None:
-                # Match a FULL microbatched CUDA graph, falling back to an eager
-                # descriptor if no graph matches.
-                ubatch_desc = cudagraph_manager.dispatch(
-                    num_reqs,
-                    ubatch_num_tokens,
-                    synced_uniform_token_count,
-                    num_active_loras=num_active_loras,
-                    num_ubatches=num_ubatches,
-                )
-                if 2 * int(num_tokens_across_dp.min()) < ubatch_desc.num_tokens:
-                    # If one rank has an empty second microbatch, run without
-                    # CUDA graphs.
-                    ubatch_desc = None
-            if ubatch_desc is None:
-                ubatch_desc = BatchExecutionDescriptor(
-                    cg_mode=CUDAGraphMode.NONE,
-                    num_tokens=ubatch_num_tokens,
-                    num_reqs=num_reqs,
-                    num_ubatches=num_ubatches,
-                )
+        if ubatch_desc is not None:
             # Refresh the token count to include CUDA graph padding.
             ubatch_num_tokens = ubatch_desc.num_tokens
             num_reqs = int(num_reqs_across_dp.max())
