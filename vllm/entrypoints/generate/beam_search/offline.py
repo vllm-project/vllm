@@ -85,6 +85,10 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
         request_allowed_token_ids = params.allowed_token_ids
+        if request_allowed_token_ids is not None:
+            SamplingParams(
+                allowed_token_ids=request_allowed_token_ids
+            )._validate_allowed_token_ids(self.model_config)
         self.llm_engine.vllm_config._check_watermarking_unsupported(beam_search=True)
 
         tokenizer = self.renderer.get_tokenizer()
@@ -124,7 +128,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             max_tokens=1,
             temperature=temperature,
             detokenize=False,
-            skip_clone=True,
+            skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
 

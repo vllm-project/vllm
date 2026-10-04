@@ -16,6 +16,7 @@ from transformers import AutoModelForSeq2SeqLM
 from vllm import CompletionOutput, RequestOutput
 from vllm.assets.audio import AudioAsset
 from vllm.entrypoints.llm import LLM
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensInput
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.platforms import current_platform
@@ -132,6 +133,28 @@ def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
     assert all(beam.finish_reason != "abort" for beam in normal.sequences)
 
 
+@pytest.mark.parametrize("allowed_token_ids", [[], [-1], [1000]])
+@pytest.mark.parametrize("with_grammar", [False, True])
+def test_beam_search_rejects_invalid_allowlist_before_grammar(
+    allowed_token_ids, with_grammar
+) -> None:
+    llm = LLM.__new__(LLM)
+    llm.llm_engine = Mock()
+    llm.model_config = Mock(get_vocab_size=Mock(return_value=1000))
+    with pytest.raises(VLLMValidationError):
+        llm.beam_search(
+            ["prompt"],
+            BeamSearchParams(
+                beam_width=1,
+                max_tokens=1,
+                allowed_token_ids=allowed_token_ids,
+                structured_outputs=StructuredOutputsParams(regex="foo")
+                if with_grammar
+                else None,
+            ),
+        )
+
+
 def test_beam_search_scores_allowed_tokens_across_chunks(monkeypatch) -> None:
     """Keep both valid beams even when raw top-k misses the second chunk."""
     scores = {0: Logprob(-0.1), 11: Logprob(-1.0), 12: Logprob(-2.0)}
@@ -175,6 +198,7 @@ def test_beam_search_scores_allowed_tokens_across_chunks(monkeypatch) -> None:
     monkeypatch.setattr(llm, "_preprocess_cmpl", lambda prompts: prompts)
     monkeypatch.setattr(llm, "_render_and_run_requests", run_requests)
     prompt: TokensInput = {"type": "token", "prompt_token_ids": [1]}
+    llm.model_config = Mock(get_vocab_size=Mock(return_value=1000))
     output = llm.beam_search(
         [prompt],
         BeamSearchParams(
