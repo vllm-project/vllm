@@ -70,6 +70,9 @@ def test_registry_imports(model_arch):
     ):
         pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
+    if model_arch == "Qwen4ExpMTP" and current_platform.is_cpu():
+        pytest.skip("Qwen4Exp MTP is not supported on CPU")
+
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None

@@ -27,9 +27,22 @@ def __getattr__(name: str) -> Any:
     }:
         from vllm.platforms import current_platform
 
+        Qwen4ExpMTP: Any = None
         if current_platform.is_xpu() or current_platform.is_tpu():
-            raise NotImplementedError("Qwen4Exp currently supports CUDA and ROCm only")
-        if current_platform.is_rocm():
+            raise NotImplementedError(
+                "Qwen4Exp currently supports CUDA, ROCm, and x86 CPU only"
+            )
+        if current_platform.is_cpu():
+            if name == "Qwen4ExpMTP":
+                raise NotImplementedError(
+                    "Qwen4Exp MTP is not supported on CPU; run without "
+                    "speculative decoding."
+                )
+            from .cpu.model import (
+                Qwen4ExpForCausalLM,
+                Qwen4ExpForConditionalGeneration,
+            )
+        elif current_platform.is_rocm():
             from .amd.model import (
                 Qwen4ExpForCausalLM,
                 Qwen4ExpForConditionalGeneration,
