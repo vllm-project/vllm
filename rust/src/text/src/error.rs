@@ -22,6 +22,19 @@ pub enum Error {
          but the prompt contains {prompt_len} input tokens"
     )]
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
+    #[error(
+        "This model's maximum context length is {max_model_len} tokens. \
+         However, you requested {max_tokens} output tokens and your prompt \
+         contains {prompt_len} input tokens, for a total of {total} tokens. \
+         Please reduce the length of the input prompt or the number of \
+         requested output tokens."
+    )]
+    RequestedOutputExceedsContext {
+        max_model_len: u32,
+        max_tokens: u32,
+        prompt_len: u32,
+        total: u64,
+    },
     #[error(transparent)]
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
@@ -61,6 +74,7 @@ impl Error {
     pub fn is_request_validation_error(&self) -> bool {
         match self {
             Self::PromptTooLong { .. }
+            | Self::RequestedOutputExceedsContext { .. }
             | Self::EmptyPromptTokenIds { .. }
             | Self::EmptyStopString { .. }
             | Self::Logprobs(_)
