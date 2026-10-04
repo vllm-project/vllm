@@ -64,13 +64,20 @@ void eagle_prepare_next_token_padded_kernel_impl(
       }
     }
 
+    // The backup token can be -1 (async-scheduling placeholder); keep it
+    // inside the vocab since it feeds the draft model's embedding.
+    int64_t backup_token = backup_ids_ptr[req_idx];
+    if (backup_token < 0 || backup_token >= vocab_size) {
+      backup_token = 0;
+    }
+
     bool discard = discard_mask_ptr[req_idx];
     if (discard) {
-      next_ids_out_ptr[req_idx] = backup_ids_ptr[req_idx];
+      next_ids_out_ptr[req_idx] = backup_token;
       valid_count_out_ptr[req_idx] = 0;
     } else {
       next_ids_out_ptr[req_idx] =
-          (valid_count > 0) ? last_valid_token : backup_ids_ptr[req_idx];
+          (valid_count > 0) ? last_valid_token : backup_token;
       valid_count_out_ptr[req_idx] = valid_count;
     }
   }
