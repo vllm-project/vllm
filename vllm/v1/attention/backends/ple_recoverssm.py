@@ -19,7 +19,10 @@ from vllm.model_executor.layers.mamba.ops.recoverssm import (
     compact_conv_state_kernel,
     prepare_commit_plan_kernel,
 )
-from vllm.model_executor.layers.mamba.recoverssm_utils import recoverssm_require
+from vllm.model_executor.layers.mamba.recoverssm_utils import (
+    recoverssm_ptr_table,
+    recoverssm_require,
+)
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.recoverssm_metadata import (
@@ -68,7 +71,7 @@ class _PleConvCommit:
         _require(self.hist > 0, "PLE conv state is shorter than its window")
         self.spec_query_len = spec_query_len
         t = lambda xs: torch.tensor(xs, dtype=torch.int64, device=dev)
-        self.base = t([s.data_ptr() for s in self.conv_states])
+        self.base = recoverssm_ptr_table(self.conv_states, dev)
         self.bstride = t([s.stride(0) for s in self.conv_states])
         self.dstride = t([s.stride(1) for s in self.conv_states])
         self.tstride = t([s.stride(2) for s in self.conv_states])

@@ -24,7 +24,10 @@ from vllm.model_executor.layers.mamba.ops.recoverssm import (
     compact_conv_state_kernel,
     prepare_commit_plan_kernel,
 )
-from vllm.model_executor.layers.mamba.recoverssm_utils import recoverssm_require
+from vllm.model_executor.layers.mamba.recoverssm_utils import (
+    recoverssm_ptr_table,
+    recoverssm_require,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -495,9 +498,7 @@ class GDNRecoverSSMCommitContext:
         hist = conv_len - spec_query_len + 1
         _require(hist > 0, "conv state is shorter than its window")
         dev = ref.device
-        addr = lambda ts: torch.tensor(
-            [t.data_ptr() for t in ts], dtype=torch.int64, device=dev
-        )
+        addr = lambda ts: recoverssm_ptr_table(ts, dev)
         bstr = lambda ts: torch.tensor(
             [t.stride(0) for t in ts], dtype=torch.int64, device=dev
         )

@@ -4,6 +4,8 @@
 layers, models and backends, and argument validation that raises ``ValueError``
 before any raw-pointer kernel launch."""
 
+import torch
+
 
 def recoverssm_require(cond: bool, msg: str, component: str = "RecoverSSM") -> None:
     if not cond:
@@ -22,4 +24,14 @@ def uses_recoverssm(cache_config, num_speculative_tokens: int) -> bool:
     )
 
 
-__all__ = ["recoverssm_require", "uses_recoverssm"]
+def recoverssm_ptr_table(tensors, device) -> torch.Tensor:
+    """int64 table of the tensors' data pointers, keeping each uint64 bit pattern.
+
+    Device pointers with the top bit set (XPU) overflow a plain int64 conversion;
+    the kernels only cast the value back to a pointer."""
+    ptrs = [t.data_ptr() for t in tensors]
+    ptrs = [p if p < (1 << 63) else p - (1 << 64) for p in ptrs]
+    return torch.tensor(ptrs, dtype=torch.int64, device=device)
+
+
+__all__ = ["recoverssm_ptr_table", "recoverssm_require", "uses_recoverssm"]
