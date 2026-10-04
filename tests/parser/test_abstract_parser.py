@@ -13,11 +13,14 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.structural_tag_registry import ToolChoice
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 
 class TestToolChoice_Plus_ResponseFormat:
@@ -279,6 +282,39 @@ class TestToolChoice_Plus_ResponseFormat:
         assert _is_grammar_accept_string(grammar, "ok")
         assert not _is_grammar_accept_string(grammar, "bad")
         assert _is_grammar_accept_string(grammar, self._qwen_tool_call())
+
+    @pytest.mark.parametrize(
+        "tool_parser_cls", [Qwen3EngineToolParser, Glm47MoeModelToolParser]
+    )
+    def test_auto_with_builtin_tools_only(self, tool_parser_cls: type[ToolParser]):
+        """Builtin tools have no call to constrain, so the text format applies
+        alone instead of an empty required tool-call list."""
+
+        class TestParser(DelegatingParser):
+            tool_strict_level = ToolStrictLevel.FUNCTION
+
+        TestParser.tool_parser_cls = tool_parser_cls
+        request = ResponsesRequest.model_validate(
+            {
+                "input": "hi",
+                "tools": [{"type": "web_search"}],
+                "tool_choice": "auto",
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "answer",
+                        "schema": {"type": "object"},
+                    }
+                },
+            }
+        )
+        parser = TestParser(MagicMock(), tools=None)
+        parser._reasoning_parser = MagicMock(adjust_request=lambda request: request)
+
+        out = parser.adjust_request(request)
+
+        assert out.structured_outputs is None
+        assert out.text is not None
 
     # ================================
     # Test cases

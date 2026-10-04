@@ -527,6 +527,10 @@ class DelegatingParser(Parser):
 
         output_format = None
         if resolved_tools and is_auto and structured_outputs:
+            if not any(tool.type == "function" for tool in resolved_tools):
+                # Builtin tools only: no call to constrain, the output format
+                # alone applies.
+                return request
             if not _xgrammar_supports(structured_outputs):
                 logger.warning_once(
                     "Tool calls are not constrained for tool_choice=auto with "
