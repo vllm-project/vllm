@@ -145,6 +145,19 @@ Every plugin has three parts:
 
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 
+#### Selecting the model runner
+
+vLLM selects the built-in V2 model runner by default when it is available (the V2 model runner requires Triton) and the requested features are supported; otherwise it falls back to the V1 model runner. A platform plugin that ships its own worker/model runner and cannot install Triton should override [Platform.supports_v2_model_runner][vllm.platforms.interface.Platform.supports_v2_model_runner] to return `False`:
+
+```python
+class MyDummyPlatform(Platform):
+    @classmethod
+    def supports_v2_model_runner(cls) -> bool:
+        return False
+```
+
+vLLM then selects the V1 model runner without probing for Triton and without emitting a fallback warning, so shared components (scheduler, input processor, ...) consistently use V1 semantics. If a configuration still forces the V2 model runner - for example `VLLM_USE_V2_MODEL_RUNNER=1`, or a V2-only feature - vLLM raises a clear error instead of failing later at runtime.
+
 ## Compatibility Guarantee
 
 vLLM guarantees the interface of documented plugins, such as `ModelRegistry.register_model`, will always be available for plugins to register models. However, it is the responsibility of plugin developers to ensure their plugins are compatible with the version of vLLM they are targeting. For example, `"vllm_add_dummy_model.my_llava:MyLlava"` should be compatible with the version of vLLM that the plugin targets.
