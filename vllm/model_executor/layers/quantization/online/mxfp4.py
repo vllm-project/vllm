@@ -168,7 +168,11 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             moe_parallel_config=moe_parallel_config,
         )
         return mxfp4_round_up_hidden_size_and_intermediate_size(
-            self.mxfp4_backend, hidden_size, intermediate_size_per_partition
+            self.mxfp4_backend,
+            hidden_size,
+            intermediate_size_per_partition,
+            activation=self.moe.activation,
+            has_bias=self.moe.has_bias,
         )
 
     def create_weights(
