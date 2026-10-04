@@ -485,13 +485,18 @@ def sparse_attn_indexer(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
-        # Get the full shared workspace buffers once (will allocate on first use).
+        # Get the shared workspace buffers once, sized for this batch's largest
+        # chunk rather than the profiled bound (total_seq_lens), so the scratch
+        # stays at the workspace head and leaves retained tail spans intact.
         # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
         # MXFP4 (head_dim/2 bytes packed + head_dim/MXFP4_BLOCK_SIZE ue8m0
         # scales) based on use_fp4_cache.
         workspace_manager = current_workspace_manager()
         values_spec, scales_spec = _gather_workspace_shapes(
-            total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+            max(c.max_local_total_seq_lens for c in prefill_metadata.chunks),
+            head_dim,
+            fp8_dtype,
+            use_fp4_cache,
         )
         # PCP + DCP needs two more pairs: the rank-major all-gather destination
         # and the de-interleaved result.
