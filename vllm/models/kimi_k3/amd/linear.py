@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -113,9 +114,12 @@ class KimiMLP(nn.Module):
                 f"Unsupported activation: {hidden_act}. "
                 "Only silu and situ are supported."
             )
+        self.down_proj_fused_into_tail = False
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
+        if self.down_proj_fused_into_tail:
+            return gate_up
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -1088,6 +1092,29 @@ class KimiLinearForCausalLM(
         # that the pre-norm hidden states can be fed to the MTP draft model.
         hidden_states = self.model.norm(hidden_states, None)
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def process_weights_after_loading(self) -> None:
+        from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+
+        # The fused shared output no longer matches the MoE op's fake impl.
+        if not rocm_aiter_ops.is_enabled() or isinstance(
+            self.model, TorchCompileWithNoGuardsWrapper
+        ):
+            return
+        fused = sum(
+            m.experts.fuse_shared_down_proj_into_tail(m.shared_experts)
+            for m in self.modules()
+            if isinstance(m, KimiMoE)
+            and m.shared_experts is not None
+            and isinstance(m.experts, ROCmLatentMoERunner)
+        )
+        if fused:
+            logger.info_once(
+                "Kimi-K3 latent-MoE tail: fused the shared-expert down-projection "
+                "into the routed up-projection GEMM in %d layers.",
+                fused,
+                scope="global",
+            )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
