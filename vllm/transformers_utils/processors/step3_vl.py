@@ -192,6 +192,13 @@ class ImagePatcher:
         self, img: Image.Image
     ) -> tuple[Image.Image, list[Image.Image], list[bool]]:
         img_width, img_height = img.size
+        new_img_width, new_img_height = self.get_image_size_for_preprocess(
+            img_width, img_height
+        )
+        if (new_img_width, new_img_height) != (img_width, img_height):
+            img = img.resize((new_img_width, new_img_height), Image.Resampling.BILINEAR)
+            img_width, img_height = img.size
+
         new_img_width, new_img_height = self.get_image_size_for_padding(
             img_width, img_height
         )
