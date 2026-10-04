@@ -371,6 +371,22 @@ class KVCacheCoordinator(ABC):
                 replay_boundaries=boundaries,
             )
 
+    def cache_partial_tails(self, request: Request, num_computed_tokens: int) -> None:
+        """Register Mamba sub-block states at allocation.
+
+        Lookahead block hashes publish full blocks from the step's output, which
+        under async scheduling arrives after the next chunk is allocated. That
+        chunk overwrites a sub-block state in place, so it is registered here.
+        """
+        num_tokens_to_cache = max(
+            0, num_computed_tokens - self.num_reprefillable_tokens
+        )
+        for manager in self.single_type_managers:
+            if manager.enable_caching and isinstance(manager, MambaManager):
+                manager.cache_partial_tail(
+                    request, num_tokens_to_cache, self.retention_interval
+                )
+
     def emit_cached_block_events(
         self, request: Request, computed_blocks: tuple[list[KVCacheBlock], ...]
     ) -> None:

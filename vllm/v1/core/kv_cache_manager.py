@@ -615,7 +615,9 @@ class KVCacheManager:
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
-        if not self.coordinator.use_lookahead_block_hashes:
+        if self.coordinator.use_lookahead_block_hashes:
+            self.coordinator.cache_partial_tails(request, num_tokens_to_cache)
+        else:
             self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)

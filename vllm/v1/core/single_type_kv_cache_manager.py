@@ -2028,12 +2028,8 @@ class MambaManager(SingleTypeKVCacheManager):
             replay_boundaries=replay_boundaries,
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
-        if self.mamba_cache_mode == "align":
-            partial_hash = self._cache_partial_tail_block(
-                request, num_tokens, retention_interval=retention_interval
-            )
-            if partial_hash is not None:
-                self.cached_blocks_this_step.add(partial_hash)
+        if not self.block_pool.use_lookahead_block_hashes:
+            self.cache_partial_tail(request, num_tokens, retention_interval)
         if num_cached_blocks_after > num_cached_blocks_before:
             blocks = self.req_to_blocks[request.request_id]
             for idx in range(num_cached_blocks_before, num_cached_blocks_after):
@@ -2058,6 +2054,24 @@ class MambaManager(SingleTypeKVCacheManager):
                             block.block_hash_num_tokens,
                         )
                     )
+
+    def cache_partial_tail(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None,
+    ) -> None:
+        """Register the sub-block state the chunk ending at ``num_tokens``
+        writes. Must run when that chunk is allocated: the next chunk's forward
+        overwrites the state in place, so its CoW copy is queued by the next
+        allocation."""
+        if self.mamba_cache_mode != "align":
+            return
+        partial_hash = self._cache_partial_tail_block(
+            request, num_tokens, retention_interval=retention_interval
+        )
+        if partial_hash is not None:
+            self.cached_blocks_this_step.add(partial_hash)
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
