@@ -707,6 +707,13 @@ def paged_mqa_logits_module():
     return None
 
 
+@functools.lru_cache
+def _aiter_paged_mqa_logits() -> Callable | None:
+    import aiter
+
+    return getattr(aiter, "paged_mqa_logits", None)
+
+
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -774,6 +781,20 @@ def rocm_fp8_paged_mqa_logits(
             (out_logits,) = current_workspace_manager().get_simultaneous(
                 ((batch_size * next_n, max_model_len), torch.float32),
             )
+            aiter_paged_mqa_logits = _aiter_paged_mqa_logits()
+            if aiter_paged_mqa_logits is not None:
+                aiter_paged_mqa_logits(
+                    q_fp8,
+                    kv_cache_fp8,
+                    weights,
+                    out_logits,
+                    context_lens,
+                    block_tables,
+                    max_model_len,
+                    Preshuffle=block_size > 1,
+                    KVBlockSize=block_size,
+                )
+                return out_logits
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
