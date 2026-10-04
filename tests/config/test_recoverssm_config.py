@@ -107,6 +107,13 @@ def test_runtime_checks_reject(override, value, match):
         _validator()(cfg)
 
 
+def test_pipeline_parallel_without_align_is_accepted():
+    cfg = _config(TARGET, parallel_config__pipeline_parallel_size=2)
+    cfg.cache_config.mamba_cache_mode = "none"
+    _validator()(cfg)
+    assert cfg.cache_config.use_recoverssm is True
+
+
 def test_flag_unset_keeps_the_stock_path():
     cfg = _config(TARGET, use_replayssm=False)
     _validator()(cfg)
