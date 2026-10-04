@@ -20,11 +20,22 @@ from vllm.v1.worker.gpu_worker import Worker
 class _RecordingEngine:
     """Minimal stand-in for a weight transfer engine."""
 
-    def __init__(self, raise_on_update: bool = False):
+    def __init__(
+        self,
+        raise_on_update: bool = False,
+        raise_on_start: bool = False,
+        raise_on_finish: bool = False,
+        raise_on_abort: bool = False,
+    ):
         self.raise_on_update = raise_on_update
+        self.raise_on_start = raise_on_start
+        self.raise_on_finish = raise_on_finish
+        self.raise_on_abort = raise_on_abort
         self.started = False
         self.finished = False
         self.reset_count = 0
+        self.abort_count = 0
+        self.calls: list[str] = []
         self.supports_draft_weight_update = False
         self.update_calls: list[dict] = []
         self.seen_configs: list[VllmConfig] = []
@@ -34,19 +45,33 @@ class _RecordingEngine:
 
     def start_weight_update(self) -> None:
         self._record_config()
+        self.calls.append("start")
+        if self.raise_on_start:
+            raise ValueError("boom")
         self.started = True
 
     def update_weights(self, update_info: dict) -> None:
         self._record_config()
+        self.calls.append("update")
         self.update_calls.append(update_info)
         if self.raise_on_update:
             raise ValueError("boom")
 
     def finish_weight_update(self) -> None:
         self._record_config()
+        self.calls.append("finish")
+        if self.raise_on_finish:
+            raise ValueError("boom")
         self.finished = True
 
+    def abort_weight_update(self) -> None:
+        self.calls.append("abort")
+        self.abort_count += 1
+        if self.raise_on_abort:
+            raise RuntimeError("abort failed")
+
     def reset_weight_update_target(self) -> None:
+        self.calls.append("reset")
         self.reset_count += 1
 
 
@@ -68,6 +93,7 @@ def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
     worker._weight_update_is_draft = False
+    worker._asleep_tags = set()
     worker.model_runner = _RecordingModelRunner()
     return worker
 
@@ -212,7 +238,178 @@ def test_update_resets_active_on_error():
     assert worker._weight_update_active is False
 
 
+def test_update_error_lets_engine_abort_before_target_reset():
+    engine = _RecordingEngine(raise_on_update=True)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.update_weights(worker, {"names": ["w"]})
+
+    # The engine restores the model while it still points at the session's
+    # target, then the target is reset and the session is gone.
+    assert engine.calls == ["start", "update", "abort", "reset"]
+    assert worker._weight_update_active is False
+    with pytest.raises(RuntimeError, match="without a matching"):
+        Worker.finish_weight_update(worker)
+
+
+def test_start_error_lets_engine_abort():
+    engine = _RecordingEngine(raise_on_start=True)
+    worker = _make_worker(engine)
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.start_weight_update(worker)
+
+    assert engine.calls == ["start", "abort", "reset"]
+    assert worker._weight_update_active is False
+
+
+def test_finish_error_lets_engine_abort_and_drops_session():
+    engine = _RecordingEngine(raise_on_finish=True)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+    Worker.update_weights(worker, {"names": ["w"]})
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.finish_weight_update(worker)
+
+    assert engine.calls == ["start", "update", "finish", "abort", "reset"]
+    assert worker._weight_update_active is False
+    assert worker.model_runner.reset_lora_calls == 0
+
+
+def test_abort_error_does_not_hide_the_update_error():
+    engine = _RecordingEngine(raise_on_update=True, raise_on_abort=True)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.update_weights(worker, {"names": ["w"]})
+
+    # The target is still reset and the session still ends.
+    assert engine.calls == ["start", "update", "abort", "reset"]
+    assert worker._weight_update_active is False
+
+
+def test_successful_session_never_aborts():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+    Worker.update_weights(worker, {"names": ["w"]})
+    Worker.finish_weight_update(worker)
+
+    assert engine.calls == ["start", "update", "finish", "reset"]
+    assert engine.abort_count == 0
+
+
 def test_missing_engine_raises():
     worker = _make_worker(None)
     with pytest.raises(RuntimeError, match="Weight transfer not configured"):
         Worker.start_weight_update(worker)
+
+
+def test_start_update_rejected_while_weights_asleep():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    worker._asleep_tags = {"weights", "kv_cache"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        Worker.start_weight_update(worker)
+    assert engine.started is False
+    assert worker._weight_update_active is False
+
+
+def test_update_rejected_while_weights_asleep_resets_session():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+    # The engine went to sleep between start and the first chunk.
+    worker._asleep_tags = {"weights", "kv_cache"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        Worker.update_weights(worker, {"names": ["w"]})
+    assert engine.update_calls == []
+    assert worker._weight_update_active is False
+    assert engine.reset_count == 1
+
+
+def test_update_allowed_once_weights_are_resident_again():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    worker._asleep_tags = {"kv_cache"}  # weights woken, KV cache still asleep
+    Worker.start_weight_update(worker)
+    Worker.update_weights(worker, {"names": ["w"]})
+    Worker.finish_weight_update(worker)
+    assert engine.update_calls == [{"names": ["w"]}]
+    assert engine.finished is True
+
+
+def test_finish_rejected_while_weights_asleep_resets_session():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+    Worker.update_weights(worker, {"names": ["w"]})
+    # The engine went to sleep after the last chunk and before finish.
+    worker._asleep_tags = {"weights", "kv_cache"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        Worker.finish_weight_update(worker)
+    assert engine.finished is False
+    assert worker._weight_update_active is False
+    assert engine.reset_count == 1
+
+
+def test_reload_weights_rejected_while_weights_asleep():
+    worker = _make_worker(None)
+    worker._asleep_tags = {"weights"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        Worker.reload_weights(worker)
+    assert worker.model_runner.seen_config is None
+
+
+def test_worker_tracks_asleep_tags_across_sleep_and_partial_wake(monkeypatch):
+    """Weight updates stay refused until the "weights" tag itself is woken."""
+    from types import SimpleNamespace
+
+    class _Backend:
+        def suspend(self, level: int = 1) -> None:
+            pass
+
+        def resume(self, tags: list[str] | None = None) -> None:
+            pass
+
+        def discard(self, tags: tuple[str, ...]) -> None:
+            pass
+
+    worker = _make_worker(_RecordingEngine())
+    worker._sleep_mode_backend = _Backend()
+    worker._sleep_saved_buffers = {}
+    worker._sleep_saved_draft_buffers = {}
+    worker.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_nccl_comm_suspend=False)
+    )
+    monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
+    monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (0, 0))
+    monkeypatch.setattr(Worker, "synchronize_device", lambda self: None)
+
+    worker._require_resident_weights("update weights")  # awake: allowed
+
+    worker.sleep(level=1)
+    assert worker._asleep_tags == {"weights", "kv_cache"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        worker._require_resident_weights("update weights")
+
+    worker.wake_up(tags=["kv_cache"])
+    assert worker._asleep_tags == {"weights"}
+    with pytest.raises(RuntimeError, match="asleep"):
+        worker._require_resident_weights("update weights")
+
+    worker.wake_up(tags=["weights"])
+    assert worker._asleep_tags == set()
+    worker._require_resident_weights("update weights")
+
+    worker.sleep(level=1)
+    worker.wake_up()
+    assert worker._asleep_tags == set()
+
+    worker.discard(("kv_cache",))
+    assert worker._asleep_tags == {"kv_cache"}
+    worker._require_resident_weights("update weights")  # only the KV cache is gone

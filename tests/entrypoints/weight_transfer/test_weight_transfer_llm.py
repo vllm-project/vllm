@@ -23,6 +23,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
     WeightTransferUpdateRequest,
 )
+from vllm.platforms import current_platform
 
 from ...utils import create_new_process_for_each_test
 
@@ -238,6 +239,74 @@ def test_update_weights_calls_engine(vllm_runner):
 
 
 @create_new_process_for_each_test()
+def test_weight_update_rejected_while_asleep(vllm_runner):
+    """A weight update against unmapped weights is refused, not a crash."""
+    if torch.accelerator.device_count() < 1:
+        pytest.skip("Need at least 1 GPU for this test")
+
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+    with (
+        patch(
+            "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+            mock_create_engine,
+        ),
+        vllm_runner(
+            MODEL_NAME,
+            enforce_eager=True,
+            load_format="dummy",
+            tensor_parallel_size=1,
+            enable_sleep_mode=True,
+            weight_transfer_config=WeightTransferConfig(backend="nccl"),
+        ) as runner,
+    ):
+        llm = weakref.proxy(runner.llm)
+        llm.init_weight_transfer_engine(
+            WeightTransferInitRequest(init_info={"test_param": "init"})
+        )
+
+        def assert_refused_until_weights_wake(level: int) -> None:
+            llm.sleep(level=level)
+            with pytest.raises(RuntimeError, match="asleep"):
+                llm.start_weight_update()
+            llm.wake_up(tags=["kv_cache"])  # weights still unmapped
+            with pytest.raises(RuntimeError, match="asleep"):
+                llm.start_weight_update()
+            llm.wake_up()
+
+        assert_refused_until_weights_wake(level=1)
+
+        # A session interrupted by sleep is dropped, not resumed.
+        llm.start_weight_update()
+        llm.sleep(level=1)
+        with pytest.raises(RuntimeError, match="asleep"):
+            llm.finish_weight_update()
+        llm.wake_up()
+        with pytest.raises(RuntimeError, match="without a matching"):
+            llm.finish_weight_update()
+
+        # Fully awake again: the normal flow works and the engine is alive.
+        llm.start_weight_update()
+        llm.update_weights(
+            WeightTransferUpdateRequest(
+                update_info={
+                    "names": ["layer.weight"],
+                    "dtype_names": ["float32"],
+                    "shapes": [[10, 10]],
+                }
+            )
+        )
+        llm.finish_weight_update()
+        outputs = llm.generate(["Hello"], use_tqdm=False)
+        assert len(outputs) == 1
+
+        # Level 2 discards the weights; with dummy weights there is nothing to
+        # reload, so only the refusal itself is checked here.
+        assert_refused_until_weights_wake(level=2)
+
+
+@create_new_process_for_each_test()
 def test_full_weight_transfer_flow(vllm_runner):
     """Test the complete weight transfer flow: init -> start -> update -> finish."""
     if torch.accelerator.device_count() < 1:
@@ -314,6 +383,56 @@ def test_full_weight_transfer_flow(vllm_runner):
             assert result["update_called"], "receive_weights should be called"
             assert result["init_param"] == "flow_test"
             assert result["update_names"] == ["test.weight"]
+
+
+@create_new_process_for_each_test()
+def test_failed_update_leaves_model_usable(vllm_runner):
+    """A chunk that fails inside update_weights must not take the model down.
+
+    The IPC engine parks every weight on the meta device at start_weight_update;
+    the worker's abort path has to put them back, or the next forward runs on
+    meta tensors and kills the engine.
+    """
+    # A real IPC engine reaches CUDA IPC calls; the mock-engine tests here do not.
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Requires a CUDA-like device for the real IPC engine")
+
+    with vllm_runner(
+        MODEL_NAME,
+        enforce_eager=True,
+        load_format="dummy",
+        tensor_parallel_size=1,
+        weight_transfer_config=WeightTransferConfig(backend="ipc"),
+    ) as runner:
+        llm = weakref.proxy(runner.llm)
+        prompts = ["The capital of France is"]
+        before = runner.generate_greedy(prompts, 8)
+
+        llm.init_weight_transfer_engine(WeightTransferInitRequest(init_info={}))
+        llm.start_weight_update()
+        # The worker error comes back as a plain string flattened into an
+        # Exception by the engine-core RPC, so match on the message, not a type.
+        with pytest.raises(Exception, match="IPC handle not found"):
+            llm.update_weights(
+                WeightTransferUpdateRequest(
+                    update_info={
+                        "names": ["model.embed_tokens.weight"],
+                        "dtype_names": ["float32"],
+                        "shapes": [[1, 1]],
+                        "ipc_handles": [{"not-this-gpu": []}],
+                    }
+                )
+            )
+
+        # The failed session is gone and the weights are back where they were.
+        assert runner.generate_greedy(prompts, 8) == before
+        with pytest.raises(Exception, match="without a matching"):
+            llm.finish_weight_update()
+
+        # A fresh session works on the restored model.
+        llm.start_weight_update()
+        llm.finish_weight_update()
+        assert runner.generate_greedy(prompts, 8) == before
 
 
 @create_new_process_for_each_test()

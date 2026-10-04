@@ -23,7 +23,7 @@ Under the hood every round is the same **four-phase protocol**, which the traine
 engine drives on your behalf:
 
 1. **Initialization** (`init_weight_transfer_engine`): establishes the communication channel between the trainer and inference workers. Called once, from `trainer_init`, before the training loop begins.
-2. **Start** (`start_weight_update`): prepares the inference engine for a weight update.
+2. **Start** (`start_weight_update`): prepares the inference engine for a weight update. The model weights must be resident on the device: after `sleep()` (either level), call `wake_up()` or `wake_up(tags=["weights"])` before starting an update, otherwise the update is rejected with an error.
 3. **Weight Update** (`update_weights`): transfers updated weights. May be called one or more times (e.g. for chunked transfers).
 4. **Finish** (`finish_weight_update`): finalizes the update (e.g. runs post-processing for checkpoint-format weights). Called once after all weights have been transferred.
 
