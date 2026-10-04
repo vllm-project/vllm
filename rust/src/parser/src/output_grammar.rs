@@ -12,7 +12,8 @@ use xgrammar_structural_tag::builders::{StructuralTagBuilder, StructuralTagOptio
 use xgrammar_structural_tag::format::Format;
 use xgrammar_structural_tag::tool::ToolChoiceValue;
 use xgrammar_structural_tag::{
-    FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
+    FunctionDefinition, FunctionToolParam, NormalizedToolChoice, ToolChoice, ToolParam,
+    build_structural_tag,
 };
 
 use crate::tool::Tool;
@@ -216,6 +217,22 @@ fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<ToolParam> 
             }))
         })
         .collect()
+}
+
+/// Normalize the request tools the way `build_structural_tag` does before
+/// calling a crate builder, for model-owned grammar builders. Returns `None`
+/// when the request asks for no tool grammar.
+pub(crate) fn normalize_tool_choice(
+    ctx: &OutputGrammarContext<'_>,
+) -> Result<Option<NormalizedToolChoice>> {
+    if !tool_grammar_applies(ctx) {
+        return Ok(None);
+    }
+
+    let tools = tool_params(ctx.tools, ctx.tool_strict_level);
+    let normalized =
+        xgrammar_structural_tag::normalize_tool_choice(&tools, ctx.tool_choice.clone())?;
+    Ok(Some(normalized))
 }
 
 /// Whether the request asks for a tool grammar at all.
