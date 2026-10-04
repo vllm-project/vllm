@@ -131,11 +131,9 @@ def test_calibrated_load_path_uses_measured_min_n(
     assert page >= THRESHOLD_BYTES
     refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page)]]
     calibration = (torch.zeros(1, dtype=torch.int8), torch.device("cpu"))
-    timings = {"dma": [1, 2, 4, 8, 16], "triton": [3, 3, 3, 4, 5]}
+    measured = {"ratios": [3.0, 1.5, 0.75, 0.5, 0.3]}
     monkeypatch.setattr(
-        gpu_worker,
-        "measure_load_paths",
-        lambda *args: (timings["dma"], timings["triton"]),
+        gpu_worker, "measure_load_paths", lambda *args: measured["ratios"]
     )
 
     default = gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False)
@@ -147,7 +145,7 @@ def test_calibrated_load_path_uses_measured_min_n(
     assert calibrated.keywords["min_n"] == 64
 
     # Triton never wins: stay on DMA.
-    timings["triton"] = [3, 3, 5, 9, 17]
+    measured["ratios"] = [3.0, 1.5, 1.4, 1.3, 1.2]
     assert (
         gpu_worker._select_swap_blocks_fn(
             refs, gpu_to_cpu=False, calibration=calibration

@@ -68,7 +68,7 @@ def _resolve_min_n(
     host, device = calibration
     t0 = time.perf_counter()
     try:
-        measured = measure_load_paths(copy_size, chunk, host, device)
+        ratios = measure_load_paths(copy_size, chunk, host, device)
     except Exception:
         logger.warning(
             "KV offload load path calibration failed for %d-byte copies, "
@@ -77,7 +77,7 @@ def _resolve_min_n(
             exc_info=True,
         )
         return default
-    if measured is None:
+    if ratios is None:
         logger.info(
             "KV offload load path not calibrated for %d-byte copies (needs "
             "copies of at most %d bytes, at least %d CPU chunks and room for "
@@ -87,15 +87,16 @@ def _resolve_min_n(
             2 * CALIBRATION_NS[-1],
         )
         return default
-    min_n = pick_min_n(*measured)
-    logger.debug("Load path timings (ms): DMA %s, Triton %s", *measured)
+    min_n = pick_min_n(ratios, default)
     logger.info(
         "KV offload load path calibrated for %d-byte copies in %.1f ms: "
-        "Triton from N=%s (default N=%s)",
+        "Triton from N=%s (default N=%s); Triton/DMA time at N=%s: %s",
         copy_size,
         (time.perf_counter() - t0) * 1e3,
         min_n,
         default,
+        "/".join(map(str, CALIBRATION_NS)),
+        " ".join(f"{r:.2f}" for r in ratios),
     )
     return min_n
 
