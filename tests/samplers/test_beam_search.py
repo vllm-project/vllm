@@ -40,6 +40,17 @@ EXTRA_ENGINE_KWARGS: dict = (
     else dict(async_scheduling=False, max_num_seqs=1)
 )
 
+# The structured-output tests below require ``forked`` isolation (the
+# fork-after-threads workaround for #21073). On XPU, forking a child that
+# initializes a device engine leaks Level-Zero memory on child exit, which
+# fails the per-test memory-clear gate for every subsequent test in the suite.
+# The constrained beam-search logic under test is platform-independent and
+# fully covered on CUDA/ROCm, so skip these on XPU.
+skip_so_on_xpu = pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="fork isolation (#21073 workaround) leaks XPU device memory",
+)
+
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
 #   2. Increase beam_width to 8.
@@ -309,6 +320,7 @@ def test_beam_search_passes_multimodal_data(
 # configuring a structured-output backend starts compiler threads in the
 # parent, after which the next engine's forked EngineCore subprocess segfaults
 # during weight load (fork-after-threads). See GH issue #21073.
+@skip_so_on_xpu
 @pytest.mark.forked
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
@@ -369,6 +381,7 @@ def test_beam_search_structured_output(
 
 
 # forked: see note on ``test_beam_search_structured_output`` above (#21073).
+@skip_so_on_xpu
 @pytest.mark.forked
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
@@ -422,6 +435,7 @@ def test_beam_search_structured_output_auto_backend(
 
 
 # forked: see note on ``test_beam_search_structured_output`` above (#21073).
+@skip_so_on_xpu
 @pytest.mark.forked
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
