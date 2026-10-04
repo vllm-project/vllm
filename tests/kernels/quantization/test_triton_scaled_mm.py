@@ -160,3 +160,42 @@ def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_b
     out_plain = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=False)
     out_td = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=True)
     torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)
+
+
+# Regression: use_heuristic=False must honour the caller-supplied block sizes
+# instead of raising ``UnboundLocalError: ... 'tile_shape'`` (the tile was only
+# assigned inside the ``if use_heuristic:`` branch).
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Triton scaled_mm runs on CUDA-alike or XPU.",
+)
+@pytest.mark.parametrize("M,N,K", [(1, 256, 128), (64, 971, 1024)])
+@pytest.mark.parametrize(
+    "block_size_m,block_size_n,block_size_k", [(32, 32, 32), (64, 64, 128)]
+)
+def test_scaled_mm_use_heuristic_false(
+    M, N, K, block_size_m, block_size_n, block_size_k
+):
+    dev = current_platform.device_type
+    out_dtype = torch.bfloat16
+    set_random_seed(0)
+
+    a = torch.randint(-32, 32, (M, K), dtype=torch.int8, device=dev)
+    b = torch.randint(-32, 32, (K, N), dtype=torch.int8, device=dev)
+    scale_a = 0.25 * torch.rand((M, 1), device=dev)
+    scale_b = 0.25 * torch.rand((N, 1), device=dev)
+
+    # Must not raise UnboundLocalError, and must match the golden result.
+    c_check = triton_scaled_mm(
+        a,
+        b,
+        scale_a,
+        scale_b,
+        out_dtype,
+        use_heuristic=False,
+        block_size_m=block_size_m,
+        block_size_n=block_size_n,
+        block_size_k=block_size_k,
+    )
+    c_actual = torch_scaled_mm(a, b, scale_a, scale_b, out_dtype)
+    torch.testing.assert_close(c_check, c_actual, rtol=1e-1, atol=1e-1)
