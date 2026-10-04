@@ -380,12 +380,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Llama4ForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
-    "LongcatFlashForCausalLM": _HfExamplesInfo(
-        "meituan-longcat/LongCat-Flash-Chat", trust_remote_code=True
-    ),
+    "LongcatFlashForCausalLM": _HfExamplesInfo("meituan-longcat/LongCat-Flash-Chat"),
     "LongcatFlashNgramForCausalLM": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Lite",
-        trust_remote_code=True,
         # Shrink the ~62GB n-gram tables (ngram_vocab_size_ratio * vocab_size)
         # so the dummy-weight init test fits in CI memory.
         hf_overrides={"ngram_vocab_size_ratio": 1},
@@ -1752,7 +1749,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
-        trust_remote_code=True,
         speculative_model="meituan-longcat/LongCat-Flash-Chat",
     ),
     "MiMoMTPModel": _HfExamplesInfo(

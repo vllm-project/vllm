@@ -960,7 +960,7 @@ class SpeculativeConfig:
                     "architectures": [architecture],
                 }
             )
-        if hf_config.model_type in ("longcat_flash", "longcat_flash_ngram"):
+        if hf_config.model_type == "longcat_flash":
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update(
