@@ -5,6 +5,8 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
+import os
+
 import torch
 
 from vllm import envs
@@ -401,6 +403,78 @@ def _get_workspace_buffer(
     return _fi_sparse_workspace
 
 
+# Optional-API probe evaluated once at import time. The multi-CTA-KV counter
+# buffer API (get_trtllm_gen_multi_ctas_kv_counter_bytes /
+# get_device_sm_count) only exists in FlashInfer >= 0.6.16. On older
+# versions the module must stay importable and retain the current behavior
+# (FlashInfer allocates + zeroes the counter internally on every decode step).
+_FI_HAS_MULTI_CTAS_COUNTER_API: bool = False
+try:
+    from flashinfer.utils import (  # noqa: F401  (guarded import)
+        get_device_sm_count,
+        get_trtllm_gen_multi_ctas_kv_counter_bytes,
+    )
+
+    _FI_HAS_MULTI_CTAS_COUNTER_API = True
+except ImportError:
+    # FlashInfer < 0.6.16: the multi-CTA-KV counter-buffer API does not exist.
+    # Retain current behavior (FlashInfer allocates internally).
+    pass
+
+
+def _trtllm_gen_mla_decode_supports_num_heads(num_heads: int) -> bool:
+    """True if trtllm-gen's MLA decode kernel supports this query head count.
+
+    The kernel groups Q heads into CTAs of ``min(num_heads, tileSizeQ)`` and
+    requires ``num_heads`` divisible by that, else raises "The
+    numHeadsQ/numHeadsKv is not supported" (flashinfer fmhaKernels.cuh).
+    ``tileSizeQ`` is 8/16 for ``num_heads <= 8``/``<= 32`` (SwapsMmaAb) else 64;
+    treat ``> 32`` as tile 64 (safe bound). E.g. 96/24 -> False, 48/64/128 -> True.
+    """
+    if num_heads <= 8:
+        tile = 8
+    elif num_heads <= 32:
+        tile = 16
+    else:
+        tile = 64
+    return num_heads % min(num_heads, tile) == 0
+
+
+_fi_sparse_multi_ctas_kv_counter: torch.Tensor | None = None
+
+
+def _get_multi_ctas_kv_counter_buffer(
+    min_bytes: int, device: torch.device
+) -> torch.Tensor:
+    """Persistent, zero-initialized trtllm-gen multi-CTA-KV counter buffer.
+
+    trtllm-gen's multi-CTA-KV MLA decode kernel resets these semaphores to zero
+    at the end of every launch, so the buffer only needs zeroing once. The
+    public ``trtllm_batch_decode_with_kv_cache_mla`` entry point builds a fresh
+    runner per call, so without a caller-owned buffer it re-allocates and
+    re-zeros this counter on every decode step (a tiny ``FillFunctor<uint8>``
+    launch right before the FMHA). Owning it here and passing it in removes that
+    per-step launch. ``min_bytes`` is sized to the worst-case batch so the
+    buffer is allocated once and never reallocated after CUDA-graph capture.
+
+    SAFETY: this module-global buffer is shared by ALL layers of the model. Reuse
+    is safe only for ORDERED, NON-OVERLAPPING launches (the kernel self-resets
+    the semaphores at the end of each launch). This matches the dense sibling and
+    SGLang (one buffer per backend). Do NOT use it from multiple
+    concurrently-executing CUDA streams.
+    """
+    global _fi_sparse_multi_ctas_kv_counter
+    if (
+        _fi_sparse_multi_ctas_kv_counter is None
+        or _fi_sparse_multi_ctas_kv_counter.numel() < min_bytes
+        or _fi_sparse_multi_ctas_kv_counter.device != device
+    ):
+        _fi_sparse_multi_ctas_kv_counter = torch.zeros(
+            min_bytes, dtype=torch.uint8, device=device
+        )
+    return _fi_sparse_multi_ctas_kv_counter
+
+
 class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     """FlashInfer MLA Sparse implementation.
 
@@ -472,6 +546,46 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         # as the TRTLLM-GEN sparse MLA kernel requires matching dtypes
         # for query and kv_cache (mixed bf16+fp8 is not supported).
         self.supports_quant_query_input = True
+
+        # Worst-case decode batch for the persistent trtllm-gen multi-CTA-KV
+        # counter buffer (see _get_multi_ctas_kv_counter_buffer). Captured here
+        # (config is in scope during construction) so the byte size can be resolved
+        # once on the first decode and never grows after CUDA-graph capture. The impl
+        # has no _vllm_config, hence get_current_vllm_config().
+        from vllm.config import get_current_vllm_config
+
+        _sched = get_current_vllm_config().scheduler_config
+        self._mla_counter_max_batch: int = (
+            _sched.max_num_batched_tokens or _sched.max_num_seqs
+        )
+        # Size the counter for the MAX possible runtime head count so the buffer can
+        # never grow after capture even if DCP gather changes head count. self.num_heads
+        # is set by MLACommonBaseImpl.__init__ and self.dcp_world_size by
+        # AttentionImplBase.__new__, both BEFORE this point (super().__init__ above).
+        # For dcp>1 this deliberately OVER-sizes vs the dense sibling (which uses
+        # runtime_num_heads); that is REQUIRED so the buffer never grows after capture.
+        self._mla_counter_max_heads: int = self.num_heads * max(
+            1, self.dcp_world_size
+        )
+        self._mla_counter_bytes: int | None = None
+
+        # Feature toggle: persist FlashInfer's multi-CTA-KV counter buffer across
+        # decode steps (eliminates the per-step FillFunctor<uint8> launch). Enabled
+        # by default; set VLLM_DISABLE_PERSISTENT_MLA_COUNTER=1 to fall back
+        # to the original behavior (FlashInfer allocates + zeroes the counter on every
+        # decode step).
+        self._persistent_mla_counter_enabled = (
+            os.getenv("VLLM_DISABLE_PERSISTENT_MLA_COUNTER", "0") != "1"
+        )
+        if self._persistent_mla_counter_enabled:
+            logger.info_once(
+                "Persistent FlashInfer multi-CTA-KV counter buffer is ENABLED"
+            )
+        else:
+            logger.info_once(
+                "Persistent FlashInfer multi-CTA-KV counter buffer is DISABLED "
+                "(env override)"
+            )
 
     def forward_mqa(
         self,
@@ -701,6 +815,61 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             if needs_empty_query_guard:
                 topk_lens = prepare_sparse_mla_safe_lengths(topk_indices, seq_lens)
             extra_kwargs["sparse_mla_top_k_lens"] = topk_lens
+
+        # Parallel gathers can change the runtime Q heads from TP-local num_heads.
+        runtime_num_heads = q.shape[-2]
+        # trtllm-gen rejects MLA head counts it can't tile (e.g. 96). In the
+        # SPARSE path cute-dsl cannot run either (it rejects sparse_mla_top_k>0), so
+        # we NEVER forward backend="cute-dsl" here. We only use the tileability
+        # check to decide whether a trtllm-gen runner can consume our persistent
+        # multi-CTA-KV counter buffer.
+        heads_tileable = _trtllm_gen_mla_decode_supports_num_heads(
+            runtime_num_heads
+        )
+        extra_kwargs = {}
+        if (
+            self._persistent_mla_counter_enabled
+            and _FI_HAS_MULTI_CTAS_COUNTER_API
+            and heads_tileable
+            and kv_cache.shape[-2] in (32, 64)  # trtllm-gen page size
+        ):
+            if self._mla_counter_bytes is None:
+                # Sized for the worst-case batch AND the max possible runtime heads, so
+                # it is allocated once and never grows after CUDA-graph capture.
+                self._mla_counter_bytes = get_trtllm_gen_multi_ctas_kv_counter_bytes(  # noqa: F821
+                    self._mla_counter_max_batch,
+                    self._mla_counter_max_heads,
+                    get_device_sm_count(q.device),  # noqa: F821
+                )
+            extra_kwargs["multi_ctas_kv_counter_buffer"] = (
+                _get_multi_ctas_kv_counter_buffer(
+                    self._mla_counter_bytes, q.device
+                )
+            )
+            logger.info_once(
+                "FlashInfer sparse MLA: page size %d, num_heads %d -> "
+                "persistent multi-CTA-KV counter buffer (%d bytes).",
+                kv_cache.shape[-2],
+                runtime_num_heads,
+                self._mla_counter_bytes,
+            )
+        elif not heads_tileable:
+            # Untileable heads: the auto path RAISES (no fallback backend exists
+            # for sparse MLA). Warn clearly instead of claiming an "auto path".
+            logger.warning_once(
+                "FlashInfer sparse MLA: trtllm-gen cannot tile num_heads=%d and "
+                "no fallback backend is available for sparse MLA (cute-dsl rejects "
+                "sparse_mla_top_k>0).",
+                runtime_num_heads,
+            )
+        else:
+            # Benign ineligibility: page size not in (32,64) or
+            # FlashInfer < 0.6.16. Current auto behavior is preserved.
+            logger.info_once(
+                "FlashInfer sparse MLA: page size %d -> no persistent counter "
+                "buffer (auto path).",
+                kv_cache.shape[-2],
+            )
 
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,
