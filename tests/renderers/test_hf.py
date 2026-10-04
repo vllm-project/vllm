@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
+
 import jinja2
 import pytest
 
@@ -1006,6 +1008,145 @@ def test_template_error_reason_prefers_template_error():
 def test_template_error_reason_falls_back_to_message():
     err = ValueError("plain failure")
     assert _template_error_reason(err) == "plain failure"
+
+
+# Role dispatch copied from the Qwen2.5 chat template: roles other than
+# system/user/assistant/tool produce no prompt text.
+_QWEN_ROLE_TEMPLATE = """
+{%- if messages[0]['role'] == 'system' -%}
+{{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' -}}
+{%- endif -%}
+{%- for message in messages -%}
+    {%- if (message.role == "user") or (message.role == "system" and not loop.first)
+        or (message.role == "assistant" and not message.tool_calls) -%}
+        {{- '<|im_start|>' + message.role + '\\n'
+            + message.content + '<|im_end|>\\n' -}}
+    {%- elif message.role == "assistant" -%}
+        {{- '<|im_start|>' + message.role + '\\n'
+            + (message.content or '') + '<|im_end|>\\n' -}}
+    {%- elif message.role == "tool" -%}
+        {{- '<tool_response>\\n' + message.content + '\\n</tool_response>' -}}
+    {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{- '<|im_start|>assistant\\n' -}}
+{%- endif -%}
+"""
+
+_ELSE_ROLE_TEMPLATE = """
+{% for message in messages %}
+{% if message['role'] == 'user' %}
+user:{{ message['content'] }}
+{% elif message['role'] == 'assistant' %}
+assistant:{{ message['content'] }}
+{% else %}
+{{ message['role'] }}:{{ message['content'] }}
+{% endif %}
+{% endfor %}
+"""
+
+
+class TestChatTemplateDropsUnhandledRoles:
+    """Non-empty messages that a template drops must be HTTP 400.
+
+    Custom roles stay valid when the template actually emits their content.
+    Empty content is not an error: there is nothing to drop.
+    """
+
+    @pytest.fixture
+    def model_config(self):
+        return ModelConfig(
+            "facebook/opt-125m",
+            tokenizer="facebook/opt-125m",
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+            dtype="float16",
+        )
+
+    @pytest.fixture
+    def tokenizer(self):
+        return get_tokenizer("facebook/opt-125m")
+
+    @pytest.mark.parametrize("role", ["system", "user", "assistant", "tool"])
+    def test_known_roles_render(self, model_config, tokenizer, role):
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            [{"role": role, "content": "hello"}],
+            chat_template=_QWEN_ROLE_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert "hello" in result
+        assert "vllmprobe" not in result
+
+    @pytest.mark.parametrize("role", ["usr", "assistan", "USER", "wizard", "", " "])
+    def test_typo_role_is_bad_request(self, model_config, tokenizer, role):
+        with pytest.raises(VLLMValidationError, match=re.escape(repr(role))) as exc:
+            safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                [{"role": role, "content": "hello"}],
+                chat_template=_QWEN_ROLE_TEMPLATE,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        assert exc.value.parameter == "messages"
+        assert exc.value.value == role
+
+    def test_typo_role_rejected_when_tokenizing(self, model_config, tokenizer):
+        with pytest.raises(VLLMValidationError, match="'usr'"):
+            safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                [
+                    {"role": "system", "content": "You are terse."},
+                    {"role": "usr", "content": "The launch code is TANGERINE-42."},
+                    {"role": "user", "content": "What is the launch code?"},
+                ],
+                chat_template=_QWEN_ROLE_TEMPLATE,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+
+    @pytest.mark.parametrize("content", ["", "   "])
+    def test_empty_content_unknown_role_is_allowed(
+        self, model_config, tokenizer, content
+    ):
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            [{"role": "wizard", "content": content}],
+            chat_template=_QWEN_ROLE_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        assert "wizard" not in result
+
+    def test_custom_role_rendered_by_template(self, model_config, tokenizer):
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            [{"role": "wizard", "content": "hello from a custom role"}],
+            chat_template=_ELSE_ROLE_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        assert "wizard:hello from a custom role" in result
+        # The inclusion probe must not leak into the prompt that is served.
+        assert "vllmprobe" not in result
+
+    def test_chatml_renders_custom_role(self, model_config, tokenizer):
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            [{"role": "wizard", "content": "hello"}],
+            chat_template=CHATML_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        assert "wizard" in result
+        assert "hello" in result
 
 
 class TestConsolidateSystemMessages:
