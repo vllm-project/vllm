@@ -9,6 +9,11 @@ draft belonging to a large target model is instantiated at full size even
 when the target itself is shrunk — which is what kept spec-decode archs like
 ``EagleMistralLarge3ForCausalLM`` stuck at ``is_available_online=False``
 ("TODO: revert once figuring out OOM in CI").
+
+Dict ``--hf-overrides`` (the CLI path) must forward rope-relevant keys so
+the MTP draft shares the target's positional encoding. Otherwise YaRN /
+RoPE extensions applied only to the target make acceptance collapse to 0%
+past the draft's native ``max_position_embeddings`` (#58080).
 """
 
 import functools
@@ -19,6 +24,16 @@ from transformers import PreTrainedConfig
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
+
+_YARN_ROPE_PARAMETERS = {
+    "mrope_interleaved": True,
+    "mrope_section": [11, 11, 10],
+    "rope_type": "yarn",
+    "rope_theta": 10_000_000,
+    "partial_rotary_factor": 0.25,
+    "factor": 4.0,
+    "original_max_position_embeddings": 262_144,
+}
 
 
 def _make_hf_config(**kwargs) -> PreTrainedConfig:
@@ -32,12 +47,9 @@ def _make_hf_config(**kwargs) -> PreTrainedConfig:
 
 
 @pytest.mark.cpu_test
-def test_dict_overrides_are_not_forwarded_to_draft():
-    """Dict overrides are target-specific key patches; the draft must get
-    only the architecture-mapping override."""
-    composed = SpeculativeConfig.compose_draft_hf_overrides(
-        {"max_position_embeddings": 1234}
-    )
+def test_non_rope_dict_overrides_are_not_forwarded_to_draft():
+    """Non-rope dict patches stay target-only; the draft keeps arch mapping."""
+    composed = SpeculativeConfig.compose_draft_hf_overrides({"num_hidden_layers": 1})
     assert composed is SpeculativeConfig.hf_config_override
 
 
@@ -130,6 +142,83 @@ def test_mtp_stages_are_independent_of_dspark_width():
         _make_speculative_config(
             hf_kwargs, "DeepSeekV4MTPModel", method="mtp", num_speculative_tokens=5
         )
+
+
+@pytest.mark.cpu_test
+def test_empty_dict_overrides_fall_back_to_arch_mapping():
+    composed = SpeculativeConfig.compose_draft_hf_overrides({})
+    assert composed is SpeculativeConfig.hf_config_override
+
+
+@pytest.mark.cpu_test
+def test_dict_yarn_overrides_reach_the_draft_config():
+    """CLI nested YaRN overrides must apply to the draft before arch mapping.
+
+    This is the #58080 path: ``--hf-overrides '{"text_config":
+    {"rope_parameters": {...yarn...}}}'`` with MTP.
+    """
+    overrides = {"text_config": {"rope_parameters": _YARN_ROPE_PARAMETERS}}
+    composed = SpeculativeConfig.compose_draft_hf_overrides(overrides)
+    assert composed is not SpeculativeConfig.hf_config_override
+    assert isinstance(composed, functools.partial)
+    assert composed.func is SpeculativeConfig._apply_dict_then_arch_override
+
+    text_config = _make_hf_config(
+        rope_parameters={"rope_type": "default"},
+        max_position_embeddings=262_144,
+    )
+    cfg = _make_hf_config(
+        architectures=["MiMoForCausalLM"],
+        model_type="mimo",
+        num_nextn_predict_layers=1,
+        text_config=text_config,
+        max_position_embeddings=262_144,
+    )
+    out = composed(cfg)
+    assert out.text_config.rope_parameters == _YARN_ROPE_PARAMETERS
+    # Architecture mapping still rewrites the draft class.
+    assert out.architectures == ["MiMoMTPModel"]
+
+
+@pytest.mark.cpu_test
+def test_dict_yarn_overrides_ignore_unrelated_keys():
+    """Hidden-size / layer-count patches stay target-only even when mixed
+    with a YaRN override."""
+    overrides = {
+        "num_hidden_layers": 1,
+        "text_config": {
+            "hidden_size": 1024,
+            "rope_parameters": _YARN_ROPE_PARAMETERS,
+        },
+    }
+    composed = SpeculativeConfig.compose_draft_hf_overrides(overrides)
+    text_config = _make_hf_config(
+        hidden_size=4096,
+        rope_parameters={"rope_type": "default"},
+    )
+    cfg = _make_hf_config(text_config=text_config, num_hidden_layers=64)
+    out = composed(cfg)
+    assert out.num_hidden_layers == 64
+    assert out.text_config.hidden_size == 4096
+    assert out.text_config.rope_parameters == _YARN_ROPE_PARAMETERS
+
+
+@pytest.mark.cpu_test
+def test_top_level_rope_parameters_replace_on_draft():
+    """Top-level dict-valued rope_parameters is replaced, matching ModelConfig."""
+    yarn = {"rope_type": "yarn", "factor": 2.0}
+    composed = SpeculativeConfig.compose_draft_hf_overrides({"rope_parameters": yarn})
+    out = composed(_make_hf_config(rope_parameters={"rope_type": "default", "base": 1}))
+    assert out.rope_parameters == yarn
+
+
+@pytest.mark.cpu_test
+def test_max_position_embeddings_override_reaches_draft():
+    composed = SpeculativeConfig.compose_draft_hf_overrides(
+        {"max_position_embeddings": 1_000_000}
+    )
+    out = composed(_make_hf_config(max_position_embeddings=262_144))
+    assert out.max_position_embeddings == 1_000_000
 
 
 @pytest.mark.cpu_test
