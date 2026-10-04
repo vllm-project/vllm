@@ -9,4 +9,4 @@ from vllm.tokenizers import TokenizerLike
 
 @pytest.fixture(scope="module")
 def default_tokenizer() -> TokenizerLike:
-    return AutoTokenizer.from_pretrained("gpt2")
+    return AutoTokenizer.from_pretrained("openai-community/gpt2")
