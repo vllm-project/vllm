@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import socket
 import threading
+import warnings
 
 import pytest
 import zmq
@@ -25,6 +27,31 @@ def test_get_file_store_init_method_is_unique():
 
     assert len(init_methods) == 2
     assert all(method.startswith("file://") for method in init_methods)
+
+
+def test_loopback_bind_closes_its_socket_when_bind_fails():
+    """A failed bind must still close the socket that was created for it.
+
+    ``test_loopback_bind`` exists to answer "is this address bindable?", so
+    returning False is a normal outcome rather than an error. 192.0.2.0/24 is
+    TEST-NET-1 (RFC 5737) and is never assigned to an interface, so bind()
+    raises and the function takes that path.
+
+    Note this calls through the module rather than importing the function by
+    name: the name starts with ``test_``, so importing it here would make
+    pytest collect it as a test case and call it with no arguments.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        assert network_utils.test_loopback_bind("192.0.2.1", socket.AF_INET) is False
+        # The socket is closed from __del__ if it is closed at all, so force
+        # collection before inspecting the warnings.
+        gc.collect()
+
+    unclosed = [w for w in caught if issubclass(w.category, ResourceWarning)]
+    assert not unclosed, (
+        f"socket left unclosed by a failed bind: {[str(w.message) for w in unclosed]}"
+    )
 
 
 def _call_with_timeout(func, timeout: float = 10.0):
