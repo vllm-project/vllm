@@ -710,21 +710,23 @@ async def test_text_mode_rejected_when_tokens_only(client):
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
-    reason="output_mode is not supported by the Rust frontend",
+    reason="the Rust frontend does not serve /inference/v1/abort_requests",
 )
-async def test_text_mode_stream_delivers_abort_finish_chunk(
-    client, tokenizer, messages
+@pytest.mark.parametrize("output_mode", ["tokens", "text"])
+async def test_stream_delivers_abort_finish_chunk(
+    client, tokenizer, messages, output_mode
 ):
-    """The final output after an abort has no new token IDs, so it
-    reaches a text stream only because text mode emits finish-only chunks."""
+    """The final output after an abort has no new token IDs, but the
+    stream must still deliver its finish reason."""
     payload = {
         **_text_mode_payload(
             _chat_prompt_token_ids(tokenizer, messages),
             max_tokens=900,
             ignore_eos=True,
         ),
+        "output_mode": output_mode,
         "stream": True,
-        "request_id": "text-abort-e2e",
+        "request_id": f"{output_mode}-abort-e2e",
     }
 
     chunks = []
@@ -736,7 +738,7 @@ async def test_text_mode_stream_delivers_abort_finish_chunk(
                 continue
             chunk = json.loads(line[len("data: ") :])
             chunks.append(chunk)
-            if not aborted and chunk["choices"] and chunk["choices"][0]["text"]:
+            if not aborted and chunk["choices"] and chunk["choices"][0]["token_ids"]:
                 abort = await client.post(
                     ABORT_ENDPOINT,
                     json={"request_ids": [chunk["request_id"]]},
@@ -745,7 +747,7 @@ async def test_text_mode_stream_delivers_abort_finish_chunk(
                 aborted = True
 
     assert aborted
-    assert {chunk["output_mode"] for chunk in chunks} == {"text"}
+    assert {chunk["output_mode"] for chunk in chunks} == {output_mode}
     final_choice = chunks[-1]["choices"][0]
     assert final_choice["finish_reason"] == "abort"
     generated = sum(len(chunk["choices"][0]["token_ids"] or []) for chunk in chunks)

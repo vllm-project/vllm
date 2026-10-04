@@ -516,11 +516,12 @@ class ServingTokens(GenerateBaseServing):
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         num_prompt_tokens = 0
-        num_generated_tokens: list[int] = []
         first_iteration = True
         prompt_token_ids: list[int] | None = None
         num_cached_tokens = None
         sampling_params: SamplingParams = request.sampling_params
+        # With n > 1, the first output may not include every choice yet.
+        num_generated_tokens = [0] * sampling_params.n
         last_res: RequestOutput | None = None
         text_mode = request.output_mode == "text"
         tokenizer = self._logprobs_tokenizer(text_mode)
@@ -540,7 +541,6 @@ class ServingTokens(GenerateBaseServing):
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
                     num_cached_tokens = res.num_cached_tokens
-                    num_generated_tokens = [0] * len(res.outputs)
                     first_iteration = False
 
                 for output in res.outputs:
@@ -551,21 +551,15 @@ class ServingTokens(GenerateBaseServing):
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
-                    if text_mode:
-                        # Text held back for stop string matching is flushed
-                        # with the final output, and the abort output has no
-                        # new token IDs, so text or a finish reason is enough.
-                        emit = bool(
-                            delta_token_ids or output.text or finish_reason is not None
-                        )
-                    else:
-                        # Still emit a terminal empty chunk while prompt
-                        # metadata is pending, so zero-token completions
-                        # deliver it.
-                        emit = bool(delta_token_ids) or (
-                            finish_reason is not None and prompt_token_ids is not None
-                        )
-                    if not emit:
+                    # Terminal outputs are always emitted so the client sees
+                    # the finish reason, e.g. an abort, which has no new
+                    # tokens. Text mode also emits text held back for stop
+                    # string matching, which can arrive without token IDs.
+                    if not (
+                        delta_token_ids
+                        or finish_reason is not None
+                        or (text_mode and output.text)
+                    ):
                         continue
 
                     if sampling_params.logprobs is not None:
