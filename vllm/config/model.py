@@ -26,7 +26,7 @@ from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -108,11 +108,37 @@ HfOverrides = dict[str, Any] | Callable[[PreTrainedConfig], PreTrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
 
+_ATTENTION_LAYER_TYPES = frozenset(
+    {
+        "full_attention",
+        "deepseek_sparse_attention",
+        "qwen_sparse_attention",
+    }
+)
+"""`layer_types` spellings that consume a full attention KV cache. Sparse
+attention still caches every token, so it counts as attention here."""
+
 _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "generate": [],
     "pooling": ["embed", "classify"],
     "draft": [],
 }
+
+
+def _modelopt_mixed_has_nvfp4(quant_config: dict[str, Any] | None) -> bool:
+    """Whether a ModelOpt MIXED_PRECISION checkpoint quantizes any layer to NVFP4.
+
+    ``W4A16_NVFP4`` is excluded on purpose: it quantizes weights only, so there
+    is no activation quantization for the fusion passes to act on.
+    """
+    layers = (quant_config or {}).get("quantized_layers")
+    if not isinstance(layers, dict):
+        return False
+    return any(
+        isinstance(info, dict) and info.get("quant_algo") == "NVFP4"
+        for info in layers.values()
+    )
+
 
 AttnTypeStr = Literal[
     "decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free", "hybrid"
@@ -1718,7 +1744,8 @@ class ModelConfig:
             if layer_types_value is not None:
                 if block_type == "attention":
                     return sum(
-                        t == "full_attention" for t in layer_types_value[start:end]
+                        t in _ATTENTION_LAYER_TYPES
+                        for t in layer_types_value[start:end]
                     )
                 elif block_type == "linear_attention":
                     return sum(
@@ -2238,13 +2265,20 @@ class ModelConfig:
         return getattr(self.hf_config, "quantization_config", None) is not None
 
     def is_nvfp4_quantized(self) -> bool:
+        quant_config = self.model_arch_config.quantization_config
+
         # ModelOpt NVFP4 checkpoints resolve to modelopt_fp4 quantization method
         if self.quantization in ("modelopt_fp4",):
             return True
 
+        # A checkpoint mixing NVFP4 with another algorithm declares
+        # quant_algo MIXED_PRECISION and resolves to modelopt_mixed, so the
+        # per-layer algorithms decide.
+        if self.quantization == "modelopt_mixed":
+            return _modelopt_mixed_has_nvfp4(quant_config)
+
         # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
         # in the quantization config
-        quant_config = self.model_arch_config.quantization_config
         return (
             self.quantization == "compressed-tensors"
             and quant_config is not None
@@ -2419,6 +2453,12 @@ def _get_and_verify_dtype(
                 config_dtype,
                 is_pooling_model=is_pooling_model,
             )
+            if (
+                current_platform.is_cpu()
+                and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+                and torch_dtype in (torch.float16, torch.float32)
+            ):
+                torch_dtype = torch.bfloat16
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype!r}")
