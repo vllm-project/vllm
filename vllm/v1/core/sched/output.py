@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from array import array
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
@@ -54,6 +55,31 @@ class NewRequestData:
     prefill_token_ids: list[int] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
+    # v2 model runner: workers receive the token-id lists as int32 arrays.
+    pack_token_ids: bool = False
+    # Request.packed_prompt_token_ids; not pickled.
+    packed_prompt_token_ids: array | None = None
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        packed_prompt = state.pop("packed_prompt_token_ids", None)
+        if self.pack_token_ids:
+            packed: dict[int, array] = {}
+            prompt = state["prompt_token_ids"]
+            if (
+                packed_prompt is not None
+                and isinstance(prompt, list)
+                and len(packed_prompt) == len(prompt)
+            ):
+                packed[id(prompt)] = packed_prompt
+            for key in ("prompt_token_ids", "prefill_token_ids"):
+                ids = state[key]
+                if isinstance(ids, list):
+                    # One array for a list both fields reference.
+                    if id(ids) not in packed:
+                        packed[id(ids)] = array("i", ids)
+                    state[key] = packed[id(ids)]
+        return state
 
     @classmethod
     def from_request(
@@ -62,7 +88,13 @@ class NewRequestData:
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
         uses_mrope: bool = False,
+        pack_token_ids: bool = False,
     ) -> "NewRequestData":
+        packed_prompt = None
+        if pack_token_ids:
+            packed_prompt = getattr(request, "packed_prompt_token_ids", None)
+            if packed_prompt is not None:
+                request.packed_prompt_token_ids = None
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
@@ -80,6 +112,8 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
+            pack_token_ids=pack_token_ids,
+            packed_prompt_token_ids=packed_prompt,
         )
 
     @property
