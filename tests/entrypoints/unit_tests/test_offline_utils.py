@@ -4,7 +4,7 @@
 import pytest
 
 from vllm import SamplingParams
-from vllm.entrypoints.offline_utils import OfflineInferenceMixin
+from vllm.entrypoints.launchers.offline import OfflineInferenceMixin
 from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 

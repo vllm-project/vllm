@@ -39,6 +39,7 @@ from vllm.entrypoints.chat_utils import (
     load_chat_template,
 )
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
+from vllm.entrypoints.launchers.offline import _O, _R, OfflineInferenceMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import PromptType
@@ -56,7 +57,6 @@ from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 from ..renderers import ChatParams
-from .offline_utils import _O, _R, OfflineInferenceMixin
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric

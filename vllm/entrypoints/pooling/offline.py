@@ -7,7 +7,7 @@ from typing import Any
 from tqdm.auto import tqdm
 
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
-from vllm.entrypoints.offline_utils import OfflineInferenceMixin
+from vllm.entrypoints.launchers.offline import OfflineInferenceMixin
 from vllm.inputs import DataPrompt, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
