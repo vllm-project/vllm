@@ -61,15 +61,16 @@ def _get_token_offs(
     naive_block_assignment: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
-    """Returns token offsets."""
+    """Returns int64 token offsets; offs_token * stride can exceed int32."""
     if naive_block_assignment:
-        return tl.where(offs == 0, pid_m, num_valid_tokens)
+        offs_token = tl.where(offs == 0, pid_m, num_valid_tokens)
     else:
         offs_token_id = pid_m * BLOCK_SIZE_M + offs
         token_ind = stride_tl * lora_id + offs_token_id
-        return tl.load(
+        offs_token = tl.load(
             sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
         )
+    return offs_token.to(tl.int64)
 
 
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
