@@ -744,3 +744,70 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
+
+
+def _checkpoint_engine_core_proc(pause_state: PauseState) -> EngineCoreProc:
+    core = _pausable_engine_core_proc()
+    core.model_executor.suspend.return_value = None
+    core._checkpoint_scheduler_pause_state = None
+    core.scheduler.pause_state = pause_state
+    core.scheduler.finish_requests.return_value = []
+    core.scheduler.set_pause_state.side_effect = lambda state: setattr(
+        core.scheduler, "pause_state", state
+    )
+    core._reset_caches = MagicMock()
+    core.resume_scheduler = MagicMock(wraps=core.resume_scheduler)
+    return core
+
+
+@pytest.mark.parametrize("pause_state", list(PauseState))
+@pytest.mark.parametrize("mode", ["abort", "wait", "keep"])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_checkpoint_resume_preserves_scheduler_pause(pause_state, mode, deferred):
+    core = _checkpoint_engine_core_proc(pause_state)
+    core.engines_running = deferred
+
+    result = core.suspend(mode=mode)
+    if deferred:
+        assert isinstance(result, Future)
+        core.model_executor.suspend.assert_not_called()
+        core.engines_running = False
+        core._notify_idle_state_callbacks()
+        assert result.result(timeout=0) is None
+    else:
+        assert result is None
+
+    # A repeated suspend must retain the original pause ownership.
+    assert core.suspend(mode=mode) is None
+    core.resume()
+    assert core.scheduler.pause_state == pause_state
+    assert core._checkpoint_scheduler_pause_state is None
+    if pause_state == PauseState.UNPAUSED:
+        core.resume_scheduler.assert_called_once_with()
+    else:
+        core.resume_scheduler.assert_not_called()
+        # The generation pause is released separately by resume_generation().
+        core.resume_scheduler()
+        assert core.scheduler.pause_state == PauseState.UNPAUSED
+
+    # Resume without a checkpoint-owned pause must preserve a new pause.
+    core.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    core.resume()
+    assert core.scheduler.pause_state == PauseState.PAUSED_ALL
+
+
+def test_checkpoint_resume_failure_retains_scheduler_pause():
+    core = _checkpoint_engine_core_proc(PauseState.UNPAUSED)
+    core.suspend(mode="keep")
+    core.model_executor.resume.side_effect = RuntimeError("restore failed")
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        core.resume()
+    assert core.scheduler.pause_state == PauseState.PAUSED_ALL
+    assert core._checkpoint_scheduler_pause_state == PauseState.UNPAUSED
+    core.resume_scheduler.assert_not_called()
+
+    core.model_executor.resume.side_effect = None
+    core.resume()
+    assert core.scheduler.pause_state == PauseState.UNPAUSED
+    assert core._checkpoint_scheduler_pause_state is None
