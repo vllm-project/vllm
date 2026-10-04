@@ -27,6 +27,9 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.utils import (
+    compute_mm_prefix_range_tensor,
+)
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
     has_native_kv_cache_layout,
@@ -71,6 +74,10 @@ class RocmAttentionMetadata:
 
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
+
+    # Prefix-LM / multimodal bidirectional attention ranges.
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
+    mm_prefix_range_tensor: torch.Tensor | None = None
 
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
@@ -157,6 +164,17 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             causal=common_attn_metadata.causal,
         )
+
+        num_reqs = common_attn_metadata.num_reqs
+        mm_ranges = common_attn_metadata.mm_req_doc_ranges
+        if mm_ranges is not None:
+            attn_metadata.mm_prefix_range = mm_ranges
+            attn_metadata.mm_prefix_range_tensor = (
+                compute_mm_prefix_range_tensor(
+                    mm_ranges, num_reqs, seq_lens.device
+                )
+            )
+
         return attn_metadata
 
 
@@ -193,7 +211,10 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        # Not implemented
+        # ROCM_ATTN uses chunked_prefill_paged_decode with an asymmetric
+        # (2, num_blocks, ...) KV cache layout that does not support
+        # multimodal bidirectional prefix masking (Prefix-LM).
+        # Models requiring Prefix-LM should use ROCM_AITER_UNIFIED_ATTN or TRITON_ATTN.
         return False
 
     @classmethod
@@ -463,6 +484,13 @@ class RocmAttentionImpl(AttentionImpl):
         max_seqlen_q = attn_metadata.max_query_len
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
+
+        if attn_metadata.mm_prefix_range_tensor is not None:
+            raise NotImplementedError(
+                "Prefix-LM / multimodal bidirectional attention "
+                "(mm_prefix_range) is not supported by RocmAttentionImpl "
+                "(ROCM_ATTN). Use ROCM_AITER_UNIFIED_ATTN or TRITON_ATTN."
+            )
 
         # Compute attention and update output up to `num_actual_tokens`.
         chunked_prefill_paged_decode(
