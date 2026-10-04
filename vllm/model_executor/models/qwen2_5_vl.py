@@ -81,7 +81,11 @@ from vllm.multimodal.inputs import (
     VideoItem,
 )
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing import (
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
 from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
@@ -1246,6 +1250,8 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             "image": vocab[hf_processor.image_token],
             "video": vocab[hf_processor.video_token],
         }
+        vision_start = vocab["<|vision_start|>"]
+        vision_end = vocab["<|vision_end|>"]
 
         merge_length = image_processor.merge_size**2
 
@@ -1274,12 +1280,22 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 )
             # End of EVS-specific code
 
-            return [placeholder[modality]] * num_tokens
+            replacement = (
+                [vision_start] + [placeholder[modality]] * num_tokens + [vision_end]
+            )
+            return PromptUpdateDetails.select_token_id(
+                replacement, placeholder[modality]
+            )
+
+        targets = {
+            modality: [vision_start, placeholder[modality], vision_end]
+            for modality in ("image", "video")
+        }
 
         return [
             PromptReplacement(
                 modality=modality,
-                target=[placeholder[modality]],
+                target=targets[modality],
                 replacement=partial(get_replacement_qwen2vl, modality=modality),
             )
             for modality in ("image", "video")
