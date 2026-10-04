@@ -1180,3 +1180,152 @@ def test_barrier_release_failure_keeps_original_error(iid, monkeypatch):
         _make_region(iid, barrier=MagicMock(side_effect=TimeoutError("barrier")))
 
     assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+
+
+def test_defer_unlink_preserves_file_after_barrier(monkeypatch):
+    """When defer_unlink=True, the backing file is NOT unlinked after barrier
+    so later openers (like Tiering scheduler) can map the same inode."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = "test-defer-unlink"
+    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    mock_unlink = MagicMock()
+    mock_barrier = MagicMock()
+
+    monkeypatch.setattr(region.os, "open", MagicMock(return_value=123))
+    monkeypatch.setattr(region.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region.os, "ftruncate", MagicMock())
+    monkeypatch.setattr(region.os, "close", MagicMock())
+    monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
+    real_mmap = mmap.mmap
+    monkeypatch.setattr(
+        "mmap.mmap", lambda *args, **kwargs: real_mmap(-1, 4 * PAGE_SIZE)
+    )
+    monkeypatch.setattr(region.torch, "frombuffer", MagicMock())
+
+    r = SharedOffloadRegion(
+        engine_id=engine_id,
+        num_chunks=4,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        barrier=mock_barrier,
+        defer_unlink=True,
+    )
+
+    mock_barrier.assert_called_once_with()
+    # When defer_unlink=True, unlink should NOT have been called yet
+    mock_unlink.assert_not_called()
+    assert r._creator is True
+
+    # Now manually calling unlink() should unlink the file and reset _creator
+    r.unlink()
+    mock_unlink.assert_called_once_with(mmap_path)
+    assert r._creator is False
+
+
+def test_unlink_method_idempotency_and_suppression(monkeypatch):
+    """r.unlink() is idempotent and suppresses FileNotFoundError."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = "test-unlink-idempotency"
+    unlink_calls = []
+
+    def fake_unlink(path):
+        unlink_calls.append(path)
+        if len(unlink_calls) > 1:
+            raise FileNotFoundError(f"No such file: {path}")
+
+    monkeypatch.setattr(region.os, "open", MagicMock(return_value=123))
+    monkeypatch.setattr(region.os, "unlink", fake_unlink)
+    monkeypatch.setattr(region.os, "ftruncate", MagicMock())
+    monkeypatch.setattr(region.os, "close", MagicMock())
+    monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
+    real_mmap = mmap.mmap
+    monkeypatch.setattr(
+        "mmap.mmap", lambda *args, **kwargs: real_mmap(-1, 4 * PAGE_SIZE)
+    )
+    monkeypatch.setattr(region.torch, "frombuffer", MagicMock())
+
+    r = SharedOffloadRegion(
+        engine_id=engine_id,
+        num_chunks=4,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+    )
+    assert r._creator is True
+
+    # First call unlinks successfully
+    r.unlink()
+    assert len(unlink_calls) == 1
+    assert r._creator is False
+
+    # Second call suppresses FileNotFoundError safely
+    r.unlink()
+    assert len(unlink_calls) == 2
+    assert r._creator is False
+
+
+def test_cleanup_suppresses_file_not_found_without_warning(monkeypatch):
+    """Graceful cleanup when file was already unlinked does not log warnings."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = "test-cleanup-suppress"
+    mock_warning = MagicMock()
+    monkeypatch.setattr(region.logger, "warning", mock_warning)
+    monkeypatch.setattr(region.os, "open", MagicMock(return_value=123))
+    monkeypatch.setattr(
+        region.os, "unlink", MagicMock(side_effect=FileNotFoundError("already gone"))
+    )
+    monkeypatch.setattr(region.os, "ftruncate", MagicMock())
+    monkeypatch.setattr(region.os, "close", MagicMock())
+    monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
+    real_mmap = mmap.mmap
+    monkeypatch.setattr(
+        "mmap.mmap", lambda *args, **kwargs: real_mmap(-1, 4 * PAGE_SIZE)
+    )
+    monkeypatch.setattr(region.torch, "frombuffer", MagicMock())
+
+    r = SharedOffloadRegion(
+        engine_id=engine_id,
+        num_chunks=4,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+    )
+    assert r._creator is True
+
+    # cleanup should not re-raise FileNotFoundError or log a warning
+    r.cleanup()
+    for call_item in mock_warning.call_args_list:
+        assert "Failed to unlink path" not in str(call_item)
+    assert r._creator is False
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
+def test_real_fs_defer_unlink_and_manual_unlink(iid):
+    """On real /dev/shm, verify defer_unlink keeps file until unlink() is called."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    barrier = MagicMock()
+
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=4,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        barrier=barrier,
+        defer_unlink=True,
+    )
+    try:
+        barrier.assert_called_once_with()
+        assert os.path.exists(path), "file must exist after barrier with defer_unlink"
+        assert region._creator is True
+
+        region.unlink()
+        assert not os.path.exists(path), "file must be gone after unlink()"
+        assert region._creator is False
+    finally:
+        region.cleanup()
+        _cleanup_file(path)

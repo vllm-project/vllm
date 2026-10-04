@@ -97,6 +97,7 @@ class SharedOffloadRegion:
         *,
         creator_memory_check: Callable[[int], None] | None = None,
         populate_only_on_creator: bool = False,
+        defer_unlink: bool = False,
     ) -> None:
         if populate_only_on_creator and barrier is None:
             raise ValueError("Creator-only population requires a barrier.")
@@ -196,10 +197,8 @@ class SharedOffloadRegion:
                 self.mmap_obj = None
                 self.fd = None
                 raise
-            if self._creator:
-                os.unlink(self.mmap_path)
-                self._creator = False
-                logger.info("Unlinked mmap file %s", self.mmap_path)
+            if self._creator and not defer_unlink:
+                self.unlink()
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
@@ -341,6 +340,17 @@ class SharedOffloadRegion:
         )
         return memoryview(np_arr)
 
+    def unlink(self) -> None:
+        """Unlink the backing mmap file from the filesystem.
+
+        Open file descriptors and memory mappings remain valid until closed.
+        """
+        if getattr(self, "mmap_path", None):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.mmap_path)
+                logger.info("Unlinked mmap file %s", self.mmap_path)
+            self._creator = False
+
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
             if current_platform.is_cuda_alike():
@@ -381,6 +391,8 @@ class SharedOffloadRegion:
             try:
                 os.unlink(self.mmap_path)
                 logger.info("Removed mmap file %s", self.mmap_path)
+            except FileNotFoundError:
+                pass
             except Exception:
                 logger.warning(
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
