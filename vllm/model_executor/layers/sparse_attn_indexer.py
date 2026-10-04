@@ -767,6 +767,7 @@ def sparse_attn_indexer(
                 max_model_len,
                 decode_metadata.write_max_decode_len or next_n,
                 lite_histogram,
+                schedule=decode_metadata.litetopk_bf16_schedule,
             )
         else:
             logits = fp8_fp4_paged_mqa_logits(

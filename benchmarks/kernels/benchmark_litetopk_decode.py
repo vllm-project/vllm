@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare paged MQA + top-k chains using CUDA graph replay on SM100.
 
-BF16 measurements include the per-call split384 schedule and weight cast.
-The baseline uses FP32 scores and the auto selector, with its schedule reused
-as in the serving layer. These are kernel-chain timings, not model latency.
+Both paths reuse their per-forward schedules as in the serving layer. The
+baseline uses FP32 scores and the auto selector. These are per-layer kernel-chain
+timings; they exclude shared metadata construction and are not model latency.
 """
 
 import argparse
@@ -16,6 +16,7 @@ import torch
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.model_executor.layers.litetopk_decode import (
     CANDIDATE_CAPACITY,
+    get_litetopk_bf16_metadata,
     has_litetopk_decode,
     litetopk_bf16_scores,
     litetopk_select,
@@ -94,6 +95,7 @@ def run_case(fp4, requests, n, width, repeats):
         width - n + 1 + torch.arange(rows, device="cuda", dtype=torch.int32) % n
     ).view(-1, 1)
     schedule = get_paged_mqa_logits_metadata(lengths, page, get_num_sms(), indices=ids)
+    bf16_schedule = get_litetopk_bf16_metadata(lengths, ids, n) if fp4 else None
     histogram = torch.zeros((rows, 1024), device="cuda", dtype=torch.int32)
     workspace = torch.zeros(
         rows * (16 + CANDIDATE_CAPACITY * 8), device="cuda", dtype=torch.uint8
@@ -118,7 +120,16 @@ def run_case(fp4, requests, n, width, repeats):
     def lite():
         if fp4:
             scores = litetopk_bf16_scores(
-                (q, sf), cache, weights, lengths, table, ids, width, n, histogram
+                (q, sf),
+                cache,
+                weights,
+                lengths,
+                table,
+                ids,
+                width,
+                n,
+                histogram,
+                schedule=bf16_schedule,
             )
         else:
             scores = fp8_fp4_paged_mqa_logits(

@@ -91,23 +91,39 @@ def has_litetopk_bf16() -> bool:
     )
 
 
-def litetopk_bf16_scores(
-    q, kv_cache, weights, lengths, table, indices, max_model_len, next_n, histogram
-):
+def get_litetopk_bf16_metadata(lengths, indices, next_n):
     dg = _import_deep_gemm()
-    # Rebuild from live lengths/IDs in captured execution: split384/Q4 or Q6
-    # metadata cannot reuse the generic split256 schedule.
-    schedule = dg.get_paged_mqa_logits_bf16_metadata(
+    return dg.get_paged_mqa_logits_bf16_metadata(
         lengths,
         128,
         dg.get_num_sms(),
         indices=indices,
         tokens_per_request=next_n,
     )
+
+
+def litetopk_bf16_scores(
+    q,
+    kv_cache,
+    weights,
+    lengths,
+    table,
+    indices,
+    max_model_len,
+    next_n,
+    histogram,
+    schedule=None,
+):
+    dg = _import_deep_gemm()
+    if schedule is None:
+        schedule = get_litetopk_bf16_metadata(lengths, indices, next_n)
+    # The n=6 swizzled kernel prefers packed weights for long-context decode.
+    if next_n == 6 or not getattr(dg, "paged_mqa_logits_bf16_fp32_weights", False):
+        weights = weights.to(torch.bfloat16)
     return dg.fp4_paged_mqa_logits_bf16(
         q,
         kv_cache,
-        weights.to(torch.bfloat16),
+        weights,
         lengths,
         table,
         schedule,

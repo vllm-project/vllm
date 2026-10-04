@@ -12,6 +12,7 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks,
 )
 from vllm.model_executor.layers.litetopk_decode import (
+    get_litetopk_bf16_metadata,
     get_litetopk_workspace,
     has_litetopk_decode,
     litetopk_bf16_scores,
@@ -48,9 +49,10 @@ pytestmark = pytest.mark.skipif(
         (True, 7, None, "auto", True, False),
     ],
 )
+@pytest.mark.parametrize("reuse_schedule", [False, True])
 @torch.inference_mode()
 def test_decode_route_and_live_graph(
-    fp4, n, candidate, backend, enabled, expected_lite
+    fp4, n, candidate, backend, enabled, expected_lite, reuse_schedule
 ):
     if not has_litetopk_decode():
         pytest.skip("requires the native op and companion DeepGEMM histogram patch")
@@ -102,6 +104,11 @@ def test_decode_route_and_live_graph(
         schedule,
         write_max_decode_len=n,
         indices=ids,
+        litetopk_bf16_schedule=(
+            get_litetopk_bf16_metadata(lengths, ids, n)
+            if fp4 and expected_lite and reuse_schedule
+            else None
+        ),
     )
     metadata = DeepseekV32IndexerMetadata(
         seq_lens=lengths.flatten(),
@@ -205,6 +212,10 @@ def test_decode_route_and_live_graph(
                         lengths, page, get_num_sms(), indices=ids
                     )
                 )
+                if decode.litetopk_bf16_schedule is not None:
+                    decode.litetopk_bf16_schedule.copy_(
+                        get_litetopk_bf16_metadata(lengths, ids, n)
+                    )
                 graph.replay()
                 scores = reference()
                 for row, length in enumerate(lengths.flatten().tolist()):
