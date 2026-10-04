@@ -3,12 +3,13 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
+from vllm.config import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -241,6 +242,78 @@ def _profile_result(consumed, reserved_before=0, reserved_after=0):
         before_create=_snapshot(ANY_FREE_MEMORY, reserved_before),
         after_profile=_snapshot(ANY_FREE_MEMORY - consumed, reserved_after),
     )
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("use_v2", [False, True], ids=["v1", "v2"])
+@pytest.mark.parametrize("platform", ["cuda", "rocm", "xpu", "cpu"])
+@pytest.mark.parametrize(
+    "decoder,encoder,eager,opt_in,profiled",
+    [
+        pytest.param(False, True, False, True, True, id="encoder-only"),
+        pytest.param(True, False, False, True, True, id="decoder-only"),
+        pytest.param(True, True, False, True, True, id="both"),
+        pytest.param(False, False, False, True, False, id="neither"),
+        pytest.param(False, True, True, True, False, id="enforce-eager"),
+        pytest.param(True, True, False, False, True, id="disabled-opt-in"),
+    ],
+)
+def test_available_memory_reserves_enabled_cudagraphs(
+    monkeypatch, use_v2, platform, decoder, encoder, eager, opt_in, profiled
+):
+    """Profile either graph type, but reserve its estimate only with opt-in."""
+    monkeypatch.setenv("VLLM_ENABLE_STARTUP_PLAN", "0")
+    monkeypatch.setenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", str(int(opt_in)))
+    monkeypatch.setattr(
+        gpu_worker,
+        "current_platform",
+        SimpleNamespace(
+            is_cuda_alike=lambda: platform in ("cuda", "rocm"),
+            is_rocm=lambda: platform == "rocm",
+            is_xpu=lambda: platform == "xpu",
+        ),
+    )
+    result = _profile_result(consumed=MEASURED_DROP)
+    result.non_kv_cache_memory = result.total_consumed
+    monkeypatch.setattr(
+        gpu_worker, "memory_profiling", lambda *args, **kwargs: nullcontext(result)
+    )
+    estimate = GiB_bytes
+    profile_graphs = Mock(return_value=estimate)
+    worker = SimpleNamespace(
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+        use_v2_model_runner=use_v2,
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=CUDAGraphMode.FULL if decoder else CUDAGraphMode.NONE,
+                cudagraph_mm_encoder=encoder,
+            ),
+        ),
+        cache_config=SimpleNamespace(
+            kv_cache_memory_bytes=None, gpu_memory_utilization=0.75
+        ),
+        model_config=SimpleNamespace(multimodal_config=None, enforce_eager=eager),
+        parallel_config=SimpleNamespace(),
+        init_snapshot=SimpleNamespace(
+            free_memory=ANY_FREE_MEMORY, total_memory=ANY_FREE_MEMORY
+        ),
+        requested_memory=6 * GiB_bytes,
+        model_runner=SimpleNamespace(
+            model_memory_usage=GiB_bytes,
+            profile_run=lambda: None,
+            profile_cudagraph_memory=profile_graphs,
+        ),
+    )
+
+    available = gpu_worker.Worker.determine_available_memory(worker)
+
+    profiled = profiled and (decoder or use_v2) and platform != "cpu"
+    if profiled:
+        profile_graphs.assert_called_once_with()
+    else:
+        profile_graphs.assert_not_called()
+    reserved = estimate if profiled and opt_in else 0
+    assert available == worker.requested_memory - result.non_kv_cache_memory - reserved
 
 
 @pytest.fixture
