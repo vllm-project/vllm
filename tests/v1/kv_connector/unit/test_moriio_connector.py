@@ -3,6 +3,8 @@
 import importlib.util
 import socket
 import uuid
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -20,11 +22,13 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    ROLE,
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
     MoRIIOMode,
     resolve_host_ip,
+    set_role,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -145,6 +149,50 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler._reqs_need_recv = {}
     scheduler.unmap_request_id = MagicMock()
     return scheduler
+
+
+def _write_producer_scheduler(block_size: int = 1) -> Any:
+    """Bare WRITE-mode PRODUCER scheduler exercising the save path without a
+    real engine/RDMA stack. Uses a single full-attention KV group (index 0)."""
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.mode = MoRIIOMode.WRITE
+    scheduler.is_producer = True
+    scheduler.block_size = block_size
+    scheduler.blocks_per_sw = [0]
+    scheduler._group_block_sizes = [block_size]
+    scheduler.transfer_id_to_request_id = {}
+    scheduler._reqs_need_recv = {}
+    scheduler._reqs_need_save = {}
+    scheduler._reqs_need_pending_save = {}
+    scheduler._req_kv_params = {}
+    scheduler._reqs_need_send = {}
+    return scheduler
+
+
+def _spec_kv_params(transfer_id: str = "xfer-spec") -> dict[str, Any]:
+    # request_id embeds no zmq address, so add_new_req resolves the peer here.
+    return {
+        "transfer_id": transfer_id,
+        "remote_engine_id": "remote-engine",
+        "remote_block_ids": [],
+        "remote_host": "127.0.0.1",
+        "remote_handshake_port": 5000,
+        "remote_notify_port": 5001,
+    }
+
+
+def _build_meta(
+    scheduler: Any, req_ids=None, new_block_ids=None, num_scheduled_tokens=None
+) -> Any:
+    # Final-chunk detection reads num_scheduled_tokens, so expose it.
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=req_ids or [],
+            new_block_ids=new_block_ids or [],
+        ),
+        num_scheduled_tokens=num_scheduled_tokens or {},
+    )
+    return scheduler.build_connector_meta(scheduler_output)
 
 
 class FakeMoRIIOWrapper:
@@ -700,6 +748,203 @@ def test_resolve_host_ip_prefers_extra_config():
     assert resolve_host_ip({"host_ip": ""}) == fallback
 
 
+def test_write_mode_excludes_spec_lookahead_blocks():
+    # The save path must record only the prompt blocks, clamping off the
+    # trailing lookahead blocks decode never allocates.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=1)
+
+    req_id = "req-spec"
+    prompt_blocks = [10, 11, 12, 13, 14, 15, 16, 17]
+    lookahead_blocks = [18, 19, 20]
+    local_block_ids = [prompt_blocks + lookahead_blocks]
+
+    # block_size=1 => num_prompt_tokens == prompt block count, all scheduled in
+    # this single chunk, so final-chunk detection fires.
+    num_prompt_tokens = len(prompt_blocks)
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+    scheduler._reqs_need_save[req_id] = (req, local_block_ids)
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+
+    meta = _build_meta(scheduler, num_scheduled_tokens={req_id: num_prompt_tokens})
+
+    assert isinstance(meta, MoRIIOConnectorMetadata)
+    assert req_id in meta.reqs_to_save
+    saved = meta.reqs_to_save[req_id]
+    assert saved.local_block_ids == [prompt_blocks]
+
+
+def test_write_mode_chunked_prefill_clamps_spec_lookahead_blocks():
+    # Non-final chunks are buffered untouched; lookahead blocks are only clamped
+    # on the final-chunk save.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=1)
+
+    req_id = "req-spec-chunked"
+    num_prompt_tokens = 8
+    first_chunk = [10, 11, 12, 13]
+    final_chunk = [14, 15, 16, 17, 18, 19, 20]  # 4 prompt + 3 lookahead
+    prompt_blocks = [10, 11, 12, 13, 14, 15, 16, 17]
+
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+
+    # Step 1: first chunk (4 of 8 tokens) is buffered, not saved.
+    scheduler._reqs_need_save[req_id] = (req, [first_chunk])
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+    meta_step1 = _build_meta(scheduler, num_scheduled_tokens={req_id: 4})
+    assert req_id not in meta_step1.reqs_to_save
+    assert req_id in scheduler._reqs_need_pending_save
+    assert scheduler._reqs_need_pending_save[req_id][1] == [first_chunk]
+
+    # Step 2: final chunk (computed 4 + scheduled 4 >= 8) assembles the full
+    # local set, clamps the lookahead, and records only the prompt blocks.
+    req.num_computed_tokens = 4
+    meta_step2 = _build_meta(
+        scheduler,
+        req_ids=[req_id],
+        new_block_ids=[[final_chunk]],
+        num_scheduled_tokens={req_id: 4},
+    )
+    assert req_id in meta_step2.reqs_to_save
+    assert meta_step2.reqs_to_save[req_id].local_block_ids == [prompt_blocks]
+    assert req_id not in scheduler._reqs_need_pending_save
+
+
+@pytest.mark.parametrize(
+    ("block_size", "num_prompt_tokens", "num_prompt_blocks"),
+    [
+        # block_size=4: exact multiple (2 full blocks) and non-multiple (3 blocks,
+        # last one partial).
+        pytest.param(4, 8, 2, id="bs4-exact-multiple"),
+        pytest.param(4, 9, 3, id="bs4-non-multiple"),
+        # block_size=16: exact multiple (2 full blocks) and non-multiple (3
+        # blocks, last one partial).
+        pytest.param(16, 32, 2, id="bs16-exact-multiple"),
+        pytest.param(16, 40, 3, id="bs16-non-multiple"),
+    ],
+)
+def test_write_mode_clamps_prompt_blocks_with_block_size_gt_1(
+    block_size, num_prompt_tokens, num_prompt_blocks
+):
+    # With block_size > 1 the clamp must keep exactly
+    # ceil(num_prompt_tokens / block_size) prompt blocks and drop the tail.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=block_size)
+
+    req_id = f"req-bs{block_size}-{num_prompt_tokens}"
+    prompt_blocks = list(range(10, 10 + num_prompt_blocks))
+    lookahead_blocks = [10 + num_prompt_blocks]
+    local_block_ids = [prompt_blocks + lookahead_blocks]
+
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+    scheduler._reqs_need_save[req_id] = (req, local_block_ids)
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+
+    meta = _build_meta(scheduler, num_scheduled_tokens={req_id: num_prompt_tokens})
+
+    assert isinstance(meta, MoRIIOConnectorMetadata)
+    assert req_id in meta.reqs_to_save
+    assert len(prompt_blocks) == num_prompt_blocks
+    assert meta.reqs_to_save[req_id].local_block_ids == [prompt_blocks]
+
+
+def test_write_mode_defers_save_until_prompt_complete_with_lookahead():
+    # Under speculative decoding the producer reserves lookahead blocks beyond
+    # the last-scheduled prompt token, inflating the accumulated block count on
+    # a non-final chunk. Token-progress detection must keep deferring until the
+    # prompt is complete, where the lookahead is clamped off.
+    #
+    # block_size=1, num_prompt_tokens=10, chunk=4, num_lookahead=3: after 8
+    # prompt tokens the producer holds 8 + 3 = 11 blocks, but token progress
+    # 8 < 10 must keep waiting until the final chunk completes tokens 9-10.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=1)
+
+    req_id = "req-lookahead-final-chunk"
+    num_prompt_tokens = 10
+
+    chunk1_blocks = [100, 101, 102, 103]  # prompt tokens 1-4
+    chunk2_blocks = [104, 105, 106, 107, 108, 109, 110]  # 4 prompt + 3 lookahead
+    prompt_blocks = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
+
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+
+    # Chunk 1 (tokens 1-4): computed 0 + scheduled 4 < 10 -> buffered.
+    scheduler._reqs_need_save[req_id] = (req, [chunk1_blocks])
+    meta1 = _build_meta(scheduler, num_scheduled_tokens={req_id: 4})
+    assert req_id not in meta1.reqs_to_save, "chunk 1 must not be saved"
+    assert req_id in scheduler._reqs_need_pending_save
+    assert scheduler._reqs_need_pending_save[req_id][1] == [chunk1_blocks]
+
+    # Chunk 2 (tokens 5-8) inflates the buffered count to 11 via lookahead, but
+    # token progress 4 + 4 = 8 < 10 keeps the request deferred.
+    req.num_computed_tokens = 4
+    meta2 = _build_meta(
+        scheduler,
+        req_ids=[req_id],
+        new_block_ids=[[chunk2_blocks]],
+        num_scheduled_tokens={req_id: 4},
+    )
+    assert req_id not in meta2.reqs_to_save, (
+        "second-to-last chunk saved prematurely despite incomplete prompt"
+    )
+    assert req_id in scheduler._reqs_need_pending_save
+    assert scheduler._reqs_need_pending_save[req_id][1] == [
+        chunk1_blocks + chunk2_blocks
+    ]
+
+    # Final chunk (tokens 9-10, no new blocks): computed 8 + scheduled 2 >= 10
+    # emits the save with the trailing lookahead block clamped off.
+    req.num_computed_tokens = 8
+    meta3 = _build_meta(
+        scheduler,
+        req_ids=[req_id],
+        new_block_ids=[None],
+        num_scheduled_tokens={req_id: 2},
+    )
+    assert req_id in meta3.reqs_to_save, "final chunk must emit the WRITE save"
+    assert meta3.reqs_to_save[req_id].local_block_ids == [prompt_blocks]
+    assert req_id not in scheduler._reqs_need_pending_save
+
+
+def test_clamp_to_prompt_blocks_clamps_each_group_by_its_own_block_size():
+    # Two full-attention groups with different block sizes are each clamped to
+    # their own prompt-block count; a sliding-window group is left untouched.
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.blocks_per_sw = [0, 0, 3]
+    scheduler._group_block_sizes = [16, 32, 16]
+
+    req = SimpleNamespace(num_prompt_tokens=40)
+    block_ids = [
+        [0, 1, 2, 3, 4],  # ceil(40/16)=3 -> clamp to 3
+        [10, 11, 12],  # ceil(40/32)=2 -> clamp to 2
+        [20, 21, 22, 23, 24],  # sliding-window -> untouched
+    ]
+    clamped = scheduler._clamp_to_prompt_blocks(req, block_ids)
+    assert clamped == [[0, 1, 2], [10, 11], [20, 21, 22, 23, 24]]
+
+
 def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     """One full-attention group + one sliding-window group (Gemma-like)."""
     full_spec = FullAttentionSpec(
@@ -726,6 +971,35 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
+            KVCacheGroupSpec(layer_names=["sw0"], kv_cache_spec=sw_spec),
+        ],
+    )
+
+
+def _make_sliding_window_only_kv_cache_config() -> KVCacheConfig:
+    """A uniform sliding-window model (e.g. Mistral-7B): the single group is a
+    SlidingWindowSpec, so HMA is not required once hybrid management is
+    disabled, yet the spec guard still applies."""
+    sw_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=32,
+    )
+    num_blocks = 2
+    page = sw_spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * page,
+                layers=["sw0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["sw0"], kv_cache_spec=sw_spec),
         ],
     )
@@ -820,15 +1094,6 @@ def test_non_sliding_window_hybrid_is_rejected():
         _read_scheduler(config)
 
 
-def test_token_count_basis_uses_full_attention_group():
-    """Chunked-prefill token counting must use an unclipped full-attention
-    group (blocks_per_sw == 0), not a clipped sliding-window group."""
-    scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
-    # Group 0 is the full-attention group
-    assert scheduler._full_attn_group_idx == 0
-    assert scheduler._full_attn_block_size == 16
-
-
 def test_get_exchange_clipped_blocks_clips_only_sw_group():
     """get_exchange_clipped_blocks keeps the full attn group intact and clips the
     sliding-window group to its window tail."""
@@ -895,6 +1160,67 @@ def test_single_group_path_unchanged():
     assert scheduler.blocks_per_sw == [0]
     blocks = [[1, 2, 3, 4, 5]]
     assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
+
+
+def _fake_speculative_config(num_speculative_tokens: int = 1) -> SimpleNamespace:
+    # Minimal stand-in satisfying VllmConfig.num_lookahead_tokens, which probes
+    # the drafter method flags.
+    return SimpleNamespace(
+        num_speculative_tokens=num_speculative_tokens,
+        use_dflash=lambda: False,
+        use_eagle=lambda: False,
+        uses_draft_model=lambda: False,
+    )
+
+
+def _spec_vllm_config() -> VllmConfig:
+    vllm_config = create_vllm_config(role="kv_producer", read_mode=False)
+    vllm_config.speculative_config = _fake_speculative_config()
+    # HMA off => the WRITE+hybrid guard is skipped, so construction reaches the
+    # spec-decode guard (the only path that hits it).
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
+    return vllm_config
+
+
+def test_spec_decode_rejected_with_sliding_window_groups():
+    """MoRIIO + speculative decoding fails closed on sliding-window models,
+    since the prompt-block clamp only covers full-attention groups. The only
+    reachable path is a uniform SWA model with HMA disabled."""
+    vllm_config = _spec_vllm_config()
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(NotImplementedError, match="speculative decoding"),
+    ):
+        MoRIIOConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            _make_sliding_window_only_kv_cache_config(),
+        )
+
+
+def test_spec_decode_allowed_with_full_attention_only():
+    """Full-attention-only models (e.g. GLM) do not trip the spec guard."""
+    vllm_config = _spec_vllm_config()
+    with set_current_vllm_config(vllm_config):
+        connector = MoRIIOConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            _make_test_kv_cache_config(),
+        )
+    assert connector.connector_scheduler is not None
+
+
+def test_spec_decode_allowed_with_sliding_window_in_read_mode():
+    """The spec guard is WRITE-mode only; READ mode is unaffected."""
+    vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
+    vllm_config.speculative_config = _fake_speculative_config()
+    with set_current_vllm_config(vllm_config):
+        connector = MoRIIOConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            _make_hybrid_kv_cache_config(),
+        )
+    assert connector.connector_scheduler is not None
 
 
 def test_hybrid_write_mode_rejected():
