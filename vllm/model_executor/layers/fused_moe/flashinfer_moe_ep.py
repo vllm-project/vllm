@@ -161,7 +161,10 @@ def flashinfer_moe_ep_unsupported_reasons(
     if spec.kernel == "deep_gemm" and vllm_config.parallel_config.enable_eplb:
         unsupported.append("EPLB")
     if spec.kernel == "cutedsl" and not has_nvshmem4py():
-        unsupported.append("running without nvshmem4py (pip install nvshmem4py-cu13)")
+        unsupported.append(
+            "running without a usable nvshmem4py (nvshmem.core; on CUDA 13: "
+            "pip install nvshmem4py-cu13)"
+        )
     return tuple(unsupported)
 
 

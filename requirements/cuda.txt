@@ -16,7 +16,7 @@ PyNvVideoCodec==2.0.4
 --extra-index-url https://flashinfer.ai/whl/
 flashinfer-python==0.7.0.post1
 flashinfer-cubin==0.7.0.post1
-# nvshmem.core for --moe-backend flashinfer_moe_ep_cutedsl; no cp314 wheels
+# nvshmem.core for flashinfer_moe_ep_cutedsl until FlashInfer declares it; no cp314 wheels
 nvshmem4py-cu13==0.4.0; platform_system == "Linux" and python_version < "3.14"
 apache-tvm-ffi==0.1.11
 tilelang==0.1.12
