@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import threading
 import warnings
 from collections.abc import Mapping
 from typing import Literal
@@ -19,6 +20,7 @@ from vllm.entrypoints.chat_utils import (
     AsyncMultiModalItemTracker,
     ChatCompletionMessageParam,
     ConversationMessage,
+    MultiModalItemTracker,
     _load_embeds_dict,
     _parse_metadata_array,
     _postprocess_messages,
@@ -26,8 +28,9 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_async,
     validate_chat_template,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.multimodal.media import MediaConnector, MediaRef
 from vllm.multimodal.utils import (
     encode_audio_url,
     encode_image_url,
@@ -3072,6 +3075,176 @@ async def test_resolve_items_does_not_leak_tasks_on_partial_failure():
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modality", ["image", "video"])
+async def test_resolve_items_decodes_lazy_vision_chunk_off_event_loop(modality):
+    """Lazy vision_chunk items decode on the media thread pool, not the
+    event-loop thread, when use_unified_vision_chunk_modality is active."""
+    loop_thread_name = threading.current_thread().name
+    decode_thread_names: list[str] = []
+
+    def _decode():
+        decode_thread_names.append(threading.current_thread().name)
+        return "decoded-image" if modality == "image" else ("decoded-frames", {})
+
+    lazy_item = MediaRef(_decode, b"fake-image-bytes")
+
+    async def _fetch():
+        return lazy_item, "uuid-0"
+
+    tracker = AsyncMultiModalItemTracker(
+        MagicMock(
+            is_multimodal_model=True,
+            hf_config=MagicMock(use_unified_vision_chunk=True),
+        )
+    )
+    processor = MagicMock()
+    processor.split_video_chunks.return_value = [
+        {"video_chunk": "split-frames", "prompt": "video-prompt"}
+    ]
+    tracker.__dict__["mm_processor"] = processor
+    tracker._items_by_modality["vision_chunk"] = [lambda: _fetch()]
+    tracker._modality_order["vision_chunk"] = [modality]
+
+    mm_data, mm_uuids = await tracker.resolve_items()
+
+    assert decode_thread_names
+    assert all(name != loop_thread_name for name in decode_thread_names)
+    assert lazy_item.is_decoded
+    assert mm_data is not None and mm_data["vision_chunk"] is not None
+    chunk = mm_data["vision_chunk"][0]
+    assert chunk is not None
+    if modality == "image":
+        assert chunk["type"] == "image"
+        assert chunk["image"] == "decoded-image"
+    else:
+        processor.split_video_chunks.assert_called_once_with("decoded-frames")
+        assert chunk["type"] == "video_chunk"
+        assert chunk["video_chunk"] == "split-frames"
+    assert mm_uuids == {"vision_chunk": ["uuid-0"]}
+
+
+@pytest.mark.asyncio
+async def test_resolve_items_drains_vision_chunk_decode_on_cancellation():
+    """Cancellation waits for the media worker before returning to the caller."""
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    finish = threading.Event()
+    completed = threading.Event()
+
+    def decode():
+        loop.call_soon_threadsafe(started.set)
+        assert finish.wait(timeout=10)
+        completed.set()
+        return "decoded-image"
+
+    ref = MediaRef(decode, b"image")
+
+    async def fetch():
+        return ref, "uuid-0"
+
+    tracker = AsyncMultiModalItemTracker(
+        MagicMock(
+            is_multimodal_model=True,
+            hf_config=MagicMock(use_unified_vision_chunk=True),
+        )
+    )
+    tracker.__dict__["mm_processor"] = MagicMock()
+    tracker._items_by_modality["vision_chunk"] = [fetch]
+    tracker._modality_order["vision_chunk"] = ["image"]
+
+    task = asyncio.create_task(tracker.resolve_items())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=10)
+        task.cancel()
+        # Let the cancellation handler run while the worker is still blocked.
+        await asyncio.sleep(0)
+        assert not task.done()
+    finally:
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=10)
+
+    assert completed.is_set()
+    assert ref.is_decoded
+
+
+@pytest.mark.asyncio
+async def test_resolve_items_lazy_vision_chunk_decode_error_propagates_async():
+    """A MediaRef decode failure in a vision_chunk item must raise
+    VLLMUnprocessableEntityError, not be logged and swallowed."""
+
+    def _decode():
+        raise ValueError("corrupt media")
+
+    lazy_item = MediaRef(_decode, b"corrupt-video-bytes")
+
+    async def _fetch():
+        return lazy_item, None
+
+    tracker = AsyncMultiModalItemTracker(
+        MagicMock(
+            is_multimodal_model=True,
+            hf_config=MagicMock(use_unified_vision_chunk=True),
+        )
+    )
+    tracker.__dict__["mm_processor"] = MagicMock()
+    tracker._items_by_modality["vision_chunk"] = [lambda: _fetch()]
+    tracker._modality_order["vision_chunk"] = ["video"]
+
+    with pytest.raises(VLLMUnprocessableEntityError, match="corrupt media"):
+        await tracker.resolve_items()
+
+
+def test_resolve_items_lazy_vision_chunk_decode_error_propagates_sync(caplog):
+    """Sync path: a MediaRef decode failure in a vision_chunk item must
+    propagate as VLLMUnprocessableEntityError instead of hitting the
+    "Failed to split video chunks" log-and-append fallback."""
+
+    def _decode():
+        raise ValueError("corrupt media")
+
+    lazy_item = MediaRef(_decode, b"corrupt-video-bytes")
+
+    tracker = MultiModalItemTracker(MagicMock(is_multimodal_model=True))
+    tracker.__dict__["mm_processor"] = MagicMock()
+    tracker._items_by_modality["vision_chunk"] = [(lazy_item, None)]
+    tracker._modality_order["vision_chunk"] = ["video"]
+
+    with pytest.raises(VLLMUnprocessableEntityError, match="corrupt media"):
+        tracker.resolve_items()
+    assert "Failed to split video chunks" not in caplog.text
+
+
+def test_resolve_items_vision_chunk_decode_error_numbers_within_modality():
+    """The index counts items of the failing item's own modality rather than
+    chunk positions, so it matches what the mm processor reports for the same
+    item. Here the corrupt video is the third chunk but the second video."""
+
+    def _corrupt():
+        raise ValueError("corrupt media")
+
+    tracker = MultiModalItemTracker(
+        MagicMock(
+            is_multimodal_model=True,
+            hf_config=MagicMock(use_unified_vision_chunk=True),
+        )
+    )
+    tracker.__dict__["mm_processor"] = MagicMock()
+    tracker._items_by_modality["vision_chunk"] = [
+        (MediaRef(lambda: object(), b"image-bytes"), None),
+        (MediaRef(lambda: object(), b"video-bytes"), None),
+        (MediaRef(_corrupt, b"corrupt-video-bytes"), None),
+    ]
+    tracker._modality_order["vision_chunk"] = ["image", "video", "video"]
+
+    with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
+        tracker.resolve_items()
+
+    assert "video media at index 1" in str(exc_info.value)
+    assert exc_info.value.parameter == "video_url"
+
+
 def _assistant_tool_call(arguments, name="write"):
     return [
         {
@@ -3196,3 +3369,112 @@ def test_validate_chat_template_rejects_invalid_type():
     ) as exc_info:
         validate_chat_template(123)
     assert exc_info.value.parameter == "chat_template"
+
+
+_STUB_VIDEO_URL = "https://example.com/video.mp4"
+
+
+@pytest.fixture
+def downloads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every URL the connector downloads, in order.
+
+    The bytes are never decoded by these tests, so a stub payload is enough to
+    count how many times one URL is fetched.
+    """
+    fetched: list[str] = []
+    payload = b"stub-video-container"
+
+    def fetch_url_bytes(self, url, url_spec, **kwargs):
+        fetched.append(url)
+        return payload
+
+    async def fetch_url_bytes_async(self, url, url_spec, **kwargs):
+        fetched.append(url)
+        return payload
+
+    monkeypatch.setattr(MediaConnector, "_fetch_url_bytes", fetch_url_bytes)
+    monkeypatch.setattr(MediaConnector, "_fetch_url_bytes_async", fetch_url_bytes_async)
+    return fetched
+
+
+def _video_conversation(url: str):
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "video_url", "video_url": {"url": url}},
+                {"type": "text", "text": "What's in this video?"},
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize("use_audio_in_video", [False, True])
+def test_use_audio_in_video_downloads_the_video_once(
+    qwen25omni_model_config_mm_interleaved,
+    downloads: list[str],
+    use_audio_in_video: bool,
+):
+    """`use_audio_in_video` reads the audio track out of the video payload, so
+    it must feed two decoders from one download, not fetch the URL twice."""
+    _, mm_data, _ = parse_chat_messages(
+        _video_conversation(_STUB_VIDEO_URL),
+        qwen25omni_model_config_mm_interleaved,
+        content_format="string",
+        mm_processor_kwargs={"use_audio_in_video": use_audio_in_video},
+    )
+
+    assert downloads == [_STUB_VIDEO_URL]
+    expected: MultiModalDataCounts = (
+        {"video": 1, "audio": 1} if use_audio_in_video else {"video": 1}
+    )
+    _assert_mm_data_inputs(mm_data, expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_audio_in_video", [False, True])
+async def test_use_audio_in_video_downloads_the_video_once_async(
+    qwen25omni_model_config_mm_interleaved,
+    downloads: list[str],
+    use_audio_in_video: bool,
+):
+    """Same for the async parser: both tracker entries await one download."""
+    _, mm_data, _ = await parse_chat_messages_async(
+        _video_conversation(_STUB_VIDEO_URL),
+        qwen25omni_model_config_mm_interleaved,
+        content_format="string",
+        mm_processor_kwargs={"use_audio_in_video": use_audio_in_video},
+    )
+
+    assert downloads == [_STUB_VIDEO_URL]
+    expected: MultiModalDataCounts = (
+        {"video": 1, "audio": 1} if use_audio_in_video else {"video": 1}
+    )
+    _assert_mm_data_inputs(mm_data, expected)
+
+
+@pytest.mark.parametrize("predecoded", [False, True])
+def test_resolve_items_passes_materialized_video_to_chunk_splitter(predecoded):
+    """The synchronous tracker passes decoded frames to the video splitter."""
+    ref: MediaRef[tuple[str, dict]] = MediaRef(lambda: ("decoded-frames", {}), b"video")
+    if predecoded:
+        ref.decode()
+    processor = MagicMock()
+    processor.split_video_chunks.return_value = [
+        {"video_chunk": "split-frames", "prompt": "video-prompt"}
+    ]
+    tracker = MultiModalItemTracker(
+        MagicMock(hf_config=MagicMock(use_unified_vision_chunk=True))
+    )
+    tracker.__dict__["mm_processor"] = processor
+    tracker._items_by_modality["vision_chunk"] = [(ref, "video-id")]
+    tracker._modality_order["vision_chunk"] = ["video"]
+
+    mm_data, _ = tracker.resolve_items()
+
+    processor.split_video_chunks.assert_called_once_with("decoded-frames")
+    assert mm_data is not None
+    chunks = mm_data["vision_chunk"]
+    assert isinstance(chunks, list)
+    assert chunks[0] is not None
+    assert chunks[0]["video_chunk"] == "split-frames"

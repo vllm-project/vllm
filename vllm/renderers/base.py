@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import replace
-from functools import cached_property
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
@@ -43,11 +43,11 @@ from vllm.multimodal.parse import (
     MultiModalUUIDItems,
     parse_mm_uuids,
 )
-from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.processing import BaseMultiModalProcessor, MultiModalApplyState
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import make_async
+from vllm.utils.async_utils import await_with_cancellation_drain, make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -70,6 +70,7 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+    from vllm.multimodal.processing.context import TimingContext
 
 logger = init_logger(__name__)
 
@@ -162,7 +163,10 @@ class BaseRenderer(ABC, Generic[_T]):
         self._clear_mm_cache_async = make_async(
             self.clear_mm_cache, executor=self._mm_executor
         )
-        self._process_multimodal_async = make_async(
+        # Blocking fallback for processors whose subclassed apply() (or
+        # _cached_apply_hf_processor) is not phase-aware; see
+        # BaseMultiModalProcessor.supports_two_phase_apply.
+        self._process_multimodal_blocking_async = make_async(
             self._process_multimodal, executor=self._mm_executor
         )
         self._safe_load_prompt_embeds_async = make_async(
@@ -854,7 +858,10 @@ class BaseRenderer(ABC, Generic[_T]):
                         f"got {len(uuid_items)} vs {len(data_items)}."
                     )
 
-                for i, item in enumerate(data_items):
+                for i in range(len(data_items)):
+                    # Only None-ness is checked here; use the raw item so that
+                    # reading a MediaRef does not trigger its decode.
+                    item = data_items.get_raw(i)
                     if item is None and uuid_items[i] is None:
                         raise ValueError(
                             f"multi_modal_data[{modality!r}][{i}] is empty but "
@@ -891,7 +898,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return mm_uuid_items
 
-    def _process_multimodal(
+    def _prepare_multimodal_inputs(
         self,
         prompt: list[int],
         mm_data: MultiModalDataDict,
@@ -900,7 +907,8 @@ class BaseRenderer(ABC, Generic[_T]):
         media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
         *,
         skip_mm_cache: bool = False,
-    ) -> "MultiModalInput":
+    ) -> tuple["BaseMultiModalProcessor", MMProcessorInputs, "TimingContext"]:
+        """Prepare parsed inputs and timing for blocking and split processing."""
         mm_processor = self.get_mm_processor()
 
         mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
@@ -926,12 +934,137 @@ class BaseRenderer(ABC, Generic[_T]):
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
+        return mm_processor, mm_processor_inputs, mm_timing_ctx
+
+    def _process_multimodal_phase1(
+        self,
+        prompt: list[int],
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
+        mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> tuple["BaseMultiModalProcessor", MultiModalApplyState]:
+        """Submit decodes without joining them on the single multimodal worker."""
+        mm_processor, mm_processor_inputs, mm_timing_ctx = (
+            self._prepare_multimodal_inputs(
+                prompt,
+                mm_data,
+                mm_uuids,
+                mm_processor_kwargs,
+                media_io_kwargs,
+                skip_mm_cache=skip_mm_cache,
+            )
+        )
+
+        with set_default_torch_num_threads():
+            state = mm_processor.apply_phase1(mm_processor_inputs, mm_timing_ctx)
+        return mm_processor, state
+
+    def _process_multimodal_phase2(
+        self,
+        mm_processor: "BaseMultiModalProcessor",
+        state: MultiModalApplyState,
+    ) -> "MultiModalInput":
+        """HF processing + cache merge; runs on `_mm_executor` after the
+        state's decode futures completed."""
+        with set_default_torch_num_threads():
+            mm_inputs = mm_processor.apply_phase2(state)
+
+        self.update_mm_cache_stats()
+
+        return mm_inputs
+
+    def _process_multimodal(
+        self,
+        prompt: list[int],
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
+        mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> "MultiModalInput":
+        mm_processor, mm_processor_inputs, mm_timing_ctx = (
+            self._prepare_multimodal_inputs(
+                prompt,
+                mm_data,
+                mm_uuids,
+                mm_processor_kwargs,
+                media_io_kwargs,
+                skip_mm_cache=skip_mm_cache,
+            )
+        )
+
         with set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
 
         self.update_mm_cache_stats()
 
         return mm_inputs
+
+    async def _process_multimodal_async(
+        self,
+        prompt: list[int],
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
+        mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> "MultiModalInput":
+        """Two-phase `_process_multimodal`: the single mm worker runs phase
+        1 (parse/hash/cache lookup/decode submission) and phase 2 (HF
+        processing/cache merge), while the decode futures are awaited here
+        on the event loop, so the worker is never blocked on decoding and
+        can interleave other requests' phases."""
+        mm_processor = self.get_mm_processor()
+
+        if not mm_processor.supports_two_phase_apply:
+            return await self._process_multimodal_blocking_async(
+                prompt,
+                mm_data,
+                mm_uuids,
+                mm_processor_kwargs,
+                media_io_kwargs=media_io_kwargs,
+                skip_mm_cache=skip_mm_cache,
+            )
+
+        loop = asyncio.get_running_loop()
+        cancelled = False
+
+        async def run_phases() -> "MultiModalInput":
+            processor, state = await loop.run_in_executor(
+                self._mm_executor,
+                partial(
+                    self._process_multimodal_phase1,
+                    prompt,
+                    mm_data,
+                    mm_uuids,
+                    mm_processor_kwargs,
+                    media_io_kwargs=media_io_kwargs,
+                    skip_mm_cache=skip_mm_cache,
+                ),
+            )
+            with state:
+                await state.wait_decodes_async()
+                if cancelled:
+                    raise asyncio.CancelledError
+
+                def finish_processing() -> "MultiModalInput":
+                    if cancelled:
+                        raise asyncio.CancelledError
+                    return self._process_multimodal_phase2(processor, state)
+
+                return await loop.run_in_executor(self._mm_executor, finish_processing)
+
+        def mark_cancelled() -> None:
+            nonlocal cancelled
+            cancelled = True
+
+        operation = asyncio.create_task(run_phases())
+        return await await_with_cancellation_drain(operation, on_cancel=mark_cancelled)
 
     def _process_tokens(
         self,

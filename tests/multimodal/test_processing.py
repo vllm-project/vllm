@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+import threading
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -10,21 +12,28 @@ from typing import TypedDict
 
 import numpy as np
 import pytest
+import torch
+from PIL import Image
 
-from vllm.config import ModelConfig, SchedulerConfig
-from vllm.config.multimodal import MultiModalConfig
-from vllm.exceptions import VLLMValidationError
+from vllm.config import ModelConfig, MultiModalConfig, SchedulerConfig
+from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.hasher import MultiModalHasher
-from vllm.multimodal.parse import MultiModalDataParser
+from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.multimodal.media import MediaRef
+from vllm.multimodal.media.decode import MediaDecodeJob
+from vllm.multimodal.parse import MultiModalDataParser, ProcessorBatchItems
 from vllm.multimodal.processing.context import (
     BaseProcessingInfo,
     InputProcessingContext,
+    TimingContext,
     _resolve_mm_processor_kwargs,
 )
 from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
+    MultiModalApplyState,
     PlaceholderFeaturesInfo,
     PromptIndexTargets,
     PromptInsertion,
@@ -1585,6 +1594,38 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
     assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}
 
 
+def test_processor_inputs_hashes_ref_spec_replaces_media_io_kwargs():
+    """A ref's decode spec lives inside its key, so `media_io_kwargs` is not
+    hashed a second time for it. A client-supplied UUID replaces the item
+    entirely, so there the factor must stay -- the key is never consulted."""
+    from vllm.multimodal.media import ImageMediaIO
+
+    data = b"encoded-image-bytes"
+    keep_ref = ImageMediaIO(image_mode=None).load_bytes_ref(data)
+    rgb_ref = ImageMediaIO().load_bytes_ref(data)
+
+    def hash_of(ref, uuid_item, media_io_kwargs):
+        return ProcessorInputs(
+            prompt=[],
+            mm_data_items=MultiModalDataParser().parse_mm_data({"image": [ref]}),
+            mm_uuid_items={"image": [uuid_item]},
+            media_io_kwargs=media_io_kwargs,
+        ).get_mm_hashes("test-model", "blake3")["image"][0]
+
+    # Different decode settings still produce different identities...
+    assert keep_ref.key != rgb_ref.key
+    # ...but the request-level copy of those settings adds nothing on top.
+    assert hash_of(keep_ref, None, {}) == hash_of(
+        keep_ref, None, {"image": {"image_mode": None}}
+    )
+
+    # With a UUID the ref is not hashed, so media_io_kwargs is the only thing
+    # keeping two decode settings apart.
+    assert hash_of(keep_ref, "image-uuid", {}) != hash_of(
+        keep_ref, "image-uuid", {"image": {"image_mode": None}}
+    )
+
+
 @pytest.mark.parametrize(
     ("left", "right"),
     [
@@ -1622,6 +1663,515 @@ def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
     assert hash_with(left) != hash_with(right)
 
 
+class _LazyTestProcessingInfo:
+    """Minimal ProcessingInfo for exercising the deferred-decode orchestration
+    in `_cached_apply_hf_processor` without a real HF model."""
+
+    model_id = "lazy-test-model"
+
+    def __init__(self) -> None:
+        self.data_parser = MultiModalDataParser()
+        self.ctx = SimpleNamespace(
+            tokenizer=None,
+            get_mm_config=lambda: MultiModalConfig(),
+        )
+
+    def get_data_parser(self):
+        return self.data_parser
+
+    def parse_mm_data(self, mm_data, *, validate=True):
+        return self.data_parser.parse_mm_data(mm_data)
+
+
+class _LazyTestModelConfig:
+    def __init__(self, mm_processor_cache_gb: float) -> None:
+        self._mm_config = MultiModalConfig(mm_processor_cache_gb=mm_processor_cache_gb)
+
+    def get_multimodal_config(self) -> MultiModalConfig:
+        return self._mm_config
+
+
+class _LazyTestProcessor(BaseMultiModalProcessor):
+    """Processor whose HF call fabricates one dummy tensor per image item."""
+
+    requires_tokenizer = False
+
+    def __init__(self) -> None:
+        super().__init__(
+            _LazyTestProcessingInfo(),  # type: ignore[arg-type]
+            dummy_inputs=None,  # type: ignore[arg-type]
+        )
+
+        # Encoded bytes visible to byte-consuming models (see dots3_note) at
+        # HF-processing time, one entry per media ref.
+        self.seen_encoded_bytes = list[bytes]()
+        self.seen_media_refs = list[MediaRef]()
+        self.fail_hf_processor = False
+        self.hf_calls = 0
+
+    def _get_hf_mm_inputs(self, mm_items, hf_kwargs):
+        for items in mm_items.values():
+            if not isinstance(items, ProcessorBatchItems):
+                continue
+            for idx in range(items.get_count()):
+                raw = items.get_raw(idx)
+                if isinstance(raw, MediaRef):
+                    self.seen_encoded_bytes.append(raw.data)
+                    self.seen_media_refs.append(raw)
+        return super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+
+    def _call_hf_processor(self, hf_data, hf_kwargs):
+        from transformers.feature_extraction_utils import BatchFeature
+
+        if self.fail_hf_processor:
+            raise RuntimeError("boom")
+
+        images = hf_data.get("images") or []
+        if not images:
+            return BatchFeature()
+        self.hf_calls += 1
+        return BatchFeature({"pixel_values": torch.zeros(len(images), 1)})
+
+    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
+        if "pixel_values" not in hf_inputs:
+            return {}
+        return {
+            "pixel_values": MultiModalFieldConfig.shared(
+                "image", hf_inputs["pixel_values"].shape[0]
+            )
+        }
+
+    def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
+        # One placeholder update per image item so the modality is present
+        # in the grouped updates consumed by `_merge_mm_kwargs`. An index
+        # target keeps `apply()` usable without a tokenizer.
+        return [PromptInsertion("image", PromptIndexTargets.start(), [0])]
+
+
+def _lazy_cache():
+    return MultiModalProcessorOnlyCache(
+        _LazyTestModelConfig(mm_processor_cache_gb=1)  # type: ignore[arg-type]
+    )
+
+
+class _CountingDecoder:
+    """Decoder that records how many times it ran."""
+
+    def __init__(self, value):
+        self.value = value
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return self.value
+
+
+def _lazy_inputs(processor, lazy_items, cache):
+    mm_items = MultiModalDataParser().parse_mm_data({"image": lazy_items})
+    return ProcessorInputs(prompt=[], mm_data_items=mm_items, cache=cache)
+
+
+def _lazy_apply(processor, lazy_items, cache=None, timing_ctx=None):
+    inputs = _lazy_inputs(processor, lazy_items, cache)
+    return processor._cached_apply_hf_processor(
+        inputs, timing_ctx or TimingContext(enabled=False)
+    )
+
+
+def test_lazy_cache_hit_skips_decode():
+    """A cache hit skips decode and leaves the borrowed ref reusable."""
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
+    data = b"fake-image-bytes"
+
+    # A miss decodes once and releases only the processing wrapper.
+    decoder_1 = _CountingDecoder(Image.new("RGB", (4, 4)))
+    lazy_1 = MediaRef(decoder_1, data)
+    timing_ctx = TimingContext(enabled=True)
+    _lazy_apply(processor, [lazy_1], cache, timing_ctx)
+    assert decoder_1.calls == 1
+    assert lazy_1.data == data
+    assert processor.seen_media_refs[0].data == b""
+    assert "decode_mm_items" in timing_ctx.stage_secs
+
+    # A borrowed hit can be reused after eviction without reconstructing it.
+    decoder_2 = _CountingDecoder(Image.new("RGB", (4, 4)))
+    lazy_2 = MediaRef(decoder_2, data)
+    _lazy_apply(processor, [lazy_2], cache)
+    assert decoder_2.calls == 0
+    assert lazy_2.data == data
+    cache.clear_cache()
+    _lazy_apply(processor, [lazy_2], cache)
+    assert decoder_2.calls == 1
+    assert lazy_2.decode() is decoder_2.value
+
+
+@pytest.mark.parametrize("passthrough", [False, True])
+def test_uncached_apply_preserves_processor_override(passthrough, monkeypatch):
+    """No-cache and passthrough inputs must dispatch through the model hook."""
+
+    class OverrideProcessor(_LazyTestProcessor):
+        def _apply_hf_processor(self, inputs, timing_ctx):
+            self.override_called = True
+            return super()._apply_hf_processor(inputs, timing_ctx)
+
+    processor = OverrideProcessor()
+    ref = MediaRef(lambda: Image.new("RGB", (4, 4)), b"image")
+    inputs = _lazy_inputs(processor, [ref], _lazy_cache() if passthrough else None)
+    if passthrough:
+        monkeypatch.setattr(
+            inputs.mm_data_items["image"],
+            "get_passthrough_data",
+            lambda: {"dummy": torch.zeros(1)},
+        )
+    processor.apply(inputs, TimingContext(enabled=False))
+    assert processor.override_called
+
+
+def test_processing_preserves_borrowed_mapped_ref():
+    """Releasing a processing wrapper must not consume its mapped source."""
+    processor = _LazyTestProcessor()
+    parent = MediaRef(lambda: Image.new("RGB", (4, 4)), b"image")
+    mapped = parent.map(lambda image: image.copy(), copy=True)
+    inputs = _lazy_inputs(processor, [mapped], None)
+    state = processor.apply_phase1(inputs, TimingContext(enabled=False))
+    owned = state.inputs.mm_data_items["image"].get_raw(0)
+    assert owned is not mapped
+    with state:
+        state.wait_decodes()
+        processor.apply_phase2(state)
+
+    assert isinstance(owned, MediaRef) and owned.data == b""
+    assert mapped.data == parent.data == b"image"
+    assert mapped.decode().size == parent.decode().size == (4, 4)
+
+
+def test_lazy_cache_miss_decodes_in_parallel():
+    """Cache-miss items must decode concurrently, not serialized."""
+    num_items = 4
+    barrier = threading.Barrier(num_items)
+    calls = [0] * num_items
+
+    def make_decoder(idx):
+        def decode():
+            calls[idx] += 1
+            # Deadlocks (BrokenBarrierError after timeout) if the decodes
+            # were serialized.
+            barrier.wait(timeout=10)
+            return Image.new("RGB", (4, 4))
+
+        return decode
+
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
+    lazy_items = [
+        MediaRef(make_decoder(idx), f"image-{idx}".encode()) for idx in range(num_items)
+    ]
+    _lazy_apply(processor, lazy_items, cache)
+
+    assert calls == [1] * num_items
+
+
+@pytest.mark.parametrize("use_cache", [False, True])
+def test_lazy_decode_error_becomes_unprocessable(use_cache):
+    """A decode failure surfaces as VLLMUnprocessableEntityError, and
+    in-flight sibling decodes are still awaited rather than abandoned."""
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache() if use_cache else None
+
+    slow_started = threading.Event()
+    bad_failed = threading.Event()
+    slow_completed = threading.Event()
+
+    def bad_decode():
+        assert slow_started.wait(timeout=10)
+        bad_failed.set()
+        raise ValueError("corrupt media")
+
+    def slow_decode():
+        slow_started.set()
+        assert bad_failed.wait(timeout=10)
+        slow_completed.set()
+        return Image.new("RGB", (4, 4))
+
+    refs = [MediaRef(bad_decode, b"broken"), MediaRef(slow_decode, b"good")]
+    with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
+        _lazy_apply(
+            processor,
+            refs,
+            cache,
+        )
+
+    assert exc_info.value.parameter is None
+    assert "image media at index 0" in str(exc_info.value)
+    assert slow_completed.is_set()
+    assert [ref.data for ref in refs] == [b"broken", b"good"]
+
+
+def test_cache_missing_items_selects_existing_refs(monkeypatch):
+    """Cache lookup selects parsed refs without decoding or reparsing them."""
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
+    decoder = _CountingDecoder(Image.new("RGB", (4, 4)))
+    ref = MediaRef(decoder, b"miss")
+    inputs = _lazy_inputs(processor, [None, ref], cache)
+    monkeypatch.setattr(cache, "is_cached", lambda hashes: [True, False])
+
+    def unexpected_parse(*args, **kwargs):
+        pytest.fail("Cache misses must not be parsed again")
+
+    monkeypatch.setattr(processor.info, "parse_mm_data", unexpected_parse)
+    flags, missing = processor._get_cache_missing_items(
+        cache, inputs.mm_data_items, {"image": ["cached", "miss"]}
+    )
+
+    assert flags == {"image": [True, False]}
+    assert missing["image"].get_raw(0) is ref
+    assert missing["image"].get_original_index(0) == 1
+    assert decoder.calls == 0
+
+
+@pytest.mark.parametrize("phase", ["sync", "async", "eviction"])
+def test_lazy_decode_error_keeps_request_index_with_cache_hits(phase, monkeypatch):
+    """Compacting misses must not change the corrupt item's reported index."""
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
+    payloads = [b"cached-first", b"good-miss", b"corrupt-miss", b"cached-last"]
+    cached_payloads = payloads if phase == "eviction" else [payloads[0], payloads[3]]
+    _lazy_apply(
+        processor,
+        [MediaRef(lambda: Image.new("RGB", (4, 4)), data) for data in cached_payloads],
+        cache,
+    )
+
+    def bad_decode():
+        raise ValueError("corrupt media")
+
+    refs = [
+        MediaRef(bad_decode if index == 2 else lambda: Image.new("RGB", (4, 4)), data)
+        for index, data in enumerate(payloads)
+    ]
+    state = processor.apply_phase1(
+        _lazy_inputs(processor, refs, cache), TimingContext(enabled=False)
+    )
+    if phase == "eviction":
+        assert not state.decodes
+        monkeypatch.setattr(
+            cache, "is_cached", lambda hashes: [True, False, False, True]
+        )
+
+    with (
+        state,
+        pytest.raises(VLLMUnprocessableEntityError, match="image media at index 2"),
+    ):
+        if phase == "sync":
+            state.wait_decodes()
+        elif phase == "async":
+            asyncio.run(state.wait_decodes_async())
+        else:
+            processor.apply_phase2(state)
+
+    assert [ref.data for ref in refs] == payloads
+    assert all(ref.data == b"" for ref in state.inputs.mm_data_items["image"].data)
+
+
+@pytest.mark.parametrize("use_cache", [False, True])
+def test_lazy_miss_bytes_available_during_hf_processing(use_cache):
+    """A cache-miss ref still holds its encoded bytes while the HF processor
+    runs, and they are released afterwards."""
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache() if use_cache else None
+    lazy = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
+
+    _lazy_apply(processor, [lazy], cache)
+
+    # The HF-facing layer saw the raw bytes for the miss item...
+    assert processor.seen_encoded_bytes == [b"image-bytes"]
+    # Processing wrappers are released; borrowed inputs remain reusable.
+    assert processor.seen_media_refs[0].data == b""
+    assert lazy.data == b"image-bytes"
+
+
+@pytest.mark.parametrize("use_cache", [False, True])
+def test_lazy_miss_bytes_released_on_hf_processor_error(use_cache):
+    """Payloads are released if HF processing fails, with or without a cache."""
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache() if use_cache else None
+    processor.fail_hf_processor = True
+    lazy = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), b"image-bytes")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _lazy_apply(processor, [lazy], cache)
+
+    assert processor.seen_encoded_bytes == [b"image-bytes"]
+    assert processor.seen_media_refs[0].data == b""
+    assert lazy.data == b"image-bytes"
+
+
+def test_lazy_cancellation_drains_decodes_before_release():
+    """Repeated cancellation must not release a payload still being decoded."""
+    from concurrent.futures import Future
+
+    ref = MediaRef(lambda: Image.new("RGB", (4, 4)), b"payload")
+    future: Future[Image.Image] = Future()
+    state = MultiModalApplyState(
+        _lazy_inputs(_LazyTestProcessor(), [ref], None),
+        TimingContext(enabled=False),
+        None,
+        [MediaDecodeJob("image", 0, future)],
+    )
+
+    async def cancel_decode_wait():
+        async def wait_owned_decodes():
+            with state:
+                await state.wait_decodes_async()
+
+        task = asyncio.create_task(wait_owned_decodes())
+        await asyncio.sleep(0)
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done()
+        assert ref.data == b"payload"
+        future.set_result(ref.decode())
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        assert ref.data == b""
+
+    asyncio.run(cancel_decode_wait())
+
+
+@pytest.mark.asyncio
+async def test_lazy_phase1_does_not_block_mm_worker():
+    """While request A's decode is in flight, request B's phase 1 must be
+    able to run on the same single-worker executor (i.e. phase 1 submits
+    decodes without joining them)."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
+    executor = ThreadPoolExecutor(max_workers=1)  # stands in for _mm_executor
+
+    decode_entered = threading.Event()
+    release_decode = threading.Event()
+
+    def gated_decode():
+        decode_entered.set()
+        release_decode.wait(timeout=30)
+        return Image.new("RGB", (4, 4))
+
+    inputs_a = _lazy_inputs(processor, [MediaRef(gated_decode, b"a-bytes")], cache)
+    inputs_b = _lazy_inputs(
+        processor,
+        [MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), b"b-bytes")],
+        cache,
+    )
+
+    try:
+        loop = asyncio.get_running_loop()
+        state_a = await loop.run_in_executor(
+            executor, processor.apply_phase1, inputs_a, TimingContext(enabled=False)
+        )
+        assert len(state_a.decodes) == 1
+        await asyncio.to_thread(decode_entered.wait, 30)
+        assert decode_entered.is_set()
+
+        # B's phase 1 + decode + phase 2 all complete while A's decode is
+        # still blocked: the mm worker is not occupied by A's decode.
+        state_b = await asyncio.wait_for(
+            loop.run_in_executor(
+                executor, processor.apply_phase1, inputs_b, TimingContext(enabled=False)
+            ),
+            timeout=30,
+        )
+        with state_b:
+            await state_b.wait_decodes_async()
+            result_b = await asyncio.wait_for(
+                loop.run_in_executor(executor, processor.apply_phase2, state_b),
+                timeout=30,
+            )
+        assert not release_decode.is_set()
+        assert result_b["mm_kwargs"]["image"][0] is not None
+
+        release_decode.set()
+        with state_a:
+            await state_a.wait_decodes_async()
+            result_a = await asyncio.wait_for(
+                loop.run_in_executor(executor, processor.apply_phase2, state_a),
+                timeout=30,
+            )
+        assert result_a["mm_kwargs"]["image"][0] is not None
+    finally:
+        release_decode.set()
+        executor.shutdown(wait=True)
+
+
+def test_lazy_phase2_rederives_miss_to_hit():
+    """If another request caches a miss item between phase 1 and phase 2
+    (A1, B1, B2, A2 interleaving), phase 2 must re-check the cache and skip
+    reprocessing instead of blindly applying the HF processor."""
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
+    data = b"shared-bytes"
+
+    # A starts first: its phase 1 sees a cache miss and submits the decode.
+    lazy_a = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    inputs_a = _lazy_inputs(processor, [lazy_a], cache)
+    state_a = processor.apply_phase1(inputs_a, TimingContext(enabled=False))
+    state_a.wait_decodes()
+
+    # B's whole apply interleaves between A's phases and caches the content.
+    lazy_b = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    hf_before = processor.hf_calls
+    processor.apply(
+        _lazy_inputs(processor, [lazy_b], cache), TimingContext(enabled=False)
+    )
+    assert processor.hf_calls == hf_before + 1
+
+    # A's phase 2 re-checks the cache, finds the hit, and skips reprocessing.
+    with state_a:
+        result_a = processor.apply_phase2(state_a)
+    assert processor.hf_calls == hf_before + 1
+    assert result_a["mm_kwargs"]["image"][0] is not None
+
+
+def test_lazy_phase2_handles_hit_eviction():
+    """If a phase-1 hit is evicted before phase 2, phase 2 must fall back to
+    decoding and processing it instead of asserting on a missing cache
+    entry."""
+    processor = _LazyTestProcessor()
+    cache = _lazy_cache()
+    data = b"evict-me"
+
+    first = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    _lazy_apply(processor, [first], cache)
+    assert processor.hf_calls == 1
+
+    lazy2 = MediaRef(_CountingDecoder(Image.new("RGB", (4, 4))), data)
+    inputs2 = _lazy_inputs(processor, [lazy2], cache)
+    state = processor.apply_phase1(inputs2, TimingContext(enabled=False))
+
+    # Hit in phase 1: nothing to decode, and the bytes are still held --
+    # releasing them here would leave the eviction fallback below with
+    # nothing to decode from.
+    assert not state.decodes
+    assert lazy2.data == data
+
+    # The item is evicted between the phases, so phase 2 has to decode and
+    # process it after all.
+    cache.clear_cache()
+    with state:
+        result = processor.apply_phase2(state)
+
+    assert processor.hf_calls == 2
+    assert result["mm_kwargs"]["image"][0] is not None
+    assert lazy2.data == data
+
+    ref = state.inputs.mm_data_items["image"].get_raw(0)
+    assert isinstance(ref, MediaRef) and ref.data == b""
+
+
 @pytest.mark.parametrize(
     ("chunked_prefill", "max_model_len", "expected_seq_len"),
     [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
@@ -1657,3 +2207,32 @@ def test_dummy_inputs_scheduler_budget(
         {"image": 1}, scheduler_config=scheduler_config
     )
     assert len(result["prompt_token_ids"]) == expected_seq_len
+
+
+def test_lazy_submission_failure_releases_owned_refs(monkeypatch):
+    """Partial submission drains jobs without masking the submission error."""
+    from concurrent.futures import Future
+
+    from vllm.multimodal.media.executor import global_thread_pool
+
+    processor = _LazyTestProcessor()
+    refs = [MediaRef(lambda: Image.new("RGB", (4, 4)), data) for data in (b"a", b"b")]
+    inputs = _lazy_inputs(processor, refs, None).fork_media_refs()
+    monkeypatch.setattr(inputs, "fork_media_refs", lambda: inputs)
+    submitted: Future[Image.Image] = Future()
+    submitted.set_exception(ValueError("decode failed"))
+    calls = 0
+
+    def submit(decoder):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return submitted
+        raise RuntimeError("submission failed")
+
+    monkeypatch.setattr(global_thread_pool, "submit", submit)
+    with pytest.raises(RuntimeError, match="submission failed"):
+        processor.apply_phase1(inputs, TimingContext(enabled=False))
+
+    assert all(ref.data == b"" for ref in inputs.mm_data_items["image"].data)
+    assert [ref.data for ref in refs] == [b"a", b"b"]

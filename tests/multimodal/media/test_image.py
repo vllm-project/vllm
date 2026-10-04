@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
+import sys
+import uuid
+import weakref
+from functools import partial
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PIL import Image
 
-from vllm.multimodal.media import ImageMediaIO
+from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.media import ImageMediaIO, MediaRef
 
 pytestmark = pytest.mark.cpu_test
 
@@ -91,16 +98,16 @@ def test_image_media_io_no_mode_conversion(tmp_path):
     # Default behavior: RGBA is composited onto a white background
     image_io_default = ImageMediaIO()
     converted_default = image_io_default.load_file(test_image_path)
-    assert converted_default.media.mode == "RGB"
-    assert converted_default.media.getpixel((0, 0)) == (255, 255, 255)
-    assert converted_default.media.getpixel((5, 5)) == (0, 0, 0)
+    assert converted_default.mode == "RGB"
+    assert converted_default.getpixel((0, 0)) == (255, 255, 255)
+    assert converted_default.getpixel((5, 5)) == (0, 0, 0)
 
     # image_mode=None: original mode and alpha channel are preserved
     image_io_keep = ImageMediaIO(image_mode=None)
     converted_keep = image_io_keep.load_file(test_image_path)
-    assert converted_keep.media.mode == "RGBA"
-    assert converted_keep.media.getpixel((0, 0)) == (0, 0, 0, 0)
-    assert converted_keep.media.getpixel((5, 5)) == (0, 0, 0, 255)
+    assert converted_keep.mode == "RGBA"
+    assert converted_keep.getpixel((0, 0)) == (0, 0, 0, 0)
+    assert converted_keep.getpixel((5, 5)) == (0, 0, 0, 255)
 
 
 def test_image_media_io_rgba_background_color_validation():
@@ -169,9 +176,9 @@ def test_image_media_io_load_bytes(tmp_path):
     result = image_io.load_bytes(valid_data)
 
     # Check the returned media is a properly loaded image
-    assert isinstance(result.media, Image.Image)
-    assert result.media.size == (8, 8)
-    assert result.media.getpixel((0, 0)) == (100, 150, 200)
+    assert isinstance(result, Image.Image)
+    assert result.size == (8, 8)
+    assert result.getpixel((0, 0)) == (100, 150, 200)
 
     # Test 2: Garbage bytes raise ValueError
     with pytest.raises(ValueError, match="Failed to load image"):
@@ -202,9 +209,9 @@ def test_image_media_io_load_file(tmp_path):
     result = image_io.load_file(valid_path)
 
     # Check the returned media is a properly loaded image
-    assert isinstance(result.media, Image.Image)
-    assert result.media.size == (4, 4)
-    assert result.media.getpixel((0, 0)) == (10, 20, 30)
+    assert isinstance(result, Image.Image)
+    assert result.size == (4, 4)
+    assert result.getpixel((0, 0)) == (10, 20, 30)
 
     # Test 2: File with garbage content raises ValueError
     bad_file = tmp_path / "bad.png"
@@ -244,7 +251,7 @@ def test_image_pixel_limit_respected():
 
     image_io = ImageMediaIO()
     result = image_io.load_bytes(data)
-    assert result.media.size == (100, 100)
+    assert result.size == (100, 100)
 
 
 def test_image_pixel_limit_rejected(monkeypatch):
@@ -280,4 +287,180 @@ def test_image_pixel_limit_disabled(monkeypatch):
 
     image_io = ImageMediaIO()
     result = image_io.load_bytes(data)
-    assert result.media.size == (1000, 1000)
+    assert result.size == (1000, 1000)
+
+
+def _png_bytes(image: Image.Image) -> bytes:
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _hash(item) -> str:
+    return MultiModalHasher.hash_kwargs("blake3", image=item)
+
+
+def test_load_bytes_ref_defers_decode():
+    """load_bytes_ref parses only the header; pixels decode on first access."""
+    data = _png_bytes(Image.new("RGB", (8, 8), (100, 150, 200)))
+    image_io = ImageMediaIO()
+
+    ref = image_io.load_bytes_ref(data)
+    assert isinstance(ref, MediaRef)
+    assert not ref.is_decoded
+    assert ref.data == data
+
+    decoded = ref.decode()
+    assert ref.is_decoded
+    assert decoded is ref.decode()  # decode result is cached
+
+    eager = image_io.load_bytes(data)
+    assert decoded.mode == eager.mode
+    assert np.array_equal(np.array(decoded), np.array(eager))
+
+
+def test_load_bytes_ref_preserves_mode_when_disabled():
+    """image_mode=None keeps the original mode."""
+    data = _png_bytes(Image.new("RGBA", (8, 8), (0, 0, 0, 0)))
+    ref = ImageMediaIO(image_mode=None).load_bytes_ref(data)
+
+    assert ref.decode().mode == "RGBA"
+
+
+def test_load_bytes_ref_error_timing():
+    """Decode errors surface at first access, not at construction."""
+    image_io = ImageMediaIO()
+
+    # Unparsable header: deferred so decode errors surface at the use site
+    ref = image_io.load_bytes_ref(b"not an image")
+    assert not ref.is_decoded
+    with pytest.raises(ValueError, match="Failed to load image"):
+        ref.decode()
+
+    # Truncated JPEG: the header still parses, pixel decoding fails
+    buf = BytesIO()
+    Image.new("RGB", (64, 64), (100, 150, 200)).save(buf, format="JPEG")
+    data = buf.getvalue()[:-50]
+
+    ref = image_io.load_bytes_ref(data)
+    assert not ref.is_decoded
+    with pytest.raises(ValueError, match="Failed to load image"):
+        ref.decode()
+
+
+def test_load_bytes_ref_rejects_oversized_image_eagerly(monkeypatch):
+    """The VLLM_MAX_IMAGE_PIXELS check stays in the eager header phase."""
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_MAX_IMAGE_PIXELS", 100)
+
+    data = _png_bytes(Image.new("RGB", (20, 20), (0, 255, 0)))
+    with pytest.raises(ValueError, match="exceed"):
+        ImageMediaIO().load_bytes_ref(data)
+
+
+def test_load_bytes_ref_key_covers_bytes_and_spec():
+    """The key is a function of the encoded bytes and the decode spec, and is
+    stable across requests."""
+    data = _png_bytes(Image.new("RGBA", (8, 8), (255, 0, 0, 128)))
+    other = _png_bytes(Image.new("RGBA", (8, 8), (0, 255, 0, 128)))
+
+    white = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes_ref(data)
+    white2 = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes_ref(data)
+    black = ImageMediaIO(rgba_background_color=(0, 0, 0)).load_bytes_ref(data)
+    keep = ImageMediaIO(image_mode=None).load_bytes_ref(data)
+
+    assert white.key == white2.key
+    assert len({white.key, black.key, keep.key}) == 3
+    assert white.key != ImageMediaIO().load_bytes_ref(other).key
+    # None of that needed a decode.
+    assert not white.is_decoded and not black.is_decoded
+
+
+def test_exif_key_is_read_from_the_header_only(monkeypatch):
+    """The ImageID probe reads the header and never rasterizes.
+
+    A PNG whose `info` has no "exif" entry is not probed at all, because
+    PngImageFile.getexif() calls .load() to look for a trailing eXIf chunk.
+    """
+    image_id = uuid.uuid4()
+    header = Image.new("RGB", (10, 20))
+    header.getexif()[Image.ExifTags.Base.ImageID] = image_id
+    assert ImageMediaIO()._exif_key(header) == image_id.bytes
+
+    png_bytes = _png_bytes(Image.new("RGB", (4, 4)))
+
+    def fail_load(self):
+        raise AssertionError("the EXIF probe rasterized the image")
+
+    monkeypatch.setattr(Image.Image, "load", fail_load)
+    png = Image.open(BytesIO(png_bytes))
+    assert ImageMediaIO()._exif_key(png) is None
+
+
+def test_load_bytes_ref_keys_off_exif_image_id(monkeypatch):
+    """When a header carries an ImageID, that ID *is* the ref's cache key --
+    the same identity the offline `Image.Image` hasher branch uses, so one
+    logical image shares a cache entry across encodings.
+
+    The probe is stubbed because Pillow hands back raw bytes (never a
+    `uuid.UUID`) for an ImageID parsed out of an encoded image, so no real
+    payload can reach this branch.
+    """
+    image_id = uuid.uuid4()
+    monkeypatch.setattr(
+        "vllm.multimodal.media.image.get_image_id_bytes", lambda image: image_id.bytes
+    )
+
+    def jpeg_bytes(size, color):
+        buf = BytesIO()
+        Image.new("RGB", size, color).save(buf, format="JPEG")
+        return buf.getvalue()
+
+    data = jpeg_bytes((8, 4), (10, 20, 30))
+    ref = ImageMediaIO().load_bytes_ref(data)
+    assert ref.key == image_id.bytes
+    assert _hash(ref) == _hash(image_id.bytes)
+    assert not ref.is_decoded
+
+    # A different payload carrying the same ImageID shares the key.
+    assert ImageMediaIO().load_bytes_ref(jpeg_bytes((16, 16), (1, 2, 3))).key == (
+        image_id.bytes
+    )
+
+
+def test_load_bytes_ref_png_key_does_not_decode(monkeypatch):
+    """Deriving a PNG's key must not rasterize it.
+
+    PngImageFile.getexif() calls .load() when info lacks an "exif" key, so the
+    EXIF probe has to consult only what was parsed at open time.
+    """
+    data = _png_bytes(Image.new("RGB", (8, 8), (1, 2, 3)))
+
+    def fail_load(self):
+        raise AssertionError("key derivation triggered a pixel decode")
+
+    monkeypatch.setattr(Image.Image, "load", fail_load)
+    ref = ImageMediaIO().load_bytes_ref(data)
+    assert _hash(ref) == _hash(ImageMediaIO().load_bytes_ref(data))
+    assert not ref.is_decoded
+
+
+def test_load_bytes_ref_release_frees_the_header_image():
+    """release() must drop the header-opened image, whose `fp` holds a second
+    copy of the payload in a BytesIO buffer."""
+    data = _png_bytes(Image.new("RGB", (8, 8), (1, 2, 3)))
+    baseline = sys.getrefcount(data)
+
+    ref = ImageMediaIO().load_bytes_ref(data)
+    assert isinstance(ref._decoder, partial)
+    header = ref._decoder.args[0]
+    assert isinstance(header, Image.Image)
+    header_ref = weakref.ref(header)
+    del header
+
+    ref.release()
+    gc.collect()
+
+    assert header_ref() is None
+    assert sys.getrefcount(data) == baseline

@@ -2,8 +2,33 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import uuid
 
 from PIL import Image, ImageOps
+
+
+def get_image_id_bytes(image: Image.Image) -> bytes | None:
+    """Return the EXIF `ImageID` of an image as a UUID, if it carries one.
+
+    An `ImageID` identifies the logical image, so callers use it as the cache
+    identity: the same image under different encodings, dimensions or
+    quantization then shares one entry. Malformed EXIF (e.g. an invalid TIFF
+    header) yields `None` instead of raising, leaving the caller to fall back
+    to the encoded bytes.
+
+    Only pass an image whose pixels are already decoded or whose header was
+    parsed without decoding: `getexif()` rasterizes a PNG that has no `exif`
+    entry in `info` (a trailing eXIf chunk is only findable by reading to EOF).
+    """
+    try:
+        exif = image.getexif()
+        image_id = exif.get(Image.ExifTags.Base.ImageID)
+        if isinstance(image_id, uuid.UUID):
+            return image_id.bytes
+    except Exception:
+        # Tolerate malformed EXIF metadata (e.g. invalid TIFF header).
+        pass
+    return None
 
 
 def rescale_image_size(

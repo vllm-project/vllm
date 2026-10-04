@@ -14,6 +14,7 @@ from PIL import Image
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.utils import TensorType
 
+from vllm.multimodal.media.base import MediaRef
 from vllm.utils.import_utils import is_numba_available
 from vllm.utils.jit_monitor import numba_workqueue_threading_layer
 
@@ -144,8 +145,8 @@ def navit_resize_video(
 
 
 def _to_pil(data: Any) -> Image.Image:
-    if hasattr(data, "media") and hasattr(data, "original_bytes"):
-        data = data.media
+    if isinstance(data, MediaRef):
+        data = data.decode()
     if isinstance(data, Image.Image):
         return data if data.mode == "RGB" else data.convert("RGB")
     if isinstance(data, str):
