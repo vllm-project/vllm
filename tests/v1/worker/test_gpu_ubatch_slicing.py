@@ -45,6 +45,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     _slice_input_batch,
     create_ubatch_slices,
+    merge_ubatch_outputs,
     slice_model_inputs,
 )
 from vllm.v1.worker.ubatch_utils import (
@@ -56,6 +57,43 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_yield
 
 MAX_NUM_REQS = 32
 MAX_NUM_TOKENS = 128
+
+
+@pytest.mark.parametrize(
+    "merge",
+    [legacy_gpu_ubatch_wrapper._cat_ubatch_outputs, merge_ubatch_outputs],
+    ids=["v1", "v2"],
+)
+@pytest.mark.parametrize("output_kind", ["tensor", "tuple", "aux"])
+@pytest.mark.parametrize("sizes", [(2,), (2, 3), (2, 3, 4)])
+def test_merge_preserves_model_output_structure_and_token_order(
+    merge, output_kind, sizes
+):
+    """Speculative targets return (hidden_states, a list of auxiliary states)."""
+    hidden = torch.arange(sum(sizes) * 4).reshape(-1, 4)
+    auxiliary = [hidden + 100, hidden + 200]
+    if output_kind == "tensor":
+        outputs = list(hidden.split(sizes))
+        expected = hidden
+    elif output_kind == "tuple":
+        outputs = list(zip(hidden.split(sizes), auxiliary[0].split(sizes)))
+        expected = (hidden, auxiliary[0])
+    else:
+        outputs = [
+            (h, [a, b])
+            for h, a, b in zip(
+                hidden.split(sizes),
+                auxiliary[0].split(sizes),
+                auxiliary[1].split(sizes),
+            )
+        ]
+        expected = (hidden, auxiliary)
+
+    actual = merge(outputs)
+    assert type(actual) is type(expected)
+    if output_kind == "aux":
+        assert isinstance(actual[1], list)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def _make_buffers() -> InputBuffers:
@@ -593,9 +631,10 @@ def test_runner_allocates_one_buffer_pair_per_microbatch():
 class _YieldingModel(torch.nn.Module):
     """Toy model that hands off to the other microbatch mid-forward."""
 
-    def __init__(self, trace: list[tuple[str, int]]):
+    def __init__(self, trace: list[tuple[str, int]], with_aux: bool = False):
         super().__init__()
         self.trace = trace
+        self.with_aux = with_aux
 
     def forward(self, input_ids, positions, intermediate_tensors=None, **kwargs):
         self.trace.append(("enter", dbo_current_ubatch_id()))
@@ -603,11 +642,14 @@ class _YieldingModel(torch.nn.Module):
         # Stands in for the expert all-to-all handoff point.
         dbo_yield()
         self.trace.append(("exit", dbo_current_ubatch_id()))
+        if self.with_aux:
+            return out, [out + 1, out + 2]
         return out
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
-def test_ubatch_runner_overlaps_and_matches_single_batch():
+@pytest.mark.parametrize("with_aux", [False, True])
+def test_ubatch_runner_overlaps_and_matches_single_batch(with_aux: bool):
     """Microbatches interleave at the yield point and produce the same output."""
     vllm_config = _make_dbo_config()
     device = torch.device("cuda:0")
@@ -623,13 +665,14 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
     )
 
     trace: list[tuple[str, int]] = []
-    model = _YieldingModel(trace)
+    model = _YieldingModel(trace, with_aux)
     output = runner.run(model, model_inputs, ubatch_state)
 
     expected = model_inputs["input_ids"].float().unsqueeze(-1) * 2 + model_inputs[
         "positions"
     ].float().unsqueeze(-1)
-    torch.testing.assert_close(output, expected)
+    expected_output = (expected, [expected + 1, expected + 2]) if with_aux else expected
+    torch.testing.assert_close(output, expected_output)
 
     # Both microbatches reach the handoff before either finishes.
     assert trace == [("enter", 0), ("enter", 1), ("exit", 0), ("exit", 1)]
@@ -821,7 +864,8 @@ def test_slicing_drops_stale_dcp_metadata_when_dcp_is_off():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
-def test_capturable_run_replays_as_a_cudagraph():
+@pytest.mark.parametrize("with_aux", [False, True])
+def test_capturable_run_replays_as_a_cudagraph(with_aux: bool):
     """Microbatched graph replay reads updated persistent input buffers."""
     vllm_config = VllmConfig(
         model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
@@ -849,7 +893,7 @@ def test_capturable_run_replays_as_a_cudagraph():
         ],
     )
 
-    model = _YieldingModel([])
+    model = _YieldingModel([], with_aux)
     graph = torch.cuda.CUDAGraph()
     finish = runner.begin_capturable_run(
         model, model_inputs, ubatch_state, for_capture=True
@@ -865,7 +909,8 @@ def test_capturable_run_replays_as_a_cudagraph():
     expected = torch.full(
         (num_tokens, 1), 3 * 2 + 5, dtype=torch.float32, device=device
     )
-    torch.testing.assert_close(captured, expected)
+    expected_output = (expected, [expected + 1, expected + 2]) if with_aux else expected
+    torch.testing.assert_close(captured, expected_output)
 
 
 def _request_slices(input_batch: InputBatch) -> list[slice]:
