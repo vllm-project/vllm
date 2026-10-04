@@ -81,6 +81,17 @@ void cutlass_scaled_mm_sm100(torch::stable::Tensor& c,
                              torch::stable::Tensor const& a_scales,
                              torch::stable::Tensor const& b_scales,
                              std::optional<torch::stable::Tensor> const& bias);
+
+void cutlass_scaled_mm_sm100_gemma4_gated(
+    torch::stable::Tensor& c, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales);
+
+void cutlass_scaled_mm_sm100_gemma4_gated_amax(
+    torch::stable::Tensor& c, torch::stable::Tensor& row_amax,
+    torch::stable::Tensor const& a, torch::stable::Tensor const& b,
+    torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales);
 #endif
 
 #if (defined(ENABLE_CUTLASS_MOE_SM90) && ENABLE_CUTLASS_MOE_SM90) ||   \
@@ -266,6 +277,80 @@ void cutlass_scaled_mm(torch::stable::Tensor& c, torch::stable::Tensor const& a,
       false,
       "No compiled cutlass_scaled_mm for a compute capability less than "
       "CUDA device capability: ",
+      version_num);
+}
+
+static void check_gemma4_gated_scaled_mm_args(
+    torch::stable::Tensor const& c, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales) {
+  STD_TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
+  STD_TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
+                  b.size(1) == c.size(1));
+  STD_TORCH_CHECK(b.size(1) % 2 == 0,
+                  "Gemma4 gated epilogue expects interleaved gate/up pairs");
+  STD_TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);
+  STD_TORCH_CHECK(b.stride(0) == 1);
+  STD_TORCH_CHECK(c.stride(0) % 16 == 0 && b.stride(1) % 16 == 0);
+  STD_TORCH_CHECK(a_scales.scalar_type() ==
+                  torch::headeronly::ScalarType::Float);
+  STD_TORCH_CHECK(b_scales.scalar_type() ==
+                  torch::headeronly::ScalarType::Float);
+  STD_TORCH_CHECK((a_scales.numel() == 1 || a_scales.numel() == a.size(0)) &&
+                  (b_scales.numel() == 1 || b_scales.numel() == b.size(1)));
+  STD_TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
+}
+
+void cutlass_scaled_mm_gemma4_gated(torch::stable::Tensor& c,
+                                    torch::stable::Tensor const& a,
+                                    torch::stable::Tensor const& b,
+                                    torch::stable::Tensor const& a_scales,
+                                    torch::stable::Tensor const& b_scales) {
+  check_gemma4_gated_scaled_mm_args(c, a, b, a_scales, b_scales);
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
+  int32_t version_num = get_sm_version_num();
+
+#if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
+  if (version_num >= 100 && version_num < 120) {
+    cutlass_scaled_mm_sm100_gemma4_gated(c, a, b, a_scales, b_scales);
+    return;
+  }
+#endif
+
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "Gemma4 gated FP8 epilogue is only supported on SM100. "
+             "CUDA device capability: ",
+      version_num);
+}
+
+void cutlass_scaled_mm_gemma4_gated_amax(
+    torch::stable::Tensor& c, torch::stable::Tensor& row_amax,
+    torch::stable::Tensor const& a, torch::stable::Tensor const& b,
+    torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales) {
+  check_gemma4_gated_scaled_mm_args(c, a, b, a_scales, b_scales);
+  STD_TORCH_CHECK(row_amax.dim() == 1 && row_amax.numel() == a.size(0));
+  STD_TORCH_CHECK(row_amax.scalar_type() ==
+                  torch::headeronly::ScalarType::Float);
+  STD_TORCH_CHECK(row_amax.is_contiguous());
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
+  int32_t version_num = get_sm_version_num();
+
+#if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
+  if (version_num >= 100 && version_num < 120) {
+    cutlass_scaled_mm_sm100_gemma4_gated_amax(c, row_amax, a, b, a_scales,
+                                              b_scales);
+    return;
+  }
+#endif
+
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "Gemma4 gated FP8 amax epilogue is only supported on SM100. "
+             "CUDA device capability: ",
       version_num);
 }
 
