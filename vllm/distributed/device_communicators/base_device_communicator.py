@@ -154,6 +154,12 @@ class All2AllManagerBase:
             type(self).__name__,
         )
 
+    def suspend(self) -> None:
+        """Release reclaimable all2all buffers (collective, default: no-op)."""
+
+    def resume(self) -> None:
+        """Restore buffers released by ``suspend`` (collective, default: no-op)."""
+
     def combine(self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False):
         raise NotImplementedError
 

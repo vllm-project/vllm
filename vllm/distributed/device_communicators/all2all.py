@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_pcp_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
@@ -190,8 +190,44 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
         # reasonable defaults based on profiling.
         self.num_sms = 20
 
+        # Captured CUDA graphs hold the buffer addresses, which change on
+        # re-create, so suspend keeps the buffers.
+        cudagraph_mode = get_current_vllm_config().compilation_config.cudagraph_mode
+        self.resident_reason: str | None = None
+        if cudagraph_mode != CUDAGraphMode.NONE:
+            self.resident_reason = "CUDA graphs captured their addresses"
+        self._suspended = False
+        # NVSHMEM builds NCCL comms for its teams on every init. DeepEP never uses
+        # them, and they cost ~1.6 GiB/GPU, ~4 s per wake and most of the creep.
+        model_config = get_current_vllm_config().model_config
+        if model_config is not None and model_config.enable_nccl_comm_suspend:
+            os.environ.setdefault("NVSHMEM_DISABLE_NCCL", "1")
+
     def get_handle(self, kwargs):
         raise NotImplementedError
+
+    def suspend(self) -> None:
+        if self.resident_reason is not None:
+            logger.info_once(
+                "DeepEP buffers stay resident during suspend: %s.",
+                self.resident_reason,
+            )
+            return
+        if self._suspended:
+            return
+        self._suspended = True
+        with self.handle_cache._lock:
+            for handle in self.handle_cache._cache.values():
+                handle.destroy()
+
+    def resume(self) -> None:
+        if not self._suspended:
+            return
+        with self.handle_cache._lock:
+            for key, handle in self.handle_cache._cache.items():
+                # Re-init in place: prepare/finalize objects hold this Buffer.
+                handle.__init__(**dict(key))
+        self._suspended = False
 
     def dispatch_router_logits(
         self,
@@ -222,8 +258,9 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
 
     def destroy(self):
         with self.handle_cache._lock:
-            for _, handle in self.handle_cache._cache.items():
-                handle.destroy()
+            if not self._suspended:  # suspend() already destroyed them
+                for _, handle in self.handle_cache._cache.items():
+                    handle.destroy()
             self.handle_cache._cache.clear()
 
 
@@ -298,6 +335,9 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         self.support_fault_tolerance = (
             get_current_vllm_config().parallel_config.enable_fault_tolerance
         )
+        # DeepEP's MNNVL path keeps a reference to the NVL buffer after destroy().
+        if envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL:
+            self.resident_reason = "DeepEP does not free MNNVL (fabric) buffers"
 
     def _make_all2all_kwargs(
         self,
