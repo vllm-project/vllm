@@ -1454,6 +1454,86 @@ def test_file_gather_forward_reads_staging_without_host_work(
     assert output.shape == (6, 4)
 
 
+def _make_nvfp4_file_gather_embedding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, device: str = "cpu"
+) -> tuple[Qwen4ExpNGramEmbedding, torch.Tensor, torch.Tensor]:
+    """Bind an 8-row NVFP4 table saved as three shards of packed rows and scales."""
+    _patch_ple_construction(monkeypatch)
+    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
+    nn.Module.__init__(module)
+    module.split_ngram_parts = 3
+    module.register_buffer("layer_multipliers", torch.tensor([3, 5]))
+    module.register_buffer("ngram_heads_vocab_sizes", torch.tensor([5, 3]))
+    module.register_buffer("ngram_heads_offsets", torch.tensor([0, 5]))
+    with torch.device(device):
+        module.ngram_embedding = Qwen4ExpPLEFileGatherEmbedding(
+            8,
+            160,
+            params_dtype=torch.bfloat16,
+            padding_size=2,
+            prefix="test.ple_embedding",
+            embedding_method=Qwen4ExpPLENvFp4EmbeddingMethod(),
+            num_ngram_heads=2,
+            max_total_tokens=4,
+        )
+    codes = torch.arange(8 * 80).reshape(8, 80).to(torch.uint8)
+    scales = ((torch.arange(80).reshape(8, 10) + 1) / 4).to(torch.float8_e4m3fn)
+    checkpoint = {"ngram_embedding.weight_scale_2": torch.tensor(0.37)}
+    for suffix, table in (("weight", codes), ("weight_scale", scales)):
+        for index, shard in enumerate(table.split(3)):
+            checkpoint[f"ngram_embedding.shard_{index}.{suffix}"] = shard.clone()
+    save_file(checkpoint, tmp_path / "model.safetensors")
+    loaded = _load_file_shards(module, tmp_path / "model.safetensors")
+    assert {"ngram_embedding.weight", "ngram_embedding.weight_scale"} <= loaded
+    embedding = module.ngram_embedding
+    embedding.quant_method.process_weights_after_loading(embedding)
+    return module, codes, scales
+
+
+def test_file_gather_nvfp4_stages_packed_rows_and_scales(monkeypatch, tmp_path) -> None:
+    """Both NVFP4 planes reach staging byte-exact, including repeated ids."""
+    module, codes, scales = _make_nvfp4_file_gather_embedding(monkeypatch, tmp_path)
+    embedding = module.ngram_embedding
+    ids = torch.tensor([[7, 0], [3, 3], [5, 7]])
+    embedding._host_ids[:3] = ids
+
+    embedding.stage_rows(3)
+
+    weight, scale = (embedding._plane_buffers[n][0] for n in embedding._planes)
+    assert torch.equal(weight[:3], codes[ids])
+    assert torch.equal(scale[:3].view(torch.uint8), scales.view(torch.uint8)[ids])
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA is required"
+            ),
+        ),
+    ],
+)
+def test_file_gather_nvfp4_forward_matches_resident_decode(
+    monkeypatch, tmp_path, device
+) -> None:
+    """The decoded staging rows equal the resident NVFP4 lookup of the same ids."""
+    module, codes, scales = _make_nvfp4_file_gather_embedding(
+        monkeypatch, tmp_path, device
+    )
+    ids = torch.tensor([[7, 0], [3, 3], [5, 7]])
+    module.ngram_embedding._host_ids[:3] = ids
+    module.ngram_embedding.stage_rows(3)
+    hidden_states = torch.zeros(3, 8, dtype=torch.bfloat16, device=device)
+
+    output = module.ngram_embedding(hidden_states)
+
+    expected = _reference_nvfp4_ple(codes, scales)[ids].flatten(-2)
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
 def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
     conv_state_len = 6
     dilation = 2

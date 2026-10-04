@@ -104,7 +104,8 @@ safetensors shard files instead of allocating the table. Set
 and takes precedence over `cpu_offload`.
 
 Rows stay in the checkpoint dtype: an FP8 table stays FP8 and is dequantized
-on the GPU, and an unquantized table must match `--dtype`. CPU offload
+on the GPU, an NVFP4 table reads its packed rows and block scales and decodes
+them on the GPU, and an unquantized table must match `--dtype`. CPU offload
 converts on load; this mode rejects the mismatch at load.
 
 Each step reads its rows from the files with `preadv` and stages them on the

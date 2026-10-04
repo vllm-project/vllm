@@ -491,6 +491,7 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
                     f"NVFP4 PLE checkpoint is missing {name} rows "
                     f"starting at local row {loaded_end}"
                 )
+        super().process_weights_after_loading(layer)
 
     def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
         return layer.params_dtype
