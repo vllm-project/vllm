@@ -60,6 +60,8 @@ def test_mtp_draft_lm_head_quantization(
     for quant in (None, quantization):
         with vllm_runner(
             "Qwen/Qwen3.5-0.8B-Base",
+            block_size=None,
+            enable_chunked_prefill=None,
             max_model_len=2048,
             limit_mm_per_prompt={"image": 0, "video": 0},
             speculative_config={
