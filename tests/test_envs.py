@@ -60,6 +60,29 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+@pytest.mark.parametrize(
+    "strategy",
+    ["PACK", "SPREAD", "STRICT_PACK", "STRICT_SPREAD"],
+)
+def test_ray_pg_strategy(monkeypatch: pytest.MonkeyPatch, strategy: str) -> None:
+    monkeypatch.setenv("VLLM_RAY_PG_STRATEGY", strategy)
+    assert strategy == envs.VLLM_RAY_PG_STRATEGY
+
+
+def test_ray_pg_strategy_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VLLM_RAY_PG_STRATEGY", raising=False)
+    assert envs.VLLM_RAY_PG_STRATEGY == "PACK"
+
+
+def test_ray_pg_strategy_rejects_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_RAY_PG_STRATEGY", "INVALID")
+
+    with pytest.raises(ValueError, match="VLLM_RAY_PG_STRATEGY"):
+        _ = envs.VLLM_RAY_PG_STRATEGY
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")

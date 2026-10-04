@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Union
 
 import numpy as np
 
+import vllm.envs as envs
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group
@@ -642,9 +643,9 @@ def initialize_ray_cluster(
             # current node.
             placement_group_specs[0][f"node:{current_ip}"] = 0.001
 
-        # By default, Ray packs resources as much as possible.
+        # Use the configured Ray placement group strategy; defaults to PACK.
         current_placement_group = ray.util.placement_group(
-            placement_group_specs, strategy="PACK"
+            placement_group_specs, strategy=envs.VLLM_RAY_PG_STRATEGY
         )
         _wait_until_pg_ready(current_placement_group)
 
