@@ -122,14 +122,14 @@ def register_pooling_api_routers(
 
         app.include_router(pooling_router)
 
-    if "classify" in supported_tasks:
+    if pooling_task == "classify":
         from .classify.api_router import (
             router as classify_router,
         )
 
         app.include_router(classify_router)
 
-    if "embed" in supported_tasks:
+    if pooling_task == "embed":
         from .embed.api_router import router as embed_router
 
         app.include_router(embed_router)
