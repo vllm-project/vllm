@@ -90,6 +90,7 @@ def moe_mmk(
     stride_am: tl.int64 = 0,
     stride_bn: tl.int64 = 0,
     USE_TD: tl.constexpr = False,
+    per_out_ch_quant: tl.constexpr = False,
 ):
     offs_k = tl.arange(0, BLOCK_K)
 
@@ -121,19 +122,18 @@ def moe_mmk(
             offs_bsn = offs_bn // group_n
             b_scale_ptrs = b_scale_ptr + offs_bsn * stride_bsn
 
-        # per act token
-        elif per_act_token_quant:
-            # Load per-token scale for activations
-            a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
-            a_scale = tl.load(a_scale_ptrs, mask=mask_m, other=0.0)[:, None]
-
-            b_scale_ptrs = b_scale_ptr + offs_bn[None, :] * stride_bsn
-            b_scale = tl.load(b_scale_ptrs)
-
-        # tensor-wise
+        # Weight-scale layout is independent of activation-scale layout.
         else:
-            a_scale = tl.load(a_scale_ptr)
-            b_scale = tl.load(b_scale_ptr)
+            if per_out_ch_quant:
+                b_scale_ptrs = b_scale_ptr + offs_bn[None, :] * stride_bsn
+                b_scale = tl.load(b_scale_ptrs)
+            else:
+                b_scale = tl.load(b_scale_ptr)
+            if per_act_token_quant:
+                a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
+                a_scale = tl.load(a_scale_ptrs, mask=mask_m, other=0.0)[:, None]
+            else:
+                a_scale = tl.load(a_scale_ptr)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -233,6 +233,7 @@ def expert_triton_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     USE_TD: tl.constexpr = False,
+    per_out_ch_quant: tl.constexpr = False,
 ):
     offs_m = tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N) % N
@@ -285,6 +286,7 @@ def expert_triton_kernel(
         stride_am,
         stride_bn,
         USE_TD,
+        per_out_ch_quant,
     )
 
     # store in C
@@ -340,6 +342,7 @@ def batched_triton_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     USE_TD: tl.constexpr = False,
+    per_out_ch_quant: tl.constexpr = False,
 ):
     expert_id = tl.program_id(axis=0)
     e_num_tokens = tl.load(expert_num_tokens + expert_id)
@@ -421,6 +424,7 @@ def batched_triton_kernel(
         BLOCK_N,
         BLOCK_K,
         USE_TD,
+        per_out_ch_quant,
     )
 
 
@@ -441,6 +445,7 @@ def invoke_moe_batched_triton_kernel(
     config: dict[str, int],
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
+    per_out_ch_quant: bool = False,
 ):
     assert not use_int4_w4a16
     max_num_tokens = A.size(1)
@@ -547,6 +552,7 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         USE_TD=use_td,
+        per_out_ch_quant=per_out_ch_quant,
     )
 
 
@@ -980,6 +986,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             config=config,
             per_act_token_quant=self.per_act_token_quant,
+            per_out_ch_quant=self.per_out_ch_quant,
             block_shape=self.block_shape,
         )
 
@@ -1026,5 +1033,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             config=config,
             per_act_token_quant=self.per_act_token_quant,
+            per_out_ch_quant=self.per_out_ch_quant,
             block_shape=self.block_shape,
         )
