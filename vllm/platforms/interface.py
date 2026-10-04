@@ -698,6 +698,7 @@ class Platform:
 
         # Phase 2: Align block/mamba sizes for hybrid models
         # (may override user settings).
+        pre_block_size = cache_config.block_size
         if model_config.is_hybrid:
             cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
@@ -706,6 +707,36 @@ class Platform:
         # May override the user's --block-size.
         if cache_config.kv_cache_dtype_skip_layers:
             cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
+        cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
+
+    @classmethod
+    def _check_aligned_block_size(
+        cls,
+        vllm_config: "VllmConfig",
+        backend_classes: "list[type[AttentionBackend]]",
+        pre_block_size: int,
+    ) -> None:
+        """Fail now, not at worker setup, if alignment left a rejected size.
+
+        Alignment rounds by the first backend's kernel block only, so it can
+        land on a size a sibling backend rejects.
+        """
+        from vllm.config.vllm import set_current_vllm_config
+
+        block_size = vllm_config.cache_config.block_size
+        if block_size == pre_block_size:
+            return
+        with set_current_vllm_config(vllm_config):
+            rejecting = [
+                b.get_name()
+                for b in backend_classes
+                if not b.supports_block_size(block_size)
+            ]
+        if rejecting:
+            raise ValueError(
+                f"Aligned KV cache block size {block_size} is not supported by "
+                f"attention backend(s): {', '.join(rejecting)}."
+            )
 
     @classmethod
     def _align_heterogeneous_kv_block_size(
