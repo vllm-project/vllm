@@ -101,15 +101,15 @@ class _FlashInferBf16Backend:
     can_implement: _FlashInferBf16RuntimeCheck
 
 
-def _can_use_flashinfer_cutedsl_bf16(
+def bf16_mm_shape_supported(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> bool:
-    if not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ):
-        return False
+    """Shape constraints shared by the FlashInfer bf16 mm backends.
+
+    Platform and backend availability are checked separately.
+    """
     if x.ndim < 1 or weight.ndim != 2:
         return False
     if (
@@ -146,6 +146,18 @@ def _can_use_flashinfer_cutedsl_bf16(
         and bias.shape[0] == n
         and bias.is_contiguous()
     )
+
+
+def _can_use_flashinfer_cutedsl_bf16(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ):
+        return False
+    return bf16_mm_shape_supported(x, weight, bias)
 
 
 _FLASHINFER_BF16_BACKENDS = {
