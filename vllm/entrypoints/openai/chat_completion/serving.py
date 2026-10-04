@@ -652,8 +652,9 @@ class OpenAIServingChat(GenerateBaseServing):
                         not delta_text
                         and not output.token_ids
                         and not previous_num_tokens[i]
+                        and output.finish_reason is None
                     ):
-                        # Chunked prefill case, don't return empty chunks
+                        # Skip only intermediate empty prefill chunks.
                         continue
 
                     delta_message: DeltaMessage | None
