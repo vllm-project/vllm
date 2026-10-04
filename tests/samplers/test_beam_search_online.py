@@ -62,8 +62,25 @@ class _Serving(BeamSearchOnlineMixin):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("allowed_token_ids", [None, [11, 12], [11, 12, *range(100, 229)]])
-async def test_beam_search_handles_extra_logprob_candidates(allowed_token_ids) -> None:
+@pytest.mark.parametrize(
+    "allowed_token_ids", [None, [11, 12], [11, *range(100, 227), 12]]
+)
+async def test_beam_search_handles_extra_logprob_candidates(
+    monkeypatch, allowed_token_ids
+) -> None:
+    async def generate(prompt, params, *args, **kwargs):
+        result = await anext(_EngineClient().generate(prompt, params, *args, **kwargs))
+        scores = result.outputs[0].logprobs[0]
+        # Raw top-k may miss a valid beam; exact scoring must cover every chunk.
+        ids = params.logprob_token_ids or [11]
+        result.outputs[0].logprobs = [
+            {token: score for token, score in scores.items() if token in [0, *ids]}
+        ]
+        yield result
+
+    serving = _Serving()
+    monkeypatch.setattr(serving, "engine_client", _EngineClient())
+    monkeypatch.setattr(serving.engine_client, "generate", generate)
     prompt: TokensInput = {
         "type": "token",
         "prompt": "prompt",
@@ -74,7 +91,7 @@ async def test_beam_search_handles_extra_logprob_candidates(allowed_token_ids) -
     )
 
     outputs = [
-        output async for output in _Serving().beam_search(prompt, "request", params)
+        output async for output in serving.beam_search(prompt, "request", params)
     ]
 
     assert len(outputs) == 1

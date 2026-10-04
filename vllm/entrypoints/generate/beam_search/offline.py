@@ -13,7 +13,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (
-    MAX_LOGPROB_TOKEN_IDS,
     BeamSearchParams,
     SamplingParams,
     StructuredOutputsParams,
@@ -27,6 +26,8 @@ from .utils import (
     BeamSearchOutput,
     BeamSearchSequence,
     create_sort_beams_key_function,
+    merge_beam_scoring_outputs,
+    split_beam_scoring_params,
 )
 
 logger = init_logger(__name__)
@@ -118,25 +119,12 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
-        request_logprob_token_ids = (
-            request_allowed_token_ids
-            if request_allowed_token_ids is not None
-            and len(request_allowed_token_ids) <= MAX_LOGPROB_TOKEN_IDS
-            else None
-        )
         base_sampling_params = SamplingParams(
-            logprobs=None if request_logprob_token_ids is not None else 2 * beam_width,
-            logprob_token_ids=request_logprob_token_ids,
+            logprobs=2 * beam_width,
             max_tokens=1,
             temperature=temperature,
-            allowed_token_ids=(
-                request_allowed_token_ids
-                if request_allowed_token_ids is not None
-                and len(request_allowed_token_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS
-                else None
-            ),
             detokenize=False,
-            skip_clone=True,  # Internal beam search, safe to skip clone
+            skip_clone=True,
         )
         instances: list[BeamSearchInstance] = []
 
@@ -285,19 +273,36 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 base_sampling_params, len(all_beams)
             )
 
+        scoring_beams = []
+        scoring_params = []
+        boundaries = [0]
+        for idx, beam, step_params in zip(active_indices, active_beams, active_params):
+            assert isinstance(step_params, SamplingParams)
+            allowed_ids = request_allowed_token_ids
+            if allowed_ids is not None and structured_output_backend is not None:
+                entry = beam_entries[idx]
+                assert entry is not None
+                allowed_ids = entry[1]
+            chunks = split_beam_scoring_params(step_params, allowed_ids)
+            scoring_params.extend(chunks)
+            scoring_beams.extend([beam] * len(chunks))
+            boundaries.append(len(scoring_params))
+
         # only runs for one step
         # we don't need to use tqdm here
         active_output = self._render_and_run_requests(
-            prompts=(beam.get_prompt() for beam in active_beams),
-            params=active_params,
+            prompts=(beam.get_prompt() for beam in scoring_beams),
+            params=scoring_params,
             output_type=RequestOutput,
-            lora_requests=[beam.lora_request for beam in active_beams],
+            lora_requests=[beam.lora_request for beam in scoring_beams],
             use_tqdm=False,
         )
 
         output: list[RequestOutput | None] = [None] * len(all_beams)
         for idx, active_idx in enumerate(active_indices):
-            output[active_idx] = active_output[idx]
+            output[active_idx] = merge_beam_scoring_outputs(
+                active_output[boundaries[idx] : boundaries[idx + 1]]
+            )
 
         # Logprobs are computed from raw logits before
         # allowed_token_ids masking, so they may contain
@@ -488,14 +493,8 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             # grammar still allows more tokens than the cap (e.g. inside
             # free-form strings), skip the engine-side constraint and rely
             # on the logprobs filtering in _beam_search_step instead.
-            logprob_token_ids = (
-                allowed_ids if len(allowed_ids) <= MAX_LOGPROB_TOKEN_IDS else None
-            )
             beam_params = SamplingParams(
-                logprobs=None
-                if logprob_token_ids is not None
-                else base_params.logprobs,
-                logprob_token_ids=logprob_token_ids,
+                logprobs=base_params.logprobs,
                 max_tokens=1,
                 temperature=base_params.temperature,
                 detokenize=False,

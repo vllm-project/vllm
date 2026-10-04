@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import itertools
 from abc import ABC
 from collections.abc import AsyncGenerator, Mapping
 
@@ -12,15 +13,16 @@ from vllm.engine.protocol import EngineClient
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
-from vllm.sampling_params import (
-    MAX_LOGPROB_TOKEN_IDS,
-    BeamSearchParams,
-    SamplingParams,
-)
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import collect_from_async_generator
 
-from .utils import BeamSearchSequence, create_sort_beams_key_function
+from .utils import (
+    BeamSearchSequence,
+    create_sort_beams_key_function,
+    merge_beam_scoring_outputs,
+    split_beam_scoring_params,
+)
 
 
 class BeamSearchOnlineMixin(ABC):
@@ -65,20 +67,13 @@ class BeamSearchOnlineMixin(ABC):
         allowed_token_ids_set = (
             set(allowed_token_ids) if allowed_token_ids is not None else None
         )
-        logprob_token_ids = (
-            allowed_token_ids
-            if allowed_token_ids is not None
-            and len(allowed_token_ids) <= MAX_LOGPROB_TOKEN_IDS
-            else None
-        )
         sampling_params = SamplingParams(
-            logprobs=None if logprob_token_ids is not None else 2 * beam_width,
-            logprob_token_ids=logprob_token_ids,
+            logprobs=2 * beam_width,
             max_tokens=1,
             temperature=temperature,
             detokenize=False,
-            allowed_token_ids=allowed_token_ids,
         )
+        scoring_params = split_beam_scoring_params(sampling_params, allowed_token_ids)
         all_beams = [
             BeamSearchSequence(
                 orig_prompt=prompt,
@@ -94,7 +89,9 @@ class BeamSearchOnlineMixin(ABC):
             tasks = []
             request_id_batch = f"{request_id}-{random_uuid()}"
 
-            for i, beam in enumerate(all_beams):
+            for i, (beam, step_params) in enumerate(
+                itertools.product(all_beams, scoring_params)
+            ):
                 prompt_item = beam.get_prompt()
                 lora_request_item = beam.lora_request
                 request_id_item = f"{request_id_batch}-beam-{i}"
@@ -102,7 +99,7 @@ class BeamSearchOnlineMixin(ABC):
                     collect_from_async_generator(
                         self.engine_client.generate(
                             prompt_item,
-                            sampling_params,
+                            step_params,
                             request_id_item,
                             lora_request=lora_request_item,
                             trace_headers=trace_headers,
@@ -112,7 +109,11 @@ class BeamSearchOnlineMixin(ABC):
                 )
                 tasks.append(task)
 
-            output = [x[0] for x in await asyncio.gather(*tasks)]
+            chunk_outputs = [x[0] for x in await asyncio.gather(*tasks)]
+            output = [
+                merge_beam_scoring_outputs(chunk_outputs[i : i + len(scoring_params)])
+                for i in range(0, len(chunk_outputs), len(scoring_params))
+            ]
 
             for result in output:
                 # check for error finish reason and abort beam search

@@ -13,6 +13,44 @@ from vllm.inputs import (
 )
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
+from vllm.outputs import RequestOutput
+from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
+
+
+def split_beam_scoring_params(
+    params: SamplingParams, allowed_token_ids: list[int] | None
+) -> list[SamplingParams]:
+    """Score constrained beams in chunks within the engine's token scoring limit."""
+    if allowed_token_ids is None:
+        return [params]
+    result = []
+    for start in range(0, max(1, len(allowed_token_ids)), MAX_LOGPROB_TOKEN_IDS):
+        chunk = allowed_token_ids[start : start + MAX_LOGPROB_TOKEN_IDS]
+        chunk_params = params.clone()
+        chunk_params.logprobs = None
+        chunk_params.logprob_token_ids = chunk
+        # Apply the request constraint when ranking, not separately per chunk:
+        # processed logprobs must use the same normalization across chunks.
+        chunk_params.allowed_token_ids = None if chunk else []
+        result.append(chunk_params)
+    return result
+
+
+def merge_beam_scoring_outputs(outputs: list[RequestOutput]) -> RequestOutput:
+    """Combine scores without losing an abort or error from any chunk."""
+    for output in outputs:
+        choice = output.outputs[0]
+        if choice.finish_reason in ("abort", "error") or not choice.logprobs:
+            return output
+    result = outputs[0]
+    if len(outputs) > 1:
+        scores = {}
+        for output in outputs:
+            logprobs = output.outputs[0].logprobs
+            assert logprobs is not None
+            scores.update(logprobs[0])
+        result.outputs[0].logprobs = [scores]
+    return result
 
 
 @dataclass
