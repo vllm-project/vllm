@@ -109,7 +109,19 @@ class DeepSeekV3ToolParser(ToolParser):
                         )
                     )
 
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
+                # Content spans text before the tool-calls block and text
+                # after it, matching what the streaming mode emits as
+                # content deltas (issue #56263).
+                content_start = model_output[
+                    : model_output.find(self.tool_calls_start_token)
+                ]
+                calls_end = model_output.find(self.tool_calls_end_token)
+                content_tail = (
+                    model_output[calls_end + len(self.tool_calls_end_token) :]
+                    if calls_end != -1
+                    else ""
+                )
+                content = content_start + content_tail
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
