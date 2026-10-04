@@ -20,12 +20,23 @@ from tests.parser.engine.streaming_helpers import (
 )
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.mimo import MiMoParser
+from vllm.parser.nemotron_v3 import NemotronV3Parser
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
     Qwen3Parser,
     qwen3_config,
 )
+from vllm.parser.seed_oss import SeedOssParser
+from vllm.parser.step3p5 import Step3p5Parser
+
+QWEN3_FAMILY_PARSERS = [
+    Qwen3Parser,
+    MiMoParser,
+    SeedOssParser,
+    Step3p5Parser,
+    NemotronV3Parser,
+]
 
 
 @pytest.fixture
@@ -1201,7 +1212,7 @@ def test_mimo_preserves_verbatim_parameter_values(
     assert json.loads(collect_tool_arguments(results)) == {"text": value}
 
 
-@pytest.mark.parametrize("parser_cls", [Qwen3Parser, MiMoParser])
+@pytest.mark.parametrize("parser_cls", QWEN3_FAMILY_PARSERS)
 @pytest.mark.parametrize("chunk_size", [1, 1000])
 def test_unclosed_last_parameter_kept_when_function_closed(
     mock_tokenizer, mock_request, parser_cls, chunk_size
@@ -1226,7 +1237,7 @@ def test_unclosed_last_parameter_kept_when_function_closed(
     assert json.loads(collect_tool_arguments(results)) == expected
 
 
-@pytest.mark.parametrize("parser_cls", [Qwen3Parser, MiMoParser])
+@pytest.mark.parametrize("parser_cls", QWEN3_FAMILY_PARSERS)
 def test_unclosed_last_parameter_dropped_when_output_cut_off(
     mock_tokenizer, mock_request, parser_cls
 ):
