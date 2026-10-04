@@ -106,6 +106,26 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         return -1
 
     @staticmethod
+    def _find_token_sequence(
+        token_ids: Sequence[int], marker_ids: Sequence[int], start: int = 0
+    ) -> int:
+        if not marker_ids or len(marker_ids) > len(token_ids):
+            return -1
+        marker_len = len(marker_ids)
+        for i in range(start, len(token_ids) - marker_len + 1):
+            if tuple(token_ids[i : i + marker_len]) == tuple(marker_ids):
+                return i
+        return -1
+
+    @staticmethod
+    def _starts_with_token_sequence(
+        token_ids: Sequence[int], marker_ids: Sequence[int]
+    ) -> bool:
+        if not marker_ids or len(marker_ids) > len(token_ids):
+            return False
+        return tuple(token_ids[: len(marker_ids)]) == tuple(marker_ids)
+
+    @staticmethod
     def _ends_with_token_sequence_prefix(
         token_ids: Sequence[int], marker_ids: Sequence[int]
     ) -> bool:
@@ -148,51 +168,57 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
                 if not text:
                     return None, None
 
-        if self._initial_in_reasoning and self.start_token not in text:
+        if self._initial_in_reasoning:
             reasoning, end, content = text.partition(self.end_token)
             if end:
                 return reasoning or None, content or None
             reasoning = self._strip_partial_marker_suffix(reasoning, self.end_token)
             return reasoning or None, None
 
-        if self.start_token not in text:
-            content = self._strip_partial_marker_suffix(text, self.start_token)
-            return None, content or None
+        # Only a leading start marker opens reasoning; hold back while the text so
+        # far is still a prefix of that marker. A start marker anywhere else is
+        # literal content, so it never gets stripped mid-stream.
+        if not text.startswith(self.start_token):
+            if self.start_token.startswith(text):
+                return None, None
+            return None, text
 
-        content_before, _, after_start = text.partition(self.start_token)
+        after_start = text[len(self.start_token) :]
         reasoning, end, content_after = after_start.partition(self.end_token)
         if end:
-            return reasoning or None, (content_before + content_after) or None
+            return reasoning or None, content_after or None
 
         reasoning = self._strip_partial_marker_suffix(reasoning, self.end_token)
-        return reasoning or None, content_before or None
+        return reasoning or None, None
 
     def extract_reasoning(
         self,
         model_output: str,
         request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
-        # MiniMax M3 can start a response with a stray closer. Drop that first
-        # token only; later unmatched closers stay visible as content.
-        if not self._initial_in_reasoning and model_output.startswith(self.end_token):
-            content = model_output[len(self.end_token) :]
-            return None, content or None
-
-        if self._initial_in_reasoning and self.start_token not in model_output:
+        # Markers are only meaningful at the boundary they delimit: a reasoning
+        # block is opened by a leading start marker (or the prefilled template in
+        # enabled mode) and closed by the first end marker. A start marker that
+        # the model emits inside content is literal text, not a block opener.
+        if self._initial_in_reasoning:
             reasoning, end, content = model_output.partition(self.end_token)
             if not end:
                 return model_output, None
             return reasoning, content or None
 
-        if self.start_token not in model_output:
+        # A leading closer is a stray token; drop it. Later closers stay content.
+        if model_output.startswith(self.end_token):
+            content = model_output[len(self.end_token) :]
+            return None, content or None
+
+        if not model_output.startswith(self.start_token):
             return None, model_output
 
-        content_before, _, after_start = model_output.partition(self.start_token)
+        after_start = model_output[len(self.start_token) :]
         reasoning, end, content_after = after_start.partition(self.end_token)
         if not end:
-            return reasoning, content_before or None
-
-        return reasoning, (content_before + content_after) or None
+            return reasoning, None
+        return reasoning, content_after or None
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
@@ -232,13 +258,15 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         if end_index >= 0:
             return input_ids[end_index + len(self._end_token_ids) :]
 
-        has_start = self._contains_token_sequence(input_ids, self._start_token_ids)
-        if self._initial_in_reasoning and not has_start:
+        # Reasoning is open only from a leading start marker (or the prefilled
+        # template). A start marker elsewhere is literal content, so without a
+        # closer the whole sequence is content.
+        leading_reasoning = self._initial_in_reasoning or (
+            self._starts_with_token_sequence(input_ids, self._start_token_ids)
+        )
+        if leading_reasoning:
             return []
-
-        if not has_start:
-            return input_ids
-        return []
+        return input_ids
 
     def extract_reasoning_streaming(
         self,
@@ -288,29 +316,25 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         return DeltaMessage(reasoning=reasoning, content=content)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        count = 0
-        depth = 1 if self._initial_in_reasoning else 0
-        i = 0
-        while i < len(token_ids):
-            if tuple(token_ids[i : i + len(self._start_token_ids)]) == (
-                self._start_token_ids
-            ):
-                depth += 1
-                i += len(self._start_token_ids)
-                continue
-            if tuple(token_ids[i : i + len(self._end_token_ids)]) == (
-                self._end_token_ids
-            ):
-                if depth > 0:
-                    depth -= 1
-                i += len(self._end_token_ids)
-                continue
-            if depth > 0:
-                count += 1
-            i += 1
-        return count
+        # Reasoning spans from a leading start marker (or the prefilled template)
+        # to the first closer. A non-leading start marker is literal content.
+        token_ids = list(token_ids)
+        if self._initial_in_reasoning:
+            body_start = 0
+        elif self._starts_with_token_sequence(token_ids, self._start_token_ids):
+            body_start = len(self._start_token_ids)
+        else:
+            return 0
+        end_index = self._find_token_sequence(
+            token_ids, self._end_token_ids, body_start
+        )
+        body_end = end_index if end_index >= 0 else len(token_ids)
+        return body_end - body_start
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        # Operates on the full prompt/history token stream to initialize
+        # reasoning state, so it uses rightmost-marker (current-state) semantics
+        # rather than the leading-only rule used for generated output above.
         start_index = self._rfind_token_sequence(input_ids, self._start_token_ids)
         end_index = self._rfind_token_sequence(input_ids, self._end_token_ids)
         if end_index < 0:

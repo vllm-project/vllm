@@ -199,6 +199,39 @@ def test_nonstreaming_non_leading_end_tag_is_content():
     assert content == "XXX</mm:think>YYY"
 
 
+def test_nonstreaming_non_leading_start_tag_is_content():
+    parser, _ = make_parser()
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    reasoning, content = parser.extract_reasoning("XXX<mm:think>YYY", request)
+
+    assert reasoning is None
+    assert content == "XXX<mm:think>YYY"
+
+
+def test_nonstreaming_literal_start_marker_in_json_content():
+    parser, _ = make_parser()
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    payload = '{"note": "the <mm:think> marker leaks"}'
+    reasoning, content = parser.extract_reasoning(payload, request)
+
+    assert reasoning is None
+    assert content == payload
+
+
+def test_nonstreaming_enabled_mode_literal_start_marker_in_reasoning():
+    parser, _ = make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
+    request = ChatCompletionRequest(messages=[], model="test-model")
+
+    reasoning, content = parser.extract_reasoning(
+        "quoting <mm:think> here</mm:think>answer", request
+    )
+
+    assert reasoning == "quoting <mm:think> here"
+    assert content == "answer"
+
+
 def test_nonstreaming_enabled_mode_starts_in_reasoning():
     parser, _ = make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
     request = ChatCompletionRequest(messages=[], model="test-model")
@@ -273,6 +306,20 @@ def test_streaming_non_leading_end_tag_is_content():
     assert reasoning is None
     assert content == "XXX</mm:think>YYY"
     assert end_states == [True]
+
+
+def test_streaming_non_leading_start_tag_stays_content():
+    parser, tokenizer = make_parser()
+
+    reasoning, content, end_states = run_streaming(
+        parser,
+        tokenizer,
+        ["the ", "<mm:think>", " marker leaks"],
+    )
+
+    assert reasoning is None
+    assert content == "the <mm:think> marker leaks"
+    assert end_states == [True, True, True]
 
 
 def test_streaming_enabled_mode_starts_in_reasoning():
@@ -459,3 +506,43 @@ def test_token_id_helpers_enabled_mode():
     assert parser.count_reasoning_tokens(open_reasoning_ids) == len(
         tokenizer.encode("abc")
     )
+
+
+def test_token_id_helpers_literal_start_marker_is_content():
+    parser, tokenizer = make_parser()
+    payload = '{"note": "the <mm:think> marker leaks"}'
+    output_ids = tokenizer.encode(payload, add_special_tokens=False)
+
+    assert parser.extract_content_ids(output_ids) == output_ids
+    assert parser.count_reasoning_tokens(output_ids) == 0
+
+
+def test_token_id_helpers_literal_start_marker_split_tokens():
+    tokenizer = SplitMiniMaxM3Tokenizer()
+    parser = MiniMaxM3ReasoningParser(tokenizer)
+    payload = '{"note": "the <mm:think> marker leaks"}'
+    output_ids = tokenizer.encode(payload, add_special_tokens=False)
+
+    assert parser.extract_content_ids(output_ids) == output_ids
+    assert parser.count_reasoning_tokens(output_ids) == 0
+
+
+def test_is_reasoning_end_prompt_state_preserved():
+    # is_reasoning_end runs on the full prompt/history to initialize reasoning
+    # state (serving.py, structured_output/__init__.py, abstract_parser.py), so
+    # it must keep rightmost-marker semantics, not the leading-only rule used
+    # for generated output.
+    parser, tokenizer = make_parser()
+    closed_prompt = tokenizer.encode(
+        "<chat>user asks</chat></mm:think>", add_special_tokens=False
+    )
+    assert parser.is_reasoning_end(closed_prompt)
+
+    enabled_parser, tokenizer = make_parser(
+        chat_template_kwargs={"thinking_mode": "enabled"}
+    )
+    open_prompt = tokenizer.encode(
+        "<mm:think>past</mm:think>answer<chat>new</chat><mm:think>",
+        add_special_tokens=False,
+    )
+    assert not enabled_parser.is_reasoning_end(open_prompt)
