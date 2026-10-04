@@ -4,8 +4,9 @@ Initialized engine snapshots are an experimental way to trade local disk space
 and host privileges for a faster vLLM activation. Snapshot creation initializes
 the engine and records deterministic generation output before CRIU captures the
 process tree and CUDA state. Restore validates the saved environment, restores
-the engine, binds the HTTP server, and reproduces the recorded token and sampled
-token log probability before returning.
+the engine, and checks the recorded token and sampled-token log probability
+before binding HTTP. The controller repeats the check through the public API
+before returning.
 
 This path is intended for repeatedly activating the same model and engine
 configuration on the same machine. It is not a portable model artifact.
@@ -99,6 +100,7 @@ Stop and remove it only after the restored API server is no longer needed.
 
 Create initializes the engine, records a one-token canary, releases and reloads
 weights and KV cache to rehearse restore, then releases them again for capture.
+Preparation and recovery also await the existing communicator checkpoint hooks.
 The manifest is published only after CRIU completes and the source tree stops.
 Creation is offline preparation and is not part of restore latency.
 
@@ -108,18 +110,23 @@ Literal API keys and Hugging Face tokens are redacted from the manifest's engine
 arguments. The manifest records selected environment names plus deterministic
 name-bound fingerprints, not their values. The protected CRIU artifact can
 still contain process secrets, so treat it as sensitive data. Restore reloads
-model files and KV cache before binding HTTP, then reproduces the canary or
-tears down the restored tree. The inspect command prints that identity and
-canary without executing the saved process.
+model files and KV cache, then validates the canary before binding HTTP.
+The inspect command prints that identity and canary without executing the saved
+process.
 
 ## Restore behavior
 
 Restore fails before CRIU runs if the saved identity does not match the current
 host. It does not silently fall back to ordinary startup. After CRIU restores
-the process tree, vLLM releases the saved engine to bind the requested HTTP
-address and checks the first generated token and sampled-token log probability
-against the snapshot canary. The command returns only after that check passes.
+the process tree, vLLM completes communicator and memory recovery and checks
+the snapshot canary on the private engine. Only then does it bind the requested
+HTTP address. The command returns after a second canary check through HTTP.
 The restored API server continues to run as a detached process.
+
+A failed engine preparation or recovery terminates the attempt without opening
+HTTP. The artifact's `error.json` records the phase and error before worker
+cleanup, since the restored process's launch-log streams are detached. Each
+activation clears the previous recovery error before attempting recovery.
 
 The pre-release port probe is best-effort only. It neither reserves the port
 nor authenticates the listener that appears afterward.
