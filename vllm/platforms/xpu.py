@@ -110,6 +110,9 @@ class XPUPlatform(Platform):
     ray_device_key: str = "GPU"
     dist_backend: str = "xccl"  # xccl only
     device_control_env_var: str = "ZE_AFFINITY_MASK"
+    ray_noset_device_env_vars: list[str] = [
+        "RAY_EXPERIMENTAL_NOSET_ZE_AFFINITY_MASK",
+    ]
     supported_quantization: list[str] = [
         "awq",
         "gptq",
