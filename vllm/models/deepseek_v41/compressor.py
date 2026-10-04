@@ -75,8 +75,14 @@ def _ring_slot_mapping_kernel(
     block = tl.load(block_table_ptr + req * block_table_stride, mask=valid, other=0)
     pos = tl.load(positions_ptr + offsets, mask=valid, other=0)
     slot = block.to(tl.int64) * CAPACITY + pos % CAPACITY
+    # Block 0 is the null block. Every KV-cache group shares it, so a ring row
+    # written there lands in other layers' pages. Requests only resolve to it
+    # when they own no ring block: warmup and capture dummy batches, whose block
+    # tables are zeroed, and padded requests.
     tl.store(
-        slot_mapping_ptr + offsets, tl.where(valid, slot, -1), mask=offsets < num_tokens
+        slot_mapping_ptr + offsets,
+        tl.where(valid & (block != 0), slot, -1),
+        mask=offsets < num_tokens,
     )
 
 
