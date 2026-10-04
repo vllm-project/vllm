@@ -75,6 +75,7 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import (
@@ -164,8 +165,8 @@ class NixlBaseConnectorWorker:
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
 
-    # Layer-name routing is supported only by NixlPushConnector for HMA KV
-    # caches under PP.
+    # Layer-name routing is supported only by NixlPushConnector for HMA or
+    # packed KV caches under PP.
     _supports_pp_hma = False
 
     def _compute_desc_ids(
@@ -431,14 +432,21 @@ class NixlBaseConnectorWorker:
             group_by_layer[name] for name in layer_names
         )
 
-    def _requires_layer_name_routing(self) -> bool:
-        """Whether PP push must match HMA layers by name, not region index."""
+    def _tracks_region_layers(self) -> bool:
+        """Whether regions advertise their member layer names.
+
+        Push workers do so for HMA and packed layouts, so a PP producer can
+        match layers by name instead of by region index.
+        """
         return (
             self._supports_pp_hma
-            and self.pp_size > 1
-            and self._is_hma_required
+            and (self._is_hma_required or self._has_packed_cache)
             and not self._has_mamba
         )
+
+    def _requires_layer_name_routing(self) -> bool:
+        """Whether PP push must match HMA/packed layers by name, not region index."""
+        return self.pp_size > 1 and self._tracks_region_layers()
 
     def _align_remote_regions_by_layer(
         self, nixl_agent_meta: NixlAgentMetadata
@@ -478,6 +486,10 @@ class NixlBaseConnectorWorker:
         ]
         assert not missing, f"Remote is missing locally owned layers: {missing}"
 
+        packed_regions = {
+            remote_region_by_layer[name]
+            for name in nixl_agent_meta.packed_member_layouts
+        }
         remote_regions = [
             remote_region_by_layer[name] for name in self._transfer_layer_names
         ]
@@ -504,6 +516,24 @@ class NixlBaseConnectorWorker:
             ]
         if nixl_agent_meta.region_names is not None:
             nixl_agent_meta.region_names = list(self._transfer_layer_names)
+        if nixl_agent_meta.packed_member_layouts:
+            for i, layer_name in enumerate(self._transfer_layer_names):
+                if remote_regions[i] not in packed_regions:
+                    continue
+                assert layer_name in nixl_agent_meta.packed_member_layouts, (
+                    f"Remote packed layer {layer_name!r} has no layout"
+                )
+                offset, page_size = nixl_agent_meta.packed_member_layouts[layer_name]
+                assert (
+                    0 <= offset < offset + page_size <= nixl_agent_meta.block_lens[i]
+                ), f"Remote packed layer {layer_name!r} escapes its block"
+                local_region = self._transfer_layer_region_indices[i]
+                assert page_size == self.block_len_per_layer[local_region], (
+                    f"Packed MLA page sizes must match for layer {layer_name!r}"
+                )
+                nixl_agent_meta.kv_caches_base_addr[i] += offset
+                nixl_agent_meta.block_lens[i] = page_size
+            nixl_agent_meta.packed_member_layouts = {}
         # One layer per region keeps a second alignment pass a no-op.
         nixl_agent_meta.region_members = [[name] for name in self._transfer_layer_names]
 
@@ -838,6 +868,8 @@ class NixlBaseConnectorWorker:
         self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config(
             "engine_ttl", 3600.0
         )
+        # Map of pull peer (host, port) -> engine_id currently serving it.
+        self._engine_by_address: dict[tuple[str, int], EngineId] = {}
 
         self.model_config = vllm_config.model_config
 
@@ -896,7 +928,10 @@ class NixlBaseConnectorWorker:
         # within a block (BLHNC/BHLNC), where stride > block_len.
         self.block_stride_per_layer = list[int]()
 
-        # Region layer membership is populated for HMA layouts.
+        # Block-outermost layouts (BLHNC/BHLNC) pack every layer's page into one
+        # block row of a shared allocation.
+        self._has_packed_cache = KVCacheLayout[self.kv_cache_layout].is_block_outermost
+        # Region layer membership is populated for HMA and packed layouts.
         self.region_members = []
         # Local layer order, set by ``_set_region_layers`` only when
         # routing by layer name. Empty means region-index routing.
@@ -1299,6 +1334,7 @@ class NixlBaseConnectorWorker:
                         self._remote_agents[eid] = remote_agents
                         self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
+                        self._track_remote_engine_replacement(eid, host, port)
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -1348,6 +1384,8 @@ class NixlBaseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+        use_layer_name_routing = self._requires_layer_name_routing()
+        route_packed_layers = self._has_packed_cache and use_layer_name_routing
         self.transfer_topo = TransferTopology(
             tp_rank=self.transfer_tp_rank,
             tp_size=self.transfer_tp_size,
@@ -1365,9 +1403,15 @@ class NixlBaseConnectorWorker:
             else None,
             is_mamba=self._has_mamba,
         )
+        backend_name = self.backend_name
+        if self._supports_pp_hma and self._has_packed_cache:
+            # PP can reorder the same backends across stages of a packed model.
+            backend_name = ",".join(
+                sorted(backend.get_name() for backend in self.attn_backends)
+            )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config,
-            self.backend_name,
+            backend_name,
             transfer_mode=self._TRANSFER_MODE,
         )
 
@@ -1409,6 +1453,11 @@ class NixlBaseConnectorWorker:
         # CSA-linear needs separate logical regions for attention and state
         # aliases even though every view shares one block-major allocation.
         packed_storage = packed_storage and not self._is_csa_linear
+        if route_packed_layers and any(
+            not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            for spec in self._layer_specs.values()
+        ):
+            raise NotImplementedError("PP push with packed KV caches requires MLA")
 
         layer_specs: dict[str, KVCacheSpec] = {}
         compressed_region_owners: dict[int, torch.Tensor] = {}
@@ -1435,10 +1484,9 @@ class NixlBaseConnectorWorker:
             ):
                 compressed_region_owners.setdefault(cache.data_ptr(), cache)
 
-        track_region_layers = (
-            self._supports_pp_hma and self._is_hma_required and not self._has_mamba
-        )
+        track_region_layers = self._tracks_region_layers()
         region_layers: list[list[str]] = []
+        packed_member_layouts: dict[str, tuple[int, int]] = {}
 
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
@@ -1566,7 +1614,13 @@ class NixlBaseConnectorWorker:
                     block_stride = physical_page_size
                 else:
                     block_stride = cache.stride(0) * cache.element_size()
-                storage_is_block_major = num_blocks * block_stride == registration_len
+                # A connector that registers the backing as one memory region
+                # may need its length rounded up to a page boundary. Such a tail
+                # is shorter than one block, so it cannot make the storage
+                # segmented.
+                storage_is_block_major = (
+                    0 <= registration_len - num_blocks * block_stride < block_stride
+                )
                 # A view with a contiguous page can own a strided region even
                 # when sibling layers share the same backing allocation.
                 page_contiguous = (
@@ -1577,18 +1631,43 @@ class NixlBaseConnectorWorker:
                 virtual_transfer_pages = _uses_dense_virtual_transfer_pages(
                     layer_spec, cache, physical_page_size, num_blocks
                 )
+                # Push workers address the pages of packed MLA rows by layer.
+                packed_mla_push = (
+                    track_region_layers
+                    and self._has_packed_cache
+                    and packed_storage
+                    and storage_is_block_major
+                    and is_mla_region
+                )
                 if virtual_transfer_pages:
                     # A compressed kernel row can contain multiple NIXL transfer pages.
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, physical_page_size)
                     ]
+                elif packed_mla_push and use_layer_name_routing:
+                    # PP>1 prefill stage: register only this layer's page of each row.
+                    region_specs = [
+                        (cache.data_ptr(), physical_page_size, block_stride)
+                    ]
+                elif packed_mla_push:
+                    # PP=1 decode or prefill: register whole rows, and advertise where
+                    # this layer's page sits so a PP>1 prefill can write into it.
+                    storage_block_len = registration_len // num_blocks
+                    region_specs = [
+                        (registration_base, storage_block_len, storage_block_len)
+                    ]
+                    offset = cache.data_ptr() - storage_addr
+                    assert offset >= 0 and offset + physical_page_size <= block_stride
+                    packed_member_layouts[layer_name] = (offset, physical_page_size)
                 elif storage_is_block_major and (
                     not page_contiguous
                     and ((packed_storage and is_mla_region) or not self._is_csa_linear)
                 ):
                     # TODO(Lucas): handle TP slicing for packed_storage; for now
                     # restrict to MLA (DSv4) where kv is replicated.
-                    storage_block_len = registration_len // num_blocks
+                    # The complete storage row is one block stride. Dividing the
+                    # registered length instead would fold the padding tail in.
+                    storage_block_len = block_stride
                     region_specs = [
                         (registration_base, storage_block_len, storage_block_len)
                     ]
@@ -1621,7 +1700,9 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
-                if base_addr in seen_base_addresses:
+                # A packed PP producer keeps one region per layer, so aliases at
+                # one address (a layer and its SWA view) stay distinct.
+                if base_addr in seen_base_addresses and not route_packed_layers:
                     region_index = seen_base_addresses.index(base_addr)
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
@@ -1705,7 +1786,7 @@ class NixlBaseConnectorWorker:
 
         self._set_region_layers(region_layers)
 
-        if self.pp_size > 1 and not self._is_hma_required:
+        if self.pp_size > 1 and not use_layer_name_routing:
             start_layer, end_layer = self.model_config.get_layers_start_end_indices(
                 self.vllm_config.parallel_config
             )
@@ -1795,6 +1876,7 @@ class NixlBaseConnectorWorker:
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
             region_members=self.region_members,
+            packed_member_layouts=packed_member_layouts,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -2431,6 +2513,18 @@ class NixlBaseConnectorWorker:
             nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
         if (
+            (self.dcp_size > 1 or remote_dcp_size > 1)
+            and self.region_group_ids
+            and self.region_group_ids != self.dst_region_group_ids[remote_engine_id]
+            and (
+                self._physical_blocks_per_logical_kv_block != 1
+                or remote_physical_per_logical != 1
+            )
+        ):
+            raise NotImplementedError(
+                "DCP region pulls require matching logical and physical block sizes"
+            )
+        if (
             self._has_mamba
             and remote_physical_per_logical
             != self._physical_blocks_per_logical_kv_block
@@ -2608,17 +2702,18 @@ class NixlBaseConnectorWorker:
         assert self.copy_blocks is not None
 
         local_block_ids = meta.local_physical_block_ids
-        # TODO (NickLucche) D2H<>H2D ops could benefit from coalescing io across groups
-        # The h2d block copies below are intentionally synchronous.
+        # Every KV cache group allocates from the same BlockPool, so block ids
+        # are unique across groups and the per-group copies can be issued as one.
+        block_ids = [block_id for group in local_block_ids for block_id in group]
+        # The h2d block copy below is intentionally synchronous.
         with gpu_sync_allowed():
-            for group_block_ids in local_block_ids:
-                self.copy_blocks(
-                    self.host_xfer_buffers,
-                    self.device_kv_caches,
-                    group_block_ids,
-                    group_block_ids,
-                    "h2d",
-                )
+            self.copy_blocks(
+                self.host_xfer_buffers,
+                self.device_kv_caches,
+                block_ids,
+                block_ids,
+                "h2d",
+            )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "synced recved kv of request[%s] to device kv buffer,"
@@ -2646,14 +2741,18 @@ class NixlBaseConnectorWorker:
                         ",".join(map(str, meta.local_physical_block_ids)),
                     )
                 # blocking
-                for group_block_ids in meta.local_physical_block_ids:
-                    self.copy_blocks(
-                        self.device_kv_caches,
-                        self.host_xfer_buffers,
-                        group_block_ids,
-                        group_block_ids,
-                        "d2h",
-                    )
+                block_ids = [
+                    block_id
+                    for group in meta.local_physical_block_ids
+                    for block_id in group
+                ]
+                self.copy_blocks(
+                    self.device_kv_caches,
+                    self.host_xfer_buffers,
+                    block_ids,
+                    block_ids,
+                    "d2h",
+                )
 
     @cached_property
     def _attention_kv_caches(self) -> list[torch.Tensor]:
@@ -2930,25 +3029,9 @@ class NixlBaseConnectorWorker:
         self._sync_device_after_direct_recv(direct_device_recving)
 
         # Handle timeout to avoid stranding blocks on remote.
-        now = time.perf_counter()
-        while self._reqs_to_send:
-            req_id, expires = next(iter(self._reqs_to_send.items()))
-            # Sorted dict, oldest requests are put first so we can exit early.
-            if now < expires:
-                break
-            count = self.consumer_notification_counts_by_req.pop(req_id, 0)
-            self.expected_consumer_notifications_by_req.pop(req_id, None)
-            self.xfer_stats.record_kv_expired_req()
-            logger.warning(
-                "Releasing expired KV blocks for request %s which were "
-                "retrieved by %d remote worker(s) before lease expired.",
-                req_id,
-                count,
-            )
-            self._reqs_to_process.remove(req_id)
-            del self._reqs_to_send[req_id]
-            done_sending.add(req_id)
+        self._reap_expired_send_leases(done_sending)
 
+        self._cleanup_replaced_remote_engines()
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
@@ -2974,6 +3057,34 @@ class NixlBaseConnectorWorker:
         Subclasses must implement this to handle mode-specific notifications.
         """
         raise NotImplementedError
+
+    def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
+        """Reclaim expired send-side KV leases into ``done_sending``.
+
+        ``_reqs_to_send`` is not ordered by expiry: heartbeats update the
+        deadline in place, and mixed TTLs share the map, so a live head
+        entry can sit in front of already-expired ones. Scan every entry
+        rather than stopping at the first still-live request.
+        """
+        if not self._reqs_to_send:
+            return
+        now = time.perf_counter()
+        expired = [
+            req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
+        ]
+        for req_id in expired:
+            count = self.consumer_notification_counts_by_req.pop(req_id, 0)
+            self.expected_consumer_notifications_by_req.pop(req_id, None)
+            self.xfer_stats.record_kv_expired_req()
+            logger.warning(
+                "Releasing expired KV blocks for request %s which were "
+                "retrieved by %d remote worker(s) before lease expired.",
+                req_id,
+                count,
+            )
+            self._reqs_to_process.remove(req_id)
+            del self._reqs_to_send[req_id]
+            done_sending.add(req_id)
 
     def _handle_heartbeat(self, payload: str) -> None:
         """Extend leases for requests referenced in a heartbeat.
@@ -3234,11 +3345,14 @@ class NixlBaseConnectorWorker:
         local_dcp_rank: int,
         remote_dcp_size: int,
         local_num_computed_blocks: int,
+        num_remote_blocks: int | None = None,
     ) -> tuple[list[int], list[int]]:
         """Match local and remote block IDs by global DCP position.
 
         ``local_ids`` excludes blocks already satisfied by the local prefix
         cache, while ``remote_ids`` contains the full transferable remote list.
+        ``num_remote_blocks``, when provided, is the global block count before
+        DCP partitioning and excludes allocation padding.
 
         Example:
             local DCP size 2, rank 0 owns *global positions*=[0, 2, 4, 6]
@@ -3254,6 +3368,9 @@ class NixlBaseConnectorWorker:
 
         """
         local_size, remote_size = local_dcp_size, remote_dcp_size
+        if num_remote_blocks is not None:
+            num_local = cdiv(num_remote_blocks - local_dcp_rank, local_size)
+            local_ids = local_ids[: max(0, num_local - local_num_computed_blocks)]
 
         if local_size == remote_size:
             local_slice = local_ids
@@ -3274,6 +3391,8 @@ class NixlBaseConnectorWorker:
             remote_slice = remote_ids[start_remote::k]
 
         matched_blocks = min(len(local_slice), len(remote_slice))
+        if num_remote_blocks is not None and matched_blocks < len(local_slice):
+            raise ValueError("Remote KV pages do not cover the requested range")
         return local_slice[:matched_blocks], remote_slice[:matched_blocks]
 
     @staticmethod
@@ -3290,13 +3409,15 @@ class NixlBaseConnectorWorker:
             block_ids_by_region.append(list(block_ids[group_id]))
         return block_ids_by_region
 
-    @staticmethod
     def _apply_prefix_caching_by_region(
+        self,
         decode_block_ids: BlockIds,
         prefill_block_ids: BlockIds,
         *,
         num_computed_blocks: list[int] | None = None,
         num_remote_blocks: int | None = None,
+        remote_rank: int = 0,
+        remote_dcp_size: int = 1,
     ) -> tuple[BlockIds, BlockIds]:
         """Pair an uncached decode suffix with the same prefill regions."""
         assert len(decode_block_ids) == len(prefill_block_ids)
@@ -3310,13 +3431,18 @@ class NixlBaseConnectorWorker:
             for decode_region, prefill_region, start in zip(
                 decode_block_ids, prefill_block_ids, num_computed_blocks, strict=True
             ):
-                count = min(len(decode_region), max(num_remote_blocks - start, 0))
-                if start + count > len(prefill_region):
-                    raise ValueError("Remote KV pages do not cover the requested range")
-                # An extra producer page can be allocation padding, not a
-                # cached prefix. Select by token position instead of list length.
-                matched_decode.append(list(decode_region[:count]))
-                matched_prefill.append(list(prefill_region[start : start + count]))
+                local, remote = self._apply_dcp_prefix_caching(
+                    decode_region,
+                    prefill_region,
+                    remote_rank,
+                    self.dcp_size,
+                    self.dcp_rank,
+                    remote_dcp_size,
+                    start,
+                    num_remote_blocks=num_remote_blocks,
+                )
+                matched_decode.append(local)
+                matched_prefill.append(remote)
             return matched_decode, matched_prefill
 
         trimmed_prefill: list[list[int]] = []
@@ -3389,13 +3515,12 @@ class NixlBaseConnectorWorker:
                 if _is_ssm_spec(self._group_spec_types[i]):
                     if num_decode_blocks == num_prefill_blocks:
                         continue
-                    # Only state-bearing slots reach here, single-state modes
-                    # just one (see get_exchange_clipped_blocks), so differing
-                    # counts mean position-indexed "all"-mode lists. A longer
-                    # prefill list carries earlier positions the decode side
-                    # already has (prefix hit) -> take its tail; a longer decode
-                    # list holds the position D recomputes itself, which gets
-                    # no prefill state.
+                    # Only state-bearing slots reach here, normally just one
+                    # (see get_exchange_clipped_blocks). A longer prefill list
+                    # carries earlier positions the decode side already has
+                    # (prefix hit) -> take its tail; a longer decode list holds
+                    # the position D recomputes itself, which gets no prefill
+                    # state.
                     assert num_decode_blocks - num_prefill_blocks <= 1, (
                         f"Group {i}: unpairable SSM state slots, "
                         f"decode={num_decode_blocks} prefill={num_prefill_blocks}"
@@ -3494,14 +3619,53 @@ class NixlBaseConnectorWorker:
             and meta.remote is not None
         }
 
+    def _track_remote_engine_replacement(
+        self, engine_id: EngineId, host: str, port: int
+    ) -> None:
+        """Record the engine currently serving a pull peer address."""
+        # TODO: Also handle push mode, which handshakes in both directions.
+        if self._TRANSFER_MODE != "pull":
+            return
+        previous = self._engine_by_address.get((host, port))
+        self._engine_by_address[(host, port)] = engine_id
+        if previous is None or previous == engine_id:
+            return
+        logger.info(
+            "Remote engine at %s:%d changed from %s to %s.",
+            host,
+            port,
+            previous,
+            engine_id,
+        )
+
+    def _cleanup_replaced_remote_engines(self) -> None:
+        """Release replaced pull peers once requests and handshakes have drained."""
+        if self._TRANSFER_MODE != "pull":
+            return
+        with self._handshake_lock:
+            if self._handshake_futures:
+                return
+            replaced = self._remote_agents.keys() - self._engine_by_address.values()
+        if not replaced:
+            return
+        # _recving_metadata is only accessed from this (main) thread.
+        busy = {
+            meta.remote.engine_id
+            for meta in self._recving_metadata.values()
+            if meta.remote is not None
+        }
+        for engine_id in replaced - busy:
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+            logger.info("Released NIXL state for replaced remote engine %s.", engine_id)
+
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True
     ) -> None:
         """Remove all state for a single remote engine.
 
         Releases NIXL resources (dlist handles, remote agents) and clears
-        all per-engine data structures. Used by both TTL eviction and
-        shutdown.
+        all per-engine data structures. Used by TTL eviction, replaced peer
+        cleanup and shutdown.
         """
         assert engine_id in self._remote_agents
 
@@ -3511,6 +3675,9 @@ class NixlBaseConnectorWorker:
         # Pop under the handshake lock; NIXL teardown stays outside it.
         with self._handshake_lock:
             agents = self._remote_agents.pop(engine_id)
+            for address, eid in list(self._engine_by_address.items()):
+                if eid == engine_id:
+                    del self._engine_by_address[address]
         for agent_name in agents.values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
 

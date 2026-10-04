@@ -36,7 +36,7 @@ from itertools import islice
 import torch
 from torch import nn
 from transformers import GraniteConfig
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -72,7 +72,7 @@ from .utils import (
 
 
 def granite_layer_attn_params(
-    config: PretrainedConfig, layer_idx: int
+    config: PreTrainedConfig, layer_idx: int
 ) -> tuple[int | None, float, bool]:
     """Resolve one layer's sliding window, RoPE base and sink usage.
 

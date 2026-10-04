@@ -84,7 +84,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
-            self._read_blocks_for_req(*self._ready_requests.get_nowait())
+            req_id, meta = self._ready_requests.get_nowait()
+            assert meta.remote is not None
+            if meta.remote.engine_id not in self._remote_agents:
+                # The engine was released after its handshake completed, so
+                # handshake again. This fails if the engine is gone.
+                self._background_nixl_handshake(req_id, meta.remote.engine_id, meta)
+                continue
+            self._read_blocks_for_req(req_id, meta)
 
         if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             # Replicated-KV PCP: only PCP rank 0 serves the KV, so this rank
@@ -191,7 +198,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     "Different NIXL cache-group layouts are only supported for "
                     "pure MLA models"
                 )
-            assert len(plan.all_source_ranks) == 1
             if self.block_size != remote_info.remote_block_size:
                 raise NotImplementedError(
                     "Region-mapped NIXL transfers require matching physical block sizes"
@@ -213,7 +219,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 and meta.local_num_computed_blocks
                 and all(group >= 0 for group in local_region_groups)
                 and all(group >= 0 for group in remote_region_groups)
-                and not dcp_active
             ):
                 transfer_groups = self.kv_cache_config.transfer_group_ids
                 num_computed_blocks = [
@@ -224,32 +229,34 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 num_remote_blocks = cdiv(
                     meta.remote.num_tokens, remote_info.remote_block_size
                 )
-            elif (
-                remote_info.remote_physical_blocks_per_logical
+            elif any(local_by_region) and (
+                dcp_active
+                or remote_info.remote_physical_blocks_per_logical
                 != self._physical_blocks_per_logical_kv_block
             ):
                 raise NotImplementedError(
-                    "Region-mapped pulls with different logical block sizes require "
-                    "remote_num_tokens, per-group prefix counts, unshared regions "
-                    "and DCP=1"
+                    "Region-mapped pulls with DCP or different logical block sizes "
+                    "require remote_num_tokens, per-group prefix counts "
+                    "and unshared regions"
                 )
-            matched_local, matched_remote = self._apply_prefix_caching_by_region(
-                local_by_region,
-                remote_by_region,
-                num_computed_blocks=num_computed_blocks,
-                num_remote_blocks=num_remote_blocks,
-            )
-            meta.region_blocks_to_zero = [
-                list(blocks[len(matched) :])
-                for blocks, matched in zip(local_by_region, matched_local, strict=True)
-            ]
             read_specs = [
                 ReadSpec(
-                    remote_rank=plan.all_source_ranks[0],
-                    local_block_ids=matched_local,
-                    remote_block_ids=matched_remote,
+                    rank,
+                    *self._apply_prefix_caching_by_region(
+                        local_by_region,
+                        remote_by_region,
+                        num_computed_blocks=num_computed_blocks,
+                        num_remote_blocks=num_remote_blocks,
+                        remote_rank=rank,
+                        remote_dcp_size=remote_info.remote_dcp_size,
+                    ),
                     block_ids_by_region=True,
                 )
+                for rank in plan.all_source_ranks
+            ]
+            meta.region_blocks_to_zero = [
+                list(blocks[sum(len(spec.local_block_ids[r]) for spec in read_specs) :])
+                for r, blocks in enumerate(local_by_region)
             ]
         else:
             remote_logical_block_ids = meta.remote.block_ids
@@ -653,6 +660,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
                 ):
+                    self.xfer_stats.record_notification_after_expiry()
                     logger.error(
                         "Potentially invalid KV blocks for "
                         "unrecognized request %s were retrieved by "
