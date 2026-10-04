@@ -6,7 +6,7 @@
 """Data classes for MooncakeStoreConnector."""
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import cast
 
 import numpy as np
@@ -827,6 +827,41 @@ class ReqMeta:
             token_ids=token_ids,
             token_ids_start=token_ids_start,
             num_prompt_tokens=tracker.prefill_end_tokens,
+        )
+
+
+@dataclass
+class BoundaryStoreStats:
+    """Cumulative counters for the mamba boundary-state hand-offs.
+
+    ``store_mask`` keeps mamba groups out of the positional save, so a hand-off
+    is the only way a mamba state is ever persisted. Every branch that declines
+    one is silent: the state is simply not written and a later request misses on
+    that group, with nothing in the logs. Each decline reason is counted here so
+    that a lower hit rate can be attributed.
+
+    Counters are in hand-off entries as offered by the core, not in store keys:
+    rank striping drops a key on every rank but one, and a sub-block tail entry
+    contributes keys for every group. Never cleared.
+    """
+
+    published: int = 0
+    accepted: int = 0
+    dropped_consumer_role: int = 0
+    dropped_request_gone: int = 0
+    dropped_past_prefill_end: int = 0
+    dropped_null_block: int = 0
+    dropped_group_not_boundary: int = 0
+
+    @property
+    def dropped(self) -> int:
+        return self.published - self.accepted
+
+    def summary(self) -> str:
+        return ", ".join(
+            f"{f.name}={getattr(self, f.name)}"
+            for f in fields(self)
+            if getattr(self, f.name)
         )
 
 
