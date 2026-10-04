@@ -388,6 +388,9 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     task: str | None
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
 
+    truncate: bool
+    """Allow shortening this message's text to fit the context window."""
+
 
 ChatCompletionMessageParam: TypeAlias = (
     OpenAIChatCompletionMessageParam
