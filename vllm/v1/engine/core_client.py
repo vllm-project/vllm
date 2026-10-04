@@ -1760,22 +1760,37 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
-            min_score: float = sys.maxsize
+            min_score: tuple[float, int] = (sys.maxsize, sys.maxsize)
             eng_index = 0
             for i in range(num_engines):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
                 waiting, running, kv_cache_usage = current_counts[idx]
-                # Estimate engine load as the greater of the coordinator's
-                # latest (waiting + running) snapshot and this client's own
-                # in-flight count (scaled by the number of clients). The
-                # in-flight floor is exact and can't be erased by a snapshot
-                # rebind, so a burst spreads round-robin even when snapshots
-                # race with routing decisions; the snapshot raises the score
-                # when other clients or stale requests load the engine.
                 inflight = self.engine_inflight[self.core_engines[idx]]
-                score: float = max(self.client_count * inflight, waiting + running)
+                snapshot_load = int(waiting + running)
+                if self.client_count == 1:
+                    # This client routes every request, so its in-flight
+                    # count is the engine's exact load. The coordinator's
+                    # snapshot only lags it: it is published at step
+                    # boundaries, which can be seconds apart during long
+                    # prefills, and still counts requests that have since
+                    # finished. Taking the max with it would tie the engine
+                    # that just freed a slot with the full ones, so the
+                    # snapshot only breaks ties here.
+                    load: float = inflight
+                    tie_break = snapshot_load
+                else:
+                    # Estimate engine load as the greater of the coordinator's
+                    # latest (waiting + running) snapshot and this client's
+                    # own in-flight count (scaled by the number of clients).
+                    # The in-flight floor is exact and can't be erased by a
+                    # snapshot rebind, so a burst spreads round-robin even
+                    # when snapshots race with routing decisions; the
+                    # snapshot raises the score when other clients or stale
+                    # requests load the engine.
+                    load = max(self.client_count * inflight, snapshot_load)
+                    tie_break = 0
                 if waiting:
                     # Waiting requests are penalized in proportion to KV cache
                     # pressure: a queue on a KV-bound engine drains slowly, so
@@ -1783,7 +1798,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     # low KV usage the queue is transient (e.g. mid-burst) and
                     # the penalty stays off, preserving exact round-robin.
                     # Ramps from 0 at <=50% usage to 3x waiting at 100%.
-                    score += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
+                    load += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
+                score = (load, tie_break)
                 if score < min_score:
                     min_score = score
                     eng_index = idx
