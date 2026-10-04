@@ -64,6 +64,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
     KVConnectorOutput,
+    LogprobsLists,
     ModelRunnerOutput,
     SamplingMaskLists,
     make_empty_encoder_model_runner_output,
@@ -3947,6 +3948,131 @@ def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
     assert [req.req_id for req in next_output.scheduled_new_reqs] == [
         healthy_request.request_id
     ]
+
+
+@pytest.mark.parametrize("resumable", [False, True])
+def test_invalid_logits_finish_only_failed_request(resumable: bool):
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=3, max_tokens=2)
+    failed = requests[1]
+    failed.resumable = resumable
+    for request in requests:
+        request.sampling_params.logprobs = 1
+        scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    pool = scheduler.kv_cache_manager.block_pool
+    free_before = pool.get_num_free_blocks()
+    failed_blocks = scheduler.kv_cache_manager.get_block_ids(failed.request_id)[0]
+    assert failed_blocks
+
+    # Model-runner row order need not match scheduler iteration order.
+    req_ids = [requests[i].request_id for i in (2, 0, 1)]
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+            sampled_token_ids=[[102], [100], [0]],
+            logprobs=LogprobsLists(
+                np.array([[102], [100], [0]]),
+                np.array([[-0.2], [-0.1], [float("nan")]]),
+                np.ones(3, dtype=np.int32),
+            ),
+            invalid_logits_req_ids={failed.request_id},
+        ),
+    )
+    by_id = {output.request_id: output for output in outputs[0].outputs}
+    error_output = by_id[failed.request_id]
+    assert error_output.finish_reason == FinishReason.ERROR
+    assert error_output.new_token_ids == []
+    assert error_output.new_logprobs is None
+    assert not failed.output_token_ids
+    assert failed.status == RequestStatus.FINISHED_ERROR
+    assert failed.request_id not in scheduler.requests
+    assert failed not in scheduler.running
+    assert pool.get_num_free_blocks() == free_before + len(failed_blocks)
+    for index in (0, 2):
+        request = requests[index]
+        output = by_id[request.request_id]
+        assert output.new_token_ids == [100 + index]
+        assert output.finish_reason is None
+        assert output.new_logprobs is not None
+        assert output.new_logprobs.logprobs.shape == (1, 1)
+        assert request.status == RequestStatus.RUNNING
+
+    next_step = scheduler.schedule()
+    healthy_ids = [requests[index].request_id for index in (0, 2)]
+    assert set(next_step.num_scheduled_tokens) == set(healthy_ids)
+    finished = scheduler.update_from_output(
+        next_step,
+        ModelRunnerOutput(
+            req_ids=healthy_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(healthy_ids)},
+            sampled_token_ids=[[200], [202]],
+        ),
+    )
+    assert all(
+        output.finish_reason == FinishReason.LENGTH for output in finished[0].outputs
+    )
+    assert not scheduler.requests
+
+
+def test_invalid_logits_for_aborted_request_are_ignored():
+    scheduler = create_scheduler()
+    (request,) = create_requests(num_requests=1)
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            invalid_logits_req_ids={request.request_id},
+        ),
+    )
+    assert not any(output.outputs for output in outputs.values())
+    assert request.status == RequestStatus.FINISHED_ABORTED
+    assert request.request_id not in scheduler.requests
+    assert not request.output_token_ids
+
+
+def test_dropped_stale_invalid_logits_do_not_finish_resumed_request():
+    scheduler = create_scheduler()
+    (request,) = create_requests(num_requests=1, max_tokens=1)
+    scheduler.add_request(request)
+    stale_step = scheduler.schedule()
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0, drop_stale_output=True)
+    resumed_step = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+
+    stale_outputs = scheduler.update_from_output(
+        stale_step,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            invalid_logits_req_ids={request.request_id},
+        ),
+    )
+    assert not any(output.outputs for output in stale_outputs.values())
+    assert scheduler.requests[request.request_id] is request
+    assert request.status == RequestStatus.RUNNING
+    assert not request.output_token_ids
+
+    outputs = scheduler.update_from_output(
+        resumed_step,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[123]],
+        ),
+    )
+    assert outputs[0].outputs[0].new_token_ids == [123]
+    assert outputs[0].outputs[0].finish_reason == FinishReason.LENGTH
 
 
 def test_abort_request_when_structured_output_fsm_cannot_advance():

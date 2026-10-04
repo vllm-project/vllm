@@ -135,17 +135,24 @@ class TestBucketedRejectionSampling:
     @pytest.mark.parametrize(
         "row", [[0.0, float("nan")], [0.0, float("inf")], [-float("inf")] * 2]
     )
-    @pytest.mark.parametrize("batch_size", [1, 4])
-    def test_invalid_rows_raise(self, row, batch_size):
+    @pytest.mark.parametrize("batch_size", [1, 16])
+    def test_invalid_rows_preserve_other_rows(self, row, batch_size):
         logits = torch.zeros(batch_size, 2)
-        logits[-1] = torch.tensor(row)
+        seeds = torch.arange(batch_size, dtype=torch.int64)
+        expected = torch.ops._C.bucketed_rejection_sample(logits, seeds)
+        invalid_row = batch_size // 2
+        logits[invalid_row] = torch.tensor(row)
+        expected[invalid_row] = -1
         original_threads = torch.get_num_threads()
         try:
-            torch.set_num_threads(4)
-            with pytest.raises(RuntimeError):
-                torch.ops._C.bucketed_rejection_sample(
-                    logits, torch.arange(batch_size, dtype=torch.int64)
+            for threads in (1, 4):
+                torch.set_num_threads(threads)
+                actual = torch.ops._C.bucketed_rejection_sample(logits, seeds)
+                torch.testing.assert_close(actual, expected)
+                actual = torch.ops._C.bucketed_rejection_sample(
+                    logits.flip(0), seeds.flip(0)
                 )
+                torch.testing.assert_close(actual, expected.flip(0))
         finally:
             torch.set_num_threads(original_threads)
 

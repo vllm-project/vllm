@@ -323,6 +323,9 @@ class TopKTopPSampler(nn.Module):
 
         Draw one seed per row from its request generator, or the global
         generator for unseeded requests. Keep the fp64 exponential path.
+        The bucketed path returns -1 for rows containing NaN, +inf, or only
+        -inf. Sampler converts these sentinels to per-request errors before
+        gathering logprobs; other rows are sampled normally.
         """
         logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None

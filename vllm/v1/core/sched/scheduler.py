@@ -2040,6 +2040,7 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+        invalid_logits_req_ids: set[str] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -2066,6 +2067,16 @@ class Scheduler(SchedulerInterface):
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
+                continue
+
+            if req_id in model_runner_output.invalid_logits_req_ids:
+                # A stale result belongs to the request's previous execution.
+                # Never expose an error row's placeholder token or logprobs.
+                if not output_is_stale:
+                    invalid_logits_req_ids.add(req_id)
+                    logger.error(
+                        "Sampling failed for request %s: invalid logits", req_id
+                    )
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
@@ -2266,6 +2277,7 @@ class Scheduler(SchedulerInterface):
             self.deferred_waiting.difference_update(stopped_preempted_reqs)
 
         error_req_ids = set(self.grammar_compile_error_reqs)
+        error_req_ids.update(invalid_logits_req_ids)
         self.grammar_compile_error_reqs.clear()
         error_req_ids.update(self.encoder_cache_mismatch_reqs)
         self.encoder_cache_mismatch_reqs.clear()

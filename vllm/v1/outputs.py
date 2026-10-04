@@ -209,6 +209,8 @@ class SamplerOutput:
     # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: LogprobsTensors | None
+    # CPU request rows with invalid logits; their token IDs are placeholders.
+    invalid_logits_indices: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -309,6 +311,9 @@ class ModelRunnerOutput:
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
+
+    # Requests whose sampled token IDs and logprobs must be discarded.
+    invalid_logits_req_ids: set[str] = field(default_factory=set)
 
     @staticmethod
     def with_kv_conn_output_only(

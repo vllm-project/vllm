@@ -104,13 +104,12 @@ int64_t bucketed_rejection_sample_row(const float* row, int64_t vocab_size,
   double max_logit = -std::numeric_limits<double>::infinity();
   for (int64_t i = 0; i < vocab_size; ++i) {
     const double value = row[i];
-    TORCH_CHECK(
-        !std::isnan(value) && value != std::numeric_limits<double>::infinity(),
-        "bucketed_rejection_sample does not support NaN or +inf logits");
+    // Invalid rows are reported to the caller without interrupting other rows.
+    if (std::isnan(value) || value == std::numeric_limits<double>::infinity())
+      return -1;
     max_logit = std::max(max_logit, value);
   }
-  TORCH_CHECK(std::isfinite(max_logit),
-              "bucketed_rejection_sample cannot sample an all-masked row");
+  if (!std::isfinite(max_logit)) return -1;  // All tokens are masked.
 
   std::array<uint64_t, NUM_BUCKETS> counts{}, offsets{};
   std::array<BucketMass, NUM_BUCKETS> cumulative{};

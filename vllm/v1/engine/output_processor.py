@@ -753,6 +753,12 @@ class OutputProcessor:
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
+            if finish_reason == FinishReason.ERROR:
+                # Errors end the request, including any queued input chunks.
+                req_state.streaming_input = False
+                req_state.input_chunk_queue = None
+                if req_state.queue is not None:
+                    req_state.queue.close()
             if request_output := req_state.make_request_output(
                 new_token_ids,
                 pooling_output,
