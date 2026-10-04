@@ -904,6 +904,7 @@ class EngineCore:
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
+        self.scheduler.set_preserve_paused_kv(mode == "keep" and not clear_cache)
         self._finish_pause(clear_cache)
 
         return None
@@ -986,6 +987,7 @@ class EngineCore:
         if not (
             self.is_scheduler_paused()
             and not self.scheduler.has_requests()
+            and not self.scheduler.has_finished_requests()
             and not self.batch_queue
         ):
             raise RuntimeError(
@@ -2019,6 +2021,7 @@ class EngineCoreProc(EngineCore):
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
+        self.scheduler.set_preserve_paused_kv(mode == "keep" and not clear_cache)
 
         if self._pause_complete():
             self._finish_pause(clear_cache)
