@@ -22,6 +22,7 @@ from vllm.models.deepseek_v4.common.ops.cache_utils import (
     build_flashinfer_mixed_sparse_indices,
     combine_topk_swa_indices,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadataBuilder,
@@ -302,8 +303,13 @@ def combine_case(
     with_image: bool,
     replay_starts: list[int] | None = None,
     combine_fn=combine_topk_swa_indices,
+    in_range_topk: bool = False,
 ):
-    """Run combine_topk_swa_indices and return (indices, lens, expected)."""
+    """Run combine_topk_swa_indices and return (indices, lens, expected).
+
+    ``in_range_topk`` draws top-k indices below N, for combiners that drop
+    out-of-range ones.
+    """
     device = torch.device("cuda")
     num_reqs = len(seq_lens)
     replay_starts = replay_starts or [0] * num_reqs
@@ -326,7 +332,11 @@ def combine_case(
     M = N + int(gather_lens.max()) + 8
     gen = torch.Generator(device="cpu").manual_seed(0)
     topk_indices = torch.randint(
-        0, 4096, (num_tokens, max(topk, 1)), generator=gen, dtype=torch.int32
+        0,
+        N if in_range_topk else 4096,
+        (num_tokens, max(topk, 1)),
+        generator=gen,
+        dtype=torch.int32,
     ).to(device)
     topk_indices = topk_indices[:, : max(topk, 1)]
 
@@ -433,6 +443,32 @@ def test_v41_combine_topk_swa_stops_at_replay_start(cfg):
         with_image=False,
         replay_starts=[16, 0],
         combine_fn=combine_v41,
+    )
+    assert lens.cpu().tolist() == exp_lens
+    assert indices.cpu().tolist() == rows
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="requires ROCm")
+@pytest.mark.parametrize("cfg", COMBINE_CASES)
+@pytest.mark.parametrize("query_len", [24, 20])
+def test_v41_rocm_combine_topk_swa_stops_at_replay_start(cfg, query_len):
+    """The ROCm prefill combiner bounds replayed windows the same way."""
+    from vllm.models.deepseek_v41.amd.rocm import (
+        combine_topk_swa_indices as combine_rocm,
+    )
+
+    # Request 0 replays from 16: a 24-token chunk starts there, a 20-token
+    # chunk leaves only 4 context tokens above it (fewer than the window).
+    indices, lens, rows, exp_lens = combine_case(
+        cfg["compress_ratio"],
+        cfg["topk"],
+        seq_lens=[40, 12],
+        query_lens=[query_len, 12],
+        spans=[[], []],
+        with_image=False,
+        replay_starts=[16, 0],
+        combine_fn=combine_rocm,
+        in_range_topk=True,
     )
     assert lens.cpu().tolist() == exp_lens
     assert indices.cpu().tolist() == rows
