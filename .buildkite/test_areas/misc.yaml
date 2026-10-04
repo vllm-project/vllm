@@ -422,6 +422,27 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (L4) Meta-Device Op Capture"
+  key: op-capture
+  timeout_in_minutes: 20
+  device: l4
+  source_file_dependencies:
+  - vllm/config/load.py
+  - vllm/model_executor/model_loader/
+  - vllm/profiler/op_capture/
+  - vllm/utils/torch_utils.py
+  - tests/profiler/
+  commands:
+  - pytest -v -s profiler/test_op_capture.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) Meta-Device Op Capture"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+
 - label: ":nvidia: (H200 MIG 18GB) Python-only Installation"
   key: python-only-installation
   depends_on: ~
