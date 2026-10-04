@@ -593,7 +593,7 @@ fn qwen_multimodal_model_info_with_limits(
     ));
     fs::write(
         &config_path,
-        r#"{"model_type":"qwen2_vl","image_token_id":151655}"#,
+        r#"{"model_type":"qwen2_vl","image_token_id":151655,"vision_token_id":151655}"#,
     )
     .expect("write qwen test config");
     let info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(

@@ -86,14 +86,15 @@ impl MultimodalModelInfo {
         support: &VisionModalitySupport,
         clip: Arc<VideoClip>,
     ) -> Result<PreprocessedEncoderInputs> {
-        let processor = Arc::clone(&support.processor);
+        let processor = support.processor;
+        let config = support.config.clone();
 
         tokio::task::spawn_blocking(move || {
             // Prefer the borrowed-RGB fast path, which avoids materializing a
             // `DynamicImage` per sampled frame after media decode.
             if let Some(rgb_video) = clip.rgb_video() {
                 match rgb_video.frame_refs() {
-                    Ok(frame_refs) => match processor.preprocess_video_rgb(&frame_refs) {
+                    Ok(frame_refs) => match processor.preprocess_video_rgb(&frame_refs, &config) {
                         Ok(preprocessed) => return Ok(preprocessed),
                         Err(error) => warn!(
                             error = %error.as_report(),
@@ -108,7 +109,7 @@ impl MultimodalModelInfo {
             }
 
             let frames = clip.materialized_frames().map_err(|error| multimodal!("{error}"))?;
-            Ok(processor.preprocess_video(&frames)?)
+            Ok(processor.preprocess_video(&frames, &config)?)
         })
         .await
         .map_err(|error| multimodal!("video preprocessing task failed: {error}"))?
