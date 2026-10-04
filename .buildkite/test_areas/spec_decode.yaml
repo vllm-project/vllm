@@ -250,6 +250,15 @@ steps:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/v1/attention/backends/
+    # Uno also runs through the V2 runner, its sampler, warmup and scheduler:
+    # a change there can break Uno at engine start without touching the paths
+    # above.
+    - vllm/v1/worker/gpu/model_runner.py
+    - vllm/v1/worker/gpu/warmup.py
+    - vllm/v1/worker/gpu/sample/
+    - vllm/v1/core/sched/
+    - vllm/config/speculative.py
+    - vllm/lora/
     - tests/v1/e2e/spec_decode/
   commands:
     # test_uno.py's greedy matrix measures the plain engine's own
