@@ -744,11 +744,14 @@ class CudaPlatformBase(Platform):
         if envs.VLLM_USE_OINK_OPS:
             rms_norm = ["oink"] + default
 
+        rotary_embedding = ["vllm_c", "native"]
+
         return IrOpPriorityConfig.with_default(
             default,
             rms_norm=rms_norm,
             fused_add_rms_norm=rms_norm,
             gelu_and_mul_sparse=["triton", "native"],
+            rotary_embedding=rotary_embedding,
         )
 
     @classmethod
