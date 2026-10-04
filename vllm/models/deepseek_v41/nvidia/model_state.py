@@ -302,7 +302,7 @@ class DeepseekV41ModelState(DefaultModelState):
             self._warm_up_replay_kernels(input_batch, slot_mappings)
         window, cacheable_groups = self._replay
         replay_start: torch.Tensor | None = None
-        if window:
+        if window or self.decoder_replay_layers is not None:
             num_reqs = input_batch.num_reqs
             # Decode rows sit above the hit, so only prefills carry a replay
             # start; dummy batches (captures, profiling) carry none.
@@ -314,7 +314,7 @@ class DeepseekV41ModelState(DefaultModelState):
             replay_start = self._replay_start_staging.copy_to_gpu(
                 replay_start_np, out=self._replay_start[:num_reqs]
             )
-            if replay_start_np.any():
+            if window and replay_start_np.any():
                 # The replayed tokens rebuild window KV only: their slots in the
                 # prefix-cacheable groups are padded so the cached KV stays as is.
                 _pad_replayed_slots_kernel[(num_reqs,)](
