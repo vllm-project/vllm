@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
+from pathlib import Path
 
 import pytest
 
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
+import vllm.distributed.nixl_utils as nixl_utils
 from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
 from vllm.config.ec_transfer import ECTransferConfig
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
@@ -55,6 +57,27 @@ def test_string_false_in_extra_config_leaves_nixl_off(monkeypatch):
     s = ECCPUScheduler(cfg)
     assert s._nixl_enabled is False
     s.shutdown()
+
+
+@pytest.mark.cpu_test
+def test_missing_nixl_releases_shared_region(monkeypatch):
+    """A failed constructor leaves no scheduler for the caller to shut down."""
+    region = _region()
+    monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
+    monkeypatch.setattr(nixl_utils, "NixlWrapper", None)
+    monkeypatch.setattr(nixl_utils, "nixl_agent_config", None)
+    cfg = create_ec_vllm_config(ec_role="ec_both")
+    cfg.ec_transfer_config.ec_connector_extra_config["ec_enable_nixl"] = True
+
+    try:
+        with pytest.raises(RuntimeError, match="ec_enable_nixl requires NIXL"):
+            ECCPUScheduler(cfg)
+
+        assert not Path(region._mmap_path).exists()
+        assert region._fd is None
+        assert region._mmap_obj is None
+    finally:
+        region.cleanup()
 
 
 @pytest.mark.skipif(NixlWrapper is None, reason="Requires NIXL package")

@@ -115,7 +115,11 @@ class ECCPUScheduler:
         self._element_size: int = 0
         self._ack_timeout_s: float = 0.0
         if self._nixl_enabled:
-            self._setup_nixl(vllm_config)
+            try:
+                self._setup_nixl(vllm_config)
+            except Exception:
+                self.shutdown()
+                raise
 
     def _setup_nixl(self, vllm_config: "VllmConfig") -> None:
         # Lazy imports keep nixl/zmq off the gate-off path.
