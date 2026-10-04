@@ -655,6 +655,18 @@ class SpeculativeConfig:
                 )
             )
 
+        # Fields that change how the draft model itself executes. None is a
+        # meaningful value for the overrides below (it means "inherit from the
+        # target"), so it is hashed as-is rather than normalized away.
+        factors.append(self.parallel_drafting)
+        factors.append(self.draft_tensor_parallel_size)
+        # Applied by `apply_draft_overrides`, which clones the sub-configs for
+        # the draft, so the hashes folded in by VllmConfig never see them.
+        for field, _, _ in _DRAFT_VLLM_CONFIG_OVERRIDES:
+            factors.append(getattr(self, field))
+        factors.append(self.draft_sample_method)
+        factors.append(self.enable_adaptive_verification)
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
