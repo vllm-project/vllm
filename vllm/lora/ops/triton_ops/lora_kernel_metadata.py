@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-LoRA kernels metadata preparation utilities.
-"""
+"""LoRA kernels metadata preparation utilities."""
 
 import bisect
 from dataclasses import dataclass, field
@@ -107,14 +105,13 @@ class LoRAKernelMeta:
         self.num_active_loras_cpu.fill_(0)
 
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
-        """
-        Prepare kernel metadata tensors for the current forward pass.
+        """Prepare kernel metadata tensors for the current forward pass.
 
         Args:
             token_lora_mapping (torch.Tensor): Tensor containing lora indices
                 for each input token.
-        """
 
+        """
         self._reset()
 
         # Check and record no-lora case.
@@ -180,8 +177,7 @@ class LoRAKernelMeta:
         torch.Tensor,
         torch.Tensor,
     ]:
-        """
-        This function returns the kernel metadata required for the current
+        """This function returns the kernel metadata required for the current
         forward pass execution of the kernel. The function returns all the
         metadata required by the kernel, in order, as a tuple, so it can be
         unpacked directly during the lora_shrink/lora_expand function call.
@@ -189,6 +185,10 @@ class LoRAKernelMeta:
         Args:
             token_nums (int): Number of input tokens in the current forward
                 pass of the kernel.
+            specialize_active_lora (bool): If True, report the actual active
+                LoRA count; otherwise report the padded default, which keeps
+                the kernel launch shape stable.
+
         """
         if specialize_active_lora:
             num_active_loras = self.num_active_loras_cpu

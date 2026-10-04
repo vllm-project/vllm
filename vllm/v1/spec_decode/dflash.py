@@ -10,10 +10,12 @@ from typing_extensions import override
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.triton_utils import triton
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
-from vllm.v1.spec_decode.utils import copy_and_expand_dflash_inputs_kernel
+from vllm.v1.spec_decode.utils import (
+    _copy_and_expand_dflash_inputs,
+    next_power_of_2,
+)
 
 logger = init_logger(__name__)
 
@@ -36,8 +38,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
         # Only next_token_ids and mask tokens are query tokens, all other context is K/V
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
+        self.max_padded_query_tokens = max(
+            self.max_query_tokens,
+            vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+        )
         # Positions covers both context states + query states
-        self.max_positions = self.max_num_tokens + self.max_query_tokens
+        self.max_positions = self.max_num_tokens + self.max_padded_query_tokens
 
         # Separate context buffers to keep query buffer addresses stable for CUDA graphs
         self._context_slot_mapping_buffer = torch.zeros(
@@ -46,7 +52,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             device=device,
         )
         self._slot_mapping_buffer = torch.zeros(
-            self.max_query_tokens,
+            self.max_padded_query_tokens,
             dtype=torch.int64,
             device=device,
         )
@@ -56,7 +62,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             device=device,
         )
         self.positions = torch.zeros(
-            self.max_query_tokens,
+            self.max_padded_query_tokens,
             dtype=torch.int64,
             device=device,
         )
@@ -68,7 +74,18 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # For DFlash we use the input embeddings to embed the mask token
         self.parallel_drafting_hidden_state_tensor = None
 
-        self.dflash_causal = self.dflash_config.get("causal", False)
+        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
+
+        self.dflash_causal = not dflash_has_any_non_causal(
+            self.draft_model_config.hf_config
+        )
+        _copy_and_expand_dflash_inputs.register_warmup(
+            block_table_stride=(self.max_model_len + self.block_size - 1)
+            // self.block_size,
+            parallel_drafting_token_id=self.parallel_drafting_token_id,
+            block_size=self.block_size,
+            num_speculative_tokens=self.num_speculative_tokens,
+        )
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -126,12 +143,10 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # and token_indices_to_sample
         max_ctx_per_req = cad.max_query_len
         max_tokens_per_req = max_ctx_per_req + num_query_per_req
-        BLOCK_SIZE = min(256, triton.next_power_of_2(max_tokens_per_req))
-        num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
-        grid = (batch_size, num_blocks)
+        BLOCK_SIZE = min(256, next_power_of_2(max_tokens_per_req))
 
         has_num_rejected = num_rejected_tokens_gpu is not None
-        copy_and_expand_dflash_inputs_kernel[grid](
+        _copy_and_expand_dflash_inputs(
             # Inputs
             next_token_ids_ptr=next_token_ids,
             target_positions_ptr=target_positions,
@@ -156,8 +171,9 @@ class DFlashProposer(SpecDecodeBaseProposer):
             num_query_per_req=num_query_per_req,
             num_speculative_tokens=self.num_speculative_tokens,
             total_input_tokens=num_context,
-            BLOCK_SIZE=BLOCK_SIZE,
-            HAS_NUM_REJECTED=has_num_rejected,
+            max_tokens_per_req=max_tokens_per_req,
+            triton_block_size=BLOCK_SIZE,
+            has_num_rejected=has_num_rejected,
         )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
@@ -182,8 +198,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
                 torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone()
                 * num_query_per_req
             ),
-            _seq_lens_cpu=None,
-            _num_computed_tokens_cpu=None,
             seq_lens_cpu_upper_bound=new_seq_lens_cpu_upper_bound,
             num_reqs=cad.num_reqs,
             num_actual_tokens=num_query_total,
@@ -205,8 +219,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-        """
-        Key differences to default dummy_run:
+        """Key differences to default dummy_run:
         - Only one forward pass due to parallel drafting
         - DFlash uses context states as unpadded metadata, so hidden_states will
         use the unpadded num_tokens instead of num_input_tokens

@@ -18,8 +18,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class PEFTHelper:
-    """
-    A helper class for PEFT configurations, specifically designed for LoRA.
+    """A helper class for PEFT configurations, specifically designed for LoRA.
     This class handles configuration validation, compatibility checks for
     various LoRA implementations.
     """
@@ -40,17 +39,25 @@ class PEFTHelper:
     vllm_max_position_embeddings: int | None = field(default=False)
 
     def _validate_features(self) -> list[str]:
-        """
-        Check if there are any unsupported LoRA features.
-        """
+        """Check if there are any unsupported LoRA features."""
         error_msg = []
         if self.modules_to_save:
-            error_msg.append("vLLM only supports modules_to_save being None.")
+            unsupported_modules = [
+                m for m in self.modules_to_save if m not in ["classifier", "score"]
+            ]
+            if unsupported_modules:
+                error_msg.append(
+                    "vLLM only supports modules_to_save being either None "
+                    'or ["classifier", "score"] for classification models. '
+                    f"Unsupported modules_to_save: {unsupported_modules}"
+                )
         if self.use_dora:
             error_msg.append("vLLM does not yet support DoRA.")
         return error_msg
 
     def __post_init__(self):
+        if self.r <= 0:
+            raise ValueError(f"LoRA rank `r` must be a positive integer, got {self.r}.")
         if self.use_rslora:
             logger.info_once("Loading LoRA weights trained with rsLoRA.")
             self.vllm_lora_scaling_factor = self.lora_alpha / math.sqrt(self.r)
@@ -91,9 +98,11 @@ class PEFTHelper:
             tensorizer_args = tensorizer_config._construct_tensorizer_args()
             from tensorizer.stream_io import open_stream
 
-            lora_config_path = os.path.join(
-                tensorizer_config.tensorizer_dir, "adapter_config.json"
-            )
+            tensorizer_dir = tensorizer_config.tensorizer_dir
+            if tensorizer_dir is None:
+                raise ValueError("tensorizer_dir must be set in tensorizer config.")
+
+            lora_config_path = os.path.join(tensorizer_dir, "adapter_config.json")
             with open_stream(
                 lora_config_path, mode="rb", **tensorizer_args.stream_kwargs
             ) as f:
@@ -112,8 +121,7 @@ class PEFTHelper:
         return cls.from_dict(config)
 
     def validate_legal(self, lora_config: LoRAConfig) -> None:
-        """
-        Validates the LoRA configuration settings against application
+        """Validates the LoRA configuration settings against application
         constraints and requirements.
         """
         error_msg = self._validate_features()

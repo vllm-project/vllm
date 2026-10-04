@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vllm_engine_core_client::protocol::StructuredOutputsParams;
+use thiserror_ext::AsReport as _;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 
 use crate::error::ApiError;
 
@@ -26,7 +30,7 @@ pub struct JsonSchemaFormat {
 /// that we can support the vLLM-specific `structural_tag` variant.
 ///
 /// Original Python definitions:
-/// <https://github.com/vllm-project/vllm/blob/f22d6e026/vllm/entrypoints/openai/engine/protocol.py#L116-L157>
+/// <https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/generate/base/protocol.py#L71-L112>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseFormat {
@@ -37,7 +41,7 @@ pub enum ResponseFormat {
     },
     /// vLLM-specific structural tag format. The entire object (including the
     /// `type` field) is JSON-serialized and passed as
-    /// `StructuredOutputsParams.structural_tag`.
+    /// `StructuredOutputConstraint::StructuralTag`.
     ///
     /// We capture the payload as a catch-all map so both the legacy
     /// (`structures`/`triggers`) and current (`format`) shapes are
@@ -77,16 +81,12 @@ pub fn convert_from_response_format(
     let Some(fmt) = response_format else {
         return Ok(None);
     };
-    match fmt {
-        ResponseFormat::Text => Ok(None),
-        ResponseFormat::JsonObject => Ok(Some(StructuredOutputsParams {
-            json_object: Some(true),
-            ..Default::default()
-        })),
-        ResponseFormat::JsonSchema { json_schema } => Ok(Some(StructuredOutputsParams {
-            json: Some(json_schema.schema.clone()),
-            ..Default::default()
-        })),
+    let params = match fmt {
+        ResponseFormat::Text => return Ok(None),
+        ResponseFormat::JsonObject => StructuredOutputsParams::json_object(),
+        ResponseFormat::JsonSchema { json_schema } => {
+            StructuredOutputsParams::json(json_schema.schema.clone())
+        }
         ResponseFormat::StructuralTag { .. } => {
             // The Python frontend dumps the entire response_format object (including the
             // `type` field) as a JSON string for the engine-core backend.
@@ -96,12 +96,13 @@ pub fn convert_from_response_format(
                     Some("response_format"),
                 )
             })?;
-            Ok(Some(StructuredOutputsParams {
-                structural_tag: Some(tag_json),
-                ..Default::default()
-            }))
+            StructuredOutputsParams::structural_tag(tag_json)
         }
-    }
+    };
+    params.validate().map_err(|error| {
+        ApiError::invalid_request(error.to_report_string(), Some("response_format"))
+    })?;
+    Ok(Some(params))
 }
 
 /// Convert raw `response_format` and/or `structured_outputs` JSON blobs into
