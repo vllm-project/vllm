@@ -539,7 +539,9 @@ def load_weights_using_from_2_way_softmax(
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if text_config.tie_word_embeddings:
+    # For VLMs, VllmConfig.with_hf_config sets tie_word_embeddings on the
+    # language model's config, which may be a copy of text_config
+    if language_model.config.get_text_config().tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
@@ -608,7 +610,9 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if text_config.tie_word_embeddings:
+    # For VLMs, VllmConfig.with_hf_config sets tie_word_embeddings on the
+    # language model's config, which may be a copy of text_config
+    if language_model.config.get_text_config().tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
