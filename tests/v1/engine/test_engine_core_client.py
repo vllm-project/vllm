@@ -310,7 +310,7 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
     client.current_wave = 0
     client.resources = SimpleNamespace(stats_update_task=None)
     client.stats_update_address = "inproc://scale-down-stats"
-    client.first_req_sock_addr = "inproc://scale-down-first-request"
+    client.scale_sock_addr = "inproc://scale-down-notify"
     pause_started = asyncio.Event()
 
     async def pause_scheduler(*args, **kwargs):
@@ -322,11 +322,11 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
     with (
         zmq.asyncio.Context() as ctx,
         ctx.socket(zmq.XPUB) as coordinator,
-        ctx.socket(zmq.PAIR) as first_req_socket,
+        ctx.socket(zmq.PAIR) as scale_socket,
     ):
         client.ctx = ctx
         coordinator.bind(client.stats_update_address)
-        first_req_socket.bind(client.first_req_sock_addr)
+        scale_socket.bind(client.scale_sock_addr)
         client._ensure_stats_update_task()
         scale_task = None
         try:
@@ -405,6 +405,28 @@ def test_dplb_finished_requests_release_inflight():
 
     assert client.engine_inflight[engine] == 0
     assert req.request_id not in client.reqs_in_flight
+
+
+def test_dplb_abort_without_route_reaches_every_engine():
+    """A paused rejection retires a streaming session's route, but its input task
+    may already have re-sent a chunk under that id; the abort must still land."""
+    client = _make_dplb_client(num_engines=2)
+    client.resources = SimpleNamespace(engine_dead=False)
+    routed = make_request(SamplingParams(max_tokens=1))
+    engine = client.get_core_engine_for_request(routed)
+    sent = []
+
+    async def record(req_ids, eng):
+        sent.append((tuple(req_ids), eng))
+
+    client._abort_requests = record
+    asyncio.run(client.abort_requests_async([routed.request_id]))
+    asyncio.run(client.abort_requests_async(["retired"]))
+
+    assert sent == [
+        ((routed.request_id,), engine),
+        *((("retired",), eng) for eng in client.core_engines),
+    ]
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,7 @@ from tests.v1.engine.utils import (
     MockEngineCore,
 )
 from vllm import PoolingParams
+from vllm.exceptions import EnginePausedError
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
@@ -1581,6 +1582,54 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("runner", ["generate", "pooling"])
+@pytest.mark.parametrize("async_consumer", [False, True])
+def test_request_rejected_while_paused(
+    runner: str, async_consumer: bool, dummy_test_vectors
+):
+    """A paused engine rejects a request with no output of any kind: it still
+    finishes cleanly, as a retryable error for AsyncLLM and as a "paused"
+    result for LLMEngine, and a streaming-input session stops taking input."""
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams() if runner == "generate" else None,
+        pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
+        resumable=runner == "generate",
+    )
+    queue = (
+        RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
+        if async_consumer
+        else None
+    )
+    output_processor.add_request(request, None, queue=queue)
+    input_task = MagicMock()
+    if queue is not None:
+        queue._input_stream_task = input_task
+
+    result = output_processor.process_outputs(
+        [EngineCoreOutput(request.request_id, [], finish_reason=FinishReason.PAUSED)]
+    )
+
+    assert not output_processor.has_unfinished_requests()
+    # Chunks the input task sent after the rejection must not outlive it.
+    assert result.reqs_to_abort == ([request.request_id] if request.resumable else [])
+    if queue is not None:
+        with pytest.raises(EnginePausedError):
+            queue.get_nowait()
+        input_task.cancel.assert_called_once()
+    else:
+        [output] = result.request_outputs
+        assert output.finished
 
 
 @pytest.mark.parametrize("output_kind", list(RequestOutputKind))

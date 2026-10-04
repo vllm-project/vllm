@@ -806,6 +806,7 @@ fn chat_finish_reason_to_openai(
         FinishReason::Error => {
             bail_server_error!("Internal server error");
         }
+        FinishReason::Paused => Err(ApiError::EnginePaused),
     }
 }
 

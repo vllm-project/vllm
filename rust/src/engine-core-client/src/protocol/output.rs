@@ -54,6 +54,8 @@ pub enum EngineCoreFinishReason {
     Error = 3,
     /// A repetitive token pattern was detected.
     Repetition = 4,
+    /// Rejected on arrival because generation is paused.
+    Paused = 5,
 }
 
 /// Event types emitted by engine-core for one request.

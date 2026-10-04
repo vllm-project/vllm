@@ -18,13 +18,21 @@ To safely update weights while the inference engine is running, vLLM provides `p
 await engine.pause_generation(mode="keep", clear_cache=True)
 ```
 
-The `mode` parameter controls how in-flight requests are handled:
+The `mode` parameter controls how in-flight requests are handled, and whether
+new requests are admitted while paused:
 
-| Mode | Behavior |
-| ---- | -------- |
-| `"abort"` | Abort all in-flight requests immediately and return partial results (default) |
-| `"wait"` | Wait for all in-flight requests to finish before pausing |
-| `"keep"` | Freeze requests in the queue; they resume when `resume_generation` is called |
+| Mode | In-flight requests | New requests |
+| ---- | ------------------ | ------------ |
+| `"abort"` | Aborted immediately, returning partial results (default) | Rejected with HTTP 503 until resume |
+| `"wait"` | Running requests finish before the pause completes; queued ones run after resume | Rejected with HTTP 503 until resume |
+| `"keep"` | Frozen in the queue; they resume when `resume_generation` is called | Accepted and queued |
+
+`"abort"` and `"wait"` treat the pause as a generation boundary: once
+`pause_generation` returns, the engine rejects new requests from every API server
+until `resume_generation` returns, rather than carrying them across the boundary.
+Clients should retry on 503. A request racing the pause call itself may instead be
+treated as in-flight. A streaming-input session's next input is rejected the
+same way, which ends the session; closing an idle session's input just closes it.
 
 The `clear_cache` parameter controls whether to clear the KV cache and prefix cache after pausing.
 

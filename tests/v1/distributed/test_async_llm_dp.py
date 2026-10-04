@@ -14,10 +14,12 @@ from vllm import SamplingParams
 from vllm.config import VllmConfig
 from vllm.config.parallel import DataParallelBackend
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.exceptions import EnginePausedError
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.engine import EngineCoreRequestType
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.metrics.loggers import StatLoggerBase
@@ -316,12 +318,12 @@ async def _poll_flag(engine: AsyncLLM, want: bool, timeout: float) -> bool:
 
 @pytest.mark.asyncio
 async def test_dp_pause_late_request_does_not_block_drain():
-    """A request arriving after pause must not leave the coordinator believing
+    """A request arriving after pause must not make the coordinator believe
     the engines are running.
 
-    Paused engines discard START_DP_WAVE, so nothing can report wave
-    completion afterwards; if forwarding the wake also marks the engines as
-    running, drain has no way back and can only end in a timeout.
+    Paused engines start no wave for it, so nothing could report wave
+    completion afterwards; a running flag set on its behalf would leave drain
+    no way back but a timeout.
 
     MoE only: wave coordination is enabled iff the model is MoE, so a dense
     model never reaches the coordinator state this exercises.
@@ -345,9 +347,7 @@ async def test_dp_pause_late_request_does_not_block_drain():
 
         # A design that never reports the engines as running would satisfy
         # every drain assertion below while destroying the signal, so pin it
-        # down first. The front-end sets its own copy optimistically when it
-        # forwards the wake, so sample only after several coordinator
-        # publishes (every 100ms while stats change) have overwritten it.
+        # down first.
         await asyncio.sleep(2)
         assert not long_request.done(), "the warmup request was too short to sample"
         assert engine.engine_core.dp_engines_running(), (
@@ -360,31 +360,70 @@ async def test_dp_pause_late_request_does_not_block_drain():
         await engine.pause_generation(mode="abort")
         await engine.wait_for_requests_to_drain(drain_timeout=30)
 
-        # Awaiting add_request guarantees the new-request notification has been
-        # sent to the coordinator - the message that used to latch the flag.
         collector = await engine.add_request(
             request_id="late",
             prompt=DP_PAUSE_PROMPT,
             params=SamplingParams(max_tokens=5),
         )
+        assert not await _poll_flag(engine, True, timeout=5)
 
-        # The front-end marks the engines running off the back of that
-        # notification. This is what makes the test non-vacuous: it is the
-        # path that used to leave the coordinator stuck.
-        assert await _poll_flag(engine, True, timeout=5), (
-            "the late request did not notify the coordinator"
+        # The engine rejected it rather than carrying it across the boundary.
+        with pytest.raises(EnginePausedError):
+            await asyncio.wait_for(collector.get(), timeout=60)
+        assert not engine.output_processor.has_unfinished_requests()
+        await engine.resume_generation()
+
+        # The rejection must not leave the next request stranded.
+        await asyncio.wait_for(
+            _consume(
+                engine.generate(
+                    request_id="after-resume",
+                    prompt=DP_PAUSE_PROMPT,
+                    sampling_params=SamplingParams(max_tokens=5),
+                )
+            ),
+            timeout=60,
         )
 
-        # It must settle back by itself. Unfixed it never does, because the
-        # paused engines discard the wake and so never report wave completion.
-        assert await _poll_flag(engine, False, timeout=60)
 
-        # The late request was held rather than dropped: it completes on resume.
+@pytest.mark.asyncio
+async def test_dp_request_reaching_rank_after_resume_wakes_peers():
+    """A request can reach its rank only after resume (e.g. from another API
+    server), with no other work anywhere. That rank must wake its peers itself,
+    or it steps alone. Modelled here by holding the request's ADD on the client
+    side across pause and resume."""
+    with ExitStack() as after:
+        engine = AsyncLLM.from_engine_args(
+            _get_dp_pause_engine_args(expert_parallel=True)
+        )
+        after.callback(engine.shutdown)
+        client = engine.engine_core
+        params = SamplingParams(max_tokens=5)
+
+        await _consume(engine.generate(DP_PAUSE_PROMPT, params, "warmup"))
+        await engine.pause_generation(mode="abort")
+        assert await _poll_flag(engine, False, timeout=30)
+
+        held: list[tuple] = []
+        send_input = client._send_input
+
+        def hold_add(request_type, request, engine_id=None):
+            if request_type == EngineCoreRequestType.ADD:
+                held.append((request_type, request, engine_id))
+                return asyncio.sleep(0)
+            return send_input(request_type, request, engine_id)
+
+        client._send_input = hold_add
+        task = asyncio.create_task(
+            _consume(engine.generate(DP_PAUSE_PROMPT, params, "late"))
+        )
+        await asyncio.sleep(2)
+        assert held
+
         await engine.resume_generation()
-        while True:
-            out = await asyncio.wait_for(collector.get(), timeout=60)
-            if out.finished:
-                break
+        client._send_input = send_input
+        await send_input(*held[0])
+        await asyncio.wait_for(task, timeout=60)
 
 
 @pytest.mark.asyncio
@@ -419,21 +458,13 @@ async def test_dp_sleep_late_request_does_not_block_drain():
             prompt=DP_PAUSE_PROMPT,
             params=SamplingParams(max_tokens=5),
         )
+        assert not await _poll_flag(engine, True, timeout=5)
 
-        assert await _poll_flag(engine, True, timeout=5), (
-            "the request did not notify the coordinator"
-        )
-
-        # Sleeping engines cannot report wave completion, so a coordinator that
-        # marked them running when it forwarded the wake never hears otherwise.
-        assert await _poll_flag(engine, False, timeout=60)
-
+        with pytest.raises(EnginePausedError):
+            await asyncio.wait_for(collector.get(), timeout=60)
+        assert not engine.output_processor.has_unfinished_requests()
         await engine.wake_up()
         assert not await engine.is_sleeping()
-        while True:
-            out = await asyncio.wait_for(collector.get(), timeout=60)
-            if out.finished:
-                break
 
 
 @pytest.mark.asyncio
@@ -606,7 +637,7 @@ async def test_dp_pause_keep_race_staggered_engines():
 
 @pytest.mark.asyncio
 async def test_dp_pause_barrier_request_deadlock():
-    """Test that start_dp_wave is ignored while paused.
+    """Test that a request sent while paused does not wake any engine.
 
     Sequence:
       1. Pause all engines (PAUSED_ALL).
@@ -675,7 +706,7 @@ async def test_dp_pause_barrier_request_deadlock():
 
             # Yield so generate() preprocessing completes and
             # add_request_async is called (which, in buggy code,
-            # would send FIRST_REQ and wake engine 1).
+            # would wake engine 1).
             for _ in range(200):
                 await asyncio.sleep(0)
 
@@ -703,7 +734,7 @@ async def test_dp_pause_barrier_request_deadlock():
             for t in mid_barrier_tasks:
                 t.cancel()
             pytest.fail(
-                "Staggered barrier deadlocked — FIRST_REQ sent while "
+                "Staggered barrier deadlocked — a request sent while "
                 "paused caused collective-op mismatch between engines"
             )
 

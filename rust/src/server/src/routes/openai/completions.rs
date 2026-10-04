@@ -161,6 +161,7 @@ async fn collect_completion(
         .map_err(|error| server_error!("completion stream failed: {}", error.to_report_string()))?;
     let finish_reason = collected.finish_reason.clone();
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
+    let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
 
     let prompt_char_count = echo.as_ref().map(|prompt| text_len(prompt)).unwrap_or_default();
     let logprobs = if requested_logprobs.is_some() && prompt_only {
@@ -196,7 +197,6 @@ async fn collect_completion(
         Some(prompt) if prompt_only => prompt.clone(),
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
-    let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
     let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
@@ -465,6 +465,7 @@ fn completion_finish_reason_to_openai(
         FinishReason::Error => {
             bail_server_error!("Internal server error");
         }
+        FinishReason::Paused => Err(ApiError::EnginePaused),
     }
 }
 

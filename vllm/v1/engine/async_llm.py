@@ -766,6 +766,9 @@ class AsyncLLM(EngineClient):
 
         # Request validation error or admission control rejection.
         except (VLLMClientError, GracefulHTTPError) as e:
+            if q is not None:
+                # E.g. a paused engine rejected one child: reclaim its n>1 siblings.
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
@@ -930,8 +933,9 @@ class AsyncLLM(EngineClient):
         """Pause generation to allow model weight updates.
 
         All mode handling (abort / wait / keep) and cache clearing is done
-        in the engine. New generation/encoding requests will not be scheduled
-        until resume is called.
+        in the engine. In ``abort`` and ``wait`` mode, requests submitted after
+        this returns are rejected with a retryable ``EnginePausedError`` until
+        :meth:`resume_generation`; ``keep`` accepts and queues them.
 
         Args:
             mode: How to handle in-flight requests:

@@ -24,6 +24,8 @@ pub enum ApiError {
     JsonParseError { message: String },
     /// An unexpected internal failure happened before streaming started.
     ServerError { message: String },
+    /// Generation is paused; the request was rejected and can be retried.
+    EnginePaused,
 }
 
 impl ApiError {
@@ -34,6 +36,7 @@ impl ApiError {
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
+            Self::EnginePaused => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -64,6 +67,12 @@ impl ApiError {
                 error_type: "invalid_request_error".to_string(),
                 param: None,
                 code: Some("json_parse_error".to_string()),
+            },
+            Self::EnginePaused => ErrorDetail {
+                message: "Generation is paused. Please retry after it resumes.".to_string(),
+                error_type: "service_unavailable_error".to_string(),
+                param: None,
+                code: Some("engine_paused".to_string()),
             },
         };
 

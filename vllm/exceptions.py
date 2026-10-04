@@ -181,3 +181,17 @@ class MaxQueuedTokensError(GracefulHTTPError):
             "Please try again later or on a different instance.",
             HTTPStatus.SERVICE_UNAVAILABLE,
         )
+
+
+class EnginePausedError(GracefulHTTPError):
+    """Raised when a request arrives while generation is paused.
+
+    Returns HTTP 503 (Service Unavailable) so that load balancers and
+    client SDKs retry the request once the engine resumes.
+    """
+
+    def __init__(self):
+        super().__init__(
+            "Generation is paused. Please retry after it resumes.",
+            HTTPStatus.SERVICE_UNAVAILABLE,
+        )
