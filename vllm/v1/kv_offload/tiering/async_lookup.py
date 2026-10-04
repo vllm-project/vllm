@@ -266,7 +266,8 @@ class AsyncLookupManager(ABC):
             for req_context, entries in batches.values():
                 keys = [key for key, _ in entries]
                 try:
-                    hits = self.batch_lookup(keys, req_context)
+                    # Lazy results may raise while being consumed.
+                    hits = list(self.batch_lookup(keys, req_context))
                 except Exception as exc:
                     logger.warning(
                         "batch_lookup failed on tier %s for %d keys: %s",
@@ -274,7 +275,7 @@ class AsyncLookupManager(ABC):
                         len(keys),
                         exc,
                     )
-                    hits = (False for _ in keys)
+                    hits = [False] * len(keys)
 
                 for (key, generation), hit in zip(entries, hits):
                     results.append((key, generation, hit))
