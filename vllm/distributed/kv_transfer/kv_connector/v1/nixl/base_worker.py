@@ -846,7 +846,6 @@ class NixlBaseConnectorWorker:
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
         self._recv_failures: set[ReqId] = set()
-        self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -897,7 +896,7 @@ class NixlBaseConnectorWorker:
         # With heterogeneous TP (or DCP), P must wait for all assigned D
         # workers to finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
-        self.expected_consumer_notifications_by_req: dict[ReqId, int] = {}
+        self._remaining_read_notifs: dict[ReqId, dict[str, int]] = {}
         self.xfer_stats = NixlKVConnectorStats()
 
         self._physical_blocks_per_logical_kv_block = 1
@@ -2955,7 +2954,6 @@ class NixlBaseConnectorWorker:
 
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
-                self._pending_recv_notifs.pop(req_id, None)
                 # TODO (NickLucche) handle failed transfer for HMA.
                 if not self._is_hma_required:
                     self._invalid_block_ids.put(set(meta.local_block_ids[0]))
@@ -2965,7 +2963,6 @@ class NixlBaseConnectorWorker:
                 )
                 continue
 
-            self._send_pending_recv_notifs(req_id)
             assert meta.remote is not None
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
@@ -3074,7 +3071,7 @@ class NixlBaseConnectorWorker:
         ]
         for req_id in expired:
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
-            self.expected_consumer_notifications_by_req.pop(req_id, None)
+            self._remaining_read_notifs.pop(req_id, None)
             self.xfer_stats.record_kv_expired_req()
             logger.warning(
                 "Releasing expired KV blocks for request %s which were "
@@ -3200,22 +3197,6 @@ class NixlBaseConnectorWorker:
         if failed_req_ids is not None:
             failed_req_ids.add(req_id)
         return handle is None or self._try_release_xfer_handle(req_id, handle)
-
-    def _send_pending_recv_notifs(self, req_id: str) -> None:
-        """Send notifications deferred by split DRAM/VRAM reads."""
-        for agent_name, notif_id in self._pending_recv_notifs.pop(req_id, []):
-            try:
-                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
-            except Exception as e:
-                self._log_failure(
-                    failure_type="notification_failed",
-                    msg="P worker blocks will be freed after timeout. "
-                    "This may indicate network issues.",
-                    req_id=req_id,
-                    error=e,
-                    remote_agent_name=agent_name,
-                )
-                self.xfer_stats.record_failed_notification()
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """Send heartbeats to remote engines, extending the lease on KV blocks."""
