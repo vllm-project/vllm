@@ -155,6 +155,15 @@ class ModelState(ABC):
     ) -> None:
         return None
 
+    def warmup_postprocess_state(
+        self,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        """Warm kernels used only by model-specific postprocessing."""
+        return None
+
     @abstractmethod
     def prepare_inputs_embeds(
         self,

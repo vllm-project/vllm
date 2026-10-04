@@ -1041,6 +1041,26 @@ class Worker(WorkerBase):
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
 
+        pp_handler = getattr(self.model_runner, "pp_handler", None)
+        if pp_handler is not None:
+            # Profilers and multimodal timing can synchronize the device during
+            # serving. Keep immediate receives in those diagnostic modes so a
+            # sender never waits on a receiver that has not been posted yet.
+            runtime_device_syncs = bool(
+                (
+                    self.profiler_config is not None
+                    and self.profiler_config.profiler is not None
+                )
+                or (
+                    self.observability_config is not None
+                    and self.observability_config.enable_mm_processor_stats
+                )
+            )
+            pp_handler.enable_deferred_collectives(
+                jit_warmup_complete=self.vllm_config.kernel_config.enable_jit_warmup,
+                runtime_device_syncs=runtime_device_syncs,
+            )
+
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
@@ -1252,6 +1272,14 @@ class Worker(WorkerBase):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
+    def flush_pending_collectives(self) -> None:
+        if not getattr(self, "use_v2_model_runner", False):
+            return
+        model_runner = getattr(self, "model_runner", None)
+        pp_handler = getattr(model_runner, "pp_handler", None)
+        if pp_handler is not None:
+            pp_handler.flush_pending_collectives()
+
     @torch.inference_mode()
     @with_gpu_sync_check
     def execute_model(
@@ -1266,6 +1294,11 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        if not forward_pass and self.use_v2_model_runner:
+            # SchedulerOutput is replicated across PP ranks, so this flush
+            # boundary is group-uniform. The runner's zero-token launch is an
+            # additional safety net for direct runner invocations.
+            self.flush_pending_collectives()
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         all_gather_tensors = {}
         compilation_config = self.vllm_config.compilation_config
@@ -1576,6 +1609,9 @@ class Worker(WorkerBase):
             self.model_runner.reset_lora_state()
 
     def shutdown(self) -> None:
+        # Shutdown helpers (including profilers and transfer engines) may
+        # synchronize the device. Match every deferred PP receive first.
+        self.flush_pending_collectives()
         gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.
