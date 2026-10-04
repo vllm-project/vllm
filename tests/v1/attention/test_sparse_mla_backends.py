@@ -3822,6 +3822,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         topk_indices_buffer=topk_indices,
         num_heads=2,
         kv_lora_rank=1,
+        q_head_size=3,
         index_group=None,
         index_group_index=0,
         dcp_world_size=1,
