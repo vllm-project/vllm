@@ -565,6 +565,7 @@ class NixlBaseConnectorWorker:
         )
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._lease_extension = kv_lease_duration * 2 // 3
+        self._kv_lease_duration = kv_lease_duration
 
         self._bidirectional_kv_xfer_enabled: bool = (
             vllm_config.kv_transfer_config.get_from_extra_config(
@@ -3085,6 +3086,27 @@ class NixlBaseConnectorWorker:
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
+
+    def _is_lease_expired(self, meta: ReqMeta) -> bool:
+        """Whether the remote may release the request's blocks before a transfer
+        of them completes, so that they must not be transferred.
+
+        Only the expiry the remote exported counts: heartbeats ask it for more
+        time, but nothing confirms that it granted it.
+        """
+        assert meta.remote is not None
+        expiry = meta.remote.blocks_expiry_time
+        # The router may not forward the expiry: transfer as before.
+        if expiry is None:
+            return False
+        offset = self._engine_clock_offset.get(meta.remote.engine_id)
+        if offset is None:
+            return True  # The engine was evicted meanwhile: its lease is unknown.
+        # Slack for clock-offset error and transfer latency, from the remote's
+        # lease (an older remote exports none: use ours).
+        lease = meta.remote.blocks_lease_duration or self._kv_lease_duration
+        margin = min(5.0, lease / 4)
+        return time.perf_counter() + margin >= expiry - offset
 
     def _handle_heartbeat(self, payload: str) -> None:
         """Extend leases for requests referenced in a heartbeat.

@@ -980,16 +980,22 @@ def test_turn2_deadline_gate(dist_init, offset, expiry_delta, expect_declined):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_turn2_full_prefix_hit_with_expired_deadline_skips_gate(dist_init):
-    """A full local prefix hit issues no READ. The expiry gate must be skipped
-    even when D's deadline is expired."""
+@pytest.mark.parametrize("awaiting_kvs", [False, True])
+def test_turn2_full_prefix_hit_with_expired_deadline_skips_gate(
+    dist_init, awaiting_kvs
+):
+    """A full local prefix hit issues no READ, so an expired deadline fails
+    nothing; the remote already released its blocks, so it is not notified.
+    A request waiting for the transfer completes."""
     connector, worker = _make_connector_with_fake_worker()
     worker._engine_clock_offset[_REMOTE] = 0.0
 
+    notifs = patch.object(worker.nixl_wrapper, "send_notif").start()
     meta = NixlConnectorMetadata()
     meta.add_new_req_to_recv(
         request_id="req",
         local_block_ids=(),  # full prefix hit -> zero local block groups
+        awaiting_kvs=awaiting_kvs,
         kv_transfer_params={
             "do_remote_prefill": False,
             "do_remote_decode": True,
@@ -1007,6 +1013,9 @@ def test_turn2_full_prefix_hit_with_expired_deadline_skips_gate(dist_init):
     _do_load_kv(connector, meta)
     assert worker.xfer_stats.data["num_kv_expired_reqs"] == []
     assert worker.xfer_stats.data["num_failed_transfers"] == []
+    notifs.assert_not_called()
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == ({"req"} if awaiting_kvs else set())
 
 
 def test_d_node_request_finished_exports_blocks_expiry_time():
@@ -1031,6 +1040,25 @@ def test_d_node_request_finished_exports_blocks_expiry_time():
     assert kv["do_remote_decode"] is True
     assert isinstance(kv["remote_blocks_expiry_time"], float)
     assert kv["remote_blocks_expiry_time"] > time.perf_counter()
+
+
+def test_p_node_request_finished_exports_its_lease(monkeypatch):
+    """A prefiller exports when its lease on the blocks ends."""
+    monkeypatch.setattr(time, "perf_counter", lambda: 1000.0)
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    BS = vllm_config.cache_config.block_size
+    req = create_request(
+        request_id=601, block_size=BS, num_tokens=int(BS * 2.5), do_remote_decode=True
+    )
+    scheduler.add_request(req)
+    so = scheduler.schedule()
+    eco = scheduler.update_from_output(
+        so, create_model_runner_output(reqs=[req], use_eos=True)
+    )
+    kv = eco[0].outputs[0].kv_transfer_params
+    assert kv["remote_blocks_expiry_time"] == 1030.0  # default kv_lease_duration
+    assert kv["remote_blocks_lease_duration"] == 30  # the reader derives its margin
 
 
 def test_handshake_listener_appends_perf_counter_frame():
