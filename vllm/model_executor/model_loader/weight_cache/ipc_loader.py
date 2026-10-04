@@ -6,7 +6,8 @@ daemon via CUDA IPC instead of loading from disk."""
 import dataclasses
 import socket
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from copy import copy
 from typing import TypeVar
 
@@ -22,6 +23,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers import rotary_embedding
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import (
@@ -57,6 +59,34 @@ _STATE_TIMEOUT_S = 300.0
 _STARTUP_RETRY_INTERVAL_S = 0.5
 
 _T = TypeVar("_T")
+
+
+@contextmanager
+def _preserve_model_state_on_error(vllm_config: VllmConfig) -> Iterator[None]:
+    compilation = vllm_config.compilation_config
+    registries = (
+        compilation.static_forward_context,
+        compilation.enabled_custom_ops,
+        compilation.disabled_custom_ops,
+        rotary_embedding._ROPE_DICT,
+        *(
+            registry
+            for rope in rotary_embedding._ROPE_DICT.values()
+            for module in rope.modules()
+            for registry in (module._buffers, module._non_persistent_buffers_set)
+        ),
+    )
+    snapshots = [registry.copy() for registry in registries]
+    moe_layers = compilation.static_all_moe_layers[:]
+    try:
+        yield
+    except Exception:
+        # A failed draft load must not discard the target model's registrations.
+        for registry, snapshot in zip(registries, snapshots):
+            registry.clear()
+            registry.update(snapshot)
+        compilation.static_all_moe_layers[:] = moe_layers
+        raise
 
 
 class IpcModelLoader(BaseModelLoader):
@@ -210,7 +240,8 @@ class IpcModelLoader(BaseModelLoader):
                 )
             state = self._fetch_entries(model_config)
             state_fetched = True
-            return self._build_model(vllm_config, model_config, prefix, state)
+            with _preserve_model_state_on_error(vllm_config):
+                return self._build_model(vllm_config, model_config, prefix, state)
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
             if not self.fallback:
                 raise
