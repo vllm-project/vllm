@@ -628,3 +628,40 @@ def test_deepseek_v4_request_tools_do_not_mutate_caller_messages():
     _tokenizer().apply_chat_template(messages, tools=_request_tools(), tokenize=False)
 
     assert messages == snapshot
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        # dict passthrough (the shape produced by _postprocess_messages)
+        ({"a": "1"}, {"a": "1"}),
+        # JSON object string (raw OpenAI format, e.g. via direct
+        # apply_chat_template without going through _postprocess_messages)
+        ('{"a": "1"}', {"a": "1"}),
+        # double-encoded JSON string
+        ('"{\\"a\\": \\"1\\"}"', {"a": "1"}),
+    ],
+)
+def test_deepseek_v4_encode_arguments_to_dsml_parses_strings(arguments, expected):
+    from vllm.tokenizers.deepseek_v4_encoding import encode_arguments_to_dsml
+
+    rendered = encode_arguments_to_dsml({"arguments": arguments})
+    for key, value in expected.items():
+        assert f'parameter name="{key}" string="true">{value}<' in rendered
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "not json",  # malformed string
+        "",  # empty string
+        "42",  # valid JSON but not an object
+    ],
+)
+def test_deepseek_v4_encode_arguments_to_dsml_tolerates_non_object(arguments):
+    # A tool call whose arguments do not decode to a JSON object must not crash;
+    # it is wrapped under an "arguments" key. Mirrors deepseek_v41_encoding.
+    from vllm.tokenizers.deepseek_v4_encoding import encode_arguments_to_dsml
+
+    rendered = encode_arguments_to_dsml({"arguments": arguments})
+    assert 'parameter name="arguments"' in rendered
