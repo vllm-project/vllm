@@ -739,6 +739,59 @@ def test_worker_rejects_incompatible_mamba_specs_before_registration():
         worker.register_kv_caches({"kda.0": object(), "kda.1": object()})
 
 
+def test_register_kv_caches_allows_hybrid_divergent_block_len():
+    """GLM-5.2 / MiniMax HMA: divergent per-layer block_len is allowed."""
+    Geom = moriio_layout.LayerTransferGeometry
+    caches = {
+        "layer0": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+        "layer1": torch.zeros(2, 4, 16, 1, 8, dtype=torch.float16),
+    }
+    geoms = {
+        "layer0": Geom(4, 16, 2112, 132, 2112, None, None, 1, 1, False),
+        "layer1": Geom(4, 16, 9216, 576, 9216, None, None, 1, 1, False),
+    }
+    worker = _FakeWorker(
+        mode=MoRIIOMode.READ,
+        _transfer_layer_names=set(caches),
+        block_size=16,
+        engine_id="e0",
+        dst_num_blocks={},
+        block_lens={},
+        layer_name_to_local_kv_cache_metadata={},
+        kv_caches_base_addr={},
+        kv_layer_mr_offset={},
+        local_kv_cache_size=[],
+        block_window_per_layer=[],
+        moriio_wrapper=SimpleNamespace(
+            register_local_tensor=lambda _t: b"m",
+            get_agent_metadata=lambda: b"a",
+            async_wait_reqid=lambda: None,
+        ),
+        world_size=1,
+        layer_to_spec={},
+        backend_name="TRITON_ATTN",
+        side_channel_port=6301,
+        tp_rank=0,
+        dp_rank=0,
+        is_producer=False,
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="x"))
+        ),
+    )
+    worker._is_mamba_layer = lambda _n: False
+    worker._is_mla_cache_layer = lambda _n: False
+    worker._get_layer_transfer_geometry = lambda n, remote_num_blocks=None: geoms[n]
+    worker._iter_layer_registration_regions = lambda n: [
+        (caches[n], caches[n].nbytes)
+    ]
+    worker._moriio_handshake_listener = lambda _m, ready_event, *_a, **_k: ready_event.set()
+
+    worker.register_kv_caches(caches)
+
+    assert worker.block_lens == {"layer0": 2112, "layer1": 9216}
+    assert worker.block_len == 9216
+
+
 # --------------------------------------------------------------------------
 # _truncate_mamba_request_for_prefill
 # --------------------------------------------------------------------------
