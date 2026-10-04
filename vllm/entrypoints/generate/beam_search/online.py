@@ -107,12 +107,18 @@ class BeamSearchOnlineMixin(ABC):
         try:
             for _ in range(max_tokens):
                 if so_backend is not None or so_trie is not None:
+                    # Grammar compile/accept/fill_bitmask (and the trie walk)
+                    # are CPU-bound and run once per beam per step. Offload to a
+                    # worker thread so they do not block the API server's
+                    # asyncio event loop and stall other concurrent requests,
+                    # mirroring StructuredOutputManager's executor offload.
                     (
                         active_beams,
                         beam_params_list,
                         allowed_sets,
                         newly_completed,
-                    ) = self._build_online_so_params(
+                    ) = await asyncio.to_thread(
+                        self._build_online_so_params,
                         all_beams,
                         logprobs_num,
                         temperature,
