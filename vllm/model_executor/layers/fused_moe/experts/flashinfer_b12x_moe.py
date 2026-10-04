@@ -49,6 +49,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         MoEActivation.RELU2_NO_MUL: "relu2",
     }
 
+    # Per-process (per-worker) buffers shared across layers; see
+    # _ensure_wrapper.
+    _shared_buffers: dict[tuple, tuple] = {}
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -239,6 +243,21 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
         from flashinfer.fused_moe import B12xMoEWrapper
 
+        # Workspaces are identical for every MoE layer and layers execute
+        # sequentially, so all layers share the buffers allocated by the
+        # first wrapper instead of paying the (large) per-layer cost.
+        key = (
+            self.global_num_experts,
+            self.topk,
+            self.hidden_dim,
+            self.intermediate_size_per_partition,
+            self.max_num_tokens,
+            self._activation_str,
+            torch.accelerator.current_device_index(),
+        )
+        shared = FlashInferB12xExperts._shared_buffers.get(key)
+        static_ws, dynamic_ws, output = shared if shared else (None, None, None)
+
         self._wrapper = B12xMoEWrapper(
             num_experts=self.global_num_experts,
             top_k=self.topk,
@@ -248,7 +267,16 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=self.max_num_tokens,
             num_local_experts=self.num_local_experts,
             activation=self._activation_str,
+            shared_static_workspace=static_ws,
+            shared_dynamic_workspace=dynamic_ws,
+            shared_output=output,
         )
+        if shared is None:
+            FlashInferB12xExperts._shared_buffers[key] = (
+                self._wrapper._static_workspace,
+                self._wrapper._dynamic_workspace,
+                self._wrapper._moe_output,
+            )
 
     def apply(
         self,
