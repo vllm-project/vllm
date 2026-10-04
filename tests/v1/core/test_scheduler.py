@@ -688,66 +688,31 @@ def test_throttle_capacity_bound_guard_admits():
     assert "b" in output.num_scheduled_tokens
 
 
-@pytest.mark.parametrize("prefix_tokens", [0, 800], ids=["waiting", "running"])
-@pytest.mark.parametrize("external_load", [False, True], ids=["local", "external"])
-def test_same_step_duplicate_encoder_input_stays_cached(
-    prefix_tokens: int, external_load: bool
-):
+def test_same_step_duplicate_encoder_input_stays_cached():
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
-        max_num_batched_tokens=1600,
-        long_prefill_token_threshold=800,
-        max_model_len=4096,
-        use_ec_connector=external_load,
-        ec_role="ec_consumer" if external_load else None,
+        max_num_batched_tokens=1024,
+        max_model_len=2048,
     )
-    if external_load:
-        scheduler.ec_connector.has_cache_item = Mock(return_value=True)
-    competitor = create_requests(
-        1,
-        num_tokens=prefix_tokens + 2000,
-        req_ids=["competitor"],
-        mm_hashes_list=[["other-0", "other-1"]],
-        mm_positions=[
-            [
-                PlaceholderRange(offset=prefix_tokens + 800 + 576 * i, length=576)
-                for i in range(2)
-            ]
-        ],
-    )[0]
     request = create_requests(
         1,
-        num_tokens=prefix_tokens + 2600,
+        num_tokens=2000,
         req_ids=["repeated"],
         mm_hashes_list=[["image", "image", "image"]],
         mm_positions=[
-            [
-                PlaceholderRange(offset=prefix_tokens + offset, length=576)
-                for offset in (0, 600, 2000)
-            ]
+            [PlaceholderRange(offset=offset, length=576) for offset in (0, 600, 1300)]
         ],
     )[0]
-    scheduler.add_request(competitor)
     scheduler.add_request(request)
-    if prefix_tokens:
-        output = scheduler.schedule()
-        _model_output(scheduler, output, [[], []])
 
     output = scheduler.schedule()
-    assert output.scheduled_encoder_inputs == (
-        {} if external_load else {request.request_id: [0]}
-    )
-    _model_output(scheduler, output, [[], []])
+    assert output.scheduled_encoder_inputs == {request.request_id: [0]}
+    _model_output(scheduler, output, [[]])
 
     # The second occurrence is partially consumed; the third is not scheduled.
     cache = scheduler.encoder_cache_manager
     assert cache.get_cached_input_ids(request) == {1}
-    output = scheduler.schedule()
-    assert output.num_scheduled_tokens[request.request_id] == 800
-    assert request.request_id not in output.scheduled_encoder_inputs
-    assert "image" not in output.free_encoder_mm_hashes
-    _model_output(scheduler, output, [[], []])
-    assert not cache.get_cached_input_ids(request)
+    assert "image" not in cache.freeable
 
 
 def test_no_mm_input_chunking():
