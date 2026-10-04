@@ -2072,6 +2072,16 @@ class KNvfp4StaticMoE(MoEQuantKeyScheme):
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process(self, layer, method) -> None:
+        if is_weights_pre_processed():
+            if method.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+                raise RuntimeError(
+                    "pre-processed weights require FLASHINFER_TRTLLM backend, "
+                    f"moe backend, got {method.nvfp4_backend}"
+                )
+            self._restore_padded_moe_dims(layer)
+            self._build_moe_kernel(layer, method)
+            return
+
         if method.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
         ):
@@ -2114,6 +2124,20 @@ class KNvfp4StaticMoE(MoEQuantKeyScheme):
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
+        self._build_moe_kernel(layer, method)
+
+    @staticmethod
+    def _restore_padded_moe_dims(layer: RoutedExperts) -> None:
+        mc = layer.moe_config
+        padded_hidden = layer.w2_weight.shape[1]
+        if padded_hidden != mc.hidden_dim:
+            if mc.hidden_dim_unpadded is None:
+                mc.hidden_dim_unpadded = mc.hidden_dim
+            mc.hidden_dim = padded_hidden
+        mc.intermediate_size_per_partition = layer.w2_weight.shape[2] * 2
+
+    @staticmethod
+    def _build_moe_kernel(layer: RoutedExperts, method: "ModelOptMoEMethod") -> None:
         method.moe_quant_config = method.get_fused_moe_quant_config(layer)
         assert method.experts_cls is not None
         method.moe_kernel = make_nvfp4_moe_kernel(
@@ -2362,6 +2386,7 @@ class ModelOptMoEMethod(FusedMoEMethodBase):
         self.spec = spec
         self.ctx = ctx
         self.quant_config = quant_config
+        self.supports_pre_processed_weights = spec.weight is kNvfp4Static
         try:
             self.wsch = MOE_SCHEME_FOR[spec.weight]
         except KeyError:
@@ -2423,6 +2448,7 @@ class ModelOptMoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
     def apply(
@@ -2433,7 +2459,7 @@ class ModelOptMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -2573,8 +2599,7 @@ def build_moe_method(
         return ModelOptMoEMethod(spec, ctx, moe_config, quant_config=config)
     if algo in LINEAR_ALGOS:
         raise NotImplementedError(
-            f"ModelOpt MoE does not support {algo!r}; "
-            f"only {' / '.join(MOE_ALGOS)}"
+            f"ModelOpt MoE does not support {algo!r}; only {' / '.join(MOE_ALGOS)}"
         )
     raise NotImplementedError(
         f"build_moe_method: unsupported ModelOpt MoE algo {algo!r}"

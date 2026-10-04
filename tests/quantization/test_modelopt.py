@@ -776,6 +776,7 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         moe = ModelOptMoEMethod(spec, ctx, MagicMock(), quant_config=config)
 
     assert moe.use_a16 is expected_use_a16
+    assert moe.supports_pre_processed_weights
     _, kwargs = mock_select.call_args
     assert kwargs["weight_key"] is kNvfp4Static
     if act_key_is_none:
@@ -877,6 +878,59 @@ def test_build_moe_method_deepseek_nvfp4_is_w4a4():
     assert isinstance(method, ModelOptMoEMethod)
     assert isinstance(method.wsch, KNvfp4StaticMoE)
     assert method.use_a16 is False
+
+
+def test_modelopt_moe_forwards_routing_sink_to_monolithic_kernel():
+    method = object.__new__(ModelOptMoEMethod)
+    method.moe_kernel = MagicMock(is_monolithic=True)
+    layer = MagicMock()
+    layer.routing_sink = object()
+
+    method.apply_monolithic(layer, torch.empty(1, 1), torch.empty(1, 1))
+
+    assert method.moe_kernel.apply_monolithic.call_args.kwargs["routing_sink"] is (
+        layer.routing_sink
+    )
+
+
+def test_modelopt_nvfp4_moe_reuses_preprocessed_flashinfer_weights():
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+
+    scheme = KNvfp4StaticMoE()
+    method = MagicMock(nvfp4_backend=NvFp4MoeBackend.FLASHINFER_TRTLLM)
+    layer = MagicMock()
+    layer.moe_config.hidden_dim = 128
+    layer.moe_config.hidden_dim_unpadded = None
+    layer.w2_weight.shape = (2, 160, 96)
+
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.is_weights_pre_processed",
+            return_value=True,
+        ),
+        patch.object(scheme, "_build_moe_kernel") as build_kernel,
+    ):
+        scheme.process(layer, method)
+
+    assert layer.moe_config.hidden_dim == 160
+    assert layer.moe_config.hidden_dim_unpadded == 128
+    assert layer.moe_config.intermediate_size_per_partition == 192
+    build_kernel.assert_called_once_with(layer, method)
+
+
+def test_modelopt_nvfp4_moe_rejects_preprocessed_non_flashinfer_weights():
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+
+    scheme = KNvfp4StaticMoE()
+    method = MagicMock(nvfp4_backend=NvFp4MoeBackend.MARLIN)
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.is_weights_pre_processed",
+            return_value=True,
+        ),
+        pytest.raises(RuntimeError, match="FLASHINFER_TRTLLM"),
+    ):
+        scheme.process(MagicMock(), method)
 
 
 def test_modelopt_mixed_precision_skips_pcpt_moe():
