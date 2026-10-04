@@ -87,7 +87,10 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [64 if current_platform.is_device_capability_family(90) else 128]
+        uses_64_token_pages = any(
+            current_platform.is_device_capability_family(family) for family in (90, 120)
+        )
+        return [64 if uses_64_token_pages else 128]
 
     @staticmethod
     def get_builder_cls() -> type["DeepseekV4SparseMLAMetadataBuilder"]:
