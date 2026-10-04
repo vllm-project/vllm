@@ -111,6 +111,8 @@ LayerBlockType = Literal["attention", "linear_attention", "mamba"]
 _ATTENTION_LAYER_TYPES = frozenset(
     {
         "full_attention",
+        "indexed_attention",
+        # TODO: Delete below once Transformers 5.18.0 is the minimum required version.
         "deepseek_sparse_attention",
         "qwen_sparse_attention",
     }
