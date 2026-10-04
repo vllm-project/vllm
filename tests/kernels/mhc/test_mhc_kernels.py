@@ -51,6 +51,58 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE = current_platform.device_type
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(90),
+    reason="SM90 WGMMA regression",
+)
+@pytest.mark.parametrize("num_tokens,num_splits", [(256, 19), (512, 9), (1024, 4)])
+@pytest.mark.parametrize("side_stream", [False, True])
+def test_sm90_mhc_prenorm_preserves_register_operands(
+    num_tokens, num_splits, side_stream, monkeypatch
+):
+    """An in-flight WGMMA must finish before its register A inputs are reused.
+
+    Regression adapted from deepseek-ai/DeepGEMM#448. These multi-stage K
+    loops reproduce corruption that short decode shapes do not expose.
+    """
+    from vllm.utils.deep_gemm import (
+        is_deep_gemm_supported,
+        tf32_hc_prenorm_gemm,
+    )
+
+    if not is_deep_gemm_supported():
+        pytest.skip("DeepGEMM required")
+
+    set_random_seed(123)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    stream = torch.cuda.Stream() if side_stream else torch.cuda.current_stream()
+    with torch.cuda.stream(stream):
+        x = torch.randn(num_tokens, 16384, dtype=torch.bfloat16, device=DEVICE)
+        weight = torch.randn(24, 16384, dtype=torch.float32, device=DEVICE) * 0.02
+        blocks, remainder = divmod(x.shape[1] // 64, num_splits)
+        ref_out, ref_sqrsum = [], []
+        for split in range(num_splits):
+            start = (split * blocks + min(split, remainder)) * 64
+            end = start + (blocks + (split < remainder)) * 64
+            part = x[:, start:end].float()
+            ref_out.append(part @ weight[:, start:end].T)
+            ref_sqrsum.append(part.square().sum(-1))
+        ref_out, ref_sqrsum = torch.stack(ref_out), torch.stack(ref_sqrsum)
+        previous = None
+        for _ in range(3):
+            out = torch.empty(num_splits, num_tokens, 24, device=DEVICE)
+            sqrsum = torch.empty(num_splits, num_tokens, device=DEVICE)
+            tf32_hc_prenorm_gemm(x, weight, out, sqrsum, num_splits)
+            stream.synchronize()
+            torch.testing.assert_close(out, ref_out, rtol=1e-3, atol=2e-3)
+            torch.testing.assert_close(sqrsum, ref_sqrsum, rtol=1e-5, atol=2e-3)
+            if previous is not None:
+                torch.testing.assert_close(out, previous[0], rtol=0, atol=0)
+                torch.testing.assert_close(sqrsum, previous[1], rtol=0, atol=0)
+            previous = out, sqrsum
+
+
 @pytest.mark.parametrize(
     "tp,ep,hidden,hc,multicast,expected",
     [
