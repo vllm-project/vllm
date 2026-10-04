@@ -622,6 +622,12 @@ def test_dsv41_flashinfer_dspark_window_matches_reference(
     from vllm.models.deepseek_v41.sparse_mla import (
         DeepseekV41SparseSWAMetadataBuilder,
     )
+    from vllm.v1.worker import workspace
+
+    # The FlashInfer DSV4 workspace comes from the WorkspaceManager.
+    monkeypatch.setattr(
+        workspace, "_manager", workspace.WorkspaceManager(torch.device("cuda"))
+    )
 
     torch.manual_seed(123)
     device = "cuda"
