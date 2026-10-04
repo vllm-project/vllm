@@ -512,20 +512,41 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
             dtype=layer.params_dtype,
             device=input_.device,
         )
+        # Device rows are already local, so every ID in range is owned.
+        self.lookup_rows(
+            layer.weight,
+            layer.weight_scale,
+            layer.weight_scale_2,
+            ids,
+            output,
+            0,
+            layer.weight.shape[0],
+        )
+        return output
+
+    def lookup_rows(
+        self,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_scale_2: torch.Tensor,
+        ids: torch.Tensor,
+        output: torch.Tensor,
+        vocab_start: int,
+        vocab_end: int,
+    ) -> None:
+        """Decode the packed rows for `ids` in `[vocab_start, vocab_end)`."""
         if ids.numel():
-            # Device rows are already local, so every ID in range is owned.
             _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
-                layer.weight,
-                layer.weight_scale,
-                layer.weight_scale_2,
+                weight,
+                weight_scale,
+                weight_scale_2,
                 ids,
                 output,
-                layer.embedding_dim,
-                0,
-                layer.weight.shape[0],
-                BLOCK_D=triton.next_power_of_2(layer.embedding_dim),
+                output.shape[-1],
+                vocab_start,
+                vocab_end,
+                BLOCK_D=triton.next_power_of_2(output.shape[-1]),
             )
-        return output
 
     def lookup_from_pinned(
         self,
@@ -533,16 +554,14 @@ class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         ids: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
+        self.lookup_rows(
             layer._uva_weight,
             self._uva_weight_scale,
             layer.weight_scale_2,
             ids,
             output,
-            layer.embedding_dim,
             layer.shard_indices.org_vocab_start_index,
             layer.shard_indices.org_vocab_end_index,
-            BLOCK_D=triton.next_power_of_2(layer.embedding_dim),
         )
 
     def dequantize(

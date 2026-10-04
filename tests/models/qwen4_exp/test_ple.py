@@ -1504,29 +1504,18 @@ def test_file_gather_nvfp4_stages_packed_rows_and_scales(monkeypatch, tmp_path) 
     assert torch.equal(scale[:3].view(torch.uint8), scales.view(torch.uint8)[ids])
 
 
-@pytest.mark.parametrize(
-    "device",
-    [
-        "cpu",
-        pytest.param(
-            "cuda",
-            marks=pytest.mark.skipif(
-                not torch.cuda.is_available(), reason="CUDA is required"
-            ),
-        ),
-    ],
-)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_file_gather_nvfp4_forward_matches_resident_decode(
-    monkeypatch, tmp_path, device
+    monkeypatch, tmp_path
 ) -> None:
     """The decoded staging rows equal the resident NVFP4 lookup of the same ids."""
     module, codes, scales = _make_nvfp4_file_gather_embedding(
-        monkeypatch, tmp_path, device
+        monkeypatch, tmp_path, "cuda"
     )
     ids = torch.tensor([[7, 0], [3, 3], [5, 7]])
     module.ngram_embedding._host_ids[:3] = ids
     module.ngram_embedding.stage_rows(3)
-    hidden_states = torch.zeros(3, 8, dtype=torch.bfloat16, device=device)
+    hidden_states = torch.zeros(3, 8, dtype=torch.bfloat16, device="cuda")
 
     output = module.ngram_embedding(hidden_states)
 

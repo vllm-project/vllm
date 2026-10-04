@@ -15,11 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
-    dequantize_to_dtype,
-)
 from vllm.model_executor.models.utils import AutoWeightsLoader
-from vllm.triton_utils import triton
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
@@ -29,7 +25,6 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
-    _lookup_nvfp4_ple_embedding_kernel,
 )
 from .ops.ple import ple_ngram_ids
 
@@ -237,30 +232,17 @@ class Qwen4ExpPLEFileGatherEmbedding(Qwen4ExpPLEEmbedding):
         if not self._nvfp4:
             return self._staging[:num_tokens].flatten(-2)
         weight, scale = (self._plane_buffers[n][0] for n in self._planes)
-        num_ids = num_tokens * weight.shape[1]
         output = self._output[:num_tokens]
-        if not weight.is_cuda:
-            output.copy_(
-                dequantize_to_dtype(
-                    weight[:num_tokens].flatten(0, 1),
-                    scale[:num_tokens].flatten(0, 1),
-                    self.weight_scale_2,
-                    output.dtype,
-                    swizzle=False,
-                ).view(output.shape)
-            )
-        elif num_ids:
-            _lookup_nvfp4_ple_embedding_kernel[(num_ids,)](
-                weight,
-                scale,
-                self.weight_scale_2,
-                self._row_ids,
-                output,
-                self.embedding_dim,
-                0,
-                num_ids,
-                BLOCK_D=triton.next_power_of_2(self.embedding_dim),
-            )
+        # Staged rows are compact, so the i-th staged row has id i.
+        self.embedding_method.lookup_rows(
+            weight,
+            scale,
+            self.weight_scale_2,
+            self._row_ids[: num_tokens * weight.shape[1]],
+            output,
+            0,
+            num_tokens * weight.shape[1],
+        )
         return output.flatten(-2)
 
     def start_prefetch(
