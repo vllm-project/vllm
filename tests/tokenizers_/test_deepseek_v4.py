@@ -532,6 +532,56 @@ def test_deepseek_v4_attaches_request_tools_to_existing_system_message():
     assert prompt.count("## Tools") == 1
 
 
+def test_deepseek_v4_request_tools_follow_system_prompt_golden_layout():
+    """Reference encoder layout is `{system}\\n\\n## Tools`, not tools-first."""
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "List /tmp."},
+    ]
+
+    prompt = _tokenizer().apply_chat_template(
+        messages,
+        tools=_request_tools(),
+        tokenize=False,
+        thinking=True,
+        reasoning_effort="low",
+    )
+
+    expected = _encode_reference(
+        [{**messages[0], "tools": _request_tools()}, messages[1]]
+    )
+    assert prompt == expected
+    assert prompt.startswith(
+        "<｜begin▁of▁sentence｜>You are a helpful assistant.\n\n## Tools"
+    )
+    assert prompt.index("You are a helpful assistant.") < prompt.index("## Tools")
+    assert prompt.count("## Tools") == 1
+
+
+def test_deepseek_v4_attaches_request_tools_to_existing_developer_message():
+    """A leading developer message carries tools the same way a system does."""
+    messages = [
+        {"role": "developer", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "List /tmp."},
+    ]
+
+    prompt = _tokenizer().apply_chat_template(
+        messages,
+        tools=_request_tools(),
+        tokenize=False,
+        thinking=True,
+        reasoning_effort="low",
+    )
+
+    expected = _encode_reference(
+        [{**messages[0], "tools": _request_tools()}, messages[1]]
+    )
+    assert prompt == expected
+    assert "You are a helpful assistant.\n\n## Tools" in prompt
+    assert prompt.index("You are a helpful assistant.") < prompt.index("## Tools")
+    assert prompt.count("## Tools") == 1
+
+
 def test_deepseek_v4_synthetic_system_only_when_no_system_message():
     """Without a system message, request tools still get a synthetic leading
     system entry."""
