@@ -2083,6 +2083,71 @@ class TestTruncatedToolOpenerStreamParity:
         assert tool_calls[0].name == "get_weather"
         assert not content
 
+    def test_speculative_chunk_think_end_preserves_tool_call(self):
+        """Regression test for #56077: N-gram speculative decoding chunks
+        must not drop tool calls when </think> and <tool_call> land in one delta.
+        """
+
+        vocab = {
+            "<think>": 90,
+            "</think>": 91,
+            "<tool_call>": 100,
+            "</tool_call>": 101,
+        }
+        tokenizer = make_mock_tokenizer(vocab)
+
+        tool = ChatCompletionToolsParam(
+            type="function",
+            function=FunctionDefinition(
+                name="run_shell_command",
+                parameters={
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                },
+            ),
+        )
+
+        request = MagicMock()
+        request.tools = [tool]
+        request.tool_choice = "auto"
+        request.include_reasoning = True
+
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="qwen3_coder",
+            reasoning_parser_name="qwen3",
+            enable_auto_tools=True,
+        )
+        parser = parser_cls(tokenizer, [tool])
+
+        speculative_deltas = [
+            "<think>I should list files",
+            "</think><tool_call>\n<function=run_shell_command>\n",
+            "<parameter=command>ls</parameter>\n</function>\n</tool_call>",
+        ]
+
+        streamed_calls = []
+        arguments_collected = ""
+        for i, chunk in enumerate(speculative_deltas):
+            token_ids = [tid for t, tid in vocab.items() if t in chunk]
+            delta = parser.parse_delta(
+                chunk,
+                token_ids,
+                request,
+                finished=(i == len(speculative_deltas) - 1),
+            )
+            if delta and delta.tool_calls:
+                streamed_calls.extend(delta.tool_calls)
+                for tc in delta.tool_calls:
+                    if tc.function and tc.function.arguments:
+                        arguments_collected += tc.function.arguments
+
+        assert len(streamed_calls) > 0, "Streamed tool calls were completely dropped!"
+        assert any(
+            tc.function and tc.function.name == "run_shell_command"
+            for tc in streamed_calls
+        )
+        assert json.loads(arguments_collected) == {"command": "ls"}
+
 
 class TestThinkMarkupWithoutReasoningParser:
     """With no reasoning parser configured, reasoning markup is plain
