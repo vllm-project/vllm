@@ -43,6 +43,17 @@ def test_video_embeds_are_embedded_by_4_6():
     assert torch.equal(embeddings[0], embeds)
 
 
+def test_4_6_maps_vision_module_names_for_quantization():
+    """AWQ checkpoints list the unquantized towers in `modules_to_not_convert`
+    by HF module name, which must map to the vLLM module names."""
+    mapper = MiniCPMV4_6ForConditionalGeneration.hf_to_vllm_mapper.get_rename_mapper()
+
+    assert mapper.apply_list(["model.vision_tower", "model.merger"]) == [
+        "vpm",
+        "merger",
+    ]
+
+
 def test_image_and_video_embeds_stay_in_their_own_modality():
     image_embeds = torch.zeros(1, 4, 8)
     video_embeds = torch.ones(1, 4, 8)
