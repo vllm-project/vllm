@@ -169,7 +169,8 @@ def _is_supported(moe, weight_key, activation_key) -> tuple[bool, str]:
 
 @pytest.fixture
 def megakernel_host(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    """A vLLM config without DBO/EPLB/weight transfer, on a supported device."""
+    """A vLLM config without DBO/EPLB/weight transfer, on a supported device
+    with nvshmem4py installed."""
     config = SimpleNamespace(
         weight_transfer_config=None,
         parallel_config=SimpleNamespace(enable_dbo=False, enable_eplb=False),
@@ -178,6 +179,7 @@ def megakernel_host(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(
         FlashInferMoeEpExperts, "_supports_current_device", staticmethod(lambda: True)
     )
+    monkeypatch.setattr(fi_ep, "has_nvshmem4py", lambda: True)
     return config
 
 
@@ -209,6 +211,22 @@ def test_megakernel_reports_its_own_constraints(megakernel_host):
         _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM), kMxfp4Static, None
     )
     assert reason.endswith("EPLB")
+
+
+def test_only_cutedsl_requires_nvshmem4py(
+    megakernel_host, monkeypatch: pytest.MonkeyPatch
+):
+    """CuTeDSL bootstraps NVSHMEM, so the oracle rejects it without nvshmem4py
+    instead of FlashInfer failing after the weights load; DeepGEMM does not
+    need it."""
+    monkeypatch.setattr(fi_ep, "has_nvshmem4py", lambda: False)
+    supported, reason = _is_supported(
+        _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL), kNvfp4Static, kNvfp4Dynamic
+    )
+    assert not supported and "nvshmem4py" in reason
+    assert _is_supported(
+        _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM), kMxfp4Static, None
+    ) == (True, "")
 
 
 def test_megakernels_are_oracle_backends():
