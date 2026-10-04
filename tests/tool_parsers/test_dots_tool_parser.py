@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import time
 from collections.abc import Iterable
 from unittest.mock import MagicMock
 
@@ -273,3 +274,70 @@ def test_streaming_emits_complete_json_before_end_marker_without_duplication(
         '{"query": "chairs"}'
     )
     assert messages[-1].tool_calls == calls
+
+
+def test_unterminated_block_with_whitespace_is_not_cubic(
+    parser: DotsToolParser,
+) -> None:
+    """A short model output must not take seconds to parse.
+
+    ``_block_regex`` matched ``\\s*(.*?)\\s*`` between the markers. Under
+    ``DOTALL`` a dot matches a space too, so those three quantifiers competed
+    for the same run of spaces and a block with no closing marker after it
+    backtracked through every way of splitting that run: a ~3 KB model output
+    cost more than a minute of CPU on the event loop.
+    """
+    request = _request([_tool("get_weather", {"city": {"type": "string"}})])
+    model_output = DotsToolParser.tool_call_start_token + " " * 4096
+
+    start = time.perf_counter()
+    result = parser.extract_tool_calls(model_output, request)
+    elapsed = time.perf_counter() - start
+
+    assert not result.tools_called
+    assert result.content == model_output
+    # Before the fix this took minutes; a generous bound keeps the test stable
+    # on slow CI machines while still failing on the old behaviour.
+    assert elapsed < 5.0, f"parsing took {elapsed:.1f}s"
+
+
+def test_adjacent_blocks_still_parsed_separately(parser: DotsToolParser) -> None:
+    """The capture must stay lazy: a block ends at the *first* closing marker.
+
+    Guards the fix against a rewrite that lets one block swallow the next.
+    """
+    request = _request([_tool("get_weather", {"city": {"type": "string"}})])
+    block = "{}<invoke name=get_weather><parameter name=city>{}</parameter></invoke>{}"
+    model_output = block.format(
+        DotsToolParser.tool_call_start_token,
+        "Paris",
+        DotsToolParser.tool_call_end_token,
+    ) + block.format(
+        DotsToolParser.tool_call_start_token,
+        "Berlin",
+        DotsToolParser.tool_call_end_token,
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 2
+    assert json.loads(result.tool_calls[0].function.arguments) == {"city": "Paris"}
+    assert json.loads(result.tool_calls[1].function.arguments) == {"city": "Berlin"}
+
+
+def test_whitespace_padded_block_content_is_still_stripped(
+    parser: DotsToolParser,
+) -> None:
+    """Making the whitespace runs possessive must not change what is captured."""
+    request = _request([_tool("get_weather", {"city": {"type": "string"}})])
+    model_output = (
+        DotsToolParser.tool_call_start_token + "\n   <invoke name=get_weather>"
+        "<parameter name=city>Paris</parameter></invoke>   \n"
+        + DotsToolParser.tool_call_end_token
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {"city": "Paris"}
