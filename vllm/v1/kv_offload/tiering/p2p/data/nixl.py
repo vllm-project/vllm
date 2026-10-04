@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import itertools
+import threading
 from collections.abc import Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -66,6 +68,23 @@ class NixlTransport(DataTransport):
         # transfer_id → _Inflight(peer_id, handle).
         self._inflight: dict[int, _Inflight] = {}
         self._next_id = itertools.count()
+        # Registration is O(num_blocks) NIXL work — add_remote_agent plus a
+        # prep_xfer_dlist over every block of the peer's region — so it runs
+        # off the scheduler thread, mirroring the NIXL connector's
+        # _handshake_initiation_executor. One worker only: NIXL is not
+        # guaranteed to be thread-safe, so registrations stay serialized
+        # against each other.
+        self._reg_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="vllm-p2p-nixl-reg"
+        )
+        # peer_id → registration generation, bumped on every add and remove.
+        # A worker that finishes building handles under a stale generation
+        # releases them instead of publishing, so a late completion cannot
+        # revive a peer that was reaped or superseded meanwhile.
+        self._peer_gen: dict[str, int] = {}
+        # Guards _peer_gen together with _peer_nixl_names/_remote_dlists so
+        # the generation check and the publish are one atomic step.
+        self._peer_lock = threading.Lock()
 
         self._init(view)
 
@@ -126,23 +145,113 @@ class NixlTransport(DataTransport):
         num_blocks: int,
         block_len: int,
     ) -> None:
+        gen = self._begin_registration(peer_id)
+        nixl_name, remote_dlist = self._build_peer_handles(
+            agent_metadata, base_addr, num_blocks, block_len
+        )
+        self._publish_peer(peer_id, gen, nixl_name, remote_dlist)
+
+    def add_remote_peer_async(
+        self,
+        peer_id: str,
+        agent_metadata: bytes,
+        base_addr: int,
+        num_blocks: int,
+        block_len: int,
+    ) -> Future[None]:
+        gen = self._begin_registration(peer_id)
+
+        def register() -> None:
+            nixl_name, remote_dlist = self._build_peer_handles(
+                agent_metadata, base_addr, num_blocks, block_len
+            )
+            if not self._publish_peer(peer_id, gen, nixl_name, remote_dlist):
+                raise RuntimeError(
+                    f"registration for peer {peer_id} was superseded "
+                    "(peer removed or re-registered while registering)"
+                )
+
+        return self._reg_executor.submit(register)
+
+    def remove_remote_peer(self, peer_id: str) -> None:
+        with self._peer_lock:
+            # Invalidate any registration still being built for this peer so
+            # its worker releases the handles instead of publishing them.
+            self._peer_gen[peer_id] = self._peer_gen.get(peer_id, 0) + 1
+            nixl_name = self._peer_nixl_names.pop(peer_id, None)
+            dlist = self._remote_dlists.pop(peer_id, None)
+        if self._agent is not None:
+            if dlist is not None:
+                self._agent.release_dlist_handle(dlist)
+            if nixl_name:
+                self._agent.remove_remote_agent(nixl_name)
+
+    def _begin_registration(self, peer_id: str) -> int:
+        """Claim the next registration generation for *peer_id*."""
+        with self._peer_lock:
+            gen = self._peer_gen.get(peer_id, 0) + 1
+            self._peer_gen[peer_id] = gen
+            return gen
+
+    def _build_peer_handles(
+        self,
+        agent_metadata: bytes,
+        base_addr: int,
+        num_blocks: int,
+        block_len: int,
+    ) -> tuple[str, Any]:
+        """The expensive half: agent wireup plus one descriptor per block.
+
+        Touches no shared state, so it runs unlocked — holding the peer
+        lock across it would stall the scheduler thread for exactly as
+        long as the registration it is meant to move off that thread.
+        """
         nixl_name = self._agent.add_remote_agent(agent_metadata)
         block_descs = [
             (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)
         ]
         xfer_dlist = self._agent.get_xfer_descs(block_descs, mem_type="DRAM")
         remote_dlist = self._agent.prep_xfer_dlist(nixl_name, xfer_dlist)
-        self._peer_nixl_names[peer_id] = nixl_name
-        self._remote_dlists[peer_id] = remote_dlist
+        return nixl_name, remote_dlist
 
-    def remove_remote_peer(self, peer_id: str) -> None:
-        nixl_name = self._peer_nixl_names.pop(peer_id, None)
-        dlist = self._remote_dlists.pop(peer_id, None)
+    def _publish_peer(
+        self,
+        peer_id: str,
+        gen: int,
+        nixl_name: str,
+        remote_dlist: Any,
+    ) -> bool:
+        """Install freshly built handles, unless *gen* is stale.
+
+        Returns False when the peer was removed or re-registered while the
+        handles were being built; the handles are released here since
+        nothing else ever saw them.
+        """
+        with self._peer_lock:
+            fresh = self._peer_gen.get(peer_id) == gen
+            if fresh:
+                self._peer_nixl_names[peer_id] = nixl_name
+                self._remote_dlists[peer_id] = remote_dlist
+        if fresh:
+            return True
+        logger.info(
+            "NixlTransport %s: discarding superseded registration for peer=%s",
+            self._agent_name,
+            peer_id,
+        )
         if self._agent is not None:
-            if dlist is not None:
-                self._agent.release_dlist_handle(dlist)
-            if nixl_name:
+            try:
+                self._agent.release_dlist_handle(remote_dlist)
                 self._agent.remove_remote_agent(nixl_name)
+            except Exception as exc:
+                logger.warning(
+                    "NixlTransport %s: releasing superseded registration "
+                    "for peer=%s failed: %s",
+                    self._agent_name,
+                    peer_id,
+                    exc,
+                )
+        return False
 
     # ------------------------------------------------------------------
     # Transfer submission and polling
@@ -286,6 +395,9 @@ class NixlTransport(DataTransport):
     # ------------------------------------------------------------------
 
     def close(self) -> None:
+        # Stop accepting registrations and let any in-flight one finish
+        # before the agent goes away underneath it.
+        self._reg_executor.shutdown(wait=True)
         if self._agent is None:
             return
         self._release_handles([entry.handle for entry in self._inflight.values()])
