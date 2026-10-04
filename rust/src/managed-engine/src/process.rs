@@ -17,8 +17,11 @@ use tracing::info;
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const MIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Allocate one ephemeral TCP port for the managed headless-engine handshake on
-/// the given host.
+/// Probe an ephemeral TCP port on `host`.
+///
+/// This closes the listener before returning, so the port can be stolen
+/// before the handshake ROUTER binds. Managed `serve` must bind the
+/// handshake ROUTER first instead of using this helper.
 pub fn allocate_handshake_port(host: &str) -> Result<u16> {
     let listener = TcpListener::bind((host, 0)).context("failed to allocate handshake port")?;
     let port = listener
