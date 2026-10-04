@@ -484,7 +484,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         try:
             sizes = [(image.height, image.width) for image in images]
             mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
-                image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs({})
+                image_sizes=sizes, **self.info.ctx.get_modality_mm_kwargs({}, "image")
             )
             return list(mm_tokens["num_image_patches"])
         except (AttributeError, KeyError, TypeError):
