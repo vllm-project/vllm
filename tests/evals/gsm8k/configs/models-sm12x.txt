@@ -1,0 +1,1 @@
+Qwen3.6-35B-A3B-NVFP4-W4A16-b12x.yaml
