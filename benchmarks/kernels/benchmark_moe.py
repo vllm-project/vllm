@@ -650,6 +650,16 @@ class BenchmarkWorker:
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
                     continue
+                except Exception as e:
+                    # Compilation can also fail with other exception types
+                    # (e.g. Triton MLIR pass errors on newer architectures).
+                    # These are candidate-local: skip them instead of aborting
+                    # the entire tuning run.
+                    print(
+                        f"Skipping config {config}: {type(e).__name__}",
+                        flush=True,
+                    )
+                    continue
 
                 if kernel_time < best_time:
                     best_time = kernel_time
