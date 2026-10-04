@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
+import itertools
 import time
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
+    ReqId,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -28,10 +30,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Slack (seconds) subtracted from D's exported block-expiry deadline on the turn-2
-# readback, absorbing clock-offset error and read latency.
-_KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
-
 
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
@@ -43,12 +41,18 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Requests to a re-registered engine, held back while reads to its
+        # previous registration are still in flight.
+        self._deferred_recvs: dict[ReqId, ReqMeta] = {}
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        for req_id, meta in metadata.reqs_to_recv.items():
+        deferred, self._deferred_recvs = self._deferred_recvs, {}
+        for req_id, meta in itertools.chain(
+            deferred.items(), metadata.reqs_to_recv.items()
+        ):
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block
             )
@@ -72,26 +76,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Aborted cleanup requests have already been removed from the scheduler.
             if meta.awaiting_kvs or any(meta.local_block_ids):
                 self._recving_metadata[req_id] = meta
-            if remote_engine_id not in self._remote_agents:
-                # Initiate handshake with remote engine to exchange metadata.
-                with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
-                        self._background_nixl_handshake(req_id, remote_engine_id, meta)
-                        continue
-
-            # Handshake already completed, start async read xfer.
-            self._read_blocks_for_req(req_id, meta)
+            self._start_recv(req_id, meta)
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
             req_id, meta = self._ready_requests.get_nowait()
-            assert meta.remote is not None
-            if meta.remote.engine_id not in self._remote_agents:
-                # The engine was released after its handshake completed, so
-                # handshake again. This fails if the engine is gone.
-                self._background_nixl_handshake(req_id, meta.remote.engine_id, meta)
-                continue
-            self._read_blocks_for_req(req_id, meta)
+            self._start_recv(req_id, meta)
 
         if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             # Replicated-KV PCP: only PCP rank 0 serves the KV, so this rank
@@ -137,16 +127,28 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # requests sit in the D scheduler WAITING queue.
         self._send_heartbeats(metadata)
 
-    def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
-        """Whether D's cached blocks for this turn-2 readback have (nearly) expired."""
+    def _start_recv(self, req_id: str, meta: ReqMeta) -> None:
+        """Read the request's blocks, handshaking again (after old reads drain) if
+        the engine registered anew; fail a request naming an older registration."""
         assert meta.remote is not None
-        blocks_expiry_time = meta.remote.blocks_expiry_time
-        # Deadline may be absent (router may not forward it) -> read as usual.
-        if blocks_expiry_time is None or not meta.local_physical_block_ids:
-            return False
-        clock_offset = self._engine_clock_offset[meta.remote.engine_id]
-        deadline = blocks_expiry_time - clock_offset
-        return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
+        engine_id = meta.remote.engine_id
+        delta = self._registration_epoch_delta(
+            engine_id, meta.remote.registration_epoch
+        )
+        if delta < 0:
+            # Prefilled before the remote slept: its blocks are gone.
+            self._log_failure("stale_remote_registration", req_id, meta=meta)
+            self._failed_recv_reqs.put(req_id)
+            return
+        if delta > 0:
+            if engine_id in self._engines_with_inflight_transfers():
+                self._deferred_recvs[req_id] = meta
+                return
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+        if engine_id not in self._remote_agents:
+            self._background_nixl_handshake(req_id, engine_id, meta)
+            return
+        self._read_blocks_for_req(req_id, meta)
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
@@ -155,7 +157,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
 
-        if self._bidirectional_kv_xfer_enabled and self._is_turn2_read_expired(meta):
+        if self._is_lease_expired(meta):
+            if not any(meta.local_block_ids):
+                # Nothing to read, and the remote already released the blocks.
+                if meta.awaiting_kvs:
+                    self._recving_transfers.setdefault(req_id, [])
+                return
             logger.warning(
                 "Declining expired remote read for %s from engine %s.",
                 req_id,

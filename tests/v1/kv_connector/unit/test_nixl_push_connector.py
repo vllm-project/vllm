@@ -26,6 +26,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -153,6 +154,7 @@ class TestPushScheduler:
         """D scheduler stashes registration data + arms watchdog deadline."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
+        sched._registration_epoch = 3
 
         request = _make_request(request_id="req-d-1")
         blocks = _BlocksMock(block_ids=([10, 11, 12],))
@@ -164,6 +166,7 @@ class TestPushScheduler:
         # ``request_id`` is D's own vLLM request id; plus our own (D) coords.
         assert reg["request_id"] == request.request_id
         assert reg["decode_engine_id"] == sched.engine_id
+        assert reg["decode_registration_epoch"] == 3
         assert reg["decode_host"] == sched.side_channel_host
         assert reg["decode_port"] == sched.side_channel_port
         assert reg["local_block_ids"] == ([10, 11, 12],)
@@ -195,6 +198,10 @@ class TestPushScheduler:
         assert request.request_id in sched._finished_request_blocks
         assert request.request_id in sched._newly_finished_push_blocks
         assert request.request_id in sched._reqs_need_send  # lease armed
+        # The decoder registers only while this lease holds.
+        expiry = sched._reqs_need_send[request.request_id]
+        assert ret_params["remote_blocks_expiry_time"] == expiry
+        assert ret_params["remote_blocks_lease_duration"] == sched._kv_lease_duration
 
     def test_build_connector_meta_drains_both_sides(self):
         """meta.push_registrations and meta.push_finished_blocks are filled
@@ -347,8 +354,12 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         )
 
         w._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
+        w._sending_engines = {}
         w._send_failures = set()
-        w._sending_transfers_lock = threading.Lock()
+        w._sending_transfers_lock = threading.RLock()
+        w._engine_clock_offset = {}
+        w._kv_lease_duration = 30
+        w._push_failed_reqs = set()
         w._push_finished_blocks = {}
         w._pending_d_registrations = {}
         w._reg_send_inbox = queue.Queue()
@@ -379,6 +390,9 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.pp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
+        w._remote_registration_epochs = {}
+        w._lease_extension = 20
+        w._lease_margin = 5.0
         w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
         w._uses_region_group_mapping = False
@@ -674,6 +688,7 @@ class TestPushWriterStartLoadKv:
 # handshake resolves, then re-drives via ``_deferred_push_inbox``. These call
 # the *real* ``_do_start_push_kv`` (the stub overrides it for matching tests).
 def _real_do_start_push_kv(w, *args):
+    w._reqs_to_process.add(args[0])  # P holds the lease of the blocks it pushes
     return NixlPushConnectorWorker._do_start_push_kv(w, *args)
 
 
@@ -717,6 +732,43 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
     assert meta.remote.engine_id == "decode-engine"
     # RemoteMeta.request_id is D's request id from the registration.
     assert meta.remote.request_id == "req-hs"
+
+
+@pytest.mark.parametrize(
+    ("epoch", "writing_to", "evicted", "written"),
+    [
+        (2, None, True, True),
+        (2, "other-engine", True, True),
+        (2, "decode-engine", False, False),
+        (0, None, False, False),
+    ],
+    ids=["newer", "newer-while-writing-elsewhere", "newer-while-writing", "older"],
+)
+def test_do_start_push_kv_evicts_a_reregistered_decoder_first(
+    epoch, writing_to, evicted, written
+):
+    """A newer decoder epoch evicts the cached handshake before the WRITE, after
+    in-flight WRITEs; an older epoch was aborted by D."""
+    w = _StubWriterWorker.fresh()
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    w._remote_agents["decode-engine"] = {(0, 0): "agent"}
+    w._remote_registration_epochs["decode-engine"] = 1
+    w._cleanup_remote_engine = MagicMock()
+    w._ensure_handshake = lambda *a, **k: None
+    xfer_calls: list[dict[str, Any]] = []
+    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+    if writing_to:
+        w._sending_transfers["other"] = [1]
+        w._sending_engines["other"] = writing_to
+    rd = _registration_data("req-new", decode_engine_id="decode-engine")
+    rd["decode_registration_epoch"] = epoch
+
+    _real_do_start_push_kv(w, "req-new", ([1, 2, 3],), rd)
+
+    assert w._cleanup_remote_engine.call_count == int(evicted)
+    assert [c["req_id"] for c in xfer_calls] == (["req-new"] if written else [])
+    deferred = writing_to == "decode-engine"
+    assert w._deferred_push_inbox.qsize() == int(deferred)
 
 
 def test_do_start_push_kv_drops_request_on_handshake_failure():
@@ -1716,6 +1768,7 @@ class TestPushPrefixCaching:
         w.nixl_wrapper.make_prepped_xfer.return_value = 7
         w._ensure_handshake = lambda *a, **k: None
         w._logical_to_kernel_block_ids = lambda x, ratio: x
+        w._reqs_to_process = {"req-pc", "req-full", "req-groups"}  # leased
         return w, engine_id
 
     @staticmethod
@@ -2157,3 +2210,101 @@ def test_layer_handshake_rejects_unsupported_geometry(
     assert not worker.kv_caches_base_addr
     with pytest.raises(KeyError):
         worker.transfer_topo.get_engine_info(metadata.engine_id)
+
+
+def test_decoder_registers_only_leases_the_prefiller_holds():
+    """A push decoder fails instead of registering a request within the margin of
+    the exported lease expiry; without an expiry it registers as before."""
+    w = _StubWriterWorker.fresh()
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    w._ensure_handshake = lambda *a, **k: None
+    w._engine_clock_offset = {"prefill-engine": 0.0}
+    sent: list[str] = []
+    w._do_send_reg_notif = lambda rid, rd: sent.append(rid)
+    now = time.perf_counter()
+    leases = {"held": now + 60, "ending": now + 4, "ended": now - 1, "unknown": None}
+    metadata = NixlConnectorMetadata()
+    for rid, expiry in leases.items():
+        metadata.add_new_req_to_recv(
+            request_id=rid,
+            local_block_ids=([1, 2, 3],),
+            kv_transfer_params={
+                "remote_block_ids": (),
+                "remote_engine_id": "prefill-engine",
+                "remote_request_id": f"p-{rid}",
+                "remote_host": "localhost",
+                "remote_port": 1234,
+                "remote_blocks_expiry_time": expiry,
+            },
+        )
+    w.start_load_kv(metadata)
+
+    for rid in leases:
+        NixlPushConnectorWorker._send_registration_to_p(w, rid, _registration_data(rid))
+
+    assert sent == ["held", "unknown"]
+    assert list(w._failed_recv_reqs.queue) == ["ending", "ended"]
+
+
+def test_push_writes_only_blocks_still_leased():
+    """The producer never WRITEs blocks whose lease it reaped and tells every
+    decoder rank, which fails exactly that request."""
+    w = _StubWriterWorker.fresh()
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    w._ensure_handshake = lambda *a, **k: None
+    w.nixl_wrapper = MagicMock()
+    w._remote_agents = {"decode-engine": {(0, 0): "d0", (0, 1): "d1"}}
+    w.world_size = 2
+    xfer_calls: list[dict[str, Any]] = []
+    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+    w._reqs_to_send = {"leased": 0.0, "expired": 0.0}
+    w.expected_consumer_notifications_by_req = {}
+    w._reqs_to_process = {"leased", "expired"}
+    reaping_under_lock: list[bool] = []
+
+    class _Lock:
+        def __enter__(self):
+            reaping_under_lock.append(True)
+
+        def __exit__(self, *exc):
+            return False
+
+    w._sending_transfers_lock = _Lock()
+    NixlPushConnectorWorker._reap_expired_send_leases(w, set())  # both expired
+    assert reaping_under_lock  # the WRITE below checks the lease under it
+    w._reqs_to_process.add("leased")
+
+    for rid in ("leased", "expired"):
+        NixlPushConnectorWorker._do_start_push_kv(
+            w, rid, ([1, 2, 3],), _registration_data(rid)
+        )
+
+    assert [c["req_id"] for c in xfer_calls] == ["leased"]
+    send_calls = w.nixl_wrapper.send_notif.call_args_list
+    assert [c.args[0] for c in send_calls] == ["d0", "d1"]
+    # Names the producer TP size, as a completion does: D counts it per producer.
+    assert {c.kwargs["notif_msg"] for c in send_calls} == {b"PUSH_FAIL:expired:2"}
+
+
+@pytest.mark.parametrize(
+    ("notifs", "failed", "done"),
+    [
+        ([b"PUSH_FAIL:r:2"], [], set()),  # the sibling producer still writes
+        ([b"PUSH_FAIL:r:2", b"r:2"], ["r"], set()),
+        ([b"r:2", b"PUSH_FAIL:r:2"], ["r"], set()),
+        ([b"r:2", b"r:2"], [], {"r"}),
+        ([b"PUSH_FAIL:gone:2", b"PUSH_FAIL:gone:2"], [], set()),  # not waited for
+    ],
+    ids=["one-failed", "failed-then-done", "done-then-failed", "both-done", "unknown"],
+)
+def test_decoder_fails_a_push_only_once_every_producer_reported(notifs, failed, done):
+    """With two producers, a PUSH_FAIL fails the request only once the other
+    producer has finished writing too."""
+    d = _StubWriterWorker.fresh()
+    d.transfer_topo = MagicMock()
+    d._recving_metadata = {"r": SimpleNamespace(pp_size=1)}
+    for notif in notifs:
+        d._pending_completion_notifs.put(notif)
+    NixlPushConnectorWorker._get_new_notifs(d)
+    assert list(d._failed_recv_reqs.queue) == failed
+    assert set(d._recving_transfers) == done

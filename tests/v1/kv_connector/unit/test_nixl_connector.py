@@ -48,6 +48,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnectorWorker,
     NixlHandshakePayload,
     NixlKVConnectorStats,
+    NixlPushConnector,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     RemoteMeta,
@@ -501,16 +502,15 @@ def test_kv_transfer_handshake(dist_init):
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         decode_connector.register_kv_caches(kv_caches)
+        decode_worker = decode_connector.connector_worker
 
         # Here we are testing the retrieval of NIXLAgentMetadata.
         # Knowing the implementation detail, we override the add_remote_agent
         # to validate the metadata received is the same as the one in prefill_connector.
-        with patch.object(
-            decode_connector.connector_worker, "add_remote_agent"
-        ) as mock_add_remote_agent:
+        with patch.object(decode_worker, "add_remote_agent") as mock_add_remote_agent:
             mock_add_remote_agent.return_type = "remote_agent"
 
-            decode_connector.connector_worker._nixl_handshake(
+            decode_worker._nixl_handshake(
                 kv_connector_metadata["remote_host"],
                 kv_connector_metadata["remote_port"],
                 kv_connector_metadata["tp_size"],
@@ -521,6 +521,41 @@ def test_kv_transfer_handshake(dist_init):
             assert received_metadata[0] == expected_agent_metadata
             assert received_metadata[1] == 0  # remote_tp_rank
             assert received_metadata[2] == 1  # remote_tp_size
+
+        # The request and the loaded metadata name the same registration.
+        engine_id = kv_connector_metadata["remote_engine_id"]
+        assert kv_connector_metadata["remote_registration_epoch"] == 1
+        assert decode_worker._remote_registration_epochs[engine_id] == 1
+
+        # Re-registration after sleep: the scheduler learns and serves the new epoch.
+        prefill_connector.release_kv_caches()
+        assert prefill_connector.get_handshake_metadata() is None
+        prefill_connector.restore_kv_caches()
+        metadata = prefill_connector.get_handshake_metadata()
+        assert metadata.registration_epoch == 2
+        scheduler_connector.set_xfer_handshake_metadata_pp_aware(
+            {(0, 0): metadata, (0, 1): metadata}
+        )
+        request = create_request(
+            request_id=2,
+            block_size=BLOCK_SIZE,
+            num_tokens=NUM_TOKENS,
+            do_remote_decode=True,
+        )
+        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+        _, kv_connector_metadata = scheduler_connector.request_finished_all_groups(
+            request, ([0, 1, 2],)
+        )
+        assert kv_connector_metadata["remote_registration_epoch"] == 2
+        with patch.object(decode_worker, "add_remote_agent") as mock_add_remote_agent:
+            decode_worker._nixl_handshake(
+                kv_connector_metadata["remote_host"],
+                kv_connector_metadata["remote_port"],
+                2,
+                engine_id,
+            )
+        assert [c.args[1] for c in mock_add_remote_agent.call_args_list] == [0, 1]
+        assert decode_worker._remote_registration_epochs[engine_id] == 2
 
         # Need to shutdown the background thread to release NIXL side channel port
         scheduler_connector.shutdown()
@@ -2118,6 +2153,8 @@ def recv_worker():
     worker._physical_blocks_per_logical_kv_block = 1
     worker._recving_metadata = {"request": MagicMock(local_block_ids=([1, 2, 3],))}
     worker._recving_transfers = defaultdict(list)
+    worker._deferred_recvs = {}
+    worker._remote_registration_epochs = {}
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
     worker._handshake_lock = threading.RLock()
@@ -2592,6 +2629,289 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         assert mock_dereg.call_count == 2
         mock_dereg.assert_any_call("desc1")
         mock_dereg.assert_any_call("desc2")
+
+
+# ── KV cache re-registration (sleep mode) ───────────────────────────
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+@pytest.mark.parametrize(
+    ("connector_cls", "transfers"),
+    [(NixlConnector, "_recving_transfers"), (NixlPushConnector, "_sending_transfers")],
+    ids=["pull", "push"],
+)
+def test_release_kv_caches_is_the_inverse_of_register(
+    default_vllm_config, dist_init, connector_cls, transfers
+):
+    """Release drops every registration and peer so restore rebuilds the same layout
+    under a new epoch; both idempotent; release times out past the lease."""
+    vllm_config = create_vllm_config()
+    vllm_config.cache_config.kv_cache_layout = "LBHNC"
+    kv_cache_config = make_kv_cache_config(block_size=16)
+    connector = connector_cls(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+    worker = connector.connector_worker
+    nixl_wrapper = worker.nixl_wrapper
+    kv_cache_spec = cast(
+        AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    )
+    raw = torch.zeros(
+        kv_cache_spec.page_size_bytes * kv_cache_config.num_blocks * 2, dtype=torch.int8
+    )
+    kv_caches = dict(
+        zip(
+            ("layer0", "layer2"),
+            dense_kv_cache_views(
+                raw,
+                kv_cache_spec,
+                kv_cache_config.num_blocks,
+                num_layers=2,
+                layout=KVCacheLayout.LBHNC,
+            ),
+        )
+    )
+
+    def layout():
+        return (
+            list(worker.block_len_per_layer),
+            list(worker.block_stride_per_layer),
+            list(worker.region_names),
+            list(worker.region_group_ids),
+            list(worker.region_num_blocks),
+            list(worker._region_is_mla),
+            list(worker.kv_caches_base_addr[worker.engine_id][worker.tp_rank]),
+        )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch.object(nixl_wrapper, "register_memory") as mock_reg,
+        patch.object(nixl_wrapper, "deregister_memory") as mock_dereg,
+        patch.object(nixl_wrapper, "release_dlist_handle") as mock_rel_dlist,
+        patch.object(nixl_wrapper, "remove_remote_agent") as mock_rem_agent,
+    ):
+        assert NixlConnector.supports_sleep_mode(vllm_config.kv_transfer_config)
+        connector.register_kv_caches(kv_caches)
+        registered = [c.args[0] for c in mock_reg.call_args_list]
+        prepared = set(worker.src_xfer_handles_by_block_size.values())
+        first_layout = layout()
+        assert len(worker.region_names) == 2 and len(prepared) == 1
+        assert connector.get_handshake_metadata().registration_epoch == 1
+        # A peer handshaken after registration, with a descriptor list on it.
+        worker._remote_agents["peer"] = {(0, 0): "peer_agent"}
+        worker.dst_xfer_side_handles["peer"] = {0: 700}
+        worker._remote_registration_epochs["peer"] = 4
+        worker._engine_last_active["peer"] = time.perf_counter()
+        deferred = getattr(worker, "_deferred_push_inbox", None)
+        if deferred is not None:
+            # A push whose handshake finished during the drain: its blocks go.
+            deferred.put(("req", ([1],), {}))
+
+        connector.release_kv_caches()
+        connector.release_kv_caches()  # idempotent: sleeping after a discard
+
+        assert [c.args[0] for c in mock_dereg.call_args_list] == registered
+        assert {c.args[0] for c in mock_rel_dlist.call_args_list} == prepared | {700}
+        mock_rem_agent.assert_called_once_with("peer_agent")
+        assert worker._remote_agents == {} and worker._remote_registration_epochs == {}
+        assert worker._registered_descs == []
+        assert worker.src_xfer_handles_by_block_size == {}
+        assert connector.get_handshake_metadata() is None
+        assert deferred is None or deferred.empty()
+
+        # A restore that fails after registering memory is redone by the retry,
+        # releasing what the failed attempt registered.
+        mock_reg.reset_mock()
+        mock_dereg.reset_mock()
+        with (
+            patch.object(
+                nixl_wrapper, "prep_xfer_dlist", side_effect=RuntimeError("prep")
+            ),
+            pytest.raises(RuntimeError, match="prep"),
+        ):
+            connector.restore_kv_caches()
+        partial = [c.args[0] for c in mock_reg.call_args_list]
+        assert partial
+        mock_reg.reset_mock()
+        connector.restore_kv_caches()
+        assert [c.args[0] for c in mock_dereg.call_args_list] == partial
+
+        mock_reg.reset_mock()
+        connector.restore_kv_caches()  # idempotent: a retried wake-up
+
+        assert mock_reg.call_args_list == []
+        assert layout() == first_layout
+        assert set(worker.src_xfer_handles_by_block_size) == {worker.block_size}
+        assert connector.get_handshake_metadata().registration_epoch == 2
+
+        def release_waits_for(make_busy, make_idle=None) -> float:
+            mock_dereg.reset_mock()
+            mock_rel_dlist.reset_mock()
+            descs = list(worker._registered_descs)
+            dlists = set(worker.src_xfer_handles_by_block_size.values())
+            make_busy()
+            start = time.perf_counter()
+            connector.release_kv_caches()
+            took = time.perf_counter() - start
+            # No registration or descriptor list outlives its cycle.
+            assert [c.args[0] for c in mock_dereg.call_args_list] == descs
+            assert {c.args[0] for c in mock_rel_dlist.call_args_list} == dlists
+            if make_idle is not None:
+                make_idle()
+            connector.restore_kv_caches()
+            assert len(worker._registered_descs) == len(registered)
+            return took
+
+        # A transfer this worker issued: waited for until its handle is done.
+        states = iter(["PROC"] * 3 + ["DONE"] * 1000)
+        with patch.object(
+            nixl_wrapper, "check_xfer_state", side_effect=lambda h: next(states)
+        ):
+            release_waits_for(
+                lambda: getattr(worker, transfers).update(req=[123]),
+                lambda: getattr(worker, transfers).clear(),
+            )
+        assert next(states) == "DONE"  # polled until it was no longer processing
+        # A block leased to a peer, and a peer's read of a just-reaped lease.
+        assert (
+            release_waits_for(
+                lambda: worker._reqs_to_send.update(leased=time.perf_counter() + 0.3),
+                worker._reqs_to_send.clear,
+            )
+            >= 0.3
+        )
+        assert (
+            release_waits_for(
+                lambda: setattr(
+                    worker, "_lease_quarantine_until", time.perf_counter() + 0.3
+                )
+            )
+            >= 0.3
+        )
+        assert connector.get_handshake_metadata().registration_epoch == 5
+
+        # Past the lease duration the release fails without releasing anything,
+        # and this rank names the epoch the other ranks register anew in.
+        mock_dereg.reset_mock()
+        worker._kv_lease_duration, worker._lease_margin = 0.1, 0.0
+        worker._reqs_to_send["leased"] = time.perf_counter() + 30
+        writer = getattr(worker, "_push_writer_thread", None)
+        with pytest.raises(TimeoutError):
+            connector.release_kv_caches()
+        mock_dereg.assert_not_called()
+        assert worker._registered_descs
+        assert connector.get_handshake_metadata().registration_epoch == 6
+        if transfers == "_sending_transfers":
+            # The writer was stopped for the release and runs again afterwards.
+            assert writer is not None and not writer.is_alive()
+            assert worker._push_writer_thread.is_alive()
+        worker._reqs_to_send.clear()
+        connector.shutdown()
+
+
+class _EpochNixlConnectorWorker(FakeNixlConnectorWorker):
+    """Fake worker whose handshakes record the remote registration epoch."""
+
+    remote_registration_epoch = 1
+
+    def _nixl_handshake(self, *args, **kwargs):
+        result = super()._nixl_handshake(*args, **kwargs)
+        self._remote_registration_epochs[self.REMOTE_ENGINE_ID] = (
+            self.remote_registration_epoch
+        )
+        return result
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_pull_handshakes_again_for_a_new_registration_epoch(
+    default_vllm_config, dist_init
+):
+    """A newer remote epoch evicts and redoes the handshake once old reads drain;
+    the cached epoch reads right away."""
+    vllm_config = create_vllm_config()
+    kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=10)
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+    connector.connector_worker = worker = _EpochNixlConnectorWorker(
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0,
+        kv_cache_config=kv_cache_config,
+    )
+    handshakes = patch.object(worker, "_nixl_handshake", wraps=worker._nixl_handshake)
+    reads = patch.object(worker, "_read_blocks", wraps=worker._read_blocks)
+    handshakes, reads = handshakes.start(), reads.start()
+    dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+
+    def load(req_id: str, epoch: int | None) -> None:
+        metadata = NixlConnectorMetadata()
+        metadata.add_new_req_to_recv(
+            request_id=req_id,
+            local_block_ids=([1, 2, 3],),
+            kv_transfer_params={
+                "remote_block_ids": ([4, 5, 6],),
+                "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                "remote_registration_epoch": epoch,
+                "remote_request_id": f"prefill-{req_id}",
+                "remote_host": "localhost",
+                "remote_port": 1234,
+                "remote_tp_size": 1,
+            },
+        )
+        connector.bind_connector_metadata(metadata)
+        connector.start_load_kv(dummy_ctx)
+        connector.clear_connector_metadata()
+
+    def step() -> set[str]:
+        connector.bind_connector_metadata(NixlConnectorMetadata())
+        connector.start_load_kv(dummy_ctx)
+        connector.clear_connector_metadata()
+        return connector.get_finished(finished_req_ids=set())[1]
+
+    def drain(*req_ids: str) -> None:
+        done: set[str] = set()
+        for _ in range(500):
+            done |= step()
+            if done.issuperset(req_ids):
+                return
+            time.sleep(0.01)
+        raise AssertionError(f"{set(req_ids) - done} never finished")
+
+    load("req1", 1)
+    drain("req1")
+    load("req2", 1)
+    drain("req2")
+    assert (handshakes.call_count, reads.call_count) == (1, 2)
+
+    # The remote registers anew while req3 (old epoch) is still being read.
+    worker.nixl_wrapper._cycles_before_xfer_done = 3
+    load("req3", 1)
+    worker.remote_registration_epoch = 2
+    load("req4", 2)
+    assert (handshakes.call_count, reads.call_count) == (1, 3)
+    assert set(worker._deferred_recvs) == {"req4"}
+
+    drain("req3", "req4")
+    assert (handshakes.call_count, reads.call_count) == (2, 4)
+    assert worker._remote_registration_epochs == {
+        FakeNixlConnectorWorker.REMOTE_ENGINE_ID: 2
+    }
+
+    # A request prefilled before the remote slept names epoch 1: it fails.
+    load("req5", 1)
+    results = connector.get_transfer_results(finished_req_ids=set())
+    assert results.failed_recving == {"req5"}
+    assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
+    assert (handshakes.call_count, reads.call_count) == (2, 4)
+
+    # An epoch recorded by a handshake whose agents are not installed (yet,
+    # or ever) says nothing about cached keys: no eviction, no stale failure.
+    worker._remote_registration_epochs["half-handshaken"] = 3
+    assert worker._registration_epoch_delta("half-handshaken", 1) == 0
+    assert worker._registration_epoch_delta("half-handshaken", 5) == 0
 
 
 # ── TTL-based remote engine eviction tests ──────────────────────────
@@ -4258,3 +4578,165 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
         )
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_decoder_reads_only_while_the_prefillers_lease_holds(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """Requests scheduled within the margin of the exported lease expiry fail the
+    load, however long they heartbeated; all others are read."""
+    vllm_config = create_vllm_config()
+    kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=64)
+    clock = [1000.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    scheduler = NixlConnectorScheduler(
+        vllm_config, vllm_config.kv_transfer_config.engine_id, kv_cache_config
+    )
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+    connector.connector_worker = worker = FakeNixlConnectorWorker(
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0,
+        kv_cache_config=kv_cache_config,
+    )
+    reads = patch.object(worker, "_read_blocks", wraps=worker._read_blocks).start()
+    remote = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
+    worker._ensure_handshake(remote, "localhost", 1234, 1)
+    while remote not in worker._remote_agents:
+        time.sleep(0.01)
+    worker._engine_clock_offset[remote] = 0.0
+
+    def arrive(num: int):
+        request = create_request(request_id=num, do_remote_prefill=True)
+        request.kv_transfer_params.update(
+            remote_engine_id=remote,
+            remote_block_ids=([4, 5, 6],),
+            remote_blocks_expiry_time=clock[0] + 30,  # kv_lease_duration
+        )
+        scheduler.on_new_request(request)
+        return request
+
+    failed: set[str] = set()
+    done: set[str] = set()
+
+    def step(now: float, admit=()) -> None:
+        clock[0] = now
+        for request in admit:
+            block = int(request.request_id.rsplit("-", 1)[1])
+            scheduler._reqs_need_recv[request.request_id] = (
+                request,
+                ([block],),
+                (),
+                True,
+            )
+        connector.bind_connector_metadata(scheduler.build_connector_meta(MagicMock()))
+        connector.start_load_kv(MagicMock())
+        connector.clear_connector_metadata()
+        for _ in range(100):
+            results = connector.get_transfer_results(finished_req_ids=set())
+            failed.update(results.failed_recving)
+            done.update(results.finished_recving)
+            if not worker._recving_transfers:
+                break
+
+    queued = [arrive(i) for i in range(1, 33)]  # leased until 1030
+    step(1000)  # heartbeats go out every 5 s while the decoder runs
+    step(1005, queued[0:4])
+    step(1010)
+    step(1015, queued[4:8])
+    step(1020)
+    step(1024, queued[8:12])  # 6 s left: read
+    step(1026, queued[12:16])  # within the 5 s margin: declined
+    # Asleep from 1026 to 1090.
+    clock[0] = 1090.0
+    fresh = arrive(40)  # prefilled after the wake-up: leased until 1120
+    for i, now in enumerate(range(1090, 1094)):
+        step(now, queued[16 + 4 * i : 20 + 4 * i])
+    step(1094, [fresh])
+
+    ids = [r.request_id for r in queued]
+    assert failed == set(ids[12:])
+    assert done == set(ids) | {fresh.request_id}
+    assert [c.kwargs["request_id"] for c in reads.call_args_list] == ids[:12] + [
+        fresh.request_id
+    ]
+    assert worker.get_block_ids_with_load_errors() == set(range(13, 33))
+    scheduler.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("local_lease", "remote_lease", "offset", "expired"),
+    [
+        (30, None, 0.0, True),  # an older remote: our 5 s margin covers 3 s
+        (4, None, 0.0, False),  # our short lease: a 1 s margin
+        (30, 4, 0.0, False),  # the remote's short lease decides: 1 s margin
+        (4, 30, 0.0, True),  # the remote's long lease decides: 5 s margin
+        (30, 4, None, True),  # the remote was evicted: its lease is unknown
+    ],
+)
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_lease_margin_follows_the_remote_lease(
+    dist_init, local_lease, remote_lease, offset, expired
+):
+    """The safety margin is a fraction of the lease the remote granted, so a
+    short lease stays usable whatever the local configuration."""
+    vllm_config = create_vllm_config(
+        kv_connector_extra_config={"kv_lease_duration": local_lease}
+    )
+    worker = FakeNixlConnectorWorker(
+        vllm_config,
+        vllm_config.kv_transfer_config.engine_id,
+        hand_shake_latency=0,
+        kv_cache_config=make_kv_cache_config(block_size=16),
+    )
+    if offset is not None:
+        worker._engine_clock_offset["remote"] = offset
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req",
+        local_block_ids=([1],),
+        kv_transfer_params={
+            "remote_block_ids": ([1],),
+            "remote_engine_id": "remote",
+            "remote_request_id": "p-req",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_blocks_expiry_time": time.perf_counter() + 3.0,
+            "remote_blocks_lease_duration": remote_lease,
+        },
+    )
+    assert worker._is_lease_expired(metadata.reqs_to_recv["req"]) is expired
+
+
+@pytest.mark.parametrize(
+    ("sleep_mode", "cumem"),
+    [(False, False), (True, True), (False, True)],
+    ids=["neither", "sleep-mode", "cumem-allocator-only"],
+)
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_sleep_mode_disables_the_ucx_registration_cache(
+    dist_init, monkeypatch, sleep_mode, cumem
+):
+    """With sleep mode, UCX's registration cache is disabled before the agent
+    starts, since it keeps deregistered memory pinned; a user setting wins."""
+    monkeypatch.delenv("UCX_RCACHE_ENABLE", raising=False)
+    vllm_config = create_vllm_config()
+    vllm_config.model_config.enable_sleep_mode = sleep_mode
+    vllm_config.model_config.enable_cumem_allocator = cumem
+    FakeNixlConnectorWorker(
+        vllm_config,
+        vllm_config.kv_transfer_config.engine_id,
+        hand_shake_latency=0,
+        kv_cache_config=make_kv_cache_config(block_size=16),
+    )
+    assert os.environ.get("UCX_RCACHE_ENABLE") == ("n" if cumem else None)

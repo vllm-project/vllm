@@ -24,6 +24,8 @@ GET_META_MSG = b"get_meta_msg"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+# P worker -> D worker: P will not push this D request (its lease ended).
+PUSH_FAIL_NOTIF_PREFIX = b"PUSH_FAIL:"
 #
 # NIXL Connector Version
 #
@@ -49,8 +51,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
+#  14: Add registration_epoch to the handshake payload and kv_transfer_params
 #
-NIXL_CONNECTOR_VERSION: int = 13
+NIXL_CONNECTOR_VERSION: int = 14
 
 
 @dataclass
@@ -94,6 +97,9 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 
     compatibility_hash: str
     agent_metadata_bytes: bytes  # NixlAgentMetadata encoded
+    # Number of KV cache release attempts plus one, equal on all ranks of the
+    # engine: a registration made in a later epoch has new keys.
+    registration_epoch: int = 0
 
 
 def _get_speculative_compatibility_factors(
@@ -232,7 +238,9 @@ class RemoteMeta:
     engine_id: str
     request_id: str
     blocks_expiry_time: float | None = None
+    blocks_lease_duration: float | None = None
     num_tokens: int | None = None
+    registration_epoch: int | None = None
 
 
 @dataclass
@@ -332,6 +340,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             host=kv_transfer_params["remote_host"],
             port=kv_transfer_params["remote_port"],
             blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
+            blocks_lease_duration=kv_transfer_params.get(
+                "remote_blocks_lease_duration"
+            ),
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
+            registration_epoch=kv_transfer_params.get("remote_registration_epoch"),
         )
         self.reqs_to_recv[request_id] = req
