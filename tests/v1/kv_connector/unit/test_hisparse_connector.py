@@ -154,7 +154,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     leaves pre-draft rows on the host, and the page is still reported clean.
     """
     block_size, width = 4, 8
-    resident_block, host_block, transfer_id = 2, 1, 7
+    resident_block, host_block, transfer_id, step_id = 2, 1, 7, 11
     log: list[tuple[str, object]] = []
     _FakeEvent.log = log
 
@@ -243,6 +243,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
                 )
             },
             True,
+            step_id=step_id,
         )
     )
     # A verification step: four query tokens of one request fill the page.
@@ -285,7 +286,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         num_tokens=0,
         attn_metadata={},
     )
-    ((completion_event, _),) = worker._pending_transfer_events
+    (completion_event, _), _ = worker._pending_transfer_events
     worker_meta = connector.build_connector_worker_meta()
 
     host_rows = slice(host_block * block_size, (host_block + 1) * block_size)
@@ -314,8 +315,10 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     )
     assert compute_stream.wait_event.call_args_list[0].args == (draft_copy_event,)
     assert worker_meta is not None
-    assert worker_meta.enqueued_transfer_counts == {transfer_id: 1}
-    assert worker_meta.completed_transfer_counts == {transfer_id: 1}
+    # The step's deferred writes are reported, so the scheduler can release
+    # host blocks it freed after the step.
+    assert worker_meta.enqueued_transfer_counts == {transfer_id: 1, step_id: 1}
+    assert worker_meta.completed_transfer_counts == {transfer_id: 1, step_id: 1}
 
 
 def test_scheduled_prefix_hit_publishes_adopted_copies():

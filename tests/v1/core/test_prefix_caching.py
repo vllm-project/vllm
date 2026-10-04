@@ -782,6 +782,43 @@ def test_hisparse_deferred_free_retains_host_blocks_until_fence():
     assert manager.block_pool.get_num_free_blocks() == device_free
 
 
+def test_hisparse_holds_freed_host_blocks_until_step_writes_land():
+    """A P/D import must not reuse host blocks the last step still writes.
+
+    Workers copy a step's draft-layer rows and page spills to host at the next
+    step's start, after the scheduler may already have freed those host blocks.
+    Handing one to a NIXL import first would let the late copy overwrite it.
+    """
+    manager = make_hisparse_kv_cache_manager(64, 4)
+    coordinator = get_hisparse_coordinator(manager)
+    host_pool = coordinator.get_host_block_pool()
+    assert host_pool is not None
+    host_free = host_pool.get_num_free_blocks()
+    num_tokens = host_free * HISPARSE_BLOCK_SIZE
+    finished = make_request(
+        "finished", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert manager.allocate_slots(finished, num_tokens, delay_cache_blocks=True)
+    assert host_pool.get_num_free_blocks() == 0
+    step_id = coordinator.begin_step()
+    manager.free(finished)
+    assert coordinator.has_pending_work()
+
+    imported = make_request(
+        "imported",
+        list(range(1000, 1000 + HISPARSE_BLOCK_SIZE)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+    assert allocate_external_prefix(manager, imported, HISPARSE_BLOCK_SIZE) is None
+    coordinator.update_spills({step_id: 1}, {})
+    assert allocate_external_prefix(manager, imported, HISPARSE_BLOCK_SIZE) is None
+
+    coordinator.update_spills({}, {step_id: 1})
+    assert host_pool.get_num_free_blocks() == host_free
+    assert allocate_external_prefix(manager, imported, HISPARSE_BLOCK_SIZE)
+
+
 def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
     """Host-only copy-on-write work must reach the worker copy queue."""
     manager = make_hisparse_kv_cache_manager(16, 16)
@@ -799,7 +836,8 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
     connector = HiSparseConnectorScheduler(async_speculative=False)
     connector.bind_coordinator(coordinator)
     output = SchedulerOutput.make_empty()
-    copies = connector.build_connector_meta(output).host_block_copies
+    metadata = connector.build_connector_meta(output)
+    copies = metadata.host_block_copies
     assert output.has_sync_kv_loads
 
     assert new_blocks and new_block_ids == []
@@ -812,7 +850,9 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
     connector.update_connector_output(
         KVConnectorOutput(
             kv_connector_worker_meta=HiSparseConnectorWorkerMetadata(
-                {}, {}, completed_host_copy_dst_ids=(copies[0].dst_block_id,)
+                {metadata.step_id: 1},
+                {metadata.step_id: 1},
+                completed_host_copy_dst_ids=(copies[0].dst_block_id,),
             )
         )
     )
