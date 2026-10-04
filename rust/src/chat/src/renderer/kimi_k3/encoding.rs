@@ -281,6 +281,7 @@ fn content_is_empty(content: &ChatContent) -> bool {
             | ChatContentPart::VideoUrl { .. }
             | ChatContentPart::InputAudio { .. }
             | ChatContentPart::AudioUrl { .. } => false,
+            ChatContentPart::ImageEmbeds { .. } => false,
         }),
     }
 }
@@ -484,6 +485,9 @@ fn write_content(
                     }
                     ChatContentPart::AudioUrl { .. } => {
                         return Err(Error::UnsupportedMultimodalContent("audio_url"));
+                    }
+                    ChatContentPart::ImageEmbeds{ .. } => {
+                        return Err(Error::UnsupportedMultimodalContent("image_embeds"));
                     }
                 }
             }
