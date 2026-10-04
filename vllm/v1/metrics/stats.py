@@ -361,6 +361,18 @@ class RequestSpecDecodeMetrics:
             self.per_step_accepted.append(num_accepted)
             self.per_step_drafted.append(num_draft_tokens)
 
+    def merge(self, other: "RequestSpecDecodeMetrics") -> None:
+        """Accumulate another sequence's stats, e.g. a later generation turn."""
+        assert other.num_spec_tokens == self.num_spec_tokens, (
+            f"cannot merge num_spec_tokens={other.num_spec_tokens} into "
+            f"num_spec_tokens={self.num_spec_tokens}"
+        )
+        for j, count in enumerate(other.histogram):
+            self.histogram[j] += count
+        self.num_draft_tokens += other.num_draft_tokens
+        self.per_step_accepted.extend(other.per_step_accepted)
+        self.per_step_drafted.extend(other.per_step_drafted)
+
     def to_dict(self) -> dict[str, Any]:
         """Payload matching ``SpeculativeDecodingMetrics`` for the response.
 
