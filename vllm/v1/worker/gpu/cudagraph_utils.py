@@ -19,10 +19,13 @@ from vllm.compilation.breakable_cudagraph import (
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
+from vllm.compilation.cudagraph_pool import (
+    capture_outside_cumem_pool,
+    capture_pool,
+)
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
     get_pp_group,
     graph_capture,
@@ -481,15 +484,14 @@ class CudaGraphManager:
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
-                        if self.pool is not None:
-                            set_graph_pool_id(self.pool)
-                        else:
-                            set_graph_pool_id(current_platform.graph_pool_handle())
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
-                        with torch.cuda.graph(
-                            graph, self.pool, stream=self._capture_stream(desc)
+                        with (
+                            capture_pool(self.pool, self.vllm_config) as pool,
+                            torch.cuda.graph(
+                                graph, pool, stream=self._capture_stream(desc)
+                            ),
                         ):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
@@ -941,7 +943,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             mem_samples: list[int] = []
             manager._capture_mem_samples = mem_samples
 
-            measured = int(runner.capture_model(profile_only=True))
+            with capture_outside_cumem_pool():
+                measured = int(runner.capture_model(profile_only=True))
 
             # The measured delta covers PIECEWISE, encoder and speculator graphs
             # plus the sampled FULL graphs; swap the sampled FULL cost for the
