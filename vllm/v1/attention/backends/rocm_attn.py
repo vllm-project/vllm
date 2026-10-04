@@ -126,6 +126,11 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
 
         use_cascade = common_prefix_len > 0
 
+        cu_prefix_query_lens = None
+        prefix_kv_lens = None
+        suffix_kv_lens = None
+        prefix_scheduler_metadata = None
+
         if use_cascade:
             cu_prefix_query_lens = torch.tensor(
                 [0, num_actual_tokens], dtype=torch.int32, device=self.device
@@ -135,11 +140,6 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             )
             suffix_kv_lens = common_attn_metadata.seq_lens.cpu() - common_prefix_len
             suffix_kv_lens = suffix_kv_lens.to(self.device)
-        else:
-            cu_prefix_query_lens = None
-            prefix_kv_lens = None
-            suffix_kv_lens = None
-            prefix_scheduler_metadata = None
 
         attn_metadata = RocmAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
