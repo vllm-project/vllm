@@ -18,6 +18,18 @@ if TYPE_CHECKING:
 _INT32_MAX = np.iinfo(np.int32).max
 _COLD_SCAN_BLOCK = 1024
 
+# Sentinel budget for requests tracked only for reasoning loop breaking: the
+# largest value the int32 budget tensor holds, so the budget countdown never
+# trips and only a loop detection can force the end sequence. It also keeps the
+# request inside the marker-cache and forcing kernels, which both skip a
+# negative budget.
+_LOOP_BREAK_ONLY_BUDGET = _INT32_MAX
+
+# Per-request loop-break state, held on device in a single int32 tensor. The
+# detection kernel flips ARMED to 1 (fired) and back; only the host writes OFF.
+_LOOP_BREAK_OFF = -1
+_LOOP_BREAK_ARMED = 0
+
 
 class ThinkingBudgetState:
     """Model Runner V2 state for per-request thinking token budgets."""
@@ -47,6 +59,12 @@ class ThinkingBudgetState:
             else reasoning_config.natural_reasoning_end_token_ids or []
         )
         self.enabled = bool(start_ids and end_ids and natural_end_ids)
+        self.loop_break_enabled = False
+        # ``reasoning_end_str`` may prepend a transition phrase to the parser's
+        # own marker, in which case forcing writes a longer sequence than a
+        # natural exit and both have to close a section. When they are equal the
+        # natural scan already covers both, so the extra one is skipped.
+        self.track_forced_end = end_ids != natural_end_ids
         if not self.enabled:
             return
 
@@ -79,23 +97,117 @@ class ThinkingBudgetState:
             end_ids, dtype=torch.int32, device=self.device
         )
 
+        self._init_loop_break(reasoning_config)
+
+    def _init_loop_break(self, reasoning_config: "ReasoningConfig | None") -> None:
+        """Set up reasoning-scoped loop breaking, if the server configured it.
+
+        Detection semantics mirror ``check_sequence_repetition``, which rejects
+        a degenerate parameter set rather than firing on it; the equivalent
+        rejection here has to happen on the host, because a ``min_count`` below
+        2 would make the on-device tail comparison vacuously true.
+        """
+        max_pattern = getattr(reasoning_config, "loop_break_max_pattern_size", 0)
+        min_pattern = getattr(reasoning_config, "loop_break_min_pattern_size", 0)
+        min_count = getattr(reasoning_config, "loop_break_min_count", 0)
+        if min_pattern <= 0:
+            min_pattern = 1
+        if max_pattern <= 0 or min_count < 2 or min_pattern > max_pattern:
+            return
+
+        self.loop_break_enabled = True
+        self.lb_min_pattern_size = min_pattern
+        self.lb_max_pattern_size = max_pattern
+        self.lb_min_count = min_count
+        self.lb_min_reasoning_tokens = getattr(
+            reasoning_config, "loop_break_min_reasoning_tokens", 256
+        )
+        self.lb_check_interval = max(
+            1, getattr(reasoning_config, "loop_break_check_interval", 16)
+        )
+        self.lb_release = getattr(reasoning_config, "loop_break_release", "force")
+        self.lb_ramp_increment = getattr(
+            reasoning_config, "loop_break_ramp_increment", 2.0
+        )
+        self.lb_ramp_max_tokens = getattr(
+            reasoning_config, "loop_break_ramp_max_tokens", 32
+        )
+
+        self.use_loop_break = np.zeros(self.max_num_reqs, dtype=bool)
+        # -1 off, 0 armed, 1 fired. Written per request on the host and flipped
+        # on device by the detection kernel.
+        self.loop_break_fired = torch.full(
+            (self.max_num_reqs,), _LOOP_BREAK_OFF, dtype=torch.int32, device=self.device
+        )
+        # Reasoning-section length at the last detection run, so a check costs
+        # nothing until ``loop_break_check_interval`` more tokens are accepted.
+        self.loop_break_last_check = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+        # Reasoning-section length at a detection not yet taken by
+        # ``take_loop_breaks``; 0 when there is none.
+        self.loop_break_report = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+        # Tokens the request's release ramps before forcing; 0 forces at once.
+        self.loop_break_ramp_tokens = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+        self._lb_reset_reqs: list[int] = []
+        self._lb_reset_vals: list[int] = []
+        self._lb_ramp_tokens: list[int] = []
+
+    def _loop_break_ramp_tokens_for(
+        self, sampling_params: SamplingParams
+    ) -> int | None:
+        """Tokens a request's release ramps before forcing: 0 for ``"force"``,
+        None when loop breaking is off for the request.
+
+        ``thinking_loop_break=False`` opts a request out; ``None`` or ``True``
+        follows the server configuration, and ``"force"`` or ``"ramp"`` picks
+        the release. No value enables the feature on a server that has not
+        configured it, because the detection parameters live in
+        ``ReasoningConfig``.
+        """
+        if not self.loop_break_enabled:
+            return None
+        override = sampling_params.thinking_loop_break
+        if override is False:
+            return None
+        release = override if isinstance(override, str) else self.lb_release
+        return self.lb_ramp_max_tokens if release == "ramp" else 0
+
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
+        """Stage budget and loop-break settings; True if logits need processing."""
         if not self.enabled:
             return False
         budget = sampling_params.thinking_token_budget
         use_thinking_budget = budget is not None
         self.use_thinking_budget[req_idx] = use_thinking_budget
+        ramp_tokens = self._loop_break_ramp_tokens_for(sampling_params)
+        loop_break = ramp_tokens is not None
         if budget is None:
-            budget = -1
+            budget = _LOOP_BREAK_ONLY_BUDGET if loop_break else -1
         else:
             budget = min(budget, _INT32_MAX)
+        if budget >= 0:
             self._reset_reqs.append(req_idx)
+        if self.loop_break_enabled:
+            # Always staged, including the opt-out: the slot may still hold a
+            # fired flag from the request that previously occupied it.
+            self.use_loop_break[req_idx] = loop_break
+            self._lb_reset_reqs.append(req_idx)
+            self._lb_reset_vals.append(
+                _LOOP_BREAK_ARMED if loop_break else _LOOP_BREAK_OFF
+            )
+            self._lb_ramp_tokens.append(ramp_tokens or 0)
         if self.thinking_token_budget.np[req_idx] != budget:
             self.thinking_token_budget.np[req_idx] = budget
             self._budget_dirty = True
-        return use_thinking_budget
+        return use_thinking_budget or loop_break
 
     def apply_staged_writes(self) -> None:
+        """Copy the staged per-request state to the device."""
         if not self.enabled:
             return
         if self._reset_reqs:
@@ -106,13 +218,36 @@ class ThinkingBudgetState:
             self.cached_last_end.index_fill_(0, idx, -1)
             self.cached_scan_pos.index_fill_(0, idx, 0)
             self._reset_reqs.clear()
+        if self.loop_break_enabled and self._lb_reset_reqs:
+            idx = async_tensor_h2d(
+                self._lb_reset_reqs, dtype=torch.int64, device=self.device
+            )
+            vals = async_tensor_h2d(
+                self._lb_reset_vals, dtype=torch.int32, device=self.device
+            )
+            ramp_tokens = async_tensor_h2d(
+                self._lb_ramp_tokens, dtype=torch.int32, device=self.device
+            )
+            self.loop_break_fired.index_copy_(0, idx, vals)
+            self.loop_break_ramp_tokens.index_copy_(0, idx, ramp_tokens)
+            self.loop_break_last_check.index_fill_(0, idx, 0)
+            self.loop_break_report.index_fill_(0, idx, 0)
+            self._lb_reset_reqs.clear()
+            self._lb_reset_vals.clear()
+            self._lb_ramp_tokens.clear()
         if self._budget_dirty:
             self.thinking_token_budget.copy_to_uva()
             self._budget_dirty = False
 
     def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> None:
+        """Apply thinking budgets and reasoning loop breaking to this batch's logits."""
+        if not self.enabled:
+            return
         idx_mapping_np = ctx.idx_mapping_np
-        if not self.enabled or not np.any(self.use_thinking_budget[idx_mapping_np]):
+        active = self.use_thinking_budget[idx_mapping_np]
+        if self.loop_break_enabled:
+            active = active | self.use_loop_break[idx_mapping_np]
+        if not np.any(active):
             return
 
         apply_thinking_budget(
@@ -130,7 +265,61 @@ class ThinkingBudgetState:
             self.reasoning_start_token_ids,
             self.natural_reasoning_end_token_ids,
             self.reasoning_end_token_ids,
+            track_forced_end=self.track_forced_end,
+            loop_break_fired=(
+                self.loop_break_fired if self.loop_break_enabled else None
+            ),
+            loop_break_last_check=(
+                self.loop_break_last_check if self.loop_break_enabled else None
+            ),
+            loop_break_report=(
+                self.loop_break_report if self.loop_break_enabled else None
+            ),
+            loop_break_ramp_tokens=(
+                self.loop_break_ramp_tokens if self.loop_break_enabled else None
+            ),
+            loop_break_ramp_increment=(
+                self.lb_ramp_increment if self.loop_break_enabled else 0.0
+            ),
+            loop_break_min_pattern_size=(
+                self.lb_min_pattern_size if self.loop_break_enabled else 0
+            ),
+            loop_break_max_pattern_size=(
+                self.lb_max_pattern_size if self.loop_break_enabled else 0
+            ),
+            loop_break_min_count=(self.lb_min_count if self.loop_break_enabled else 0),
+            loop_break_min_reasoning_tokens=(
+                self.lb_min_reasoning_tokens if self.loop_break_enabled else 0
+            ),
+            loop_break_check_interval=(
+                self.lb_check_interval if self.loop_break_enabled else 1
+            ),
         )
+
+    def take_loop_breaks(
+        self, idx_mapping: torch.Tensor, idx_mapping_np: np.ndarray
+    ) -> torch.Tensor | None:
+        """Per batch row, the reasoning-section length at a loop detected since
+        the last call, or 0. None when no request in the batch is tracked."""
+        if not self.loop_break_enabled or not np.any(
+            self.use_loop_break[idx_mapping_np]
+        ):
+            return None
+        num_reqs = idx_mapping.shape[0]
+        loop_breaks = torch.empty(num_reqs, dtype=torch.int32, device=self.device)
+        _take_loop_breaks_kernel[(num_reqs,)](
+            idx_mapping, self.loop_break_report, loop_breaks
+        )
+        return loop_breaks
+
+
+@triton.jit
+def _take_loop_breaks_kernel(idx_mapping_ptr, loop_break_report_ptr, out_ptr):
+    """Hand each request's pending loop-break report to the host and clear it."""
+    batch_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    tl.store(out_ptr + batch_idx, tl.load(loop_break_report_ptr + req_state_idx))
+    tl.store(loop_break_report_ptr + req_state_idx, 0)
 
 
 @triton.jit
@@ -164,11 +353,23 @@ def _update_committed_marker_cache_kernel(
     cached_scan_pos_ptr,
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
+    reasoning_end_token_ids_ptr,
     START_LEN: tl.constexpr,
     NATURAL_END_LEN: tl.constexpr,
+    END_LEN: tl.constexpr,
     MAX_LEN: tl.constexpr,
+    TRACK_FORCED_END: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    """Track the last reasoning start and the last reasoning end.
+
+    A section ends on either sequence: the parser's natural marker, or the
+    sequence forcing writes when ``reasoning_end_str`` carries a transition
+    phrase and so differs from it. Missing the forced one leaves the section
+    open after forcing completes, and forcing then restarts forever.
+    ``TRACK_FORCED_END`` is off when the two sequences are equal, where the
+    natural scan already covers both.
+    """
     req_state_idx = tl.load(req_ids_ptr + tl.program_id(0))
     budget = tl.load(thinking_token_budget_ptr + req_state_idx)
     if budget < 0:
@@ -186,8 +387,8 @@ def _update_committed_marker_cache_kernel(
 
     if scan_pos == 0 and last_start < 0 and last_end < 0:
         # Cold scan: walk backward in vectorized blocks, stopping at the first
-        # block with a marker; only the relative order of the two positions
-        # found matters below.
+        # block with a marker; only the relative order of the start and end
+        # positions found matters below.
         block_hi = total_len
         while block_hi > 0 and last_start < 0 and last_end < 0:
             block_lo = block_hi - BLOCK
@@ -215,8 +416,26 @@ def _update_committed_marker_cache_kernel(
                 )
                 end_match = end_match & (actual == expected)
 
+            found_end = tl.max(tl.where(end_match, offs, -1), axis=0)
+            if TRACK_FORCED_END:
+                forced_match = (offs < block_hi) & (offs + END_LEN <= total_len)
+                for j in tl.static_range(0, END_LEN):
+                    expected = tl.load(reasoning_end_token_ids_ptr + j)
+                    actual = tl.load(
+                        all_token_ids_ptr
+                        + req_state_idx * all_token_ids_stride
+                        + offs
+                        + j,
+                        mask=offs + j < total_len,
+                        other=-1,
+                    )
+                    forced_match = forced_match & (actual == expected)
+                found_forced = tl.max(tl.where(forced_match, offs, -1), axis=0)
+                if found_forced > found_end:
+                    found_end = found_forced
+
             last_start = tl.max(tl.where(start_match, offs, -1), axis=0)
-            last_end = tl.max(tl.where(end_match, offs, -1), axis=0)
+            last_end = found_end
             block_hi = block_lo
     else:
         for i in tl.range(scan_pos, total_len):
@@ -242,12 +461,133 @@ def _update_committed_marker_cache_kernel(
                 if end_match:
                     last_end = i
 
+            if TRACK_FORCED_END:
+                # Order between the two end sequences does not matter: within one
+                # position both assign the same i, and across positions the
+                # largest matching i is assigned last, which is the max over
+                # the two searches.
+                forced_match = i + END_LEN <= total_len
+                for j in tl.static_range(0, END_LEN):
+                    expected = tl.load(reasoning_end_token_ids_ptr + j)
+                    actual = tl.load(
+                        all_token_ids_ptr
+                        + req_state_idx * all_token_ids_stride
+                        + i
+                        + j,
+                        mask=i + j < total_len,
+                        other=-1,
+                    )
+                    forced_match = forced_match & (actual == expected)
+                if forced_match:
+                    last_end = i
+
     tl.store(cached_last_start_ptr + req_state_idx, last_start)
     tl.store(cached_last_end_ptr + req_state_idx, last_end)
     new_scan_pos = total_len - (MAX_LEN - 1)
     if new_scan_pos < 0:
         new_scan_pos = 0
     tl.store(cached_scan_pos_ptr + req_state_idx, new_scan_pos)
+
+
+@triton.jit
+def _loop_break_detect_kernel(
+    req_ids_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    total_len_ptr,
+    cached_last_start_ptr,
+    cached_last_end_ptr,
+    loop_break_fired_ptr,
+    loop_break_last_check_ptr,
+    loop_break_report_ptr,
+    START_LEN: tl.constexpr,
+    MIN_PATTERN: tl.constexpr,
+    MAX_PATTERN: tl.constexpr,
+    MIN_COUNT: tl.constexpr,
+    MIN_REASONING_TOKENS: tl.constexpr,
+    CHECK_INTERVAL: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Flag requests whose open reasoning section ends in a repeating pattern.
+
+    Runs on committed tokens only, after
+    ``_update_committed_marker_cache_kernel`` has refreshed the section
+    boundary, and before ``_thinking_budget_kernel`` reads the flag.
+    """
+    req_state_idx = tl.load(req_ids_ptr + tl.program_id(0))
+    fired = tl.load(loop_break_fired_ptr + req_state_idx)
+    if fired < 0:
+        # Loop breaking is off for this request.
+        return
+
+    last_start = tl.load(cached_last_start_ptr + req_state_idx)
+    last_end = tl.load(cached_last_end_ptr + req_state_idx)
+    if last_start < 0 or last_start <= last_end:
+        # No reasoning section is open; re-arm for the next one. This is also
+        # what clears the flag once the forced end sequence lands in the
+        # committed tokens.
+        tl.store(loop_break_fired_ptr + req_state_idx, 0)
+        tl.store(loop_break_last_check_ptr + req_state_idx, 0)
+        return
+    if fired > 0:
+        # Already releasing. Under speculative decoding a forced end token can
+        # be rejected, so the flag stays set and _thinking_budget_kernel
+        # re-asserts the end sequence every step until the section closes.
+        # Returning before the checkpoint below also freezes it at the fire,
+        # which is where the ramp release counts from.
+        return
+
+    total_len = tl.load(total_len_ptr + req_state_idx)
+    think_len = total_len - last_start - START_LEN
+    if think_len < MIN_REASONING_TOKENS:
+        return
+
+    last_check = tl.load(loop_break_last_check_ptr + req_state_idx)
+    if think_len < last_check:
+        # The section shrank behind the checkpoint (a rewind, or a new section
+        # that starts further right); re-arm rather than stall the interval.
+        last_check = 0
+    if think_len - last_check < CHECK_INTERVAL:
+        return
+    tl.store(loop_break_last_check_ptr + req_state_idx, think_len)
+
+    # The tail comparison never reaches back further than
+    # max_pattern_size * min_count, and is clamped to the section start so a
+    # pattern cannot span a previous section or the prompt.
+    avail = MAX_PATTERN * MIN_COUNT
+    if think_len < avail:
+        avail = think_len
+
+    offs = tl.arange(0, BLOCK)
+    found = 0
+    for pattern_len in tl.range(MIN_PATTERN, MAX_PATTERN + 1):
+        # ``pattern_len`` only grows, so skipping an oversized candidate is the
+        # same as the early return in ``check_sequence_repetition``.
+        if found == 0 and pattern_len * MIN_COUNT <= avail:
+            mask = offs < pattern_len
+            base = total_len - pattern_len + offs
+            tail = tl.load(
+                all_token_ids_ptr + req_state_idx * all_token_ids_stride + base,
+                mask=mask,
+                other=0,
+            )
+            mismatches = 0
+            for m in tl.static_range(1, MIN_COUNT):
+                prev = tl.load(
+                    all_token_ids_ptr
+                    + req_state_idx * all_token_ids_stride
+                    + base
+                    - pattern_len * m,
+                    mask=mask,
+                    other=0,
+                )
+                mismatches += tl.sum(tl.where(mask & (prev != tail), 1, 0), axis=0)
+            if mismatches == 0:
+                found = 1
+
+    if found == 1:
+        tl.store(loop_break_fired_ptr + req_state_idx, 1)
+        tl.store(loop_break_report_ptr + req_state_idx, think_len)
 
 
 @triton.jit
@@ -263,13 +603,20 @@ def _thinking_budget_kernel(
     expanded_local_pos_ptr,
     cached_last_start_ptr,
     cached_last_end_ptr,
+    loop_break_fired_ptr,
+    loop_break_last_check_ptr,
+    loop_break_ramp_tokens_ptr,
+    ramp_increment,
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
     reasoning_end_token_ids_ptr,
     START_LEN: tl.constexpr,
     NATURAL_END_LEN: tl.constexpr,
     END_LEN: tl.constexpr,
+    TRACK_FORCED_END: tl.constexpr,
+    HAS_LOOP_BREAK: tl.constexpr,
 ):
+    """Force the reasoning end, or ramp toward it, for each logits row."""
     token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     budget = tl.load(thinking_token_budget_ptr + req_state_idx)
@@ -324,6 +671,31 @@ def _thinking_budget_kernel(
         if end_match:
             last_end = i
 
+    if TRACK_FORCED_END:
+        # The forced sequence can also complete among the speculative positions,
+        # and the ones after it belong to the answer. Take the max rather than
+        # assigning, since the natural scan above may already have found a later
+        # end within this same window.
+        forced_lo = total_len - END_LEN + 1
+        if forced_lo < 0:
+            forced_lo = 0
+        for i in tl.range(forced_lo, effective_len - END_LEN + 1):
+            forced_match = True
+            for j in tl.static_range(0, END_LEN):
+                expected = tl.load(reasoning_end_token_ids_ptr + j)
+                actual = _load_effective_token(
+                    all_token_ids_ptr,
+                    all_token_ids_stride,
+                    input_ids_ptr,
+                    cur_req_first_pos,
+                    req_state_idx,
+                    total_len,
+                    i + j,
+                )
+                forced_match = forced_match & (actual == expected)
+            if forced_match:
+                last_end = tl.maximum(last_end, i)
+
     if last_start < 0 or last_start <= last_end:
         return
 
@@ -332,7 +704,61 @@ def _thinking_budget_kernel(
     # reasoning content, count it against the remaining budget.
     num_reasoning_tokens = effective_len - reasoning_start
     if num_reasoning_tokens < budget:
-        return
+        # The budget is not exhausted, so only a detected reasoning loop can
+        # force the end sequence here. Both paths share every line below, and
+        # therefore share the rejected-end continuation and the multi-token
+        # marker handling. The load has to sit inside the constexpr guard: an
+        # early return does not stop Triton from compiling what follows it, so
+        # a null pointer would still be dereferenced at codegen time.
+        fired = 0
+        if HAS_LOOP_BREAK:
+            fired = tl.load(loop_break_fired_ptr + req_state_idx)
+        if fired <= 0:
+            return
+        if HAS_LOOP_BREAK:
+            ramp_tokens = tl.load(loop_break_ramp_tokens_ptr + req_state_idx)
+            if ramp_tokens > 0:
+                # The detection kernel stops advancing the checkpoint once a
+                # loop fires, so it holds the section length at the fire.
+                since_fire = num_reasoning_tokens - tl.load(
+                    loop_break_last_check_ptr + req_state_idx
+                )
+                since_fire = tl.maximum(since_fire, 0)
+                # Once the model starts a multi-token natural marker, finish it,
+                # even past the end of the ramp.
+                started = 0
+                for prefix_len in tl.static_range(1, NATURAL_END_LEN):
+                    if prefix_len <= since_fire:
+                        prefix_match = True
+                        for j in tl.static_range(0, NATURAL_END_LEN):
+                            if j < prefix_len:
+                                expected = tl.load(
+                                    natural_reasoning_end_token_ids_ptr + j
+                                )
+                                actual = _load_effective_token(
+                                    all_token_ids_ptr,
+                                    all_token_ids_stride,
+                                    input_ids_ptr,
+                                    cur_req_first_pos,
+                                    req_state_idx,
+                                    total_len,
+                                    effective_len - prefix_len + j,
+                                )
+                                prefix_match = prefix_match & (actual == expected)
+                        if prefix_match:
+                            started = prefix_len
+                ramp_token_id = tl.load(natural_reasoning_end_token_ids_ptr + started)
+                ramp_logit_ptr = logits_ptr + token_idx * logits_stride + ramp_token_id
+                if started > 0:
+                    tl.store(ramp_logit_ptr, 1.0e9)
+                    return
+                if since_fire < ramp_tokens:
+                    # Bias, rather than force, the model's own end marker, so
+                    # it picks where to close.
+                    bias = ramp_increment * (since_fire + 1).to(tl.float32)
+                    tl.store(ramp_logit_ptr, tl.load(ramp_logit_ptr) + bias)
+                    return
+                # The ramp has run out: fall through to the forced sequence.
 
     # If the tail already ends with a prefix of the forced end sequence
     # (even from a resumed prompt), continue from the next marker token.
@@ -380,7 +806,19 @@ def apply_thinking_budget(
     reasoning_start_token_ids: torch.Tensor,
     natural_reasoning_end_token_ids: torch.Tensor,
     reasoning_end_token_ids: torch.Tensor,
+    track_forced_end: bool = True,
+    loop_break_fired: torch.Tensor | None = None,
+    loop_break_last_check: torch.Tensor | None = None,
+    loop_break_report: torch.Tensor | None = None,
+    loop_break_ramp_tokens: torch.Tensor | None = None,
+    loop_break_ramp_increment: float = 0.0,
+    loop_break_min_pattern_size: int = 0,
+    loop_break_max_pattern_size: int = 0,
+    loop_break_min_count: int = 0,
+    loop_break_min_reasoning_tokens: int = 0,
+    loop_break_check_interval: int = 1,
 ) -> None:
+    """Apply thinking budgets and reasoning loop breaking to ``logits`` in place."""
     num_tokens = logits.shape[0]
     start_len = reasoning_start_token_ids.shape[0]
     natural_end_len = natural_reasoning_end_token_ids.shape[0]
@@ -397,11 +835,36 @@ def apply_thinking_budget(
         cached_scan_pos,
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
+        reasoning_end_token_ids,
         START_LEN=start_len,
         NATURAL_END_LEN=natural_end_len,
-        MAX_LEN=max(start_len, natural_end_len),
+        END_LEN=end_len,
+        # The re-scan overlap has to cover the longest sequence being matched,
+        # or a forced end split across two decode steps is never seen.
+        MAX_LEN=max(start_len, natural_end_len, end_len if track_forced_end else 0),
+        TRACK_FORCED_END=track_forced_end,
         BLOCK=_COLD_SCAN_BLOCK,
     )
+
+    if loop_break_fired is not None:
+        _loop_break_detect_kernel[(req_ids.shape[0],)](
+            req_ids,
+            all_token_ids,
+            all_token_ids.stride(0),
+            total_len,
+            cached_last_start,
+            cached_last_end,
+            loop_break_fired,
+            loop_break_last_check,
+            loop_break_report,
+            START_LEN=start_len,
+            MIN_PATTERN=loop_break_min_pattern_size,
+            MAX_PATTERN=loop_break_max_pattern_size,
+            MIN_COUNT=loop_break_min_count,
+            MIN_REASONING_TOKENS=loop_break_min_reasoning_tokens,
+            CHECK_INTERVAL=loop_break_check_interval,
+            BLOCK=triton.next_power_of_2(loop_break_max_pattern_size),
+        )
 
     _thinking_budget_kernel[(num_tokens,)](
         logits,
@@ -415,10 +878,16 @@ def apply_thinking_budget(
         expanded_local_pos,
         cached_last_start,
         cached_last_end,
+        loop_break_fired,
+        loop_break_last_check,
+        loop_break_ramp_tokens,
+        loop_break_ramp_increment,
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
         reasoning_end_token_ids,
         START_LEN=start_len,
         NATURAL_END_LEN=natural_end_len,
         END_LEN=end_len,
+        TRACK_FORCED_END=track_forced_end,
+        HAS_LOOP_BREAK=loop_break_fired is not None,
     )

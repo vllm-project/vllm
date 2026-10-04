@@ -411,6 +411,7 @@ class RejectionSampler:
         draft_logits: torch.Tensor | None = None,
         invalid_drafts: torch.Tensor | None = None,
     ) -> SamplerOutput:
+        """Verify the draft tokens and sample each request's bonus token."""
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
@@ -467,4 +468,7 @@ class RejectionSampler:
             num_sampled=num_sampled,
             num_rejected=num_rejected,
             sampling_mask_tensors=sampling_mask_tensors,
+            thinking_loop_breaks=self.sampler.thinking_budget_state.take_loop_breaks(
+                input_batch.idx_mapping, input_batch.idx_mapping_np
+            ),
         )
