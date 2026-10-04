@@ -67,7 +67,7 @@ class BaseServing:
         return error_response or self.create_error_response(
             message=(
                 f"The model `{request.model}` does not exist. "
-                f"Served models: {served_names}."
+                f"Valid aliases: {served_names}."
             ),
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND,
