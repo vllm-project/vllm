@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     prepare_fp8_moe_layer_for_deepgemm,
 )
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
@@ -98,6 +99,7 @@ def _get_priority_backends(
         Fp8MoeBackend.CPU,
         Fp8MoeBackend.HPC,
     ]
+    _AVAILABLE_BACKENDS = prioritize_humming(_AVAILABLE_BACKENDS)
 
     def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend) -> None:
         backends.insert(0, backends.pop(backends.index(backend)))

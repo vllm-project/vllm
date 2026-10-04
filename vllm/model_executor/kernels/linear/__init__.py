@@ -228,6 +228,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
 from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
     ZentorchInt8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
@@ -376,8 +377,9 @@ def _resolve_backend_kernels(
     layer_desc: str,
     *,
     quantization: str,
+    compute_capability: int | None = None,
 ) -> list[type]:
-    """Apply --linear-backend filtering to one layer type's kernel list.
+    """Apply device priorities and --linear-backend filtering to a kernel list.
 
     When the requested backend has no kernel for this layer type, fall back
     to the unfiltered list (with a WARNING log) instead of failing engine
@@ -386,6 +388,7 @@ def _resolve_backend_kernels(
     layer types (e.g. NVFP4 MoE projections next to FP8 attention
     projections).
     """
+    kernels = prioritize_humming(kernels, compute_capability)
     linear_backend = _get_linear_backend(quantization=quantization)
     if linear_backend == "auto":
         return kernels
@@ -682,6 +685,7 @@ def choose_scaled_mm_linear_kernel(
         platform_kernels,
         "scaled-mm",
         quantization=quantization,
+        compute_capability=compute_capability,
     )
 
     for kernel in platform_kernels:
@@ -845,6 +849,7 @@ def choose_mp_linear_kernel(
         platform_kernels,
         "mixed-precision",
         quantization="mixed_precision",
+        compute_capability=compute_capability,
     )
 
     failure_reasons = []
@@ -1121,13 +1126,13 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None
         # Weight-only: prefer FlashInfer CuTe-DSL W4A16 on SM100/103,
-        # otherwise Marlin.
+        # Humming then Marlin on SM90, and Marlin elsewhere.
         cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
             compute_capability
         )
         if compute_capability in (100, 103) and cutedsl_ok:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
-        else:
+        elif compute_capability != 90:
             force_kernel = MarlinNvFp4LinearKernel
 
     if force_kernel is not None:
