@@ -112,6 +112,28 @@ def build_response_output_items(
     return outputs
 
 
+def reuse_streamed_item_ids(
+    items: list[ResponseOutputItem],
+    streamed_items: list[ResponseOutputItem],
+) -> None:
+    """Give rebuilt output items the ids already streamed for the same message.
+
+    Items are paired by type in order; an item without a streamed counterpart
+    keeps its own id.
+    """
+    remaining = list(streamed_items)
+    for item in items:
+        for i, streamed in enumerate(remaining):
+            if streamed.type != item.type:
+                continue
+            item.id = streamed.id
+            if isinstance(item, ResponseFunctionToolCall):
+                assert isinstance(streamed, ResponseFunctionToolCall)
+                item.call_id = streamed.call_id
+            del remaining[i]
+            break
+
+
 def should_continue_final_message(
     request_input: str | list[ResponseInputOutputItem],
 ) -> bool:
