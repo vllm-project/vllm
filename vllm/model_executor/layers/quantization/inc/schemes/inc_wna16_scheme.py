@@ -5,8 +5,6 @@ from typing import TYPE_CHECKING
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
-from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.platforms import current_platform
 
 from ..inc_linear import INCLinearMethod
@@ -33,7 +31,7 @@ XPU_ONEDNN_BACKENDS = ("w4a16", "w4a8")
 
 
 def _check_xpu_w4a8_supported(layer_config: "INCLayerConfig", prefix: str) -> None:
-    """Raise unless ``int4_gemm_w4a8`` can serve this layer.
+    """Raise unless ``int4_gemm_w4a8`` can serve this linear layer.
 
     The backend is requested explicitly, so an unusable configuration is an
     error rather than something to silently fall back from.
@@ -100,7 +98,7 @@ class INCWna16Scheme(INCScheme):
                     )
                 if is_ark_available:
                     return INCLinearMethod(INCARKLinearMethod(layer_config))
-                elif layer_config.bits == 2:
+                if layer_config.bits == 2:
                     raise NotImplementedError(
                         "INC int2 on XPU requires the ARK backend. "
                         f"Layer: {prefix}. "
@@ -158,119 +156,125 @@ class INCWna16Scheme(INCScheme):
         prefix: str,
         layer_config: "INCLayerConfig",
     ):
-        del config, prefix
-        # CPU does not support quantized MoE yet.
-        if current_platform.is_cpu():
-            from vllm.model_executor.layers.fused_moe import (
-                UnquantizedFusedMoEMethod,
-            )
+        del config
 
-            return UnquantizedFusedMoEMethod(layer.moe_config)
+        if (
+            current_platform.is_xpu()
+            and layer_config.is_gptq
+            and layer_config.bits == 4
+            and layer_config.sym
+        ):
+            from .inc_ark_ops import get_ark_state
+            from .inc_wna16_moe import INCARKWNA16MoEMethod
+
+            backend = envs.VLLM_XPU_INC_WNA16_BACKEND
+            if backend != "w4a16":
+                from vllm.model_executor.layers.quantization.moe_wna16 import (
+                    MoeWNA16Config,
+                )
+
+                group_size = layer_config.group_size
+                assert isinstance(group_size, int), (
+                    "WNA16 only supports integer group_size."
+                )
+
+                def make_moe_config() -> MoeWNA16Config:
+                    return MoeWNA16Config.from_config(
+                        {
+                            "quant_method": "gptq",
+                            "bits": layer_config.bits,
+                            "group_size": group_size,
+                            "sym": layer_config.sym,
+                            "lm_head": False,
+                        }
+                    )
+
+                is_ark_available, ark_error, ark, _ = get_ark_state()
+                xpu_lib = getattr(ark, "xpu_lib", None) if ark is not None else None
+                ark_moe_error = ark_error or "ARK MoE kernels are unavailable"
+
+                if backend in ("w4a8", "ark"):
+                    from .inc_w4a8_moe import (
+                        INCARKW4A8MoEMethod,
+                        check_xpu_moe_w4a8_supported,
+                        has_ark_w4a8_moe_kernel,
+                    )
+
+                    is_ark_w4a8_moe_available = has_ark_w4a8_moe_kernel(
+                        is_ark_available,
+                        ark,
+                    )
+                    if not is_ark_w4a8_moe_available:
+                        if backend == "w4a8":
+                            raise NotImplementedError(
+                                "VLLM_XPU_INC_WNA16_BACKEND=w4a8 was requested but "
+                                "ARK W4A8 prefill/W4A16 decode MoE kernels are "
+                                f"unavailable: {ark_moe_error}. Layer: {prefix}."
+                            )
+                        logger.debug(
+                            "ARK W4A8 MoE kernels are unavailable for layer %s; "
+                            "falling back to ARK WNA16 MoE. Error: %s",
+                            prefix,
+                            ark_moe_error,
+                        )
+                    else:
+                        try:
+                            check_xpu_moe_w4a8_supported(
+                                layer,
+                                layer_config,
+                                prefix,
+                            )
+                        except NotImplementedError as exc:
+                            if backend == "w4a8":
+                                raise
+                            logger.debug(
+                                "ARK W4A8 MoE is unsupported for layer %s; "
+                                "falling back to ARK WNA16 MoE. Error: %s",
+                                prefix,
+                                exc,
+                            )
+                        else:
+                            return INCARKW4A8MoEMethod(
+                                make_moe_config(),
+                                layer.moe_config,
+                            )
+
+                is_ark_moe_available = (
+                    is_ark_available
+                    and ark is not None
+                    and xpu_lib is not None
+                    and hasattr(ark, "MoeSymmetricGemm")
+                )
+                if backend == "ark" and not is_ark_moe_available:
+                    raise NotImplementedError(
+                        "VLLM_XPU_INC_WNA16_BACKEND=ark was requested but "
+                        f"ARK MoE kernels are unavailable: {ark_moe_error}. "
+                        f"Layer: {prefix}."
+                    )
+
+                if is_ark_moe_available:
+                    return INCARKWNA16MoEMethod(
+                        make_moe_config(),
+                        layer.moe_config,
+                    )
+
+                logger.info(
+                    "ARK backend is unavailable for MoE layer %s; "
+                    "falling back to the default WNA16 MoE path. Error: %s",
+                    prefix,
+                    ark_moe_error,
+                )
+
         # CUDA low-bit (2/3/5/6/7): route to the humming MoE kernel (see above).
         if (
             current_platform.is_cuda()
             and layer_config.bits in CUDA_HUMMING_SUPPORTED_BITS
         ):
             return _build_humming_moe_method(layer, layer_config)
-        if layer_config.is_gptq:
-            return _resolve_gptq_moe(layer, layer_config)
-        if layer_config.is_awq:
-            return _resolve_awq_moe(layer, layer_config)
-        raise NotImplementedError(f"WNA16 MoE does not support config {layer_config}")
 
+        from .inc_wna16_moe import INCWNA16MoEScheme
 
-def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
-    from vllm.model_executor.layers.quantization.auto_gptq import (
-        AutoGPTQMoEMethod,
-    )
-    from vllm.model_executor.layers.quantization.moe_wna16 import (
-        MoeWNA16Config,
-        MoeWNA16Method,
-    )
-    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-        check_moe_marlin_supports_layer,
-    )
-
-    assert isinstance(layer_config.group_size, int), (
-        "WNA16 only supports integer group_size."
-    )
-
-    # AutoGPTQMoEMethod selects its fused-MoE backend through the WNA16 oracle
-    # (Marlin on CUDA, XPUExpertsWNA16 on XPU). Gate only on the layer-shape
-    # check like compressed-tensors does; the capability-based
-    # check_marlin_supported is skipped so the XPU path is reachable.
-    use_marlin = (layer_config.bits, layer_config.sym) in {
-        (4, True),
-        (8, True),
-    } and check_moe_marlin_supports_layer(layer, layer_config.group_size)
-
-    if use_marlin:
-        return AutoGPTQMoEMethod(
-            AutoGPTQConfig(
-                weight_bits=layer_config.bits,
-                group_size=layer_config.group_size,
-                desc_act=False,
-                is_sym=layer_config.sym,
-                lm_head_quantized=False,
-                dynamic={},
-                full_config={},
-            ),
-            layer.moe_config,
-        )
-
-    moe_config = MoeWNA16Config.from_config(
-        {
-            "quant_method": "gptq",
-            "bits": layer_config.bits,
-            "group_size": layer_config.group_size,
-            "sym": layer_config.sym,
-            "lm_head": False,
-        }
-    )
-    return MoeWNA16Method(moe_config, layer.moe_config)
-
-
-def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
-    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQMoEMethod
-    from vllm.model_executor.layers.quantization.moe_wna16 import (
-        MoeWNA16Config,
-        MoeWNA16Method,
-    )
-    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-        check_moe_marlin_supports_layer,
-    )
-
-    assert isinstance(layer_config.group_size, int), (
-        "WNA16 only supports integer group_size."
-    )
-
-    use_marlin = layer_config.bits in (4, 8) and check_moe_marlin_supports_layer(
-        layer, layer_config.group_size
-    )
-
-    if use_marlin:
-        return AutoAWQMoEMethod(
-            AutoAWQConfig(
-                weight_bits=layer_config.bits,
-                group_size=layer_config.group_size,
-                zero_point=not layer_config.sym,
-                lm_head_quantized=False,
-                modules_to_not_convert=[],
-                full_config={},
-            ),
-            layer.moe_config,
-        )
-
-    moe_config = MoeWNA16Config.from_config(
-        {
-            "quant_method": "awq",
-            "bits": layer_config.bits,
-            "group_size": layer_config.group_size,
-            "zero_point": not layer_config.sym,
-            "lm_head": False,
-        }
-    )
-    return MoeWNA16Method(moe_config, layer.moe_config)
+        return INCWNA16MoEScheme(layer_config).get_method(layer)
 
 
 def _humming_weight_config(layer_config: "INCLayerConfig") -> dict:
