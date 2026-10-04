@@ -669,8 +669,8 @@ def _qsa_staged_block_n(head_dim: int, raw_fp8: bool) -> int | None:
     than what the hardware could do natively. A native fp8 pointer stages
     nothing and keeps the tuned tile.
 
-    The budget is fitted at head_dim 256, where BLOCK_N=64 spills about 1.9 KB
-    per thread.
+    The budget is fitted at head_dim 256: on sm_80 ptxas reports no spill
+    stores at BLOCK_N 32 and 7716 bytes per thread at 64.
     """
     if not raw_fp8:
         return None
