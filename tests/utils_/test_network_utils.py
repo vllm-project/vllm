@@ -59,6 +59,19 @@ def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
                     s3.bind(("localhost", get_open_port()))
 
 
+def test_get_open_port_resolves_zero_to_bound_ephemeral_port(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_PORT", "0")
+        m.delenv("VLLM_DP_MASTER_PORT", raising=False)
+        port = get_open_port()
+        assert port > 0
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("localhost", port))
+            assert s.getsockname()[1] == port
+
+
 def test_get_open_port_vllm_port_in_dp_reserved_range(
     monkeypatch: pytest.MonkeyPatch,
 ):

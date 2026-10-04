@@ -224,7 +224,7 @@ def _get_open_port(
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.bind(("", port))
-                    return port
+                    return s.getsockname()[1]
             except OSError:
                 port += 1  # Increment port number if already in use
                 logger.info("Port %d is already in use, trying port %d", port - 1, port)
