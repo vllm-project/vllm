@@ -42,6 +42,7 @@ from vllm.utils.import_utils import (
     has_mori,
     has_nixl_ep,
 )
+from vllm.utils.math_utils import cdiv
 
 
 @dataclass(frozen=True)
@@ -281,8 +282,12 @@ def maybe_make_prepare_finalize(
             and quant_config.quant_dtype == current_platform.fp8_dtype()
             and quant_config.is_block_quantized
         )
+        # With sequence parallelism, each EP rank dispatches at most a
+        # ceil(max_num_tokens / sp_size) shard of its DP rank's batch.
+        sp_size = moe.moe_parallel_config.sp_size
+        max_tokens_per_rank = cdiv(moe.max_num_tokens, sp_size)
         all_to_all_args = dict(
-            num_max_tokens_per_rank=moe.max_num_tokens,
+            num_max_tokens_per_rank=max_tokens_per_rank,
             hidden=moe.hidden_dim,
             num_topk=moe.experts_per_token,
             num_experts=moe.num_experts,
@@ -301,7 +306,8 @@ def maybe_make_prepare_finalize(
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
-            sp_size=moe.moe_parallel_config.sp_size,
+            sp_size=sp_size,
+            max_tokens_per_rank=max_tokens_per_rank,
         )
 
     elif moe.use_moonep_kernels:
