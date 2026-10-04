@@ -3,6 +3,7 @@
 
 import json
 import sys
+import threading
 from collections import defaultdict
 from contextlib import nullcontext
 from inspect import signature
@@ -313,3 +314,248 @@ def test_pp1_retains_world_synchronization_and_existing_cache_name(autotune_run)
         (0, "autotune_configs.json")
     ]
     assert all(groups == [(0, 1, 2, 3)] for groups in run.profile_groups.values())
+
+
+class _CacheOnlyGroup:
+    """Per-rank view of a group whose collectives rendezvous across threads."""
+
+    def __init__(self, run, ranks):
+        self.run = run
+        self.ranks = tuple(ranks)
+        self.world_size = len(self.ranks)
+        self.rank_in_group = self.ranks.index(run.rank)
+        self.cpu_group = self
+
+    def _exchange(self, operation, value):
+        self.run.collectives[self.ranks][self.run.rank].append(operation)
+        if self.world_size == 1:
+            return [value]
+        slots, barrier = self.run.rendezvous(self.ranks)
+        slots[self.rank_in_group] = value
+        barrier.wait()
+        values = list(slots)
+        barrier.wait()
+        return values
+
+    def broadcast_object(self, obj, src=0):
+        return self._exchange("broadcast", obj)[src]
+
+    def all_gather_object(self, output, obj):
+        output[:] = self._exchange("all_gather", obj)
+
+
+class _CacheOnlyTuner:
+    def __init__(self, result):
+        self.result = result
+        self.loaded = None
+
+    def load_configs(self, path):
+        self.loaded = Path(path).read_bytes()
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+class _CacheOnlyRun:
+    def __init__(self, pp, tp, load_results):
+        self.pp, self.tp = pp, tp
+        self.load_results = load_results
+        self.local = threading.local()
+        self.lock = threading.Lock()
+        self.rendezvous_points = {}
+        self.collectives: dict[tuple[int, ...], dict[int, list[str]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        self.tuners = {}
+        self.errors = {}
+        self.autotuned = []
+
+    @property
+    def rank(self):
+        return self.local.rank
+
+    def rendezvous(self, ranks):
+        with self.lock:
+            if ranks not in self.rendezvous_points:
+                self.rendezvous_points[ranks] = (
+                    [None] * len(ranks),
+                    threading.Barrier(len(ranks), timeout=5),
+                )
+            return self.rendezvous_points[ranks]
+
+    def world(self):
+        return _CacheOnlyGroup(self, range(self.pp * self.tp))
+
+    def tensor_group(self):
+        start = self.rank // self.tp * self.tp
+        return _CacheOnlyGroup(self, range(start, start + self.tp))
+
+    def _run_rank(self, rank):
+        self.local.rank = rank
+        self.tuners[rank] = _CacheOnlyTuner(self.load_results.get(rank, True))
+        try:
+            flashinfer_autotune(_make_runner([]))
+        except Exception as exc:
+            self.errors[rank] = exc
+
+    def execute(self):
+        threads = [
+            threading.Thread(target=self._run_rank, args=(rank,))
+            for rank in range(self.pp * self.tp)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert not any(thread.is_alive() for thread in threads), "ranks hung"
+        assert not any(
+            isinstance(error, threading.BrokenBarrierError)
+            for error in self.errors.values()
+        ), "ranks issued mismatched collectives"
+        for ranks, traces in self.collectives.items():
+            assert set(traces) == set(ranks)
+            assert all(trace == traces[ranks[0]] for trace in traces.values())
+        return self
+
+    def assert_all_failed(self, *fragments):
+        assert set(self.errors) == set(range(self.pp * self.tp))
+        messages = {str(error) for error in self.errors.values()}
+        assert len(messages) == 1, messages
+        message = messages.pop()
+        assert "VLLM_FLASHINFER_AUTOTUNE_CACHE_ONLY" in message
+        for fragment in fragments:
+            assert fragment in message
+
+
+@pytest.fixture
+def cache_only_run(monkeypatch, tmp_path):
+    import torch
+
+    import vllm.utils.flashinfer as fi_utils
+    from vllm.distributed import parallel_state
+
+    monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_ONLY", "1")
+
+    def make_run(*, pp=1, tp=2, load_results=None):
+        run = _CacheOnlyRun(pp, tp, load_results or {})
+        autotuner = ModuleType("flashinfer.autotuner")
+        monkeypatch.setattr(
+            autotuner,
+            "AutoTuner",
+            SimpleNamespace(get=lambda: run.tuners[run.rank]),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            autotuner,
+            "set_autotune_process_group",
+            lambda group: run.autotuned.append(run.rank),
+            raising=False,
+        )
+        monkeypatch.setitem(sys.modules, "flashinfer.autotuner", autotuner)
+        monkeypatch.setattr(
+            torch.distributed,
+            "all_gather_object",
+            lambda output, obj, group: group.all_gather_object(output, obj),
+        )
+        monkeypatch.setattr(parallel_state, "get_world_group", run.world)
+        monkeypatch.setattr(parallel_state, "get_tp_group", run.tensor_group)
+        monkeypatch.setattr(
+            parallel_state, "get_pp_group", lambda: SimpleNamespace(world_size=pp)
+        )
+        monkeypatch.setattr(fi_utils, "autotune", lambda **kwargs: nullcontext())
+        monkeypatch.setattr(
+            warmup,
+            "resolve_flashinfer_autotune_file",
+            lambda runner: tmp_path / "autotune_configs.json",
+        )
+        monkeypatch.setattr(
+            warmup, "_flashinfer_autotune_skip_ops", lambda runner: None
+        )
+        monkeypatch.setattr(
+            warmup,
+            "_run_flashinfer_autotune_dummy_runs",
+            lambda runner, **kwargs: run.autotuned.append(run.rank),
+        )
+        return run
+
+    return make_run
+
+
+@pytest.mark.parametrize("tp", [1, 2])
+def test_cache_only_loads_cache_on_every_rank_and_skips_autotune(
+    cache_only_run, tmp_path, tp
+):
+    cache = b'{"gemm": ["Runner", 3]}'
+    (tmp_path / "autotune_configs.json").write_bytes(cache)
+    run = cache_only_run(tp=tp).execute()
+    assert not run.errors
+    assert all(tuner.loaded == cache for tuner in run.tuners.values())
+    assert not run.autotuned
+    assert list(tmp_path.iterdir()) == [tmp_path / "autotune_configs.json"]
+
+
+@pytest.mark.parametrize(
+    ("cache", "fragment"),
+    [
+        (None, "FileNotFoundError"),
+        (b"", "is empty"),
+        ("directory", "IsADirectoryError"),
+    ],
+)
+def test_cache_only_read_failure_fails_every_rank_without_loading(
+    cache_only_run, tmp_path, cache, fragment
+):
+    path = tmp_path / "autotune_configs.json"
+    if cache == "directory":
+        path.mkdir()
+    elif cache is not None:
+        path.write_bytes(cache)
+    run = cache_only_run(tp=4).execute()
+    run.assert_all_failed("rank 0:", fragment)
+    assert all(tuner.loaded is None for tuner in run.tuners.values())
+    assert not run.autotuned
+
+
+@pytest.mark.parametrize(
+    ("result", "fragment"),
+    [
+        (False, "FlashInfer rejected the cache"),
+        (ValueError("bad tactic"), "ValueError: bad tactic"),
+    ],
+)
+@pytest.mark.parametrize("failing_rank", [0, 3])
+def test_cache_only_load_failure_on_any_rank_fails_every_rank(
+    cache_only_run, tmp_path, result, fragment, failing_rank
+):
+    (tmp_path / "autotune_configs.json").write_bytes(b"{}")
+    run = cache_only_run(tp=4, load_results={failing_rank: result}).execute()
+    run.assert_all_failed(f"rank {failing_rank}: {fragment}")
+    assert not run.autotuned
+
+
+def test_cache_only_pp_stages_load_own_cache_and_fail_together(
+    cache_only_run, tmp_path
+):
+    stage_caches = {0: b'{"stage": 0}', 1: b'{"stage": 1}'}
+    for stage, cache in stage_caches.items():
+        ranks = f"{2 * stage}-{2 * stage + 1}"
+        (tmp_path / f"autotune_configs_tp_{ranks}.json").write_bytes(cache)
+    run = cache_only_run(pp=2, tp=2).execute()
+    assert not run.errors
+    for rank, tuner in run.tuners.items():
+        assert tuner.loaded == stage_caches[rank // 2]
+    assert set(run.collectives) == {(0, 1), (2, 3), (0, 1, 2, 3)}
+    assert run.collectives[(0, 1, 2, 3)][0] == ["all_gather"]
+
+    (tmp_path / "autotune_configs_tp_2-3.json").unlink()
+    run = cache_only_run(pp=2, tp=2).execute()
+    run.assert_all_failed("rank 2:", "autotune_configs_tp_2-3.json")
+    assert "rank 0:" not in str(run.errors[0])
+
+
+def test_cache_only_disabled_keeps_autotune_path(autotune_run, monkeypatch):
+    monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_ONLY", "0")
+    run = autotune_run(pp=1, tp=2).execute()
+    run.assert_collectives_match()
+    assert set(run.profile_groups) == {0, 1}
+    assert [rank for rank, _, _ in run.saves] == [0]

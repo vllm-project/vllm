@@ -9,6 +9,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import torch
+
 import vllm.envs as envs
 
 if TYPE_CHECKING:
@@ -77,6 +79,63 @@ def sync_flashinfer_autotune_cache(
         f.flush()
         if not AutoTuner.get().load_configs(f.name):
             raise RuntimeError("FlashInfer autotune cache is incompatible")
+
+
+def load_flashinfer_autotune_cache_only(
+    cache_path: Path,
+    tune_group: "GroupCoordinator",
+    world: "GroupCoordinator",
+) -> None:
+    """Load the tuning group leader's autotune cache on every rank, or fail.
+
+    Every world rank makes the same decision: read, transfer and load errors
+    are gathered over ``world`` and re-raised on all ranks, so no rank is left
+    waiting in a later collective. A successful load only means FlashInfer
+    accepted the file; ops without an entry use FlashInfer's default tactic.
+
+    Raises:
+        RuntimeError: If the cache is missing, empty, unreadable or rejected
+            by FlashInfer on any rank.
+
+    """
+    is_leader = tune_group.rank_in_group == 0
+    cache: bytes | str | None = None
+    if is_leader:
+        try:
+            cache = cache_path.read_bytes() or f"{cache_path} is empty"
+        except Exception as exc:
+            cache = f"{type(exc).__name__}: {exc}"
+    cache = tune_group.broadcast_object(cache, src=0)
+
+    error: str | None = None
+    if isinstance(cache, str):
+        if is_leader:
+            error = cache
+    else:
+        try:
+            from flashinfer.autotuner import AutoTuner
+
+            with tempfile.NamedTemporaryFile(suffix=".json") as f:
+                f.write(cache)
+                f.flush()
+                if not AutoTuner.get().load_configs(f.name):
+                    error = "FlashInfer rejected the cache (environment mismatch)"
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+
+    errors: list[str | None] = [error]
+    if world.world_size > 1:
+        errors = [None] * world.world_size
+        torch.distributed.all_gather_object(errors, error, group=world.cpu_group)
+    failures = "; ".join(
+        f"rank {rank}: {error}" for rank, error in enumerate(errors) if error
+    )
+    if failures:
+        raise RuntimeError(
+            "VLLM_FLASHINFER_AUTOTUNE_CACHE_ONLY is set but the FlashInfer "
+            f"autotune cache could not be loaded: {failures}. Unset it to "
+            "autotune, or prepare a cache for this configuration."
+        )
 
 
 def write_flashinfer_autotune_cache(cache_path: Path, contents: bytes) -> None:
