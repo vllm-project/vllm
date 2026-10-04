@@ -1741,6 +1741,8 @@ async def test_kv_consumuer(monkeypatch):
         (["release", "claim", "ready", "pull"], False, True),
         (["claim", "release", "expire", "ready"], None, True),
         (["claim", "ready", "failing-pull"], None, True),
+        (["claim", "ready", "abort-all"], None, True),
+        (["claim", "pull", "abort-all"], None, False),
         (["claim", "ready", "busy", "pull", "abort", "free"], False, True),
         (["claim", "ready", "busy", "abort", "pull"], False, True),
         (["claim", "abort", "neighbor", "busy", "pull"], False, False),
@@ -1769,6 +1771,8 @@ async def test_kv_consumuer(monkeypatch):
         "release-before-claim",
         "release-outlives-expiry-while-claimed",
         "failed-send-frees-kv",
+        "abort-all-frees-ready-kv",
+        "abort-all-spares-unfinished",
         "pull-waiting-for-a-sender-stays-abortable",
         "aborted-pull-answered-while-senders-are-busy",
         "aborted-pull-answered-before-its-batch-writes",
@@ -1819,12 +1823,13 @@ async def test_send_state_answers_every_pull_once(monkeypatch, events, pull_ok, 
         now = [time.perf_counter()]
         monkeypatch.setattr(mooncake_connector.time, "perf_counter", lambda: now[0])
 
-        def scheduler_meta(blocks=None, aborted=False):
+        def scheduler_meta(blocks=None, aborted=False, abort_all=False):
             meta = MooncakeConnectorMetadata()
             if blocks is not None:
                 meta.reqs_to_send["p-req"] = ("tx", blocks)
             if aborted:
                 meta.reqs_not_processed = {"tx"}
+            meta.abort_pending_sends = abort_all
             return meta
 
         with patch.object(worker, "_send_blocks", return_value=0) as send_blocks:
@@ -1859,6 +1864,8 @@ async def test_send_state_answers_every_pull_once(monkeypatch, events, pull_ok, 
                     await asyncio.wait([pull], timeout=3)
                 elif event == "free":
                     worker._send_slots.release()
+                elif event == "abort-all":
+                    await worker.record_send_reqs(scheduler_meta(abort_all=True))
                 elif event in ("pull", "failing-pull"):
                     if event == "failing-pull":
                         send_blocks.side_effect = RuntimeError("transfer engine died")
