@@ -1030,6 +1030,12 @@ def test_generate_block_hash_extra_keys_cache_salt():
     assert next_mm_idx == 1
 
 
+def _expected_prompt_embeds_hash(embeds: torch.Tensor) -> bytes:
+    hasher = hashlib.sha256(str(embeds.dtype).encode() + b"\0")
+    hasher.update(tensor_data(embeds))
+    return hasher.digest()
+
+
 def test_generate_block_hash_extra_keys_prompt_embeds():
     prompt_embeds = torch.randn(10, 3)
     request = make_request(
@@ -1043,13 +1049,13 @@ def test_generate_block_hash_extra_keys_prompt_embeds():
     # Test with prompt embeds for the first block
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
     expected_embeds = prompt_embeds[0:5]
-    expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
+    expected_hash = _expected_prompt_embeds_hash(expected_embeds)
     assert extra_keys == (("prompt_embeds", expected_hash),)
 
     # Test with prompt embeds for the second block
     extra_keys, _ = generate_block_hash_extra_keys(request, 5, 10, 0)
     expected_embeds = prompt_embeds[5:10]
-    expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
+    expected_hash = _expected_prompt_embeds_hash(expected_embeds)
     assert extra_keys == (("prompt_embeds", expected_hash),)
 
 
@@ -1101,6 +1107,28 @@ def test_generate_block_hash_extra_keys_different_prompt_embeds():
     extra_keys1, _ = generate_block_hash_extra_keys(request1, 0, 5, 0)
     extra_keys2, _ = generate_block_hash_extra_keys(request2, 0, 5, 0)
     assert extra_keys1 != extra_keys2
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_prompt_embeds_same_bytes_different_dtype_do_not_share_cache(hash_fn):
+    """Numerically different prompt embeddings must not reuse the same KV."""
+    block_size = 3
+    fp16_embeds = torch.arange(30, dtype=torch.float16).reshape(6, 5) / 32
+    bf16_embeds = fp16_embeds.view(torch.bfloat16)
+    assert not torch.equal(fp16_embeds.float(), bf16_embeds.float())
+
+    requests = [
+        make_request(
+            request_id=str(i),
+            prompt_token_ids=None,
+            block_size=block_size,
+            hash_fn=hash_fn,
+            prompt_embeds=embeds,
+        )
+        for i, embeds in enumerate([fp16_embeds, bf16_embeds, fp16_embeds.clone()])
+    ]
+    assert requests[0].block_hashes != requests[1].block_hashes
+    assert requests[0].block_hashes == requests[2].block_hashes
 
 
 def test_generate_block_hash_extra_keys_lora():
@@ -3859,9 +3887,7 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
 
-    block1_embeds_hash = hashlib.sha256(
-        tensor_data(prompt_embeds[:block_size])
-    ).digest()
+    block1_embeds_hash = _expected_prompt_embeds_hash(prompt_embeds[:block_size])
     expected_hash1 = hash_fn(
         (
             kv_cache_utils.NONE_HASH,
@@ -3871,9 +3897,9 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
     )
     assert block_hashes[0] == expected_hash1
 
-    block2_embeds_hash = hashlib.sha256(
-        tensor_data(prompt_embeds[block_size:num_tokens])
-    ).digest()
+    block2_embeds_hash = _expected_prompt_embeds_hash(
+        prompt_embeds[block_size:num_tokens]
+    )
     expected_hash2 = hash_fn(
         (
             block_hashes[0],
@@ -3908,9 +3934,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
 
-    block1_embeds_hash = hashlib.sha256(
-        tensor_data(prompt_embeds[:block_size])
-    ).digest()
+    block1_embeds_hash = _expected_prompt_embeds_hash(prompt_embeds[:block_size])
     expected_hash1 = hash_fn(
         (
             kv_cache_utils.NONE_HASH,
@@ -3920,9 +3944,9 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
     )
     assert block_hashes[0] == expected_hash1
 
-    block2_embeds_hash = hashlib.sha256(
-        tensor_data(prompt_embeds[block_size:num_tokens])
-    ).digest()
+    block2_embeds_hash = _expected_prompt_embeds_hash(
+        prompt_embeds[block_size:num_tokens]
+    )
     expected_hash2 = hash_fn(
         (
             block_hashes[0],
