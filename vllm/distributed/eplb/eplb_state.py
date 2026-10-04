@@ -661,15 +661,14 @@ class EplbState:
             # Run _move_to_workspace if all ranks have finished transferring the
             # new weights to the intermediate buffer
             for eplb_model_state in self.model_states.values():
-                # rebalanced must remain consistent amongst all ranks otherwise the
-                # all_reduce in _all_ranks_result_ready will hang
-                if eplb_model_state.rebalanced and self._all_ranks_result_ready(
-                    eplb_model_state
-                ):
-                    _move_to_workspace(
-                        model_state=eplb_model_state,
-                        ep_rank=ep_group.rank(),
-                    )
+                # The all_reduce in _all_ranks_result_ready is called unconditionally
+                # so that all ranks participate and do not hang.
+                if self._all_ranks_result_ready(eplb_model_state):
+                    if eplb_model_state.rebalanced:
+                        _move_to_workspace(
+                            model_state=eplb_model_state,
+                            ep_rank=ep_group.rank(),
+                        )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if self.is_async and any(
@@ -1005,14 +1004,15 @@ class EplbState:
                     "Draining async EPLB worker for model %s",
                     model_key,
                 )
-            while ms.rebalanced:
+            while self._any_rank_rebalanced(ms):
                 if self._all_ranks_result_ready(ms):
-                    result = ms.pending_result
-                    assert result is not None
-                    if result.layer_idx == ms.model.num_moe_layers - 1:
-                        ms.rebalanced = False
-                    ms.pending_result = None
-                    result.consumed_event.record()
+                    if ms.rebalanced:
+                        result = ms.pending_result
+                        assert result is not None
+                        if result.layer_idx == ms.model.num_moe_layers - 1:
+                            ms.rebalanced = False
+                        ms.pending_result = None
+                        result.consumed_event.record()
                 else:
                     time.sleep(0.001)
             if needs_drain:
@@ -1021,24 +1021,45 @@ class EplbState:
                     model_key,
                 )
 
-    def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
+    def _any_rank_rebalanced(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()
-        has_result = int(model_state.pending_result is not None)
+        is_rebalanced = int(model_state.rebalanced)
 
         cpu_group = getattr(parallel_state, "cpu_group", None)
         if cpu_group is not None and cpu_group.size() > 1:
-            flag = torch.tensor((has_result,), dtype=torch.int32, device="cpu")
+            flag = torch.tensor((is_rebalanced,), dtype=torch.int32, device="cpu")
+            all_reduce(flag, group=cpu_group, op=torch.distributed.ReduceOp.MAX)
+            return int(flag.item()) == 1
+
+        device_group = parallel_state.device_group
+        if device_group.size() <= 1:
+            return bool(is_rebalanced)
+
+        device = getattr(
+            parallel_state, "device", model_state.physical_to_logical_map.device
+        )
+        flag = torch.tensor((is_rebalanced,), dtype=torch.int32, device=device)
+        all_reduce(flag, group=device_group, op=torch.distributed.ReduceOp.MAX)
+        return int(flag.item()) == 1
+
+    def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
+        parallel_state = get_ep_group()
+        is_ready = int(model_state.pending_result is not None or not model_state.rebalanced)
+
+        cpu_group = getattr(parallel_state, "cpu_group", None)
+        if cpu_group is not None and cpu_group.size() > 1:
+            flag = torch.tensor((is_ready,), dtype=torch.int32, device="cpu")
             all_reduce(flag, group=cpu_group)
             return int(flag.item()) == cpu_group.size()
 
         device_group = parallel_state.device_group
         if device_group.size() <= 1:
-            return bool(has_result)
+            return bool(is_ready)
 
         device = getattr(
             parallel_state, "device", model_state.physical_to_logical_map.device
         )
-        flag = torch.tensor((has_result,), dtype=torch.int32, device=device)
+        flag = torch.tensor((is_ready,), dtype=torch.int32, device=device)
         all_reduce(flag, group=device_group)
         return int(flag.item()) == device_group.size()
 
