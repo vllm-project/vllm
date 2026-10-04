@@ -33,7 +33,7 @@ steps:
 - label: ":nvidia: (H200 MIG 18GB) CUDAGraph"
   device: h200_18gb
   key: cudagraph
-  timeout_in_minutes: 30
+  timeout_in_minutes: 40
   source_file_dependencies:
   - tests/v1/cudagraph
   - vllm/v1/cudagraph_dispatcher.py
