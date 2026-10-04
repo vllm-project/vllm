@@ -7,13 +7,15 @@ send trimming, and group-count invariant checking in _build_transfer_params.
 """
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
+    MooncakeConnectorWorker,
+    _transfer_block_size,
     KVConnectorRole,
     MooncakeConnector,
     MooncakeConnectorMetadata,
@@ -66,6 +68,105 @@ def test_sw_sizes(swa_enabled, expected_blocks_per_sw):
         kv_cache_config=kv_cache_config,
     )
     assert scheduler.blocks_per_sw == expected_blocks_per_sw
+
+
+@pytest.mark.cpu_test
+def test_transfer_block_size_uses_physical_group_size():
+    """A collapsed logical block size must not shrink the transfer page size."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_both",
+        block_size=128,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=1024,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=128,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+        ],
+    )
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+    assert scheduler.block_size == 1024
+
+
+class _FullAttentionBackend:
+    @classmethod
+    def get_supported_kernel_block_sizes(cls):
+        return [1024]
+
+
+@pytest.mark.cpu_test
+def test_worker_sync_handles_logical_below_physical():
+    """A collapsed logical size must not trigger the inverse-kernel assert."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        block_size=128,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=1024,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=128,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+        ],
+    )
+
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.vllm_config = vllm_config
+    worker.block_size = _transfer_block_size(vllm_config, kv_cache_config)
+    worker._physical_blocks_per_logical_kv_block = 1
+    # Avoid destructor work for this partially initialized test worker.
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    worker.async_zmq_ctx = MagicMock()
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
+        ".mooncake_connector.get_current_attn_backends",
+        return_value=[_FullAttentionBackend],
+    ):
+        worker._sync_block_size_with_kernel()
+
+    assert worker.block_size == 1024
+    assert worker._physical_blocks_per_logical_kv_block == 1
 
 
 # ---------------------------------------------------------------------------
