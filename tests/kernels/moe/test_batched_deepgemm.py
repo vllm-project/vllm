@@ -266,4 +266,3 @@ def test_batched_deepgemm_needle_batch_invariance(workspace_init):
 
     for actual in variants:
         torch.testing.assert_close(actual, reference, rtol=0, atol=0)
-
