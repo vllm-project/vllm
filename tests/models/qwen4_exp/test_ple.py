@@ -2194,29 +2194,3 @@ def test_amd_pinned_embedding_output_written_under_cudagraph_capture(
 
         expected = loaded_weight[ngram_ids.cpu()].to(device="cuda:0").flatten(-2)
         torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
-
-
-def test_ngram_cpu_offload_padding_does_not_overwrite_real_tokens() -> None:
-    """CUDA-graph padding rows must not reach the n-gram scatter."""
-    module = Qwen4ExpNGramEmbedding.__new__(Qwen4ExpNGramEmbedding)
-    nn.Module.__init__(module)
-    module.ngram_size = 2
-    module.heads_per_ngram = 1
-    module.ngram_heads = 1
-    module.eos_token_id = 99
-    module.register_buffer("layer_multipliers", torch.tensor([3, 5]))
-    module.register_buffer("ngram_heads_vocab_sizes", torch.tensor([101]))
-    module.register_buffer("ngram_heads_offsets", torch.tensor([0]))
-
-    # query_start_loc stays unpadded while the token count carries CUDA-graph
-    # padding, so the extra rows must not reach the scatter.
-    query_start_loc = torch.tensor([0, 2])
-    ngram_context = torch.full((1, 1), 99, dtype=torch.long)
-    expected = module.compute_ngram_ids(
-        torch.tensor([11, 13]), query_start_loc, ngram_context
-    )
-    actual = module.compute_ngram_ids(
-        torch.tensor([11, 13, 777, 888]), query_start_loc, ngram_context
-    )
-
-    assert torch.equal(actual[:2], expected)

@@ -36,6 +36,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
+    ngram_eos_token_id,
 )
 
 logger = init_logger(__name__)
@@ -201,7 +202,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 f"{embedding_dim} % {self.ngram_heads} != 0"
             )
         self.head_dim = embedding_dim // self.ngram_heads
-        self.eos_token_id = int(config.eos_token_id)
+        self.eos_token_id = ngram_eos_token_id(config)
         self.unigram_vocab_size = int(config.vocab_size)
         self.split_ngram_parts = int(getattr(config, "split_ngram_parts", 512))
         if self.split_ngram_parts <= 0:

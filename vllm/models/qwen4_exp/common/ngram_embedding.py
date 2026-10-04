@@ -51,6 +51,18 @@ from .ple import PLEVocabParallelEmbedding
 logger = init_logger(__name__)
 
 
+def ngram_eos_token_id(config) -> int:
+    """The single stop id the n-gram context filler pads with.
+
+    Checkpoints may declare `eos_token_id` as a list of every stop id; the
+    filler needs one, so the first is taken.
+    """
+    eos_token_id = config.eos_token_id
+    if isinstance(eos_token_id, (list, tuple)):
+        eos_token_id = eos_token_id[0]
+    return int(eos_token_id)
+
+
 class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
     """ETP-sharded PLE table shared by device and pinned-host backends."""
 

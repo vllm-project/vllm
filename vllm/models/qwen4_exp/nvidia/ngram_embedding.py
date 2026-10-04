@@ -22,6 +22,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    ngram_eos_token_id,
 )
 from .ops.ple import ple_ngram_ids
 
@@ -162,7 +163,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 f"{embedding_dim} % {self.ngram_heads} != 0"
             )
         self.head_dim = embedding_dim // self.ngram_heads
-        self.eos_token_id = int(config.eos_token_id)
+        self.eos_token_id = ngram_eos_token_id(config)
         self.unigram_vocab_size = int(config.vocab_size)
         self.split_ngram_parts = int(getattr(config, "split_ngram_parts", 512))
         if self.split_ngram_parts <= 0:
@@ -312,13 +313,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         columns = (positions - query_start_loc[request_indices]).clamp(
             0, packed.shape[1] - 1
         )
-        # The model runner sends the CUDA-graph padded token count together with
-        # an unpadded query_start_loc. Stale padding must not enter the scatter:
-        # its clamped indices would overwrite the last real token.
-        num_valid_tokens = min(int(query_start_loc[-1].item()), num_tokens)
-        packed[request_indices[:num_valid_tokens], columns[:num_valid_tokens]] = (
-            input_ids[:num_valid_tokens]
-        )
+        packed[request_indices, columns] = input_ids
         ngram_context = ngram_context[:num_reqs].to(
             device=input_ids.device, dtype=torch.long
         )

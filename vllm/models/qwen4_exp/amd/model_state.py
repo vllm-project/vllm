@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.models.qwen4_exp.common.ngram_embedding import ngram_eos_token_id
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
@@ -43,11 +44,7 @@ class Qwen4ExpModelState(MambaHybridModelState):
         self.ngram_context_len = int(config.ngram_size) - 1
         if self.ngram_context_len <= 0:
             raise ValueError("N-gram embedding requires context length >= 1.")
-        eos_token_id = config.eos_token_id
-        if isinstance(eos_token_id, (list, tuple)):
-            # Some checkpoints list every stop id; the context filler needs one.
-            eos_token_id = eos_token_id[0]
-        self.ngram_eos_token_id = int(eos_token_id)
+        self.ngram_eos_token_id = ngram_eos_token_id(config)
         self.ngram_context = torch.full(
             (self.max_num_reqs, self.ngram_context_len),
             self.ngram_eos_token_id,
