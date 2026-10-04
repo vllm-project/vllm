@@ -274,6 +274,47 @@ class TestNonStreaming:
             ' "multiSelect": false, "answer": null}]',
         }
 
+    @pytest.mark.parametrize(
+        "unclosed_func",
+        ["<function=function_name", "<function=function_name>"],
+    )
+    def test_unclosed_tool_call_in_prose_does_not_swallow_later_tool_call(
+        self, parser, mock_request, unclosed_func
+    ):
+        text = (
+            f"Use <tool_call>\n{unclosed_func}\n"
+            "Wait, let me call the real tool via <tool_call>:\n"
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert result.tool_calls[-1].function.name == "get_weather"
+        assert json.loads(result.tool_calls[-1].function.arguments) == {
+            "city": "Tokyo",
+        }
+
+    def test_tool_call_tag_inside_parameter_value_preserved(self, parser, mock_request):
+        text = (
+            "<tool_call>\n"
+            "<function=write_file>\n"
+            "<parameter=content>Document <tool_call> usage</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "write_file"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "content": "Document <tool_call> usage",
+        }
+
 
 class TestStreaming:
     def test_basic_streaming(self, parser, mock_request):
@@ -634,6 +675,63 @@ class TestStreaming:
 
         assert "Bash" in names
         assert "Read" in names
+
+    @pytest.mark.parametrize(
+        "unclosed_func",
+        ["<function=function_name", "<function=function_name>"],
+    )
+    def test_streaming_unclosed_tool_call_in_prose_does_not_swallow_later_tool_call(
+        self, parser, mock_request, unclosed_func
+    ):
+        chunks = [
+            "Use <tool_call>\n",
+            f"{unclosed_func}\n",
+            "Wait, let me call the real tool via ",
+            "<tool_call>",
+            ":\n",
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>Tokyo</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        calls_by_index: dict[int, dict[str, str]] = {}
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    entry = calls_by_index.setdefault(
+                        tc.index, {"name": "", "arguments": ""}
+                    )
+                    if tc.function:
+                        if tc.function.name:
+                            entry["name"] += tc.function.name
+                        if tc.function.arguments:
+                            entry["arguments"] += tc.function.arguments
+
+        last_call = calls_by_index[max(calls_by_index)]
+        assert last_call["name"] == "get_weather"
+        assert json.loads(last_call["arguments"]) == {"city": "Tokyo"}
+
+    def test_streaming_tool_call_tag_inside_parameter_value_preserved(
+        self, parser, mock_request
+    ):
+        chunks = [
+            "<tool_call>\n",
+            "<function=write_file>\n",
+            "<parameter=content>Document ",
+            "<tool_call>",
+            " usage</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) == "write_file"
+        assert json.loads(collect_tool_arguments(results)) == {
+            "content": "Document <tool_call> usage",
+        }
 
 
 class TestArgConverter:
