@@ -29,7 +29,8 @@ def test_reference_encoder_fixtures(case_id):
     messages = data["messages"] if isinstance(data, dict) else data
     tools = data.get("tools") if isinstance(data, dict) else None
     expected = (FIXTURES / "deepseek_v41" / f"test_output_{case_id}.txt").read_text()
-    assert render(messages, tools=tools) == expected
+    assert render(messages, tools=tools, add_generation_prompt=False) == expected
+    assert render(messages, tools=tools) == expected + "<｜Assistant｜><think>"
 
 
 @pytest.mark.parametrize(
@@ -185,3 +186,82 @@ def test_images_preserve_content_order_and_reference_separator(image_type):
 def test_unsupported_media_is_a_request_error():
     with pytest.raises(ValueError, match="text and image content only"):
         render([{"role": "user", "content": [{"type": "input_audio"}]}])
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("final_role", ["user", "developer", "system", "assistant"])
+def test_generation_prompt_only_controls_final_turn(thinking, final_role):
+    messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+        {"role": final_role, "content": "final message"},
+    ]
+    original = copy.deepcopy(messages)
+    closed = render(messages, thinking=thinking, add_generation_prompt=False)
+    opened = render(messages, thinking=thinking, add_generation_prompt=True)
+    cue = "<｜Assistant｜>" + ("<think>" if thinking else "</think>")
+
+    assert opened == closed + cue
+    assert "first answer<｜end▁of▁sentence｜>" in closed
+    assert "<｜User｜>first question<｜Assistant｜>" in closed
+    assert messages == original
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_system_only_generation_prompt(thinking):
+    messages = [{"role": "system", "content": "Be helpful."}]
+    closed = render(messages, thinking=thinking, add_generation_prompt=False)
+    cue = "<｜Assistant｜>" + ("<think>" if thinking else "</think>")
+    assert render(messages, thinking=thinking) == closed + cue
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_continue_final_message_preserves_historical_eos(thinking):
+    messages = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+        {"role": "assistant", "content": "The answer is "},
+    ]
+    original = copy.deepcopy(messages)
+    closed = render(messages, thinking=thinking, add_generation_prompt=False)
+    continued = render(
+        messages,
+        thinking=thinking,
+        add_generation_prompt=False,
+        continue_final_message=True,
+    )
+    assert closed == continued + "<｜end▁of▁sentence｜>"
+    assert continued.endswith("The answer is ")
+    assert "first answer<｜end▁of▁sentence｜>" in continued
+    assert messages == original
+
+
+def test_continue_final_message_through_chat_request():
+    request = ChatCompletionRequest(
+        model="deepseek-ai/DeepSeek-V4.1-Flash",
+        messages=[
+            {"role": "user", "content": "Finish this sentence."},
+            {"role": "assistant", "content": "The answer is "},
+        ],
+        continue_final_message=True,
+    )
+    kwargs = request.build_chat_params(None, "auto").get_apply_chat_template_kwargs()
+    assert render(request.messages, **kwargs).endswith("The answer is ")
+
+
+def test_continue_final_reasoning_keeps_thinking_open():
+    messages = [
+        {"role": "user", "content": "Explain your answer."},
+        {"role": "assistant", "content": None, "reasoning": "Let me consider "},
+    ]
+    assert render(messages, continue_final_message=True).endswith(
+        "<｜Assistant｜><think>Let me consider "
+    )
+
+
+@pytest.mark.parametrize("messages", [[], [{"role": "user", "content": "hello"}]])
+def test_continue_final_message_requires_assistant(messages):
+    with pytest.raises(ValueError, match="final assistant"):
+        render(messages, continue_final_message=True)
