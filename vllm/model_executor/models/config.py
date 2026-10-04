@@ -366,6 +366,30 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
                 )
 
 
+class MiniMaxM3SparseConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """The fused decode kernel reads FP8 per-channel attention projections.
+        Unless the user gave a quantization config of their own, quantize the
+        sparse layers' ``qkv_proj`` and ``o_proj`` to it at load."""
+        model_config = vllm_config.model_config
+        if (
+            not vllm_config.attention_config.minimax_m3_fused_decode
+            or model_config.quantization_config is not None
+        ):
+            return
+        from vllm.config.quantization import QuantizationConfigArgs
+
+        text_config = model_config.hf_text_config
+        sparse = text_config.sparse_attention_config["sparse_attention_freq"]
+        targets = {
+            f"re:.*layers\\.{i}\\.self_attn\\.(qkv|o)_proj$": "fp8_per_channel"
+            for i, on in enumerate(sparse)
+            if on
+        }
+        model_config.quantization_config = QuantizationConfigArgs(targets=targets)
+
+
 class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     """Route MXFP4-checkpointed Kimi-K3 MoE experts to the MXFP4 interface.
 
@@ -1036,6 +1060,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
+    "MiniMaxM3SparseForCausalLM": MiniMaxM3SparseConfig,
+    "MiniMaxM3SparseForConditionalGeneration": MiniMaxM3SparseConfig,
     "MambaForCausalLM": MambaModelConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
