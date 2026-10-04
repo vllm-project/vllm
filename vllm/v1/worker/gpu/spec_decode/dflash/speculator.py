@@ -362,6 +362,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         is_profile: bool = False,
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
+        if dummy_run and dp_sync is not None:
+            num_reqs = min(num_reqs, dp_sync.num_reqs_unpadded)
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
@@ -442,6 +444,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_num_tokens,
                 self.max_model_len,
                 self.sample_from_anchor,
+                num_reqs,
             )
 
         batch_sync, num_batch_tokens = (
@@ -754,12 +757,16 @@ def prepare_dflash_inputs(
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
+    num_reqs_override: int | None = None,
 ) -> None:
-    num_reqs = input_batch.num_reqs
+    num_reqs = (
+        input_batch.num_reqs if num_reqs_override is None else num_reqs_override
+    )
+    assert num_reqs <= input_batch.num_reqs
     assert num_reqs > 0
     # Cover the longest possible per-request span (ctx + query). Use the max
     # per-request query length, not the total token count across the batch.
-    max_target_query_len = int(input_batch.num_scheduled_tokens.max())
+    max_target_query_len = int(input_batch.num_scheduled_tokens[:num_reqs].max())
     max_tokens_per_req = max_target_query_len + num_query_per_req
     BLOCK_SIZE = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))
     num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
