@@ -78,7 +78,8 @@ enum ScoringFunc {
 // in the softmax kernel when we extend this module to support expert-choice routing.
 template <int TPB, typename InputType>
 __launch_bounds__(TPB) __global__
-    void moeSoftmax(const InputType* input, const bool* finished, float* output, const int num_cols)
+    void moeSoftmax(const InputType* input, const bool* finished, float* output, const int num_cols,
+        const int64_t input_row_stride)
 {
     using BlockReduce = cub::BlockReduce<float, TPB>;
     __shared__ typename BlockReduce::TempStorage tmpStorage;
@@ -86,7 +87,8 @@ __launch_bounds__(TPB) __global__
     __shared__ float normalizing_factor;
     __shared__ float float_max;
 
-    const int thread_row_offset = blockIdx.x * num_cols;
+    const int64_t input_row_offset = blockIdx.x * input_row_stride;
+    const int output_row_offset = blockIdx.x * num_cols;
 
     float threadData(-FLT_MAX);
 
@@ -98,8 +100,7 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
-        const float val = toFloat(input[idx]);
+        const float val = toFloat(input[input_row_offset + ii]);
         threadData = max(val, threadData);
     }
 
@@ -114,8 +115,7 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
-        const float val = toFloat(input[idx]);
+        const float val = toFloat(input[input_row_offset + ii]);
         threadData += expf(val - float_max);
     }
 
@@ -129,20 +129,21 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
-        const float val = toFloat(input[idx]);
+        const float val = toFloat(input[input_row_offset + ii]);
         float softmax_val = expf(val - float_max) * normalizing_factor;
         // Clamp NaN/Inf to 0 to prevent duplicate expert IDs downstream.
         if (isnan(softmax_val) || isinf(softmax_val)) softmax_val = 0.f;
-        output[idx] = softmax_val;
+        output[output_row_offset + ii] = softmax_val;
     }
 }
 
 template <int TPB, typename InputType>
 __launch_bounds__(TPB) __global__
-    void moeSigmoid(const InputType* input, const bool* finished, float* output, const int num_cols)
+    void moeSigmoid(const InputType* input, const bool* finished, float* output, const int num_cols,
+        const int64_t input_row_stride)
 {
-    const int thread_row_offset = blockIdx.x * num_cols;
+    const int64_t input_row_offset = blockIdx.x * input_row_stride;
+    const int output_row_offset = blockIdx.x * num_cols;
 
     // Don't touch finished rows.
     if ((finished != nullptr) && finished[blockIdx.x])
@@ -152,12 +153,11 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
-        const float val = toFloat(input[idx]);
+        const float val = toFloat(input[input_row_offset + ii]);
         float sigmoid_val = 1.0f / (1.0f + __expf(-val));
         // Clamp NaN/Inf to 0 to prevent duplicate expert IDs downstream.
         if (isnan(sigmoid_val) || isinf(sigmoid_val)) sigmoid_val = 0.f;
-        output[idx] = sigmoid_val;
+        output[output_row_offset + ii] = sigmoid_val;
     }
 }
 
@@ -662,6 +662,7 @@ void topkGatingKernelLauncher(
     float* workspace,
     const int num_tokens,
     const int num_experts,
+    const int64_t input_row_stride,
     const int topk,
     const bool renormalize,
     const float* bias,
@@ -676,6 +677,28 @@ void topkGatingKernelLauncher(
     static constexpr int BYTES_PER_LDG_MULTIPLE_64 =
     (std::is_same_v<InputType, __nv_bfloat16> || std::is_same_v<InputType, __half>) ? 4 : 8;
 #endif
+    // Inductor can pad GEMM outputs (for example, a [M, 60] view with a row
+    // stride of 64). The fused kernels assume packed rows, so use the
+    // stride-aware unfused path for row-padded inputs.
+    if (input_row_stride != num_experts) {
+        STD_TORCH_CHECK(workspace != nullptr,
+            "workspace must be provided for row-padded gating output.");
+        static constexpr int TPB = 256;
+        if constexpr (SF == SCORING_SOFTMAX) {
+          moeSoftmax<TPB, InputType><<<num_tokens, TPB, 0, stream>>>(
+            gating_output, nullptr, workspace, num_experts, input_row_stride);
+        } else if constexpr (SF == SCORING_SIGMOID) {
+          moeSigmoid<TPB, InputType><<<num_tokens, TPB, 0, stream>>>(
+            gating_output, nullptr, workspace, num_experts, input_row_stride);
+        } else {
+            STD_TORCH_CHECK(false, "Unsupported scoring func");
+        }
+        moeTopK<TPB><<<num_tokens, TPB, 0, stream>>>(
+            workspace, nullptr, topk_weights, topk_indices, token_expert_indices,
+            num_experts, topk, 0, num_experts, renormalize, bias,
+            routed_scaling_factor, is_padding);
+        return;
+    }
     switch (num_experts) {
         case 1:
             LAUNCH_TOPK(1, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
@@ -733,10 +756,12 @@ void topkGatingKernelLauncher(
             static constexpr int TPB = 256;
             if constexpr (SF == SCORING_SOFTMAX) {
               moeSoftmax<TPB, InputType><<<num_tokens, TPB, 0, stream>>>(
-                gating_output, nullptr, workspace, num_experts);
+                gating_output, nullptr, workspace, num_experts,
+                input_row_stride);
             } else if constexpr (SF == SCORING_SIGMOID) {
               moeSigmoid<TPB, InputType><<<num_tokens, TPB, 0, stream>>>(
-                gating_output, nullptr, workspace, num_experts);
+                gating_output, nullptr, workspace, num_experts,
+                input_row_stride);
             } else {
                 STD_TORCH_CHECK(false, "Unsupported scoring func");
             }
@@ -795,7 +820,7 @@ void dispatch_topk_launch(
             topk_indices.mutable_data_ptr<int>(),
             token_expert_indices.mutable_data_ptr<int>(),
             softmax_workspace.mutable_data_ptr<float>(),
-            num_tokens, num_experts, topk, renormalize,
+            num_tokens, num_experts, gating_output.stride(0), topk, renormalize,
             bias_ptr, routed_scaling_factor, stream, is_padding_ptr);
     } else if (topk_indices.scalar_type() == torch::headeronly::ScalarType::UInt32) {
         vllm::moe::topkGatingKernelLauncher<uint32_t, ComputeType, SF>(
@@ -804,7 +829,7 @@ void dispatch_topk_launch(
             topk_indices.mutable_data_ptr<uint32_t>(),
             token_expert_indices.mutable_data_ptr<int>(),
             softmax_workspace.mutable_data_ptr<float>(),
-            num_tokens, num_experts, topk, renormalize,
+            num_tokens, num_experts, gating_output.stride(0), topk, renormalize,
             bias_ptr, routed_scaling_factor, stream, is_padding_ptr);
     } else {
         STD_TORCH_CHECK(topk_indices.scalar_type() == torch::headeronly::ScalarType::Long);
@@ -814,7 +839,7 @@ void dispatch_topk_launch(
             topk_indices.mutable_data_ptr<int64_t>(),
             token_expert_indices.mutable_data_ptr<int>(),
             softmax_workspace.mutable_data_ptr<float>(),
-            num_tokens, num_experts, topk, renormalize,
+            num_tokens, num_experts, gating_output.stride(0), topk, renormalize,
             bias_ptr, routed_scaling_factor, stream, is_padding_ptr);
     }
 }
@@ -828,12 +853,17 @@ void topk_softmax(
     std::optional<torch::stable::Tensor> bias,
     std::optional<torch::stable::Tensor> is_padding)
 {
+    STD_TORCH_CHECK(gating_output.dim() == 2,
+                    "gating_output must be a 2D tensor");
+    STD_TORCH_CHECK(gating_output.stride(1) == 1,
+                    "gating_output's last dimension must be contiguous");
     const int num_experts = gating_output.size(-1);
     const auto num_tokens = gating_output.numel() / num_experts;
     const int topk = topk_weights.size(-1);
 
     const bool is_pow_2 = (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
-    const bool needs_workspace = !is_pow_2 || num_experts > 256;
+    const bool needs_workspace = !is_pow_2 || num_experts > 256 ||
+                                 gating_output.stride(0) != num_experts;
     const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
 
     torch::stable::accelerator::DeviceGuard guard(gating_output.get_device_index());
@@ -869,12 +899,17 @@ void topk_sigmoid(
     double routed_scaling_factor,
     std::optional<torch::stable::Tensor> is_padding)
 {
+    STD_TORCH_CHECK(gating_output.dim() == 2,
+                    "gating_output must be a 2D tensor");
+    STD_TORCH_CHECK(gating_output.stride(1) == 1,
+                    "gating_output's last dimension must be contiguous");
     const int num_experts = gating_output.size(-1);
     const auto num_tokens = gating_output.numel() / num_experts;
     const int topk = topk_weights.size(-1);
 
     const bool is_pow_2 = (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
-    const bool needs_workspace = !is_pow_2 || num_experts > 256;
+    const bool needs_workspace = !is_pow_2 || num_experts > 256 ||
+                                 gating_output.stride(0) != num_experts;
     const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
 
     torch::stable::accelerator::DeviceGuard guard(gating_output.get_device_index());
