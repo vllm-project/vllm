@@ -67,7 +67,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.parser.harmony import Segment
+from vllm.parser.harmony import ChunkResult, HarmonyParser, Segment
 from vllm.renderers import TokenizeParams
 from vllm.renderers.online_renderer import (
     OnlineRenderer,
@@ -1451,12 +1451,11 @@ def _make_serving_instance(
     reasoning_parser: str = "",
     tool_parser: str | None = None,
     enable_per_request_metrics: bool = False,
-    model_type: str = "test",
 ) -> OpenAIServingResponses:
     engine_client = MagicMock()
     model_config = MagicMock()
     model_config.max_model_len = 100
-    model_config.hf_config.model_type = model_type
+    model_config.hf_config.model_type = "test"
     model_config.hf_text_config = MagicMock()
     model_config.get_diff_sampling_param.return_value = {}
     engine_client.model_config = model_config
@@ -2130,54 +2129,39 @@ async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
     assert function_call.call_id == "chatcmpl-tool-parser-id"
 
 
-class _PlaybackHarmonyContext(HarmonyContext):
-    """HarmonyContext that replays pre-cooked segments without a parser."""
-
-    def __init__(self, function_tool_names: frozenset[str]):
-        self._messages: list = []
-        self.request = None
-        self.function_tool_names = function_tool_names
-        self.last_append_segments: list[Segment] = []
-        self.last_append_flush_status = False
-        self.finish_reason = None
-        self.streamed_output_items = None
-        self.num_init_messages = 0
-        self.num_prompt_tokens = 1
-        self.num_output_tokens = 0
-        self.num_cached_tokens = 0
-        self.num_reasoning_tokens = 0
-        self.num_tool_output_tokens = 0
-        self.all_turn_metrics: list = []
-        self.kv_transfer_params = None
-        self.ec_transfer_params = None
+def _harmony_msg(channel: str, text: str, recipient: str | None = None):
+    msg = OpenAIHarmonyMessage.from_role_and_content(Role.ASSISTANT, text)
+    msg = msg.with_channel(channel)
+    return msg.with_recipient(recipient) if recipient else msg
 
 
-def _delta_segment(channel: str, recipient: str | None, text: str) -> Segment:
-    return Segment(
-        channel=channel, recipient=recipient, delta=text, completed_message=None
-    )
+def _harmony_segments(msg, *, streamed: bool = True) -> list[Segment]:
+    """Segments the parser yields for one message: a content delta (absent
+    for a zero-delta message), then the completed message."""
+    delta = [Segment(msg.channel, msg.recipient, msg.content[0].text)]
+    completed = Segment(msg.channel, msg.recipient, "", completed_message=msg)
+    return (delta if streamed else []) + [completed]
 
 
-def _completed_segment(message: OpenAIHarmonyMessage) -> Segment:
-    return Segment(channel=None, recipient=None, delta=None, completed_message=message)
-
-
-async def _stream_harmony_events(segment_script: list[list[Segment]]):
-    serving = _make_serving_instance(model_type="gpt_oss")
-    context = _PlaybackHarmonyContext(frozenset({"get_weather"}))
+async def _harmony_stream_events(segment_chunks: list[list[Segment]]):
+    serving = _make_serving_instance()
+    serving.use_harmony = True
+    parser = MagicMock(spec=HarmonyParser)
+    parser.process_chunk.side_effect = [
+        ChunkResult(segments=segments, reasoning_token_count=0)
+        for segments in segment_chunks
+    ]
+    context = HarmonyContext([], [], frozenset({"get_weather"}), parser)
 
     async def result_generator():
-        for segments in segment_script:
-            context.last_append_segments = segments
-            context._messages.extend(
-                s.completed_message for s in segments if s.completed_message
-            )
+        for token_id in range(len(segment_chunks)):
+            context.append_output(_make_request_output("", [token_id]))
             yield context
 
     return [
         event
         async for event in serving.responses_stream_generator(
-            request=ResponsesRequest(input="hi", tools=[], stream=True, store=False),
+            request=ResponsesRequest(input="hi", stream=True, store=False),
             sampling_params=SamplingParams(max_tokens=16),
             result_generator=result_generator(),
             context=context,
@@ -2189,79 +2173,41 @@ async def _stream_harmony_events(segment_script: list[list[Segment]]):
 
 
 @pytest.mark.asyncio
-async def test_harmony_stream_completed_reuses_streamed_item_ids():
-    """Harmony streaming: response.completed must carry the item ids (and the
-    function call_id) that were streamed in output_item.done events, not
-    freshly minted ones from the final reparse."""
-    analysis = OpenAIHarmonyMessage.from_role_and_content(
-        Role.ASSISTANT, "let me think"
-    ).with_channel("analysis")
-    weather = (
-        OpenAIHarmonyMessage.from_role_and_content(Role.ASSISTANT, '{"city": "Paris"}')
-        .with_channel("commentary")
-        .with_recipient("functions.get_weather")
-    )
-    final = OpenAIHarmonyMessage.from_role_and_content(
-        Role.ASSISTANT, "Sunny in Paris"
-    ).with_channel("final")
+async def test_harmony_stream_completed_response_reuses_streamed_ids():
+    """response.completed must carry the id and call_id each item was streamed
+    with, not ones minted when the harmony messages are converted again."""
+    messages = [
+        _harmony_msg("analysis", "think"),
+        _harmony_msg("commentary", '{"city": "Paris"}', "functions.get_weather"),
+        _harmony_msg("final", "Sunny"),
+    ]
 
-    events = await _stream_harmony_events(
-        [
-            [_delta_segment("analysis", None, "let me think")],
-            [_completed_segment(analysis)],
-            [
-                _delta_segment(
-                    "commentary", "functions.get_weather", '{"city": "Paris"}'
-                )
-            ],
-            [_completed_segment(weather)],
-            [_delta_segment("final", None, "Sunny in Paris")],
-            [_completed_segment(final)],
-        ]
-    )
+    events = await _harmony_stream_events([_harmony_segments(msg) for msg in messages])
 
     streamed = [e.item for e in events if e.type == "response.output_item.done"]
-    assert [item.type for item in streamed] == [
-        "reasoning",
-        "function_call",
-        "message",
-    ]
-    reasoning, tool_call, message = events[-1].response.output
-    assert reasoning.id == streamed[0].id
-    assert tool_call.id == streamed[1].id
-    assert tool_call.call_id == streamed[1].call_id
-    assert message.id == streamed[2].id
-    # Content still comes from the rebuilt parse.
-    assert message.content[0].text == "Sunny in Paris"
-    assert tool_call.arguments == '{"city": "Paris"}'
+    output = events[-1].response.output
+    assert [item.type for item in output] == ["reasoning", "function_call", "message"]
+    assert [item.id for item in output] == [item.id for item in streamed]
+    assert output[1].call_id == streamed[1].call_id
+    assert output[2].content[0].text == "Sunny"
 
 
 @pytest.mark.asyncio
-async def test_harmony_stream_completed_keeps_zero_delta_item():
-    """A zero-delta item emits no done event, so it has no streamed id; the
-    completed response must keep it (with its rebuilt id) rather than drop it
-    or shift the streamed ids of later items."""
-    analysis = OpenAIHarmonyMessage.from_role_and_content(
-        Role.ASSISTANT, "thinking"
-    ).with_channel("analysis")
-    final = OpenAIHarmonyMessage.from_role_and_content(
-        Role.ASSISTANT, "Done"
-    ).with_channel("final")
+async def test_harmony_stream_unstreamed_item_keeps_own_id():
+    """An item with no done event (zero-delta) must not take the streamed id
+    of a later item of the same type."""
+    unstreamed = _harmony_msg("analysis", "skipped")
+    reasoning = _harmony_msg("analysis", "think")
 
-    events = await _stream_harmony_events(
-        [
-            [_completed_segment(analysis)],
-            [_delta_segment("final", None, "Done")],
-            [_completed_segment(final)],
-        ]
+    events = await _harmony_stream_events(
+        [_harmony_segments(unstreamed, streamed=False), _harmony_segments(reasoning)]
     )
 
-    streamed = [e.item for e in events if e.type == "response.output_item.done"]
-    assert [item.type for item in streamed] == ["message"]
-    reasoning, message = events[-1].response.output
-    assert reasoning.type == "reasoning"
-    assert reasoning.id.startswith("rs_")
-    assert message.id == streamed[0].id
+    (streamed,) = [e.item for e in events if e.type == "response.output_item.done"]
+    first, second = events[-1].response.output
+    assert first.content[0].text == "skipped"
+    assert first.id != streamed.id
+    assert second.id == streamed.id
 
 
 @pytest.mark.asyncio

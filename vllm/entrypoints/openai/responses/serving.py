@@ -66,10 +66,10 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     split_delta,
 )
 from vllm.entrypoints.openai.responses.utils import (
-    apply_streamed_item_ids,
     build_response_output_items,
     extract_function_tool_names,
     extract_tool_types,
+    reuse_streamed_item_ids,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
@@ -783,18 +783,21 @@ class OpenAIServingResponses(GenerateBaseServing):
             assert isinstance(context, HarmonyContext)
             output = []
             harmony_msgs = context.messages[context.num_init_messages :]
-            if harmony_msgs:
-                fn_names = context.function_tool_names
-                for msg in harmony_msgs[:-1]:
-                    output.extend(harmony_to_response_output(msg, fn_names))
-                output.extend(
-                    harmony_to_response_output(
-                        harmony_msgs[-1],
-                        fn_names,
-                        incomplete=context.last_append_flush_status,
-                    )
+            # Streamed messages are a subsequence of harmony_msgs, in order.
+            streamed = iter(context.streamed_items_by_message)
+            next_streamed = next(streamed, None)
+            for i, msg in enumerate(harmony_msgs):
+                items = harmony_to_response_output(
+                    msg,
+                    context.function_tool_names,
+                    incomplete=(
+                        i == len(harmony_msgs) - 1 and context.last_append_flush_status
+                    ),
                 )
-                output = apply_streamed_item_ids(output, context.streamed_output_items)
+                if next_streamed is not None and next_streamed[0] is msg:
+                    reuse_streamed_item_ids(items, next_streamed[1])
+                    next_streamed = next(streamed, None)
+                output.extend(items)
 
             if request.enable_response_messages:
                 input_messages = context.messages[: context.num_init_messages]
@@ -1279,7 +1282,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
-        streamed_items: list[ResponseOutputItem] = []
 
         async for ctx in result_generator:
             assert isinstance(ctx, HarmonyContext)
@@ -1295,24 +1297,25 @@ class OpenAIServingResponses(GenerateBaseServing):
                         yield _increment_sequence_number_and_return(event)
 
                 elif completed_message := segment.completed_message:
+                    done_items: list[ResponseOutputItem] = []
                     # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(
                         completed_message, state, ctx.function_tool_names
                     ):
                         if isinstance(event, ResponseOutputItemDoneEvent):
-                            streamed_items.append(event.item)
+                            done_items.append(event.item)
                         yield _increment_sequence_number_and_return(event)
 
                     for event in emit_tool_action_events(
                         completed_message, state, self.tool_server
                     ):
                         if isinstance(event, ResponseOutputItemDoneEvent):
-                            streamed_items.append(event.item)
+                            done_items.append(event.item)
                         yield _increment_sequence_number_and_return(event)
+                    ctx.streamed_items_by_message.append(
+                        (completed_message, done_items)
+                    )
                     state.reset_for_new_item()
-
-        assert isinstance(context, HarmonyContext)
-        context.streamed_output_items = streamed_items
 
     async def responses_stream_generator(
         self,
