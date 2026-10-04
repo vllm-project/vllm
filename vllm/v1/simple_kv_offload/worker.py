@@ -101,6 +101,11 @@ class SimpleCPUOffloadWorker:
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
         assert self.kv_cache_config.kv_cache_tensors
+        storage_plan = self.kv_cache_config.storage_plan
+        if storage_plan is not None:
+            kv_caches = {
+                name: kv_caches[name] for name in storage_plan.persistent_layers
+            }
 
         # The DMA backend copies blocks as base + block_id * stride(0), so every
         # region is a [num_blocks, block_bytes] view. Block bytes come from each
@@ -159,7 +164,10 @@ class SimpleCPUOffloadWorker:
         ]
         total_bytes_per_block = sum(per_tensor_bpb)
 
-        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
+        capacity_block_bytes = (
+            self.kv_cache_config.offload_block_size_bytes or total_bytes_per_block
+        )
+        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // capacity_block_bytes)
 
         # Use lowest priority so KV cache I/O yields to compute streams.
         low_pri, _ = torch.cuda.Stream.priority_range()
@@ -179,7 +187,11 @@ class SimpleCPUOffloadWorker:
         total_bytes_per_block: int,
         device: torch.device,
     ) -> None:
-        num_disk_slots = max(1, self.disk_capacity_bytes // total_bytes_per_block)
+        assert self.kv_cache_config is not None
+        capacity_block_bytes = (
+            self.kv_cache_config.offload_block_size_bytes or total_bytes_per_block
+        )
+        num_disk_slots = max(1, self.disk_capacity_bytes // capacity_block_bytes)
         self.num_cpu_blocks = num_disk_slots
 
         logger.info(

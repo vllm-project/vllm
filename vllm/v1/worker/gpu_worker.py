@@ -45,12 +45,14 @@ from vllm.distributed.parallel_state import (
     Handle,
     checkpoint_prepare_distributed_state,
     checkpoint_restore_distributed_state,
+    get_kvpp_group,
     get_pcp_group,
     get_pp_group,
     get_tp_group,
     resume_device_comms,
     suspend_device_comms,
 )
+from vllm.distributed.utils import warmup_process_group
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
     WeightTransferEngineFactory,
@@ -1648,6 +1650,9 @@ def init_worker_distributed_environment(
         parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
+
+    if vllm_config.cache_config.enable_kvpp:
+        warmup_process_group(get_kvpp_group(), ["broadcast"])
 
     # Init ec connector here before KV caches init
     # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode

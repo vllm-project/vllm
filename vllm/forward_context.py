@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -18,6 +18,9 @@ from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlices
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.kvpp_runtime import KVPPRuntime
 
 track_batchsize: bool = envs.VLLM_LOG_BATCHSIZE_INTERVAL >= 0
 last_logging_time: float = 0
@@ -195,6 +198,7 @@ class ForwardContext:
     moe_layer_index: int = 0
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
+    kvpp_runtime: "KVPPRuntime | None" = field(default=None, kw_only=True)
 
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.is_valid_runtime_mode(), (
@@ -212,6 +216,20 @@ def get_forward_context() -> ForwardContext:
         "Please use `set_forward_context` to set the forward context."
     )
     return _forward_context
+
+
+def acquire_kv_cache(layer_name: str) -> None:
+    """Make a temporary cache view ready before its first read or write."""
+    kvpp_runtime = get_forward_context().kvpp_runtime
+    if kvpp_runtime is not None:
+        kvpp_runtime.acquire(layer_name)
+
+
+def release_kv_cache(layer_name: str) -> None:
+    """Record the last device access before a cache view can be reused."""
+    kvpp_runtime = get_forward_context().kvpp_runtime
+    if kvpp_runtime is not None:
+        kvpp_runtime.release(layer_name)
 
 
 def is_forward_context_available() -> bool:
@@ -238,6 +256,7 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    kvpp_runtime: "KVPPRuntime | None" = None,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -256,6 +275,7 @@ def create_forward_context(
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
         is_padding=is_padding,
+        kvpp_runtime=kvpp_runtime,
     )
 
 
@@ -286,6 +306,7 @@ def set_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    kvpp_runtime: "KVPPRuntime | None" = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -355,6 +376,7 @@ def set_forward_context(
         additional_kwargs,
         skip_compiled,
         is_padding=is_padding,
+        kvpp_runtime=kvpp_runtime,
     )
 
     try:

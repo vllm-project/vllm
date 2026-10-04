@@ -602,6 +602,10 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
+    def get_kvpp_runtime_cls(cls) -> str:
+        return "vllm.v1.worker.kvpp_runtime.KVPPRuntime"
+
+    @classmethod
     def supports_fp8(cls) -> bool:
         return cls.has_device_capability(89)
 

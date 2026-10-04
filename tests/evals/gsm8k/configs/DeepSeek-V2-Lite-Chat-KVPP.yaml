@@ -1,0 +1,20 @@
+model_name: "deepseek-ai/DeepSeek-V2-Lite-Chat"
+accuracy_threshold: 0.65
+tolerance: 0.08
+num_questions: 200
+num_fewshot: 5
+max_concurrency: 8
+server_args: >-
+  --tensor-parallel-size 2
+  --prefill-context-parallel-size 2
+  -cc.mode=3
+  -cc.cudagraph_mode=PIECEWISE
+  -cc.use_inductor_graph_partition=false
+  --max-model-len 4096
+  --kv-cache-memory-bytes 536870912
+  --enable-kvpp
+  --enable-prefix-caching
+env:
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  # PCP MoE gathers token rows; padding masks are currently rank-local.
+  VLLM_MOE_SKIP_PADDING: "0"

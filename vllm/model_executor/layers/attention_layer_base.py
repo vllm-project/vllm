@@ -24,6 +24,14 @@ class AttentionLayerBase(ABC):
     # Set by the speculator on its draft model's layers.
     is_draft_layer: bool = False
 
+    def get_kv_cache_bundle(self) -> tuple["AttentionLayerBase", ...] | None:
+        """Components whose KV updates are replicated across PCP x TP ranks.
+
+        Returning None leaves this layer ineligible for layer-sharded storage.
+        Implementations list actual cache modules, including auxiliary caches.
+        """
+        return None
+
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Bind the allocated KV cache tensor to this layer.
 

@@ -1359,10 +1359,19 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     assert VllmConfig.use_v2_model_runner.fget(config) is expected
 
 
-def test_v1_model_runner_rejects_v2_only_features():
+@pytest.mark.parametrize(
+    "pcp_size,enable_kvpp,error",
+    [
+        (2, False, "prefill context parallel"),
+        (1, True, "KVPP"),
+        (1, False, None),
+    ],
+)
+def test_v1_model_runner_rejects_v2_only_features(pcp_size, enable_kvpp, error):
     config = SimpleNamespace(
+        cache_config=CacheConfig(enable_kvpp=enable_kvpp),
         parallel_config=ParallelConfig(
-            prefill_context_parallel_size=2,
+            prefill_context_parallel_size=pcp_size,
             distributed_executor_backend="mp",
         ),
         scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
@@ -1375,7 +1384,10 @@ def test_v1_model_runner_rejects_v2_only_features():
         VllmConfig._get_v1_model_runner_unsupported_features(config)
     )
 
-    with pytest.raises(ValueError, match="prefill context parallel"):
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            VllmConfig._validate_v1_model_runner(config)
+    else:
         VllmConfig._validate_v1_model_runner(config)
 
 
