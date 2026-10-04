@@ -107,6 +107,7 @@ class DraftModelSpeculator(BaseSpeculator):
     # draft_token_map hooks into sample_draft(), so only speculators that
     # sample every draft token there can support it.
     supports_draft_token_map: bool = False
+    draft_vocab: DraftVocab | None = None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
