@@ -50,6 +50,7 @@ def _create_vllm_config() -> MagicMock:
     vllm_config.parallel_config = ParallelConfig()
     vllm_config.speculative_config = None
     vllm_config.num_speculative_tokens = 0
+    vllm_config.use_cumem_cudagraph_pool = False
     return vllm_config
 
 
@@ -132,6 +133,7 @@ def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
         pcp_world_size=pcp_world_size,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=False,
         max_num_reqs=num_reqs,
         max_num_tokens=num_tokens,
         block_tables=pcp_block_tables,
