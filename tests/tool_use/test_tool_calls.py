@@ -17,6 +17,96 @@ from .utils import (
 )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("cities", [("Shenzhen",), ("Shenzhen", "Hangzhou")])
+async def test_minicpm5_auto_tool_calls(client, server_config, stream, cities):
+    """MiniCPM5 XML calls must become complete OpenAI tool calls in both modes."""
+    if server_config["model"] != "openbmb/MiniCPM5-2B":
+        pytest.skip("MiniCPM5-specific tool-call regression")
+
+    model = (await client.models.list()).data[0].id
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Call get_weather once for each city requested. "
+                    "Do not answer directly. Preserve the city names exactly."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Get the weather for {' and '.join(cities)}.",
+            },
+        ],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather for one city",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+        tool_choice="auto",
+        temperature=0,
+        seed=SEED,
+        max_completion_tokens=192,
+        stream=stream,
+    )
+
+    calls = {}
+    finish_reasons = []
+    if stream:
+        async for chunk in response:
+            for choice in chunk.choices:
+                if choice.finish_reason is not None:
+                    finish_reasons.append(choice.finish_reason)
+                for delta in choice.delta.tool_calls or []:
+                    call = calls.setdefault(
+                        delta.index, {"id": None, "name": None, "arguments": ""}
+                    )
+                    if delta.id is not None:
+                        assert call["id"] is None
+                        call["id"] = delta.id
+                    if delta.function is not None:
+                        if delta.function.name is not None:
+                            assert call["name"] is None
+                            call["name"] = delta.function.name
+                        call["arguments"] += delta.function.arguments or ""
+    else:
+        choice = response.choices[0]
+        finish_reasons.append(choice.finish_reason)
+        assert choice.message.role == "assistant"
+        calls = {
+            index: {
+                "id": call.id,
+                "name": call.function.name,
+                "arguments": call.function.arguments,
+            }
+            for index, call in enumerate(choice.message.tool_calls or [])
+        }
+
+    assert finish_reasons == ["tool_calls"]
+    assert set(calls) == set(range(len(cities)))
+    assert len({call["id"] for call in calls.values()}) == len(cities)
+    parsed_cities = []
+    for call in calls.values():
+        assert call["id"]
+        assert call["name"] == "get_weather"
+        arguments = json.loads(call["arguments"])
+        assert set(arguments) == {"city"}
+        parsed_cities.append(arguments["city"])
+    assert sorted(parsed_cities) == sorted(cities)
+
+
 # test: request a chat completion that should return tool calls, so we know they
 # are parsable
 @pytest.mark.asyncio

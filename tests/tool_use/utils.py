@@ -53,6 +53,17 @@ ARGS: list[str] = [
 ]
 
 CONFIGS: dict[str, ServerConfig] = {
+    "minicpm5": {
+        "model": "openbmb/MiniCPM5-2B",
+        "arguments": [
+            "--enforce-eager",
+            "--tool-call-parser",
+            "minicpm5",
+            "--max-model-len",
+            "2048",
+        ],
+        "extended": True,
+    },
     "hermes": {
         "model": "NousResearch/Hermes-3-Llama-3.1-8B",
         "arguments": [
