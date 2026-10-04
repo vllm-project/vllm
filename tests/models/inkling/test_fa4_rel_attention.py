@@ -62,22 +62,47 @@ def test_split_packed_kv_cache():
     torch.testing.assert_close(value_cache, attention.kv_cache[..., 8:].transpose(1, 2))
 
 
-def test_num_splits_hopper_is_unsplit(monkeypatch):
+@pytest.fixture
+def hopper_platform(monkeypatch):
     monkeypatch.setattr(
         current_platform,
         "get_device_capability",
         lambda: DeviceCapability(major=9, minor=0),
     )
+
+
+@pytest.mark.parametrize(
+    ("batch_size", "expected"),
+    [
+        (1, 128),
+        (2, 64),
+        (4, 32),
+        (8, 16),
+        (16, 8),
+        (32, 4),
+        (48, 2),
+        (64, 2),
+        (80, 1),
+        (96, 1),
+        (128, 1),
+        (192, 1),
+        (256, 1),
+    ],
+)
+@pytest.mark.parametrize("max_query_len", [1, 2])
+def test_num_splits_hopper_uses_default_schedule(
+    hopper_platform, batch_size, max_query_len, expected
+):
     assert (
         inkling_fa4_num_splits(
             is_local=False,
-            batch_size=1,
-            max_query_len=1,
-            num_heads=16,
-            num_kv_heads=2,
+            batch_size=batch_size,
+            max_query_len=max_query_len,
+            num_heads=4,
+            num_kv_heads=1,
             max_kv_len=1_048_576,
         )
-        == 1
+        == expected
     )
 
 
