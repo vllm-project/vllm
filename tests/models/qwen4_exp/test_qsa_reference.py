@@ -1396,3 +1396,24 @@ def test_qsa_streaming_compression_and_compressor_state_store_match_reference() 
                 rope_cache[block, position % 4, 0],
                 position_row(request, position).to("cuda"),
             )
+
+
+@requires_qsa_kernels
+def test_qsa_e4m3_byte_decode_matches_every_encoding() -> None:
+    """The byte decoder must agree with e4m3 on all 256 codes, NaN included."""
+    from vllm.models.qwen4_exp.nvidia.ops.qsa import _dequant_e4m3fn_bits
+    from vllm.triton_utils import tl, triton
+
+    @triton.jit
+    def _decode(src, dst, n: tl.constexpr):
+        offsets = tl.arange(0, n)
+        tl.store(dst + offsets, _dequant_e4m3fn_bits(tl.load(src + offsets)))
+
+    bits = torch.arange(256, device="cuda", dtype=torch.uint8)
+    decoded = torch.empty(256, device="cuda", dtype=torch.bfloat16)
+    _decode[(1,)](bits, decoded, n=256)
+
+    expected = bits.view(torch.float8_e4m3fn).to(torch.float32)
+    torch.testing.assert_close(
+        decoded.float(), expected, rtol=0, atol=0, equal_nan=True
+    )

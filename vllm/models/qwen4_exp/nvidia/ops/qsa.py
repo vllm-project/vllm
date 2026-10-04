@@ -72,6 +72,11 @@ def _dequant_e4m3fn_bits(bits):
         tl.math.exp2(exponent.to(tl.float32) - 10.0) * (8.0 + mantissa),
         mantissa * 0.001953125,
     )
+    # 0x7f and 0xff are the only NaN codes in e4m3fn, and the only bytes with
+    # all seven low bits set; every other exponent-15 code is finite, up to 448.
+    magnitude = tl.where((x & 127) == 127, float("nan"), magnitude)
+    # 0x7f and 0xff are the only NaN codes in e4m3fn, and the only bytes with
+    # all seven low bits set; every other exponent-15 code is finite, up to 448.
     return (sign * magnitude).to(tl.bfloat16)
 
 
@@ -895,19 +900,16 @@ def warmup_qsa_sparse_paged_attention(
     *,
     num_query_heads: int,
     selection_width: int,
-    head_size: int | None = None,
-    kv_quantized: bool = False,
 ) -> tuple[tuple[int, int, int], ...]:
     """Compile every production-reachable split-K/merge specialization.
 
-    The layout the deployment actually serves decides what gets compiled: a
-    raw-byte e4m3 cache takes the narrowed staging profile, so warming the BF16
-    shape instead would leave every served specialization to be JIT-compiled on
-    the first request. `uint8` alone cannot say whether a cache is raw e4m3, so
-    the caller states it and the dispatch helper the forward uses decides the
-    rest.
+    The served cache decides what gets compiled: a raw-byte e4m3 cache takes
+    the narrowed staging profile, so warming the BF16 shape instead would leave
+    every served specialization to be JIT-compiled on the first request. QSA
+    allocates bf16 as bfloat16 and e4m3 as uint8 and refuses anything else, so
+    the allocation alone says which one this is.
     """
-    head_dim = head_size if head_size is not None else kv_cache.shape[-1] // 2
+    head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     num_kv_heads = key_cache.shape[2]
     page_size = key_cache.shape[1]
@@ -919,21 +921,13 @@ def warmup_qsa_sparse_paged_attention(
         value_cache.stride(1),
         value_cache.stride(2),
     )
-    kv_quant, raw_fp8 = qsa_kv_dispatch(
-        key_cache.dtype
-        if not kv_quantized
-        else (torch.uint8 if _fp8_pages_are_raw_bytes() else torch.float8_e4m3fn)
-    )
-    cache_dtype = torch.uint8 if raw_fp8 else key_cache.dtype
-    if kv_quant == 1 and not raw_fp8:
-        cache_dtype = torch.float8_e4m3fn
-    # The same storage contract the forward asserts, checked here because a
-    # warmup that compiled a different one would leave the served shape cold.
-    if kv_quantized:
-        if kv_cache.dtype != torch.uint8:
-            raise ValueError("an e4m3 QSA cache is allocated as uint8")
-    elif kv_cache.dtype != torch.bfloat16:
-        raise ValueError("an unquantized QSA cache is allocated as bfloat16")
+    if kv_cache.dtype == torch.uint8:
+        cache_dtype = torch.uint8 if _fp8_pages_are_raw_bytes() else torch.float8_e4m3fn
+    elif kv_cache.dtype == torch.bfloat16:
+        cache_dtype = torch.bfloat16
+    else:
+        raise ValueError("a QSA cache is allocated as bfloat16 or uint8")
+    kv_quant, raw_fp8 = qsa_kv_dispatch(cache_dtype)
     if num_query_heads % num_kv_heads:
         raise ValueError("QSA sparse attention requires valid grouped-query heads")
     group_size = num_query_heads // num_kv_heads
