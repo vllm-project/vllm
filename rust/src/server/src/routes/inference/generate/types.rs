@@ -88,6 +88,7 @@ pub(super) struct GenerateStreamResponse {
     pub prompt_token_ids: Option<Vec<u32>>,
     pub mm_placeholders: Option<MultiModalPlaceholders>,
     pub metrics: Option<PerRequestMetrics<StreamingSpeculativeDecodingMetrics>>,
+    pub weight_version: Option<String>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponse` class.
@@ -103,6 +104,7 @@ pub(super) struct GenerateResponse {
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
     pub metrics: Option<PerRequestMetrics<SpeculativeDecodingMetrics>>,
+    pub weight_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

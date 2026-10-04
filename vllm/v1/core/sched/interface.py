@@ -94,6 +94,7 @@ class SchedulerInterface(ABC):
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
+        weight_version: str | None = None,
     ) -> dict[int, "EngineCoreOutputs"]:
         """Update the scheduler state based on the model runner output.
 

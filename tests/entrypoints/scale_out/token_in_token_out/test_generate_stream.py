@@ -146,6 +146,7 @@ def _make_request_output(
     index: int = 0,
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None,
     text: str = "",
+    weight_version: str | None = None,
 ) -> RequestOutput:
     return RequestOutput(
         request_id=request_id,
@@ -169,6 +170,7 @@ def _make_request_output(
         encoder_prompt=None,
         encoder_prompt_token_ids=None,
         num_cached_tokens=num_cached_tokens,
+        weight_version=weight_version,
     )
 
 
@@ -226,7 +228,11 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
 
     async def mock_generate(*args, **kwargs):
         yield _make_request_output(
-            "req-1", token_ids=[10], finish_reason="stop", finished=True
+            "req-1",
+            token_ids=[10],
+            finish_reason="stop",
+            finished=True,
+            weight_version="step-7",
         )
 
     engine.generate = MagicMock(side_effect=mock_generate)
@@ -242,6 +248,7 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
     response = await serving.serve_tokens(request)
 
     assert isinstance(response, GenerateTokensResponse)
+    assert response.weight_version == "step-7"
     assert (
         serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
         is True
@@ -344,10 +351,14 @@ async def test_stream_basic():
     engine = _mock_engine()
 
     async def mock_generate(*args, **kwargs):
-        yield _make_request_output("req-1", token_ids=[10])
-        yield _make_request_output("req-1", token_ids=[20, 30])
+        yield _make_request_output("req-1", token_ids=[10], weight_version="step-1")
+        yield _make_request_output("req-1", token_ids=[20, 30], weight_version="step-2")
         yield _make_request_output(
-            "req-1", token_ids=[40], finish_reason="stop", finished=True
+            "req-1",
+            token_ids=[40],
+            finish_reason="stop",
+            finished=True,
+            weight_version="step-2",
         )
 
     engine.generate = MagicMock(side_effect=mock_generate)
@@ -376,6 +387,11 @@ async def test_stream_basic():
     assert data_chunks[1]["choices"][0]["token_ids"] == [20, 30]
     assert data_chunks[2]["choices"][0]["token_ids"] == [40]
     assert data_chunks[2]["choices"][0]["finish_reason"] == "stop"
+    assert [chunk["weight_version"] for chunk in data_chunks] == [
+        "step-1",
+        "step-2",
+        "step-2",
+    ]
 
 
 @pytest.mark.asyncio
@@ -957,7 +973,11 @@ async def test_stream_include_usage():
     async def mock_generate(*args, **kwargs):
         yield _make_request_output("req-1", token_ids=[10])
         yield _make_request_output(
-            "req-1", token_ids=[20], finish_reason="stop", finished=True
+            "req-1",
+            token_ids=[20],
+            finish_reason="stop",
+            finished=True,
+            weight_version="step-2",
         )
 
     engine.generate = MagicMock(side_effect=mock_generate)
@@ -980,11 +1000,13 @@ async def test_stream_include_usage():
     assert parsed[-1] == "[DONE]"
 
     # The chunk before [DONE] should be the usage-only chunk
+    assert "weight_version" not in parsed[0]
     usage_chunk = parsed[-2]
     assert usage_chunk["choices"] == []
     assert usage_chunk["usage"]["prompt_tokens"] == 3
     assert usage_chunk["usage"]["completion_tokens"] == 2
     assert usage_chunk["usage"]["total_tokens"] == 5
+    assert usage_chunk["weight_version"] == "step-2"
 
 
 @pytest.mark.asyncio
