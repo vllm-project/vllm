@@ -76,11 +76,16 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
 
     kv_cache = owner.kv_cache
     assert kv_cache.numel()
+    # The served cache layout decides which specializations exist, so pass it
+    # rather than letting the warmup infer a BF16 page from the allocation.
+    impl = owner.impl
     attention_profiles = warmup_qsa_sparse_paged_attention(
         kv_cache,
         block_table_for(owner.layer_name),
         num_query_heads=owner.num_heads,
         selection_width=indexer.output_width,
+        head_size=impl.head_size,
+        kv_quantized=impl.kv_cache_dtype in ("fp8", "fp8_e4m3"),
     )
     logger.info(
         "Warmed up Qwen4Exp QSA sparse attention kernels: %s.",

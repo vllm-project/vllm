@@ -213,10 +213,13 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         k_scale = v_scale = None
         if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            # The cache is allocated as uint8; reinterpret the e4m3 bytes
-            # (same itemsize, so shape and strides are preserved).
-            key_cache = key_cache.view(torch.float8_e4m3fn)
-            value_cache = value_cache.view(torch.float8_e4m3fn)
+            # The cache is allocated as uint8. Where the platform reports FP8
+            # the kernel takes an e4m3 pointer, so reinterpret the bytes (same
+            # itemsize, so shape and strides are preserved); below that the
+            # kernel reads the bytes and decodes them itself.
+            if current_platform.supports_fp8():
+                key_cache = key_cache.view(torch.float8_e4m3fn)
+                value_cache = value_cache.view(torch.float8_e4m3fn)
             # Host-side per-tensor dequant scales (Python floats), as used by
             # other host-scale backends; folded into the kernel's scales.
             k_scale = layer._k_scale_float
@@ -224,9 +227,11 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         if query.dtype != torch.bfloat16 or key_cache.dtype not in (
             torch.bfloat16,
             torch.float8_e4m3fn,
+            torch.uint8,
         ):
             raise NotImplementedError(
-                "Qwen4Exp QSA requires BF16 Q and BF16 or FP8-e4m3 K/V"
+                "Qwen4Exp QSA requires BF16 Q and BF16 or FP8-e4m3 K/V (e4m3 "
+                "arrives as raw bytes below compute capability 8.9)"
             )
 
         from .ops.qsa import qsa_sparse_paged_attention

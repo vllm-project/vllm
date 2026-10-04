@@ -1389,3 +1389,80 @@ def test_qsa_streaming_compression_and_compressor_state_store_match_reference() 
                 rope_cache[block, position % 4, 0],
                 position_row(request, position).to("cuda"),
             )
+
+
+def _fp8_roundtrip(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
+    """Quantize to per-tensor E4M3; the scale comes back as `_k_scale_float` does."""
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    scale = (tensor.abs().amax().float() / finfo.max).clamp_min(1e-12)
+    quantized = (tensor.float() / scale).clamp(finfo.min, finfo.max)
+    return quantized.to(torch.float8_e4m3fn), float(scale)
+
+
+def _fp8_pages_as_dispatched(quantized: torch.Tensor) -> torch.Tensor:
+    """Below compute capability 8.9 Triton cannot type an fp8 pointer: raw bytes."""
+    if current_platform.supports_fp8():
+        return quantized
+    return quantized.view(torch.uint8)
+
+
+@requires_qsa_kernels
+def test_qsa_sparse_paged_attention_fp8_matches_dequantized_reference() -> None:
+    """The FP8 reader must agree with attention over the dequantized pages."""
+    torch.manual_seed(11)
+    num_rows, num_query_heads, num_kv_heads, page_size, head_dim = 3, 8, 1, 16, 256
+    num_pages, width = 6, 8
+    q = torch.randn(
+        num_rows, num_query_heads, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    k_ref = torch.randn(
+        num_pages,
+        page_size,
+        num_kv_heads,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    v_ref = torch.randn_like(k_ref)
+    k_bytes, k_scale = _fp8_roundtrip(k_ref)
+    v_bytes, v_scale = _fp8_roundtrip(v_ref)
+
+    block_table = torch.arange(num_pages, device="cuda", dtype=torch.int32).reshape(
+        1, -1
+    )
+    token_to_req = torch.zeros(num_rows, device="cuda", dtype=torch.int32)
+    # +1: the packed trailing column holds each row's valid-entry count.
+    logical_indices = torch.empty(
+        (num_rows, width + 1), device="cuda", dtype=torch.int32
+    )
+    logical_indices[:, :width] = torch.arange(width, device="cuda", dtype=torch.int32)
+    logical_indices[:, width] = width
+    # One gate for both calls: the gate multiplies each side identically, so
+    # what this compares is still the FP8 reader against the dequantized pages.
+    output_gate = torch.randn_like(q)
+
+    quantized = qsa_ops.qsa_sparse_paged_attention(
+        q,
+        _fp8_pages_as_dispatched(k_bytes),
+        _fp8_pages_as_dispatched(v_bytes),
+        logical_indices,
+        block_table,
+        token_to_req,
+        use_prefill_config=False,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        output_gate=output_gate,
+    )
+    reference = qsa_ops.qsa_sparse_paged_attention(
+        q,
+        (k_bytes.to(torch.float32) * k_scale).to(torch.bfloat16),
+        (v_bytes.to(torch.float32) * v_scale).to(torch.bfloat16),
+        logical_indices,
+        block_table,
+        token_to_req,
+        use_prefill_config=False,
+        output_gate=output_gate,
+    )
+    torch.testing.assert_close(
+        quantized.float(), reference.float(), rtol=2e-2, atol=2e-2
+    )
