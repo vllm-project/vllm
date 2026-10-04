@@ -195,11 +195,12 @@ def test_beam_search_scores_allowed_tokens_across_chunks(monkeypatch) -> None:
             )
         )
     )
-    monkeypatch.setattr(llm, "_preprocess_cmpl", lambda prompts: prompts)
     monkeypatch.setattr(llm, "_render_and_run_requests", run_requests)
     prompt: TokensPrompt = {"prompt_token_ids": [1]}
     monkeypatch.setattr(
-        llm, "_preprocess_cmpl", lambda prompts: [{"type": "token", **p} for p in prompts]
+        llm,
+        "_preprocess_cmpl",
+        lambda prompts: [{"type": "token", **p} for p in prompts],
     )
     llm.model_config = Mock(get_vocab_size=Mock(return_value=1000))
     output = llm.beam_search(
