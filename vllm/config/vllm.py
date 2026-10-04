@@ -1210,7 +1210,8 @@ class VllmConfig:
             )
             if not connector_cls.supports_sleep_mode(self.kv_transfer_config):
                 raise ValueError(
-                    f"{connector_cls.__name__} does not support sleep mode."
+                    f"{self.kv_transfer_config.kv_connector} does not support "
+                    "sleep mode."
                 )
 
         # PyTorch's expandable_segments allocator uses CUDA VMM, which can

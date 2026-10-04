@@ -104,6 +104,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
+    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -224,6 +225,11 @@ def resolve_moriio_transfer_ack(
 
 class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
     _cache_hit_source = CacheHitSource.P2P
+
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        # Peers keep the KV cache registration that sleep mode makes stale.
+        return False
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:

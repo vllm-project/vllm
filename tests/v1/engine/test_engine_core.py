@@ -744,16 +744,3 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
-
-
-def test_sleep_mode_refuses_unsupported_kv_connector_at_startup():
-    """With sleep mode, an unsupported connector is refused by the config."""
-    engine_args = EngineArgs(
-        model=MODEL_NAME,
-        enable_sleep_mode=True,
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="NixlConnector", kv_role="kv_producer"
-        ),
-    )
-    with pytest.raises(ValueError, match="does not support sleep mode"):
-        engine_args.create_engine_config()

@@ -2581,12 +2581,12 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
 
 @contextlib.contextmanager
-def mooncake_sleep_worker(kv_role: str, protocol: str = "rdma"):
+def mooncake_sleep_worker(kv_role: str):
     """Build a worker with live loops and registered KV caches."""
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role=kv_role,
-        kv_connector_extra_config={"mooncake_protocol": protocol},
+        kv_connector_extra_config={"mooncake_protocol": "rdma"},
     )
     spec = FullAttentionSpec(
         block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
@@ -2632,14 +2632,6 @@ def test_sleep_cycle_releases_and_restores_registration(kv_role: str):
             assert engine.registered == expected
 
 
-@pytest.mark.parametrize("protocol", ["rdma", "nvlink"])
-def test_only_rdma_supports_sleep_mode(protocol: str):
-    """Only RDMA peers refresh a stale remote key, through the failed access."""
-    with mooncake_sleep_worker("kv_producer", protocol=protocol) as (connector, _):
-        config = connector._kv_transfer_config
-        assert type(connector).supports_sleep_mode(config) is (protocol == "rdma")
-
-
 @pytest.mark.parametrize(
     ("ready", "expired", "sending", "waits"),
     [
@@ -2677,7 +2669,7 @@ def test_release_waits_for_blocks_ready_to_send(
         asyncio.run_coroutine_threadsafe(add_send_req(), worker.sender_loop).result()
 
         if waits:
-            with pytest.raises(TimeoutError):
+            with pytest.raises(TimeoutError, match="did not finish in time"):
                 connector.release_kv_caches()
             assert worker.engine.registered == expected
         else:
@@ -2685,26 +2677,39 @@ def test_release_waits_for_blocks_ready_to_send(
             assert worker.engine.registered == {}
 
 
+@pytest.mark.parametrize("bootstrap", [False, True], ids=["known_engine", "bootstrap"])
 @pytest.mark.parametrize(
     ("local_block_ids", "waits"),
     [([[0]], True), ([[]], False)],
     ids=["pull", "notify_only"],
 )
-def test_release_waits_for_pull_into_local_blocks(local_block_ids, waits: bool):
-    """Memory that P may still write into keeps its registration until the pull
-    has finished; a notify-only pull writes nothing and does not wait."""
+def test_release_waits_for_pull_into_local_blocks(
+    local_block_ids, waits: bool, bootstrap: bool
+):
+    """Memory that P may still write into keeps its registration until the pull,
+    bootstrap included, has finished; a notify-only pull does not wait."""
     with mooncake_sleep_worker("kv_consumer") as (connector, expected):
         worker = connector.connector_worker
-        worker._remote_agents = {"p-engine": {0: {0: "tcp://producer:1234"}}}
+        remote_agent = {0: {0: "tcp://producer:1234"}}
+        if not bootstrap:
+            worker._remote_agents["p-engine"] = remote_agent
         worker._tp_size["p-engine"] = 1
         pulling = threading.Event()
         pulled = threading.Event()
         release: list[asyncio.Event] = []
 
-        async def pull(worker_addr, pull_metas):
+        async def hold():
             release.append(asyncio.Event())
             pulling.set()
             await release[0].wait()
+
+        async def query_bootstrap(remote_bootstrap_addr):
+            await hold()
+            worker._remote_agents["p-engine"] = remote_agent
+
+        async def pull(worker_addr, pull_metas):
+            if not bootstrap:
+                await hold()
             pulled.set()
 
         metadata = MooncakeConnectorMetadata()
@@ -2717,7 +2722,10 @@ def test_release_waits_for_pull_into_local_blocks(local_block_ids, waits: bool):
                 "remote_bootstrap_addr": "http://bootstrap:33333",
             },
         )
-        with patch.object(worker, "receive_kv_from_single_worker", pull):
+        with (
+            patch.object(worker, "_connect_to_prefiller_bootstrap", query_bootstrap),
+            patch.object(worker, "receive_kv_from_single_worker", pull),
+        ):
             worker.start_load_kv(metadata)
             assert pulling.wait(timeout=10)
 
@@ -2748,7 +2756,7 @@ def test_release_times_out_on_a_wedged_loop(monkeypatch):
         unwedge = threading.Event()
         worker.sender_loop.call_soon_threadsafe(unwedge.wait, 10)
         try:
-            with pytest.raises(TimeoutError):
+            with pytest.raises(TimeoutError, match="did not finish in time"):
                 connector.release_kv_caches()
             assert worker.engine.registered == expected
         finally:

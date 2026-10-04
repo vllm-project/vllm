@@ -9,6 +9,7 @@ import time
 from collections import defaultdict
 from collections.abc import Collection, Coroutine
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Final
@@ -2241,10 +2242,13 @@ class MooncakeConnectorWorker:
         if self._kv_released or not self.seen_base_addresses:
             return
         deadline = time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
-        while self._transfers_pending(deadline):
-            if time.perf_counter() >= deadline:
-                raise TimeoutError("Mooncake KV transfers did not finish in time")
-            time.sleep(0.01)
+        try:
+            while self._transfers_pending(deadline):
+                if time.perf_counter() >= deadline:
+                    raise TimeoutError
+                time.sleep(0.01)
+        except (TimeoutError, FuturesTimeoutError) as e:
+            raise TimeoutError("Mooncake KV transfers did not finish in time") from e
         if self.engine.batch_unregister_memory(self.seen_base_addresses) != 0:
             raise RuntimeError("Mooncake batch memory unregistration failed.")
         self._kv_released = True
@@ -2276,7 +2280,7 @@ class MooncakeConnectorWorker:
             )
         # A wedged loop raises TimeoutError instead of hanging past the deadline.
         return any(
-            [fut.result(timeout=deadline - time.perf_counter()) for fut in pending]
+            fut.result(timeout=deadline - time.perf_counter()) for fut in pending
         )
 
     async def _has_pending_sends(self) -> bool:
