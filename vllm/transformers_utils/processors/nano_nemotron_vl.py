@@ -588,6 +588,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         tokenizer: HfTokenizer,
         *args,
         max_model_len: int,
+        dtype: torch.dtype | None = None,
         max_num_tiles: int | None = None,
         **kwargs,
     ) -> None:
@@ -620,7 +621,7 @@ class BaseNanoNemotronVLProcessor(ABC):
                 norm_mean=config.norm_mean,
                 norm_std=config.norm_std,
             )
-        self.dtype: torch.dtype = getattr(config, "dtype", torch.float32)
+        self.dtype = dtype or getattr(config, "dtype", None) or torch.float32
 
     @staticmethod
     def use_dynamic_resolution(config: PreTrainedConfig) -> bool:
@@ -775,6 +776,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         tokenizer: HfTokenizer,
         *,
         max_model_len: int,
+        dtype: torch.dtype | None = None,
         max_num_tiles: int | None = None,
         video_token: str | None = None,
         video_pruning_rate: float | None = None,
@@ -784,6 +786,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             config=config,
             tokenizer=tokenizer,
             max_model_len=max_model_len,
+            dtype=dtype,
             max_num_tiles=max_num_tiles,
         )
         # add extra video token for video processing
