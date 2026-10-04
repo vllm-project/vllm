@@ -4,18 +4,20 @@
 
 Under tensor parallelism a ``RowParallelLinear`` (e.g. attention ``o_proj``)
 produces a per-rank partial sum that is all-reduced, and the result is then fed
-into a ``GemmaRMSNorm`` that adds the residual and normalizes. flashinfer ships a
-kernel that fuses all-reduce + residual-add + RMSNorm into a single launch; this
-helper drives it directly (no torch.compile pass) for models that run eager.
+into a ``GemmaRMSNorm`` that adds the residual and normalizes. Both flashinfer
+(CUDA) and AITER (ROCm) ship a kernel that fuses all-reduce + residual-add +
+RMSNorm into a single launch; this helper drives them directly (no torch.compile
+pass) for models that run eager.
 
-Scope: attention output only, no quantization. When the flashinfer fast path is
-not applicable (TP==1, flashinfer/NVSwitch unavailable, unsupported dtype, or an
+Scope: attention output only, no quantization. When neither fast path is
+applicable (TP==1, backend unavailable, unsupported dtype/hidden size, or an
 oversize batch) it falls back to ``all_reduce`` + ``GemmaRMSNorm``, which is
 numerically identical to the unfused model path.
 """
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -23,9 +25,13 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
-from vllm.platforms import current_platform
 
 MiB = 1024 * 1024
+
+# aiter builds before v0.1.12 template-specialize the fused AR+RMSNorm launcher
+# on HIDDEN_DIM and silently no-op for sizes outside this set; newer builds take
+# hidden_dim as a runtime arg (detected via ``supports_dynamic_hidden_dim``).
+_AITER_OLD_FUSED_AR_RMS_HIDDEN = (512, 1024, 2048, 4096)
 
 # flashinfer fused all-reduce + RMSNorm is wired as a registered custom op in
 # allreduce_rms_fusion; both that op and the workspace helpers only exist when
@@ -112,28 +118,41 @@ def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool
     return True, max_token_num
 
 
-def _can_use_aiter_fused_ar_rms(hidden_states: torch.Tensor) -> bool:
-    if not current_platform.is_rocm():
-        return False
-    from vllm._aiter_ops import rocm_aiter_ops
+def _can_use_aiter(hidden_states: torch.Tensor, tp_size: int):
+    """Whether the AITER (ROCm) fused AR+GemmaRMSNorm path applies.
 
-    if not rocm_aiter_ops.is_custom_all_reduce_enabled():
-        return False
+    Returns the AITER custom-allreduce communicator when eligible, else ``None``.
+    Mirrors the eligibility checks in ``RocmAiterAllReduceFusionPass`` so this
+    eager helper only calls the fused op for shapes the kernel can service;
+    everything else falls back to the unfused path.
+    """
+    if not rocm_aiter_ops.is_enabled():
+        return None
+    # Requires the shared AITER custom-allreduce instance
+    # (VLLM_ROCM_USE_AITER_CUSTOM_AR=1); without it the fused op cannot run.
+    ca_comm = rocm_aiter_ops.get_aiter_allreduce()
+    if ca_comm is None or ca_comm.disabled:
+        return None
     if (
         hidden_states.dim() != 2
         or not hidden_states.is_contiguous()
         or hidden_states.dtype not in _FI_SUPPORTED_DTYPES
     ):
-        return False
-    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
-    if aiter_ar is None or aiter_ar.disabled:
-        return False
-    total_bytes = hidden_states.numel() * hidden_states.element_size()
-    if total_bytes > aiter_ar.effective_max_size():
-        return False
-    if not aiter_ar.should_custom_ar(hidden_states):
-        return False
-    return aiter_ar.use_1stage_fused_ar_rms(hidden_states)
+        return None
+
+    num_tokens, hidden_size = hidden_states.shape
+    # Older aiter builds only support a fixed set of hidden dims.
+    if (
+        not ca_comm.supports_dynamic_hidden_dim
+        and hidden_size not in _AITER_OLD_FUSED_AR_RMS_HIDDEN
+    ):
+        return None
+
+    element_size = hidden_states.element_size()
+    max_token_num = ca_comm.effective_max_size() // (hidden_size * element_size)
+    if num_tokens > max_token_num:
+        return None
+    return ca_comm
 
 
 def fused_allreduce_gemma_rms_norm(
@@ -152,6 +171,17 @@ def fused_allreduce_gemma_rms_norm(
     if tp_size == 1:
         # No all-reduce needed; identical to the unfused path.
         return norm(hidden_states, residual)
+
+    # ROCm/AITER fused path. The op forwards the raw gamma and applies the
+    # GemmaRMSNorm ``(1 + weight)`` scaling internally (gemma_norm=True), so it
+    # matches ``norm``'s semantics; it returns (normed_output, new_residual).
+    if _can_use_aiter(hidden_states, tp_size) is not None:
+        return torch.ops.vllm.rocm_aiter_fused_allreduce_gemma_rmsnorm(
+            hidden_states,
+            residual,
+            norm.weight,
+            norm.variance_epsilon,
+        )
 
     ok, max_token_num = _can_use_flashinfer(hidden_states, tp_size)
     if ok:
@@ -173,17 +203,6 @@ def fused_allreduce_gemma_rms_norm(
             norm_out=norm_out,
         )
         return norm_out, hidden_states
-
-    if _can_use_aiter_fused_ar_rms(hidden_states):
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        return rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(
-            input_=hidden_states,
-            residual=residual,
-            weight=norm.weight,
-            epsilon=norm.variance_epsilon,
-            gemma_norm=True,
-        )
 
     # Fallback: explicit all-reduce + GemmaRMSNorm (matches the unfused model).
     reduced = tensor_model_parallel_all_reduce(hidden_states)
