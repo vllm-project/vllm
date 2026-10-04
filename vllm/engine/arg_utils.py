@@ -720,6 +720,7 @@ class EngineArgs:
     cache_aware_admission_threshold: float = (
         SchedulerConfig.cache_aware_admission_threshold
     )
+    prefill_release_min_dp_ranks: int = SchedulerConfig.prefill_release_min_dp_ranks
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1835,6 +1836,10 @@ class EngineArgs:
             **scheduler_kwargs["cache_aware_admission_threshold"],
         )
         scheduler_group.add_argument(
+            "--prefill-release-min-dp-ranks",
+            **scheduler_kwargs["prefill_release_min_dp_ranks"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2714,6 +2719,7 @@ class EngineArgs:
             prefill_schedule_interval=self.prefill_schedule_interval,
             cache_aware_admission_window=self.cache_aware_admission_window,
             cache_aware_admission_threshold=self.cache_aware_admission_threshold,
+            prefill_release_min_dp_ranks=self.prefill_release_min_dp_ranks,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
