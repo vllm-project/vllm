@@ -58,6 +58,13 @@ def _image_equals(a: Image.Image, b: Image.Image) -> bool:
     return (np.asarray(a) == np.asarray(convert_image_mode(b, a.mode))).all()
 
 
+@pytest.fixture(autouse=True)
+def _allow_loopback_media_fetches(monkeypatch):
+    # This module serves fixtures from a loopback test server, which the
+    # SSRF guard (#57157) blocks by default. Opt out explicitly.
+    monkeypatch.setenv("VLLM_MEDIA_URL_ALLOW_PRIVATE_IPS", "1")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_fetch_image_http(image_url: str):

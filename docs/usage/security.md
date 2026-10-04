@@ -85,6 +85,11 @@ significantly reduce the attack surface for these types of abuse.
 Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
 redirects from being followed to bypass domain restrictions.
 
+Since this fix, every redirect hop re-checks the domain allowlist, and media
+hosts resolving to non-public IPs (loopback, private, link-local, etc.) are
+refused by default; set `VLLM_MEDIA_URL_ALLOW_PRIVATE_IPS=1` only on trusted
+networks or for tests serving fixtures from localhost.
+
 ### 5. **Restrict Media Download and Decode Sizes:**
 
 Remote media responses and compressed media files can expand into gigabytes of
