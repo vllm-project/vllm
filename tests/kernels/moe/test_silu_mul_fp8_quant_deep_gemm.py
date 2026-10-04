@@ -181,7 +181,8 @@ def ref_with_scale_fmt(
     ]
 
     ref_q = torch.empty((E, T, H), dtype=fp8_dtype, device=DEVICE)
-    ref_s_f32 = torch.empty(
+    # Padding rows are packed too, so keep UE8M0 fp32 scales exponent-only.
+    ref_s_f32 = torch.zeros(
         (E, T, cdiv(H, group_size)), dtype=torch.float32, device=DEVICE
     )
 
