@@ -215,6 +215,7 @@ class TrtLlmMxfp4ExpertsMonolithic(
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         from flashinfer import trtllm_fp4_block_scale_moe
 
@@ -236,10 +237,6 @@ class TrtLlmMxfp4ExpertsMonolithic(
                 device=hidden_states.device,
             )
 
-        routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=num_tokens,
-            device=hidden_states.device,
-        )
         flashinfer_output = trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -279,7 +276,6 @@ class TrtLlmMxfp4ExpertsMonolithic(
             top_k=self.topk,
             finalized_output=finalized_output,
         )
-        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
         return routed_output
 
 
