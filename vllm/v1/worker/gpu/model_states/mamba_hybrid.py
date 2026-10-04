@@ -344,6 +344,7 @@ class MambaHybridModelState(DefaultModelState):
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
+        recoverssm_step: tuple | None = None,
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
@@ -371,6 +372,7 @@ class MambaHybridModelState(DefaultModelState):
                 idx_mapping,
                 state_indices=(self._mamba_state_idx_gpu if self._align_mode else None),
                 num_accepted_tokens=self.num_accepted_tokens_gpu,
+                step=recoverssm_step,
             )
 
         if not num_reqs:
