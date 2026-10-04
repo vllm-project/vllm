@@ -45,8 +45,9 @@ def _compute_clamped_mm_tile_bounds(
     USE_PER_SEQ_CAUSAL: tl.constexpr,
     CHUNK_LOOKBACK: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    SHIFT_TILE_BASE: tl.constexpr = False,
 ):
-    loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
+    loop_lo, loop_hi, max_seq_prefix_len, tile_base = compute_tile_loop_bounds(
         0,  # context_len
         4096,  # seq_len
         4096,  # cur_batch_query_len
@@ -69,10 +70,13 @@ def _compute_clamped_mm_tile_bounds(
         2,  # MAX_MM_RANGES
         mm_prefix_range_ptr,
         0,  # seq_idx
+        False,  # USE_TD
+        SHIFT_TILE_BASE,
     )
     tl.store(output_ptr, loop_lo)
     tl.store(output_ptr + 1, loop_hi)
     tl.store(output_ptr + 2, max_seq_prefix_len)
+    tl.store(output_ptr + 3, tile_base)
 
 
 def test_clamped_mm_prefix_prunes_sliding_window_tiles() -> None:
@@ -80,7 +84,7 @@ def test_clamped_mm_prefix_prunes_sliding_window_tiles() -> None:
     mm_prefix_ranges = torch.tensor(
         [[[1024, 2303], [0, 0]]], dtype=torch.int32, device=DEVICE_TYPE
     )
-    bounds = torch.empty(3, dtype=torch.int32, device=DEVICE_TYPE)
+    bounds = torch.empty(4, dtype=torch.int32, device=DEVICE_TYPE)
 
     _compute_clamped_mm_tile_bounds[(1,)](
         bounds,
@@ -93,7 +97,7 @@ def test_clamped_mm_prefix_prunes_sliding_window_tiles() -> None:
 
     # The range is wider than the sliding window, so the upper bound must use
     # its inclusive endpoint rather than query_pos + sliding_window.
-    assert bounds.tolist() == [3, 72, 4096]
+    assert bounds.tolist() == [3, 72, 4096, 0]
 
 
 @pytest.mark.parametrize(
@@ -106,7 +110,7 @@ def test_clamped_mm_prefix_preserves_noncausal_right_window(
     mm_prefix_ranges = torch.tensor(
         [[[1024, 1500], [0, 0]]], dtype=torch.int32, device=DEVICE_TYPE
     )
-    bounds = torch.empty(3, dtype=torch.int32, device=DEVICE_TYPE)
+    bounds = torch.empty(4, dtype=torch.int32, device=DEVICE_TYPE)
 
     _compute_clamped_mm_tile_bounds[(1,)](
         bounds,
@@ -119,7 +123,33 @@ def test_clamped_mm_prefix_preserves_noncausal_right_window(
 
     # q_hi=1127 and window=1024 admit keys through 2150, beyond the image
     # range endpoint at 1500. Tile 67 must therefore remain in the loop.
-    assert bounds.tolist() == [3, 68, 4096]
+    assert bounds.tolist() == [3, 68, 4096, 0]
+
+
+@pytest.mark.parametrize(
+    ("shift_tile_base", "expected"),
+    [(False, [3, 72, 4096, 0]), (True, [0, 68, 4096, 97])],
+)
+def test_shift_tile_base_drops_misaligned_tile(
+    shift_tile_base: bool, expected: list[int]
+) -> None:
+    """Keys [97, 2272] span 69 floor-aligned tiles but only 68 shifted ones."""
+    mm_prefix_ranges = torch.tensor(
+        [[[1024, 2272], [0, 0]]], dtype=torch.int32, device=DEVICE_TYPE
+    )
+    bounds = torch.empty(4, dtype=torch.int32, device=DEVICE_TYPE)
+
+    _compute_clamped_mm_tile_bounds[(1,)](
+        bounds,
+        mm_prefix_ranges,
+        USE_CAUSAL=True,
+        USE_PER_SEQ_CAUSAL=False,
+        CHUNK_LOOKBACK=-1,
+        CHUNK_SIZE=-1,
+        SHIFT_TILE_BASE=shift_tile_base,
+    )
+
+    assert bounds.tolist() == expected
 
 
 def ref_paged_attn(
