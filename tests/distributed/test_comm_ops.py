@@ -404,7 +404,6 @@ def _patch_fi_ar_module(
     monkeypatch: pytest.MonkeyPatch,
     node_count: int,
     fabric_supported: Callable[[int], bool],
-    same_node: list[bool] | None = None,
 ) -> tuple[Mock, Mock]:
     # patch flashinfer_all_reduce for CPU-only _create_workspace tests; returns
     # the fake flashinfer_comm and the all_ranks_support_mnnvl vote mock.
@@ -423,13 +422,7 @@ def _patch_fi_ar_module(
     monkeypatch.setattr(
         flashinfer_all_reduce, "_mnnvl_supported_groups", {}, raising=False
     )
-    monkeypatch.setattr(flashinfer_all_reduce, "get_node_count", lambda: node_count)
-    monkeypatch.setattr(
-        flashinfer_all_reduce,
-        "in_the_same_node_as",
-        lambda group: same_node if same_node is not None else [True, False],
-        raising=False,
-    )
+    monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda group: node_count)
     monkeypatch.setattr(
         flashinfer_all_reduce,
         "is_mnnvl_fabric_supported",
@@ -485,30 +478,13 @@ def test_create_workspace_attempts_mnnvl_when_multinode_fabric_supported(
     fake_comm.create_allreduce_fusion_workspace.assert_called_once()
 
 
-def test_create_workspace_skips_fabric_probe_on_single_node(
+def test_create_workspace_skips_fabric_probe_for_node_local_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # single-node mnnvl uses NVSwitch multicast, not the NVLink fabric.
+    # a group confined to one node (single-node job, or TP=8 in a 2-node DP
+    # job) needs no NVLink fabric.
     fake_comm, _ = _patch_fi_ar_module(
         monkeypatch, node_count=1, fabric_supported=_fabric_probe_must_not_run
-    )
-
-    workspace = _create_mnnvl_workspace()
-
-    assert workspace is fake_comm.create_allreduce_fusion_workspace.return_value
-    fake_comm.create_allreduce_fusion_workspace.assert_called_once()
-
-
-def test_create_workspace_skips_fabric_probe_for_intra_node_group(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # a group confined to one node (e.g. TP=8 in a 2-node DP job) works via
-    # node-local handle exchange without an NVLink fabric.
-    fake_comm, _ = _patch_fi_ar_module(
-        monkeypatch,
-        node_count=2,
-        fabric_supported=_fabric_probe_must_not_run,
-        same_node=[True, True, True, True],
     )
 
     workspace = _create_mnnvl_workspace()

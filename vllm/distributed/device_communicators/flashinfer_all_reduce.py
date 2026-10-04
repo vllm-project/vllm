@@ -17,11 +17,7 @@ from vllm.config.compilation import PassConfig
 from vllm.distributed.device_communicators.all_reduce_utils import (
     FI_MNNVL_ALLREDUCE_MAX_SIZE_MB,
 )
-from vllm.distributed.parallel_state import (
-    _node_count,
-    get_node_count,
-    in_the_same_node_as,
-)
+from vllm.distributed.parallel_state import _node_count
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -81,9 +77,9 @@ def _mnnvl_group_supported(
 
     On multi-node groups without an NVLink fabric (e.g. IB-only), mnnvl
     workspace creation itself hangs for ~30s and leaks GPU memory, so probe
-    before attempting it. Groups confined to one node use node-local handle
-    exchange and need no fabric. Both the node-span check and the capability
-    vote are collectives and must run on every rank of the group.
+    before attempting it. Groups confined to one node need no fabric. The
+    node count and the capability vote are collectives and must run on every
+    rank of the group.
 
     Args:
         world_size: Number of ranks in the workspace group.
@@ -94,17 +90,17 @@ def _mnnvl_group_supported(
         Whether mnnvl workspace creation should be attempted. True when the
         probe APIs are unavailable (older flashinfer), falling back to the
         pre-existing attempt-and-check behavior.
+
     """
-    if get_node_count() == 1:
-        # Single-node mnnvl uses NVSwitch multicast, not the NVLink fabric;
-        # the mc_ptr check after creation covers that case.
-        return True
     if is_mnnvl_fabric_supported is None or all_ranks_support_mnnvl is None:
         return True
     supported = _mnnvl_supported_groups.get(id(group))
     if supported is not None:
         return supported
-    if all(in_the_same_node_as(group)):
+    if _node_count(group) == 1:
+        # A node-local group (single node, or e.g. TP=8 inside a multi-node DP
+        # job) uses node-local handle exchange / NVSwitch multicast and needs
+        # no NVLink fabric; the mc_ptr check after creation covers it.
         supported = True
     else:
         try:
