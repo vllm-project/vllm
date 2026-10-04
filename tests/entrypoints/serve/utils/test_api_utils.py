@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from argparse import Namespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +14,45 @@ from vllm.entrypoints.serve.utils.api_utils import (
     redact_sensitive_args,
     should_include_usage,
 )
+
+
+@pytest.mark.asyncio
+async def test_with_cancellation_cleans_up_children_when_wrapper_is_cancelled():
+    blocker = asyncio.Event()
+    handler_started = asyncio.Event()
+    receive_started = asyncio.Event()
+    child_tasks: list[asyncio.Task] = []
+
+    async def handler(_self, _request):
+        task = asyncio.current_task()
+        assert task is not None
+        child_tasks.append(task)
+        handler_started.set()
+        await blocker.wait()
+
+    async def receive():
+        task = asyncio.current_task()
+        assert task is not None
+        child_tasks.append(task)
+        receive_started.set()
+        await blocker.wait()
+
+    wrapped = api_utils.with_cancellation(handler)
+    parent_task = asyncio.create_task(wrapped(None, SimpleNamespace(receive=receive)))
+    await asyncio.gather(handler_started.wait(), receive_started.wait())
+
+    try:
+        parent_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await parent_task
+
+        assert len(child_tasks) == 2
+        assert all(task.done() for task in child_tasks)
+    finally:
+        for task in child_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*child_tasks, return_exceptions=True)
 
 
 @pytest.mark.parametrize(
