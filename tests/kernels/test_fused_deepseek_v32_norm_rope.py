@@ -878,7 +878,15 @@ def test_fused_q_no_indexer(num_tokens: int, cfg: ModelConfig):
     assert_fp8(mqa[:, :, cfg.kv_lora :], (qpe_ref / s).to(FP8), "mqa q_pe")
 
 
-@pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
+@pytest.mark.parametrize(
+    "cfg",
+    MODEL_CONFIGS
+    + [
+        ModelConfig(1536, 512, 32, 16, 32, 64, 7168),
+        ModelConfig(1536, 512, 128, 16, 32, 256, 7168),
+    ],
+    ids=MODEL_IDS + ["small-dims", "large-dims"],
+)
 @pytest.mark.parametrize("num_tokens", [1, 17, 512])
 @pytest.mark.parametrize("has_indexer", [True, False])
 @pytest.mark.parametrize("use_mha", [True, False])
@@ -909,6 +917,18 @@ def test_fused_q_bf16_query(
     ql_nope = torch.randn(
         num_tokens, cfg.num_heads, cfg.kv_lora, device=dev, dtype=torch.bfloat16
     )
+    fuse_q_proj = (
+        cfg.num_heads in (4, 8, 16, 32, 64, 128)
+        and (has_indexer or (cfg.num_heads <= 32 and num_tokens <= 1024))
+        and current_platform.is_device_capability_family(100)
+    )
+    if fuse_q_proj:
+        q_nope = torch.randn(
+            num_tokens, cfg.num_heads, 192, device=dev, dtype=torch.bfloat16
+        )
+        w_uk_t = torch.randn(512, cfg.num_heads, 192, device=dev, dtype=torch.bfloat16)
+        w_uk_t = w_uk_t.permute(1, 2, 0)
+        ql_nope = torch.bmm(q_nope.transpose(0, 1), w_uk_t).transpose(0, 1)
     q_scale = torch.tensor([0.37], device=dev, dtype=torch.float32)
     q_cos_sin = make_cos_sin(max_pos, cfg.rope_dim, dev).to(cache_dtype)
 
@@ -979,6 +999,31 @@ def test_fused_q_bf16_query(
             index_w * scale_ref * (cfg.index_head_dim**-0.5) * (cfg.index_heads**-0.5)
         )
         torch.testing.assert_close(iw_out, iw_ref, rtol=1e-3, atol=1e-3)
+
+    if fuse_q_proj:
+        ql_projected = torch.empty_like(ql_nope)
+        iq_fused, iw_fused, qpe_fused = K.fused_q(
+            pos,
+            q_pe,
+            q_cos_sin,
+            index_q,
+            idx_cos_sin,
+            ql_projected,
+            q_scale,
+            index_w,
+            cfg.index_head_dim**-0.5,
+            cfg.index_heads**-0.5,
+            has_indexer=has_indexer,
+            index_rope_interleave=index_interleave,
+            quantize_mqa=False,
+            q_nope=q_nope,
+            w_uk_t=w_uk_t,
+        )
+        assert_bf16(ql_projected, ql_nope, "projected ql_nope")
+        assert_bf16(qpe_fused, q_pe_out, "projected q_pe RoPE")
+        if has_indexer:
+            assert_fp8(iq_fused, iq_fp8, "projected indexer-Q")
+            torch.testing.assert_close(iw_fused, iw_out, rtol=1e-3, atol=1e-3)
 
 
 def test_fused_q_triton_supports_large_token_count():
