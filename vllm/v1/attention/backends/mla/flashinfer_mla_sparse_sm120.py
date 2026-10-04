@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
 )
@@ -34,6 +35,11 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
 
     is_sparse = True
     supports_dense_mha_prefill = False
+
+    def get_fp8_ds_mla_row_bytes(self) -> int:
+        if self.kv_lora_rank == 512 and self.qk_rope_head_dim == 0:
+            return 528
+        return super().get_fp8_ds_mla_row_bytes()
 
     def __init__(
         self,
@@ -82,8 +88,6 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             topk_indices_buffer=topk_indices_buffer,
             **mla_args,
         )
-        from vllm.config import get_current_vllm_config
-
         vllm_config = get_current_vllm_config()
         model_type = None
         if vllm_config.model_config is not None:
