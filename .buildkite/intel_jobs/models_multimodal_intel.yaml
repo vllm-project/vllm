@@ -7,7 +7,7 @@ steps:
   timeout_in_minutes: 70
   device: intel_gpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
     mem: 16+
   no_plugin: true
@@ -31,7 +31,7 @@ steps:
   timeout_in_minutes: 90
   device: intel_gpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
     mem: 16+
   no_plugin: true
@@ -53,7 +53,7 @@ steps:
 
 - label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl"
   key: multi-modal-models-standard-3-llava-qwen2-vl
-  timeout_in_minutes: 125
+  timeout_in_minutes: 65
   device: intel_gpu
   agent_tags:
     label: production
@@ -80,7 +80,7 @@ steps:
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
     mem: 16+
   no_plugin: true
@@ -130,7 +130,7 @@ steps:
   timeout_in_minutes: 60
   device: intel_gpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
     mem: 16+
   no_plugin: true

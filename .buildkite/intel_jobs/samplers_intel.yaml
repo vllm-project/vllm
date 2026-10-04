@@ -7,7 +7,7 @@ steps:
   timeout_in_minutes: 40
   device: intel_gpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
     mem: 16+
   no_plugin: true

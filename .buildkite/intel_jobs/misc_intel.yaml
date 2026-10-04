@@ -8,7 +8,7 @@ steps:
   num_devices: 2
   device: intel_gpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
     mem: 16+
   no_plugin: true
@@ -35,7 +35,7 @@ steps:
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
     mem: 16+
   no_plugin: true
@@ -101,7 +101,7 @@ steps:
   timeout_in_minutes: 90
   device: intel_gpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
     mem: 16+
   no_plugin: true
@@ -296,7 +296,7 @@ steps:
   timeout_in_minutes: 55
   device: intel_gpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
     mem: 16+
   no_plugin: true
