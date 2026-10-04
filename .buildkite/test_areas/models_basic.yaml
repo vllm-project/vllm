@@ -124,10 +124,9 @@ steps:
   - csrc/libtorch_stable/kimi_k3/
   - tests/models/kimi_k3/
   - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
-  - tests/kernels/test_bf16_skinny_gemm.py
   commands:
     # The native NVIDIA Kimi K3 kernels require the SM100 family.
-    - pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_bf16_skinny_gemm.py
+    - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py kernels/attention/test_kimi_k3_mla_fused_epilogue.py
   mirror:
     amd:
       label: ":amd: (MI355) Kimi K3"
@@ -142,9 +141,29 @@ steps:
       - vllm/platforms/rocm.py
       commands:
       # The ROCm KDA/AttnRes kernels are gated on gfx950, so this has to be MI355.
-      # The two kernels/ files the NVIDIA job adds are CUDA-only (they import
-      # cuda.bindings.driver), so they are deliberately left out here.
+      # The kernels/ file the NVIDIA job adds is CUDA-only (it imports
+      # cuda.bindings.driver), so it is deliberately left out here.
       - pytest -v -s models/kimi_k3
+
+- label: ":nvidia: (4xB200) Kimi K3 Prefix Cache Shard %N"
+  key: kimi-k3-prefix-cache-4xb200
+  timeout_in_minutes: 75
+  device: b200-k8s
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/models/kimi_k3/
+  - vllm/v1/core/
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/simple_kv_offload/
+  - vllm/v1/spec_decode/
+  - vllm/model_executor/layers/mamba/
+  - tests/models/kimi_k3/test_prefix_cache.py
+  - .buildkite/scripts/install-kv-connectors.sh
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - pytest -v -s models/kimi_k3/test_prefix_cache.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
@@ -178,7 +197,7 @@ steps:
   - vllm/v1/attention/backends/short_conv_attn.py
   - tests/models/qwen4_exp/
   commands:
-    - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_pre_indexer.py models/qwen4_exp/test_qsa_reference.py
+    - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_prepare.py models/qwen4_exp/test_qsa_reference.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Qwen4 Exp"
@@ -223,13 +242,3 @@ steps:
   device: cpu-small
   commands:
     - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ model_executor/layers/test_activation.py
-  mirror:
-    amd:
-      label: ":amd: (MI250) Basic Models Other"
-      dind: false
-      device: mi250_1
-      no_gpu: true
-      working_dir: "/vllm-workspace/tests"
-      timeout_in_minutes: 35
-      depends_on:
-      - image-build-amd

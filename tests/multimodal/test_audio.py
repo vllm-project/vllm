@@ -179,7 +179,7 @@ def test_audio_resampler_invalid_method(dummy_audio):
     # Validated eagerly so a bad method fails at construction, not on the
     # first audio request.
     with pytest.raises(ValueError, match="Invalid resampling method"):
-        AudioResampler(target_sr=22050, method="invalid")  # type: ignore[arg-type]
+        AudioResampler(target_sr=22050, method="invalid")
 
 
 def test_audio_resampler_no_target_sr(dummy_audio):

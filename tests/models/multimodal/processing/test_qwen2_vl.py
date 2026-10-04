@@ -106,7 +106,7 @@ def test_merge_and_resolve_mm_processor_kwargs_preserves_request_alias_precedenc
         mm_device_do_normalize=False,
     )
     model_config = SimpleNamespace(get_multimodal_config=lambda: mm_config)
-    ctx = InputProcessingContext(model_config, tokenizer=None)  # type: ignore[arg-type]
+    ctx = InputProcessingContext(model_config, tokenizer=None)
     info = Qwen2VLProcessingInfo(ctx)
     monkeypatch.setattr(
         info,
@@ -236,7 +236,7 @@ def test_get_vision_info_reads_merged_modality_scope(
         do_resize=False,
         image_processor=image_processor,
         mm_kwargs={},
-        modality=modality,  # type: ignore[arg-type]
+        modality=modality,
     )
 
     assert seen == [merged[scope]]
