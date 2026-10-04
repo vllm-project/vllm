@@ -273,6 +273,7 @@ def test_dummy_batch_can_be_microbatched():
     assert [u.num_tokens for u in ubatches] == [16, 16]
     # The one dummy request spans both microbatches, 16 of its tokens in each.
     assert all(u.num_reqs == 1 for u in ubatches)
+    assert all(u.is_dummy for u in ubatches)
     for ubatch in ubatches:
         torch.testing.assert_close(
             ubatch.query_start_loc, torch.tensor([0, 16], dtype=torch.int32)

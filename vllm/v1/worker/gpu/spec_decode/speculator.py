@@ -306,6 +306,7 @@ class DraftModelSpeculator(BaseSpeculator):
         query_start_loc_np: np.ndarray,
         seq_lens_cpu_upper_bound: torch.Tensor,
         step: int,
+        is_dummy: bool,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
         slot_mappings: torch.Tensor | None = None,
@@ -371,6 +372,7 @@ class DraftModelSpeculator(BaseSpeculator):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
+            is_dummy_batch=is_dummy,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
             positions=self.input_buffers.positions[:num_tokens],
@@ -548,6 +550,7 @@ class DraftModelSpeculator(BaseSpeculator):
         num_query_per_req: int,
         seq_lens_cpu_upper_bound: torch.Tensor,
         step: int,
+        is_dummy: bool,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
@@ -558,6 +561,7 @@ class DraftModelSpeculator(BaseSpeculator):
             query_start_loc_np=query_start_loc_np,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             step=step,
+            is_dummy=is_dummy,
             causal=causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
         )

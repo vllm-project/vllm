@@ -67,7 +67,6 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
     DraftTokenIds,
@@ -616,10 +615,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
-            layer_spec = (
-                spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
-            )
-            slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+            slot_mapping_enabled.append(spec.uses_slot_mapping)
             dcp_sharded.append(spec.dcp_sharded)
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
