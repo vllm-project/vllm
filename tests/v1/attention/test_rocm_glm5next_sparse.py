@@ -198,6 +198,55 @@ def test_rocm_sparse_triton_route_preserves_padded_sinks(monkeypatch, num_heads)
     assert lse is None
 
 
+@pytest.mark.parametrize(
+    ("num_splits", "num_decode_tokens", "expected"),
+    [(4, 2, "decode"), (1, 2, "prefill"), (4, 1, "prefill")],
+)
+def test_rocm_sparse_triton_decode_routes_on_num_splits(
+    monkeypatch, num_splits, num_decode_tokens, expected
+):
+    """Split-K needs both a pure-decode batch and a heuristic asking for splits."""
+    called = []
+
+    def fake_decode(**kwargs):
+        called.append("decode")
+        assert kwargs["num_splits"] == num_splits
+
+    def fake_prefill(**kwargs):
+        called.append("prefill")
+
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_decode_bf16", fake_decode)
+    monkeypatch.setattr(sparse_mod, "rocm_sparse_attn_prefill", fake_prefill)
+    monkeypatch.setattr(
+        sparse_mod, "rocm_sparse_decode_bf16_num_splits", lambda *args: num_splits
+    )
+
+    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl.num_heads = 16
+    impl.kv_lora_rank = 512
+    impl.kv_cache_dtype = "auto"
+    impl.scale = 512**-0.5
+    impl.sinks = None
+
+    q = torch.zeros(2, 16, 512, dtype=torch.bfloat16)
+    kv = torch.zeros(4, 1, 512, dtype=torch.bfloat16)
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        num_prefills=2 - num_decode_tokens,
+        num_decodes=num_decode_tokens,
+        num_decode_tokens=num_decode_tokens,
+        max_query_len=1,
+        max_seq_len=4096,
+        topk_tokens=2048,
+        paged_kv_indices=torch.empty(0, dtype=torch.int32),
+        paged_kv_indptr=torch.zeros(3, dtype=torch.int32),
+    )
+
+    impl._forward_mla(SimpleNamespace(), q, kv, metadata)
+
+    assert called == [expected]
+
+
 def test_rocm_sparse_attention_accepts_glm_nope_dimensions():
     _validate_sparse_dims(512, 512, 0, "test")
 
