@@ -7,6 +7,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
+    create_encoder_cache_manager,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -32,6 +33,67 @@ class MockRequest:
 
 
 # ------------------ Unit Tests ------------------ #
+def test_create_encoder_cache_manager_supports_constructor_only_manager():
+    class ConstructorOnlyManager:
+        def __init__(self, cache_size: int):
+            self.cache_size = cache_size
+
+    manager = create_encoder_cache_manager(
+        ConstructorOnlyManager,
+        cache_size=10,
+        vllm_config=object(),
+    )
+
+    assert isinstance(manager, ConstructorOnlyManager)
+    assert manager.cache_size == 10
+
+
+def test_create_encoder_cache_manager_prefers_from_vllm_config():
+    vllm_config = object()
+
+    class ConfigAwareManager(EncoderCacheManager):
+        @classmethod
+        def from_vllm_config(cls, *, cache_size: int, vllm_config):
+            return cls(cache_size, vllm_config)
+
+        def __init__(self, cache_size: int, vllm_config):
+            self.cache_size = cache_size
+            self.vllm_config = vllm_config
+
+    manager = create_encoder_cache_manager(
+        ConfigAwareManager,
+        cache_size=10,
+        vllm_config=vllm_config,
+    )
+
+    assert isinstance(manager, ConfigAwareManager)
+    assert manager.cache_size == 10
+    assert manager.vllm_config is vllm_config
+
+
+def test_create_encoder_cache_manager_supports_create_manager():
+    vllm_config = object()
+
+    class FactoryManager:
+        @classmethod
+        def create_manager(cls, *, cache_size: int, vllm_config):
+            return cls(cache_size, vllm_config)
+
+        def __init__(self, cache_size: int, vllm_config):
+            self.cache_size = cache_size
+            self.vllm_config = vllm_config
+
+    manager = create_encoder_cache_manager(
+        FactoryManager,
+        cache_size=10,
+        vllm_config=vllm_config,
+    )
+
+    assert isinstance(manager, FactoryManager)
+    assert manager.cache_size == 10
+    assert manager.vllm_config is vllm_config
+
+
 def test_basic_allocate_and_reuse():
     cache = EncoderCacheManager(cache_size=10)
     req = MockRequest("r1", ["imgA"], [4])
