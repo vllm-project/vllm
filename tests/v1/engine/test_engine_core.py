@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import queue
 import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import pytest
 from transformers import AutoTokenizer
@@ -698,6 +699,19 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
+    core._send_abort_outputs = MagicMock()
+    core.is_running = lambda: True
+    core.process_input_queue_block = True
+    core.aborts_queue = MagicMock()
+    core.input_queue = MagicMock()
+    core.input_queue.empty.return_value = True
+
+    def get(block):
+        # Waiting for client input is only right when there is no work.
+        assert not core.has_work(), "blocked on input with work pending"
+        raise queue.Empty
+
+    core.input_queue.get.side_effect = get
     return core
 
 
@@ -724,23 +738,77 @@ def test_kv_cache_release_rejects_unsafe_state(pause_state, has_requests, has_ba
     core.model_executor.discard.assert_not_called()
 
 
-@pytest.mark.parametrize("deferred", [False, True])
-def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
-    """A resolved pause promises an idle device: the barrier must run before
-    caches are cleared and before the caller is unblocked."""
+@pytest.mark.parametrize("held", [False, True], ids=["no-transfers", "transfers"])
+@pytest.mark.parametrize("deferred", [False, True], ids=["idle", "draining"])
+@pytest.mark.parametrize(
+    ("op", "clears"),
+    [
+        ("keep", True),
+        ("wait", True),
+        ("keep", False),
+        ("abort", False),
+        ("release", True),
+    ],
+)
+def test_cache_reset_waits_for_transfer_kv(op, clears, deferred, held):
+    """Once idle, an operation clearing the KV cache makes KV transfers give back
+    their blocks and waits for them; the device barrier precedes the reset."""
     core = _pausable_engine_core_proc()
+    core.scheduler.pause_state = PauseState.PAUSED_ALL
     core.engines_running = deferred
-    order: list[str] = []
-    core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
+    order: list = []
+    core.model_executor.collective_rpc.side_effect = order.append
+    core.model_executor.discard.side_effect = order.append
     core._reset_caches = lambda: order.append("reset_caches")
 
-    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=True)
-    if deferred:
-        assert isinstance(result, Future)
-        assert not result.done() and order == []
-        core.engines_running = False
-        core._notify_idle_state_callbacks()
-        assert result.result(timeout=0) is None
+    def release_transfer_kv():
+        order.append("release")
+        core.scheduler.has_requests.return_value = held
+        return ["aborted-load"]
+
+    core.scheduler.release_transfer_kv.side_effect = release_transfer_kv
+
+    if op == "release":
+        if deferred:
+            pytest.skip("release needs a completed pause")
+        core.model_executor.is_sleeping = False
+        result = core.release_kv_cache_memory()
     else:
-        assert result is None
-    assert order == ["synchronize_device", "reset_caches"]
+        result = EngineCoreProc.pause_scheduler(core, mode=op, clear_cache=clears)
+    assert isinstance(result, Future) == (deferred or (clears and held))
+    for busy in (deferred, clears and held):
+        if busy:
+            assert not result.done() and "reset_caches" not in order
+            core.engines_running = False
+            core.scheduler.has_requests.return_value = False
+            core._process_input_queue()
+    if isinstance(result, Future):
+        result = result.result(timeout=0)
+    assert result is None
+
+    released = ["release"] * clears
+    if op == "release":
+        assert order == released + ["reset_caches", ("kv_cache",)]
+    else:
+        assert order == released + ["synchronize_device"] + ["reset_caches"] * clears
+    assert (call(["aborted-load"]) in core._send_abort_outputs.call_args_list) == clears
+
+
+def test_resume_cancels_a_pending_cache_reset():
+    """Resume fails a reset still waiting for the engine to drain, at once, so
+    a later pause can never run it."""
+    core = _pausable_engine_core_proc()
+    core._reset_caches = MagicMock()
+    core.engines_running = True
+    core.scheduler.pause_state = PauseState.PAUSED_ALL
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=True)
+
+    core.scheduler.set_pause_state.side_effect = lambda state: setattr(
+        core.scheduler, "pause_state", state
+    )
+    core.resume_scheduler()
+    with pytest.raises(RuntimeError, match="Resumed before"):
+        result.result(timeout=0)
+    assert not core._idle_state_callbacks
+    core.scheduler.release_transfer_kv.assert_not_called()
+    core._reset_caches.assert_not_called()

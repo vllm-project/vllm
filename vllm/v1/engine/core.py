@@ -11,7 +11,6 @@ from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
-from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
@@ -895,7 +894,7 @@ class EngineCore:
             reset_running_requests=reset_running_requests,
             reset_connector=reset_connector,
         ):
-            raise RuntimeError("Failed to reset the KV connector cache.")
+            raise RuntimeError("Failed to reset the KV cache: blocks are in use.")
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
@@ -1006,11 +1005,9 @@ class EngineCore:
             self.resume_scheduler()
         return fully_awake
 
-    def release_kv_cache_memory(self) -> None:
-        """Discard KV cache physical memory. Requires a completed pause
-        and all executor memory to be resident. Kept requests are recomputed
-        after wake-up.
-        """
+    def release_kv_cache_memory(self) -> None | Future:
+        """Discard KV cache memory of a completed pause with resident memory. Kept
+        requests recompute after wake-up; those loading remote KV are aborted."""
         if not (
             self.is_scheduler_paused()
             and not self.scheduler.has_requests()
@@ -1023,8 +1020,19 @@ class EngineCore:
             raise RuntimeError(
                 "release_kv_cache_memory() requires all executor memory to be resident"
             )
-        self._reset_caches()
-        self.model_executor.discard(("kv_cache",))
+
+        def release() -> None:
+            self._reset_caches()
+            self.model_executor.discard(("kv_cache",))
+
+        return self._when_idle(release, release_transfer_kv=True)
+
+    def _when_idle(
+        self, fn: Callable[[], Any], release_transfer_kv: bool = False
+    ) -> Any:
+        """Run fn once idle. The in-process engine is idle between calls and
+        cannot wait for KV transfers, so a reset fails while they hold blocks."""
+        return fn()
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -1564,6 +1572,8 @@ class EngineCoreProc(EngineCore):
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
+            if self.has_work():
+                break  # A callback started work.
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
@@ -1607,7 +1617,8 @@ class EngineCoreProc(EngineCore):
         return model_executed
 
     def _notify_idle_state_callbacks(self) -> None:
-        while self._idle_state_callbacks:
+        # A callback may start new work; the rest then wait for the next idle.
+        while self._idle_state_callbacks and not self.has_work():
             callback = self._idle_state_callbacks.pop()
             callback(self)
 
@@ -2065,14 +2076,6 @@ class EngineCoreProc(EngineCore):
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
 
-        def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
-            try:
-                engine._finish_pause(clear_cache)
-            except Exception as e:
-                future.set_exception(e)
-            else:
-                future.set_result(None)
-
         if mode == "abort":
             aborted_reqs = self.scheduler.finish_requests(
                 None, RequestStatus.FINISHED_ABORTED
@@ -2081,21 +2084,48 @@ class EngineCoreProc(EngineCore):
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
+        self._begin_pause()
+        return self._when_idle(
+            lambda: self._finish_pause(clear_cache), release_transfer_kv=clear_cache
+        )
 
-        if self._pause_complete():
-            self._finish_pause(clear_cache)
-            return None
+    def _begin_pause(self) -> None:
+        """Hook for engines that must agree on a pause before going idle."""
 
+    def resume_scheduler(self) -> None:
+        super().resume_scheduler()
+        # Operations waiting within the pause end with it.
+        callbacks, self._idle_state_callbacks = self._idle_state_callbacks, []
+        for callback in callbacks:
+            callback(self)
+
+    def _when_idle(
+        self, fn: Callable[[], Any], release_transfer_kv: bool = False
+    ) -> Any:
+        """Run fn once idle, after KV transfers give back their blocks if asked.
+        Returns its result, or a Future of it while the engine has work."""
         future = Future[Any]()
-        self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
-        return future
 
-    def _pause_complete(self) -> bool:
-        """Returns True if the pause has fully completed and the caller can
-        return ``None`` synchronously; False if the pause is still pending
-        and the caller should register an idle-state callback to finish it.
-        """
-        return not self.has_work()
+        def callback(engine: "EngineCoreProc") -> None:
+            nonlocal release_transfer_kv
+            try:
+                if not engine.is_scheduler_paused():
+                    raise RuntimeError("Resumed before the operation completed.")
+                if release_transfer_kv:
+                    release_transfer_kv = False
+                    aborted = engine.scheduler.release_transfer_kv()
+                    engine._send_abort_outputs(aborted)
+                    if engine.has_work():
+                        # Wait until the transfers give back their blocks.
+                        engine._idle_state_callbacks.append(callback)
+                        return
+                future.set_result(fn())
+            except Exception as e:
+                future.set_exception(e)
+
+        self._idle_state_callbacks.append(callback)
+        self._notify_idle_state_callbacks()
+        return future.result() if future.done() else future
 
     def _send_finish_outputs_to_client(
         self, req_ids: list[str], client_index: int, finish_reason: FinishReason
@@ -2201,23 +2231,11 @@ class DPEngineCoreProc(EngineCoreProc):
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
 
-    def _pause_complete(self) -> bool:
-        """Two-phase DP-aware pause.
-
-        Phase 1: Set local pause state and ``pending_pause`` flag. If the
-        engines are idle, kick-start them by setting ``engines_running`` to
-        True so ranks enter the stepping loop and reach the all-reduce
-        consensus checkpoint in ``_has_global_unfinished_reqs``.
-
-        Phase 2 (in ``_has_global_unfinished_reqs``): Once the all-reduce
-        confirms that **all** ranks have ``pending_pause`` set, collectively
-        stop stepping and set ``ignore_start_dp_wave`` so that stale
-        ``START_DP_WAVE`` messages cannot re-wake any engine.
-        """
+    def _begin_pause(self) -> None:
+        """Step until every rank has pending_pause set (all-reduced in
+        _has_global_unfinished_reqs); ranks then stop and ignore START_DP_WAVE."""
         self.pending_pause = True
         self.engines_running = True
-
-        return False
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)

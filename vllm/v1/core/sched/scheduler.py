@@ -417,6 +417,8 @@ class Scheduler(SchedulerInterface):
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+        # Set by release_transfer_kv() until the next pause state change.
+        self._releasing_transfer_kv = False
 
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
@@ -1586,11 +1588,8 @@ class Scheduler(SchedulerInterface):
         )
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
-        self._free_request_blocks(request)
-        self.encoder_cache_manager.free(request)
-        self._inflight_prefills.discard(request)
+        self._free_computed_kv(request)
         request.status = RequestStatus.PREEMPTED
-        request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
@@ -1612,6 +1611,13 @@ class Scheduler(SchedulerInterface):
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
         self.reset_preempted_req_ids.add(request.request_id)
+
+    def _free_computed_kv(self, request: Request) -> None:
+        """Free the KV and encoder cache of a request so it recomputes them."""
+        self._free_request_blocks(request)
+        self.encoder_cache_manager.free(request)
+        self._inflight_prefills.discard(request)
+        request.num_computed_tokens = 0
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -2754,6 +2760,26 @@ class Scheduler(SchedulerInterface):
     def set_pause_state(self, pause_state: PauseState) -> None:
         logger.info("setting pause state to %s", pause_state.name)
         self._pause_state = pause_state
+        self._releasing_transfer_kv = False
+
+    def release_transfer_kv(self) -> list[Request]:
+        # A load still in flight cannot be recomputed while its KV is written;
+        # aborting it asks the remote side to end the transfer.
+        self._releasing_transfer_kv = True
+        aborted = self.finish_requests(
+            [
+                request.request_id
+                for request in self.kv_holding_waiting
+                if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                and request.request_id not in self.finished_recving_kv_req_ids
+            ],
+            RequestStatus.FINISHED_ABORTED,
+        )
+        if self.connector is not None and self.has_finished_requests():
+            # Finished requests hold KV for remote readers; the next step
+            # delivers this to the workers.
+            self.connector.abort_pending_sends()
+        return aborted
 
     def _request_blocks_can_be_freed(self, request: Request) -> bool:
         # We must defer freeing blocks if an async kv connector may
@@ -2826,9 +2852,18 @@ class Scheduler(SchedulerInterface):
         # the engine would quiesce before the connector can drain completions.
         # TODO: replace with a more general mechanism for connectors to keep
         # the scheduler alive.
+        # A paused engine does not wait for the KV finished requests hold for
+        # remote readers, unless it is releasing that KV.
+        waits_for_held_kv = (
+            self._pause_state == PauseState.UNPAUSED or self._releasing_transfer_kv
+        )
         return (
             self.has_unfinished_requests()
-            or self.has_finished_requests()
+            or (
+                self.has_finished_requests()
+                if waits_for_held_kv
+                else bool(self.finished_req_ids)
+            )
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
                 self.ec_connector is not None
@@ -2849,6 +2884,16 @@ class Scheduler(SchedulerInterface):
         if reset_running_requests:
             # For logging.
             timestamp = time.monotonic()
+            # Waiting requests holding KV recompute it too, ahead of the other
+            # waiting ones; KV a transfer or a streaming session owns is kept.
+            for request in reversed(list(self.kv_holding_waiting)):
+                if request.request_id in self.finished_recving_kv_req_ids:
+                    self._handle_blocked_waiting_request(request)  # loaded KV
+                if request.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED):
+                    self.kv_holding_waiting.remove_request(request)
+                    self.deferred_waiting.discard(request)
+                    self._free_computed_kv(request)
+                    self.waiting.prepend_request(request)
             # Invalidate all the current running requests KV's by pushing them to
             # the waiting queue. In this case, we can reduce the ref count of all
             # the kv blocks to 0 and thus we can make sure the reset is successful.
@@ -2864,14 +2909,8 @@ class Scheduler(SchedulerInterface):
             # persistent batch in the model runner.
             self.prev_step_scheduled_req_ids.clear()
 
+        # Fails while KV transfers still hold blocks; see release_transfer_kv().
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
-        if reset_running_requests and not reset_successful:
-            raise RuntimeError(
-                "Failed to reset KV cache even when all the running requests are "
-                "preempted and moved to the waiting queue. This is likely due to "
-                "the presence of running requests waiting for remote KV transfer, "
-                "which is not supported yet."
-            )
 
         if reset_connector:
             reset_successful = self.reset_connector_cache() and reset_successful
