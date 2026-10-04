@@ -73,7 +73,6 @@ class NixlBaseConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
-        self.use_eagle_prefix_cache_hashing = False
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -373,19 +372,18 @@ class NixlBaseConnectorScheduler:
                     (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)], ts)
                 )
 
-    def _prefill_backoff(self, mamba: bool = True) -> int:
+    def _prefill_backoff(self) -> int:
         """Trailing prompt tokens the prefiller must not compute; the decoder
         recomputes them locally.
 
-        Mamba needs h(N-1) so the decoder can derive h(N) itself; ``mamba=False``
-        leaves that token to the prefiller. Multi-module
+        Mamba needs h(N-1) so the decoder can derive h(N) itself. Multi-module
         MTP needs to keep its whole lookahead window off of the prefiller, which
         would otherwise embed the unverified drafts in the MTP layer's KV cache. The
         decoder would never rebuild them, because the update is sized by the rejection
         count, which is zero for the first decode.
         """
         return max(
-            1 if mamba and self._has_mamba else 0,
+            1 if self._has_mamba else 0,
             self.vllm_config.num_prefill_lookahead_tokens - 1,
         )
 
@@ -404,12 +402,9 @@ class NixlBaseConnectorScheduler:
         For Mamba that is the single token needed to yield h(N-1); for
         multi-module MTP it is the drafter's whole lookahead window.
 
-        Successor-aware prefix hashes retain h(N-1) at a proven cache boundary,
-        so the prefiller only needs to drop the multi-module MTP window.
-
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
-        backoff = self._prefill_backoff(mamba=not self.use_eagle_prefix_cache_hashing)
+        backoff = self._prefill_backoff()
         params = request.kv_transfer_params
         if (
             backoff

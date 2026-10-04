@@ -1635,20 +1635,6 @@ def test_mamba_n1_p_side_truncation():
     fa_sched.on_new_request(fa_req)
     assert len(fa_req.prompt_token_ids) == fa_original
 
-    # A successor hash proves the N-1 boundary without mutating the prompt.
-    successor_sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
-    successor_sched.use_eagle_prefix_cache_hashing = True
-    successor_req = create_request(num_tokens=10, do_remote_decode=True)
-    successor_tokens = list(successor_req.prompt_token_ids)
-
-    successor_sched.get_num_new_matched_tokens(
-        successor_req, num_computed_tokens=len(successor_tokens) - 1
-    )
-
-    assert successor_req.prompt_token_ids == successor_tokens
-    assert successor_req.num_prompt_tokens == len(successor_tokens)
-    assert "_p_side_truncated" not in successor_req.kv_transfer_params
-
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(

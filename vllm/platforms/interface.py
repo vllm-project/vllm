@@ -1228,6 +1228,13 @@ class Platform:
         return False
 
     @classmethod
+    def supports_eagle_prefix_cache_hashing(cls) -> bool:
+        """Whether the platform's model runner reports
+        ``ModelRunnerOutput.draft_kv_materialized``, which successor-aware
+        EAGLE prefix-cache hashing needs to publish blocks."""
+        return False
+
+    @classmethod
     def check_runner_kv_caches_multi_layer(cls) -> None:
         """Check whether the platform's ModelRunner can handle multiple attention
         layers that share the same layer index (e.g. cross attention and self

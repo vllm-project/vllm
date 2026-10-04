@@ -480,6 +480,10 @@ class XPUPlatform(Platform):
         return True
 
     @classmethod
+    def supports_eagle_prefix_cache_hashing(cls) -> bool:
+        return True
+
+    @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
 

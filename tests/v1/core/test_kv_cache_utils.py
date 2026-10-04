@@ -27,6 +27,9 @@ from vllm.config import (
 from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    prefix_cache as prefix_cache_module,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
     is_eagle_prefix_cache_hashing_enabled,
 )
@@ -1307,6 +1310,29 @@ def test_eagle_prefix_cache_hashing_preserves_unsupported_fallbacks(
                 )
             ),
         ),
+    )
+
+    assert not is_eagle_prefix_cache_hashing_enabled(vllm_config)
+
+
+def test_eagle_prefix_cache_hashing_requires_platform_ack(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Runners that never acknowledge draft KV would never publish a block."""
+    speculative_config = object.__new__(SpeculativeConfig)
+    object.__setattr__(speculative_config, "method", "mtp")
+    vllm_config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            cache_config=SimpleNamespace(enable_prefix_caching=True),
+            speculative_config=speculative_config,
+            kv_transfer_config=None,
+        ),
+    )
+    monkeypatch.setattr(
+        prefix_cache_module.current_platform,
+        "supports_eagle_prefix_cache_hashing",
+        lambda: False,
     )
 
     assert not is_eagle_prefix_cache_hashing_enabled(vllm_config)

@@ -143,7 +143,8 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
 
 
 @pytest.mark.cpu_test
-def test_successor_hashing_keeps_remote_decode_prompt_intact():
+def test_successor_hashing_still_truncates_remote_decode_prompt():
+    """D always recomputes the last token, so P must stop at h(N-1)."""
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role="kv_producer",
@@ -155,21 +156,14 @@ def test_successor_hashing_keeps_remote_decode_prompt_intact():
         make_hybrid_gdn_kv_cache_config(vllm_config.cache_config.block_size),
     )
     connector.set_eagle_prefix_cache_hashing(True)
-    scheduler = connector.connector_scheduler
-    assert scheduler is not None
     request = create_request(num_tokens=10, do_remote_decode=True)
     original_tokens = list(request.prompt_token_ids)
 
-    num_new_tokens, is_async = scheduler.get_num_new_matched_tokens(
-        request, num_computed_tokens=0
-    )
+    connector.on_new_request(request)
 
-    assert num_new_tokens == 0
-    assert is_async is False
-    assert request.prompt_token_ids == original_tokens
-    assert request._all_token_ids == original_tokens
-    assert request.num_prompt_tokens == len(original_tokens)
-    assert "_p_side_truncated" not in request.kv_transfer_params
+    assert request.prompt_token_ids == original_tokens[:-1]
+    assert request.num_prompt_tokens == len(original_tokens) - 1
+    assert request.kv_transfer_params["_p_side_truncated"] is True
 
 
 def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
