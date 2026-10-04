@@ -427,7 +427,9 @@ def test_cumem_with_cudagraph():
 
 @pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="cuMem CUDA graph pool"
+)
 def test_cudagraph_pool_sleep(level):
     """Routing, and the graph pool backed up at both sleep levels and restored
     in place by any wake."""

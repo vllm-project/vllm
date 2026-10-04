@@ -12,6 +12,7 @@ static const char* PYARGS_PARSE = "KKKK";
   #include <cstdint>
   #include <cerrno>
   #include <climits>
+  #include <unordered_map>
 
 // Default chunk size 256MB for ROCm. Can be overridden at runtime by the
 // environment variable VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE, specified in megabytes
@@ -115,6 +116,24 @@ void ensure_context(unsigned long long device) {
     CUDA_CHECK(cuCtxSetCurrent(pctx));
   }
 }
+
+#ifdef USE_ROCM
+// A blocking hipMemset joins the legacy stream and breaks graph capture.
+static hipStream_t get_zero_stream(unsigned long long device) {
+  static std::unordered_map<unsigned long long, hipStream_t> streams;
+  auto it = streams.find(device);
+  if (it != streams.end()) {
+    return it->second;
+  }
+  hipStream_t stream = nullptr;
+  CUDA_CHECK((CUresult)hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
+  if (error_code != 0) {
+    return nullptr;
+  }
+  streams[device] = stream;
+  return stream;
+}
+#endif
 
 void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 #ifndef USE_ROCM
@@ -230,7 +249,17 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   // (python_create_and_map) only inspects error_code, so returning without
   // setting it would make a failed memset look successful and still hand back
   // unzeroed memory.
-  CUDA_CHECK((CUresult)hipMemset(reinterpret_cast<void*>(d_mem), 0, size));
+  // Zero on a private non-blocking stream so a capturing stream is unaffected.
+  hipStream_t zero_stream = get_zero_stream(device);
+  if (error_code != 0) {
+    return;
+  }
+  CUDA_CHECK((CUresult)hipMemsetAsync(reinterpret_cast<void*>(d_mem), 0, size,
+                                      zero_stream));
+  if (error_code != 0) {
+    return;
+  }
+  CUDA_CHECK((CUresult)hipStreamSynchronize(zero_stream));
   if (error_code != 0) {
     return;
   }
