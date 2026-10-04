@@ -3665,7 +3665,7 @@ class NixlBaseConnectorWorker:
 
         Releases NIXL resources (dlist handles, remote agents) and clears
         all per-engine data structures. Used by TTL eviction, replaced peer
-        cleanup and shutdown.
+        cleanup, KV load timeouts and shutdown.
         """
         assert engine_id in self._remote_agents
 

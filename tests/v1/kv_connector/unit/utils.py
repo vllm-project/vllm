@@ -557,6 +557,8 @@ def make_nixl_scheduler(
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()
+        sched._reqs_awaiting_recv = set()
+        sched._reqs_to_abort = set()
         sched._reqs_need_save = {}
         sched.use_host_buffer = False
         sched.engine_id = "test-engine"
@@ -595,6 +597,8 @@ def make_nixl_push_scheduler(
     sched._reqs_need_send = {}
     sched._reqs_in_batch = set()
     sched._reqs_not_processed = set()
+    sched._reqs_awaiting_recv = set()
+    sched._reqs_to_abort = set()
     sched._reqs_need_save = {}
     sched._kv_lease_duration = 30
     sched.decoder_kv_blocks_ttl = decoder_kv_blocks_ttl
