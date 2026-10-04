@@ -20,7 +20,6 @@ import itertools
 import json
 import logging
 import os
-import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
@@ -224,6 +223,10 @@ class Proxy:
                             detail=f"Request failed with status {response.status}: "
                             f"{error_content}",
                         )
+            except HTTPException:
+                # Re-raise as-is: the generic handler below would re-wrap it as a
+                # 500 and lose the upstream status code raised just above.
+                raise
             except aiohttp.ClientError as e:
                 logger.error("ClientError occurred: %s", str(e))
                 raise HTTPException(
@@ -266,21 +269,30 @@ class Proxy:
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
 
-            try:
-                generator = self.forward_request(
-                    f"http://{decode_instance}/v1/completions", request
-                )
-            except HTTPException as http_exc:
-                self.remove_instance_endpoint("decode", decode_instance)
-                raise http_exc
-            response = StreamingResponse(generator)
-            return response
-        except Exception:
-            import sys
+            # ``forward_request`` is an async generator: building it performs no
+            # I/O, so a failing decode instance can only surface once the stream is
+            # consumed, which is after the response has already started. Evict it
+            # there so later requests stop being scheduled onto a node that cannot
+            # serve them -- the prefill leg above already does this.
+            async def stream_decode():
+                try:
+                    async for chunk in self.forward_request(
+                        f"http://{decode_instance}/v1/completions", request
+                    ):
+                        yield chunk
+                except HTTPException:
+                    self.remove_instance_endpoint("decode", decode_instance)
+                    raise
 
-            exc_info = sys.exc_info()
-            print("Error occurred in disagg proxy server")
-            print(exc_info)
+            return StreamingResponse(stream_decode())
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Error occurred in disagg proxy server: %s", e)
+            return JSONResponse(
+                status_code=500,
+                content={"error": {"message": str(e), "type": "proxy_error"}},
+            )
 
     async def create_chat_completion(self, raw_request: Request):
         try:
@@ -305,22 +317,28 @@ class Proxy:
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
 
-            try:
-                generator = self.forward_request(
-                    "http://" + decode_instance + "/v1/chat/completions", request
-                )
-            except HTTPException as http_exc:
-                self.remove_instance_endpoint("decode", decode_instance)
-                raise http_exc
-            response = StreamingResponse(content=generator)
-            return response
-        except Exception:
-            exc_info = sys.exc_info()
-            error_messages = [str(e) for e in exc_info if e]
-            print("Error occurred in disagg proxy server")
-            print(error_messages)
-            return StreamingResponse(
-                content=iter(error_messages), media_type="text/event-stream"
+            # Same as ``create_completion``: the decode stream is only consumed
+            # after the response has started, so evict a failing decode instance
+            # from inside the generator.
+            async def stream_decode():
+                try:
+                    async for chunk in self.forward_request(
+                        "http://" + decode_instance + "/v1/chat/completions",
+                        request,
+                    ):
+                        yield chunk
+                except HTTPException:
+                    self.remove_instance_endpoint("decode", decode_instance)
+                    raise
+
+            return StreamingResponse(content=stream_decode())
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Error occurred in disagg proxy server: %s", e)
+            return JSONResponse(
+                status_code=500,
+                content={"error": {"message": str(e), "type": "proxy_error"}},
             )
 
     def remove_instance_endpoint(self, instance_type, instance):
