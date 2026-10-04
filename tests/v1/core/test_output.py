@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pickle
+from array import array
+
+import pytest
 import torch
 
 from vllm.multimodal.inputs import (
@@ -144,3 +148,64 @@ def test_strip_covered_mm_data_shm_address_item() -> None:
     stripped = strip_covered_mm_data([feature], num_computed_tokens=250)
 
     assert stripped[0].data is address_item
+
+
+@pytest.mark.parametrize("aliased", [True, False])
+def test_new_request_data_packs_token_ids(aliased: bool) -> None:
+    prompt = list(range(150_000, 150_300))
+    prefill = prompt if aliased else prompt + [5, 6]
+    data = NewRequestData(
+        req_id="test_req",
+        prompt_token_ids=prompt,
+        mm_features=[],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=([1, 2, 3],),
+        num_computed_tokens=128,
+        lora_request=None,
+        prefill_token_ids=prefill,
+        pack_token_ids=True,
+    )
+    blob = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
+    # The scheduler-side object keeps its lists.
+    assert data.prompt_token_ids is prompt and data.prefill_token_ids is prefill
+    out = pickle.loads(blob)
+    assert isinstance(out.prompt_token_ids, array)
+    assert isinstance(out.prefill_token_ids, array)
+    assert out.prompt_token_ids.tolist() == prompt
+    assert out.prefill_token_ids.tolist() == prefill
+    assert (out.prompt_token_ids is out.prefill_token_ids) == aliased
+    assert out.prompt_len == len(prompt)
+    assert out.block_ids == ([1, 2, 3],) and out.num_computed_tokens == 128
+
+    data.pack_token_ids = False
+    out = pickle.loads(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
+    assert out.prompt_token_ids == prompt and out.prefill_token_ids == prefill
+    assert isinstance(out.prompt_token_ids, list)
+
+
+def test_new_request_data_uses_prepacked_prompt() -> None:
+    prompt = list(range(1000, 1300))
+    prepacked = array("i", prompt)
+    data = NewRequestData(
+        req_id="test_req",
+        prompt_token_ids=prompt,
+        mm_features=[],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=([1],),
+        num_computed_tokens=0,
+        lora_request=None,
+        prefill_token_ids=prompt,
+        pack_token_ids=True,
+        packed_prompt_token_ids=prepacked,
+    )
+    out = pickle.loads(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
+    assert out.prompt_token_ids is out.prefill_token_ids
+    assert out.prompt_token_ids.tolist() == prompt
+    # The pre-packed copy itself is not sent.
+    assert out.packed_prompt_token_ids is None
+    # A stale pre-packed copy (prompt extended since) is not used.
+    data.packed_prompt_token_ids = array("i", prompt[:10])
+    out = pickle.loads(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
+    assert out.prompt_token_ids.tolist() == prompt
