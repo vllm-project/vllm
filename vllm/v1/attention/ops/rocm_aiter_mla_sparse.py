@@ -757,9 +757,11 @@ def _accepts_parameters(function: Callable, required: set[str]) -> bool:
 
 @functools.lru_cache
 def _aiter_paged_mqa_logits() -> Callable | None:
-    import aiter
-
-    return getattr(aiter, "paged_mqa_logits", None)
+    try:
+        from aiter.paged_mqa_logits import paged_mqa_logits
+    except ImportError:
+        return None
+    return paged_mqa_logits
 
 
 def rocm_fp8_paged_mqa_logits(
