@@ -14,6 +14,7 @@ import contextlib
 import gc
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -114,6 +115,67 @@ def _patch_module(monkeypatch) -> None:
     monkeypatch.setattr(
         cgu.torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
     )
+
+
+@pytest.mark.parametrize("profile_only", [False, True])
+def test_capture_model_profiles_adaptive_cost_only_after_full_capture(
+    monkeypatch, profile_only
+):
+    """The throwaway memory pass must not seed AV with partial/empty timings."""
+    runner = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.cudagraph_manager = MagicMock()
+    runner.cudagraph_manager.needs_capture.return_value = True
+    runner.cudagraph_manager.captured_token_counts.return_value = [4]
+    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
+    runner.maybe_setup_dummy_loras = lambda _: contextlib.nullcontext()
+    for name in (
+        "model",
+        "input_buffers",
+        "intermediate_tensors",
+        "block_tables",
+        "kv_cache_config",
+        "pcp_manager",
+        "lora_config",
+        "speculator",
+    ):
+        setattr(runner, name, None)
+    runner.attn_groups = []
+    runner.use_aux_hidden_state_outputs = False
+    runner.adaptive_verification = MagicMock()
+    batch = {"num_tokens": 4}
+    runner.adaptive_verification.batches_to_profile.return_value = [batch]
+    timings = []
+    runner.step_timing = MagicMock()
+    runner.step_timing.collect.return_value = contextlib.nullcontext(timings)
+
+    def dummy_run(**kwargs):
+        runner.cudagraph_manager.capture.assert_called_once()
+        assert kwargs == batch
+        timings.append("measured-after-capture")
+
+    runner._dummy_run = MagicMock(side_effect=dummy_run)
+    monkeypatch.setattr(mrv2, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext)
+    monkeypatch.setattr(mrv2, "lock_workspace", MagicMock())
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+    )
+    monkeypatch.setattr(compilation_counter, "num_gpu_runner_capture_triggers", 0)
+
+    assert runner.capture_model(profile_only=profile_only) == 0
+    runner.cudagraph_manager.capture.assert_called_once()
+    if profile_only:
+        runner.step_timing.collect.assert_not_called()
+        runner.adaptive_verification.batches_to_profile.assert_not_called()
+        runner.adaptive_verification.set_initial_cost_curves.assert_not_called()
+        runner._dummy_run.assert_not_called()
+        mrv2.lock_workspace.assert_not_called()
+    else:
+        runner.adaptive_verification.batches_to_profile.assert_called_once_with([4])
+        runner.adaptive_verification.set_initial_cost_curves.assert_called_once_with(
+            ["measured-after-capture"]
+        )
+        mrv2.lock_workspace.assert_called_once()
 
 
 def test_profile_cudagraph_memory_disabled_returns_zero(monkeypatch):
