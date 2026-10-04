@@ -75,8 +75,6 @@ def _dequant_e4m3fn_bits(bits):
     # 0x7f and 0xff are the only NaN codes in e4m3fn, and the only bytes with
     # all seven low bits set; every other exponent-15 code is finite, up to 448.
     magnitude = tl.where((x & 127) == 127, float("nan"), magnitude)
-    # 0x7f and 0xff are the only NaN codes in e4m3fn, and the only bytes with
-    # all seven low bits set; every other exponent-15 code is finite, up to 448.
     return (sign * magnitude).to(tl.bfloat16)
 
 
