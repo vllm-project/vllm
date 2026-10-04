@@ -8,6 +8,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.multimodal.video_decoders import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
@@ -457,6 +458,14 @@ class Qwen2VLVideoBackend(VideoBackend):
         n = total_frames_num / original_fps * min(target.fps, cls._MAX_FPS)
         n = min(max(n, min_frames), max_frames, total_frames_num)
         n = math.floor(n / temporal_patch_size) * temporal_patch_size
+        if n <= 0:
+            raise VLLMValidationError(
+                "The qwen2_vl video sampler produced no frames after temporal "
+                f"alignment. Source frames: {total_frames_num}; temporal patch "
+                f"size: {temporal_patch_size}; aligned frame limit: {max_frames}. "
+                "Check the source video length and sampling settings.",
+                parameter="video",
+            )
 
         # ``torch.arange`` matches transformers' float32 index math exactly
         # (numpy's float64 diverges by a frame on some inputs); clamp the tail
