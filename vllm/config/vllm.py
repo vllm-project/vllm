@@ -36,6 +36,7 @@ from .diffusion import DiffusionConfig
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
+from .expert_load import ExpertLoadStatsConfig
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -418,6 +419,10 @@ class VllmConfig:
     """
     profiler_config: ProfilerConfig = Field(default_factory=ProfilerConfig)
     """Profiling configuration."""
+    expert_load_stats_config: ExpertLoadStatsConfig = Field(
+        default_factory=ExpertLoadStatsConfig
+    )
+    """Independent, local target-model expert-routing observability."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
@@ -542,6 +547,8 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.observability_config.compute_hash())
+        if self.expert_load_stats_config.enabled:
+            vllm_factors.append(self.expert_load_stats_config.compute_hash())
         if self.quant_config:
             pass  # should be captured by model_config.quantization
         if self.compilation_config:
