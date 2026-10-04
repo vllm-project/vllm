@@ -356,12 +356,16 @@ def resolve_fp8_moe_weight_block_shape(
     refined_shape = refine_fp8_moe_block_shape(config, weight_block_size)
     if is_checkpoint_fp8_serialized and config.moe_backend != "auto":
         kernel_classes = backend_to_kernel_cls(map_fp8_backend(config.moe_backend))
-        can_refine = refined_shape is not None and any(
+        refined_key = (
+            None
+            if refined_shape is None
+            else create_fp8_quant_key(
+                static=True, group_shape=GroupShape(*refined_shape)
+            )
+        )
+        can_refine = refined_key is not None and any(
             k_cls._supports_quant_scheme(
-                create_fp8_quant_key(
-                    static=True, group_shape=GroupShape(*refined_shape)
-                ),
-                activation_key,
+                refined_key, k_cls.executed_activation_key(refined_key, activation_key)
             )
             for k_cls in kernel_classes
         )

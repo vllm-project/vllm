@@ -579,7 +579,9 @@ def test_explicit_b12x_nvfp4_selection(
     selected_activation_keys = []
 
     def is_supported_config(cls, config, weight_key, activation_key, activation_format):
-        selected_activation_keys.append(activation_key)
+        selected_activation_keys.append(
+            cls.executed_activation_key(weight_key, activation_key)
+        )
         return True, None
 
     monkeypatch.setattr(B12xExperts, "is_supported_config", is_supported_config)

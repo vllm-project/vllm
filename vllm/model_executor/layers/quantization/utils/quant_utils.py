@@ -11,12 +11,16 @@ import numpy
 import torch
 from torch import fx
 
+import vllm.envs as envs
 from vllm.distributed.parallel_state import get_ep_group, get_tp_group
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import LinearBase
+
+logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -338,6 +342,36 @@ def create_fp8_quant_key(
 ) -> QuantKey:
     scale_desc = ScaleDesc(scale_dtype, static, group_shape)
     return QuantKey(FP8_DTYPE, scale_desc, symmetric=symmetric)
+
+
+def check_activation_quant_fallback(
+    kernel: str,
+    requested_key: QuantKey | None,
+    executed_key: QuantKey | None,
+) -> str | None:
+    """Check a kernel that runs `executed_key` activations for a layer that
+    requests `requested_key`.
+
+    Running a requested activation quantization as a different one (e.g.
+    Marlin running W8A8 as W8A16) is a fallback. Adding activation
+    quantization to an unquantized request is not.
+
+    Returns:
+        Why VLLM_STRICT_QUANT_SCHEME rejects the fallback, or None if the kernel
+        may be used. Warns once for an allowed fallback, so call this only once
+        the kernel is otherwise selectable.
+
+    """
+    if requested_key is None or executed_key == requested_key:
+        return None
+    executed = "unquantized" if executed_key is None else str(executed_key)
+    msg = f"{kernel} runs {requested_key} activations as {executed}"
+    if envs.VLLM_STRICT_QUANT_SCHEME:
+        return f"{msg}, which VLLM_STRICT_QUANT_SCHEME=1 forbids"
+    logger.warning_once(
+        "%s. Set VLLM_STRICT_QUANT_SCHEME=1 to forbid this fallback.", msg
+    )
+    return None
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
