@@ -174,6 +174,20 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 weight_quant, input_quant, layer.moe_config
             )
         elif quant_config._is_dynamic_token_w4a8_int(weight_quant, input_quant):
+            if current_platform.is_cuda():
+                # enable with VLLM_MARLIN_INPUT_DTYPE=int8
+                from .compressed_tensors_moe_wna16 import (
+                    CompressedTensorsWNA16MoEMethod,
+                )
+
+                logger.info_once(
+                    "Using CompressedTensorsWNA16MoEMethod for W4A8-INT MoE "
+                    "(set VLLM_MARLIN_INPUT_DTYPE=int8 for INT8 activations)"
+                )
+                return CompressedTensorsWNA16MoEMethod(
+                    weight_quant, input_quant, layer.moe_config, layer_name
+                )
+
             from .compressed_tensors_moe_w4a8_int8 import (
                 CompressedTensorsW4A8Int8MoEMethod,
             )
