@@ -3,7 +3,7 @@
 
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 import torch
@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+T = TypeVar("T")
+
 
 @contextmanager
 def preserve_rng_state(device: torch.device | None) -> Iterator[None]:
@@ -59,6 +61,18 @@ def preserve_rng_state(device: torch.device | None) -> Iterator[None]:
             torch.cuda.set_rng_state(cuda_state, device_index)
 
 
+def _builtin_logits_processor(sampler: Any, cls: type[T]) -> T:
+    """Return the sampler's own instance of a built-in logits processor.
+
+    Sampler places its built-in processors before any custom ones, and a
+    custom processor may subclass a built-in, so take the first match.
+    """
+    for processor in sampler.logits_processors:
+        if isinstance(processor, cls):
+            return processor
+    raise AssertionError(f"sampler has no {cls.__name__}")
+
+
 @contextmanager
 def uno_sampler_warmup_state(
     sampler: Any, mode: "UnoSamplingMode", num_reqs: int
@@ -66,12 +80,8 @@ def uno_sampler_warmup_state(
     """Install declared request parameters and restore every modified state."""
     assert num_reqs >= mode.min_num_reqs
     states = sampler.sampling_states
-    (logit_bias,) = (
-        p for p in sampler.logits_processors if isinstance(p, LogitBiasState)
-    )
-    (bad_words,) = (
-        p for p in sampler.logits_processors if isinstance(p, BadWordsState)
-    )
+    logit_bias = _builtin_logits_processor(sampler, LogitBiasState)
+    bad_words = _builtin_logits_processor(sampler, BadWordsState)
     state_arrays = {
         name: getattr(states, name).np
         for name in ("temperature", "top_k", "top_p", "min_p", "seeds")

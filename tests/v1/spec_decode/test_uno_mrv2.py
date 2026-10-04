@@ -3137,3 +3137,34 @@ def test_survivor_usage_percentages_are_read_against_the_pinned_pool():
         1 - 1 / 68, 5
     )
     assert round(budget.usage_with_free_blocks(81, 1), 5) == round(1 - 1 / 80, 5)
+
+
+def test_uno_warmup_finds_builtin_processors_beside_custom_subclasses():
+    """A custom processor may subclass a built-in; warmup must still pick the
+    sampler's own built-in instance instead of failing on two matches."""
+    from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
+    from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
+    from vllm.v1.worker.gpu.warmup import _builtin_logits_processor
+
+    class CustomBias(LogitBiasState):
+        pass
+
+    class CustomBadWords(BadWordsState):
+        pass
+
+    logit_bias = object.__new__(LogitBiasState)
+    bad_words = object.__new__(BadWordsState)
+    penalties = SimpleNamespace()
+    sampler = SimpleNamespace(
+        logits_processors=[
+            logit_bias,
+            penalties,
+            bad_words,
+            object.__new__(CustomBias),
+            object.__new__(CustomBadWords),
+        ]
+    )
+    assert _builtin_logits_processor(sampler, LogitBiasState) is logit_bias
+    assert _builtin_logits_processor(sampler, BadWordsState) is bad_words
+    with pytest.raises(AssertionError):
+        _builtin_logits_processor(SimpleNamespace(logits_processors=[]), LogitBiasState)
