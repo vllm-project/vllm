@@ -56,7 +56,6 @@ def _infer_user_count(
     user_count_var: str | None,
 ) -> float | None:
     candidates = [user_count_var] if user_count_var else []
-    candidates.extend(["request_rate"])
     user_count = _get_numeric(run_data, candidates, allow_zero=False)
     if user_count is not None:
         return user_count
