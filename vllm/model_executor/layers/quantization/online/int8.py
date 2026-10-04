@@ -130,5 +130,6 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
             w2_scale=getattr(layer, "w2_scale", None),
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
+            per_out_ch_quant=False,
             layer=layer,
         )
