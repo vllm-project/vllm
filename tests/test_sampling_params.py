@@ -7,6 +7,8 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.config.diffusion import DiffusionConfig
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
@@ -21,6 +23,49 @@ class MockModelConfig:
 
     def get_vocab_size(self) -> int:
         return 1024
+
+
+@pytest.mark.parametrize("length", [None, 2.6, True])
+@pytest.mark.parametrize("chat", [False, True])
+def test_synthetic_acceptance_xargs_preserve_values_in_openai_requests(length, chat):
+    kwargs = {
+        "model": "test",
+        "vllm_xargs": {"synthetic_acceptance_length": length},
+    }
+    if chat:
+        request = ChatCompletionRequest(
+            **kwargs, messages=[{"role": "user", "content": "Hello"}]
+        )
+    else:
+        request = CompletionRequest(**kwargs, prompt="Hello")
+    value = request.to_sampling_params(8, {}).extra_args["synthetic_acceptance_length"]
+    assert value == length
+    assert type(value) is type(length)
+
+
+@pytest.mark.parametrize("length", [True, "2.6", 0, 4.1, float("nan")])
+def test_request_synthetic_acceptance_length_rejects_invalid_values(length):
+    spec_config = SimpleNamespace(
+        num_speculative_tokens=3, rejection_sample_method="standard"
+    )
+    with pytest.raises(VLLMValidationError, match="must be null or a number"):
+        SamplingParams(extra_args={"synthetic_acceptance_length": length}).verify(
+            MockModelConfig(), spec_config, None, None
+        )
+
+
+@pytest.mark.parametrize("length", [None, 1, 2.6, 4])
+def test_request_synthetic_acceptance_length_requires_supported_spec_decode(length):
+    params = SamplingParams(extra_args={"synthetic_acceptance_length": length})
+    with pytest.raises(VLLMValidationError, match="requires speculative decoding"):
+        params.verify(MockModelConfig(), None, None, None)
+    spec_config = SimpleNamespace(
+        num_speculative_tokens=3, rejection_sample_method="standard"
+    )
+    params.verify(MockModelConfig(), spec_config, None, None)
+    spec_config.rejection_sample_method = "block"
+    with pytest.raises(VLLMValidationError, match="block verification"):
+        params.verify(MockModelConfig(), spec_config, None, None)
 
 
 @pytest.mark.parametrize(
