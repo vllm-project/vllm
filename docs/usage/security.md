@@ -228,7 +228,9 @@ This endpoint is **only available when the `--enable-tokenizer-info-endpoint` fl
 These endpoints are **only available when the environment variable `VLLM_SERVER_DEV_MODE` is set to `1`**. They are intended for development and debugging purposes and should never be enabled in production:
 
 - `/server_info` - Get detailed server configuration
-- `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
+- `/reset_prefix_cache` - Reset the local prefix cache (can disrupt service).
+  Connector-managed caches are preserved by default; pass
+  `reset_external=true` to request that they be reset too.
 - `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
 - `/reset_encoder_cache` - Reset encoder cache (can disrupt service)
 - `/sleep` - Put engine to sleep (causes denial of service)
