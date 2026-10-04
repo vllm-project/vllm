@@ -597,3 +597,40 @@ def test_selection_from_bf16_matches_torch(monkeypatch, step, ratio, block):
         )
         agree.append(_recall(out[mine], ref))
     assert torch.cat(agree).mean().item() >= 0.99
+
+
+def test_profiling_bounds_decode_logits_rows(monkeypatch):
+    """Memory profiling runs with no current vLLM config, so the decode-logits
+    workspace must take the row bound the layer resolved when it was built,
+    not one row per batched token."""
+    from vllm.config import (
+        VllmConfig,
+        get_current_vllm_config_or_none,
+        set_current_vllm_config,
+    )
+    from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
+        RocmSparseAttnIndexer,
+    )
+
+    config = VllmConfig()
+    config.scheduler_config.max_num_seqs = 16
+    config.speculative_config = types.SimpleNamespace(num_speculative_tokens=5)
+    k_cache = types.SimpleNamespace(prefix="indexer", kv_cache=torch.empty(0))
+    num_tokens = 4096
+    out = torch.empty(num_tokens, TOPK, dtype=torch.int32, device=DEVICE)
+    with set_current_vllm_config(config):
+        layer = RocmSparseAttnIndexer(
+            k_cache, 0, "ue8m0", TOPK, HEAD_DIM, MAX_LEN, MAX_LEN, out, True
+        )
+
+    reserved = []
+    workspace = types.SimpleNamespace(get_simultaneous=lambda *s: reserved.extend(s))
+    monkeypatch.setattr(ops, "current_workspace_manager", lambda: workspace)
+    profiling = types.SimpleNamespace(attn_metadata=None)
+    monkeypatch.setattr(ops, "get_forward_context", lambda: profiling)
+    q, q_scale, weights, _ = _queries(num_tokens)
+    assert get_current_vllm_config_or_none() is None
+    layer.forward_hip(
+        torch.empty(num_tokens, 1, device=DEVICE), (q, q_scale), None, weights
+    )
+    assert reserved == [((16 * (1 + 5), MAX_LEN), torch.float32)]

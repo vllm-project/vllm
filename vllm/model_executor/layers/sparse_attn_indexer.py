@@ -46,6 +46,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import max_decode_logits_rows
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -904,6 +905,7 @@ class SparseAttnIndexer(CustomOp):
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
         self._cp_kv_cache_interleave_size: int | None = None
+        self.max_decode_rows = max_decode_logits_rows()
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -1062,6 +1064,7 @@ class SparseAttnIndexer(CustomOp):
                 candidate_blocks=self.candidate_blocks,
                 candidate_block_size=self.candidate_block_size,
                 candidate_write=self.candidate_write,
+                max_decode_rows=self.max_decode_rows,
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path requires AITER or a supported "

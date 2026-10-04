@@ -29,7 +29,7 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _apply_candidate_mask_strided,
-    _max_decode_logits_rows,
+    _decode_logits_rows,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -192,11 +192,12 @@ def reserve_rocm_mxfp4_indexer_workspace(
     candidate_block_size: int = 0,
     gather_block_size: int = 0,
     num_candidate_cols: int = 0,
+    max_decode_rows: int = 0,
 ) -> None:
     """Profiling run: claim the decode logits workspace and the peak prefill
     logits, block scores included when the layer writes them, candidate lists
     when it gathers."""
-    rows = _max_decode_logits_rows(hidden_states.shape[0])
+    rows = _decode_logits_rows(hidden_states.shape[0], max_decode_rows)
     specs = [((rows, logits_width), torch.float32)]
     budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     if candidate_block_size:
@@ -577,6 +578,7 @@ def rocm_mxfp4_sparse_attn_indexer(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    max_decode_rows: int = 0,
 ) -> torch.Tensor:
     """Dense indexer: every layer that scores the whole context, the
     candidate source included. With ``candidate_blocks`` and not
@@ -593,6 +595,7 @@ def rocm_mxfp4_sparse_attn_indexer(
             hidden_states,
             max_model_len,
             candidate_block_size if candidate_write else 0,
+            max_decode_rows=max_decode_rows,
         )
         return topk_indices_buffer
     layer = _layer(
@@ -634,6 +637,7 @@ def rocm_mxfp4_sparse_mqa_indexer(
     candidate_blocks: torch.Tensor,
     candidate_block_size: int,
     num_candidate_cols: int,
+    max_decode_rows: int = 0,
 ) -> torch.Tensor:
     """Candidate consumer: score only the source's pool where the builder's
     length gate says it pays, else the dense walk masked to the pool."""
@@ -643,6 +647,7 @@ def rocm_mxfp4_sparse_mqa_indexer(
             max(max_model_len, num_candidate_cols),
             gather_block_size=candidate_block_size,
             num_candidate_cols=num_candidate_cols,
+            max_decode_rows=max_decode_rows,
         )
         return topk_indices_buffer
     layer = _layer(

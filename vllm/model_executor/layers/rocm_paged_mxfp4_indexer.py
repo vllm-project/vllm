@@ -13,6 +13,7 @@ from torch import nn
 
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import max_decode_logits_rows
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
     rocm_mxfp4_sparse_attn_indexer,
     rocm_mxfp4_sparse_mqa_indexer,
@@ -51,6 +52,7 @@ class RocmSparseAttnIndexer(SparseAttnIndexer):
             candidate_blocks=self.candidate_blocks,
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,
+            max_decode_rows=self.max_decode_rows,
         )
 
 
@@ -88,6 +90,7 @@ class RocmSparseMQAIndexer(nn.Module):
         self.candidate_blocks = candidate_blocks
         self.candidate_block_size = candidate_block_size
         self.num_candidate_cols = candidate_blocks.shape[1] * candidate_block_size
+        self.max_decode_rows = max_decode_logits_rows()
 
     def forward(
         self,
@@ -113,4 +116,5 @@ class RocmSparseMQAIndexer(nn.Module):
             self.candidate_blocks,
             self.candidate_block_size,
             self.num_candidate_cols,
+            self.max_decode_rows,
         )

@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -1047,7 +1047,7 @@ def _apply_candidate_mask_strided(
     )
 
 
-def _max_decode_logits_rows(num_batched_tokens: int) -> int:
+def max_decode_logits_rows() -> int:
     """Upper bound on decode rows the paged-MQA logits buffer can ever hold.
 
     ``rocm_fp8_paged_mqa_logits`` sizes its workspace as
@@ -1056,21 +1056,27 @@ def _max_decode_logits_rows(num_batched_tokens: int) -> int:
     far tighter than ``max_num_batched_tokens`` -- 192 vs 16384 for a typical
     32-seq DSpark-5 deployment. The loose bound is harmless at short contexts
     but scales with ``max_model_len``, so at the model's full context it asks
-    for tens of TiB and the engine cannot start. Take whichever valid bound is
-    smaller; the workspace is locked after profiling, so it must not be under-
-    estimated.
+    for tens of TiB and the engine cannot start.
+
+    Call this when the layer is built: the profiling run that reserves the
+    workspace has no current vLLM config. Returns 0 when the bound is unknown.
     """
-    try:
-        vllm_config = get_current_vllm_config()
-    except Exception:
-        return num_batched_tokens
+    vllm_config = get_current_vllm_config_or_none()
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
     max_num_seqs = getattr(scheduler_config, "max_num_seqs", None)
     if not max_num_seqs:
-        return num_batched_tokens
+        return 0
     speculative_config = getattr(vllm_config, "speculative_config", None)
     num_spec = getattr(speculative_config, "num_speculative_tokens", 0) or 0
-    return min(num_batched_tokens, max_num_seqs * (1 + num_spec))
+    return max_num_seqs * (1 + num_spec)
+
+
+def _decode_logits_rows(num_batched_tokens: int, max_decode_rows: int) -> int:
+    """Take whichever valid bound is smaller; the workspace is locked after
+    profiling, so it must not be underestimated."""
+    if max_decode_rows:
+        return min(num_batched_tokens, max_decode_rows)
+    return num_batched_tokens
 
 
 def rocm_aiter_sparse_attn_indexer_fake(
@@ -1092,6 +1098,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    max_decode_rows: int = 0,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1116,6 +1123,7 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    max_decode_rows: int = 0,
 ) -> torch.Tensor:
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -1142,7 +1150,7 @@ def rocm_aiter_sparse_attn_indexer(
         )
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
-        decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
+        decode_rows = _decode_logits_rows(hidden_states.shape[0], max_decode_rows)
         if _ON_GFX942 or _ON_GFX950:
             workspace_manager.get_simultaneous(
                 ((decode_rows, max_model_len), torch.float32),

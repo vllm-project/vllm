@@ -35,6 +35,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import max_decode_logits_rows
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -733,6 +734,7 @@ class SparseAttnIndexerKpool(CustomOp):
         self.topk_backend = (
             cfg.kernel_config.sparse_indexer_topk_backend if cfg is not None else "auto"
         )
+        self.max_decode_rows = max_decode_logits_rows()
 
     def forward_hip(
         self,
@@ -771,6 +773,7 @@ class SparseAttnIndexerKpool(CustomOp):
                 self.max_total_seq_len,
                 self.topk_indices_buffer,
                 skip_k_cache_insert=self.skip_k_cache_insert,
+                max_decode_rows=self.max_decode_rows,
             )
         return sparse_attn_indexer_kpool(
             hidden_states,
