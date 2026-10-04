@@ -148,8 +148,9 @@ class LogitsProcessor(PluggableLayer):
         # A quant config that excludes lm_head hands out UnquantizedLinearMethod
         # rather than UnquantizedEmbeddingMethod, so accept both: either way the
         # weight is plain and `lm_head.weight` can be cast directly.
+        quant_method = getattr(lm_head.quant_method, "fallback", lm_head.quant_method)
         if not isinstance(
-            lm_head.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+            quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
         ):
             raise ValueError(
                 "A head_dtype different from the model dtype is only "

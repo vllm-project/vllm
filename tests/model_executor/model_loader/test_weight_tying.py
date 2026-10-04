@@ -7,6 +7,9 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.model_executor.kernels.linear.unquantized.packed_bf16_lm_head import (
+    LosslessPackedLMHeadMethod,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -73,6 +76,18 @@ def test_quantized_lm_head_is_left_alone():
     maybe_retie_word_embeddings(model, make_model_config(untied_by_checkpoint=True))
 
     assert model.lm_head.weight is not model.embed_tokens.weight
+
+
+@pytest.mark.cpu_test
+@pytest.mark.usefixtures("dist_init")
+def test_lossless_packed_lm_head_can_be_retied():
+    """A lossless decorator must not hide the fallback's embedding contract."""
+    model = UntiedModel()
+    model.lm_head.quant_method = LosslessPackedLMHeadMethod(model.lm_head.quant_method)
+
+    maybe_retie_word_embeddings(model, make_model_config(untied_by_checkpoint=True))
+
+    assert model.lm_head.weight is model.embed_tokens.weight
 
 
 @pytest.mark.cpu_test
