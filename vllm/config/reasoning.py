@@ -5,8 +5,11 @@ from dataclasses import field
 
 from vllm.config.model import ModelConfig
 from vllm.config.utils import config
+from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
+
+logger = init_logger(__name__)
 
 
 @config
@@ -98,8 +101,17 @@ class ReasoningConfig:
             natural_reasoning_end_str = reasoning_end_str
 
         if not reasoning_start_str or not reasoning_end_str:
-            # If we don't have valid strings to tokenize,
-            # we can't initialize the token IDs.
+            # Most parsers define no delimiters, so only an explicitly
+            # half-written pair is a mistake worth reporting here.
+            if bool(self.reasoning_start_str) != bool(self.reasoning_end_str):
+                logger.warning(
+                    "--reasoning-config sets only %s, so reasoning token IDs "
+                    "are left uninitialized and thinking_token_budget will "
+                    "reject requests. Set both strings.",
+                    "reasoning_start_str"
+                    if self.reasoning_start_str
+                    else "reasoning_end_str",
+                )
             return
         self._reasoning_start_token_ids = tokenizer.encode(
             reasoning_start_str, add_special_tokens=False
