@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -8,6 +9,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
@@ -24,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
+from vllm.model_executor.layers.fused_moe.runner import moe_runner
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
 
@@ -44,6 +47,45 @@ def _is_aiter_capable() -> bool:
 MK_S = [(32, 256), (64, 512)]
 TOP_KS = [2, 4, 6]
 NUM_EXPERTS = [8, 16, 64]
+
+
+@pytest.mark.parametrize("pcp_size,use_all2all", [(1, False), (2, False), (2, True)])
+def test_pcp_dispatch_keeps_hash_tokens_and_padding_aligned(
+    pcp_size, use_all2all, monkeypatch
+):
+    """Hash routing must see the token IDs belonging to each gathered hidden row."""
+    runner = SimpleNamespace(
+        do_naive_dispatch_combine=False,
+        moe_config=SimpleNamespace(
+            pcp_size=pcp_size,
+            moe_parallel_config=SimpleNamespace(use_all2all_kernels=use_all2all),
+        ),
+    )
+
+    def all_gather(tensor, dim):
+        remote = 1 - tensor if tensor.dtype == torch.uint8 else tensor + 100
+        return torch.cat((tensor, remote), dim=dim)
+
+    monkeypatch.setattr(
+        moe_runner, "get_pcp_group", lambda: SimpleNamespace(all_gather=all_gather)
+    )
+    token_ids = torch.tensor([3, 7])
+    hidden = token_ids.float().unsqueeze(1)
+    padding = torch.tensor([False, True])
+    context = ForwardContext({}, {}, {}, is_padding=padding)
+    with override_forward_context(context):
+        with moe_runner.MoERunner._sequence_parallel_context(runner):
+            states, logits, ids = moe_runner.MoERunner._maybe_dispatch(
+                runner, hidden, hidden + 4, token_ids
+            )
+            expected = [3, 7, 103, 107] if pcp_size > 1 and not use_all2all else [3, 7]
+            assert ids.tolist() == expected
+            torch.testing.assert_close(states[:, 0], ids.float())
+            torch.testing.assert_close(logits[:, 0], ids.float() + 4)
+            assert context.is_padding.tolist() == (
+                [False, True, True, False] if len(expected) == 4 else [False, True]
+            )
+        assert context.is_padding is padding
 
 
 def test_degenerate_grouped_config_uses_standard_topk() -> None:

@@ -16,6 +16,32 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### DeepSeek-V4.1-Flash
+
+DeepSeek-V4.1-Flash supports text-only PCP with Model Runner V2 and the
+`FLASHMLA_SPARSE_DSV41` backend. PCP ranks keep replicated KV caches and process
+different query tokens. Ratio-2 compression restores token order before pooling
+and updates the compressor state on every rank, including ranks without queries.
+
+For example, TP4 with PCP2 uses eight GPUs:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
+    --language-model-only \
+    --tensor-parallel-size 4 \
+    --prefill-context-parallel-size 2 \
+    --attention-backend FLASHMLA_SPARSE_DSV41 \
+    --moe-backend marlin \
+    --no-enable-prefix-caching \
+    --enforce-eager
+```
+
+The initial implementation requires PP=DP=DCP=1 and excludes speculative
+decoding, CUDA graphs, microbatching, KV transfer, MegaMoE, and prefix caching.
+Engram embeddings remain TP-sharded: increasing PCP can increase host-memory
+requirements when CPU offload is enabled. Check available host memory before
+increasing PCP.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

@@ -232,6 +232,17 @@ def test_partition_padding_is_derived_from_batch_descriptor(
 
     assert local_batch.num_tokens_after_padding == expected_tokens
     assert local_batch.num_reqs_after_padding == expected_reqs
+    pcp_metadata = local_batch.pcp_metadata
+    assert pcp_metadata is not None
+    assert pcp_metadata.global_batch is global_batch
+    gathered = torch.cat([local_batch.input_ids] * manager.pcp_world_size)
+    torch.testing.assert_close(
+        gathered[pcp_metadata.restore_indices], global_batch.input_ids
+    )
+    torch.testing.assert_close(
+        global_batch.input_ids[pcp_metadata.local_indices][: local_batch.num_tokens],
+        local_batch.input_ids[: local_batch.num_tokens],
+    )
 
 
 def test_dummy_draft_does_not_reuse_previous_graph_batch():

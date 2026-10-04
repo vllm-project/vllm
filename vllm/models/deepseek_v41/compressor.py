@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -26,6 +27,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheSpec
+from vllm.v1.worker.gpu.input_batch import PCPBatchMetadata
 
 
 class CompressorBackend(AttentionBackend):
@@ -35,6 +37,10 @@ class CompressorBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "CompressorBackend"
+
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
@@ -55,6 +61,7 @@ class CompressorMetadata:
     slot_mapping: torch.Tensor
     query_start_loc: torch.Tensor  # [num_reqs + 1]
     token_to_req_indices: torch.Tensor  # [num_tokens]
+    pcp_metadata: PCPBatchMetadata | None = None
 
 
 @triton.jit(do_not_specialize=["block_table_stride", "num_actual_tokens", "num_tokens"])
@@ -87,6 +94,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         super().__init__(*args, **kwargs)
         assert isinstance(self.kv_cache_spec, CircularBufferSpec)
         self.capacity = self.kv_cache_spec.block_size
+        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
         max_num_batched_tokens = (
             self.vllm_config.scheduler_config.max_num_batched_tokens
         )
@@ -96,14 +104,19 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         self.slot_mapping_buffer = torch.empty(
             max_num_batched_tokens, dtype=torch.int64, device=self.device
         )
+        if self.pcp_size > 1:
+            self.global_token_to_req_indices = torch.empty_like(
+                self.token_to_req_indices
+            )
 
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        pcp_metadata: PCPBatchMetadata | None = None,
     ) -> CompressorMetadata:
-        num_tokens = common_attn_metadata.slot_mapping.numel()
+        num_tokens = common_attn_metadata.slot_mapping.numel() // self.pcp_size
         positions = common_attn_metadata.positions
         assert positions is not None
         token_to_req_indices = common_attn_metadata.token_to_req_indices(
@@ -122,10 +135,28 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             CAPACITY=self.capacity,
             BLOCK=256,
         )
+        query_start_loc = common_attn_metadata.query_start_loc
+        if pcp_metadata is not None:
+            # Compress each request in token order so pairs crossing PCP chunks
+            # and the final ring state are identical on every rank.
+            slot_mapping = get_pcp_group().all_gather(slot_mapping, dim=0)
+            slot_mapping = slot_mapping[pcp_metadata.restore_indices]
+            batch = pcp_metadata.global_batch
+            query_start_loc = batch.query_start_loc
+            global_metadata = common_attn_metadata.replace(
+                query_start_loc=query_start_loc,
+                query_start_loc_cpu=torch.from_numpy(batch.query_start_loc_np),
+                num_actual_tokens=batch.num_tokens,
+                _token_to_req_indices_cache=None,
+            )
+            token_to_req_indices = global_metadata.token_to_req_indices(
+                self.global_token_to_req_indices
+            )
         return CompressorMetadata(
             slot_mapping=slot_mapping,
-            query_start_loc=common_attn_metadata.query_start_loc,
+            query_start_loc=query_start_loc,
             token_to_req_indices=token_to_req_indices,
+            pcp_metadata=pcp_metadata,
         )
 
 
@@ -201,6 +232,8 @@ class DeepseekCompressor(nn.Module):
         self.rotate = rotate
         self.prefix = prefix
         self.k_cache_prefix = k_cache_prefix
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         # Ratio 1 pools single tokens, so the checkpoint carries no gate.
         self.has_gate = compress_ratio > 1
 
@@ -258,9 +291,12 @@ class DeepseekCompressor(nn.Module):
         if not isinstance(attn_metadata, dict):
             return None
 
+        pcp_metadata = None
         if self.state_cache is None:
             state_cache = query_start_loc = token_to_req_indices = None
             slot_mapping = cast(Any, attn_metadata[self.k_cache_prefix]).slot_mapping
+            if self.pcp_size > 1:
+                slot_mapping = slot_mapping.chunk(self.pcp_size)[self.pcp_rank]
         else:
             state_metadata = cast(
                 CompressorMetadata, attn_metadata[self.state_cache.prefix]
@@ -269,6 +305,12 @@ class DeepseekCompressor(nn.Module):
             slot_mapping = state_metadata.slot_mapping
             query_start_loc = state_metadata.query_start_loc
             token_to_req_indices = state_metadata.token_to_req_indices
+            pcp_metadata = state_metadata.pcp_metadata
+            if pcp_metadata is not None:
+                kv_score = get_pcp_group().all_gather(kv_score.contiguous(), dim=0)
+                kv_score = kv_score[pcp_metadata.restore_indices]
+                batch = pcp_metadata.global_batch
+                positions = batch.positions[: batch.num_tokens]
 
         latent = torch.empty(
             kv_score.shape[0],
@@ -288,6 +330,8 @@ class DeepseekCompressor(nn.Module):
             self.compress_ratio,
             latent,
         )
+        if pcp_metadata is not None:
+            latent = latent[pcp_metadata.local_indices]
         return latent
 
     def insert_cache(

@@ -14,6 +14,7 @@ These tests cover:
 import math
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -721,6 +722,7 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     capacity = 8
     vllm_config = MagicMock()
     vllm_config.scheduler_config.max_num_batched_tokens = 16
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
     spec = CircularBufferSpec(
         block_size=capacity,
         num_kv_heads=1,
@@ -788,6 +790,7 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
             slot_mapping=state_slots,
             query_start_loc=torch.tensor([0, 19], dtype=torch.int32, device="cuda"),
             token_to_req_indices=torch.zeros(19, dtype=torch.int32, device="cuda"),
+            pcp_metadata=None,
         ),
         "main": SimpleNamespace(slot_mapping=cache_slots),
         "index": SimpleNamespace(slot_mapping=cache_slots),
@@ -795,6 +798,7 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
     context = ForwardContext({}, metadata, {})
     compressor = DeepseekCompressor.__new__(DeepseekCompressor)
     torch.nn.Module.__init__(compressor)
+    compressor.pcp_size = 1
     compressor.head_dim, compressor.rope_head_dim, compressor.compress_ratio = (
         512,
         64,
@@ -820,7 +824,7 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
         use_fp4_kv=False,
     )
 
-    def prepare_indexer(qr, latent, weights, positions, rotary, qr_scale):
+    def prepare_indexer(qr, latent, weights, positions, rotary, qr_scale, **kwargs):
         DeepseekV4Indexer._produce_k(indexer, latent, positions, rotary)
         return None, None, None
 
@@ -830,6 +834,7 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
 
     auxiliary = [torch.cuda.Stream()] if use_aux else None
     attention = SimpleNamespace(
+        use_pcp=False,
         compressor=compressor,
         indexer=prepare_indexer,
         aux_stream_list=auxiliary,
@@ -885,6 +890,153 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
         if previous is not None:
             assert all(not torch.equal(a, b) for a, b in zip(expected, previous))
         previous = expected
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
+@pytest.mark.parametrize("pcp_size", [2, 4])
+def test_v41_pcp_compressor_preserves_pairs_and_decode_state(pcp_size, monkeypatch):
+    """Odd PCP boundaries and changing decode owners must preserve ring history."""
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41 import compressor as compressor_module
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        fused_save_compress_norm,
+    )
+    from vllm.models.deepseek_v41.compressor import (
+        CompressorMetadataBuilder,
+        DeepseekCompressor,
+    )
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import CircularBufferSpec
+    from vllm.v1.worker.gpu.input_batch import PCPBatchMetadata
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
+
+    torch.manual_seed(42)
+    device = torch.device("cuda")
+    norm = torch.randn(512, dtype=torch.bfloat16, device=device)
+    reference_state = torch.zeros(2, 8, 1024, device=device)
+    rank_states = [reference_state.clone() for _ in range(pcp_size)]
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
+    )
+    spec = CircularBufferSpec(
+        block_size=8, num_kv_heads=1, head_size=1024, head_size_v=0, dtype=torch.float32
+    )
+    starts = np.zeros(2, dtype=np.int32)
+    for lengths, prefilling in [
+        ([7, 3], [True, True]),
+        ([2, 1], [True, False]),
+        ([1, 1], [False, False]),
+    ]:
+        lengths = np.array(lengths, dtype=np.int32)
+        query_start = np.concatenate(([0], np.cumsum(lengths))).astype(np.int32)
+        qsl = torch.from_numpy(query_start).to(device)
+        positions = torch.cat(
+            [torch.arange(s, s + n, device=device) for s, n in zip(starts, lengths)]
+        )
+        req_ids = torch.repeat_interleave(
+            torch.arange(2, device=device, dtype=torch.int32),
+            torch.from_numpy(lengths).to(device),
+        )
+        slots = req_ids.long() * 8 + positions % 8
+        raw = torch.randn(sum(lengths), 1024, device=device)
+        expected = torch.empty(sum(lengths), 512, dtype=torch.bfloat16, device=device)
+        fused_save_compress_norm(
+            raw,
+            positions,
+            reference_state,
+            slots,
+            qsl,
+            req_ids,
+            norm,
+            1e-20,
+            2,
+            expected,
+        )
+
+        for rank in range(pcp_size):
+            manager = PCPManager(pcp_size, rank, device, shard_decode_requests=True)
+            segments, counts = manager._build_batch_layout(
+                lengths, starts, np.array(prefilling), query_start
+            )
+            width = max(counts)
+            gathered_raw = raw[manager._padded_gather_idx]
+            gathered_slots = slots[manager._padded_gather_idx].masked_fill(
+                ~manager._gathered_kv_write_mask, -1
+            )
+            local_indices = manager._padded_gather_idx[
+                rank * width : (rank + 1) * width
+            ]
+            pcp = PCPBatchMetadata(
+                SimpleNamespace(
+                    positions=positions,
+                    num_tokens=len(raw),
+                    query_start_loc=qsl,
+                    query_start_loc_np=query_start,
+                ),
+                manager._hidden_restore_idx,
+                local_indices,
+            )
+            local_lengths = [s.num_tokens for s in segments[rank]] or [0]
+            local_qsl = torch.tensor([0, *np.cumsum(local_lengths)], dtype=torch.int32)
+            local_reqs = [s.global_batch_req_idx for s in segments[rank]] or [0]
+            common = CommonAttentionMetadata(
+                query_start_loc=local_qsl.to(device),
+                query_start_loc_cpu=local_qsl,
+                seq_lens=torch.zeros(len(local_reqs), dtype=torch.int32, device=device),
+                num_reqs=len(local_reqs),
+                num_actual_tokens=counts[rank],
+                max_query_len=max(local_lengths),
+                max_seq_len=int(max(starts + lengths)),
+                block_table_tensor=torch.tensor(
+                    local_reqs, dtype=torch.int32, device=device
+                ).unsqueeze(1),
+                slot_mapping=torch.full((width * pcp_size,), -1, device=device),
+                positions=positions[local_indices],
+            )
+
+            def gather(
+                tensor,
+                dim,
+                rank=rank,
+                width=width,
+                raw=gathered_raw,
+                slots=gathered_slots,
+            ):
+                gathered = (slots if tensor.ndim == 1 else raw).clone()
+                gathered[rank * width : (rank + 1) * width] = tensor
+                return gathered
+
+            monkeypatch.setattr(
+                compressor_module,
+                "get_pcp_group",
+                lambda gather=gather: SimpleNamespace(all_gather=gather),
+            )
+            builder = CompressorMetadataBuilder(spec, ["ring"], config, device)
+            metadata = builder.build(0, common, pcp_metadata=pcp)
+            compressor = SimpleNamespace(
+                pcp_size=pcp_size,
+                head_dim=512,
+                compress_ratio=2,
+                rms_norm_eps=1e-20,
+                norm=SimpleNamespace(weight=norm),
+                state_cache=SimpleNamespace(prefix="ring", kv_cache=rank_states[rank]),
+            )
+            with override_forward_context(ForwardContext({}, {"ring": metadata}, {})):
+                actual = DeepseekCompressor.forward(
+                    compressor, raw[local_indices], positions[local_indices]
+                )
+            valid = (positions[local_indices[: counts[rank]]] + 1) % 2 == 0
+            torch.testing.assert_close(
+                actual[: counts[rank]][valid],
+                expected[local_indices[: counts[rank]]][valid],
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(
+                rank_states[rank], reference_state, rtol=0, atol=0
+            )
+        starts += lengths
 
 
 def _on_gfx950() -> bool:

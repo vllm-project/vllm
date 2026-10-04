@@ -36,6 +36,14 @@ class InputBuffers:
 
 
 @dataclass
+class PCPBatchMetadata:
+    global_batch: "InputBatch"
+    # Global token rows -> padded rank-major rows, and the inverse local slice.
+    restore_indices: torch.Tensor
+    local_indices: torch.Tensor
+
+
+@dataclass
 class InputBatch:
     # batch_idx -> req_id
     req_ids: list[str]
@@ -122,6 +130,8 @@ class InputBatch:
     # drafts) over existing context and so compute exactly like decodes.
     # None if there are no prefills.
     prefill_runs_as_decode_np: np.ndarray | None = None
+
+    pcp_metadata: PCPBatchMetadata | None = None
 
     @classmethod
     def make_dummy(
