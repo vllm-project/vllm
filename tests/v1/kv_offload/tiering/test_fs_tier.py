@@ -464,6 +464,47 @@ def test_wait_idle_blocks_until_tasks_complete():
         waiter.join(timeout=5.0)
 
 
+@pytest.mark.parametrize("wait_before_completion", [False, True])
+@pytest.mark.parametrize("cancelled_tasks", [0, 1])
+def test_wait_idle_after_shutdown(wait_before_completion, cancelled_tasks):
+    """Shutdown must not make wait_idle hang or return before active I/O ends."""
+    pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=0)
+    started = threading.Event()
+    release = threading.Event()
+    cancelled_task_ran = threading.Event()
+    waiter = threading.Thread(target=pool.wait_idle, daemon=True)
+
+    def active_task():
+        started.set()
+        assert release.wait(timeout=5)
+
+    try:
+        pool.enqueue_store(
+            job_id=1,
+            n_tasks=1 + cancelled_tasks,
+            tasks=[active_task] + [cancelled_task_ran.set] * cancelled_tasks,
+        )
+        assert started.wait(timeout=5)
+        pool.shutdown(wait=False)
+        if not wait_before_completion:
+            release.set()
+            pool.shutdown(wait=True)
+
+        waiter.start()
+        if wait_before_completion:
+            waiter.join(timeout=0.2)
+            assert waiter.is_alive(), "wait_idle returned before active I/O ended"
+            release.set()
+        waiter.join(timeout=5)
+        assert not waiter.is_alive(), "wait_idle hung after shutdown"
+        assert not cancelled_task_ran.is_set()
+    finally:
+        release.set()
+        pool.shutdown(wait=True)
+        if waiter.ident is not None:
+            waiter.join(timeout=5)
+
+
 def test_batch_lookup_c_extension(tmp_path):
     """Validates batch_lookup_C: empty, single, all-existing, all-missing,
     mixed ordering, and input type validation."""
