@@ -456,7 +456,7 @@ class Scheduler(SchedulerInterface):
 
         block_size = self.cache_config.block_size
         # The last block-aligned position whose state can be cached. Without
-        # successor-aware hashing, EAGLE prunes the last FullAttn match, so
+        # lookahead hashing, EAGLE prunes the last FullAttn match, so
         # back off one block to avoid a Mamba cache miss.
         last_cache_position = request.num_tokens - request.num_tokens % block_size
         if self.use_eagle_block_drop and not self.use_lookahead_block_hashes:
@@ -2027,14 +2027,6 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
-        publishable_prefix_tokens = (
-            {
-                req.req_id: req.num_computed_tokens
-                for req in scheduler_output.scheduled_new_reqs
-            }
-            if self.use_lookahead_block_hashes
-            else {}
-        )
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -2092,13 +2084,6 @@ class Scheduler(SchedulerInterface):
                 # be set to None (in order to finish async KV transfer).
                 # In this case, we use is_finished() to check.
                 continue
-
-            if (
-                not output_is_stale
-                and self.use_lookahead_block_hashes
-                and (prefix_tokens := publishable_prefix_tokens.get(req_id, 0))
-            ):
-                self._mark_lookahead_hashes_publishable(request, prefix_tokens)
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
@@ -2189,17 +2174,17 @@ class Scheduler(SchedulerInterface):
                 self.use_lookahead_block_hashes
                 and status_before_stop == RequestStatus.RUNNING
                 and not output_is_stale
-                and model_runner_output.draft_kv_materialized
             ):
                 # Rejections are already rolled back and later steps are still
-                # in flight, so this is the committed frontier.
-                self._mark_lookahead_hashes_publishable(
-                    request,
-                    request.num_computed_tokens - request.num_in_flight_tokens,
+                # in flight, so this is the committed frontier. Supported
+                # platforms write draft KV for every scheduled token in the step.
+                committed_tokens = (
+                    request.num_computed_tokens - request.num_in_flight_tokens
                 )
-                self.kv_cache_manager.cache_blocks(
-                    request, request.num_draft_kv_materialized_tokens
+                request.mark_lookahead_hashes_publishable(
+                    committed_tokens, self.hash_block_size
                 )
+                self.kv_cache_manager.cache_blocks(request, committed_tokens)
 
             if new_token_ids and not self.structured_output_manager.accept_tokens(
                 request, new_token_ids
@@ -3048,7 +3033,7 @@ class Scheduler(SchedulerInterface):
         )
 
         # Direct-transfer connectors need the partial physical tail. Store-style
-        # connectors enforce the EAGLE hash-publication fence themselves.
+        # connectors enforce the lookahead publication fence themselves.
         block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
             request_id=request.request_id,
             num_computed_tokens=request.num_computed_tokens,
@@ -3353,8 +3338,7 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens = req_num_computed_tokens
 
                 request.invalidate_lookahead_hash_publication(
-                    request.num_computed_tokens // self.hash_block_size,
-                    request.num_computed_tokens,
+                    request.num_computed_tokens // self.hash_block_size
                 )
 
                 affected_req_ids.add(request.request_id)

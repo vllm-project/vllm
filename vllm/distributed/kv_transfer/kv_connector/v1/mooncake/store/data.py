@@ -747,6 +747,7 @@ class ReqMeta:
     token_len_chunk: int
     block_ids: tuple[list[int], ...]
     block_hashes: list[BlockHash]
+
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
     current_event: torch.cuda.Event | None = None

@@ -1315,10 +1315,10 @@ def test_lookahead_block_hashes_preserves_unsupported_fallbacks(
     assert not is_lookahead_block_hashing_enabled(vllm_config)
 
 
-def test_lookahead_block_hashes_requires_platform_ack(
+def test_lookahead_block_hashes_requires_platform_support(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Runners that never acknowledge draft KV would never publish a block."""
+    """Out-of-tree runners may not write draft KV for every scheduled token."""
     speculative_config = object.__new__(SpeculativeConfig)
     object.__setattr__(speculative_config, "method", "mtp")
     vllm_config = cast(

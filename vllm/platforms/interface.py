@@ -1229,9 +1229,9 @@ class Platform:
 
     @classmethod
     def supports_lookahead_block_hashes(cls) -> bool:
-        """Whether the platform's model runner reports
-        ``ModelRunnerOutput.draft_kv_materialized``, which successor-aware
-        EAGLE prefix-cache hashing needs to publish blocks."""
+        """Whether the platform's model runner writes draft KV for every
+        scheduled token in the step it is scheduled, which lookahead block
+        hashes rely on to publish blocks at the committed frontier."""
         return False
 
     @classmethod

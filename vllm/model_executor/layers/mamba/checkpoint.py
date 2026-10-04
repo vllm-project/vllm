@@ -98,7 +98,7 @@ class MambaPrefillCheckpointBuilder:
         self.vllm_config = vllm_config
         self.kv_cache_spec = kv_cache_spec
         speculative_config = vllm_config.speculative_config
-        # Successor-aware hashes prove the boundary token's draft KV, so the
+        # Lookahead hashes prove the boundary token's draft KV, so the
         # checkpoint needs no Eagle back-off.
         self._drop_eagle_block = (
             speculative_config is not None

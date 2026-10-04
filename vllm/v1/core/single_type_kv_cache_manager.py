@@ -887,7 +887,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         boundary_tokens = get_prompt_hash_boundary(
             request.num_prompt_tokens,
             hash_block_size,
-            self.use_eagle and self.block_pool.use_lookahead_block_hashes,
+            self.block_pool.use_lookahead_block_hashes,
         )
         if boundary_tokens == 0 or boundary_tokens > num_tokens:
             return
@@ -2115,13 +2115,12 @@ class MambaManager(SingleTypeKVCacheManager):
             return None
         if num_tokens % hash_block_size != 0:
             return None
-        use_lookahead_block_hashes = self.block_pool.use_lookahead_block_hashes
         latest_prompt_hash_boundary = get_prompt_hash_boundary(
             request.num_prompt_tokens,
             hash_block_size,
-            use_lookahead_block_hashes,
+            self.block_pool.use_lookahead_block_hashes,
         )
-        if self.drop_eagle_checkpoint_block and not use_lookahead_block_hashes:
+        if self.drop_eagle_checkpoint_block:
             # Eagle groups match one hash unit past the candidate and drop it,
             # so register the tail one unit lower.
             latest_prompt_hash_boundary = max(

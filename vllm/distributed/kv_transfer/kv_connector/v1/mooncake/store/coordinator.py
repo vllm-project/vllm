@@ -174,13 +174,13 @@ class MooncakeStoreCoordinator:
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,
-        apply_eagle_drop: bool = True,
+        apply_eagle: bool = True,
     ) -> tuple[tuple[list[bool], ...], int]:
         """Returns ``(load_mask_per_group, hit_length)``. ``mask[g][i]`` is True iff
         group ``g`` populates chunk ``i`` locally (e.g. SWA and Mamba tail-only);
         recv-side callers skip False slots.
 
-        ``apply_eagle_drop`` controls whether the per-spec ``use_eagle`` last-block
+        ``apply_eagle`` controls whether the per-spec ``use_eagle`` last-block
         pop is applied. Lookup callers want it (the drafter requires recomputing
         the last block); per-chunk mask callers must not, because ``token_len``
         already reflects the eagle-pruned hit length and a second pop would
@@ -190,7 +190,7 @@ class MooncakeStoreCoordinator:
             block_hashes,
             max_length,
             cached_block_pool,
-            apply_eagle_drop=apply_eagle_drop,
+            apply_eagle=apply_eagle,
         )
         masks = tuple(
             [blk is not cached_block_pool.null_block for blk in blocks]
@@ -207,7 +207,7 @@ class MooncakeStoreCoordinator:
         spec would populate chunk ``i`` locally at length ``token_len``
         (e.g. SWA / Mamba tail-only).
         """
-        # ``apply_eagle_drop=False`` because ``token_len`` is already the
+        # ``apply_eagle=False`` because ``token_len`` is already the
         # eagle-pruned hit length returned by ``client.lookup``. Re-applying
         # the pop here would shorten the mask by one extra block; the recv
         # thread would then silently skip the trailing chunk yielded by
@@ -217,7 +217,7 @@ class MooncakeStoreCoordinator:
             block_hashes,
             token_len,
             ExternalCachedBlockPool(self.hash_block_size),
-            apply_eagle_drop=False,
+            apply_eagle=False,
         )
         return masks
 
@@ -226,7 +226,7 @@ class MooncakeStoreCoordinator:
         aligned_token_len: int,
         start_token: int = 0,
         num_prompt_tokens: int | None = None,
-        apply_eagle_drop: bool = True,
+        apply_eagle: bool = True,
     ) -> tuple[list[bool] | None, ...]:
         """Per-group store masks for the suffix starting at ``start_token``.
 
@@ -252,14 +252,14 @@ class MooncakeStoreCoordinator:
             start_token,
             retention_interval=self.retention_interval,
             num_prompt_tokens=num_prompt_tokens,
-            apply_eagle_drop=apply_eagle_drop,
+            apply_eagle=apply_eagle,
             exclude_mamba=True,
         )
 
     def lookup_mask(
         self,
         aligned_token_len: int,
-        apply_eagle_drop: bool = True,
+        apply_eagle: bool = True,
     ) -> tuple[list[bool] | None, ...]:
         """Per-group lookup masks.
 
@@ -272,7 +272,7 @@ class MooncakeStoreCoordinator:
             0,
             retention_interval=None,
             num_prompt_tokens=None,
-            apply_eagle_drop=apply_eagle_drop,
+            apply_eagle=apply_eagle,
         )
 
     def _reachable_masks(
@@ -282,7 +282,7 @@ class MooncakeStoreCoordinator:
         *,
         retention_interval: int | None,
         num_prompt_tokens: int | None,
-        apply_eagle_drop: bool,
+        apply_eagle: bool,
         exclude_mamba: bool = False,
     ) -> tuple[list[bool] | None, ...]:
         mask_alignment = (
@@ -304,7 +304,7 @@ class MooncakeStoreCoordinator:
                 continue
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
-            use_eagle = apply_eagle_drop and g_idx in self.eagle_group_ids
+            use_eagle = apply_eagle and g_idx in self.eagle_group_ids
             reachable_boundaries = (
                 () if num_prompt_tokens is None else (num_prompt_tokens - 1,)
             )
@@ -339,12 +339,12 @@ class MooncakeStoreCoordinator:
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,
-        apply_eagle_drop: bool = True,
+        apply_eagle: bool = True,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """Mirrors HybridKVCacheCoordinator.find_longest_cache_hit but
         dispatches via spec_manager_map (we don't allocate managers).
 
-        When ``apply_eagle_drop`` is False, ignore each group's ``use_eagle`` —
+        When ``apply_eagle`` is False, ignore each group's ``use_eagle`` —
         used by ``load_mask`` to avoid popping a second block on top of the
         one already removed by the lookup.
         """
@@ -361,7 +361,7 @@ class MooncakeStoreCoordinator:
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
                 kv_cache_spec=spec,
-                drop_eagle_block=apply_eagle_drop and group_eagle,
+                drop_eagle_block=apply_eagle and group_eagle,
                 alignment_tokens=alignment_tokens,
             )
             num_groups = len(self.kv_cache_groups)
@@ -395,7 +395,7 @@ class MooncakeStoreCoordinator:
                     continue
 
                 drop_eagle_block = (
-                    apply_eagle_drop and group_eagle and idx not in eagle_verified
+                    apply_eagle and group_eagle and idx not in eagle_verified
                 )
                 _max_length = curr_hit_length
                 # No eagle peek margin for a recurrent (Mamba) group: its finder

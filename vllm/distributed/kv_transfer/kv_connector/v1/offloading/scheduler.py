@@ -670,8 +670,7 @@ class OffloadingConnectorScheduler:
     ) -> int:
         num = min(num_computed_tokens, req_status.req.num_tokens)
         if self.use_lookahead_block_hashes:
-            # A successor key is safe to expose only after both target and
-            # draft KV have materialized through its boundary.
+            # Lookahead keys are exposed only up to the committed frontier.
             num = min(
                 num,
                 req_status.req.num_publishable_block_hashes
@@ -815,7 +814,7 @@ class OffloadingConnectorScheduler:
                 tokens_per_chunk = group_config.tokens_per_chunk
                 offload_keys = group_state.offload_keys
 
-                # A successor-aware hash waits for the token after its boundary.
+                # A lookahead hash waits for the token after its boundary.
                 num_keyed_tokens = req_status.req.num_tokens - int(
                     self.use_lookahead_block_hashes
                 )

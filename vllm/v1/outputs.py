@@ -299,11 +299,6 @@ class ModelRunnerOutput:
 
     ec_connector_output: ECConnectorOutput | None = None
 
-    # Whether the EAGLE-family drafter forward completed for every request in
-    # this step. The scheduler uses this acknowledgement to publish draft KV
-    # cache blocks.
-    draft_kv_materialized: bool = False
-
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
 

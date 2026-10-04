@@ -273,8 +273,14 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
+        # Lookahead hashes recur at hash_block_size, so a coarser cache block is
+        # published as one event per block (see _emit_individual_block_stored_events).
         event_block_indices: list[int] | None = (
-            [] if self.enable_kv_cache_events else None
+            []
+            if self.enable_kv_cache_events
+            and self.use_lookahead_block_hashes
+            and block_size != self.hash_block_size
+            else None
         )
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
@@ -305,18 +311,16 @@ class BlockPool:
             )
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
-                assert event_block_indices is not None
+            if event_block_indices is not None:
                 event_block_indices.append(num_cached_blocks + i)
 
         if self.enable_kv_cache_events:
-            assert event_block_indices is not None
-            if self._emit_individual_block_stored_events(
-                request,
-                event_block_indices,
-                block_size,
-                kv_cache_group_id,
-            ):
+            if event_block_indices is not None:
+                self._emit_individual_block_stored_events(
+                    request, event_block_indices, block_size, kv_cache_group_id
+                )
                 return
+            # Every new block may be masked out; don't emit an empty event.
             if not new_hashes:
                 return
 

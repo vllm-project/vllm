@@ -873,7 +873,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 token_len,
                 save_start,
                 num_prompt_tokens=req_meta.num_prompt_tokens,
-                apply_eagle_drop=not self.use_lookahead_block_hashes,
+                apply_eagle=not self.use_lookahead_block_hashes,
             )
 
             starts: list[int] = []
@@ -2229,7 +2229,7 @@ class MooncakeStoreWorker:
         if not block_hashes or token_len <= 0:
             return MooncakeLookupResult(0)
 
-        apply_eagle_drop = not self.use_lookahead_block_hashes
+        apply_eagle = not self.use_lookahead_block_hashes
 
         # Build per-(group, hash) candidate keys expanded across rank namespaces.
         # candidate_meta stores the (group, hash_bytes) for key slice.
@@ -2239,7 +2239,7 @@ class MooncakeStoreWorker:
         lookup_masks = (
             None
             if fine_grained
-            else self.coord.lookup_mask(token_len, apply_eagle_drop=apply_eagle_drop)
+            else self.coord.lookup_mask(token_len, apply_eagle=apply_eagle)
         )
         for g_idx, db in enumerate(self.token_dbs):
             if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
@@ -2316,7 +2316,7 @@ class MooncakeStoreWorker:
             block_hashes,
             token_len,
             cached_block_pool,
-            apply_eagle_drop=apply_eagle_drop,
+            apply_eagle=apply_eagle,
         )
         if hit_length >= num_tokens:
             usable_length = self.coord.align_lookup_length(num_tokens - 1)
@@ -2326,7 +2326,7 @@ class MooncakeStoreWorker:
                 block_hashes,
                 usable_length,
                 cached_block_pool,
-                apply_eagle_drop=apply_eagle_drop,
+                apply_eagle=apply_eagle,
             )
         return MooncakeLookupResult(
             hit_length,

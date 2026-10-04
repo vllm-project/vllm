@@ -27,7 +27,6 @@ pytestmark = pytest.mark.cpu_test
 def _make_model_runner_output(
     scheduler_output: SchedulerOutput,
     sampled_token_ids: list[list[int]] | None = None,
-    draft_kv_materialized: bool = False,
 ) -> ModelRunnerOutput:
     req_ids = list(scheduler_output.num_scheduled_tokens.keys())
     return ModelRunnerOutput(
@@ -41,7 +40,6 @@ def _make_model_runner_output(
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
-        draft_kv_materialized=draft_kv_materialized,
     )
 
 
@@ -52,7 +50,7 @@ def _enable_eagle_prefix_hashing(scheduler: AsyncScheduler) -> None:
     manager.block_pool.use_lookahead_block_hashes = True
 
 
-def test_chunked_prefill_publishes_only_acknowledged_async_steps() -> None:
+def test_chunked_prefill_publishes_each_committed_async_step() -> None:
     block_size = 2
     init_none_hash(sha256)
     scheduler = create_scheduler(
@@ -87,34 +85,27 @@ def test_chunked_prefill_publishes_only_acknowledged_async_steps() -> None:
 
     scheduler.update_from_output(
         first_step,
-        _make_model_runner_output(
-            first_step,
-            sampled_token_ids=[[]],
-            draft_kv_materialized=True,
-        ),
+        _make_model_runner_output(first_step, sampled_token_ids=[[]]),
     )
 
     assert request.num_publishable_block_hashes == 1
-    assert request.num_draft_kv_materialized_tokens == 3
     probe = make_request("probe")
     _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
     assert num_cached_tokens == 2
 
-    # The second chunk ran without a drafter acknowledgement and must not
-    # advance the publication fence.
+    # The second chunk's output commits it.
     scheduler.update_from_output(
         second_step,
         _make_model_runner_output(second_step, sampled_token_ids=[[]]),
     )
-    assert request.num_publishable_block_hashes == 1
-    assert request.num_draft_kv_materialized_tokens == 3
+    assert request.num_publishable_block_hashes == 3
     _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(probe)
-    assert num_cached_tokens == 2
+    assert num_cached_tokens == 6
 
 
 def test_eagle_publication_advances_past_rejected_async_drafts() -> None:
     """Async steps are scheduled before earlier drafts are rejected; the
-    committed frontier must still advance on every acknowledged step."""
+    committed frontier must still advance on every step."""
     block_size = 2
     init_none_hash(sha256)
     scheduler = create_scheduler(
@@ -146,14 +137,15 @@ def test_eagle_publication_advances_past_rejected_async_drafts() -> None:
             _make_model_runner_output(
                 in_flight,
                 sampled_token_ids=[[token_id]],
-                draft_kv_materialized=True,
             ),
         )
         in_flight = next_step
 
     committed = request.num_computed_tokens - request.num_in_flight_tokens
     assert committed > len(request.prompt_token_ids)
-    assert request.num_draft_kv_materialized_tokens == committed
+    assert request.num_publishable_block_hashes == min(
+        len(request.block_hashes), committed // block_size
+    )
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])

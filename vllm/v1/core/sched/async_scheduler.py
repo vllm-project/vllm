@@ -76,7 +76,6 @@ class AsyncScheduler(Scheduler):
             and not self.use_lookahead_block_hashes
         ):
             self.kv_cache_manager.cache_blocks(
-                request,
-                request.num_computed_tokens - request.num_output_placeholders,
+                request, request.num_computed_tokens - request.num_output_placeholders
             )
         return new_token_ids, stopped

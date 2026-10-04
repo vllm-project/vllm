@@ -681,8 +681,8 @@ def to_request_event_extra_keys(
     use_lookahead_block_hashes: bool,
 ) -> list[tuple[Any, ...] | None] | None:
     """`to_event_extra_keys` for keys from
-    `generate_request_block_hash_extra_keys`. EAGLE keys keep the successor
-    token and untag the block and successor extra keys."""
+    `generate_request_block_hash_extra_keys`. Lookahead keys keep the lookahead
+    token and untag the block and lookahead extra keys."""
     if not use_lookahead_block_hashes:
         return to_event_extra_keys(extra_keys)
     if not extra_keys:
@@ -940,7 +940,7 @@ def get_request_lookahead_block_hasher(
 
     A target block ending at position ``end - 1`` and the corresponding
     EAGLE draft block together depend on the token at ``end``. Each hash
-    therefore covers one full block and records its successor token and input
+    therefore covers one full block and records its lookahead token and input
     identity in the hash extra keys. This preserves the normal block shape for
     KV events while proving the EAGLE dependency at every block boundary.
     """
@@ -988,7 +988,7 @@ def generate_lookahead_block_hash_extra_keys(
         end_token_idx,
         start_mm_idx,
     )
-    successor_extra_keys, _ = generate_block_hash_extra_keys(
+    lookahead_extra_keys, _ = generate_block_hash_extra_keys(
         request,
         end_token_idx,
         end_token_idx + 1,
@@ -998,7 +998,7 @@ def generate_lookahead_block_hash_extra_keys(
         (
             block_extra_keys,
             request.all_token_ids[end_token_idx],
-            successor_extra_keys,
+            lookahead_extra_keys,
         ),
         next_block_mm_idx,
     )
@@ -1031,7 +1031,7 @@ def get_prompt_hash_boundary(
     hash_block_size: int,
     use_lookahead_block_hashes: bool,
 ) -> int:
-    """Last hash boundary within the prompt. A successor-aware hash also
+    """Last hash boundary within the prompt. A lookahead hash also
     needs the token after its boundary."""
     num_tokens = num_prompt_tokens - int(use_lookahead_block_hashes)
     return num_tokens // hash_block_size * hash_block_size

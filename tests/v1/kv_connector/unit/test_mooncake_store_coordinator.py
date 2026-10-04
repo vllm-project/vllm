@@ -662,7 +662,7 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
     assert hit == 64
 
 
-def test_successor_hashes_skip_legacy_eagle_drop():
+def test_lookahead_hashes_skip_legacy_eagle_drop():
     groups = [
         KVCacheGroupSpec(
             ["mtp"],
@@ -682,7 +682,7 @@ def test_successor_hashes_skip_legacy_eagle_drop():
         hashes,
         64,
         cached,
-        apply_eagle_drop=False,
+        apply_eagle=False,
     )
 
     assert legacy_hit == 48
@@ -700,8 +700,8 @@ def test_successor_hash_lookup_and_store_masks_match():
     ]
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
 
-    store_masks = coord.store_mask(128, apply_eagle_drop=False)
-    lookup_masks = coord.lookup_mask(128, apply_eagle_drop=False)
+    store_masks = coord.store_mask(128, apply_eagle=False)
+    lookup_masks = coord.lookup_mask(128, apply_eagle=False)
 
     assert lookup_masks == store_masks
 

@@ -2159,11 +2159,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
-            draft_kv_materialized=(
-                self.speculator is not None
-                and self.speculative_config is not None
-                and self.speculative_config.use_eagle()
-            ),
         )
         pending_aux_output = None
         if self.aux_output_connector is not None:

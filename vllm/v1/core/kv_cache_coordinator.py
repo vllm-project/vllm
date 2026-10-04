@@ -337,7 +337,7 @@ class KVCacheCoordinator(ABC):
         resend's hit to 0. The alignment is the scheduler block size, not the
         finer hash granularity, which would over-estimate the reach.
         """
-        # Successor-aware hashes make EAGLE groups match without the drop.
+        # Lookahead hashes make EAGLE groups match without the drop.
         if not self.eagle_group_ids or self.use_lookahead_block_hashes:
             return (request.num_prompt_tokens - 1,)
         block = self.scheduler_block_size
@@ -839,7 +839,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     num_finalized_computed_tokens
                 )
                 num_tokens_to_cache = cached_num_finalized_computed_tokens
-                # Without successor-aware hashes, EAGLE groups match one block
+                # Without lookahead hashes, EAGLE groups match one block
                 # past each aligned boundary and drop it, so make that
                 # lookahead block eligible to be cached.
                 if not self.use_lookahead_block_hashes:

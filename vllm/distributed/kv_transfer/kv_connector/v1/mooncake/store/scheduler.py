@@ -112,7 +112,7 @@ class MooncakeStoreScheduler:
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
-        # The final successor hash becomes publishable after the request's last
+        # The final lookahead hash becomes publishable after the request's last
         # step, so its save is pinned at finish and emitted in the next step.
         self._finished_lookahead_save_metas: dict[str, ReqMeta] = {}
 
@@ -434,7 +434,6 @@ class MooncakeStoreScheduler:
                     block_hashes=self._request_hashes_for_meta(
                         unfinished_req, load_spec
                     ),
-                    max_save_tokens=None,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -547,7 +546,7 @@ class MooncakeStoreScheduler:
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> None:
-        """Pin and queue the save of successor hashes published at finish."""
+        """Pin and queue the save of lookahead hashes published at finish."""
         if not self.use_lookahead_block_hashes:
             return
         if self.kv_role == "kv_consumer" and not self.save_decode_cache:

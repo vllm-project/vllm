@@ -312,7 +312,7 @@ def test_scheduler_stats_route_to_existing_output_client():
     assert len(engine_core_outputs[1].outputs) == 1
 
 
-def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
+def test_scheduler_publishes_lookahead_blocks_after_step_output():
     block_size = 2
     init_none_hash(sha256)
     scheduler = create_scheduler(
@@ -335,14 +335,14 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
     scheduler.add_request(request)
     scheduler_output = scheduler.schedule()
 
-    before_ack = Request(
-        request_id="before_ack",
+    before_output = Request(
+        request_id="before_output",
         prompt_token_ids=[0, 1, 2, 3, 4],
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
         block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
     )
-    _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(before_ack)
+    _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(before_output)
     assert num_tokens == 0
 
     scheduler.update_from_output(
@@ -351,18 +351,17 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
             req_ids=[request.request_id],
             req_id_to_index={request.request_id: 0},
             sampled_token_ids=[[5]],
-            draft_kv_materialized=True,
         ),
     )
 
-    after_ack = Request(
-        request_id="after_ack",
+    after_output = Request(
+        request_id="after_output",
         prompt_token_ids=[0, 1, 2, 3, 4],
         sampling_params=SamplingParams(max_tokens=1),
         pooling_params=None,
         block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
     )
-    _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(after_ack)
+    _, num_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(after_output)
     assert num_tokens == 2 * block_size
 
     (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
@@ -370,56 +369,11 @@ def test_scheduler_publishes_eagle_blocks_after_worker_acknowledgement():
         [request], {block_ids[0]}, {}, evict_blocks=False
     )
     assert request.num_publishable_block_hashes == 0
-    assert request.num_draft_kv_materialized_tokens == 0
 
     request.mark_lookahead_hashes_publishable(4, block_size)
-    assert request.num_draft_kv_materialized_tokens == 4
+    assert request.num_publishable_block_hashes == 2
     scheduler.running.remove(request)
     scheduler._preempt_request(request, timestamp=0.0)
-    assert request.num_publishable_block_hashes == 0
-    assert request.num_draft_kv_materialized_tokens == 0
-
-
-def test_scheduler_does_not_publish_eagle_blocks_without_worker_acknowledgement():
-    block_size = 2
-    init_none_hash(sha256)
-    scheduler = create_scheduler(
-        enable_prefix_caching=True,
-        block_size=block_size,
-        max_num_batched_tokens=16,
-    )
-    _enable_eagle_prefix_hashing(scheduler)
-    request = Request(
-        request_id="request",
-        prompt_token_ids=[0, 1, 2, 3, 4],
-        sampling_params=SamplingParams(max_tokens=3),
-        pooling_params=None,
-        block_hasher=get_request_lookahead_block_hasher(block_size, sha256),
-    )
-    scheduler.add_request(request)
-
-    first_step = scheduler.schedule()
-    scheduler.update_from_output(
-        first_step,
-        ModelRunnerOutput(
-            req_ids=[request.request_id],
-            req_id_to_index={request.request_id: 0},
-            sampled_token_ids=[[5]],
-        ),
-    )
-    assert request.num_publishable_block_hashes == 0
-
-    second_step = scheduler.schedule()
-    assert second_step.scheduled_cached_reqs is not None
-    scheduler.update_from_output(
-        second_step,
-        ModelRunnerOutput(
-            req_ids=[request.request_id],
-            req_id_to_index={request.request_id: 0},
-            sampled_token_ids=[[6]],
-        ),
-    )
-
     assert request.num_publishable_block_hashes == 0
 
 
@@ -450,7 +404,6 @@ def test_connector_finish_includes_partial_eagle_block(
             req_ids=[request.request_id],
             req_id_to_index={request.request_id: 0},
             sampled_token_ids=[[33]],
-            draft_kv_materialized=True,
         ),
     )
     assert request.num_computed_tokens == 33

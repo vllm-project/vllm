@@ -297,10 +297,10 @@ class KVCacheManager:
         max_cache_hit_length = request.num_tokens - 1
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
-                request.block_hashes,
-                max_cache_hit_length,
+                request.block_hashes, max_cache_hit_length
             )
         )
+
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers
         # (e.g. gateway) can learn about them.
@@ -357,8 +357,7 @@ class KVCacheManager:
 
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-            block_hashes=request.block_hashes,
-            max_cache_hit_length=request.num_tokens - 1,
+            request.block_hashes, request.num_tokens - 1
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its

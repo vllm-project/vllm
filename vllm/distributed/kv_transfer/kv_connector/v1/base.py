@@ -195,7 +195,7 @@ class KVConnectorBase_V1(ABC):
 
     @property
     def supports_lookahead_block_hashes(self) -> bool:
-        """Whether this engine can use successor-aware EAGLE cache keys.
+        """Whether this engine can use lookahead block hashes.
 
         Engines sharing a content-addressed cache must make the same choice.
         """
