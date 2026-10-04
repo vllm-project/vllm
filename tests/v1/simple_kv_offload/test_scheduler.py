@@ -1864,6 +1864,31 @@ def test_reset_pending_lazy_stores() -> None:
     assert hit_tokens == 0, "CPU cache should be empty after reset"
 
 
+@pytest.mark.parametrize("num_groups", [1, 2])
+@pytest.mark.parametrize("lazy", [False, True])
+def test_reset_releases_pending_cpu_hits(num_groups: int, lazy: bool) -> None:
+    """A lookup awaiting GPU allocation must not prevent a cache reset."""
+    fix = make_scheduler(num_groups=num_groups, lazy=lazy)
+    sched = fix.scheduler
+    req = make_request(num_blocks=2)
+    cpu_blocks = []
+    for group_id in range(num_groups):
+        cpu_blocks.extend(
+            _allocate_gpu_blocks(sched.cpu_block_pool, req, 2, group_id=group_id)
+        )
+    sched.cpu_block_pool.free_blocks(cpu_blocks)
+
+    assert sched.get_num_new_matched_tokens(req, 0) == (2 * BLOCK_SIZE, True)
+    assert all(block.ref_cnt == 1 for block in cpu_blocks)
+    assert not sched._reqs_to_load
+
+    assert sched.reset()
+    assert all(block.ref_cnt == 0 for block in cpu_blocks)
+    assert not sched._pending_cpu_hits
+    assert sched.get_num_new_matched_tokens(req, 0) == (0, False)
+    assert sched.reset()
+
+
 # ---------------------------------------------------------------------------
 # Test 14: Reset with pending loads waits for completion
 # ---------------------------------------------------------------------------

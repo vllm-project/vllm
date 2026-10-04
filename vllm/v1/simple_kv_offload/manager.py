@@ -1395,6 +1395,10 @@ class SimpleCPUOffloadScheduler:
         the transfer finished, then release refs without caching abandoned
         store results.
         """
+        for pending in self._pending_cpu_hits.values():
+            self._free_pending_cpu_hit(pending)
+        self._pending_cpu_hits.clear()
+
         self._abandoned_store_event_to_blocks.update(self._store_event_to_blocks)
         for transfer in self._pending_finished_stores:
             self._release_transfer_refs(transfer)
