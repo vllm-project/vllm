@@ -430,6 +430,30 @@ async def test_parallel_admission_cancellation_cleans_up_all_children():
     assert set(aborted_ids) == {"0_parallel", "1_parallel", "2_parallel"}
 
 
+@pytest.mark.asyncio
+async def test_single_request_cancellation_releases_admission_slot():
+    """A cancelled core submission must not reject the next request."""
+    submission_started = asyncio.Event()
+
+    async def add_request_async(_request):
+        submission_started.set()
+        await asyncio.Event().wait()
+
+    llm = _make_request_test_llm(1, add_request_async)
+    request = _make_engine_request("single", 1)
+    output = llm.generate(request, request.params, request.request_id)
+    generate_task = asyncio.create_task(anext(output))
+
+    await submission_started.wait()
+    generate_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await generate_task
+
+    assert llm.output_processor.get_num_unfinished_requests() == 0
+    llm.engine_core.abort_requests_async.assert_awaited_once_with(["single"])
+    llm.check_admission(request_id="next")
+
+
 # ---------------------------------------------------------------------------
 # create_error_response integration
 # ---------------------------------------------------------------------------
