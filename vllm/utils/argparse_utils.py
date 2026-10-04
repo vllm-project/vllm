@@ -3,6 +3,7 @@
 """Argument parsing utilities for vLLM."""
 
 import argparse
+import copy
 import json
 import sys
 import textwrap
@@ -21,6 +22,7 @@ from typing import Any, NoReturn
 import regex as re
 import yaml
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -117,7 +119,13 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpForma
 
 
 class FlexibleArgumentParser(ArgumentParser):
-    """ArgumentParser that allows both underscore and dash in names."""
+    """ArgumentParser that allows both underscore and dash in names.
+
+    ``VLLM_CLI_HELP_CONFIG`` can be set to JSON with ``hide_groups``,
+    ``hide_options``, and ``option_overrides`` keys. Overrides can change an
+    option's displayed help or choices. These settings affect help formatting
+    only; the parser retains its original arguments and validation behavior.
+    """
 
     _deprecated: set[Action] = set()
     _json_tip: str = (
@@ -189,6 +197,148 @@ class FlexibleArgumentParser(ArgumentParser):
             return group
 
     def format_help(self):
+        help_parser = self._create_help_view()
+        if help_parser is not self:
+            return help_parser._format_help()
+
+        return self._format_help()
+
+    def _create_help_view(self):
+        """Return a parser copy with optional, help-only customizations."""
+        raw_config = envs.VLLM_CLI_HELP_CONFIG
+        if not raw_config:
+            return self
+
+        try:
+            config = json.loads(raw_config)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "VLLM_CLI_HELP_CONFIG must contain valid JSON"
+            ) from exc
+
+        if not isinstance(config, dict):
+            raise ValueError("VLLM_CLI_HELP_CONFIG must be a JSON object")
+
+        allowed_keys = {"hide_groups", "hide_options", "option_overrides"}
+        unknown_keys = config.keys() - allowed_keys
+        if unknown_keys:
+            raise ValueError(
+                "Unknown VLLM_CLI_HELP_CONFIG keys: "
+                + ", ".join(sorted(unknown_keys))
+            )
+
+        hide_groups = config.get("hide_groups", [])
+        hide_options = config.get("hide_options", [])
+        option_overrides = config.get("option_overrides", {})
+        if not isinstance(hide_groups, list) or not all(
+            isinstance(title, str) for title in hide_groups
+        ):
+            raise ValueError(
+                "VLLM_CLI_HELP_CONFIG hide_groups must be a list of strings"
+            )
+        if not isinstance(hide_options, list) or not all(
+            isinstance(option, str) for option in hide_options
+        ):
+            raise ValueError(
+                "VLLM_CLI_HELP_CONFIG hide_options must be a list of strings"
+            )
+        if not isinstance(option_overrides, dict):
+            raise ValueError("VLLM_CLI_HELP_CONFIG option_overrides must be an object")
+
+        hidden_actions = {
+            action
+            for action in self._actions
+            if any(option in hide_options for option in action.option_strings)
+        }
+        for group in self._action_groups:
+            if group.title in hide_groups:
+                hidden_actions.update(group._group_actions)
+
+        action_map = {}
+        for action in self._actions:
+            if action in hidden_actions:
+                continue
+
+            override = next(
+                (
+                    option_overrides[option]
+                    for option in action.option_strings
+                    if option in option_overrides
+                ),
+                None,
+            )
+            if override is not None:
+                if not isinstance(override, dict):
+                    raise ValueError(
+                        "VLLM_CLI_HELP_CONFIG option_overrides values must be objects"
+                    )
+                unknown_overrides = override.keys() - {"help", "choices"}
+                if unknown_overrides:
+                    raise ValueError(
+                        "Unknown VLLM_CLI_HELP_CONFIG option override keys: "
+                        + ", ".join(sorted(unknown_overrides))
+                    )
+                display_action = copy.copy(action)
+                if "help" in override:
+                    if not isinstance(override["help"], str):
+                        raise ValueError(
+                            "VLLM_CLI_HELP_CONFIG option help must be a string"
+                        )
+                    display_action.help = override["help"]
+                if "choices" in override:
+                    choices = override["choices"]
+                    if not isinstance(choices, list):
+                        raise ValueError(
+                            "VLLM_CLI_HELP_CONFIG option choices must be a list"
+                        )
+                    if action.choices is None or any(
+                        choice not in action.choices for choice in choices
+                    ):
+                        raise ValueError(
+                            "VLLM_CLI_HELP_CONFIG choices must be a subset of the "
+                            "option's choices"
+                        )
+                    display_action.choices = choices
+            else:
+                display_action = action
+
+            action_map[action] = display_action
+
+        help_parser = copy.copy(self)
+        help_parser._actions = list(action_map.values())
+        help_parser._option_string_actions = {
+            option: action_map[action]
+            for option, action in self._option_string_actions.items()
+            if action in action_map
+        }
+        help_parser._action_groups = []
+        for group in self._action_groups:
+            if group.title in hide_groups:
+                continue
+            group_actions = [
+                action_map[action]
+                for action in group._group_actions
+                if action in action_map
+            ]
+            if group_actions:
+                help_group = copy.copy(group)
+                help_group._group_actions = group_actions
+                help_parser._action_groups.append(help_group)
+        help_parser._mutually_exclusive_groups = []
+        for group in self._mutually_exclusive_groups:
+            group_actions = [
+                action_map[action]
+                for action in group._group_actions
+                if action in action_map
+            ]
+            if group_actions:
+                help_group = copy.copy(group)
+                help_group._group_actions = group_actions
+                help_parser._mutually_exclusive_groups.append(help_group)
+
+        return help_parser
+
+    def _format_help(self):
         # Only use custom help formatting for bottom level parsers
         if self._subparsers is not None:
             return super().format_help()
