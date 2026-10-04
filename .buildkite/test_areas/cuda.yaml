@@ -13,10 +13,12 @@ steps:
   - vllm/plugins/
   - vllm/utils/
   - tests/cuda
+  - tests/platforms/test_interface.py
   commands:
     - pytest -v -s cuda/test_cuda_context.py
     - pytest -v -s cuda/test_platform_no_cuda_init.py
     - pytest -v -s cuda/test_cuda_compatibility_path.py
+    - pytest -v -s platforms/test_interface.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) CUDA Platform"
@@ -29,6 +31,7 @@ steps:
       source_file_dependencies:
       - vllm/
       - tests/cuda
+      - tests/platforms/test_interface.py
 
 - label: ":nvidia: (H200 MIG 18GB) CUDAGraph"
   device: h200_18gb
