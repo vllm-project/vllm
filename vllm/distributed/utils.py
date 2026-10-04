@@ -228,7 +228,7 @@ class StatelessProcessGroup:
     def send_obj(self, obj: Any, dst: int):
         """Send an object to a destination rank."""
         self.expire_data()
-        key = f"send_to/{dst}/{self.send_dst_counter[dst]}"
+        key = f"send_to/{self.rank}/{dst}/{self.send_dst_counter[dst]}"
         self.store.set(key, pickle.dumps(obj))
         self.send_dst_counter[dst] += 1
         self.entries.append((key, time.time()))
@@ -247,7 +247,7 @@ class StatelessProcessGroup:
     def recv_obj(self, src: int) -> Any:
         """Receive an object from a source rank."""
         obj = pickle.loads(
-            self.store.get(f"send_to/{self.rank}/{self.recv_src_counter[src]}")
+            self.store.get(f"send_to/{src}/{self.rank}/{self.recv_src_counter[src]}")
         )
         self.recv_src_counter[src] += 1
         return obj
@@ -301,14 +301,14 @@ class StatelessProcessGroup:
     def send(self, tensor: torch.Tensor, dst: int):
         """Send a tensor to a destination rank."""
         self.expire_data()
-        key = f"send_tensor/{dst}/{self.send_dst_counter[dst]}"
+        key = f"send_tensor/{self.rank}/{dst}/{self.send_dst_counter[dst]}"
         self.store.set(key, pickle.dumps(tensor))
         self.send_dst_counter[dst] += 1
         self.entries.append((key, time.time()))
 
     def recv(self, tensor: torch.Tensor, src: int) -> torch.Tensor:
         """Receive a tensor from a source rank."""
-        key = f"send_tensor/{self.rank}/{self.recv_src_counter[src]}"
+        key = f"send_tensor/{src}/{self.rank}/{self.recv_src_counter[src]}"
         received = pickle.loads(self.store.get(key))
         self.recv_src_counter[src] += 1
         tensor.copy_(received)
