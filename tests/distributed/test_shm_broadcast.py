@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
+import zmq
 
 from vllm.distributed.device_communicators import shm_broadcast
 from vllm.distributed.device_communicators.shm_broadcast import (
@@ -26,6 +27,99 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
+
+
+@pytest.mark.parametrize("local", [True, False], ids=["local", "remote"])
+@pytest.mark.parametrize("writer_side", [True, False], ids=["writer", "reader"])
+@pytest.mark.parametrize("cancel_before", [True, False], ids=["before", "during"])
+def test_ready_handshake_honors_shutdown(local, writer_side, cancel_before):
+    writer = MessageQueue(
+        1, int(local), max_chunk_bytes=1024, max_chunks=1, connect_ip="127.0.0.1"
+    )
+    queue = (
+        writer
+        if writer_side
+        else MessageQueue.create_from_handle(writer.export_handle(), 0)
+    )
+    socket = queue.local_socket if local else queue.remote_socket
+    # Bound cleanup on the unfixed implementation, which blocks in recv().
+    socket.setsockopt(zmq.RCVTIMEO, 1500)
+    entered = threading.Event()
+    finished = threading.Event()
+    errors = []
+
+    def wait():
+        entered.set()
+        try:
+            queue.wait_until_ready()
+        except Exception as exc:
+            errors.append((type(exc), str(exc)))
+        finally:
+            finished.set()
+
+    if cancel_before:
+        queue.shutdown()
+    waiter = threading.Thread(target=wait)
+    waiter.start()
+    try:
+        assert entered.wait(5)
+        if not cancel_before:
+            assert not finished.wait(0.05)
+            queue.shutdown()
+        assert finished.wait(1)
+        assert errors == [(RuntimeError, "cancelled")]
+    finally:
+        waiter.join(3)
+        assert not waiter.is_alive()
+        socket.context.destroy(linger=0)
+        if queue is not writer:
+            writer_socket = writer.local_socket if local else writer.remote_socket
+            writer_socket.context.destroy(linger=0)
+
+
+@pytest.mark.parametrize("local", [True, False], ids=["local", "remote"])
+def test_ready_handshake_allows_message_exchange(local):
+    writer = MessageQueue(
+        1, int(local), max_chunk_bytes=1024, max_chunks=1, connect_ip="127.0.0.1"
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), 0)
+    writer_socket = writer.local_socket if local else writer.remote_socket
+    reader_socket = reader.local_socket if local else reader.remote_socket
+    writer_socket.setsockopt(zmq.RCVTIMEO, 5000)
+    reader_socket.setsockopt(zmq.RCVTIMEO, 5000)
+    errors = []
+    messages = []
+
+    def exchange(queue, writing):
+        try:
+            queue.wait_until_ready()
+            if writing:
+                queue.enqueue("ready", timeout=5)
+            else:
+                messages.append(queue.dequeue(timeout=5))
+        except Exception as exc:
+            errors.append(str(exc))
+
+    threads = [
+        threading.Thread(target=exchange, args=(writer, True)),
+        threading.Thread(target=exchange, args=(reader, False)),
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        for thread in threads:
+            thread.join(5)
+        assert all(not thread.is_alive() for thread in threads)
+        assert not errors
+        assert messages == ["ready"]
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+        for thread in threads:
+            thread.join(5)
+        assert all(not thread.is_alive() for thread in threads)
+        writer_socket.context.destroy(linger=0)
+        reader_socket.context.destroy(linger=0)
 
 
 def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
