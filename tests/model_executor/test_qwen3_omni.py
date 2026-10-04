@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -225,6 +226,129 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     assert len(updates) == expected_total, (
         f"Expected {expected_total} total tokens, got {len(updates)}"
     )
+
+
+def _qwen3_omni_audio_processor(
+    mock_qwen3_omni_config,
+    mock_processor,
+    mock_tokenizer,
+    mock_image_processor,
+    processor_cls=None,
+):
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeThinkerDummyInputsBuilder,
+        Qwen3OmniMoeThinkerMultiModalProcessor,
+        Qwen3OmniMoeThinkerProcessingInfo,
+    )
+
+    if processor_cls is None:
+        processor_cls = Qwen3OmniMoeThinkerMultiModalProcessor
+
+    mock_ctx = Mock(spec=InputProcessingContext)
+    mock_ctx.tokenizer = mock_tokenizer
+    mm_config = Mock()
+    mm_config.enable_mm_embeds = False
+    mm_config.allow_missing_mm_embeddings = False
+    mock_ctx.model_config = Mock(multimodal_config=mm_config)
+    mock_ctx.get_merged_mm_kwargs = Mock(return_value={})
+
+    info = Qwen3OmniMoeThinkerProcessingInfo(mock_ctx)
+    info._get_expected_hidden_size = lambda: 100
+    info.get_hf_config = Mock(return_value=mock_qwen3_omni_config)
+    info.get_hf_processor = Mock(return_value=mock_processor)
+    info.get_tokenizer = Mock(return_value=mock_tokenizer)
+    info.get_image_processor = Mock(return_value=mock_image_processor)
+
+    dummy_inputs = Qwen3OmniMoeThinkerDummyInputsBuilder(info)
+    return processor_cls(info, dummy_inputs)
+
+
+def test_over_budget_audio_is_rejected(
+    mock_qwen3_omni_config,
+    mock_processor,
+    mock_tokenizer,
+    mock_image_processor,
+):
+    processor = _qwen3_omni_audio_processor(
+        mock_qwen3_omni_config,
+        mock_processor,
+        mock_tokenizer,
+        mock_image_processor,
+    )
+    max_samples = int(mock_processor.feature_extractor.n_samples)
+    audio = np.zeros(max_samples + 1, dtype=np.float32)
+    mm_items = processor.info.parse_mm_data({"audio": [audio]}, validate=False)
+
+    with pytest.raises(ValueError, match="exceeds the profiled maximum"):
+        processor._get_hf_mm_inputs(mm_items, {})
+
+
+def test_profiled_max_audio_is_accepted(
+    mock_qwen3_omni_config,
+    mock_processor,
+    mock_tokenizer,
+    mock_image_processor,
+):
+    processor = _qwen3_omni_audio_processor(
+        mock_qwen3_omni_config,
+        mock_processor,
+        mock_tokenizer,
+        mock_image_processor,
+    )
+    max_samples = int(mock_processor.feature_extractor.n_samples)
+    audio = np.zeros(max_samples, dtype=np.float32)
+    mm_items = processor.info.parse_mm_data({"audio": [audio]}, validate=False)
+
+    hf_inputs = processor._get_hf_mm_inputs(mm_items, {})
+    assert len(hf_inputs.hf_data["audio"]) == 1
+    assert hf_inputs.hf_data["audio"][0].shape[-1] >= max_samples
+
+
+def test_tuple_audio_over_budget_is_rejected(
+    mock_qwen3_omni_config,
+    mock_processor,
+    mock_tokenizer,
+    mock_image_processor,
+):
+    processor = _qwen3_omni_audio_processor(
+        mock_qwen3_omni_config,
+        mock_processor,
+        mock_tokenizer,
+        mock_image_processor,
+    )
+    sampling_rate = int(mock_processor.feature_extractor.sampling_rate)
+    max_samples = int(mock_processor.feature_extractor.n_samples)
+    audio = np.zeros(max_samples + 1, dtype=np.float32)
+    mm_items = processor.info.parse_mm_data(
+        {"audio": [(audio, sampling_rate)]},
+        validate=False,
+    )
+
+    with pytest.raises(ValueError, match="exceeds the profiled maximum"):
+        processor._get_hf_mm_inputs(mm_items, {})
+
+
+def test_asr_processor_rejects_over_budget_audio(
+    mock_qwen3_omni_config,
+    mock_processor,
+    mock_tokenizer,
+    mock_image_processor,
+):
+    from vllm.model_executor.models.qwen3_asr import Qwen3ASRMultiModalProcessor
+
+    processor = _qwen3_omni_audio_processor(
+        mock_qwen3_omni_config,
+        mock_processor,
+        mock_tokenizer,
+        mock_image_processor,
+        processor_cls=Qwen3ASRMultiModalProcessor,
+    )
+    max_samples = int(mock_processor.feature_extractor.n_samples)
+    audio = np.zeros(max_samples + 1, dtype=np.float32)
+    mm_items = processor.info.parse_mm_data({"audio": [audio]}, validate=False)
+
+    with pytest.raises(ValueError, match="exceeds the profiled maximum"):
+        processor._get_hf_mm_inputs(mm_items, {})
 
 
 @pytest.mark.skip_global_cleanup
