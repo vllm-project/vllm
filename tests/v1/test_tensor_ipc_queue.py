@@ -976,6 +976,35 @@ def test_concurrent_senders_interleaved_buffer():
         assert len(tensors) == 0, f"Sender {sid} buffer not empty: {tensors}"
 
 
+def test_stale_message_discard_warning(caplog_vllm):
+    """Test that discarding stale buffered messages emits a well-formed warning.
+
+    The discard warning has two placeholders (tensor count and sender id);
+    if the arguments do not match, the record fails to format at emit time
+    and the discard goes unreported.
+    """
+    tensor_queue = _MP_CTX.Queue()
+    receiver = TensorIpcReceiver(tensor_queue)
+
+    stale_tensors = {0: torch.randn(2, 3), 1: torch.randn(2, 3)}
+    live_tensor = torch.randn(4, 5)
+    sender = receiver._tensor_buffers["stale_sender"]
+    sender.tensors[1] = stale_tensors
+    sender.tensors[3] = {0: live_tensor}
+
+    result = receiver(
+        "float32",
+        live_tensor.shape,
+        {"sender_id": "stale_sender", "message_id": 3, "tensor_id": 0},
+    )
+
+    # The requested tensor is returned and the stale message is discarded.
+    assert torch.equal(result, live_tensor)
+    assert 1 not in sender.tensors
+
+    assert "Discarding 2 stale tensors from sender stale_sender" in caplog_vllm.text
+
+
 def test_mixed_cpu_cuda_with_ipc_enabled():
     """Test that encoder is configured correctly for IPC with all tensor types."""
     if not torch.cuda.is_available():
