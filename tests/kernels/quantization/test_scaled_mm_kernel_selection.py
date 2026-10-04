@@ -6,7 +6,9 @@ Run `pytest tests/kernels/quantization/test_scaled_mm_kernel_selection.py`.
 """
 
 import inspect
+import sys
 from abc import ABC
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -19,6 +21,7 @@ from vllm.model_executor.kernels.linear import (
     HummingFP8ScaledMMLinearKernel,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
+    RowWiseTorchFP8ScaledMMLinearKernel,
     ScaledMMLinearKernel,
     _get_linear_backend,
     _resolve_backend_kernels,
@@ -26,6 +29,7 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm import pytorch as pytorch_scaled_mm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
@@ -100,6 +104,27 @@ def test_is_supported_is_abstract():
     """Test that is_supported() is properly defined as abstract."""
     assert issubclass(ScaledMMLinearKernel, ABC)
     assert hasattr(ScaledMMLinearKernel, "is_supported")
+
+
+@pytest.mark.parametrize("is_rdna4", [True, False])
+def test_rowwise_torch_fp8_scaled_mm_rdna4_support(
+    is_rdna4: bool, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(pytorch_scaled_mm.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        pytorch_scaled_mm, "_supports_torch_fp8_scaled_mm", lambda: True
+    )
+    rocm_module = ModuleType("vllm.platforms.rocm")
+    rocm_module.on_rdna4 = lambda: is_rdna4
+    monkeypatch.setitem(sys.modules, "vllm.platforms.rocm", rocm_module)
+
+    supported, reason = RowWiseTorchFP8ScaledMMLinearKernel.is_supported()
+
+    assert supported is not is_rdna4
+    if is_rdna4:
+        assert reason == "not supported on RDNA4."
+    else:
+        assert reason is None
 
 
 def test_cpu_kernel_implements_is_supported():
