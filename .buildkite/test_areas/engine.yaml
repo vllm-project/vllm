@@ -39,6 +39,7 @@ steps:
 - label: ":nvidia: (L4) V1 Engine"
   key: engine-1-gpu
   device: l4
+  automatic_shard: true
   num_devices: 1
   timeout_in_minutes: 45
   source_file_dependencies:
@@ -108,6 +109,7 @@ steps:
 - label: ":nvidia: (H200 MIG 18GB) E2E Core"
   device: h200_18gb
   key: e2e-core-1-gpu
+  automatic_shard: true
   timeout_in_minutes: 65
   source_file_dependencies:
     - vllm/v1/
@@ -162,6 +164,7 @@ steps:
   device: h100
   num_devices: 2
   key: replayssm-e2e
+  automatic_shard: true
   timeout_in_minutes: 90
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:

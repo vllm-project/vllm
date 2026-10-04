@@ -82,6 +82,7 @@ steps:
 
 - label: ":nvidia: (H100) Distributed Compile"
   key: distributed-compile-unit-tests-2xh100
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"
   device: h100
