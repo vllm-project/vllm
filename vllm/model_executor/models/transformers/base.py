@@ -29,13 +29,14 @@ import torch
 import transformers
 from packaging.version import Version
 from torch import nn
-from transformers import AutoModel, PretrainedConfig
+from transformers import AutoModel, PreTrainedConfig
 from transformers.conversion_mapping import (
     WeightRenaming,
+    get_checkpoint_conversion_mapping,
     get_model_conversion_mapping,
 )
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import DynamicArgDims, support_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
@@ -71,11 +72,13 @@ from vllm.model_executor.models.transformers.utils import (
     named_state,
     replace_conv_class,
     replace_embedding_class,
+    replace_layernorm_class,
     replace_linear_class,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    ShardId,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
@@ -110,10 +113,13 @@ class Base(
     SupportsEagle,
     SupportsEagle3,
 ):
-    embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
+    hf_to_vllm_mapper: WeightsMapper
+
+    # TODO transformers will have a util to get these
+    embedding_modules = {"embed_tokens": "input_embeddings"}
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        super().__init__()
+        nn.Module.__init__(self)
         logger.info("Using Transformers modeling backend.")
 
         self.vllm_config = vllm_config
@@ -179,7 +185,7 @@ class Base(
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
-        self._create_attention_instances()
+        self._create_attention_instances(prefix)
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
@@ -193,8 +199,7 @@ class Base(
         )
 
     def _patch_config(self):
-        """
-        Patch the config to ensure that the model is created correctly:
+        """Patch the config to ensure that the model is created correctly:
 
         - Sets the attention implementation to "vllm" so the attention instances from
         `_create_attention_instances` are used
@@ -249,12 +254,11 @@ class Base(
     def _decorate_cls_for_torch_compile(
         self,
         cls: type["PreTrainedModel"],
-        dynamic_arg_dims: dict[str, int] | None,
+        dynamic_arg_dims: DynamicArgDims | None,
         enable_if: Callable[["VllmConfig"], bool],
         is_encoder: bool,
     ):
-        """
-        Decorate `cls` to indicate to vLLM that it supports torch compile.
+        """Decorate `cls` to indicate to vLLM that it supports torch compile.
 
         Args:
             cls: The PreTrainedModel class to decorate.
@@ -265,6 +269,7 @@ class Base(
             enable_if: A function which takes in the vLLM config and returns whether
                 torch compile should be enabled for this class.
             is_encoder: Whether the class being decorated is an encoder.
+
         """
         logger.debug(
             "Decorating `%s` as %s for torch compile with dynamic_arg_dims of %s",
@@ -285,7 +290,7 @@ class Base(
         self._decorate_cls_for_torch_compile(
             cls=self._pre_trained_model_classes.decoder,
             # Applied to a PreTrainedModel so the batch dimension will exist
-            dynamic_arg_dims=dict[str, int](
+            dynamic_arg_dims=DynamicArgDims(
                 input_ids=1,  # shape: [1, seq_len]
                 inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
                 position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
@@ -295,8 +300,7 @@ class Base(
         )
 
     def _create_hf_to_vllm_mapper(self):
-        """
-        Create a WeightsMapper to map checkpoint weight names to module qualnames.
+        """Create a WeightsMapper to map checkpoint weight names to module qualnames.
 
         This handles:
 
@@ -305,11 +309,17 @@ class Base(
         - Checkpoints saved with no base model prefix
         - Any quantization config specific mappings
         """
-        self.hf_to_vllm_mapper = WeightsMapper()
-        orig_to_new_renaming = self.hf_to_vllm_mapper.orig_to_new_renaming
-        orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
+        orig_to_new_renaming: list[WeightRenaming] = []
+        orig_to_new_regex: dict[re.Pattern, str | None] = {}
 
-        for mapping in get_model_conversion_mapping(self.model):
+        mappings = get_model_conversion_mapping(self.model)
+        # Ensure layers that are part of the model, but not AutoModel, get their mapping
+        instantiated = {type(m).__name__ for m in self.model.modules()}
+        for arch in self.config.architectures or []:
+            if arch not in instantiated:
+                mappings.extend(get_checkpoint_conversion_mapping(arch) or [])
+
+        for mapping in mappings:
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
@@ -343,22 +353,23 @@ class Base(
         nested_lm_head_pattern = re.compile(r"^model\.(.+\.)*(lm_head.+)")
         orig_to_new_regex[nested_lm_head_pattern] = r"\2"
 
+        self.hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_renaming=orig_to_new_renaming,
+            orig_to_new_regex=orig_to_new_regex,
+        )
+
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
 
     def _get_tie_word_embeddings(self):
-        """
-        Check if the model has tied word embeddings.
-        """
+        """Check if the model has tied word embeddings."""
         # Models created with Transformers v4 and v5 will store this in different places
         tie_word_embeddings_v4 = getattr(self.text_config, "tie_word_embeddings", False)
         tie_word_embeddings_v5 = getattr(self.config, "tie_word_embeddings", False)
         return tie_word_embeddings_v4 or tie_word_embeddings_v5
 
     def pipeline_parallel(self):
-        """
-        Apply the model's pipeline parallelization plan.
-        """
+        """Apply the model's pipeline parallelization plan."""
         if self.pp_group.world_size <= 1:
             return
 
@@ -377,8 +388,8 @@ class Base(
                 "modeling backend will infer the split from the layers of %s in order "
                 "of declaration and keep parameter-free modules on every rank. This "
                 "may fail if the model's structure is non-standard. %s",
-                type(self.model),
-                type(module),
+                type(self.model).__name__,
+                type(module).__name__,
                 tip,
             )
 
@@ -431,9 +442,9 @@ class Base(
     def _vocab_embeddings(self) -> set[nn.Embedding]:
         """The `nn.Embedding`s in `self.model` which hold a vocab table."""
 
-        def vocab_sizes(config: PretrainedConfig):
+        def vocab_sizes(config: PreTrainedConfig):
             for key, value in vars(config).items():
-                if isinstance(value, PretrainedConfig):
+                if isinstance(value, PreTrainedConfig):
                     yield from vocab_sizes(value)
                 elif "vocab_size" in key and isinstance(value, int):
                     yield value
@@ -464,6 +475,7 @@ class Base(
         - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
         - Vocab `nn.Embedding`s with vLLM's `VocabParallelEmbedding`
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
+        - `nn.LayerNorm` with vLLM's `LayerNorm`
         """
         tp_plan = self.model.tp_plan or {}
 
@@ -476,7 +488,7 @@ class Base(
                 "backend will shard the model the best it can during graph fusion and "
                 "replicate the rest. This may be suboptimal or fail if the model does "
                 "not fuse cleanly. %s",
-                type(self.model),
+                type(self.model).__name__,
                 tip,
             )
 
@@ -486,6 +498,8 @@ class Base(
         fusers = Fusers(self.model, self.vllm_config)
 
         vocab_embeddings = self._vocab_embeddings()
+
+        orig_to_new_stacked: dict[str, tuple[str, ShardId]] = {}
 
         def register_fusion(fuser: BaseFuser, prefix: str, module: nn.Module):
             """Register a fused layer's mappings just before it is built."""
@@ -504,8 +518,7 @@ class Base(
                     )
                 self.attention_fusers[index] = (prefix, fuser)
 
-            orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
-            self.hf_to_vllm_mapper.orig_to_new_stacked.update(orig_to_new_stacked)
+            orig_to_new_stacked.update(fuser.orig_to_new_stacked(prefix))
 
             packed_modules_mapping = fuser.packed_modules_mapping
             self.packed_modules_mapping.update(packed_modules_mapping)
@@ -553,6 +566,8 @@ class Base(
                     new_module = replace_embedding_class(
                         child_module, self.quant_config, prefix=qual_name
                     )
+                elif isinstance(child_module, nn.LayerNorm):
+                    new_module = replace_layernorm_class(child_module)
                 elif child_module_fusers := fusers[child_module]:
                     for fuser in child_module_fusers:
                         register_fusion(fuser, qual_name, child_module)
@@ -570,7 +585,9 @@ class Base(
 
         _recursive_replace(self.model, prefix="model")
 
-    def _create_attention_instances(self):
+        self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
+
+    def _create_attention_instances(self, prefix: str = ""):
         """Create `Attention` instances to inform KV cache allocation."""
         text_config = self.text_config
         attn_cls = self._get_attn_cls()
@@ -595,14 +612,17 @@ class Base(
 
         for i in range(start, end):
             if i not in self.attention_fusers:
-                in_range = layer_types and i < len(layer_types)
-                layer = f"{i} ({layer_types[i]})" if in_range else str(i)
+                layer = (
+                    f"{i} ({layer_types[i]})"
+                    if layer_types and i < len(layer_types)
+                    else str(i)
+                )
                 raise ValueError(
                     f"Layer {layer} does not dispatch through the Transformers "
                     "attention interface and vLLM has no other way to handle it."
                 )
-            prefix, attn_fuser = self.attention_fusers[i]
-            attn_module = self.get_submodule(prefix)
+            attn_prefix, attn_fuser = self.attention_fusers[i]
+            attn_module = self.get_submodule(attn_prefix)
 
             # `[i]` is the whole-model config unless the checkpoint is
             # heterogeneous, in which case it is this layer's own geometry.
@@ -620,17 +640,18 @@ class Base(
                 scale=scale,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
-                prefix=f"{i}.attn",
+                prefix=maybe_prefix(prefix, f"{attn_prefix}.{VLLM_ATTN_ATTR}"),
             )
 
             if attn_cls is MLAAttention:
                 mla_fuser = next(
-                    (f for f in self.fusers[prefix] if isinstance(f, MLAFuser)), None
+                    (f for f in self.fusers[attn_prefix] if isinstance(f, MLAFuser)),
+                    None,
                 )
                 if mla_fuser is None:
                     raise ValueError(
-                        f"Layer {i} ({prefix}) did not fuse as MLA, but the rest of "
-                        "the model did, so its latent KV cache cannot be allocated."
+                        f"Layer {i} ({attn_prefix}) did not fuse as MLA, but the rest "
+                        "of the model did, so its latent KV cache cannot be allocated."
                     )
                 dims = get_mla_dims(self.model_config)
                 kwargs.update(
@@ -678,10 +699,8 @@ class Base(
         # vLLM does not support encoder-decoder models, so if any encoder layer is
         # found in a text only model, we assume the whole model is an encoder model
         if has_encoder(self.model) and not is_multimodal(self.config):
-            self.check_version("5.0.0", "encoder models support")
             return EncoderOnlyAttention
         if self.model_config.use_mla:
-            self.check_version("5.15.0.dev0", "optimized MLA support")
             if any(
                 isinstance(fuser, MLAFuser)
                 for fusers in self.fusers.values()
@@ -697,8 +716,7 @@ class Base(
         return Attention
 
     def init_parameters(self, module: nn.Module, dtype: torch.dtype | None = None):
-        """
-        If a `parameter` is on the `meta` device, then its parent
+        """If a `parameter` is on the `meta` device, then its parent
         `module` is the original module created by:
 
         ```python
@@ -808,7 +826,6 @@ class Base(
             )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.check_version("5.2.0", "Eagle3 support")
         from transformers.utils.output_capturing import (
             OutputRecorder,
             maybe_install_capturing_hooks,
