@@ -46,6 +46,7 @@ def prompt_embeds_processor():
         supports_multimodal_inputs=False,
     )
     model_config.get_vocab_size.return_value = 32
+    model_config.get_hidden_size.return_value = 4
     model_config.try_get_generation_config.return_value = {}
     config = Mock(
         model_config=model_config,
@@ -55,6 +56,22 @@ def prompt_embeds_processor():
     renderer = Mock(tokenizer=None)
     renderer.get_eos_token_id.return_value = None
     return InputProcessor(config, renderer, mm_registry=Mock())
+
+
+@pytest.mark.parametrize("shape", [(), (3,), (3, 0), (3, 3), (3, 5), (1, 3, 4)])
+def test_prompt_embeds_shape_rejected_before_engine_submission(
+    prompt_embeds_processor, shape
+):
+    """Malformed embeddings must not reach the worker's fixed-width buffers."""
+    with pytest.raises(VLLMValidationError, match="prompt_embeds") as exc_info:
+        prompt_embeds_processor.process_inputs(
+            "invalid",
+            embeds_input(torch.zeros(shape)),
+            SamplingParams(max_tokens=1),
+            ("generate",),
+        )
+
+    assert exc_info.value.parameter == "prompt_embeds"
 
 
 @pytest.mark.parametrize("mask_len", [0, 1, 2, 4])
