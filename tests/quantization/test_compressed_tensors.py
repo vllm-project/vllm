@@ -5,6 +5,7 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -16,6 +17,7 @@ from compressed_tensors.quantization import (
     QuantizationType,
 )
 
+import vllm.model_executor.layers.attention.attention as attention_module
 from tests.models.utils import check_logprobs_close
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm.config import set_current_vllm_config
@@ -28,6 +30,9 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import (
+    _resolve_kv_cache_dtype_from_quant_config,
+)
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
@@ -400,6 +405,63 @@ def test_compressed_tensors_w8a8_fp8_moe_forwards_swiglu_params():
     assert quant_config.gemm1_alpha == 1.702
     assert quant_config.gemm1_beta is None
     assert quant_config.gemm1_clamp_limit == 7.0
+
+
+KV_CACHE_SCHEME = {
+    "num_bits": 8,
+    "type": "float",
+    "strategy": "tensor",
+    "symmetric": True,
+    "observer": "static_minmax",
+    "dynamic": False,
+}
+
+
+@pytest.mark.parametrize(
+    (
+        "is_rocm",
+        "supports_fp8",
+        "requested_dtype",
+        "has_kv_cache_scheme",
+        "expected_dtype",
+        "should_warn",
+    ),
+    [
+        (True, False, "auto", True, "auto", True),
+        (True, True, "auto", True, "fp8", False),
+        (False, False, "auto", True, "fp8", False),
+        (True, False, "fp8", True, "fp8", False),
+        (True, False, "bfloat16", True, "bfloat16", False),
+        (True, False, "auto", False, "auto", False),
+    ],
+)
+def test_compressed_tensors_fp8_kv_cache_auto_selection(
+    monkeypatch,
+    is_rocm: bool,
+    supports_fp8: bool,
+    requested_dtype: str,
+    has_kv_cache_scheme: bool,
+    expected_dtype: str,
+    should_warn: bool,
+) -> None:
+    platform = SimpleNamespace(
+        is_rocm=lambda: is_rocm,
+        supports_fp8=lambda: supports_fp8,
+    )
+    monkeypatch.setattr(attention_module, "current_platform", platform)
+    warning_once = Mock()
+    monkeypatch.setattr(attention_module.logger, "warning_once", warning_once)
+    kv_cache_scheme = KV_CACHE_SCHEME if has_kv_cache_scheme else None
+
+    assert (
+        _resolve_kv_cache_dtype_from_quant_config(requested_dtype, kv_cache_scheme)
+        == expected_dtype
+    )
+    if should_warn:
+        warning_once.assert_called_once()
+        assert "--kv-cache-dtype fp8" in warning_once.call_args.args[0]
+    else:
+        warning_once.assert_not_called()
 
 
 @pytest.mark.skipif(
