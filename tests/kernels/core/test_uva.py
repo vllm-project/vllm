@@ -96,8 +96,6 @@ def test_staged_write_uses_uva_contents_for_uva_target(device, monkeypatch):
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
 @pytest.mark.parametrize("device", DEVICES)
 def test_staged_write_packed_int32_array(device, monkeypatch):
-    """int32 `array` writes (packed token ids) land like list writes."""
-
     def fail_async_tensor_h2d(*args, **kwargs):
         pytest.fail("UVA-backed targets should not copy write contents to the GPU")
 

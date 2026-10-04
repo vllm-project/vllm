@@ -184,8 +184,6 @@ class StagedWriteTensor:
         self._staged_write_starts: list[int] = []
         self._staged_write_contents: list[int | float] = []
         self._staged_write_cu_lens: list[int] = []
-        # Contents staged before `_staged_write_contents` when a write brings an
-        # int32 `array` (UVA contents only; see `stage_write`).
         self._staged_write_chunks: list[list[int | float] | np.ndarray] = []
         self._staged_write_len = 0
 
@@ -212,8 +210,6 @@ class StagedWriteTensor:
             and self.dtype == torch.int32
             and self.write_contents is not None
         ):
-            # Packed token ids (NewRequestData.pack_token_ids): numpy copies them
-            # into the staging buffer at apply time.
             self._staged_write_chunks.append(self._staged_write_contents)
             self._staged_write_chunks.append(np.frombuffer(x, dtype=np.int32))
             self._staged_write_contents = []

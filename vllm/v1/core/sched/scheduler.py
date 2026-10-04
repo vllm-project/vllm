@@ -82,9 +82,7 @@ logger = init_logger(__name__)
 
 
 def _v2_prefill_token_ids(request: Request) -> list[int]:
-    """The tokens the v2 model runner prefills: the prompt list itself while the
-    request has no output tokens (`_all_token_ids` is then a copy of it), so the
-    two token-id fields of NewRequestData share one list and are sent once."""
+    """Reuse the prompt list while there are no outputs, so it is pickled once."""
     prompt = request.prompt_token_ids
     if (
         prompt is not None

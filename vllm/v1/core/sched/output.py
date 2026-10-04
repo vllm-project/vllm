@@ -55,11 +55,9 @@ class NewRequestData:
     prefill_token_ids: list[int] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
-    # Pickle the token-id lists as int32 arrays (v2 model runner workers), which
-    # copy at memory speed; the scheduler-side object keeps its lists.
+    # Pickle the token-id lists as int32 arrays (v2 model runner).
     pack_token_ids: bool = False
-    # Prompt already packed off the scheduling path (Request.packed_prompt_token_ids);
-    # never pickled itself.
+    # Request.packed_prompt_token_ids; not pickled.
     packed_prompt_token_ids: array | None = None
 
     def __getstate__(self) -> dict:
@@ -96,7 +94,7 @@ class NewRequestData:
         if pack_token_ids:
             packed_prompt = getattr(request, "packed_prompt_token_ids", None)
             if packed_prompt is not None:
-                request.packed_prompt_token_ids = None  # sent once
+                request.packed_prompt_token_ids = None
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,

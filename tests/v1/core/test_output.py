@@ -165,9 +165,7 @@ def test_new_request_data_packs_token_ids(aliased: bool) -> None:
         prefill_token_ids=prefill,
         pack_token_ids=True,
     )
-    # What pickle sends to the workers.
     state = data.__getstate__()
-    # The scheduler-side object keeps its lists.
     assert data.prompt_token_ids is prompt and data.prefill_token_ids is prefill
     assert isinstance(state["prompt_token_ids"], array)
     assert isinstance(state["prefill_token_ids"], array)
@@ -201,8 +199,7 @@ def test_new_request_data_uses_prepacked_prompt() -> None:
     state = data.__getstate__()
     assert state["prompt_token_ids"] is prepacked
     assert state["prefill_token_ids"] is prepacked
-    # The pre-packed copy itself is not sent.
     assert "packed_prompt_token_ids" not in state
-    # A stale pre-packed copy (prompt extended since) is not used.
+    # Stale pre-packed copy (prompt extended since).
     data.packed_prompt_token_ids = array("i", prompt[:10])
     assert data.__getstate__()["prompt_token_ids"].tolist() == prompt

@@ -188,8 +188,7 @@ class Request:
         # Multi-modal related
         self.mm_features = mm_features or []
 
-        # int32 copy of prompt_token_ids for the v2 model runner's NewRequestData,
-        # made by the EngineCore input thread; dropped once scheduled.
+        # int32 prompt_token_ids for NewRequestData, packed in the input thread.
         self.packed_prompt_token_ids: array | None = None
 
         # Read-only views

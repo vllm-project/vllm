@@ -222,9 +222,7 @@ class EngineCore:
 
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
-        # v2 model runner: pack each prompt for NewRequestData in the input thread
-        # (see Request.packed_prompt_token_ids), off the scheduling path. In-process
-        # executors never pickle the scheduler output.
+        # Pack prompts here, off the scheduling path; in-process executors don't pickle.
         self.pack_prompt_token_ids = (
             vllm_config.use_v2_model_runner
             and not vllm_config.model_config.uses_mrope
