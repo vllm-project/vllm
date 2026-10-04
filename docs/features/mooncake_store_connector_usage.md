@@ -203,7 +203,8 @@ are supported; sharing endpoints use the same layout.
 Incremental offloads wait for a common reusable hybrid prefix boundary.
 Attention entries retain their TP-independent Store chunk size, while Mamba
 and GDN entries are complete state snapshots. Lookup exposes a prefix after
-all cache groups required at that boundary are present.
+all cache groups required at that boundary are present. Each Attention page
+requires every Store chunk covering its reusable tokens, across all Store shards.
 
 Attention groups are planned from their per-layer cache specs, including specs
 wrapped by `UniformTypeKVCacheSpecs`. The Store TP and global head-slot count

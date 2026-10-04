@@ -532,6 +532,14 @@ class MooncakeStoreScheduler:
                 return False
             pinned_block_ids.append(block_id)
             remapped_offloads.append((store_group_id, block_id, boundary))
+        # Partial-tail PUTs also read attention chunks, including retry ranges.
+        pinned_block_ids.extend(
+            block_id
+            for store_group_id, group_id in enumerate(self._store_group_ids)
+            if store_group_id not in self._boundary_state_group_ids
+            for block_id in block_ids[group_id]
+            if block_id != NULL_BLOCK_ID
+        )
         pinned_block_ids = list(dict.fromkeys(pinned_block_ids))
 
         pool = self._gpu_block_pool

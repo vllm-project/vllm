@@ -17,6 +17,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.distributed import mooncake_store
 from vllm.distributed.kv_events import KVEventAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     rdma_utils,
@@ -344,6 +345,8 @@ class _FakeKVTransferConfig:
 class _FakeModelConfig:
     model = "test-model"
     use_mla = False
+    enable_sleep_mode = False
+    enable_cumem_allocator = False
 
     def get_num_layers(self, parallel_config) -> int:
         return 1
@@ -500,6 +503,7 @@ def _install_fake_mooncake(monkeypatch, store_instance: MagicMock):
     fake_store_module = types.ModuleType("mooncake.store")
     fake_store_module.MooncakeDistributedStore = lambda: store_instance  # type: ignore[attr-defined]
     fake_store_module.ReplicateConfig = FakeReplicateConfig  # type: ignore[attr-defined]
+    fake_store_module.ObjectDataType = SimpleNamespace(TENSOR=1)  # type: ignore[attr-defined]
     fake_mooncake_module = types.ModuleType("mooncake")
     fake_mooncake_module.store = fake_store_module  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "mooncake", fake_mooncake_module)
@@ -526,6 +530,64 @@ def _patch_worker_runtime(
     monkeypatch.setattr(worker, "get_dcp_group", lambda: dcp_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
     monkeypatch.setattr(worker, "LookupKeyServer", MagicMock())
+
+
+def test_create_mem_pool_returns_none_when_unconfigured():
+    assert worker.MooncakeStoreWorker._create_mem_pool({}, _FakeModelConfig()) is None
+
+
+def test_create_mem_pool_rejects_unknown_pool():
+    with pytest.raises(
+        ValueError,
+        match="Unsupported custom_mem_pool='UNKNOWN'",
+    ):
+        worker.MooncakeStoreWorker._create_mem_pool(
+            {"custom_mem_pool": "unknown"}, _FakeModelConfig()
+        )
+
+
+@pytest.mark.parametrize(
+    "conflicting_option", ["enable_sleep_mode", "enable_cumem_allocator"]
+)
+def test_create_mem_pool_rejects_cumem_conflicts(conflicting_option):
+    model_config = _FakeModelConfig()
+    setattr(model_config, conflicting_option, True)
+
+    with pytest.raises(ValueError, match="custom_mem_pool is incompatible"):
+        worker.MooncakeStoreWorker._create_mem_pool(
+            {"custom_mem_pool": "NVLINK"}, model_config
+        )
+
+
+@pytest.mark.parametrize(
+    ("pool_type", "allocator_name"),
+    [("nvlink", "NVLinkAllocator"), ("barex", "BarexAllocator")],
+)
+def test_create_mem_pool_uses_mooncake_allocator(
+    monkeypatch, pool_type, allocator_name
+):
+    allocator_cls = MagicMock()
+    allocator = allocator_cls.get_allocator.return_value
+    allocator_module = types.ModuleType("mooncake.allocator")
+    setattr(allocator_module, allocator_name, allocator_cls)
+    mooncake_module = types.ModuleType("mooncake")
+    mooncake_module.allocator = allocator_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mooncake", mooncake_module)
+    monkeypatch.setitem(sys.modules, "mooncake.allocator", allocator_module)
+
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 2)
+    mem_pool = MagicMock()
+    mem_pool_ctor = MagicMock(return_value=mem_pool)
+    monkeypatch.setattr(torch.cuda, "MemPool", mem_pool_ctor)
+
+    result = worker.MooncakeStoreWorker._create_mem_pool(
+        {"custom_mem_pool": pool_type}, _FakeModelConfig()
+    )
+
+    assert result is mem_pool
+    allocator_cls.get_allocator.assert_called_once_with(torch.device("cuda", 2))
+    allocator.allocator.assert_called_once_with()
+    mem_pool_ctor.assert_called_once_with(allocator.allocator.return_value)
 
 
 def test_pool_key_to_string_without_prefix_is_unchanged():
@@ -688,7 +750,7 @@ def test_pool_key_cache_prefix_namespaces_and_disambiguates():
 def test_default_local_buffer_size_matches_pr40900():
     """PR-40900 shipped a 4 GiB default for local_buffer_size; the dual-mode
     patch preserves it (and the JSON key) so unchanged PR-40900 configs work."""
-    assert worker.DEFAULT_LOCAL_BUFFER_SIZE == 4 * 1024**3
+    assert mooncake_store.DEFAULT_LOCAL_BUFFER_SIZE == 4 * 1024**3
 
 
 def test_get_requester_local_hostname_prefers_override(monkeypatch):
@@ -1635,7 +1697,7 @@ def test_store_sending_thread_reports_job_when_the_preamble_raises():
     # every dequeue leaves through the same exit.
     thread = _make_store_sending_thread(MagicMock())
     req = _make_store_req("req-a", [b"a0", b"a1"])
-    req.token_len_chunk = None  # type: ignore[assignment]
+    req.token_len_chunk = None
 
     with contextlib.suppress(TypeError):
         _run_store_req(thread, req)
@@ -2394,15 +2456,40 @@ def test_worker_init_excludes_nonprefix_cache_groups(monkeypatch):
     assert [db.block_size for db in store_worker.token_dbs] == [800, 800]
 
 
+def _make_two_full_attention_groups_kv_cache_config():
+    """Two full-attention groups with different block sizes: no hybrid
+    layers, but block-level failure reporting is still unsupported."""
+    return KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full0"],
+                FullAttentionSpec(
+                    block_size=800, num_kv_heads=8, head_size=64, dtype=None
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["full1"],
+                FullAttentionSpec(
+                    block_size=1600, num_kv_heads=8, head_size=64, dtype=None
+                ),
+            ),
+        ],
+    )
+
+
 @pytest.mark.parametrize(
-    ("disable_hybrid_kv_cache_manager", "expected_is_hma_required"),
+    ("make_config", "expected_is_hma_required"),
     [
-        (True, False),
-        (False, True),
+        (lambda: _make_qsa_hybrid_kv_cache_config(), True),
+        (lambda: _make_two_full_attention_groups_kv_cache_config(), True),
+        (lambda: _make_kv_cache_config(block_size=800), False),
     ],
+    ids=["hybrid", "two-full-attention-groups", "single-group"],
 )
 def test_worker_is_hma_required_from_kv_cache_groups(
-    monkeypatch, disable_hybrid_kv_cache_manager, expected_is_hma_required
+    monkeypatch, make_config, expected_is_hma_required
 ):
     store = MagicMock()
     store.setup.return_value = 0
@@ -2413,16 +2500,12 @@ def test_worker_is_hma_required_from_kv_cache_groups(
         "load_from_config",
         staticmethod(lambda: _make_config()),
     )
-    vllm_config = _make_vllm_config(
-        disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager
-    )
+    vllm_config = _make_vllm_config()
     vllm_config.cache_config.block_size = 800
     vllm_config.cache_config.enable_prefix_caching = True
     vllm_config.cache_config.prefix_match_unit = None
 
-    store_worker = worker.MooncakeStoreWorker(
-        vllm_config, _make_qsa_hybrid_kv_cache_config()
-    )
+    store_worker = worker.MooncakeStoreWorker(vllm_config, make_config())
 
     assert store_worker._is_hma_required is expected_is_hma_required
 
@@ -3202,6 +3285,7 @@ def test_requester_worker_group_semantics_string_true_enables(
     fake_store_module = types.ModuleType("mooncake.store")
     fake_store_module.MooncakeDistributedStore = lambda: store  # type: ignore[attr-defined]
     fake_store_module.ReplicateConfig = FakeReplicateConfig  # type: ignore[attr-defined]
+    fake_store_module.ObjectDataType = SimpleNamespace(TENSOR=1)  # type: ignore[attr-defined]
     fake_mooncake_module = types.ModuleType("mooncake")
     fake_mooncake_module.store = fake_store_module  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "mooncake", fake_mooncake_module)
@@ -4265,6 +4349,56 @@ def test_lookup_rejects_boundary_missing_one_mamba_shard():
     assert worker.lookup(33, [b"h0", b"h1"]).hit_length == 0
 
 
+@pytest.mark.parametrize("mamba_block_size", [4, 16])
+@pytest.mark.parametrize("missing_chunk, expected_hit", [(None, 32), (1, 0), (5, 16)])
+def test_lookup_requires_all_attention_chunks_in_page(
+    mamba_block_size, missing_chunk, expected_hit
+):
+    """A page-end key cannot hide an absent interior Store chunk."""
+    worker = _make_bare_worker(block_size=16)
+    worker.hash_block_size = 4
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["attention"],
+            FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None),
+        ),
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=mamba_block_size,
+                shapes=((1, 1),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        ),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=chunk_size,
+            hash_block_size=4,
+        )
+        for group_id, chunk_size in enumerate((4, mamba_block_size))
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups, scheduler_block_size=16, hash_block_size=4
+    )
+    _refresh_group_tp_replication_factors(worker)
+    hashes = [BlockHash(f"h{i}".encode()) for i in range(8)]
+    present = {
+        f"@group:{group_id}@{block_hash.hex()}"
+        for group_id in range(2)
+        for index, block_hash in enumerate(hashes)
+        if (group_id == 0 and index != missing_chunk)
+        or (group_id == 1 and index in (3, 7))
+    }
+    worker.store.batch_is_exist.side_effect = lambda keys: [
+        int(any(key.endswith(suffix) for suffix in present)) for key in keys
+    ]
+
+    assert worker.lookup(33, hashes).hit_length == expected_hit
+
+
 def test_lookup_requires_all_dcp_rank_namespaces():
     worker = _make_bare_worker(block_size=16)
     worker.tp_size = 4
@@ -4359,6 +4493,44 @@ def test_lookup_full_hit_with_eagle_pops_once_not_twice():
     # and return 32.
     assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]).hit_length == 48
     assert worker.store.batch_is_exist.call_count == 1
+
+
+def test_lookup_skips_tail_key_for_empty_chunked_local_window():
+    from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec
+
+    worker = _make_bare_worker(block_size=16)
+    worker._kv_cache_groups.append(
+        KVCacheGroupSpec(
+            ["local"],
+            ChunkedLocalAttentionSpec(
+                block_size=16,
+                num_kv_heads=8,
+                head_size=64,
+                dtype=None,
+                attention_chunk_size=32,
+            ),
+        )
+    )
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=16,
+            hash_block_size=16,
+        )
+        for group_id in range(2)
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups, scheduler_block_size=16, hash_block_size=16
+    )
+    _refresh_group_tp_replication_factors(worker)
+    worker.store.batch_is_exist.side_effect = lambda keys: [
+        int("@group:0@" in key) for key in keys
+    ]
+
+    result = worker.lookup(33, [BlockHash(b"h0"), BlockHash(b"h1")])
+
+    assert result.hit_length == 32
+    assert result.tail_key_boundaries == (TailKeyBoundary(0, 32),)
 
 
 def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
@@ -4932,10 +5104,10 @@ def test_config_defaults_to_embedded():
     """A JSON without explicit mode parses as embedded with 4 GiB segment."""
     cfg = _make_config()
     assert cfg.mode == "embedded"
-    assert cfg.global_segment_size == worker.DEFAULT_GLOBAL_SEGMENT_SIZE
-    assert cfg.local_buffer_size == worker.DEFAULT_LOCAL_BUFFER_SIZE
+    assert cfg.global_segment_size == mooncake_store.DEFAULT_GLOBAL_SEGMENT_SIZE
+    assert cfg.local_buffer_size == mooncake_store.DEFAULT_LOCAL_BUFFER_SIZE
     assert cfg.enable_offload is False
-    assert cfg.tenant_id == worker.DEFAULT_TENANT_ID
+    assert cfg.tenant_id == mooncake_store.DEFAULT_TENANT_ID
 
 
 def test_config_pr40900_unchanged(tmp_path):
@@ -4957,7 +5129,7 @@ def test_config_pr40900_unchanged(tmp_path):
     assert cfg.global_segment_size == 4 * 1024**3
     assert cfg.local_buffer_size == 4 * 1024**3
     assert cfg.enable_offload is False
-    assert cfg.tenant_id == worker.DEFAULT_TENANT_ID
+    assert cfg.tenant_id == mooncake_store.DEFAULT_TENANT_ID
 
 
 def test_config_from_file_normalizes_tenant_id(tmp_path):
@@ -4987,7 +5159,7 @@ def test_config_from_file_normalizes_empty_tenant_id_to_default(tmp_path):
 
     cfg = worker.MooncakeStoreConfig.from_file(config_path)
 
-    assert cfg.tenant_id == worker.DEFAULT_TENANT_ID
+    assert cfg.tenant_id == mooncake_store.DEFAULT_TENANT_ID
 
 
 def test_config_from_file_rejects_non_string_tenant_id(tmp_path):
@@ -5139,7 +5311,20 @@ def test_topology_embedded_cpu_only(tmp_path, monkeypatch):
     assert w.disk_offload_buffer_budget_bytes is None
 
 
-def test_topology_forwards_non_default_tenant_id(tmp_path, monkeypatch):
+def _create_store_client_for_tenant_test(consumer):
+    if consumer == "ec":
+        from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_client import (  # noqa: E501
+            create_mooncake_embedding_store_client,
+        )
+
+        return create_mooncake_embedding_store_client()
+    return worker.MooncakeStoreWorker(
+        _make_vllm_config(rank=1), _make_kv_cache_config()
+    )
+
+
+@pytest.mark.parametrize("consumer", ["kv", "ec"])
+def test_topology_forwards_non_default_tenant_id(tmp_path, monkeypatch, consumer):
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
@@ -5160,12 +5345,13 @@ def test_topology_forwards_non_default_tenant_id(tmp_path, monkeypatch):
         ),
     )
 
-    worker.MooncakeStoreWorker(_make_vllm_config(rank=1), _make_kv_cache_config())
+    _create_store_client_for_tenant_test(consumer)
 
     assert store.setup.call_args.kwargs == {"tenant_id": "tenant-a"}
 
 
-def test_non_default_tenant_preserves_setup_type_error(tmp_path, monkeypatch):
+@pytest.mark.parametrize("consumer", ["kv", "ec"])
+def test_non_default_tenant_preserves_setup_type_error(tmp_path, monkeypatch, consumer):
     store = MagicMock()
     setup_error = TypeError(
         "setup(): incompatible function arguments; "
@@ -5191,7 +5377,7 @@ def test_non_default_tenant_preserves_setup_type_error(tmp_path, monkeypatch):
     )
 
     with pytest.raises(TypeError) as exc_info:
-        worker.MooncakeStoreWorker(_make_vllm_config(rank=1), _make_kv_cache_config())
+        _create_store_client_for_tenant_test(consumer)
 
     assert exc_info.value is setup_error
 

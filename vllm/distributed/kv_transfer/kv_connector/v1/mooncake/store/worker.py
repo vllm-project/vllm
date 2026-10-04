@@ -11,7 +11,6 @@ and MooncakeDistributedStore integration.
 """
 
 import dataclasses
-import json
 import math
 import os
 import queue
@@ -20,15 +19,15 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar, cast
 
-import regex as re
 import torch
 import zmq
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import (
     get_dcp_group,
     get_pcp_group,
@@ -69,6 +68,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
     decode_lookup_response,
     encode_lookup_response,
 )
+from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
@@ -82,7 +82,6 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -97,10 +96,6 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from .metrics import MooncakeStoreConnectorStats
 
 logger = init_logger(__name__)
-
-DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
-DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
-DEFAULT_TENANT_ID = "default"
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
 _T = TypeVar("_T")
@@ -255,115 +250,6 @@ DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES = 1280 * 1024 * 1024
 # Mirrors DirectIO alignment in Mooncake's AllocateBatch.
 _DIRECT_IO_ALIGNMENT = 4096
 _DIRECT_IO_PADDING_BYTES = 2 * _DIRECT_IO_ALIGNMENT
-
-
-MooncakeMode = Literal["embedded", "standalone-store"]
-
-
-@dataclass
-class MooncakeStoreConfig:
-    """Configuration for MooncakeDistributedStore.
-
-    ``mode`` selects the topology: ``embedded`` (each rank contributes
-    ``global_segment_size`` in-process) or ``standalone-store`` (rank
-    contributes 0; an external ``mooncake_client`` process owns the pool
-    and the SSD tier).
-    """
-
-    metadata_server: str
-    master_server_address: str
-    protocol: str
-    device_name: str
-    mode: MooncakeMode = "embedded"
-    global_segment_size: int = DEFAULT_GLOBAL_SEGMENT_SIZE
-    local_buffer_size: int = DEFAULT_LOCAL_BUFFER_SIZE
-    enable_offload: bool = False
-    tenant_id: str = DEFAULT_TENANT_ID
-
-    def __post_init__(self) -> None:
-        if self.mode not in ("embedded", "standalone-store"):
-            raise ValueError(f"unknown Mooncake mode: {self.mode!r}")
-        if self.local_buffer_size <= 0:
-            raise ValueError("local_buffer_size must be > 0")
-        if self.mode == "embedded" and self.global_segment_size == 0:
-            raise ValueError("embedded mode requires global_segment_size > 0")
-        if self.mode == "standalone-store" and self.global_segment_size != 0:
-            raise ValueError("standalone-store mode requires global_segment_size == 0")
-
-    @staticmethod
-    def from_file(file_path: str) -> "MooncakeStoreConfig":
-        with open(file_path) as file:
-            config = json.load(file)
-        return MooncakeStoreConfig(
-            metadata_server=config.get("metadata_server", ""),
-            master_server_address=config.get("master_server_address", ""),
-            protocol=config.get("protocol", "rdma"),
-            device_name=config.get("device_name", ""),
-            mode=config.get("mode", "embedded"),
-            global_segment_size=_parse_size(
-                config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
-            ),
-            local_buffer_size=_parse_size(
-                config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)
-            ),
-            enable_offload=bool(config.get("enable_offload", False)),
-            tenant_id=_normalize_tenant_id(config.get("tenant_id", DEFAULT_TENANT_ID)),
-        )
-
-    @staticmethod
-    def load_from_config() -> "MooncakeStoreConfig":
-        config_path = os.getenv("MOONCAKE_CONFIG_PATH")
-        if not config_path:
-            raise ValueError(
-                "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
-            )
-        return MooncakeStoreConfig.from_file(config_path)
-
-
-def _normalize_tenant_id(value: Any) -> str:
-    if value is None:
-        return DEFAULT_TENANT_ID
-    if not isinstance(value, str):
-        raise TypeError(
-            f"tenant_id must be a string or null, got {type(value).__name__}: {value!r}"
-        )
-    tenant_id = value.strip()
-    return tenant_id if tenant_id else DEFAULT_TENANT_ID
-
-
-def _parse_size(value: Any) -> int:
-    """Parse storage size strings with units: GB, MB, KB, B."""
-    if isinstance(value, int):
-        return value
-    if not isinstance(value, str):
-        try:
-            return int(value)
-        except (TypeError, ValueError) as e:
-            raise TypeError(f"Unsupported type for size: {type(value)}") from e
-
-    cleaned = value.strip().lower()
-    if not cleaned:
-        raise ValueError("Size cannot be empty.")
-
-    unit_multipliers = {
-        "gb": 1024**3,
-        "mb": 1024**2,
-        "kb": 1024,
-        "b": 1,
-    }
-    match = re.match(r"^\s*([\d.]+)\s*(gb|mb|kb|b)?\s*$", cleaned)
-    if not match:
-        raise ValueError(f"Invalid format: '{value}'")
-
-    number_str = match.group(1)
-    unit = match.group(2) or "b"
-    multiplier = unit_multipliers[unit]
-
-    try:
-        numeric_value = float(number_str)
-    except ValueError as exc:
-        raise ValueError(f"Invalid numeric value '{number_str}' in: '{value}'") from exc
-    return int(numeric_value * multiplier)
 
 
 def _align_up(value: int, alignment: int) -> int:
@@ -1683,6 +1569,41 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 class MooncakeStoreWorker:
     """Worker-side component for MooncakeStoreConnector."""
 
+    @staticmethod
+    def _create_mem_pool(
+        extra_config: dict[str, Any], model_config: ModelConfig
+    ) -> torch.cuda.MemPool | None:
+        pool_type = str(extra_config.get("custom_mem_pool") or "").upper()
+        if not pool_type:
+            return None
+        if pool_type not in ("NVLINK", "BAREX"):
+            raise ValueError(
+                f"Unsupported custom_mem_pool={pool_type!r}, "
+                "expected 'NVLINK' or 'BAREX'"
+            )
+        if model_config.enable_sleep_mode or model_config.enable_cumem_allocator:
+            raise ValueError(
+                "custom_mem_pool is incompatible with enable_sleep_mode "
+                "or enable_cumem_allocator; CuMemAllocator cannot manage "
+                "allocations from the custom pool."
+            )
+        try:
+            if pool_type == "NVLINK":
+                from mooncake.allocator import NVLinkAllocator as allocator_cls
+            else:  # pool_type == "BAREX"
+                from mooncake.allocator import BarexAllocator as allocator_cls
+        except ImportError as e:
+            raise ImportError(
+                f"custom_mem_pool={pool_type!r} requires "
+                "mooncake-transfer-engine>=0.3.8. Please upgrade Mooncake."
+            ) from e
+
+        device = torch.device("cuda", torch.accelerator.current_device_index())
+        allocator = allocator_cls.get_allocator(device)
+        mem_pool = torch.cuda.MemPool(allocator.allocator())
+        logger.info("Using Mooncake custom memory pool: %s", pool_type)
+        return mem_pool
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1731,13 +1652,7 @@ class MooncakeStoreWorker:
             and not self.can_put
         )
         self.cache_config = vllm_config.cache_config
-        self._is_hma_required = (
-            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            and any(
-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.transfer_groups
-            )
-        )
+        self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
@@ -1747,26 +1662,14 @@ class MooncakeStoreWorker:
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
         store_config = MooncakeStoreConfig.load_from_config()
+        # Validate and create the custom memory pool before initializing the
+        # store so failures cannot leak a partially initialized store handle.
+        self._mem_pool = self._create_mem_pool(extra_config, model_config)
+
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
         local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
-        setup_kwargs: dict[str, str] = {}
-        if store_config.tenant_id != DEFAULT_TENANT_ID:
-            setup_kwargs["tenant_id"] = store_config.tenant_id
-        ret = self.store.setup(
-            local_hostname,
-            store_config.metadata_server,
-            store_config.global_segment_size,
-            store_config.local_buffer_size,
-            store_config.protocol,
-            store_config.device_name,
-            store_config.master_server_address,
-            **setup_kwargs,
-        )
-        if ret != 0:
-            msg = "Initialize MooncakeDistributedStore failed."
-            logger.error(msg)
-            raise RuntimeError(msg)
+        setup_mooncake_store(self.store, store_config, local_hostname)
 
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
@@ -2158,6 +2061,13 @@ class MooncakeStoreWorker:
             layout_cls=MambaStoreLayout,
             schema_fingerprint=schema_fingerprint,
         )
+
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        """Return a context manager for the custom MemPool, or None if
+        no custom pool is configured."""
+        if self._mem_pool is None:
+            return None
+        return torch.cuda.use_mem_pool(self._mem_pool)
 
     def _spec_tp_replication_factor(self, spec: KVCacheSpec) -> int:
         return _spec_tp_replication_factor(
@@ -2595,9 +2505,9 @@ class MooncakeStoreWorker:
             return MooncakeLookupResult(0)
 
         # Build per-(group, hash) candidate keys expanded across rank namespaces.
-        # candidate_meta stores the (group, hash_bytes) for key slice.
+        # candidate_meta stores (group, hash_bytes, end_token) for each key slice.
         candidate_keys: list[str] = []
-        candidate_meta: list[tuple[int, bytes]] = []
+        candidate_meta: list[tuple[int, bytes, int]] = []
         fine_grained = self.coord.enable_partial_hash_hits
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
@@ -2605,34 +2515,25 @@ class MooncakeStoreWorker:
                 continue
             spec_block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
             key_prefixes = self._lookup_key_prefixes[g_idx]
-            if fine_grained:
-                max_units = min(len(block_hashes), token_len // self.hash_block_size)
-                unit_ids: range | list[int] = range(max_units)
-                group_hashes: Sequence[BlockHash] = block_hashes
-            else:
-                lookup_mask = lookup_masks[g_idx]  # type: ignore[index]
-                group_hashes = self.coord.block_hashes_for_spec(
-                    block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
-                )
-                max_chunks = min(len(group_hashes), cdiv(token_len, spec_block_size))
-                mask_limit = (
-                    max_chunks
-                    if lookup_mask is None
-                    else min(max_chunks, len(lookup_mask))
-                )
-                unit_ids = [
-                    chunk_id
-                    for chunk_id in range(mask_limit)
-                    if lookup_mask is None or lookup_mask[chunk_id]
-                ]
-            for chunk_id in unit_ids:
-                h = group_hashes[chunk_id]
+            lookup_mask = None if lookup_masks is None else lookup_masks[g_idx]
+            unit_size = self.hash_block_size if fine_grained else db.chunk_size
+            max_units = (
+                min(token_len, len(block_hashes) * self.hash_block_size) // unit_size
+            )
+            for unit_id in range(max_units):
+                block_id = unit_id * unit_size // spec_block_size
+                if lookup_mask is not None and (
+                    block_id >= len(lookup_mask) or not lookup_mask[block_id]
+                ):
+                    continue
+                end_token = (unit_id + 1) * unit_size
+                h = block_hashes[end_token // self.hash_block_size - 1]
                 hash_hex = h.hex()
                 for key_prefix in key_prefixes:
                     candidate_keys.append(
                         PoolKey.build_key_string(key_prefix, hash_hex)
                     )
-                candidate_meta.append((g_idx, bytes(h)))
+                candidate_meta.append((g_idx, bytes(h), end_token))
 
         if not candidate_keys:
             return MooncakeLookupResult(0)
@@ -2661,17 +2562,28 @@ class MooncakeStoreWorker:
         # shard, replicated groups one namespace per unique KV head).
         exists_set = set()
         pos = 0
-        for g_idx, hash_bytes in candidate_meta:
+        previous_page = None
+        preceding_chunks_present = True
+        for g_idx, hash_bytes, end_token in candidate_meta:
+            spec_block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
+            page = (g_idx, (end_token - 1) // spec_block_size)
+            if page != previous_page:
+                preceding_chunks_present = True
+                previous_page = page
             count = len(self._lookup_key_prefixes[g_idx])
-            if all(res[pos + j] == 1 for j in range(count)):
+            present = all(res[pos + j] == 1 for j in range(count))
+            # A page-prefix hit covers every Store chunk before its final chunk.
+            if preceding_chunks_present and present:
                 exists_set.add((g_idx, hash_bytes))
+            if end_token % self.token_dbs[g_idx].chunk_size == 0:
+                preceding_chunks_present &= present
             pos += count
 
         cached_block_pool = ExternalCachedBlockPool(
             self.hash_block_size,
             exists_set,
         )
-        _, hit_length = self.coord.find_longest_cache_hit(
+        load_masks, hit_length = self.coord.find_longest_cache_hit(
             block_hashes,
             token_len,
             cached_block_pool,
@@ -2680,7 +2592,7 @@ class MooncakeStoreWorker:
             usable_length = self.coord.align_lookup_length(num_tokens - 1)
             if usable_length <= 0:
                 return MooncakeLookupResult(0)
-            _, hit_length = self.coord.find_longest_cache_hit(
+            load_masks, hit_length = self.coord.find_longest_cache_hit(
                 block_hashes,
                 usable_length,
                 cached_block_pool,
@@ -2691,6 +2603,7 @@ class MooncakeStoreWorker:
                 block_hashes,
                 hit_length,
                 cached_block_pool,
+                load_masks,
             ),
         )
 
@@ -2699,6 +2612,7 @@ class MooncakeStoreWorker:
         block_hashes: Sequence[BlockHash],
         hit_length: int,
         cached_block_pool: ExternalCachedBlockPool,
+        load_masks: tuple[list[bool], ...],
     ) -> tuple[TailKeyBoundary, ...]:
         """Return the hash boundary used to store each group's tail block.
 
@@ -2713,8 +2627,7 @@ class MooncakeStoreWorker:
         boundaries = []
         hit_boundary_hash_idx = hit_length // self.hash_block_size - 1
         for group_id, db in enumerate(self.token_dbs):
-            if not self._kv_cache_groups[group_id].kv_cache_spec.prefix_cacheable:
-                # Scratch groups are never stored, so they have no tail key.
+            if not load_masks[group_id] or not load_masks[group_id][-1]:
                 continue
             chunk_id = cdiv(hit_length, db.chunk_size) - 1
             boundary_tokens = hit_length

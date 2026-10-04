@@ -5,9 +5,6 @@
 from collections.abc import Sequence
 from typing import NamedTuple, cast
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
-    chunk_hashes_for_block_size,
-)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -317,13 +314,6 @@ class MooncakeStoreCoordinator:
                 assert len(mask) == end_chunk - start_chunk
             masks.append(mask)
         return tuple(masks)
-
-    def block_hashes_for_spec(
-        self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec
-    ) -> Sequence[BlockHash]:
-        return chunk_hashes_for_block_size(
-            block_hashes, self.hash_block_size, spec.block_size
-        )
 
     def _find_hit_blocks(
         self,
