@@ -437,6 +437,118 @@ async fn collect_output_rejects_partial_sampling_mask() {
     ));
 }
 
+/// Prefiller reuse controls response usage while decoder metrics retain KV work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_prefill_cache_usage_preserves_decoder_metrics() {
+    let remote = |cached| {
+        serde_json::json!({
+            "do_remote_prefill": true,
+            "remote_prefill_cached_tokens": cached,
+        })
+    };
+    let cases = [
+        ("positive", remote(serde_json::json!(5)), Some(5)),
+        ("zero", remote(serde_json::json!(0)), Some(0)),
+        (
+            "missing_count",
+            serde_json::json!({"do_remote_prefill": true}),
+            None,
+        ),
+    ];
+    let mut results = Vec::new();
+    let mut expected = Vec::new();
+    for (name, metadata, remote_count) in cases {
+        let ipc = IpcNamespace::new().unwrap();
+        let handshake_address = ipc.handshake_endpoint();
+        let mut request = sample_generate_request(name, 2);
+        request.prompt_token_ids = (1..=8).collect();
+        request.sampling_params.extra_args =
+            Some([("kv_transfer_params".to_string(), metadata)].into());
+        let expected_args = request.sampling_params.extra_args.clone();
+        let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+            handshake_address.clone(),
+            b"engine-cache-usage".to_vec(),
+            move |dealer, push| {
+                Box::pin(async move {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                    assert_eq!(request.sampling_params.unwrap().extra_args, expected_args);
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![
+                                EngineCoreOutput {
+                                    prefill_stats: Some(PrefillStats {
+                                        num_prompt_tokens: 8,
+                                        num_cached_tokens: 7,
+                                        num_local_cached_tokens: 0,
+                                        num_external_cached_tokens: 7,
+                                        num_computed_tokens: 1,
+                                        ..Default::default()
+                                    }),
+                                    ..request_output(&request.request_id, vec![33], None)
+                                },
+                                request_output(
+                                    &request.request_id,
+                                    vec![44],
+                                    Some(EngineCoreFinishReason::Length),
+                                ),
+                            ],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                })
+            },
+        );
+        let model_name = request_metrics_model_name(name);
+        let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
+        let mut streamed_counts = Vec::new();
+        let collected = llm
+            .generate(request)
+            .await
+            .unwrap()
+            .inspect(|output| streamed_counts.push(output.as_ref().unwrap().cached_token_count))
+            .collect_output()
+            .await
+            .unwrap();
+        results.push((name, streamed_counts, collected.usage.cached_token_count));
+        expected.push((
+            name,
+            vec![remote_count.unwrap_or(7), remote_count.unwrap_or(0)],
+            remote_count.unwrap_or(7),
+        ));
+
+        let rendered = METRICS.render().unwrap();
+        for (metric, labels, value) in [
+            ("prompt_tokens_cached_total", "", 7),
+            (
+                "prompt_tokens_by_source_total",
+                ",source=\"external_kv_transfer\"",
+                7,
+            ),
+            ("request_prefill_kv_computed_tokens_sum", "", 1),
+        ] {
+            let expected =
+                format!("vllm:{metric}{{model_name=\"{model_name}\",engine=\"0\"{labels}}}");
+            let actual = rendered.lines().find_map(|line| {
+                let (name, value) = line.split_once(' ')?;
+                (name == expected).then(|| value.parse::<f64>().expect("numeric metric"))
+            });
+            assert_eq!(
+                actual,
+                Some(f64::from(value)),
+                "unexpected metric: {expected}"
+            );
+        }
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+        llm.shutdown().await.unwrap();
+    }
+    assert_eq!(results, expected);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generate_propagates_unexpected_close_errors() {
     let ipc = IpcNamespace::new().unwrap();

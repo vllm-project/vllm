@@ -232,6 +232,7 @@ impl GenerateOutput {
 /// - For errors or unexpected engine-side closes, the stream terminates with an error.
 pub struct GenerateOutputStream {
     pending_prompt_info: Option<GeneratePromptInfo>,
+    remote_prefill_cached_tokens: Option<usize>,
     raw_stream: EngineCoreOutputStream,
     request_metrics: RequestMetricsTracker,
     /// Removes this request's external→internal tracking edge on drop. Held for
@@ -244,11 +245,13 @@ impl GenerateOutputStream {
     /// output stream.
     pub(crate) fn new(
         prompt_token_ids: Arc<[u32]>,
+        remote_prefill_cached_tokens: Option<usize>,
         raw_stream: EngineCoreOutputStream,
         request_metrics: RequestMetricsTracker,
         request_guard: RequestGuard,
     ) -> Self {
         Self {
+            remote_prefill_cached_tokens,
             pending_prompt_info: Some(GeneratePromptInfo {
                 prompt_token_ids,
                 prompt_logprobs: None,
@@ -305,10 +308,9 @@ impl Stream for GenerateOutputStream {
                 row_count: mask.rows.len(),
             })));
         }
-        let cached_token_count = raw
-            .prefill_stats
-            .as_ref()
-            .map(|stats| stats.num_cached_tokens as usize)
+        let cached_token_count = self
+            .remote_prefill_cached_tokens
+            .or_else(|| raw.prefill_stats.as_ref().map(|stats| stats.num_cached_tokens as usize))
             .unwrap_or(0);
 
         let finish_reason = finish_reason_from_engine(raw.finish_reason, raw.stop_reason);
