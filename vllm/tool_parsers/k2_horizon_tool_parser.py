@@ -29,6 +29,7 @@ from vllm.tool_parsers.utils import (
     extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
+    normalize_schema_types,
     partial_tag_overlap,
 )
 
@@ -157,7 +158,15 @@ class K2HorizonToolParser(ToolParser):
             if isinstance(value, str)
             else json.dumps(value, ensure_ascii=False, allow_nan=False)
         )
-        return coerce_to_schema_type(raw_value, extract_types_from_schema(schema))
+        types = extract_types_from_schema(schema)
+        coerced = coerce_to_schema_type(raw_value, types)
+        accepts_string = "string" in normalize_schema_types(types)
+        nothing_matched = coerced is raw_value and not accepts_string
+        if nothing_matched and not isinstance(value, str):
+            # IFM arguments arrive already decoded; when nothing matched, the
+            # returned string is the encoding made just above, not model output.
+            return value
+        return coerced
 
     @classmethod
     def _coerce_xml_value(
