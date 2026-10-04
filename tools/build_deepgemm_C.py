@@ -11,6 +11,7 @@ Usage: python build_deepgemm_C.py <DEEPGEMM_SRC_DIR> <OUTPUT_DIR> <TARGET_PY>
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -54,8 +55,11 @@ includes = [
     *cpp_extension.include_paths(device_type="cuda"),
 ]
 
+# CXXFLAGS comes first so the flags below take precedence over it; it carries
+# the toolchain's and the builder's flags (e.g. -ffile-prefix-map).
 cmd = [
     os.environ.get("CXX", "g++"),
+    *shlex.split(os.environ.get("CXXFLAGS", "")),
     "-shared",
     "-fPIC",
     "-std=c++20",
