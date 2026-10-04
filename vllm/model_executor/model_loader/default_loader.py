@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, get_current_vllm_config
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
@@ -478,7 +478,13 @@ class DefaultModelLoader(BaseModelLoader):
         self._init_ep_weight_filter(model_config)
         self._init_mm_encoder_only_weight_filter(model, model_config)
 
-        loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
+        weights = self.get_all_weights(model_config, model)
+        quant_config = get_current_vllm_config().quant_config
+        if quant_config is not None:
+            weights = quant_config.process_checkpoint_weights(
+                weights, dtype=model_config.dtype
+            )
+        loaded_weights = model.load_weights(weights)
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(
