@@ -33,6 +33,8 @@ from vllm.v1.kv_cache_interface import KVQuantMode
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
+# Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
+MAX_3D_QUERY_LEN = 8
 
 
 @triton.jit
@@ -713,12 +715,18 @@ def reduce_segments(
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
 
+    # Graph padding must be rejected before sequence lookup or scratch access.
+    if query_token_idx >= tl.load(query_start_len_ptr + num_seqs):
+        return
+
     seq_idx = find_seq_idx(
         query_start_len_ptr, query_token_idx, num_seqs, BLOCK_Q, False
     )
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
+    if seq_len <= 0:
+        return
 
     # number of segments for this particular sequence
     num_segments = NUM_SEGMENTS_PER_SEQ
@@ -738,11 +746,16 @@ def reduce_segments(
         + tl.arange(0, NUM_SEGMENTS_PER_SEQ)
     )
     segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
+    segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
+    # Empty segments must not set the maximum. Unvisited segments retain
+    # the M=-inf,L=1 initial state.
+    valid_segment = segm_mask & (segm_expsum > 0) & (segm_max != float("-inf"))
+    segm_max = tl.where(valid_segment, segm_max, float("-inf"))
     overall_max = tl.max(segm_max)
 
     # load and rescale segment exp sums
-    segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
-    segm_expsum = segm_expsum * tl.exp(segm_max - overall_max)
+    segment_scale = tl.where(valid_segment, tl.exp(segm_max - overall_max), 0.0)
+    segm_expsum = segm_expsum * segment_scale
     overall_expsum = tl.sum(segm_expsum)
 
     # load, rescale, and add segment attention outputs
@@ -758,7 +771,7 @@ def reduce_segments(
         mask=segm_mask[:, None] & dim_mask[None, :],
         other=0.0,
     )
-    segm_output *= tl.exp(segm_max - overall_max)[:, None]
+    segm_output *= segment_scale[:, None]
     acc_sum = tl.sum(segm_output, axis=0)
     # safely divide by overall_expsum, returning 0.0 if overall_expsum is 0
     acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
@@ -1039,9 +1052,11 @@ def unified_attention(
         )
 
     # Launch the 2D kernel if
-    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. The batch includes at least one prefill request, or
-    # 3. The number of sequences exceeds the configured threshold, or
+    # 1. No split-K threshold or scratch buffers, or they are invalid, or
+    # 2. max_seqlen_q > 1 and either it exceeds MAX_3D_QUERY_LEN, masking is
+    #    non-causal, per-sequence causal, or mm-prefix, or the tuned
+    #    large-head path applies, or
+    # 3. The number of Q blocks exceeds seq_threshold_3D, or
     # 4. Batch invariance is enabled
     use_3d = not (
         seq_threshold_3D is None
@@ -1049,10 +1064,37 @@ def unified_attention(
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
-        or num_seqs > seq_threshold_3D
+        or num_par_softmax_segments <= 0
+        or (
+            max_seqlen_q > 1
+            and (
+                max_seqlen_q > MAX_3D_QUERY_LEN
+                or not use_causal
+                or use_per_seq_causal
+                or use_mm_prefix
+                or tuned_large_head
+            )
+        )
+        or num_seqs * triton.cdiv(max_seqlen_q, BLOCK_Q) > seq_threshold_3D
         or is_batch_invariant
     )
+    if use_3d:
+        # Both kernels use packed FP32 offsets, without scratch stride arguments.
+        scalar_shape = (num_query_heads, num_par_softmax_segments)
+        use_3d = all(
+            buffer.ndim == len(shape) + 1
+            and buffer.shape[0] >= q.shape[0]
+            and buffer.shape[1:-1] == shape[:-1]
+            and buffer.shape[-1] >= shape[-1]
+            and buffer.dtype == torch.float32
+            and buffer.device == q.device
+            and buffer.is_contiguous()
+            for buffer, shape in (
+                (softmax_segm_output, (*scalar_shape, head_size_padded)),
+                (softmax_segm_max, scalar_shape),
+                (softmax_segm_expsum, scalar_shape),
+            )
+        )
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
