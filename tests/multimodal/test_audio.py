@@ -9,12 +9,15 @@ import pytest
 import torch
 
 from vllm.multimodal.audio import (
+    _MAX_TORCHAUDIO_KERNEL_ELEMS,
     MONO_AUDIO_SPEC,
     PASSTHROUGH_AUDIO_SPEC,
     AudioResampler,
     AudioSpec,
     ChannelReduction,
+    _bounded_resample_rates,
     _get_torchaudio_resampler,
+    _polyphase_kernel_elems,
     normalize_audio,
     resample_audio_pyav,
     resample_audio_scipy,
@@ -147,6 +150,85 @@ def test_audio_resampler_torchaudio(dummy_audio):
     expected_len = math.ceil(len(dummy_audio) * 22050 / 44100)
     assert len(out_down) == expected_len
     assert np.isfinite(out_down).all()
+
+
+_STANDARD_CAPTURE_RATES = (
+    8000,
+    11025,
+    16000,
+    22050,
+    24000,
+    32000,
+    44100,
+    48000,
+    88200,
+    96000,
+    192000,
+)
+
+
+@pytest.mark.parametrize("orig_sr", _STANDARD_CAPTURE_RATES)
+@pytest.mark.parametrize("target_sr", (16000, 24000, 44100, 48000))
+def test_bounded_resample_rates_keeps_standard_pairs(orig_sr, target_sr):
+    assert _bounded_resample_rates(orig_sr, target_sr) == (orig_sr, target_sr)
+
+
+@pytest.mark.parametrize(
+    ("orig_sr", "target_sr"),
+    [
+        (16001, 16000),
+        (44101, 16000),
+        (22051, 16000),
+        (48001, 16000),
+    ],
+)
+def test_bounded_resample_rates_caps_coprime_kernel(orig_sr, target_sr):
+    assert _polyphase_kernel_elems(orig_sr, target_sr) > _MAX_TORCHAUDIO_KERNEL_ELEMS
+    bounded_orig, bounded_target = _bounded_resample_rates(orig_sr, target_sr)
+    assert (
+        _polyphase_kernel_elems(bounded_orig, bounded_target)
+        <= _MAX_TORCHAUDIO_KERNEL_ELEMS
+    )
+
+
+def test_bounded_resample_rates_rejects_non_positive():
+    with pytest.raises(ValueError, match="positive integers"):
+        _bounded_resample_rates(0, 16000)
+    with pytest.raises(ValueError, match="positive integers"):
+        _bounded_resample_rates(16000, -1)
+
+
+def test_coprime_header_rate_does_not_build_unbounded_kernel(dummy_audio):
+    with patch("vllm.multimodal.audio._get_torchaudio_resampler") as mock_get:
+        out = resample_audio_torchaudio(dummy_audio, orig_sr=16001, target_sr=16000)
+        mock_get.assert_not_called()
+        np.testing.assert_array_equal(out, dummy_audio)
+
+
+def test_parser_coprime_header_rate_does_not_build_unbounded_kernel():
+    from vllm.multimodal.parse import MultiModalDataParser
+
+    audio = np.zeros(1600, dtype=np.float32)
+    parser = MultiModalDataParser(target_sr=16000)
+    with patch("vllm.multimodal.audio._get_torchaudio_resampler") as mock_get:
+        result = parser._parse_audio_data((audio, 16001))
+        mock_get.assert_not_called()
+        np.testing.assert_array_equal(result.get(0), audio)
+
+
+def test_parser_near_standard_rate_uses_bounded_kernel():
+    from vllm.multimodal.parse import MultiModalDataParser
+
+    audio = np.zeros(1600, dtype=np.float32)
+    parser = MultiModalDataParser(target_sr=16000)
+    with patch("vllm.multimodal.audio._get_torchaudio_resampler") as mock_get:
+        mock_get.return_value.return_value.numpy.return_value = audio
+        parser._parse_audio_data((audio, 44101))
+        mock_get.assert_called_once()
+        orig_sr, target_sr = mock_get.call_args[0]
+        assert (
+            _polyphase_kernel_elems(orig_sr, target_sr) <= _MAX_TORCHAUDIO_KERNEL_ELEMS
+        )
 
 
 def test_resample_audio_torchaudio_caches_kernel():
