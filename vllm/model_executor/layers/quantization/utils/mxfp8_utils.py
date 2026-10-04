@@ -189,6 +189,9 @@ def _mxfp8_e4m3_quantize_impl(
     is_sf_swizzled_layout: bool = False,
     alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if x.numel() == 0:
+        return mxfp8_e4m3_quantize_fake(x, is_sf_swizzled_layout, alignment)
+
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
