@@ -29,6 +29,8 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
+    CALIBRATION_MAX_SCRATCH_BYTES,
+    CALIBRATION_NS,
     default_min_n,
     measure_load_paths,
     pick_min_n,
@@ -76,6 +78,14 @@ def _resolve_min_n(
         )
         return default
     if measured is None:
+        logger.info(
+            "KV offload load path not calibrated for %d-byte copies (needs "
+            "copies of at most %d bytes, at least %d CPU chunks and room for "
+            "a GPU scratch buffer), keeping the defaults",
+            copy_size,
+            CALIBRATION_MAX_SCRATCH_BYTES // CALIBRATION_NS[-1],
+            2 * CALIBRATION_NS[-1],
+        )
         return default
     min_n = pick_min_n(*measured)
     logger.debug("Load path timings (ms): DMA %s, Triton %s", *measured)

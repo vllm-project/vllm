@@ -117,15 +117,19 @@ def measure_load_paths(
     """Time DMA and Triton loads of ``copy_size`` bytes at each of
     CALIBRATION_NS. Returns (dma_ms, triton_ms), or None if it can't be done.
 
-    ``host`` is the pinned CPU tensor real loads read from. The destination is
-    a scratch GPU buffer, so no KV block is written."""
+    ``host`` is the pinned CPU tensor real loads read from, one CPU chunk per
+    row. With the shared offload region it is a strided view, so the copies
+    read row starts rather than assuming contiguous memory. The destination
+    is a scratch GPU buffer, so no KV block is written."""
     n_max = CALIBRATION_NS[-1]
     scratch_bytes = n_max * copy_size
-    # Source slots are taken every other one so neighbours are not contiguous.
+    # Copies read every other row so neighbours are not contiguous.
     if (
         scratch_bytes > CALIBRATION_MAX_SCRATCH_BYTES
-        or not host.is_contiguous()
-        or host.numel() * host.element_size() < 2 * scratch_bytes
+        or host.dim() != 2
+        or host.stride(1) != 1
+        or host.size(1) * host.element_size() < copy_size
+        or host.size(0) < 2 * n_max
     ):
         return None
     try:
@@ -134,7 +138,8 @@ def measure_load_paths(
         return None
 
     idx = torch.arange(n_max, dtype=torch.int64)
-    src = (host.data_ptr() + 2 * copy_size * idx).pin_memory()
+    row_bytes = host.stride(0) * host.element_size()
+    src = (host.data_ptr() + 2 * row_bytes * idx).pin_memory()
     dst = (scratch.data_ptr() + copy_size * idx).pin_memory()
     sizes = torch.full((n_max,), copy_size, dtype=torch.int64).pin_memory()
 
@@ -156,6 +161,10 @@ def measure_load_paths(
         # min_n=0 so the wrapper never falls back to DMA while we time it.
         swap_blocks_batch(s, d, z, bytes_per_chunk=bytes_per_chunk, min_n=0)
 
-    dma_ms = [run_ms(dma, n) for n in CALIBRATION_NS]
-    triton_ms = [run_ms(tri, n) for n in CALIBRATION_NS]
+    # Real loads run on a dedicated stream (see transfer_async). On the legacy
+    # default stream ops.swap_blocks_batch can't use cuMemcpyBatchAsync and
+    # issues one cudaMemcpyAsync per copy, so time both paths on one as well.
+    with torch.cuda.stream(torch.cuda.Stream(device=device)):
+        dma_ms = [run_ms(dma, n) for n in CALIBRATION_NS]
+        triton_ms = [run_ms(tri, n) for n in CALIBRATION_NS]
     return dma_ms, triton_ms

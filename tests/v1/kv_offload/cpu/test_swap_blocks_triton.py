@@ -86,3 +86,49 @@ def test_measure_load_paths_times_every_probed_n() -> None:
     assert (
         measure_load_paths(copy_size, 4096, host[:16], torch.device("cuda:0")) is None
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Triton swap fast path requires CUDA"
+)
+def test_measure_load_paths_reads_strided_host_rows() -> None:
+    # A worker's view of the shared offload region: one chunk per row, with
+    # the other tensors' (and workers') bytes in between.
+    copy_size, row_stride = 4096, 3 * 4096
+    rows = 2 * CALIBRATION_NS[-1]
+    region = torch.zeros(rows * row_stride, dtype=torch.int8).pin_memory()
+    host = torch.as_strided(region, (rows, copy_size), (row_stride, 1))
+    assert not host.is_contiguous()
+
+    measured = measure_load_paths(copy_size, 4096, host, torch.device("cuda:0"))
+
+    assert measured is not None
+    assert all(len(ms) == len(CALIBRATION_NS) for ms in measured)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Triton swap fast path requires CUDA"
+)
+def test_measure_load_paths_avoids_default_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # On the default stream the DMA arm would time one cudaMemcpyAsync per
+    # copy instead of cuMemcpyBatchAsync, which real loads use.
+    streams = []
+    monkeypatch.setattr(
+        swap_blocks_triton.ops,
+        "swap_blocks_batch",
+        lambda *args, **kwargs: streams.append(torch.cuda.current_stream()),
+    )
+    monkeypatch.setattr(
+        swap_blocks_triton,
+        "swap_blocks_batch",
+        lambda *args, **kwargs: streams.append(torch.cuda.current_stream()),
+    )
+    host = torch.zeros((2 * CALIBRATION_NS[-1], 4096), dtype=torch.int8)
+
+    assert torch.cuda.current_stream() == torch.cuda.default_stream()
+    measure_load_paths(4096, 4096, host.pin_memory(), torch.device("cuda:0"))
+
+    assert streams
+    assert all(s != torch.cuda.default_stream() for s in streams)
