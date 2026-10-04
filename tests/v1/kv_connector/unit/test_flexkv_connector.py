@@ -19,6 +19,7 @@ import pytest
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVRole
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
@@ -31,7 +32,7 @@ from .utils import create_vllm_config
 
 def _make_vllm_config(
     kv_connector: str = "FlexKVConnectorV1",
-    kv_role: str = "kv_both",
+    kv_role: KVRole = "kv_both",
 ) -> VllmConfig:
     """Return a minimal VllmConfig with a KVTransferConfig attached."""
     vllm_config = create_vllm_config(block_size=16, max_num_batched_tokens=512)

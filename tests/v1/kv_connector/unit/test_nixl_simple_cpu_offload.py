@@ -27,6 +27,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
+    SimpleCPUOffloadConnector,
+)
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher
 from vllm.v1.kv_cache_interface import (
@@ -278,6 +281,8 @@ def test_cpu_offload_wins_when_nixl_has_no_match():
     assert cpu_meta.store_event >= 0, "Expected a store event on the second schedule"
 
     cpu_connector = mc._connectors[1]
+    assert isinstance(cpu_connector, SimpleCPUOffloadConnector)
+    assert cpu_connector.scheduler_manager is not None
     worker_meta = SimpleCPUOffloadWorkerMetadata(
         completed_store_events={
             cpu_meta.store_event: cpu_connector.scheduler_manager._expected_worker_count

@@ -112,7 +112,7 @@ def _run_engine_core_handshake(
         ),
     )
 
-    engine_core_module.EngineCore(vllm_config, _FakeExecutor, log_stats=False)
+    engine_core_module.EngineCore(vllm_config, _FakeExecutor, log_stats=False)  # type: ignore[arg-type]
     assert _FakeExecutor.last_instance is not None
     return _FakeExecutor.last_instance
 
