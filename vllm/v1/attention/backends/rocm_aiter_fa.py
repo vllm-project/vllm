@@ -1625,6 +1625,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        v_norm: bool = False,
+        q_out_fp8: torch.Tensor | None = None,
     ):
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
@@ -1647,6 +1649,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
             use_shuffle_layout=rocm_aiter_ops.is_shuffle_kv_cache_enabled(),
+            v_norm=v_norm,
+            q_out_fp8=q_out_fp8,
+            q_scale=layer._q_scale_cpu if q_out_fp8 is not None else None,
         )
 
     def do_rope_and_kv_cache_update(

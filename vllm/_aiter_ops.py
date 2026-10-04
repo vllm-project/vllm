@@ -3492,6 +3492,9 @@ class rocm_aiter_ops:
         block_size: int,
         x: int,
         rotary_dim: int = 0,
+        v_norm: bool = False,
+        q_out_fp8: torch.Tensor | None = None,
+        per_tensor_q_scale: torch.Tensor | None = None,
     ):
         from aiter.ops.fused_qk_norm_rope_cache_quant import (
             fused_qk_norm_rope_cache_pts_quant_shuffle,
@@ -3523,6 +3526,9 @@ class rocm_aiter_ops:
             block_size,
             x,
             rotary_dim,
+            v_norm,
+            q_out_fp8,
+            per_tensor_q_scale,
         )
 
     @staticmethod
@@ -3546,6 +3552,9 @@ class rocm_aiter_ops:
         v_scale: torch.Tensor,
         kv_cache_dtype: str,
         use_shuffle_layout: bool,
+        v_norm: bool = False,
+        q_out_fp8: torch.Tensor | None = None,
+        q_scale: torch.Tensor | None = None,
     ) -> None:
         """Run the fused QK-norm+RoPE+KV-cache op on already-split k/v caches.
 
@@ -3586,6 +3595,9 @@ class rocm_aiter_ops:
             block_size=key_cache.shape[1],
             x=16 // key_cache.element_size(),
             rotary_dim=kernel_rotary_dim,
+            v_norm=v_norm,
+            q_out_fp8=q_out_fp8,
+            per_tensor_q_scale=q_scale,
         )
 
     @staticmethod
