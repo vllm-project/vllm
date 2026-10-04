@@ -17,6 +17,24 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  mirror:
+    amd:
+      label: ':amd: (MI300) Distributed Comm Ops'
+      dind: false
+      device: mi300_2
+      timeout_in_minutes: 30
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed
+      - tests/distributed
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s distributed/test_comm_ops.py
+      - pytest -v -s distributed/test_shm_broadcast.py
+      - pytest -v -s distributed/test_shm_buffer.py
+      - pytest -v -s distributed/test_shm_storage.py
 
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer
@@ -176,6 +194,31 @@ steps:
   - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
+  mirror:
+    amd:
+      label: ':amd: (MI300) Distributed Torchrun + Shutdown'
+      dind: false
+      device: mi300_2
+      timeout_in_minutes: 35
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - vllm/engine/
+      - vllm/v1/executor/
+      - vllm/v1/worker/worker_base.py
+      - vllm/v1/engine/
+      - vllm/v1/worker/
+      - tests/distributed/
+      - tests/v1/shutdown
+      - tests/v1/worker/test_worker_memory_snapshot.py
+      - vllm/platforms/rocm.py
+      commands:
+      - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+      - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+      - HIP_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
+      - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
 - label: ":nvidia: (L4) Distributed Torchrun + Examples"
   key: distributed-torchrun-examples-4-gpus
@@ -282,6 +325,31 @@ steps:
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s distributed/test_engram_dp_shard.py
+  mirror:
+    amd:
+      label: ':amd: (MI355) Distributed DP Extended'
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 60
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - tests/v1/distributed
+      - tests/v1/engine/test_engine_core_client.py
+      - tests/distributed/test_utils
+      - vllm/platforms/rocm.py
+      commands:
+      - export NCCL_CUMEM_HOST_ENABLE=0
+      - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+      - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+      - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
+      - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_dense_dp_world_size.py
+      - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
+      - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
+      - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
+      - pytest -v -s distributed/test_utils.py
 
 - label: ":nvidia: (L4) Distributed Compile + Comm"
   key: distributed-compile-comm-4-gpus
@@ -304,6 +372,27 @@ steps:
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # test multi-node TP with multiproc executor (simulated on single node)
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
+  mirror:
+    amd:
+      label: ':amd: (MI355) Distributed Compile + Comm'
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 45
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - tests/distributed/test_pynccl
+      - tests/distributed/test_events
+      - tests/distributed/test_symm_mem_allreduce.py
+      - tests/distributed/test_multiproc_executor.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s distributed/test_pynccl.py
+      - pytest -v -s distributed/test_events.py
+      - pytest -v -s distributed/test_symm_mem_allreduce.py
+      - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
 
 - label: ":nvidia: (H100) Distributed DP + EP"
   key: distributed-tests-8xh100
@@ -359,6 +448,28 @@ steps:
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
+  mirror:
+    amd:
+      label: ':amd: (MI355) Distributed'
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 40
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/
+      - tests/models/test_vision.py
+      - vllm/platforms/rocm.py
+      - tests/distributed/
+      - tests/basic_correctness/
+      - tests/lora/test_mixtral.py
+      commands:
+      - pytest -v -s distributed/test_custom_all_reduce.py
+      - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
+      - TARGET_TEST_SUITE=MI355 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+      - pytest -v -s -x lora/test_mixtral.py
+      - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
 
 - label: ":nvidia: (H100) Distributed Features"
   key: distributed-tests-2xh100-2xmi300
@@ -439,6 +550,27 @@ steps:
     - pytest -v -s tests/distributed/test_nccl_symm_mem.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Distributed AgRs All2All"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 30
+      working_dir: "/vllm-workspace/"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/distributed.yaml
+      - vllm/distributed/
+      - vllm/config/parallel.py
+      - vllm/config/vllm.py
+      - vllm/forward_context.py
+      - vllm/platforms/rocm.py
+      - tests/distributed/test_mnnvl_alltoall.py
+      - tests/utils.py
+      commands:
+      - pytest -v -s tests/distributed/test_mnnvl_alltoall.py::test_args_dispatch_combine
 
 - label: ":nvidia: (B200) GEMM-RS/AR"
   key: gemm-rs-ar-2xb200
@@ -452,6 +584,34 @@ steps:
     - tests/kernels/test_gemm_rs_ar.py
   commands:
     - pytest -v -s tests/kernels/test_gemm_rs_ar.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) GEMM-RS-AR"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 20
+      working_dir: /vllm-workspace/
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/test_areas/distributed.yaml
+      - tests/kernels/test_gemm_rs_ar.py
+      - tests/kernels/test_rocm_gemm_rs_ar.py
+      - tests/conftest.py
+      - vllm/models/common/ops/sequence_parallel.py
+      - vllm/model_executor/layers/linear.py
+      - vllm/model_executor/layers/utils.py
+      - vllm/model_executor/layers/quantization/online/
+      - vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+      - vllm/model_executor/kernels/linear/
+      - vllm/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/_custom_ops.py
+      - csrc/rocm/skinny_gemms.cu
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s tests/kernels/test_rocm_gemm_rs_ar.py
 
 - label: ":nvidia: (L4) Distributed 2-Node"
   key: 2-node-test-4-gpus
@@ -534,3 +694,27 @@ steps:
   - pytest -v -s distributed/test_ray_v2_executor_e2e.py
   - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
+  mirror:
+    amd:
+      label: ':amd: (MI355) RayExecutorV2'
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 75
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/executor/ray_executor_v2.py
+      - vllm/v1/executor/abstract.py
+      - vllm/v1/executor/multiproc_executor.py
+      - tests/distributed/test_ray_v2_executor.py
+      - tests/distributed/test_ray_v2_executor_e2e.py
+      - tests/distributed/test_pipeline_parallel.py
+      - tests/basic_correctness/models/test_basic_correctness.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
+      - pytest -v -s distributed/test_ray_v2_executor.py
+      - pytest -v -s distributed/test_ray_v2_executor_e2e.py
+      - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
+      - TARGET_TEST_SUITE=MI355 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
