@@ -127,7 +127,9 @@ MoEBackend = Literal[
     "deep_gemm_mega_moe",
     "cutlass",
     "flashinfer_trtllm",
+    "flashinfer_trtllm_afp8",
     "flashinfer_cutlass",
+    "flashinfer_cutlass_afp8",
     "flashinfer_cutedsl",
     "flashinfer_moe_ep_cutedsl",
     "flashinfer_b12x",
@@ -140,6 +142,8 @@ MoEBackend = Literal[
     "aiter_mega_moe",
     "aiter_triton_mxfp4_bf16",
     "aiter_triton_mxfp4_mxfp4",
+    "aiter_mxfp4_fp8",
+    "aiter_mxfp4_mxfp4",
     "flydsl",
     "hpc",
     "emulation",
@@ -309,7 +313,11 @@ class KernelConfig:
     - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
+    - "flashinfer_trtllm_afp8": Use FlashInfer TRTLLM-GEN MXFP4 MoE with MXFP8
+      activations only (MXFP4 checkpoints)
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
+    - "flashinfer_cutlass_afp8": Use FlashInfer CUTLASS MXFP4 MoE with MXFP8
+      activations only (MXFP4 checkpoints)
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP
       mega-kernel with NVFP4 weights (MXFP4 checkpoints are requantized at
@@ -332,6 +340,11 @@ class KernelConfig:
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "aiter_triton_mxfp4_mxfp4": Use the AITER Triton/Gluon MXFP4 W4A4
       (moe_gemm_a4w4) MoE kernel (ROCm gfx1250)
+    - "aiter_mxfp4_fp8": Use the AITER MXFP4 MoE kernel with FP8 activations
+      (W4A8, static per-tensor input scales; MXFP4 checkpoints, ROCm only)
+    - "aiter_mxfp4_mxfp4": Use the AITER MXFP4 MoE kernel with MXFP4
+      activations (W4A4; MXFP4 checkpoints, ROCm only). Unlike "aiter", which
+      tries the BF16-activation variant first, this selects W4A4 only
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
     - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm gfx1100 only)
     - "hpc": Use HPC kernels (FP8 and Hopper only)
