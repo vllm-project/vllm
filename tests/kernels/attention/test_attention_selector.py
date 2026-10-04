@@ -892,3 +892,30 @@ def test_rswa_selection_does_not_reuse_causal_result(blackwell_selection):
             get_attn_backend(256, torch.bfloat16, None)
         config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
         assert get_attn_backend(256, torch.bfloat16, None).get_name() == "TRITON_ATTN"
+
+
+@blackwell_only
+@pytest.mark.parametrize(
+    "kv_cache_dtype,expected",
+    [("auto", "FLASHINFER"), ("int8_per_token_head", "TRITON_ATTN")],
+)
+def test_gemma4_without_fa4_uses_one_backend(kv_cache_dtype, expected):
+    from vllm.engine.arg_utils import EngineArgs
+
+    with (
+        patch.object(
+            type(current_platform),
+            "get_device_capability",
+            return_value=DeviceCapability(8, 0),
+        ),
+        patch(
+            "vllm.v1.attention.backends.fa_utils.is_fa_version_supported",
+            return_value=False,
+        ),
+    ):
+        config = EngineArgs(
+            model="google/gemma-4-31B-it",
+            language_model_only=True,
+            kv_cache_dtype=kv_cache_dtype,
+        ).create_engine_config()
+    assert config.attention_config.backend == AttentionBackendEnum[expected]
