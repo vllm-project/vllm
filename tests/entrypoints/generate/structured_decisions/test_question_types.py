@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -31,8 +30,8 @@ def test_choice_labels_follow_option_order():
     assert q.labels == ("A", "B", "C")
     assert [a.name for a in q.options] == ["billing", "outage", "other"]
     assert q.options[0].description == "money"
-    wide = choice(criteria={str(i): None for i in range(30)})
-    assert wide.labels[25:] == ("Z", "AA", "AB", "AC", "AD")
+    wide = choice(criteria={str(i): None for i in range(26)})
+    assert wide.labels[-1] == "Z"
 
 
 def test_choice_prompt():
@@ -79,13 +78,8 @@ def test_one_option_choice():
 def test_option_limit():
     with pytest.raises(StructuredDecisionError, match="at most 2 options"):
         choice(criteria={"x": None, "y": None, "z": None}, max_options=2)
-
-
-def test_labels_come_from_the_pool_in_order():
-    q = build_question("q", "choice", "", dict.fromkeys("xyz"), 128, ("A", "C", "D"))
-    assert q.labels == ("A", "C", "D")
-    with pytest.raises(StructuredDecisionError, match="at most 2 options"):
-        build_question("q", "choice", "", dict.fromkeys("xyz"), 128, ("A", "C"))
+    with pytest.raises(StructuredDecisionError, match="at most 26 options"):
+        choice(criteria={str(i): None for i in range(27)})
 
 
 def test_registered_type_plugs_in():
@@ -95,9 +89,6 @@ def test_registered_type_plugs_in():
         def parse_options(self, qid: str, criteria: Any) -> list[Option]:
             return [Option("yes"), Option("no")]
 
-        def labels(self, options: list[Option], pool: Sequence[str]) -> list[str]:
-            return ["yes", "no"]
-
         def answer(
             self, question: Question, probs: list[float], label_mass: float
         ) -> dict[str, Any]:
@@ -106,7 +97,7 @@ def test_registered_type_plugs_in():
     register_question_type(BinaryQuestion)
     try:
         q = build_question("ok", "test_binary", "Is it fine?", None, 128)
-        assert q.labels == ("yes", "no")
+        assert q.labels == ("A", "B")
         assert q.type.answer(q, [0.9, 0.1], 1.0) == {"type": "test_binary", "yes": 0.9}
         with pytest.raises(ValueError, match="already registered"):
             register_question_type(BinaryQuestion)

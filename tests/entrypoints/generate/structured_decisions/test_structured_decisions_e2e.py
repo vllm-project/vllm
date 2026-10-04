@@ -157,18 +157,22 @@ def test_single_read_answers(server, state, questions, expected):
     assert {qid: a["choice"] for qid, a in answers.items()} == expected
 
 
-def test_many_options(server):
-    response = post(
-        server,
-        {
-            "model": MODEL_NAME,
-            "state": "Pick option 77.",
-            "questions": {"n": choice("Which option?", *map(str, range(100)))},
-            "chat_template_kwargs": {"enable_thinking": False},
-        },
+def test_option_limit(server):
+    body = {
+        "model": MODEL_NAME,
+        "state": "Pick option 7.",
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    ok = post(
+        server, {**body, "questions": {"n": choice("Which?", *map(str, range(26)))}}
     )
-    assert response.status_code == 200, response.text
-    assert len(response.json()["answers"]["n"]["probabilities"]) == 100
+    assert ok.status_code == 200, ok.text
+    assert len(ok.json()["answers"]["n"]["probabilities"]) == 26
+    over = post(
+        server, {**body, "questions": {"n": choice("Which?", *map(str, range(27)))}}
+    )
+    assert over.status_code == 400
+    assert "at most 26 options" in over.json()["error"]["message"]
 
 
 def test_thinking_is_refused(server):

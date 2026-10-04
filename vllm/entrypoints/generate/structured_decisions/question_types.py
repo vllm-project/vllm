@@ -10,7 +10,6 @@ probabilities.
 import math
 import string
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -19,10 +18,9 @@ class StructuredDecisionError(ValueError):
     """An invalid request. Returned as a 400."""
 
 
-#: Label candidates, in the order options take them: A to Z, then AA, AB, ...
-LABELS = tuple(string.ascii_uppercase) + tuple(
-    a + b for a in string.ascii_uppercase for b in string.ascii_uppercase
-)
+#: Options are labeled A to Z in order. A single capital letter is one token
+#: at the start of a reply for the tokenizers tested; every read checks it.
+LABELS = tuple(string.ascii_uppercase)
 
 
 @dataclass(frozen=True)
@@ -53,11 +51,6 @@ class QuestionType(ABC):
         """The answer for ``question``. ``probs[i]`` is the probability of
         ``question.labels[i]`` among the labels, and the list sums to 1.
         ``label_mass`` is the labels' total probability over the vocabulary."""
-
-    def labels(self, options: list[Option], pool: Sequence[str]) -> list[str]:
-        """The label the model answers with for each option, taken in order
-        from ``pool``: the candidates that are one token for this model."""
-        return list(pool[: len(options)])
 
     def prompt(self, question: Question) -> str:
         """The question as the model reads it, after the state."""
@@ -97,7 +90,6 @@ def build_question(
     instructions: Any,
     criteria: Any,
     max_options: int,
-    pool: Sequence[str] = LABELS,
 ) -> Question:
     if not qid:
         raise StructuredDecisionError("question ids must be non-empty")
@@ -108,7 +100,7 @@ def build_question(
     names = [o.name for o in options]
     if len(set(names)) != len(names):
         raise StructuredDecisionError(f"question {qid!r}: duplicate option names")
-    limit = min(max_options, len(pool))
+    limit = min(max_options, len(LABELS))
     if len(options) > limit:
         raise StructuredDecisionError(
             f"question {qid!r}: at most {limit} options for this model"
@@ -120,7 +112,7 @@ def build_question(
         type=qtype,
         instructions=instructions,
         options=tuple(options),
-        labels=tuple(qtype.labels(options, pool)),
+        labels=LABELS[: len(options)],
     )
 
 

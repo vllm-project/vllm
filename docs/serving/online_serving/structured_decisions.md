@@ -88,15 +88,15 @@ whole vocabulary: its share of the labels times `label_mass`.
 
 ## Labels
 
-Options are labeled `A` to `Z` in the order the request lists them, then `AA`,
-`AB`, ... past 26 options.
+Options are labeled `A` to `Z` in the order the request lists them, so a
+`choice` has at most 26 options.
 
 ## Limits
 
 | limit | value |
 | --- | --- |
 | questions per request | 64 |
-| options per `choice` | 128 |
+| options per `choice` | 26 |
 
 ## Request fields
 

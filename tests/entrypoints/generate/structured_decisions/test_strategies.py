@@ -18,7 +18,6 @@ from vllm.entrypoints.generate.structured_decisions.strategies import (
     NextTokenStrategy,
     label_token_ids,
     select_read_strategy,
-    single_token_labels,
 )
 
 
@@ -65,15 +64,3 @@ def test_labels_start_the_reply(qwen):
     assert [tokenizer.decode([i]) for i in ids] == ["A", "B", "C"]
     with pytest.raises(StructuredDecisionError, match="not one distinct token"):
         label_token_ids(tokenizer, prompt_ids, replace(q, labels=("A", "A", "B")))
-
-
-def test_label_pool_skips_labels_that_are_not_one_token(qwen):
-    tokenizer, prompt_ids = qwen
-    pool = single_token_labels(tokenizer, prompt_ids)
-    assert pool[:26] == tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    # "BQ" splits into two tokens after Qwen's generation prompt.
-    assert "BQ" not in pool and len(pool) >= 128
-    wide = build_question(
-        "q", "choice", "", {str(i): None for i in range(128)}, 128, pool
-    )
-    label_token_ids(tokenizer, prompt_ids, wide)

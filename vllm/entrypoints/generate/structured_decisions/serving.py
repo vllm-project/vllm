@@ -31,7 +31,6 @@ def state_text(state: Any) -> str:
 def parse_questions(
     request: StructuredDecisionRequest,
     limits: DecisionLimits,
-    pool: tuple[str, ...],
 ) -> list[Question]:
     if not request.questions:
         raise StructuredDecisionError("questions: needs at least one question")
@@ -52,7 +51,6 @@ def parse_questions(
                 spec.instructions,
                 spec.criteria,
                 limits.max_options,
-                pool,
             )
         )
     return questions
@@ -87,8 +85,7 @@ class ServingStructuredDecisions(BaseServing):
         base_id = self._base_request_id(raw_request, default=request.request_id)
         request_id = f"decision-{base_id}"
         try:
-            pool = await self.strategy.label_pool(request.chat_template_kwargs)
-            questions = parse_questions(request, self.limits, pool)
+            questions = parse_questions(request, self.limits)
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
             engine_client.check_admission(len(questions))
             reads = await self.strategy.read(

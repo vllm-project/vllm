@@ -5,7 +5,6 @@
 Only models in NEXT_TOKEN_ARCHITECTURES are currently supported.
 """
 
-import json
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
@@ -21,7 +20,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 
 from .protocol import ReadPromptRequest
@@ -62,12 +61,6 @@ class ReadStrategy(ABC):
     def limits(self) -> DecisionLimits: ...
 
     @abstractmethod
-    async def label_pool(
-        self, chat_template_kwargs: dict[str, Any] | None
-    ) -> tuple[str, ...]:
-        """The labels questions take in order, for these chat options."""
-
-    @abstractmethod
     async def read(
         self,
         questions: list[Question],
@@ -101,21 +94,6 @@ def label_token_id(
     return ids[-1] if ids[:-1] == tail_ids else None
 
 
-def single_token_labels(
-    tokenizer: TokenizerLike, prompt_ids: Sequence[int]
-) -> tuple[str, ...]:
-    """The candidates in LABELS that are one distinct token at the start of the
-    reply, in order."""
-    tail_ids, tail = generation_tail(tokenizer, prompt_ids)
-    pool, seen = [], set()
-    for label in LABELS:
-        token = label_token_id(tokenizer, tail_ids, tail, label)
-        if token is not None and token not in seen:
-            pool.append(label)
-            seen.add(token)
-    return tuple(pool)
-
-
 def label_token_ids(
     tokenizer: TokenizerLike, prompt_ids: Sequence[int], question: Question
 ) -> list[int]:
@@ -139,15 +117,8 @@ class NextTokenStrategy(ReadStrategy):
     the reply's first token. The requests share the state. With prefix caching,
     it is prefilled once."""
 
-    # Label pools cached by chat options, which requests choose.
-    MAX_POOLS = 16
-
-    def __init__(self, context: ReadContext):
-        super().__init__(context)
-        self._pools: dict[str, tuple[str, ...]] = {}
-
     def limits(self) -> DecisionLimits:
-        return DecisionLimits(max_questions=64, max_options=MAX_LOGPROB_TOKEN_IDS)
+        return DecisionLimits(max_questions=64, max_options=len(LABELS))
 
     def _read_request(
         self, chat_template_kwargs: dict[str, Any] | None
@@ -173,22 +144,6 @@ class NextTokenStrategy(ReadStrategy):
             ctx.engine_client.model_config, engine_input
         ).token_ids
         return engine_input, list(prompt_ids or [])
-
-    async def label_pool(
-        self, chat_template_kwargs: dict[str, Any] | None
-    ) -> tuple[str, ...]:
-        read_request = self._read_request(chat_template_kwargs)
-        key = json.dumps(chat_template_kwargs or {}, sort_keys=True, default=str)
-        if key not in self._pools:
-            _, prompt_ids = await self._render(
-                read_request, [{"role": "user", "content": "x"}]
-            )
-            tokenizer = self.context.online_renderer.renderer.get_tokenizer()
-            pool = single_token_labels(tokenizer, prompt_ids)
-            if len(self._pools) >= self.MAX_POOLS:
-                return pool
-            self._pools[key] = pool
-        return self._pools[key]
 
     async def read(
         self,
