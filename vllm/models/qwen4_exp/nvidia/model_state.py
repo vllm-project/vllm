@@ -43,7 +43,11 @@ class Qwen4ExpModelState(MambaHybridModelState):
         self.ngram_context_len = int(config.ngram_size) - 1
         if self.ngram_context_len <= 0:
             raise ValueError("N-gram embedding requires context length >= 1.")
-        self.ngram_eos_token_id = int(config.eos_token_id)
+        eos_token_id = config.eos_token_id
+        if isinstance(eos_token_id, (list, tuple)):
+            # Some checkpoints list every stop id; the context filler needs one.
+            eos_token_id = eos_token_id[0]
+        self.ngram_eos_token_id = int(eos_token_id)
         # PLE runs inside captured regions, so these buffers keep a fixed shape
         # and address as the active request count changes between replays.
         self.ngram_context = torch.full(

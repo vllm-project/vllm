@@ -312,7 +312,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         columns = (positions - query_start_loc[request_indices]).clamp(
             0, packed.shape[1] - 1
         )
-        packed[request_indices, columns] = input_ids
+        # The model runner sends the CUDA-graph padded token count together with
+        # an unpadded query_start_loc. Stale padding must not enter the scatter:
+        # its clamped indices would overwrite the last real token.
+        num_valid_tokens = min(int(query_start_loc[-1].item()), num_tokens)
+        packed[request_indices[:num_valid_tokens], columns[:num_valid_tokens]] = (
+            input_ids[:num_valid_tokens]
+        )
         ngram_context = ngram_context[:num_reqs].to(
             device=input_ids.device, dtype=torch.long
         )
