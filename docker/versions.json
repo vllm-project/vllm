@@ -13,8 +13,14 @@
     "INSTALL_RUBIN_PRERELEASE": {
       "default": "false"
     },
+    "EFA_INSTALLER_VERSION": {
+      "default": "1.50.0"
+    },
+    "EFA_INSTALLER_SHA256": {
+      "default": "fa6dff8593d866866c13cb4640d9059835cd4efa427971f100ab40c97bef2841"
+    },
     "NCCL_VERSION": {
-      "default": "2.30.7"
+      "default": "2.31.2"
     },
     "BUILD_BASE_IMAGE": {
       "default": "pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
