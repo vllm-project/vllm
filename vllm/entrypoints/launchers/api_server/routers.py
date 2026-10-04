@@ -36,9 +36,9 @@ def register_api_routers(
 
         register_vllm_dev_api_routers(app)
 
-        from vllm.entrypoints.rlhf.online.factories import register_rlhf_api_routers
+        from vllm.entrypoints.rl.online.factories import register_rl_api_routers
 
-        register_rlhf_api_routers(app)
+        register_rl_api_routers(app)
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.generate.api_router import (

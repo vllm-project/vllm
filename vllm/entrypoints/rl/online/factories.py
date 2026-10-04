@@ -5,7 +5,7 @@
 from fastapi import FastAPI
 
 
-def register_rlhf_api_routers(app: FastAPI):
-    from .api_router import router as rlhf_router
+def register_rl_api_routers(app: FastAPI):
+    from .api_router import router as rl_router
 
-    app.include_router(rlhf_router)
+    app.include_router(rl_router)

@@ -1,20 +1,20 @@
-group: RLHF
+group: RL
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200 MIG 35GB) RLHF Entrypoints"
+- label: ":nvidia: (H200 MIG 35GB) RL Entrypoints"
   device: h200_35gb
-  key: rlhf-entrypoints-tests
+  key: rl-entrypoints-tests
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/entrypoints/rlhf
-  - tests/entrypoints/rlhf
+  - vllm/entrypoints/rl
+  - tests/entrypoints/rl
   commands:
-  - pytest -v -s entrypoints/rlhf
+  - pytest -v -s entrypoints/rl
   mirror:
     amd:
-      label: ":amd: (MI355) RLHF Entrypoints"
+      label: ":amd: (MI355) RL Entrypoints"
       dind: false
       device: mi355_1
       timeout_in_minutes: 50

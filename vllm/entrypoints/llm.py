@@ -36,7 +36,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
-from vllm.entrypoints.rlhf.offline import RLHFOfflineMixin
+from vllm.entrypoints.rl.offline import RLOfflineMixin
 from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
@@ -62,7 +62,7 @@ logger = init_logger(__name__)
 
 
 class LLM(
-    BeamSearchOfflineMixin, PoolingOfflineMixin, RLHFOfflineMixin, OfflineInferenceMixin
+    BeamSearchOfflineMixin, PoolingOfflineMixin, RLOfflineMixin, OfflineInferenceMixin
 ):
     """An LLM for generating texts from given prompts and sampling parameters.
 

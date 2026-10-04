@@ -14,7 +14,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.rlhf.online.metrics import weight_operation_metrics
+from vllm.entrypoints.rl.online.metrics import weight_operation_metrics
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
 

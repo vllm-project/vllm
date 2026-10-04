@@ -38,6 +38,7 @@ SILENT_GROUPS = [
     "tests/entrypoints/generate",
     "tests/entrypoints/multimodal",
     "tests/entrypoints/pooling",
+    "tests/entrypoints/rl",
     "tests/entrypoints/serve",
     "tests/entrypoints/tool_parsers",
     "tests/entrypoints/unit_tests",

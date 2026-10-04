@@ -85,7 +85,7 @@ engine.send_weights()
 
 Trainers with a custom producer (a Megatron export, MoE re-fusing) subclass `M2NWeightSource` and supply layouts explicitly.
 
-See [`examples/rlhf/rlhf_m2n.py`](../../../examples/rlhf/rlhf_m2n.py) for a runnable FSDP → TP example.
+See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable FSDP → TP example.
 
 ## Limitations
 

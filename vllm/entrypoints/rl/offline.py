@@ -8,7 +8,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.entrypoints.offline_utils import OfflineInferenceMixin
 
 
-class RLHFOfflineMixin(OfflineInferenceMixin):
+class RLOfflineMixin(OfflineInferenceMixin):
     def init_weight_transfer_engine(
         self, request: WeightTransferInitRequest | dict
     ) -> None:
