@@ -9,6 +9,7 @@ from typing import Generic, TypeVar
 import torch
 
 from vllm.model_executor.layers.fusion.quant_activation import (
+    InputQuantScales,
     QuantizedActivation,
     as_quantized_activation,
 )
@@ -82,7 +83,8 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
         quantization out of apply_weights into an upstream fused kernel.
         Return None when the kernel needs in-kernel quantization (custom
         padding or swizzling, dynamic scales, etc.). Kernels that return a
-        key must consume the activation via as_quantized_activation.
+        key must consume the activation via as_quantized_activation and
+        expose the scales that key needs via input_quant_scales.
         """
         return None
 
@@ -122,6 +124,11 @@ class FP8ScaledMMLinearKernel(
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
+
+    def input_quant_scales(self, layer: torch.nn.Module) -> InputQuantScales:
+        return InputQuantScales(
+            static_scale=getattr(layer, self.layer_param_names[2], None)
+        )
 
     def _get_layer_params(self, layer) -> _FP8ParamsT:
         w, w_s, x_s, x_s_ub = self.layer_param_names

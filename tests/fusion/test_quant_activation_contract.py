@@ -16,6 +16,10 @@ from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+    Mxfp8LinearKernel,
+    Mxfp8LinearLayerConfig,
+)
 from vllm.model_executor.kernels.linear.nvfp4.base import (
     NvFp4LinearKernel,
     NvFp4LinearLayerConfig,
@@ -44,16 +48,24 @@ from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     Int8ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
+    InputQuantScales,
     QuantizedActivation,
     as_quantized_activation,
     expose_input_quant_key,
     get_input_quant_key,
+    get_input_quant_scales,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
+    kMxfp8Dynamic,
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
+
+SUPPORTING_MXFP8 = {
+    FlashInferCutedslMxfp8LinearKernel,
+    FlashInferCutlassMxfp8LinearKernel,
+}
 
 # The only backends that consume a pre-quantized activation.
 SUPPORTING = {
@@ -64,9 +76,7 @@ SUPPORTING = {
     AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
-    FlashInferCutedslMxfp8LinearKernel,
-    FlashInferCutlassMxfp8LinearKernel,
-}
+} | SUPPORTING_MXFP8
 
 
 def _all_kernel_classes() -> list[type]:
@@ -90,6 +100,8 @@ def _probe(cls: type):
     obj = cls.__new__(cls)  # type: ignore[call-overload]
     if issubclass(cls, NvFp4LinearKernel):
         obj.config = NvFp4LinearLayerConfig()
+    elif issubclass(cls, Mxfp8LinearKernel):
+        obj.config = Mxfp8LinearLayerConfig()
     elif issubclass(cls, Int8ScaledMMLinearKernel):
         obj.config = Int8ScaledMMLinearLayerConfig(
             is_static_input_scheme=True, is_channelwise=False, input_symmetric=True
@@ -150,3 +162,64 @@ def test_as_quantized_activation_validates_key():
         as_quantized_activation(qa, None)
     assert as_quantized_activation(torch.zeros(2, 4), kFp8StaticTensorSym) is None
     assert as_quantized_activation(qa, kFp8StaticTensorSym) is qa
+
+
+@pytest.mark.parametrize(
+    "kernel_cls", sorted(SUPPORTING_MXFP8, key=lambda cls: cls.__name__)
+)
+def test_mxfp8_input_quant_scales_need_no_layer_parameters(kernel_cls):
+    """Dynamic MXFP8 producers need no consumer-owned quantization scales."""
+    layer = torch.nn.Module()
+    expose_input_quant_key(layer, _probe(kernel_cls))
+    assert get_input_quant_key(layer) == kMxfp8Dynamic
+    assert get_input_quant_scales(layer) == InputQuantScales()
+
+
+@pytest.mark.parametrize(
+    "kernel_cls",
+    sorted(SUPPORTING - SUPPORTING_MXFP8, key=lambda cls: cls.__name__),
+)
+@pytest.mark.parametrize("compiled", [False, True])
+def test_input_quant_scales_follow_parameter_replacement(kernel_cls, compiled):
+    """Resolve consumer scales after loading and replacement, even in a full graph."""
+    kernel = _probe(kernel_cls)
+    nvfp4 = issubclass(kernel_cls, NvFp4LinearKernel)
+    if not nvfp4:
+        kernel.layer_param_names = (
+            "weight",
+            "weight_scale",
+            "activation_scale",
+            "input_scale_ub",
+        )
+
+    layer = torch.nn.Module()
+    # The bridge runs before post-load processing creates the runtime scales.
+    expose_input_quant_key(layer, kernel)
+    scale_name = "input_global_scale_inv" if nvfp4 else "activation_scale"
+    layer.register_parameter(
+        scale_name, torch.nn.Parameter(torch.tensor(4.0), requires_grad=False)
+    )
+
+    def quantize(x):
+        scales = get_input_quant_scales(layer)
+        if nvfp4:
+            return x * scales.global_scale_inv
+        return x / scales.static_scale
+
+    if compiled:
+        quantize = torch.compile(quantize, backend="eager", fullgraph=True)
+
+    x = torch.tensor([2.0])
+    for scale_value in (4.0, 8.0):
+        scale = torch.nn.Parameter(torch.tensor(scale_value), requires_grad=False)
+        setattr(layer, scale_name, scale)
+        scales = get_input_quant_scales(layer)
+        if nvfp4:
+            assert scales.global_scale_inv is scale
+            assert scales.static_scale is None
+            expected = x * scale_value
+        else:
+            assert scales.static_scale is scale
+            assert scales.global_scale_inv is None
+            expected = x / scale_value
+        torch.testing.assert_close(quantize(x), expected)
