@@ -37,6 +37,7 @@ class FileMapper:
         inference_engine: str = "vllm",
         parallel_agnostic: bool = False,
         replicated_layout: bool = False,
+        kv_cache_layout: str | None = None,
         canonical_format: str | None = None,
     ):
         """Initialize the file mapper. Each worker constructs its own, but
@@ -66,6 +67,10 @@ class FileMapper:
         # unchanged (False is the historical default and must not appear).
         if replicated_layout:
             self.fields["replicated_layout"] = True
+        # Direct bytes use the worker's physical KV layout, so different
+        # layouts are not interchangeable and must have separate namespaces.
+        if kv_cache_layout is not None:
+            self.fields["kv_cache_layout"] = kv_cache_layout
         # The canonical byte format is not interchangeable with the direct
         # layout (or with other canonical format versions/families), so its
         # identity participates in the storage namespace.
@@ -92,9 +97,12 @@ class FileMapper:
         ]
         parallel = config.parallel
         canonical_format = None
+        kv_cache_layout = None
+        assert config.kv_cache_layout is not None
         if config.canonical_layout:
-            assert config.kv_cache_layout is not None
             canonical_format = canonical_format_id(config.kv_cache_layout)
+        else:
+            kv_cache_layout = config.kv_cache_layout
         return cls(
             root_dir=root_dir,
             model_name=config.model.name,
@@ -112,6 +120,7 @@ class FileMapper:
                 and (parallel.is_parallelism_agnostic or config.replicated_layout)
             ),
             replicated_layout=(parallel_agnostic and config.replicated_layout),
+            kv_cache_layout=kv_cache_layout,
             canonical_format=canonical_format,
         )
 
