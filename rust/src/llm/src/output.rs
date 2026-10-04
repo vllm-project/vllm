@@ -237,6 +237,10 @@ pub struct GenerateOutputStream {
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
+    /// Latest non-terminal segment finish. Recorded once when the session ends.
+    deferred_finish: Option<FinishReason>,
+    /// Terminal metrics have already been emitted for this request.
+    finished_recorded: bool,
 }
 
 impl GenerateOutputStream {
@@ -257,6 +261,8 @@ impl GenerateOutputStream {
             raw_stream,
             request_metrics,
             _request_guard: request_guard,
+            deferred_finish: None,
+            finished_recorded: false,
         }
     }
 
@@ -273,12 +279,22 @@ impl Stream for GenerateOutputStream {
         let raw = match ready!(Pin::new(&mut self.raw_stream).poll_next(cx)) {
             Some(Ok(raw)) => raw,
             Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
-            None => return Poll::Ready(None),
+            None => {
+                self.note_session_end();
+                return Poll::Ready(None);
+            }
         };
 
         let received_at = current_unix_timestamp_secs();
         self.request_metrics.observe_output(raw.timestamp, received_at, &raw.output);
 
+        let resumable = self.raw_stream.is_resumable();
+        // Abort and error retire the session. Other finish reasons only end
+        // the current segment.
+        let session_ending = matches!(
+            raw.output.finish_reason,
+            Some(EngineCoreFinishReason::Abort | EngineCoreFinishReason::Error)
+        );
         let raw = raw.output;
 
         // Populate the one-time prompt info on the first output.
@@ -311,9 +327,14 @@ impl Stream for GenerateOutputStream {
             .map(|stats| stats.num_cached_tokens as usize)
             .unwrap_or(0);
 
-        let finish_reason = finish_reason_from_engine(raw.finish_reason, raw.stop_reason);
-        if let Some(finish_reason) = finish_reason.as_ref() {
-            self.request_metrics.record_finished(received_at, finish_reason.clone());
+        let mut finish_reason = finish_reason_from_engine(raw.finish_reason, raw.stop_reason);
+        if resumable && !session_ending && finish_reason.is_some() {
+            self.deferred_finish = finish_reason.take();
+        } else if let Some(finish_reason) = finish_reason.as_ref() {
+            self.note_finished(received_at, finish_reason.clone());
+            if resumable {
+                self.raw_stream.complete_without_abort();
+            }
         }
 
         let output = GenerateOutput {
@@ -333,6 +354,27 @@ impl Stream for GenerateOutputStream {
     }
 }
 
+impl GenerateOutputStream {
+    /// Record the deferred segment finish when a resumable session closes
+    /// without an abort or error output.
+    fn note_session_end(&mut self) {
+        if self.finished_recorded || !self.raw_stream.is_completed() {
+            return;
+        }
+        let finish_reason = self.deferred_finish.take().unwrap_or_else(FinishReason::stop_eos);
+        self.note_finished(current_unix_timestamp_secs(), finish_reason);
+    }
+
+    fn note_finished(&mut self, received_at: f64, finish_reason: FinishReason) {
+        if self.finished_recorded {
+            return;
+        }
+        self.finished_recorded = true;
+        self.deferred_finish = None;
+        self.request_metrics.record_finished(received_at, finish_reason);
+    }
+}
+
 impl FusedStream for GenerateOutputStream {
     fn is_terminated(&self) -> bool {
         self.raw_stream.is_terminated()
@@ -341,7 +383,7 @@ impl FusedStream for GenerateOutputStream {
 
 impl Drop for GenerateOutputStream {
     fn drop(&mut self) {
-        if self.raw_stream.is_terminated() {
+        if self.finished_recorded || self.raw_stream.is_terminated() {
             // Already terminated cleanly, no need to record abort metrics.
             return;
         }
@@ -448,7 +490,18 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                 }
             }
 
-            unreachable!("generate stream should yield an error instead of closing early")
+            // A resumable session closes without a terminal finish reason on
+            // any chunk. One-shot streams reach this only when no output arrived.
+            let Some(mut collected) = collected else {
+                unreachable!("generate stream should yield an error instead of closing early");
+            };
+            collected.finish_reason = FinishReason::stop_eos();
+            collected.usage = TokenUsage {
+                prompt_token_count: collected.prompt_token_ids.len(),
+                output_token_count: collected.token_ids.len(),
+                cached_token_count,
+            };
+            Ok(collected)
         }
     }
 }

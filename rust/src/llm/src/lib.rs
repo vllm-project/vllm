@@ -79,7 +79,15 @@ impl Llm {
 
     /// Submit one tokenized generate request and return a per-request output
     /// stream.
+    ///
+    /// Rejects `resumable` requests: without a [`SegmentSink`] nothing could
+    /// continue or close the session, so its stream would never end.
     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateOutputStream> {
+        if req.resumable {
+            return Err(Error::ResumableRequiresStreaming {
+                request_id: req.request_id,
+            });
+        }
         let prepared = req.prepare(self.randomize_request_id)?;
         let prompt_token_ids = prepared.prompt_token_ids().into();
         let external_request_id = prepared
@@ -118,6 +126,69 @@ impl Llm {
         ))
     }
 
+    /// Open a resumable streaming-input session: one logical request fed many
+    /// prompt chunks over time, with a single continuous output stream.
+    ///
+    /// `first_segment` is the opening ADD and must have `resumable: true`.
+    /// Further chunks go through [`SegmentSink::push`], and
+    /// [`SegmentSink::finish`] sends the sentinel that ends the session — at
+    /// which point the returned stream terminates. A segment stop does not
+    /// finish that stream: `GenerateOutput::finished` stays false, and the
+    /// stream ends when the session closes. Engine-core retains the request's
+    /// KV between chunks, so later segments continue the generation instead of
+    /// re-prefilling.
+    ///
+    /// This is the Rust analog of Python's `_add_streaming_input_request`. Its
+    /// validation (`n > 1`, pooling, `FINAL_ONLY`, stop strings) has no Rust
+    /// counterpart because none of those can be expressed on [`GenerateRequest`].
+    pub async fn generate_streaming(
+        &self,
+        first_segment: GenerateRequest,
+    ) -> Result<(SegmentSink<'_>, GenerateOutputStream)> {
+        if !first_segment.resumable {
+            return Err(Error::NotResumable {
+                request_id: first_segment.request_id,
+            });
+        }
+        let prepared = first_segment.prepare(self.randomize_request_id)?;
+        let prompt_token_ids = prepared.prompt_token_ids().into();
+        let external_request_id = prepared
+            .engine_request
+            .external_req_id
+            .clone()
+            .expect("prepare always sets external_req_id");
+        let internal_request_id = prepared.engine_request.request_id.clone();
+
+        Span::current().record("engine_request_id", &internal_request_id);
+
+        let arrival_time = prepared.engine_request.arrival_time;
+        let max_tokens_param =
+            (prepared.engine_request.sampling_params.as_ref()).map(|p| p.max_tokens);
+        let prompt_len = prepared.prompt_token_ids().len() as u32;
+
+        let stream = self.client.call(prepared.engine_request).await?;
+
+        let request_metrics = RequestMetricsTracker::new(
+            self.client.model_name().to_string(),
+            stream.engine_index(),
+            arrival_time,
+            prompt_len,
+            max_tokens_param,
+            1,
+            self.client.engine_stats_enabled(),
+        );
+        let guard = self.inflight.track(external_request_id, internal_request_id.clone());
+
+        let sink = SegmentSink {
+            client: &self.client,
+            request_id: internal_request_id,
+        };
+        Ok((
+            sink,
+            GenerateOutputStream::new(prompt_token_ids, stream, request_metrics, guard),
+        ))
+    }
+
     /// Abort in-flight requests by their external (user-supplied) request ids.
     ///
     /// External ids are resolved to the internal engine ids actually known to
@@ -142,6 +213,60 @@ impl Llm {
     /// Shut down the underlying engine-core client and its background tasks.
     pub async fn shutdown(self) -> Result<()> {
         self.client.shutdown().await?;
+        Ok(())
+    }
+}
+
+/// Feeds successive prompt chunks into one open resumable request.
+///
+/// Returned by [`Llm::generate_streaming`] alongside the session's output
+/// stream. Every chunk is an ADD under the same engine-side `request_id`; the
+/// stream stays open across all of them and ends after [`Self::finish`].
+pub struct SegmentSink<'a> {
+    client: &'a EngineCoreClient,
+    /// Engine-side id of the open session. Every chunk is pinned to it.
+    request_id: String,
+}
+
+impl SegmentSink<'_> {
+    /// The engine-side request id this session runs under.
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    /// Feed one more segment into the open session.
+    ///
+    /// Its output continues on the stream `generate_streaming` returned; there
+    /// is no new stream. `segment.request_id` is ignored — the chunk is pinned
+    /// to the session's id.
+    ///
+    /// A segment with `resumable: false` is rejected: engine-core reads that
+    /// flag as the closing ADD, so it would end the session instead of
+    /// extending it, and discard the segment's own prompt. Use [`Self::finish`].
+    pub async fn push(&self, segment: GenerateRequest) -> Result<()> {
+        if !segment.resumable {
+            return Err(Error::NotResumable {
+                request_id: self.request_id.clone(),
+            });
+        }
+        self.send(segment).await
+    }
+
+    /// Close the session with the sentinel ADD, ending the output stream.
+    ///
+    /// Mirrors Python's `final_req`: a dummy one-token prompt with
+    /// `resumable: false`. Earlier segment stops stay non-terminal; the stream
+    /// ends once this close is committed and those segments have stopped.
+    pub async fn finish(&self) -> Result<()> {
+        self.send(GenerateRequest::sentinel(self.request_id.clone())).await
+    }
+
+    async fn send(&self, segment: GenerateRequest) -> Result<()> {
+        // Chunks are never id-randomized: they must land on the session's
+        // engine-side id, which `generate_streaming` already resolved.
+        let mut prepared = segment.prepare(false)?;
+        prepared.engine_request.request_id = self.request_id.clone();
+        self.client.call_continuation(prepared.engine_request).await?;
         Ok(())
     }
 }
