@@ -1587,6 +1587,9 @@ class MooncakeStoreWorker:
         self.kv_recv_threads: list[KVCacheStoreRecvingThread] = []
         self.num_recv_threads = max(1, envs.VLLM_MOONCAKE_LOAD_RECV_THREADS)
         self.recv_request_queue: queue.Queue[ReqMeta] = queue.Queue()
+        # Device KV regions (addr -> len) registered with the store.
+        self._device_regions: dict[int, int] = {}
+        self._kv_released = False
         self.finished_store_req: set[str] = set()
         self._kv_connector_stats_lock = threading.Lock()
         self.kv_connector_stats = MooncakeStoreConnectorStats()
@@ -1885,7 +1888,9 @@ class MooncakeStoreWorker:
                 seen_storage_ptrs.add(base_addr)
                 region_len = cache_storage.nbytes()
                 ret = self.store.register_buffer(base_addr, region_len)
-                if ret != 0:
+                if ret == 0:
+                    self._device_regions[base_addr] = region_len
+                else:
                     logger.error(
                         "register_buffer failed for addr %#x len %d: %d",
                         base_addr,
@@ -1950,6 +1955,8 @@ class MooncakeStoreWorker:
                             f"{base_addr:#x} len {region_len} ({mem_kind}): {ret}"
                         )
                     registered_buffers[base_addr] = region_len
+                    if not is_host_resident:
+                        self._device_regions[base_addr] = region_len
                 elif registered_len != region_len:
                     raise ValueError(
                         f"KV cache views at {base_addr:#x} expose inconsistent "
@@ -2049,6 +2056,53 @@ class MooncakeStoreWorker:
         logger.info(
             "Started %d Mooncake KV-load receive thread(s)", self.num_recv_threads
         )
+
+    def release_kv_caches(self) -> None:
+        """Unregister the device KV regions once queued puts and gets are done;
+        TimeoutError past VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT. Idempotent."""
+        if self._kv_released:
+            return
+        # Same bound as MooncakeConnector.release_kv_caches.
+        if not self._wait_for_transfers(envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT):
+            raise TimeoutError("Mooncake store transfers did not finish in time")
+        self._set_device_regions_registered(False)
+        self._kv_released = True
+
+    def restore_kv_caches(self) -> None:
+        """Register the released regions again: same addresses, new pages."""
+        if self._kv_released:
+            self._set_device_regions_registered(True)
+            self._kv_released = False
+
+    def _set_device_regions_registered(self, register: bool) -> None:
+        """(Un)register every device KV region. If a call fails, undo the calls
+        already made and raise, so the registration is left as it was."""
+
+        def call(addr: int, reg: bool) -> int:
+            if reg:
+                return self.store.register_buffer(addr, self._device_regions[addr])
+            return self.store.unregister_buffer(addr)
+
+        done: list[int] = []
+        for addr in self._device_regions:
+            if call(addr, register) != 0:
+                for prev in done:
+                    call(prev, not register)
+                op = "register" if register else "unregister"
+                raise RuntimeError(f"Mooncake {op}_buffer failed for {addr:#x}")
+            done.append(addr)
+
+    def _wait_for_transfers(self, timeout: float) -> bool:
+        """Wait until no store put or get is queued or running; False on timeout."""
+        queues = [self.recv_request_queue]
+        if self.kv_send_thread is not None:
+            queues.append(self.kv_send_thread.request_queue)
+        deadline = time.monotonic() + timeout
+        while any(q.unfinished_tasks for q in queues):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
 
     def start_load_kv(self, metadata: MooncakeStoreConnectorMetadata):
         """Issue async loads.
@@ -2390,19 +2444,10 @@ class MooncakeStoreWorker:
         if store is None:
             return
         self.store = None
-        deadline = time.monotonic() + 5.0
-        for thread in (self.kv_send_thread, *self.kv_recv_threads):
-            if thread is None:
-                continue
-            while thread.request_queue.unfinished_tasks and time.monotonic() < deadline:
-                time.sleep(0.05)
-            if thread.request_queue.unfinished_tasks:
-                logger.warning(
-                    "Mooncake store %s still has %d in-flight requests at "
-                    "close; closing anyway.",
-                    thread.name,
-                    thread.request_queue.unfinished_tasks,
-                )
+        if not self._wait_for_transfers(5.0):
+            logger.warning(
+                "Mooncake store still has in-flight requests at close; closing anyway."
+            )
         try:
             store.close()
         except Exception as e:
