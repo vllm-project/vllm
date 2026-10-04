@@ -70,7 +70,10 @@ def _discover_parsers() -> list[_ParserInfo]:
             # token, so it does not fit this TOOL_END-based replay harness.
             # It is covered by tests/parser/mistral/ instead.
             continue
-        cfg = obj(bare_tok, None).parser_engine_config
+        # Concrete engine parsers build their own ``parser_engine_config``;
+        # ``type[ParserEngine]`` only knows the base signature, which takes
+        # it as a required keyword argument.
+        cfg = obj(bare_tok, None).parser_engine_config  # type: ignore[call-arg]
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
             continue

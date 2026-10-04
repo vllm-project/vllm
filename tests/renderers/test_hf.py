@@ -5,7 +5,7 @@ import jinja2
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.chat_utils import ConversationMessage, load_chat_template
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers.hf import (
@@ -577,7 +577,9 @@ def test_resolve_content_format_examples(template_path, expected_format):
         model,
         trust_remote_code=model_config.trust_remote_code,
     )
-    dummy_tokenizer.chat_template = None
+    # Clear the HF tokenizer's own template so resolution falls back to the
+    # one loaded below; ``chat_template`` is not part of ``TokenizerLike``.
+    dummy_tokenizer.chat_template = None  # type: ignore[attr-defined]
 
     chat_template = load_chat_template(EXAMPLES_DIR / template_path)
     assert isinstance(chat_template, str)
@@ -639,8 +641,10 @@ def test_get_gen_prompt(
         continue_final_message=continue_final_message,
     )
 
-    # Call the function and get the result
-    result = safe_apply_chat_template(
+    # Call the function and get the result. The plain role/content request
+    # messages are already in conversation shape, which mypy cannot see
+    # through ``ChatCompletionMessageParam``.
+    result = safe_apply_chat_template(  # type: ignore[call-overload]
         model_config,
         tokenizer,
         mock_request.messages,
@@ -781,7 +785,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         return get_tokenizer("facebook/opt-125m")
 
     def test_developer_converted_to_system_for_chatml(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "developer", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
         ]
@@ -800,7 +804,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
     def test_developer_preserved_when_template_supports_it(
         self, model_config, tokenizer
     ):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "developer", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
         ]
@@ -816,7 +820,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         assert "You are a helpful assistant." in result
 
     def test_developer_does_not_crash_strict_template(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "developer", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
         ]
@@ -832,7 +836,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         assert "You are a helpful assistant." in result
 
     def test_no_developer_messages_no_overhead(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
         ]
@@ -850,7 +854,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
     def test_developer_at_non_first_position_consolidated(
         self, model_config, tokenizer
     ):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there!"},
@@ -871,7 +875,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         assert "What is 2+2?" in result
 
     def test_developer_only_no_prior_system(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "user", "content": "Hello"},
             {"role": "developer", "content": "Be concise."},
             {"role": "user", "content": "What is 2+2?"},
@@ -949,7 +953,7 @@ class TestApplyChatTemplateEffortTolerant:
         return get_tokenizer("facebook/opt-125m")
 
     def test_unsupported_effort_raises_bad_request(self, model_config, tokenizer):
-        conversation = [{"role": "user", "content": "Hello"}]
+        conversation: list[ConversationMessage] = [{"role": "user", "content": "Hello"}]
         with pytest.raises(
             VLLMValidationError,
             match="Unexpected reasoning effort high",
@@ -970,7 +974,7 @@ class TestApplyChatTemplateEffortTolerant:
         )
 
     def test_supported_effort_accepted(self, model_config, tokenizer):
-        conversation = [{"role": "user", "content": "Hello"}]
+        conversation: list[ConversationMessage] = [{"role": "user", "content": "Hello"}]
         result = safe_apply_chat_template(
             model_config,
             tokenizer,
@@ -982,7 +986,7 @@ class TestApplyChatTemplateEffortTolerant:
         assert result == "user: Hello\n"
 
     def test_non_effort_template_error_is_bad_request(self, model_config, tokenizer):
-        conversation = [{"role": "user", "content": "Hello"}]
+        conversation: list[ConversationMessage] = [{"role": "user", "content": "Hello"}]
         with pytest.raises(VLLMValidationError, match="unrelated reason"):
             safe_apply_chat_template(
                 model_config,

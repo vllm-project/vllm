@@ -313,6 +313,18 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
     manager.free(request)
 
 
+def _config_without_post_init(
+    speculative_config: SpeculativeConfig | None,
+) -> VllmConfig:
+    """A real `VllmConfig` built without `__post_init__`, which would otherwise
+    require a resolvable draft model. The lookahead properties only read
+    `speculative_config` and `diffusion_config`."""
+    config = object.__new__(VllmConfig)
+    object.__setattr__(config, "speculative_config", speculative_config)
+    object.__setattr__(config, "diffusion_config", None)
+    return config
+
+
 @pytest.mark.parametrize(
     ("method", "expected"),
     [
@@ -340,30 +352,16 @@ def test_num_lookahead_tokens_per_method(method: str, expected: int):
     `__post_init__` because the speculative methods otherwise require a draft
     model to be resolvable.
     """
-
-    class _Config:
-        speculative_config: SpeculativeConfig | None = None
-        diffusion_config = None
-        num_speculative_tokens = VllmConfig.num_speculative_tokens
-        num_lookahead_tokens = VllmConfig.num_lookahead_tokens
-
     speculative_config = object.__new__(SpeculativeConfig)
     object.__setattr__(speculative_config, "method", method)
     object.__setattr__(speculative_config, "num_speculative_tokens", NUM_SPEC_STEPS)
 
-    config = _Config()
-    config.speculative_config = speculative_config
+    config = _config_without_post_init(speculative_config)
 
     assert config.num_lookahead_tokens == expected
 
 
 def test_num_lookahead_tokens_without_speculation():
-    class _Config:
-        speculative_config: SpeculativeConfig | None = None
-        diffusion_config = None
-        num_speculative_tokens = VllmConfig.num_speculative_tokens
-        num_lookahead_tokens = VllmConfig.num_lookahead_tokens
-
-    config = _Config()
+    config = _config_without_post_init(None)
 
     assert config.num_lookahead_tokens == 0

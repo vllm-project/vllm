@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from vllm.model_executor.models import plamo3 as plamo3_mod
-from vllm.model_executor.models.interfaces import supports_eagle3
+from vllm.model_executor.models.interfaces import SupportsEagle3
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
@@ -39,7 +39,9 @@ def test_plamo3_returns_dflash_selected_auxiliary_hidden_states(monkeypatch):
     model.norm = DummyNorm()
     model.do_not_compile = True
 
-    target = plamo3_mod.Plamo3ForCausalLM.__new__(plamo3_mod.Plamo3ForCausalLM)
+    target = plamo3_mod.Plamo3ForCausalLM.__new__(
+        plamo3_mod.Plamo3ForCausalLM  # type: ignore[type-abstract]  # protocol attrs unset
+    )
     nn.Module.__init__(target)
     target.model = model
 
@@ -49,7 +51,9 @@ def test_plamo3_returns_dflash_selected_auxiliary_hidden_states(monkeypatch):
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
 
-    assert supports_eagle3(target)
+    # Same check as supports_eagle3(), which mypy resolves to its
+    # type[object] overload here and so narrows target to a class.
+    assert isinstance(target, SupportsEagle3)
     assert target.get_eagle3_default_aux_hidden_state_layers() == (2, 4, 5)
 
     spec_config = SimpleNamespace(

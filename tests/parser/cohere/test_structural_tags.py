@@ -139,23 +139,29 @@ def _content_types(tag_json: str) -> set[str]:
 @pytest.fixture(scope="module")
 def parser(tokenizer: MockCohereTokenizer) -> CohereCommandParser:
     """Parser configured with a supported Cohere architecture."""
-    return make_parser(
+    parser = make_parser(
         tokenizer, "cohere_command4", model_config=_model_config("Cohere2ForCausalLM")
     )
+    assert isinstance(parser, CohereCommandParser)
+    return parser
 
 
 @pytest.fixture(scope="module")
 def parser_no_model_config(tokenizer: MockCohereTokenizer) -> CohereCommandParser:
     """Parser with no ``model_config`` (cannot resolve architecture)."""
-    return make_parser(tokenizer, "cohere_command4")
+    parser = make_parser(tokenizer, "cohere_command4")
+    assert isinstance(parser, CohereCommandParser)
+    return parser
 
 
 @pytest.fixture(scope="module")
 def parser_unsupported_arch(tokenizer: MockCohereTokenizer) -> CohereCommandParser:
     """Parser configured with an architecture that has no structural tag style."""
-    return make_parser(
+    parser = make_parser(
         tokenizer, "cohere_command4", model_config=_model_config("LlamaForCausalLM")
     )
+    assert isinstance(parser, CohereCommandParser)
+    return parser
 
 
 class TestAdjustRequestPassthrough:

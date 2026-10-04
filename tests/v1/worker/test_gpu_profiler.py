@@ -1081,7 +1081,10 @@ def test_gpu_worker_creates_proton_profiler():
         Worker.profile(worker)
 
     wrapper.assert_called_once_with(worker.profiler_config, worker_name="rank1")
-    worker.profiler.start.assert_called_once_with()
+    # mypy still narrows worker.profiler to the None assigned above, so check
+    # the started wrapper directly and that it is the one the worker kept.
+    wrapper.return_value.start.assert_called_once_with()
+    assert worker.profiler is wrapper.return_value
 
 
 @_requires_cuda_for_proton

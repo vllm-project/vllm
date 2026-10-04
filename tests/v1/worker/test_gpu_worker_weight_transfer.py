@@ -168,15 +168,17 @@ def test_rank_local_update_uses_data_parallel_index_after_reconfigure():
     assert worker._weight_update_active is True
 
 
-def test_finish_draft_session_keeps_lora_state():
+def test_finish_draft_session_keeps_lora_state(monkeypatch):
     engine = _RecordingEngine()
     engine.supports_draft_weight_update = True
     worker = _make_worker(engine)
-    worker._set_draft_weight_update_target = lambda: None
+    # Stub the bound method on a hand-built worker: retargeting needs a real model.
+    monkeypatch.setattr(worker, "_set_draft_weight_update_target", lambda: None)
 
     Worker.start_draft_weight_update(worker)
     Worker.finish_weight_update(worker)
 
+    assert isinstance(worker.model_runner, _RecordingModelRunner)
     assert worker.model_runner.reset_lora_calls == 0
 
 
