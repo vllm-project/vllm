@@ -225,6 +225,11 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
         if vllm_config.attention_config.hisparse_config is not None:
             return "BLHNC"
+        quant_config = vllm_config.quant_config
+        if quant_config is not None and quant_config.has_layerwise_kv_cache():
+            # Packed heterogeneous rows are already supported by the worker.
+            # Let the allocator retain exact pages instead of forcing padding.
+            return None
         return "LBHNC"
 
     def reset_cache(self) -> bool | None:

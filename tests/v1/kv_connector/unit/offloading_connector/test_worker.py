@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
@@ -680,3 +681,113 @@ def test_register_kv_caches_uniform_type(backend):
     # opaque mapping rather than a certified, parallelism-agnostic one
     assert group_refs[0].mapping.parallelism_agnostic
     assert not group_refs[1].mapping.parallelism_agnostic
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA copies")
+@pytest.mark.parametrize("hybrid", [False, True])
+@pytest.mark.parametrize("blocks_per_chunk", [1, 3])
+def test_packed_layerwise_kv_offload_roundtrip(hybrid, blocks_per_chunk):
+    """Reload complete mixed-format rows at new block IDs, including state bytes."""
+    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+    from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    specs = {
+        "fp8": FullAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.uint8,
+            cache_dtype="fp8_e4m3",
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+        ),
+        "nvfp4": FullAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.uint8,
+            cache_dtype="nvfp4",
+            kv_quant_mode=KVQuantMode.NVFP4,
+            # Per K/V head: 64 packed bytes and 8 scale bytes.
+            state_content_bytes=72,
+        ),
+    }
+    attention_bytes = sum(spec.page_size_bytes for spec in specs.values())
+    groups = [
+        KVCacheGroupSpec(
+            layer_names=list(specs),
+            kv_cache_spec=UniformTypeKVCacheSpecs(
+                block_size=64, kv_cache_specs=dict(specs)
+            ),
+        )
+    ]
+    row_bytes = attention_bytes
+    if hybrid:
+        specs["mamba"] = MambaSpec(
+            block_size=64,
+            shapes=((20_000,),),
+            dtypes=(torch.bfloat16,),
+            mamba_cache_mode="align",
+        )
+        row_bytes = max(row_bytes, specs["mamba"].page_size_bytes)
+        groups.append(
+            KVCacheGroupSpec(
+                layer_names=["mamba"],
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=64,
+                    kv_cache_specs={"mamba": specs["mamba"]},
+                ),
+            )
+        )
+    num_blocks = 12
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_groups=groups,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=row_bytes * num_blocks,
+                layers=[name],
+                layer_stride=spec.page_size_bytes,
+                block_stride=row_bytes,
+                offset=specs["fp8"].page_size_bytes if name == "nvfp4" else 0,
+            )
+            for name, spec in specs.items()
+        ],
+    )
+    caches = allocate_kv_cache(config, torch.device("cuda:0"), KVCacheLayout.BLHNC)
+    connector, offloading_spec = _make_worker(config)
+    connector.register_kv_caches(caches)
+    canonical = offloading_spec.get_worker.call_args.args[0]
+    assert len(canonical.tensors) == 1
+    rows = canonical.tensors[0].tensor
+    assert rows.shape == (num_blocks, row_bytes)
+    worker = CPUOffloadingWorker(
+        kv_caches=canonical,
+        blocks_per_chunk=blocks_per_chunk,
+        num_cpu_chunks=8,
+    )
+    try:
+        for group_id in range(len(groups)):
+            # A manager block belongs to only one group at a time.
+            rows.random_(-128, 128)
+            original = rows.clone()
+            src_ids = list(range(blocks_per_chunk))
+            dst_ids = list(range(6, 6 + blocks_per_chunk))
+            sizes = tuple(
+                blocks_per_chunk if i == group_id else 0 for i in range(len(groups))
+            )
+            indices = (0,) * len(groups)
+            src = GPULoadStoreSpec(src_ids, group_sizes=sizes, block_indices=indices)
+            dst = GPULoadStoreSpec(dst_ids, group_sizes=sizes, block_indices=indices)
+            cpu = CPULoadStoreSpec([group_id])
+            assert worker.submit_store(0, src, cpu)
+            worker.wait({0})
+            assert all(result.success for result in worker.get_finished())
+            rows.zero_()
+            assert worker.submit_load(1, cpu, dst)
+            worker.wait({1})
+            assert all(result.success for result in worker.get_finished())
+            torch.testing.assert_close(rows[dst_ids], original[src_ids], rtol=0, atol=0)
+            assert rows[:6].count_nonzero().item() == 0
+    finally:
+        worker.shutdown()
