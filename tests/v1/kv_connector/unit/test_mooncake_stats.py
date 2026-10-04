@@ -267,12 +267,14 @@ def test_expired_request_bumps_counter():
     import asyncio
 
     worker = _bare_worker()
+    ready = asyncio.Event()
+    ready.set()
     worker.reqs_need_send = {
         "tid1": SendBlockMeta(
             p_req_id="req1",
             transfer_id="tid1",
             local_block_ids=[0, 1],
-            ready=asyncio.Event(),
+            ready=ready,
             expire_time=-1.0,  # Already expired.
             sending=0,
         ),
