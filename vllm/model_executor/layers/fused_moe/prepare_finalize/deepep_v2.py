@@ -238,6 +238,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             a1_scale,
             quant_config,
             defer_input_quant=defer_input_quant,
+            do_expand=do_expand,
         )
 
     def _receiver(
@@ -253,6 +254,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
+        do_expand: bool,
     ) -> mk.PrepareResultType:
         if event.event is not None:
             event.current_stream_wait()
@@ -267,6 +269,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 recv_expert_num_tokens,
                 device=expert_x.device,
             )
+            expert_tokens_meta.deepep_v2_do_expand = do_expand
         else:
             # Decode/cudagraph path (do_cpu_sync=False) skips the CPU sync and
             # leaves recv_expert_num_tokens empty. A present-but-empty
