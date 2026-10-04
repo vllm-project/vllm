@@ -184,6 +184,7 @@ class RequestState:
         # Per-sequence spec-decode accumulator; arrives once (on finish) via
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+        self.weight_version: str | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -580,6 +581,7 @@ class OutputProcessor:
                         stop_reason=None,
                         kv_transfer_params=None,
                         ec_transfer_params=None,
+                        weight_version=req_state.weight_version,
                     )
                 ):
                     req_state.queue.put(request_output)
@@ -757,6 +759,7 @@ class OutputProcessor:
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
+            req_state.weight_version = engine_core_output.weight_version
             if request_output := req_state.make_request_output(
                 new_token_ids,
                 pooling_output,

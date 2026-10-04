@@ -1583,6 +1583,50 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.external_req_id], internal=False)
 
 
+def test_abort_flushes_buffered_tokens_with_their_weight_version(dummy_test_vectors):
+    processor = OutputProcessor(
+        dummy_test_vectors.tokenizer, log_stats=False, stream_interval=5
+    )
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(output_kind=RequestOutputKind.DELTA),
+        pooling_params=None,
+    )
+    queue = RequestOutputCollector(RequestOutputKind.DELTA, request.request_id)
+    processor.add_request(request, None, queue=queue)
+
+    processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id, new_token_ids=[42], weight_version="2"
+            )
+        ]
+    )
+    assert queue.get_nowait().weight_version == "2"
+    processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id, new_token_ids=[43], weight_version="2"
+            )
+        ]
+    )
+    assert queue.get_nowait() is None
+
+    processor.abort_requests([request.request_id], internal=True)
+    aborted = queue.get_nowait()
+    assert aborted is not None
+    assert aborted.outputs[0].token_ids == [43]
+    assert aborted.outputs[0].finish_reason == "abort"
+    assert aborted.weight_version == "2"
+
+
 @pytest.mark.parametrize("output_kind", list(RequestOutputKind))
 def test_sampling_masks_follow_output_kind(output_kind):
     state = RequestState.__new__(RequestState)
