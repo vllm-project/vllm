@@ -98,6 +98,7 @@ def flashinfer_sampler_supported() -> bool:
             "VLLM_USE_FLASHINFER_SAMPLER=0."
         )
         return False
+    from vllm.utils.flashinfer import has_flashinfer
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
     capability = current_platform.get_device_capability()
@@ -106,6 +107,11 @@ def flashinfer_sampler_supported() -> bool:
     if not FlashInferBackend.supports_compute_capability(capability):
         unsupported_reason = (
             f"unsupported compute capability {capability.as_version_str()}"
+        )
+    elif not has_flashinfer():
+        unsupported_reason = (
+            "FlashInfer kernels are disabled: flashinfer-cubin is not installed "
+            "and nvcc or ninja is missing"
         )
     elif (
         num_sms := current_platform.num_compute_units(
