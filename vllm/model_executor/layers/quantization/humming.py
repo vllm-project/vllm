@@ -16,6 +16,12 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.oracle.humming import (
+    convert_to_humming_moe_kernel_format,
+    get_humming_moe_quant_config,
+    make_humming_moe_kernel,
+    select_humming_moe_experts,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -31,15 +37,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.humming import (
     check_and_fallback_input_schema,
-    convert_to_humming_moe_kernel_format,
     get_humming_linear_compute_config,
-    get_humming_moe_quant_config,
     humming_update_schema_hadamard_block_size,
-    input_schema_to_quant_key,
-    make_humming_moe_kernel,
     resolve_humming_layer_config,
-    select_humming_moe_experts,
-    weight_schema_to_quant_key,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import (
@@ -648,24 +648,13 @@ class HummingMoEMethod(FusedMoEMethodBase):
         self.force_weight_schema = quant_config.force_weight_schema
         self.force_input_schema = quant_config.force_input_schema
 
-        # Derive QuantKeys from humming schemas.
-        # Prefer force schemas (the final format after requant) over base.
-        weight_key = weight_schema_to_quant_key(
-            self.force_weight_schema or self.weight_schema, moe.in_dtype
-        )
-        runtime_input_schema = check_and_fallback_input_schema(
-            weight_schema=self.force_weight_schema or self.weight_schema,
-            input_schema=self.force_input_schema or self.input_schema,
-            param_dtype=moe.in_dtype,
-            allow_fallback=quant_config.allow_input_schema_fallback,
-        )
-        activation_key = input_schema_to_quant_key(runtime_input_schema, moe.in_dtype)
-
-        # Select Humming MoE experts
         self.experts_cls = select_humming_moe_experts(
             config=self.moe,
-            weight_key=weight_key,
-            activation_key=activation_key,
+            weight_schema=self.weight_schema,
+            input_schema=self.input_schema,
+            force_weight_schema=self.force_weight_schema,
+            force_input_schema=self.force_input_schema,
+            allow_input_schema_fallback=quant_config.allow_input_schema_fallback,
         )
 
     def prepare_weight_loader(self, layer, weight_loader):

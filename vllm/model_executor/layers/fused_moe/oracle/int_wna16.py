@@ -1566,10 +1566,10 @@ def convert_to_wna16_moe_kernel_format(
 
     """
     if backend == WNA16MoEBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
-        from vllm.model_executor.layers.quantization.utils.humming import (
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
             convert_to_humming_moe_kernel_format,
         )
+        from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
         if isinstance(quant_config, MoeWNA16Config):
             from vllm.utils.humming import HummingInputSchema

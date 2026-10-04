@@ -482,7 +482,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
         if self.wna16_backend == WNA16MoEBackend.HUMMING:
-            from vllm.model_executor.layers.quantization.utils.humming import (
+            from vllm.model_executor.layers.fused_moe.oracle.humming import (
                 get_humming_moe_quant_config,
             )
 
