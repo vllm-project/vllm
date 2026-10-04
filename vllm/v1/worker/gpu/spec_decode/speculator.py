@@ -97,7 +97,12 @@ class BaseSpeculator(ABC):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
+        """Propose draft tokens for the batch.
+
+        Returns None on a prefill-only PD producer (DSpark), which stores the
+        draft context KV for transfer instead of drafting.
+        """
         pass
 
 
@@ -171,12 +176,16 @@ class DraftModelSpeculator(BaseSpeculator):
         )
         self.enable_adaptive_verification = (
             self.speculative_config.enable_adaptive_verification
+            and not self.speculative_config.is_dspark_prefill_only()
         )
         self.use_acceptance_estimator = self.enable_adaptive_verification
         self.acceptance_estimator: OnlineAcceptanceEstimator | None = None
 
         self.draft_logits: torch.Tensor | None = None
-        if self.speculative_config.draft_sample_method == "probabilistic":
+        if (
+            self.speculative_config.draft_sample_method == "probabilistic"
+            and not self.speculative_config.is_dspark_prefill_only()
+        ):
             # Pre-temperature logits, cached from the previous decode step.
             dtype, fill = self.draft_logits_spec(vllm_config)
             self.draft_logits = torch.full(
