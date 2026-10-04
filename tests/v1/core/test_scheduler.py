@@ -1424,6 +1424,67 @@ def test_same_step_duplicate_encoder_input_stays_cached():
     assert "image" not in cache.freeable
 
 
+def test_throttle_dp_global_gate_ignores_capacity_bound():
+    """With the DP-global prefill gate the engine core decides each throttled
+    step for all DP ranks together, so a capacity-bound rank defers its
+    backlog like every other rank instead of releasing on its own."""
+    scheduler = create_scheduler(
+        max_num_seqs=16,
+        max_num_batched_tokens=200,
+        enable_chunked_prefill=True,
+        prefill_schedule_interval=4,
+        prefill_release_min_dp_ranks=2,
+    )
+    a, b = create_requests(num_requests=2, num_tokens=200, req_ids=["a", "b"])
+    scheduler.add_request(a)
+    scheduler.add_request(b)
+
+    output = scheduler.schedule()
+    assert "a" in output.num_scheduled_tokens
+    assert scheduler.prefill_capacity_bound
+    assert scheduler.has_prefill_work()
+
+    # Throttled step: `b` stays deferred despite the capacity-bound release.
+    output = scheduler.schedule(throttle_prefills=True)
+    assert "b" not in output.num_scheduled_tokens
+
+    # When the gate releases, `b` is admitted.
+    output = scheduler.schedule()
+    assert "b" in output.num_scheduled_tokens
+
+
+def test_has_prefill_work():
+    """`has_prefill_work` reports a waiting request or an in-progress prefill
+    chunk, and is False once every running request is decoding."""
+    scheduler = create_scheduler(
+        max_num_seqs=16, max_num_batched_tokens=50, enable_chunked_prefill=True
+    )
+    assert not scheduler.has_prefill_work()
+
+    (req,) = create_requests(num_requests=1, num_tokens=80, req_ids=["r0"])
+    scheduler.add_request(req)
+    assert scheduler.has_prefill_work()  # waiting
+
+    output = scheduler.schedule()  # first 50-token chunk
+    assert req.is_prefill_chunk
+    assert scheduler.has_prefill_work()  # running, part-way through its prompt
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["r0"],
+            req_id_to_index={"r0": 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    output = scheduler.schedule()  # final chunk
+    assert not req.is_prefill_chunk
+    assert not scheduler.has_prefill_work()
+
+
 @pytest.mark.parametrize("warm_encoder_cache", [False, True])
 def test_no_mm_input_chunking(warm_encoder_cache: bool):
     # Disable multimodal input chunking.

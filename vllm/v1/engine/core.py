@@ -2290,6 +2290,14 @@ class DPEngineCoreProc(EngineCoreProc):
 
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
+        # DP-global prefill gate (0 = off): the number of DP ranks with prefill
+        # work is counted at the end of every step and gates the next one.
+        self.prefill_release_min_dp_ranks = (
+            scheduler_config.prefill_release_min_dp_ranks
+            if self.prefill_schedule_interval > 1
+            else 0
+        )
+        self.num_dp_ranks_with_prefill_work = 0
         self.dp_sync_interval = vllm_config.parallel_config.dp_sync_interval
 
         # Counts forward-passes of the model so that we can synchronize
@@ -2448,9 +2456,17 @@ class DPEngineCoreProc(EngineCoreProc):
         # Throttle new prefills to cadence-aligned steps for DP balancing.
         # step_counter is identical across DP ranks. On a fresh wave the
         # counter is 0, so prefills are admitted immediately after idle.
+        if (
+            self.prefill_schedule_interval == 1
+            or self.step_counter % self.prefill_schedule_interval == 0
+        ):
+            return False
+        # DP-global gate: between cadence steps, release on every rank once
+        # enough ranks have prefill work, and otherwise on none, so that one
+        # backlogged rank cannot force a long mixed step while its peers wait.
         return (
-            self.prefill_schedule_interval > 1
-            and self.step_counter % self.prefill_schedule_interval != 0
+            not self.prefill_release_min_dp_ranks
+            or self.num_dp_ranks_with_prefill_work < self.prefill_release_min_dp_ranks
         )
 
     @fault_tolerant_wrapper
@@ -2546,6 +2562,13 @@ class DPEngineCoreProc(EngineCoreProc):
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
+        if self.prefill_release_min_dp_ranks:
+            # Every rank reaches this point once per step with the same
+            # step_counter, so a per-step collective stays aligned here. (An
+            # idle rank still runs _process_engine_step but skips this method.)
+            self.num_dp_ranks_with_prefill_work = ParallelConfig.count_dp_ranks(
+                self.dp_group, self.scheduler.has_prefill_work()
+            )
         if self.step_counter != 1 and self.step_counter % self.dp_sync_interval != 0:
             return True
 

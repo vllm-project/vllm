@@ -208,6 +208,14 @@ class SchedulerConfig:
     already-admitted prompt, so a long prompt can take up to N times as many
     steps to finish prefilling."""
 
+    prefill_release_min_dp_ranks: int = Field(default=0, ge=0)
+    """With `prefill_schedule_interval` > 1, gate prefills on all DP ranks
+    together: between cadence steps, release prefills on every rank when at
+    least this many DP ranks have prefill work, and otherwise defer them on
+    every rank, including a rank whose last release could not drain its queue.
+    This adds one CPU all-reduce over the DP group per engine step. 0 (the
+    default) keeps the per-rank release of capacity-bound ranks."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
@@ -310,6 +318,13 @@ class SchedulerConfig:
             logger.info_once(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens,
+            )
+
+        if self.prefill_release_min_dp_ranks and self.prefill_schedule_interval == 1:
+            logger.warning(
+                "prefill_release_min_dp_ranks=%d has no effect because "
+                "prefill_schedule_interval is 1.",
+                self.prefill_release_min_dp_ranks,
             )
 
         self.verify_max_model_len(max_model_len)
