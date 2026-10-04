@@ -178,6 +178,16 @@ def test_gsm8k_correctness(config_filename):
         server_url = remote_server.url_for("v1")
         print(f"Server started at: {server_url}")
 
+        # Run before any traffic: EPLB may rearrange experts after a few steps.
+        for method in eval_config.get("startup_rpc_checks", []):
+            response = requests.post(
+                remote_server.url_for("collective_rpc"), json={"method": method}
+            )
+            response.raise_for_status()
+            results = response.json()["results"]
+            print(f"  {method}: {results}")
+            assert results and not any(results), f"{method} failed: {results}"
+
         results = run_gsm8k_eval(eval_config, server_url)
 
         measured_metric = results["accuracy"]
