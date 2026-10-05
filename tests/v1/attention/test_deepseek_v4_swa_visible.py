@@ -415,20 +415,21 @@ def test_combine_topk_swa_with_image_spans(cfg):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
-def test_v41_combine_topk_swa_stops_at_replay_start(cfg):
+@pytest.mark.parametrize("query_len", [24, 20])
+def test_v41_combine_topk_swa_stops_at_replay_start(cfg, query_len):
     """SWA bounded replay: the gathered buffer starts at replay_start, so the
     window never indexes below it."""
     from vllm.models.deepseek_v41.common.ops.cache_utils import (
         combine_topk_swa_indices as combine_v41,
     )
 
-    # Request 0 replays [16, 40): the windows of its first rows would
-    # otherwise reach below 16.
+    # Request 0 replays from 16: a 24-token chunk starts there, a 20-token
+    # chunk leaves only 4 context tokens above it (fewer than the window).
     indices, lens, rows, exp_lens = combine_case(
         cfg["compress_ratio"],
         cfg["topk"],
         seq_lens=[40, 12],
-        query_lens=[24, 12],
+        query_lens=[query_len, 12],
         spans=[[], []],
         with_image=False,
         replay_starts=[16, 0],
