@@ -20,8 +20,6 @@ log probabilities.
 
 Thinking is off unless `chat_template_kwargs` turns it on.
 
-This endpoint does not serve diffusion models yet.
-
 Every read of a request starts with the state, so with
 `--enable-prefix-caching` the state is prefilled once and each further
 question prefills only its own text, then reads one token.
