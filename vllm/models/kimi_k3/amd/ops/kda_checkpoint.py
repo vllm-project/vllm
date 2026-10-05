@@ -7,13 +7,15 @@ from dataclasses import dataclass
 import torch
 
 from vllm.model_executor.layers.mamba.checkpoint import (
-    MambaPrefillCheckpointExporter,
     MambaPrefillCheckpointMetadata,
+)
+from vllm.model_executor.layers.mamba.kda_checkpoint import (
+    FlashKDAPrefillCheckpointExporter,
 )
 
 
 @dataclass(frozen=True)
-class KimiK3ROCmKDAPrefillCheckpointExporter(MambaPrefillCheckpointExporter):
+class KimiK3ROCmKDAPrefillCheckpointExporter(FlashKDAPrefillCheckpointExporter):
     """Conv window only; `fused_kda_chunk` writes the recurrent half itself.
 
     `state_len` is `conv_kernel_size - 1`, not the spec-widened conv row.
@@ -31,7 +33,7 @@ class KimiK3ROCmKDAPrefillCheckpointExporter(MambaPrefillCheckpointExporter):
         # An empty recurrent checkpoint masks the kernel's recurrent half off.
         super().export(
             checkpoint,
-            conv_input=raw_qkv,
+            raw_qkv=raw_qkv,
             conv_state=conv_state,
             recurrent_checkpoint=conv_state[:, :0],
             recurrent_state=conv_state,

@@ -5,8 +5,8 @@
 This is the central claim of internal prefill checkpoints: the state the SSD
 scan already materializes at the checkpoint's chunk boundary is exactly the
 state a fresh prefill over `[0, checkpoint)` would end with, so it can be
-cached and later resumed from. The last test covers the other half: the
-shared exporter moving that state, and the conv window, into the paged cache.
+cached and later resumed from. The last test covers the other half: moving
+that state, and the conv window, into the paged cache.
 """
 
 import pytest
@@ -14,8 +14,10 @@ import torch
 
 from tests.kernels.mamba.test_mamba_ssm_ssd import generate_random_inputs
 from vllm.model_executor.layers.mamba.checkpoint import (
-    MambaPrefillCheckpointExporter,
     MambaPrefillCheckpointMetadata,
+)
+from vllm.model_executor.layers.mamba.ops.ssd_checkpoint import (
+    store_prefill_checkpoint,
 )
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
@@ -113,11 +115,11 @@ def test_checkpoint_does_not_perturb_the_final_state():
 
 
 @pytest.mark.parametrize("dim_first", [True, False])
-def test_exporter_stores_the_checkpoint_selected_from_all_chunk_states(dim_first):
-    """Mamba2 hands the exporter every chunk state plus a row id per request.
+def test_store_selects_the_checkpoint_from_all_chunk_states(dim_first):
+    """The store reads the checkpoint row out of every chunk state.
 
     Row 0 checkpoints 32 tokens in, its state being chunk 3 rather than the
-    program's own row, so the store only passes if the indirection is used.
+    program's own row, so the store only passes if ``chunk_idx`` is used.
     Row 1 declines and must write nothing. The conv input is a column slice of
     a wider projection, the SD conv layout is a transposed view, and SSM rows
     are padded pages, matching the strides the mixer passes.
@@ -142,14 +144,14 @@ def test_exporter_stores_the_checkpoint_selected_from_all_chunk_states(dim_first
         offsets=[32, 0],
     )
 
-    MambaPrefillCheckpointExporter().export(
+    store_prefill_checkpoint(
         checkpoint,
-        conv_input=conv_input,
-        conv_state=conv_state,
-        recurrent_checkpoint=varlen_states,
-        recurrent_state=ssm_state,
-        cu_seqlens=torch.tensor([0, 40, 64], dtype=torch.int32, device=DEVICE),
-        recurrent_row_ids=torch.tensor([3, 0], device=DEVICE),
+        torch.tensor([3, 0], device=DEVICE),
+        conv_input.T,
+        conv_state,
+        varlen_states,
+        ssm_state,
+        torch.tensor([0, 40, 64], dtype=torch.int32, device=DEVICE),
     )
 
     exact = dict(rtol=0, atol=0)

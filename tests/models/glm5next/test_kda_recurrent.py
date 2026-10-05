@@ -203,8 +203,10 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     from types import SimpleNamespace
 
     from vllm.model_executor.layers.mamba.checkpoint import (
-        MambaPrefillCheckpointExporter,
         MambaPrefillCheckpointMetadata,
+    )
+    from vllm.model_executor.layers.mamba.kda_checkpoint import (
+        FlashKDAPrefillCheckpointExporter,
     )
     from vllm.models.glm5next.common import kda
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -244,7 +246,7 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
         ),
         ((1, 2 * length, heads, D), torch.bfloat16),
     )
-    layer._checkpoint_exporter = MambaPrefillCheckpointExporter(state_len=3)
+    layer._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(state_len=3)
     workspace = WorkspaceManager(device)
     monkeypatch.setattr(kda, "current_workspace_manager", lambda: workspace)
     conv_shape = (width, state_len) if dim_first else (state_len, width)
@@ -327,7 +329,6 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     checkpoint = MambaPrefillCheckpointMetadata(
         torch.tensor([offset, 0], dtype=torch.int32, device=device),
         torch.tensor([3, 0], dtype=torch.int32, device=device),
-        [offset, 0],
     )
     expected = run(raw_qkv, gate, beta, [1, 2], [False, False], checkpoint)
     expected_state = recurrent[1].clone()

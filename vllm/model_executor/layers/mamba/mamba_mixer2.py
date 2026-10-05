@@ -27,9 +27,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.checkpoint import (
-    MambaPrefillCheckpointExporter,
-)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -43,6 +40,7 @@ from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
 from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
     selective_state_update_replayssm_output_only,
 )
+from vllm.model_executor.layers.mamba.ops.ssd_checkpoint import store_prefill_checkpoint
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
@@ -530,7 +528,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
-        self.checkpoint_exporter = MambaPrefillCheckpointExporter()
         self.use_replayssm = (
             cache_config.use_replayssm if cache_config is not None else False
         )
@@ -821,7 +818,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
             x = hidden_states_B_C_p.transpose(
                 0, 1
             )  # this is the form that causal-conv see
-
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
                 self.conv_weights,
@@ -887,14 +883,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
             if has_checkpoints:
                 assert checkpoint_meta is not None
                 assert query_start_loc_p is not None
-                self.checkpoint_exporter.export(
+                store_prefill_checkpoint(
                     checkpoint_meta,
-                    conv_input=x.transpose(0, 1),
-                    conv_state=conv_state,
-                    recurrent_checkpoint=varlen_states,
-                    recurrent_state=ssm_state,
-                    cu_seqlens=query_start_loc_p,
-                    recurrent_row_ids=checkpoint_chunk_idx,
+                    checkpoint_chunk_idx,
+                    x,
+                    conv_state,
+                    varlen_states,
+                    ssm_state,
+                    query_start_loc_p,
                 )
             ssm_state[state_indices_tensor_p] = final_states
             if ring_start is not None and self._updates_replayssm_trackers:

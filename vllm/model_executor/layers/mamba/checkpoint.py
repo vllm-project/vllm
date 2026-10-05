@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 
 import torch
@@ -69,11 +70,9 @@ def _gather_checkpoint_state_indices(
 class MambaPrefillCheckpointMetadata:
     checkpoint_offsets: torch.Tensor
     state_indices: torch.Tensor
-    # Host copy of the per-row offsets, in ``request_rows`` order and
-    # never compacted. Backends that must place the checkpoint before the
-    # tensors exist need it: Mamba2 feeds it to the SSD chunk layout so a
-    # logical chunk ends on the checkpoint.
-    offsets: list[int]
+    # Host copy of ``checkpoint_offsets``, for backends that lay out the
+    # checkpoint before any tensor exists (Mamba2's SSD chunk split).
+    offsets: list[int] | None = None
     # Gather indices into the block table, kept so that another KV cache group
     # with the same spec can re-derive its own ``state_indices``.
     request_rows: torch.Tensor | None = None
@@ -143,7 +142,21 @@ class MambaPrefillCheckpointBuilder:
             _gather_checkpoint_state_indices(
                 m.block_table_tensor, request_rows_tensor, checkpoint_cols_tensor
             ),
-            checkpoint_offsets,
+            offsets=checkpoint_offsets,
             request_rows=request_rows_tensor,
             block_cols=checkpoint_cols_tensor,
         )
+
+
+class MambaPrefillCheckpointExporter(ABC):
+    """Export a mid-prefill checkpoint into backend-specific paged states."""
+
+    @abstractmethod
+    def export(
+        self,
+        checkpoint: MambaPrefillCheckpointMetadata,
+        *args,
+        **kwargs,
+    ) -> None:
+        """Write checkpoint state into the paged cache."""
+        raise NotImplementedError
