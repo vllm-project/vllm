@@ -130,6 +130,7 @@ Batch invariance has been tested and verified on the following models:
 - **Llama 3**: Llama3.1 and 3.2 series, `meta-llama/Llama-3.2-1B-Instruct`, `meta-llama/Llama-3.2-3B-Instruct` for example
 - **GPT-OSS**: `openai/gpt-oss-20b`, `openai/gpt-oss-120b`
 - **Mistral**: `mistralai/Mistral-7B-v0.3`
+- **Gemma 2**: `google/gemma-2-2b-it` (FLASH_ATTN and TRITON_ATTN backends)
 - **GLM-4 series**: `zai-org/glm-4-9b-chat`
 - **Phi series**: `microsoft/Phi-3.5-mini-instruct`, `microsoft/phi-4`
 - **Granite 3.1 (MoE)**: `ibm-granite/granite-3.1-1b-a400m-instruct`, `ibm-granite/granite-3.1-3b-a800m-instruct`
