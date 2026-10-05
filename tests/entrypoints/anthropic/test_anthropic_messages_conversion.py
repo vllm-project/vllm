@@ -42,6 +42,7 @@ from vllm.entrypoints.generate.base.protocol import (
     ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
@@ -2117,3 +2118,68 @@ class TestMidConversationToolChanges:
             ValidationError, match='only allowed in messages with role "system"'
         ):
             request_cls(model="test-model", max_tokens=128, **fields)
+
+
+# ======================================================================
+# _convert_tools — server tools without input_schema
+# ======================================================================
+
+
+class TestConvertServerTools:
+    def test_server_tool_accepted_without_input_schema(self):
+        # Anthropic server tools (web_search, computer use, ...) carry no
+        # input_schema; the request must still validate.
+        request = _make_request(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 8}
+            ],
+        )
+        assert request.tools is not None
+        assert request.tools[0].input_schema is None
+
+    def test_convert_tools_skips_server_tool_keeps_function(self):
+        request = _make_request(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 8},
+                {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            ],
+        )
+        req = ChatCompletionRequest(
+            model="test-model", messages=[{"role": "user", "content": "hi"}]
+        )
+        AnthropicServingMessages._convert_tools(request, req)
+
+        assert req.tools is not None
+        assert len(req.tools) == 1
+        assert req.tools[0].function.name == "get_weather"
+
+    def test_convert_tools_forwards_deferred_tool_without_schema(self):
+        # A deferred tool is announced without a schema so the model learns the
+        # name exists and can request it later. Skipping it the way an unrunnable
+        # server tool is skipped would defeat that, so it must be forwarded with
+        # parameters=None.
+        request = _make_request(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 8},
+                {"name": "deferred_grep", "defer_loading": True},
+            ],
+        )
+        req = ChatCompletionRequest(
+            model="test-model", messages=[{"role": "user", "content": "hi"}]
+        )
+        AnthropicServingMessages._convert_tools(request, req)
+
+        assert req.tools is not None
+        assert [t.function.name for t in req.tools] == ["deferred_grep"]
+        assert req.tools[0].function.parameters is None
+        assert req.tools[0].function.defer_loading is True
