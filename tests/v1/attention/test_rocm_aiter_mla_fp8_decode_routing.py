@@ -202,31 +202,164 @@ def test_a_non_causal_block_never_routes_to_gluon(gluon_available):
     assert not AiterMLAHelper.use_gluon_verify(12, 8, "auto", causal=False)
 
 
-def test_divisor_heads_skip_gluon_when_triton_cannot_compile_it(monkeypatch):
-    """Head counts that divide 16 still take Gluon on gfx950, unless Triton cannot compile it.
+@pytest.fixture
+def pin_gluon_gate(monkeypatch):
+    """Set the arch, the Triton probe and the mode knob, then clear both caches.
 
-    AITER's kernel passes ``cga_layout`` to ``PaddedSharedLayout``. Triton 3.6
-    rejects that keyword, and the ROCm vLLM image ships Triton 3.6 on MI355
-    (gfx950). Divisors of 16 are the counts ``use_gluon_decode`` still selects
-    once the arch gate passes; non-divisors already take the padded asm decode.
+    ``_gluon_mla_decode_supported`` caches its answer. The Triton probe is
+    cached too, and the arch check imports ``on_gfx950`` on each call, so the
+    patch has to land on ``vllm.platforms.rocm`` before the gate runs.
     """
-    monkeypatch.setattr(rocm_aiter_mla, "_triton_compiles_aiter_gluon_mla", lambda: False)
-    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
-    import vllm.platforms.rocm as rocm
+    originals = {
+        name: getattr(rocm_aiter_mla, name)
+        for name in ("_gluon_mla_decode_supported", "_triton_compiles_aiter_gluon_mla")
+    }
 
-    monkeypatch.setattr(rocm, "on_gfx950", lambda: True)
-    supported = rocm_aiter_mla._gluon_mla_decode_supported
-    if hasattr(supported, "cache_clear"):
-        supported.cache_clear()
+    def _clear() -> None:
+        for fn in originals.values():
+            if hasattr(fn, "cache_clear"):
+                fn.cache_clear()
 
-    assert not supported()
-    assert not AiterMLAHelper.use_gluon_decode(8, 1, "bfloat16")
-    assert not AiterMLAHelper.use_gluon_verify(8, 4, "bfloat16")
+    def apply(*, gfx950: bool, triton_ok: bool, mode: str = "auto"):
+        _clear()
+        monkeypatch.setattr(
+            rocm_aiter_mla, "_triton_compiles_aiter_gluon_mla", lambda: triton_ok
+        )
+        monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: mode)
+        import vllm.platforms.rocm as rocm
+
+        monkeypatch.setattr(rocm, "on_gfx950", lambda: gfx950)
+        _clear()
+
+    yield apply
+    _clear()
 
 
-def test_triton_gluon_mla_probe_matches_padded_shared_layout():
-    """The probe reports exactly whether this Triton accepts ``cga_layout``."""
+@pytest.mark.parametrize("num_heads", [1, 2, 4, 8, 12])
+@pytest.mark.parametrize("mode", ["auto", "gluon"])
+@pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
+def test_uncompilable_triton_never_selects_gluon(
+    pin_gluon_gate, num_heads, mode, kv_cache_dtype
+):
+    """gfx950 still must not select Gluon when this Triton cannot compile the kernel.
+
+    Divisors of 16 are the counts that take Gluon once the arch gate passes.
+    An explicit ``gluon`` mode does not override that: the kernel raises
+    ``TypeError`` on ``cga_layout`` before any request is served. 12 heads
+    (Kimi-K3 at TP8) are included because multi-token verify still uses Gluon
+    for non-divisors when the kernel does compile.
+    """
+    pin_gluon_gate(gfx950=True, triton_ok=False, mode=mode)
+
+    assert not rocm_aiter_mla._gluon_mla_decode_supported()
+    assert not AiterMLAHelper.use_gluon_decode(num_heads, 1, kv_cache_dtype)
+    assert not AiterMLAHelper.use_gluon_verify(num_heads, 4, kv_cache_dtype)
+
+
+@pytest.mark.parametrize("num_heads", [1, 2, 4, 8])
+@pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
+def test_compilable_triton_keeps_gluon_for_divisor_heads(
+    pin_gluon_gate, num_heads, kv_cache_dtype
+):
+    """With a Triton that accepts ``cga_layout``, gfx950 keeps the Gluon path."""
+    pin_gluon_gate(gfx950=True, triton_ok=True, mode="auto")
+
+    assert rocm_aiter_mla._gluon_mla_decode_supported()
+    assert AiterMLAHelper.use_gluon_decode(num_heads, 1, kv_cache_dtype)
+    assert AiterMLAHelper.use_gluon_verify(num_heads, 4, kv_cache_dtype)
+    # Single-token decode and multi-token verify stay mutually exclusive.
+    assert not AiterMLAHelper.use_gluon_decode(num_heads, 4, kv_cache_dtype)
+    assert not AiterMLAHelper.use_gluon_verify(num_heads, 1, kv_cache_dtype)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
+def test_compilable_triton_routes_non_divisor_decode_to_asm(
+    pin_gluon_gate, kv_cache_dtype
+):
+    """12 heads decode through padded ASM; verify still uses Gluon when it compiles.
+
+    ``use_gluon_decode`` refuses a head count that does not divide 16 unless
+    the mode knob is ``gluon``. ``use_gluon_verify`` has no such divisor check,
+    which is why an uncompilable Triton has to fail the shared gate.
+    """
+    pin_gluon_gate(gfx950=True, triton_ok=True, mode="auto")
+
+    assert not AiterMLAHelper.use_gluon_decode(12, 1, kv_cache_dtype)
+    assert AiterMLAHelper.use_gluon_verify(12, 4, kv_cache_dtype)
+
+    pin_gluon_gate(gfx950=True, triton_ok=True, mode="gluon")
+    assert AiterMLAHelper.use_gluon_decode(12, 1, kv_cache_dtype)
+
+
+@pytest.mark.parametrize("num_heads", [8, 12])
+@pytest.mark.parametrize("triton_ok", [True, False])
+def test_gluon_stays_off_without_gfx950_or_for_fp8_and_asm_mode(
+    pin_gluon_gate, num_heads, triton_ok
+):
+    """The Triton check does not reopen routes that were already refused."""
+    pin_gluon_gate(gfx950=False, triton_ok=triton_ok, mode="auto")
+    assert not rocm_aiter_mla._gluon_mla_decode_supported()
+    assert not AiterMLAHelper.use_gluon_decode(num_heads, 1, "bfloat16")
+    assert not AiterMLAHelper.use_gluon_verify(num_heads, 4, "bfloat16")
+
+    pin_gluon_gate(gfx950=True, triton_ok=triton_ok, mode="asm")
+    assert not AiterMLAHelper.use_gluon_decode(num_heads, 1, "bfloat16")
+    assert not AiterMLAHelper.use_gluon_verify(num_heads, 4, "bfloat16")
+
+    for kv_cache_dtype in FP8_DTYPES:
+        pin_gluon_gate(gfx950=True, triton_ok=triton_ok, mode="gluon")
+        assert not AiterMLAHelper.use_gluon_decode(num_heads, 1, kv_cache_dtype)
+        assert not AiterMLAHelper.use_gluon_verify(num_heads, 4, kv_cache_dtype)
+
+
+def test_probe_is_false_when_gluon_language_cannot_be_imported(monkeypatch):
+    """A Triton build without the Gluon language module is treated as unsupported."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "triton.experimental.gluon.language" or (
+            name == "triton.experimental.gluon" and fromlist and "language" in fromlist
+        ):
+            raise ImportError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+    rocm_aiter_mla._triton_compiles_aiter_gluon_mla.cache_clear()
+    try:
+        assert not rocm_aiter_mla._triton_compiles_aiter_gluon_mla()
+    finally:
+        rocm_aiter_mla._triton_compiles_aiter_gluon_mla.cache_clear()
+
+
+def test_installed_triton_probe_matches_padded_shared_layout_api():
+    """The probe is the ``cga_layout`` field, and a missing field raises TypeError.
+
+    AITER calls ``PaddedSharedLayout(..., cga_layout=...)``. Triton 3.6 names
+    that parameter ``block_bases``. Newer Triton accepts the keyword, so the
+    TypeError check only runs where the field is absent.
+    """
     from triton.experimental.gluon import language as gl
 
     fields = getattr(gl.PaddedSharedLayout, "__dataclass_fields__", {})
-    assert rocm_aiter_mla._triton_compiles_aiter_gluon_mla() == ("cga_layout" in fields)
+    rocm_aiter_mla._triton_compiles_aiter_gluon_mla.cache_clear()
+    try:
+        assert rocm_aiter_mla._triton_compiles_aiter_gluon_mla() == (
+            "cga_layout" in fields
+        )
+        if "cga_layout" not in fields:
+            with pytest.raises(TypeError, match="cga_layout"):
+                gl.PaddedSharedLayout(
+                    interval_padding_pairs=[[512, 16]],
+                    offset_bases=[[0, 1]],
+                    cga_layout=[],
+                    shape=[64, 512],
+                )
+            rocm_aiter_mla._gluon_mla_decode_supported.cache_clear()
+            assert not rocm_aiter_mla._gluon_mla_decode_supported()
+            assert not AiterMLAHelper.use_gluon_decode(8, 1, "bfloat16")
+            assert not AiterMLAHelper.use_gluon_verify(12, 4, "bfloat16")
+    finally:
+        rocm_aiter_mla._triton_compiles_aiter_gluon_mla.cache_clear()
+        rocm_aiter_mla._gluon_mla_decode_supported.cache_clear()
