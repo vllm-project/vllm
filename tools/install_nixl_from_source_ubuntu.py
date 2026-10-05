@@ -4,7 +4,6 @@
 import argparse
 import glob
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -77,9 +76,10 @@ def get_pinned_nixl_version():
     try:
         with open(NIXL_REQUIREMENTS_FILE) as requirements:
             for line in requirements:
-                match = re.match(r"\s*nixl\s*==\s*([^\s;#]+)", line)
-                if match:
-                    return match.group(1)
+                requirement = line.split("#")[0].split(";")[0]
+                name, separator, version = requirement.partition("==")
+                if separator and name.strip() == "nixl" and version.split():
+                    return version.split()[0]
     except OSError:
         pass
     return None
@@ -140,10 +140,16 @@ def get_cuda_version():
     if not os.path.exists(nvcc):
         return None
     output = subprocess.check_output([nvcc, "--version"], text=True)
-    match = re.search(r"release (\d+)\.(\d+)", output)
-    if match is None:
-        raise RuntimeError(f"Cannot parse the CUDA version from `{nvcc} --version`.")
-    return int(match.group(1)), int(match.group(2))
+    _, separator, release = output.partition("release ")
+    try:
+        if not separator:
+            raise ValueError
+        major, minor = release.split(",")[0].split(".")[:2]
+        return int(major), int(minor)
+    except ValueError:
+        raise RuntimeError(
+            f"Cannot parse the CUDA version from `{nvcc} --version`."
+        ) from None
 
 
 def get_default_cuda_arch_list():
