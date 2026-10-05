@@ -1335,6 +1335,7 @@ class NixlBaseConnectorWorker:
                         self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
                         self._track_remote_engine_replacement(eid, host, port)
+                        return
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -1344,6 +1345,9 @@ class NixlBaseConnectorWorker:
                         )
                         # Count once per handshake, regardless of waiting requests.
                         self.xfer_stats.record_failed_handshake()
+                # Ranks registered before the failure are redone by the retry.
+                # Their NIXL agents stay loaded; NIXL reuses them on re-add.
+                self._release_remote_engine_descs(eid)
 
             fut.add_done_callback(done_callback)
             return fut
@@ -3664,6 +3668,21 @@ class NixlBaseConnectorWorker:
             self._cleanup_remote_engine(engine_id, log_eviction=False)
             logger.info("Released NIXL state for replaced remote engine %s.", engine_id)
 
+    def _release_remote_engine_descs(self, engine_id: EngineId) -> None:
+        """Release a remote engine's dlist handles and descriptor state."""
+        # Notif-only engines (push-mode D side) have no descriptor state.
+        for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
+            self.nixl_wrapper.release_dlist_handle(handle)
+        self.kv_caches_base_addr.pop(engine_id, None)
+        self.dst_num_blocks.pop(engine_id, None)
+        self.dst_region_num_blocks.pop(engine_id, None)
+        self.dst_region_group_ids.pop(engine_id, None)
+        self.dst_uses_region_group_mapping.pop(engine_id, None)
+        self.dst_region_mem_types.pop(engine_id, None)
+        self.tp_mappings.pop(engine_id, None)
+        if self.transfer_topo is not None:
+            self.transfer_topo.unregister_remote_engine(engine_id)
+
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True
     ) -> None:
@@ -3675,9 +3694,7 @@ class NixlBaseConnectorWorker:
         """
         assert engine_id in self._remote_agents
 
-        # Notif-only engines (push-mode D side) have no descriptor state.
-        for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
-            self.nixl_wrapper.release_dlist_handle(handle)
+        self._release_remote_engine_descs(engine_id)
         # Pop under the handshake lock; NIXL teardown stays outside it.
         with self._handshake_lock:
             agents = self._remote_agents.pop(engine_id)
@@ -3686,16 +3703,6 @@ class NixlBaseConnectorWorker:
                     del self._engine_by_address[address]
         for agent_name in agents.values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
-
-        self.kv_caches_base_addr.pop(engine_id, None)
-        self.dst_num_blocks.pop(engine_id, None)
-        self.dst_region_num_blocks.pop(engine_id, None)
-        self.dst_region_group_ids.pop(engine_id, None)
-        self.dst_uses_region_group_mapping.pop(engine_id, None)
-        self.dst_region_mem_types.pop(engine_id, None)
-        self.tp_mappings.pop(engine_id, None)
-        if self.transfer_topo is not None:
-            self.transfer_topo.unregister_remote_engine(engine_id)
 
         # Drop the cached clock offset; it is re-measured on the next handshake.
         self._engine_clock_offset.pop(engine_id, None)

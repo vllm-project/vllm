@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from concurrent.futures import Future
+from concurrent.futures import Future, wait
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -3408,6 +3408,46 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     # from KV expiry.
     assert connector.connector_worker.xfer_stats.data["num_failed_handshakes"]
     assert connector.connector_worker.xfer_stats.data["num_failed_transfers"] == []
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_failed_handshake_releases_partial_remote_descs(default_vllm_config, dist_init):
+    """A handshake failing on a later rank must not leak earlier ranks' dlists."""
+    worker = FakeNixlConnectorWorker(
+        create_vllm_config(), "decode", hand_shake_latency=0
+    )
+    worker.num_descs = len(worker.src_blocks_data)
+    eid = worker.REMOTE_ENGINE_ID
+    add_remote_agent = worker.add_remote_agent
+
+    def fail_on_rank_1(meta, remote_tp_rank=0, **kwargs):
+        if remote_tp_rank == 1:
+            raise RuntimeError("rank 1 unreachable")
+        return add_remote_agent(meta, remote_tp_rank=remote_tp_rank, **kwargs)
+
+    def handshake():
+        fut = worker._ensure_handshake(eid, "localhost", 1234, tp_size=2)
+        wait([fut])
+        # Done callbacks run on the single handshake thread before its next task.
+        worker._handshake_initiation_executor.submit(lambda: None).result()
+        return fut
+
+    with (
+        patch.object(worker, "add_remote_agent", side_effect=fail_on_rank_1),
+        patch.object(worker.nixl_wrapper, "release_dlist_handle") as release,
+    ):
+        assert handshake().exception() is not None
+    release.assert_called_once()
+    assert eid not in worker._remote_agents
+    assert eid not in worker.dst_xfer_side_handles
+    assert eid not in worker.tp_mappings
+
+    assert handshake().exception() is None
+    assert set(worker.dst_xfer_side_handles[eid]) == {0, 1}
+    assert set(worker._remote_agents[eid]) == {(0, 0), (0, 1)}
 
 
 @patch(
