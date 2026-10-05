@@ -159,6 +159,10 @@ def _resolve_gdn_prefill_backend(
     return backend, "triton"
 
 
+class FlashInferGDNPrefillCheckpointExporter(FlashKDAPrefillCheckpointExporter):
+    """Store FlashInfer GDN prefill checkpoints, laid out like FlashKDA's."""
+
+
 def qwen_gdn_prefill_checkpoint_alignment(vllm_config: VllmConfig) -> int | None:
     """Token alignment of internal prefill checkpoints, if the backend has them.
 
@@ -559,7 +563,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ),
                 torch.float32,
             )
-            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter()
+            self._checkpoint_exporter = FlashInferGDNPrefillCheckpointExporter()
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
