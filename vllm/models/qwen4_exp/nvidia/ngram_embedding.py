@@ -102,7 +102,7 @@ class Qwen4ExpPLEFileGatherEmbedding(Qwen4ExpPLEEmbedding):
             )
             rows = torch.empty_like(host).view(torch.uint8).flatten(0, 1)
             self._plane_buffers[name] = (staging, host, rows)
-        self._staging, self._host_rows, self._rows = self._plane_buffers["weight"]
+        self._staging, self._host_rows, _ = self._plane_buffers["weight"]
         if self._nvfp4:
             self._output = torch.zeros(
                 (max_total_tokens, num_ngram_heads, embedding_dim),
@@ -206,7 +206,7 @@ class Qwen4ExpPLEFileGatherEmbedding(Qwen4ExpPLEEmbedding):
         local: torch.Tensor,
         rows: torch.Tensor,
     ) -> None:
-        """Read one plane's rows for sorted distinct ids into ``rows``."""
+        """Read one plane's rows for sorted distinct ids into `rows`."""
         fds_t, bases = self._sources[name]
         page, row_bytes = mmap.PAGESIZE, rows.shape[1]
         start = bases[shard] + local * row_bytes
