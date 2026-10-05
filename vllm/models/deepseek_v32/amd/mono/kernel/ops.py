@@ -66,11 +66,7 @@ def write_lane_i32(value, lane, vector):
 
     return fx.Int32(
         llvm.call_intrinsic(
-            T.i32,
-            "llvm.amdgcn.writelane.i32",
-            [as_ir_value(fx.Int32(item)) for item in (value, lane, vector)],
-            [],
-            [],
+            T.i32, "llvm.amdgcn.writelane.i32", [as_ir_value(fx.Int32(item)) for item in (value, lane, vector)], [], []
         )
     )
 
@@ -88,9 +84,7 @@ def mem_realtime():
 
 
 def _hardware_f32(name, value):
-    return fx.Float32(
-        llvm.call_intrinsic(T.f32, name, [fx.Float32(value).ir_value()], [], [])
-    )
+    return fx.Float32(llvm.call_intrinsic(T.f32, name, [fx.Float32(value).ir_value()], [], []))
 
 
 def rsq(value):
@@ -128,9 +122,7 @@ def xshfl(value, offset):
 def wave_umax_dpp(value):
     """Return a wave maximum through the tuned GLM/TileRT DPP schedule."""
 
-    result = llvm.InlineAsmOp(
-        T.i32, [as_ir_value(fx.Int32(value))], _UMAX_DPP_ASM, "=v,0"
-    ).result
+    result = llvm.InlineAsmOp(T.i32, [as_ir_value(fx.Int32(value))], _UMAX_DPP_ASM, "=v,0").result
     return read_lane_i32(result, 63)
 
 
@@ -142,9 +134,7 @@ def xred(value, offset, op):
     is_float = isinstance(value, fx.Float32)
     source = as_ir_value(value.bitcast(fx.Int32) if is_float else fx.Int32(value))
     swap = rocdl.permlane32_swap if offset == 32 else rocdl.permlane16_swap
-    pair = swap(
-        llvm.StructType.get_literal([T.i32, T.i32]), source, source, False, False
-    )
+    pair = swap(llvm.StructType.get_literal([T.i32, T.i32]), source, source, False, False)
     lhs, rhs = (fx.Int32(llvm.extractvalue(T.i32, pair, [index])) for index in range(2))
     if is_float:
         return op(lhs.bitcast(fx.Float32), rhs.bitcast(fx.Float32))
@@ -188,11 +178,7 @@ def fp8_to_bf16x8(word0, word1):
     parts = []
     for word in (word0, word1):
         for half in range_constexpr(2):
-            pair = fx.Vector(
-                rocdl.cvt_scalef32_pk_bf16_fp8(
-                    T.vec(2, T.bf16), as_ir_value(word), one, bool(half)
-                )
-            )
+            pair = fx.Vector(rocdl.cvt_scalef32_pk_bf16_fp8(T.vec(2, T.bf16), as_ir_value(word), one, bool(half)))
             parts += [pair[0], pair[1]]
     return fx.Vector.from_elements(parts, fx.BFloat16)
 
@@ -203,12 +189,7 @@ def mxfp4_to_bf16x8(word, scale):
     parts = []
     for select in range_constexpr(4):
         pair = fx.Vector(
-            rocdl.cvt_scalef32_pk_bf16_fp4(
-                T.vec(2, T.bf16),
-                as_ir_value(word),
-                as_ir_value(scale),
-                select,
-            )
+            rocdl.cvt_scalef32_pk_bf16_fp4(T.vec(2, T.bf16), as_ir_value(word), as_ir_value(scale), select)
         )
         parts += [pair[0], pair[1]]
     return fx.Vector.from_elements(parts, fx.BFloat16)

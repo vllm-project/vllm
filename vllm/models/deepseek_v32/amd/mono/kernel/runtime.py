@@ -64,11 +64,7 @@ class SymmetricPeerBuffer:
 
             readiness = [None] * npes
             dist.all_gather_object(readiness, (local_error, mine), group=group)
-            failed = [
-                (peer, status[0])
-                for peer, status in enumerate(readiness)
-                if status[0] is not None
-            ]
+            failed = [(peer, status[0]) for peer, status in enumerate(readiness) if status[0] is not None]
             if failed:
                 detail = "; ".join(f"rank {peer}: {error}" for peer, error in failed)
                 raise RuntimeError(f"symmetric peer allocation/export failed: {detail}")
@@ -90,11 +86,7 @@ class SymmetricPeerBuffer:
 
             open_status = [None] * npes
             dist.all_gather_object(open_status, open_error, group=group)
-            failed = [
-                (peer, error)
-                for peer, error in enumerate(open_status)
-                if error is not None
-            ]
+            failed = [(peer, error) for peer, error in enumerate(open_status) if error is not None]
             if failed:
                 for remote_base in self._remote_bases:
                     try:
@@ -122,9 +114,7 @@ class SymmetricPeerBuffer:
                 import torch.distributed as dist
 
                 if not dist.is_initialized():
-                    raise RuntimeError(
-                        "the distributed process group must remain initialized until peer buffers close"
-                    )
+                    raise RuntimeError("the distributed process group must remain initialized until peer buffers close")
                 dist.barrier(group=self.group)
             self._safety_barrier_complete = True
         failed = []

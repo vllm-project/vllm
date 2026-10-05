@@ -219,21 +219,13 @@ def stage_tasks(
 ):
     """Return ``(stage name, task count)`` pairs in execution order."""
 
-    tasks = [
-        ("qkv_a", N_QKV_A),
-        ("q_norm", samples),
-        ("cache", 1),
-        ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE),
-    ]
+    tasks = [("qkv_a", N_QKV_A), ("q_norm", samples), ("cache", 1), ("q_b", heads * (NOPE_DIM + PE_DIM) // Q_B_TILE)]
     if with_indexer:
         tasks += [("index_q", INDEX_Q_ROWS // INDEX_TILE)]
     tasks += [("uk", heads * KV_LORA // UK_TILE)]
     if with_indexer:
         tasks += [
-            (
-                "index_score",
-                samples * ((index_max_seq + INDEX_KEYS_PER_TASK - 1) // INDEX_KEYS_PER_TASK),
-            ),
+            ("index_score", samples * ((index_max_seq + INDEX_KEYS_PER_TASK - 1) // INDEX_KEYS_PER_TASK)),
             ("index_select", samples),
         ]
     tasks += [
@@ -251,11 +243,7 @@ def stage_tasks(
             (
                 BLOCKS
                 if samples == 1
-                else samples
-                * max(
-                    BLOCKS,
-                    ((MOE_SLOTS * inter // UG_TILE + BLOCKS - 1) // BLOCKS) * BLOCKS,
-                )
+                else samples * max(BLOCKS, ((MOE_SLOTS * inter // UG_TILE + BLOCKS - 1) // BLOCKS) * BLOCKS)
             ),
         ),
         ("down", HIDDEN // dn_tile(samples)),

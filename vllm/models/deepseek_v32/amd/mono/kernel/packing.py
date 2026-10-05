@@ -22,9 +22,7 @@ def pack_fp8(q: torch.Tensor) -> torch.Tensor:
 
     *lead, rows, k = q.shape
     if rows % 16 or k % 64:
-        raise ValueError(
-            f"FP8 matrix dimensions must be divisible by (16, 64), got {(rows, k)}"
-        )
+        raise ValueError(f"FP8 matrix dimensions must be divisible by (16, 64), got {(rows, k)}")
     w8 = q.view(torch.uint8).reshape(*lead, rows // 16, 16, k // 64, 2, 4, 8)
     nlead = len(lead)
     order = list(range(nlead)) + [nlead + position for position in (0, 2, 4, 1, 3, 5)]
@@ -38,9 +36,7 @@ def pack_bf16(w: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"BF16 packing expects a matrix, got shape {tuple(w.shape)}")
     rows, k = w.shape
     if rows % 16 or k % 64:
-        raise ValueError(
-            f"BF16 matrix dimensions must be divisible by (16, 64), got {(rows, k)}"
-        )
+        raise ValueError(f"BF16 matrix dimensions must be divisible by (16, 64), got {(rows, k)}")
     w16 = w.view(torch.int16).reshape(rows // 16, 16, k // 64, 2, 4, 8)
     return w16.permute(0, 2, 3, 4, 1, 5).contiguous().view(-1)
 
@@ -52,14 +48,8 @@ def pack_mxfp4(q: torch.Tensor) -> torch.Tensor:
     *lead, rows, packed_k = q.shape
     k = packed_k * 2
     if rows % 16 or k % 128:
-        raise ValueError(
-            f"MXFP4 matrix dimensions must be divisible by (16, 128), got {(rows, k)}"
-        )
-    w4 = (
-        q.reshape(*lead, rows // 16, 16, k // 128, 4, 4, 4)
-        .view(torch.int32)
-        .squeeze(-1)
-    )
+        raise ValueError(f"MXFP4 matrix dimensions must be divisible by (16, 128), got {(rows, k)}")
+    w4 = q.reshape(*lead, rows // 16, 16, k // 128, 4, 4, 4).view(torch.int32).squeeze(-1)
     nlead = len(lead)
     order = list(range(nlead)) + [nlead + position for position in (0, 2, 4, 1, 3)]
     return w4.permute(*order).contiguous().view(torch.uint8).view(-1)

@@ -81,14 +81,8 @@ def glm5_tp_config(tp_size: int) -> LayerConfig:
     """Return the one GLM-5 shard geometry for ``tp_size``."""
 
     if tp_size not in GLM5_TP_SIZES:
-        raise ValueError(
-            f"GLM-5 tensor parallel size must be one of {GLM5_TP_SIZES}, got {tp_size}"
-        )
-    return replace(
-        GLM5_CONFIG,
-        local_heads=GLM5_GLOBAL_HEADS // tp_size,
-        inter=GLM5_GLOBAL_INTER // tp_size,
-    )
+        raise ValueError(f"GLM-5 tensor parallel size must be one of {GLM5_TP_SIZES}, got {tp_size}")
+    return replace(GLM5_CONFIG, local_heads=GLM5_GLOBAL_HEADS // tp_size, inter=GLM5_GLOBAL_INTER // tp_size)
 
 
 # Fixed GLM-5 geometry used by its performance-specialized MonoKernel.
