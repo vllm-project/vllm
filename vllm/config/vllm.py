@@ -1117,6 +1117,28 @@ class VllmConfig:
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
 
+    def _maybe_disable_draft_confidence_stop(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or speculative_config.draft_confidence_threshold is None
+        ):
+            return
+        from vllm.platforms import current_platform
+
+        if current_platform.is_cuda() and current_platform.is_device_capability_family(
+            120
+        ):
+            return
+        logger.warning_once(
+            "draft_confidence_threshold is only enabled on SM12x GPUs. It reads "
+            "the number of live draft chains back to the CPU after every draft "
+            "step, which stalls the faster steps of other GPUs. Ignoring it and "
+            "drafting num_speculative_tokens=%d.",
+            speculative_config.num_speculative_tokens,
+        )
+        speculative_config.draft_confidence_threshold = None
+
     def _normalize_piecewise_cudagraph_mode(
         self, *, breakable_cudagraph_enabled: bool
     ) -> None:
@@ -1860,6 +1882,7 @@ class VllmConfig:
             )
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
+        self._maybe_disable_draft_confidence_stop()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (

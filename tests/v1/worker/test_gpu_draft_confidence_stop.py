@@ -150,3 +150,26 @@ def test_multi_step_decode_stops_launching(
     assert run_fullgraph.call_count == expected_launches
     assert stop.step_launched.call_count == expected_launches
     assert stop.end_round.called == expect_end_round
+
+
+@pytest.mark.parametrize(
+    ("is_cuda", "is_sm12x", "kept"),
+    [(True, True, True), (True, False, False), (False, False, False)],
+)
+def test_confidence_stop_only_enabled_on_sm12x(monkeypatch, is_cuda, is_sm12x, kept):
+    """Elsewhere the per-step readback stalls the GPU, so the key is dropped."""
+    from vllm.config import VllmConfig
+
+    fake_platform = SimpleNamespace(
+        is_cuda=lambda: is_cuda,
+        is_device_capability_family=lambda capability: (is_sm12x and capability == 120),
+    )
+    monkeypatch.setattr("vllm.platforms.current_platform", fake_platform)
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_confidence_threshold=THRESHOLD, num_speculative_tokens=NUM_STEPS
+        )
+    )
+    VllmConfig._maybe_disable_draft_confidence_stop(config)
+    expected = THRESHOLD if kept else None
+    assert config.speculative_config.draft_confidence_threshold == expected

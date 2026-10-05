@@ -560,7 +560,8 @@ class SpeculativeConfig:
     (its first draft is always kept), and the batch stops drafting once no
     request's chain continues. Every request then verifies the drafts produced
     up to that point, so the verified length is uniform across the batch.
-    Deciding to stop reads one value per draft step back to the CPU. Requires
+    Deciding to stop reads one value per draft step back to the CPU, so it is
+    only enabled on SM12x GPUs and ignored with a warning elsewhere. Requires
     method 'mtp', 'eagle' or 'eagle3' and Model Runner V2."""
 
     @staticmethod
