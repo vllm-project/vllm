@@ -255,6 +255,7 @@ steps:
         --ignore=kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
         --ignore=kernels/test_top_k_per_row.py
         --ignore=kernels/test_bf16x3_router_gemm_cutedsl.py
+        --ignore=kernels/test_bf16x3_router_gemm_rocm.py
         --ignore=kernels/test_ll_bf16_gemm.py
         --ignore=kernels/test_shuffle_rows.py
     # BROKEN on main, pending kernel fixes (B200):
@@ -280,6 +281,7 @@ steps:
           kernels/test_apply_repetition_penalties.py
           kernels/test_awq_int4_to_int8.py
           kernels/test_bf16_skinny_gemm.py
+          kernels/test_bf16x3_router_gemm_rocm.py
           kernels/test_cache_kernels.py
           kernels/test_compressor_kv_cache.py
           kernels/test_cp_gather_fp8.py
