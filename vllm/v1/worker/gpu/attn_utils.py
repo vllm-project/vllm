@@ -398,10 +398,7 @@ def init_kv_cache(
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
     # decoder layer, so a layer name carries two integers (layer + module index).
     num_attn_module = (
-        2
-        if vllm_config.model_config.hf_config.model_type
-        in ("longcat_flash", "longcat_flash_ngram")
-        else 1
+        2 if vllm_config.model_config.hf_config.model_type == "longcat_flash" else 1
     )
     bindable_caches = {
         name: cache for name, cache in kv_caches.items() if name in forward_context
