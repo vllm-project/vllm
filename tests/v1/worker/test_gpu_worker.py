@@ -30,7 +30,10 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     )
     loading_threads = []
     worker = SimpleNamespace(
-        vllm_config=SimpleNamespace(weight_transfer_config=None),
+        vllm_config=SimpleNamespace(
+            load_config=SimpleNamespace(release_weight_page_cache=False),
+            weight_transfer_config=None,
+        ),
         model_runner=SimpleNamespace(
             load_model=lambda **kwargs: loading_threads.append(torch.get_num_threads())
         ),
