@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
 )
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.models.qwen4_exp.amd import ple_layer as amd_ple_layer
 from vllm.models.qwen4_exp.amd.ple_layer import (
     Qwen4ExpPLELayer as Qwen4ExpPLELayerAMD,
@@ -583,6 +584,16 @@ def test_ple_embedding_respects_inc_layer_config() -> None:
     quant_config.extra_config = None
     with pytest.raises(NotImplementedError, match="INCConfig"):
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix)
+
+
+def test_ple_embedding_is_unquantized_under_quark() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = QuarkConfig({"exclude": [], "global_quant_config": {}})
+
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
 
 
 def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
