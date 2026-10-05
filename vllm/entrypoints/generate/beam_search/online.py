@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 from abc import ABC
 from collections.abc import AsyncGenerator, Mapping
 
@@ -20,6 +21,7 @@ from vllm.inputs import (
     MultiModalInput,
     TokensInput,
 )
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -29,6 +31,8 @@ from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
 from .choice_trie import ChoiceTrie
 from .utils import BeamSearchSequence, create_sort_beams_key_function
+
+logger = init_logger(__name__)
 
 # Engine-side cap on `SamplingParams.allowed_token_ids`; keep in sync with
 # MAX_NUM_ALLOWED_TOKEN_IDS in vllm/v1/worker/gpu/sample/logit_bias.py.
@@ -210,27 +214,42 @@ class BeamSearchOnlineMixin(ABC):
         stop; an empty ``next_beams`` means the search is complete.
         """
         if so_backend is not None or so_trie is not None:
-            # Grammar compile/accept/fill_bitmask (and the trie walk)
-            # are CPU-bound and run once per beam per step. Offload to a
-            # worker thread so they do not block the API server's
-            # asyncio event loop and stall other concurrent requests,
-            # mirroring StructuredOutputManager's executor offload.
-            (
-                active_beams,
-                beam_params_list,
-                allowed_sets,
-                newly_completed,
-            ) = await asyncio.to_thread(
-                self._build_online_so_params,
-                all_beams,
-                logprobs_num,
-                temperature,
-                so_backend,
-                so_key,
-                so_bitmask,
-                so_trie,
-                vocab_size,
+            # Grammar compile/accept/fill_bitmask (and the trie walk) are
+            # CPU-bound and run once per beam per step. Offload to a worker
+            # thread so they do not block the API server's asyncio event loop
+            # and stall other concurrent requests, mirroring
+            # StructuredOutputManager's executor offload.
+            #
+            # Keep a handle so cancellation of this coroutine does not race the
+            # caller's `finally: so_backend.destroy()`. A detached thread keeps
+            # dereferencing `so_backend`; destroying it mid-run raises
+            # AttributeError. Shield the task and, on cancellation, wait for the
+            # thread to finish before propagating so the backend is only
+            # destroyed once nothing touches it.
+            so_build_task = asyncio.ensure_future(
+                asyncio.to_thread(
+                    self._build_online_so_params,
+                    all_beams,
+                    logprobs_num,
+                    temperature,
+                    so_backend,
+                    so_key,
+                    so_bitmask,
+                    so_trie,
+                    vocab_size,
+                )
             )
+            try:
+                (
+                    active_beams,
+                    beam_params_list,
+                    allowed_sets,
+                    newly_completed,
+                ) = await asyncio.shield(so_build_task)
+            except asyncio.CancelledError:
+                with contextlib.suppress(BaseException):
+                    await asyncio.shield(so_build_task)
+                raise
             completed.extend(newly_completed)
             if not active_beams:
                 return [], None
@@ -298,11 +317,13 @@ class BeamSearchOnlineMixin(ABC):
             if result.outputs[0].logprobs is not None:
                 logprobs = result.outputs[0].logprobs[0]
                 allowed = allowed_sets[i]
+                beam_produced = False
                 for token_id, logprob_obj in logprobs.items():
                     if allowed is not None and token_id not in allowed:
                         continue
                     candidate_logprob = current_beam.cum_logprob + logprob_obj.logprob
                     if token_id == eos_token_id and not ignore_eos:
+                        beam_produced = True
                         completed.append(
                             BeamSearchSequence(
                                 orig_prompt=prompt,
@@ -316,6 +337,7 @@ class BeamSearchOnlineMixin(ABC):
                             )
                         )
                     else:
+                        beam_produced = True
                         candidates.append(
                             (
                                 candidate_logprob,
@@ -324,6 +346,26 @@ class BeamSearchOnlineMixin(ABC):
                                 logprobs,
                             )
                         )
+                if (
+                    not beam_produced
+                    and allowed is not None
+                    and len(allowed) > _MAX_NUM_ALLOWED_TOKEN_IDS
+                ):
+                    # Over-cap regime (see _build_online_so_params): the engine
+                    # sampled unconstrained and none of its top logprobs fell
+                    # in the allowed set, so the grammar was not enforced for
+                    # this beam and the beam is silently dropped. Surface it.
+                    logger.warning(
+                        "Beam search (request %s): structured-output allowed "
+                        "set has %d tokens (> cap %d), so engine-side "
+                        "constraint was disabled and none of the sampled "
+                        "top-%d tokens were valid. Dropping this beam; the "
+                        "request may finish with fewer outputs.",
+                        request_id,
+                        len(allowed),
+                        _MAX_NUM_ALLOWED_TOKEN_IDS,
+                        logprobs_num,
+                    )
 
         # Processing non-EOS tokens
         candidate_logprobs = np.fromiter(
