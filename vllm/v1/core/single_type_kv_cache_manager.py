@@ -1768,11 +1768,24 @@ class MambaManager(SingleTypeKVCacheManager):
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
-            num_new_blocks = (
-                num_required_blocks
-                - len(new_computed_blocks)
-                - len(self.req_to_blocks[request_id])
+            num_held_blocks = len(new_computed_blocks) + len(
+                self.req_to_blocks[request_id]
             )
+            num_external_blocks = 0
+            if (
+                total_computed_tokens > num_local_computed_tokens
+                and request_id not in self.num_cached_block
+            ):
+                # `allocate_external_computed_blocks` pulls the boundary state
+                # block; the cap below only covers `allocate_new_blocks`.
+                num_computed_blocks = cdiv(total_computed_tokens, self.block_size)
+                num_external_blocks = num_computed_blocks - max(
+                    self.get_num_skipped_tokens(total_computed_tokens)
+                    // self.block_size,
+                    num_held_blocks,
+                )
+                num_held_blocks = num_computed_blocks
+            num_new_blocks = num_required_blocks - num_held_blocks
             has_partial_hit = (
                 self._has_partial_local_hit(
                     new_computed_blocks, num_local_computed_tokens
@@ -1819,7 +1832,7 @@ class MambaManager(SingleTypeKVCacheManager):
             num_evictable_computed_blocks = self._get_num_evictable_blocks(
                 new_computed_blocks
             )
-            return num_new_blocks + num_evictable_computed_blocks
+            return num_new_blocks + num_external_blocks + num_evictable_computed_blocks
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
