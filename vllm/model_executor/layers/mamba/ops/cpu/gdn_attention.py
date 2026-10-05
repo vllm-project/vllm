@@ -155,7 +155,9 @@ def cpu_gdn_attention_core(
     if attn_metadata_i.num_actual_tokens == 0:
         return
 
-    assert mixed_qkv.dtype == torch.bfloat16, "CPU GDN attention requires BF16."
+    assert mixed_qkv.dtype in (torch.bfloat16, torch.float16), (
+        "CPU GDN attention requires BF16 or FP16."
+    )
 
     # The conv-state cache temporal dim is ``width - 1`` when speculative
     # decoding is disabled, and ``width - 1 + num_spec`` when it is enabled
@@ -207,9 +209,10 @@ def _cpu_gdn_attention_nonspec(
     assert state_indices_tensor is not None
     assert query_start_loc is not None
 
-    # C++ conv (conv.cpp) runs on aarch64 with bf16 support and on x86 uses VDPBF16PS,
-    # not AMX tiles, so it runs on any AVX-512BF16 CPU. The weights are packed on this
-    # same predicate at load time.
+    # C++ conv (conv.cpp) is selected on aarch64 with bf16 support and on any
+    # AVX-512BF16 CPU. The BF16 tinygemm uses VDPBF16PS; the FP16 tinygemm uses
+    # cvtph + fmadd. Neither uses AMX tiles. Weights are packed on this same
+    # predicate at load time. ARM has no FP16 tinygemm specialization.
     use_cpp_conv = torch.cpu._is_avx512_bf16_supported() or is_arm_bf16()
 
     conv_state = layer.kv_cache[0]

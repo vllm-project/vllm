@@ -62,11 +62,16 @@ inline void blas_gemm(at::native::TransposeType transa,
          c, &ldc_);
 }
 
-inline void blas_gemm(at::native::TransposeType, at::native::TransposeType,
-                      int64_t, int64_t, int64_t, float, const at::Half*,
-                      int64_t, const at::Half*, int64_t, float, float*,
-                      int64_t) {
-  TORCH_CHECK(false, "CPU OpenBLAS hgemm is not available.");
+inline void blas_gemm(at::native::TransposeType transa,
+                      at::native::TransposeType transb, int64_t m, int64_t n,
+                      int64_t k, float alpha, const at::Half* a, int64_t lda,
+                      const at::Half* b, int64_t ldb, float beta, float* c,
+                      int64_t ldc) {
+  // OpenBLAS in this build has no half GEMM. The no-downcast stub
+  // accumulates half x half in fp32.
+  auto gemm = at::native::cpublas::gemm_no_downcast_stub.DEFAULT;
+  gemm(c10::CppTypeToScalarType<at::Half>::value, transa, transb, m, n, k,
+       at::Scalar(alpha), a, lda, b, ldb, at::Scalar(beta), c, ldc);
 }
 #else
 template <typename scalar_t>
