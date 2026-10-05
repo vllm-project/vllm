@@ -575,9 +575,12 @@ class TestTritonTopkTopp:
         ]
         for name, row, p, tol in cases:
             p = float(np.float32(p))
-            logits = torch.from_numpy(np.tile(row, (4, 1)).copy()).to(DEVICE_TYPE)
+            # Batch above _SPLIT_MAX_BATCH (64): on CUDA a top-p-only batch
+            # <= 64 takes the split-row pipeline, not the monolithic kernel
+            # under test. triton-cpu always takes the monolithic kernel.
+            logits = torch.from_numpy(np.tile(row, (65, 1)).copy()).to(DEVICE_TYPE)
             out = apply_top_k_top_p_triton(
-                logits, k=None, p=torch.full((4,), p, dtype=torch.float32)
+                logits, k=None, p=torch.full((65,), p, dtype=torch.float32)
             )
             keep = torch.isfinite(out[0]).cpu().numpy()
 
@@ -587,6 +590,48 @@ class TestTritonTopkTopp:
                 f"{name}: kept {kept}, exact {exact} (old search over-kept)"
             )
             assert q[keep].sum() >= p - 1e-4, f"{name}: kept mass below p"
+
+    def test_topp_outlier_gate_overshoot_searches_full_row(self):
+        """Regression: the outlier-only gate sums the buffer in fp32 while
+        the search sums it in fp64. When p lands between the two sums, the
+        outlier search stalled below p and kept the whole row (32768 tokens
+        where 8192 reach p). A violated gate now falls through to the
+        full-row search instead of keeping everything."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        def ulps(v, d):  # v moved by d fp32 ulps
+            for _ in range(abs(d)):
+                v = np.nextafter(v, np.float32(np.sign(d)))
+            return float(v)
+
+        # A quarter of the logits high, the rest low; p within an ulp of
+        # the high quarter's mass.
+        V = 32768
+        rng = np.random.default_rng(21)
+        x = -rng.exponential(1.0, V)
+        x[: V // 4] = 1.5 + rng.exponential(1.0, V // 4)
+        x = rng.permutation(x).astype(np.float32)
+        q = np.exp(x.astype(np.float64) - x.max())
+        q /= q.sum()
+        p0 = np.float32(np.sort(q)[::-1][: V // 4].sum())
+
+        for d in (-1, 0):
+            p = ulps(p0, d)
+            # Batch above _SPLIT_MAX_BATCH; see the ulp-dense test.
+            logits = torch.from_numpy(np.tile(x, (65, 1)).copy()).to(DEVICE_TYPE)
+            out = apply_top_k_top_p_triton(
+                logits, k=None, p=torch.full((65,), p, dtype=torch.float32)
+            )
+            keep = torch.isfinite(out[0]).cpu().numpy()
+            exact, _ = self._exact_topp(x, p)
+            kept = int(keep.sum())
+            # The kernel's fp32 buffer mass sits within a couple ulps of the
+            # fp64 reference, so the kept count can differ by one boundary
+            # token; the old failure kept all V.
+            assert kept <= exact + 2, (
+                f"quarter d={d:+d} ulp: kept {kept}, exact {exact} "
+                f"(violated gate kept all {V})"
+            )
 
     def test_topk_topp_near_flat_boundary_does_not_drop_below_p(self):
         """Regression: the combined top-k+top-p mask converted the winning
