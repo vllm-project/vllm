@@ -260,6 +260,20 @@ class LongCatFlashMTP(nn.Module):
                     continue
 
                 param = params_dict[name]
+                if self.config.mla_scale_q_lora and name.endswith(
+                    "q_a_layernorm.weight"
+                ):
+                    loaded_weight = (
+                        loaded_weight
+                        * (self.config.hidden_size / self.config.q_lora_rank) ** 0.5
+                    )
+                elif self.config.mla_scale_kv_lora and name.endswith(
+                    "kv_a_layernorm.weight"
+                ):
+                    loaded_weight = (
+                        loaded_weight
+                        * (self.config.hidden_size / self.config.kv_lora_rank) ** 0.5
+                    )
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
@@ -291,22 +305,6 @@ class LongCatFlashMTP(nn.Module):
         ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)
         self_attn.w_kc = w_kc.transpose(1, 2).contiguous().transpose(1, 2)
         self_attn.w_vc = w_vc.contiguous().transpose(1, 2)
-        # Guard against compounding on incremental load_weights calls (the
-        # in-place *= would otherwise double-apply the LoRA scaling).
-        if self.config.mla_scale_q_lora and not getattr(
-            self_attn, "_mla_q_lora_scaled", False
-        ):
-            self_attn.q_a_layernorm.weight.data *= (
-                self.config.hidden_size / self.config.q_lora_rank
-            ) ** 0.5
-            self_attn._mla_q_lora_scaled = True
-        if self.config.mla_scale_kv_lora and not getattr(
-            self_attn, "_mla_kv_lora_scaled", False
-        ):
-            self_attn.kv_a_layernorm.weight.data *= (
-                self.config.hidden_size / self.config.kv_lora_rank
-            ) ** 0.5
-            self_attn._mla_kv_lora_scaled = True
         return loaded_params
 
     def _rewrite_spec_layer_name(
