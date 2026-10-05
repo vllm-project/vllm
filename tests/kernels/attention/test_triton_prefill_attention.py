@@ -258,6 +258,7 @@ def _capture_tile_config(
     dtype=torch.bfloat16,
     head_dim: int = 128,
     on_gfx1151: bool = False,
+    head_stride_pad: int = 0,
 ) -> _LaunchCapture:
     """Capture the tile configuration with the platform predicates mocked.
 
@@ -280,8 +281,12 @@ def _capture_tile_config(
     capture = _LaunchCapture()
     monkeypatch.setattr(prefill_ops, "_fwd_kernel", capture)
 
-    def meta(*shape):
-        return torch.empty(shape, dtype=dtype, device="meta")
+    def meta(tokens, heads, dim):
+        # Padding the head axis gives a stride the alignment hint cannot claim.
+        wide = torch.empty(
+            (tokens, heads, dim + head_stride_pad), dtype=dtype, device="meta"
+        )
+        return wide[..., :dim]
 
     seq_lens = torch.empty(2, dtype=torch.int32, device="meta")
     context_attention_fwd(
@@ -327,6 +332,45 @@ def test_rdna_narrows_the_kv_tile_and_nothing_else(monkeypatch) -> None:
     assert tuned.grid == stock.grid
 
 
+@pytest.mark.parametrize("D", [72, 128])
+def test_context_attention_non_contiguous_heads(D: int):
+    """A head stride the 16-byte alignment hint must not be applied to.
+
+    The hint is keyed off the runtime strides, not head_dim, so a view whose
+    head axis is not 8-element aligned has to fall back and stay correct.
+    """
+    torch.manual_seed(42)
+    B, S, H = 2, 256, 8
+    dtype = torch.bfloat16
+    total_tokens = B * S
+
+    seq_lens = torch.full((B,), S, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc = torch.zeros(B, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc[1:] = torch.cumsum(seq_lens[:-1], dim=0)
+
+    # Slicing a padded head axis keeps D contiguous but breaks the 8-element
+    # alignment of the head stride.
+    q, k, v, o = (
+        torch.randn(total_tokens, H, D + 4, dtype=dtype, device=DEVICE_TYPE)[..., :D]
+        for _ in range(4)
+    )
+    assert q.stride(1) % 8 != 0
+
+    context_attention_fwd(
+        q, k, v, o, b_start_loc, seq_lens, S, is_causal=True, sliding_window_q=None
+    )
+
+    o_ref = torch.zeros_like(o)
+    for i in range(B):
+        start = b_start_loc[i].item()
+        end = start + seq_lens[i].item()
+        o_ref[start:end] = ref_masked_attention(
+            q[start:end], k[start:end], v[start:end], is_causal=True
+        )
+
+    torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
+
+
 @pytest.mark.parametrize(
     ("head_dim", "expected"),
     [
@@ -347,6 +391,40 @@ def test_gfx1151_splits_the_head_dim(monkeypatch, head_dim, expected) -> None:
     assert got == expected
 
 
+@pytest.mark.parametrize("head_dim", [72, 80])
+def test_gfx1151_narrows_the_tile_for_the_split_dims(monkeypatch, head_dim) -> None:
+    """The 64 + 16 head dims take a narrower tile and 4 warps."""
+    capture = _capture_tile_config(
+        monkeypatch, is_rocm=True, on_gfx1x=True, on_gfx1151=True, head_dim=head_dim
+    )
+    assert capture.kwargs["BLOCK_N"] == 16
+    assert capture.kwargs["num_warps"] == 4
+
+
+@pytest.mark.parametrize("head_dim", [64, 96, 128])
+def test_gfx1151_leaves_the_other_head_dims_on_the_rdna_tile(
+    monkeypatch, head_dim
+) -> None:
+    """Only the 64 + 16 dims are faster narrower; the rest keep the RDNA tile."""
+    capture = _capture_tile_config(
+        monkeypatch, is_rocm=True, on_gfx1x=True, on_gfx1151=True, head_dim=head_dim
+    )
+    assert capture.kwargs["BLOCK_N"] == 32
+
+
+@pytest.mark.parametrize("head_dim", [64, 72, 80, 96, 128])
+def test_alignment_hint_is_not_tied_to_the_tile(monkeypatch, head_dim) -> None:
+    """The hint is an alignment fact, so it does not depend on the KV tile.
+
+    It only tells the compiler something new when head_dim is 8 mod 16;
+    elsewhere it is a tautology and measures exactly neutral.
+    """
+    capture = _capture_tile_config(
+        monkeypatch, is_rocm=True, on_gfx1x=True, on_gfx1151=True, head_dim=head_dim
+    )
+    assert capture.kwargs["HEAD_STRIDE_ALIGNED_8"] is True
+
+
 @pytest.mark.parametrize("head_dim", [72, 96])
 def test_nothing_changes_off_gfx1151(monkeypatch, head_dim) -> None:
     """Every other part keeps the launch configuration it has today."""
@@ -359,6 +437,7 @@ def test_nothing_changes_off_gfx1151(monkeypatch, head_dim) -> None:
     )
     assert stock.kwargs["BLOCK_DMODEL"] == triton.next_power_of_2(head_dim)
     assert stock.kwargs["BLOCK_DMODEL_TAIL"] == 0
+    assert stock.kwargs["HEAD_STRIDE_ALIGNED_8"] is False
     assert stock.kwargs != tuned.kwargs
 
 
@@ -391,3 +470,23 @@ def test_gfx1151_split_matches_the_reference(monkeypatch, head_dim) -> None:
             q[start:end], k[start:end], v[start:end], is_causal=True
         )
     torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
+
+
+def test_narrow_tile_needs_the_alignment_hint(monkeypatch) -> None:
+    """A padded head stride disables the hint, and then the wide tile wins.
+
+    head_dim 72 still splits as 64 + 16, but a view whose head stride is not
+    8-aligned cannot assert the alignment, and without vectorized loads the
+    narrow tile measures ~9% slower than the one #58225 picks.
+    """
+    capture = _capture_tile_config(
+        monkeypatch,
+        is_rocm=True,
+        on_gfx1x=True,
+        on_gfx1151=True,
+        head_dim=72,
+        head_stride_pad=4,
+    )
+    assert capture.kwargs["BLOCK_DMODEL_TAIL"] == 16, "still a 64 + 16 split"
+    assert capture.kwargs["HEAD_STRIDE_ALIGNED_8"] is False
+    assert capture.kwargs["BLOCK_N"] == 32
