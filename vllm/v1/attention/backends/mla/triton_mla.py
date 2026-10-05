@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
@@ -23,6 +24,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionType,
+    CommonAttentionMetadata,
     MultipleOf,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
@@ -37,6 +39,9 @@ logger = init_logger(__name__)
 # so the two cannot drift). Both are hardware dependent.
 _MIN_WORK_PER_SPLIT = 512
 _SPLIT_OCCUPANCY_MULTIPLIER = 2
+# Bounds fp32 attn_logits scratch and gathered block tables for routed prefill;
+# rows are independent, so this chunk size cannot change results.
+_BATCH_INVARIANT_PREFILL_ROWS_PER_LAUNCH = 256
 
 
 def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
@@ -48,6 +53,13 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
     return min(ideal_splits, max_splits)
 
 
+@dataclass
+class TritonMLAMetadata(MLACommonMetadata):
+    # Per-request metadata for all requests in the step; decodes first.
+    block_table: torch.Tensor | None = None
+    seq_lens: torch.Tensor | None = None
+
+
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # forward_mqa flattens a uniform multi-token block to one decode row per
     # query token, so causal and non-causal blocks both take the decode path.
@@ -56,10 +68,30 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls=TritonMLAMetadata,
+        )
         # DCP local sequence lengths are not advanced between draft steps.
         self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
         self._reserve_attn_logits_workspace()
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> MLACommonMetadata:
+        metadata = super().build(
+            common_prefix_len, common_attn_metadata, fast_build=fast_build
+        )
+        assert isinstance(metadata, TritonMLAMetadata)
+        metadata.block_table = common_attn_metadata.block_table_tensor
+        metadata.seq_lens = common_attn_metadata.seq_lens
+        return metadata
 
     def update_draft_decode_metadata(self, _metadata: MLACommonMetadata) -> None:
         pass
@@ -147,6 +179,7 @@ class TritonMLABackend(MLACommonBackend):
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
+    supports_batch_invariant_mqa_prefill: bool = True
 
     def __init__(
         self,
@@ -234,12 +267,23 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
-        assert attn_metadata.decode is not None
 
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
 
         assert isinstance(q, torch.Tensor)
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and attn_metadata.num_prefills > 0
+            and q.shape[0] > attn_metadata.num_decode_tokens
+        ):
+            # MLAAttention routed the prefill rows here as well.
+            return self._forward_mqa_all_rows(
+                q, kv_c_and_k_pe_cache, attn_metadata, layer
+            )
+
+        assert attn_metadata.decode is not None
+
         B = q.shape[0]
         q_num_heads = q.shape[1]
         o = torch.zeros(
@@ -324,5 +368,79 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             v_scale=layer._k_scale,
             is_mla=True,
         )
+
+        return o, lse
+
+    def _forward_mqa_all_rows(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: MLACommonMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run all rows as independent decode rows for batch-invariant prefill."""
+        assert isinstance(attn_metadata, TritonMLAMetadata)
+        assert attn_metadata.block_table is not None
+        assert attn_metadata.seq_lens is not None
+
+        B = q.shape[0]
+        q_num_heads = q.shape[1]
+        o = torch.zeros(
+            B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
+        )
+        lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
+
+        query_start_loc = attn_metadata.query_start_loc
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        row_to_req = torch.repeat_interleave(
+            torch.arange(query_lens.shape[0], device=q.device),
+            query_lens,
+            output_size=B,
+        )
+        row_seq_lens = (
+            attn_metadata.seq_lens[row_to_req]
+            - query_start_loc[1:][row_to_req]
+            + torch.arange(B, device=q.device, dtype=query_start_loc.dtype)
+            + 1
+        )
+
+        # Add a head dim of 1
+        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
+        kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
+        PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
+
+        rows_per_launch = _BATCH_INVARIANT_PREFILL_ROWS_PER_LAUNCH
+        attn_logits = torch.empty(
+            (
+                min(B, rows_per_launch),
+                q_num_heads,
+                1,
+                self.kv_lora_rank + 1,
+            ),
+            dtype=torch.float32,
+            device=q.device,
+        )
+
+        for start in range(0, B, rows_per_launch):
+            end = min(start + rows_per_launch, B)
+            row_count = end - start
+            block_table = attn_metadata.block_table[row_to_req[start:end]]
+
+            decode_attention_fwd(
+                q[start:end],
+                kv_c_and_k_pe_cache,
+                kv_c_cache,
+                o[start:end],
+                lse[start:end],
+                block_table,
+                row_seq_lens[start:end],
+                attn_logits[:row_count],
+                1,
+                self.scale,
+                PAGE_SIZE,
+                k_scale=layer._k_scale,
+                v_scale=layer._k_scale,
+                is_mla=True,
+            )
 
         return o, lse
