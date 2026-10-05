@@ -36,7 +36,7 @@ def register_api_routers(
 
         register_vllm_dev_api_routers(app)
 
-        from vllm.entrypoints.rl.online.factories import register_rl_api_routers
+        from vllm.entrypoints.rl.factories import register_rl_api_routers
 
         register_rl_api_routers(app)
 

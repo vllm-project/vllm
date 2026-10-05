@@ -6,6 +6,6 @@ from fastapi import FastAPI
 
 
 def register_rl_api_routers(app: FastAPI):
-    from .api_router import router as rl_router
+    from .online.api_router import router as rl_router
 
     app.include_router(rl_router)
