@@ -21,6 +21,7 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
+    plan_flashinfer_checkpoints,
 )
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -484,3 +485,20 @@ def test_update_block_table_regathers_checkpoint(num_spec):
     assert not torch.equal(
         actual.checkpoint.state_indices, source.checkpoint.state_indices
     )
+
+
+def test_plan_flashinfer_checkpoints_selects_the_state_at_each_offset():
+    """Each checkpoint row maps to the state FlashInfer emits at its offset.
+
+    The leading decode row is not in the prefill kernel and never checkpoints;
+    the 50-token prefill is shorter than the stride and emits no states.
+    """
+    every_n_tokens, cu_starts, rows = plan_flashinfer_checkpoints(
+        offsets=[0, 128, 0, 192], query_lens=[200, 50, 300]
+    )
+
+    assert every_n_tokens == 64
+    assert cu_starts == [0, 3, 3, 7]
+    # Row 1: state after 128 tokens of the first prefill. Row 3: after 192
+    # tokens of the third prefill, whose states start at index 3.
+    assert rows == [0, 1, 0, 5]

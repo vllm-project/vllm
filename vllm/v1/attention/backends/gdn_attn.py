@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 
+import math
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -26,6 +27,47 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
+
+# FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
+# 64-token chunk, so checkpoint offsets must be multiples of 64.
+FLASHINFER_GDN_CHECKPOINT_ALIGNMENT = 64
+
+
+def plan_flashinfer_checkpoints(
+    offsets: list[int], query_lens: list[int]
+) -> tuple[int, list[int], list[int]]:
+    """Lay out internal checkpoints as FlashInfer GDN prefill emits them.
+
+    Args:
+        offsets: Checkpoint offset into each checkpoint row's query, 0 for
+            none. The last ``len(query_lens)`` rows are the prefill kernel's.
+        query_lens: Query length of each sequence the prefill kernel runs.
+
+    Returns:
+        ``(every_n_tokens, cu_starts, rows)``: the stride shared by every
+        checkpoint in the batch, cumulative per-sequence checkpoint counts,
+        and the index of each checkpoint row's state among the emitted ones.
+
+    """
+    every_n_tokens = math.gcd(*offsets)
+    cu_starts = [0]
+    for query_len in query_lens:
+        cu_starts.append(cu_starts[-1] + query_len // every_n_tokens)
+    first = len(offsets) - len(query_lens)
+    rows = [0] * len(offsets)
+    for i, offset in enumerate(offsets[first:]):
+        if offset:
+            rows[first + i] = cu_starts[i] + offset // every_n_tokens - 1
+    return every_n_tokens, cu_starts, rows
+
+
+@dataclass
+class GDNFlashInferCheckpointPlan:
+    every_n_tokens: int
+    num_checkpoints: int
+    cu_starts: torch.Tensor
+    # Per checkpoint row, its state among the ``num_checkpoints`` emitted.
+    rows: torch.Tensor
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -53,6 +95,7 @@ class GDNAttentionMetadata:
     num_actual_tokens: int
 
     checkpoint: MambaPrefillCheckpointMetadata | None = None
+    flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
     has_initial_state: torch.Tensor | None = None
 
     spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
@@ -104,6 +147,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.speculative_config = vllm_config.speculative_config
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec
+        )
+        self.plan_flashinfer_checkpoints = (
+            kv_cache_spec.prefill_checkpoint_alignment
+            == FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
         )
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
             _resolve_gdn_prefill_backend,
@@ -485,6 +532,20 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 request_rows = (~spec_sequence_masks_cpu).nonzero().flatten().tolist()
             checkpoint = self.checkpoint_builder.build(m, request_rows)
 
+        flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
+        if checkpoint is not None and self.plan_flashinfer_checkpoints:
+            assert checkpoint.offsets is not None
+            every_n_tokens, cu_starts, rows = plan_flashinfer_checkpoints(
+                checkpoint.offsets, prefill_query_start_loc_cpu.diff().tolist()
+            )
+            device = query_start_loc.device
+            flashinfer_checkpoint_plan = GDNFlashInferCheckpointPlan(
+                every_n_tokens=every_n_tokens,
+                num_checkpoints=cu_starts[-1],
+                cu_starts=async_tensor_h2d(cu_starts, device, torch.int64),
+                rows=async_tensor_h2d(rows, device, torch.int64),
+            )
+
         # Function code counted on either presency non-spec decode or spec decode,
         # but not both.
         assert not (num_decodes > 0 and num_spec_decodes > 0), (
@@ -563,6 +624,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
             checkpoint=checkpoint,
+            flashinfer_checkpoint_plan=flashinfer_checkpoint_plan,
             has_initial_state=has_initial_state,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
