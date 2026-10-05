@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from typing_extensions import override
 
@@ -400,6 +400,7 @@ class CPUOffloadingManager(OffloadingManager):
                     keys=removed_keys,
                     medium=self.medium,
                     removed=True,
+                    metadata_only=True,
                 )
             )
 
@@ -458,9 +459,19 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
-        if self.events is not None:
-            yield from self.events
-            self.events.clear()
+        if self.events is None:
+            return
+        # Detach the batch up front so a partially consumed drain cannot
+        # replay cleanup against a key a retry has since re-allocated.
+        events, self.events = self.events, []
+        for event in events:
+            if event.metadata_only:
+                # A retry may already own this key before cleanup is drained.
+                keys = [key for key in event.keys if self._policy.get(key) is None]
+                if not keys:
+                    continue
+                event = replace(event, keys=keys)
+            yield event
 
     @override
     def config_info(self) -> Sequence[ConfigInfoMapping]:
