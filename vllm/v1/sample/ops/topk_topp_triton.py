@@ -821,12 +821,6 @@ def _topk_topp_kernel(
                 outlier_pivot = avg_logit + std_logit * sigma
 
                 outlier_prob = tl.exp(outlier_pivot - max_sample) / sum_exp_logits
-                # fp64 accumulator: the outlier search and the stall
-                # fallback sum this same buffer in fp64, so an fp32 gate can
-                # promise a few ulps more mass than the buffer can reach. If
-                # p lands in that gap the search stalls below p and the row
-                # is kept whole.
-                sum_outlier_probs = tl.zeros((), dtype=tl.float64)
                 num_outliers = tl.zeros((), dtype=tl.uint32)
 
                 # Second pass: Calculate softmax and gather outliers
@@ -841,7 +835,6 @@ def _topk_topp_kernel(
                     probs_blk = probs_blk / sum_exp_logits
 
                     outlier_mask = (probs_blk > outlier_prob) & mask_n
-                    sum_outlier_probs += tl.sum(outlier_mask * probs_blk)
                     cumulative_pos = tl.cast(
                         tl.cumsum(outlier_mask) - 1 + num_outliers, tl.int32
                     )
@@ -859,14 +852,29 @@ def _topk_topp_kernel(
                 p_pivots_sum = tl.zeros((), dtype=tl.float64)
                 topp_mask = 0
 
+                # Gate on the compacted buffer with the same helper the
+                # search and the stall fallback sum with, so the branch test
+                # and the stalled recompute at outlier_prob are bit-exact
+                # the same value. Summing inside the gather above instead
+                # (BLOCK tiles over the row) rounds a few ulps differently,
+                # and a p landing in that gap stalls the search below p and
+                # keeps the whole row.
+                search_range = tl.cast(num_outliers, tl.int32)
+                search_iters = tl.cast(
+                    (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
+                    tl.int32,
+                )
+                sum_outlier_probs, _gate_min_larger, _gate_nmin = _mass_ge_stats(
+                    BUFFER_ROW,
+                    search_range,
+                    search_iters,
+                    outlier_prob,
+                    BLOCK_SIZE_TRUNC,
+                )
+
                 # Third pass: Search for p_pivot
                 if sum_outlier_probs > p:
                     min_range = outlier_prob
-                    search_range = tl.cast(num_outliers, tl.int32)
-                    search_iters = tl.cast(
-                        (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC,
-                        tl.int32,
-                    )
 
                     found_pivot = 0
                     while found_pivot == 0:

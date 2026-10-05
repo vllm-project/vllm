@@ -634,6 +634,48 @@ class TestTritonTopkTopp:
                 f"(violated gate kept all {V})"
             )
 
+    def test_topp_gate_matches_search_tile_structure(self):
+        """Regression: the outlier gate summed during the gather pass, in
+        BLOCK tiles over the row, while the search and the stall fallback
+        sum the compacted buffer in TRUNC tiles. The two fp32 partial-sum
+        structures disagree by an ulp or two either way, and a p landing in
+        that gap stalled the search below p and kept the whole row (1024
+        tokens where 256 reach p). The gate now sums the compacted buffer
+        with the same helper the search and the stall fallback use, so the
+        branch test and the stalled recompute are bit-exact the same value."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        def ulps(v, d):  # v moved by d fp32 ulps
+            for _ in range(abs(d)):
+                v = np.nextafter(v, np.float32(np.sign(d)))
+            return float(v)
+
+        # A quarter of the logits high, the rest low; p within an ulp of
+        # the high quarter's mass. Each (seed, d) below kept all V tokens
+        # with the gather-summed gate (triton-cpu tile sizes).
+        V = 1024
+        for seed, d in ((55, 0), (34, -1), (6, 0), (6, 1)):
+            rng = np.random.default_rng(seed)
+            x = -rng.exponential(1.0, V)
+            x[: V // 4] = 1.5 + rng.exponential(1.0, V // 4)
+            x = rng.permutation(x).astype(np.float32)
+            q = np.exp(x.astype(np.float64) - x.max())
+            q /= q.sum()
+            p0 = np.float32(np.sort(q)[::-1][: V // 4].sum())
+            p = ulps(p0, d)
+            # Batch above _SPLIT_MAX_BATCH; see the ulp-dense test.
+            logits = torch.from_numpy(np.tile(x, (65, 1)).copy()).to(DEVICE_TYPE)
+            out = apply_top_k_top_p_triton(
+                logits, k=None, p=torch.full((65,), p, dtype=torch.float32)
+            )
+            keep = torch.isfinite(out[0]).cpu().numpy()
+            exact, _ = self._exact_topp(x, p)
+            kept = int(keep.sum())
+            assert kept <= exact + 2, (
+                f"seed {seed} d={d:+d} ulp: kept {kept}, exact {exact} "
+                f"(gate/search gap kept all {V})"
+            )
+
     def test_topk_topp_near_flat_boundary_does_not_drop_below_p(self):
         """Regression: the combined top-k+top-p mask converted the winning
         probability pivot back to a logit cut, and the round trip could
