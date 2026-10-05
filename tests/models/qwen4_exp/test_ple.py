@@ -411,6 +411,14 @@ def test_nvfp4_ple_rejects_missing_local_shards(monkeypatch, missing):
         layer.embedding_method.process_weights_after_loading(layer)
 
 
+@pytest.mark.parametrize("suffix", ["weight", "weight_scale"])
+def test_nvfp4_ple_rejects_unsharded_table(monkeypatch, suffix):
+    module, tensors, codes, scales = _make_nvfp4_ngram_embedding(monkeypatch)
+    table = codes if suffix == "weight" else scales
+    with pytest.raises(ValueError, match="got unsharded"):
+        module.load_weights([(f"ngram_embedding.{suffix}", table)])
+
+
 @pytest.mark.parametrize("scale", [None, 0.0, -1.0, float("nan"), float("inf")])
 def test_nvfp4_ple_rejects_missing_or_invalid_global_scale(monkeypatch, scale):
     module, tensors, _, _ = _make_nvfp4_ngram_embedding(monkeypatch)

@@ -458,6 +458,14 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 )
                 loaded.add(f"ngram_embedding.{suffix}")
                 continue
+            if nvfp4_method is not None and name in (
+                "ngram_embedding.weight",
+                "ngram_embedding.weight_scale",
+            ):
+                raise ValueError(
+                    f"NVFP4 PLE tables must be stored as {shard_prefix}<i>.weight "
+                    f"and {shard_prefix}<i>.weight_scale shards, got unsharded {name}"
+                )
             regular_weights.append((name, loaded_weight))
 
         if regular_weights:
