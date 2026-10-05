@@ -28,6 +28,8 @@ _request_failures: Counter | None = None
 class RequestFailureStage(Enum):
     # Before generation started, e.g. validation, rendering or admission.
     INPUT_PROCESSING = "input_processing"
+    # While generating a non-streaming response, e.g. output parsing.
+    NON_STREAMING = "non_streaming"
     # After the stream started, so the HTTP status was already sent as 200.
     STREAMING = "streaming"
 
@@ -113,5 +115,7 @@ class RequestFailureMetricsMiddleware:
         if route is None or route.path in UNINSTRUMENTED_HANDLERS:
             return
         if scope.get("state", {}).get(_GENERATION_STARTED):
-            return
-        record_request_failure(RequestFailureStage.INPUT_PROCESSING, status_code)
+            stage = RequestFailureStage.NON_STREAMING
+        else:
+            stage = RequestFailureStage.INPUT_PROCESSING
+        record_request_failure(stage, status_code)

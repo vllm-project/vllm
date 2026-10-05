@@ -95,24 +95,24 @@ async def _get(app, path: str) -> httpx.Response:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "path,code,num_recorded",
+    "path,code,stage,num_recorded",
     [
-        ("/invalid_input", 400, 1),
-        ("/unhandled_error", 500, 1),
-        ("/success", 200, 0),
+        ("/invalid_input", 400, "input_processing", 1),
+        ("/unhandled_error", 500, "input_processing", 1),
+        ("/success", 200, "input_processing", 0),
         # Unmatched paths and probes are not requests for the model.
-        ("/does_not_exist", 404, 0),
-        # Not an input processing failure.
-        ("/fails_after_generation_started", 500, 0),
+        ("/does_not_exist", 404, "input_processing", 0),
+        ("/fails_after_generation_started", 500, "non_streaming", 1),
+        ("/fails_after_generation_started", 500, "input_processing", 0),
     ],
 )
-async def test_input_processing_failures_are_counted(app, path, code, num_recorded):
-    before = _num_failures("input_processing", code)
+async def test_failures_are_counted_by_stage(app, path, code, stage, num_recorded):
+    before = _num_failures(stage, code)
 
     response = await _get(app, path)
 
     assert response.status_code == code
-    assert _num_failures("input_processing", code) - before == num_recorded
+    assert _num_failures(stage, code) - before == num_recorded
 
 
 @pytest.mark.asyncio
