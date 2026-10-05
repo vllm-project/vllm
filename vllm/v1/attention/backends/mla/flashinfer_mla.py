@@ -30,6 +30,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -71,22 +72,19 @@ def _select_mla_decode_backend(num_heads: int) -> str | None:
 FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 FLASHINFER_MLA_LSE_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
-_fi_workspace: torch.Tensor | None = None
-
 
 def _get_workspace_buffer(return_lse: bool) -> torch.Tensor:
-    global _fi_workspace
-
     buffer_size = (
         FLASHINFER_MLA_LSE_WORKSPACE_BUFFER_SIZE
         if return_lse
         else FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE
     )
-    if _fi_workspace is None or _fi_workspace.numel() < buffer_size:
-        # FlashInfer's CuteDSL MLA-decode tactic requires an int8 workspace;
-        # the trtllm-gen path views it as uint8, so int8 is safe for all backends.
-        _fi_workspace = torch.zeros(buffer_size, dtype=torch.int8, device="cuda")
-    return _fi_workspace
+    # FlashInfer's CuteDSL MLA-decode tactic requires an int8 workspace;
+    # the trtllm-gen path views it as uint8, so int8 is safe for all backends.
+    (workspace,) = current_workspace_manager().get_simultaneous(
+        ((buffer_size,), torch.int8)
+    )
+    return workspace
 
 
 _fi_multi_ctas_kv_counter: torch.Tensor | None = None
@@ -301,6 +299,8 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                 "FlashInferMLAImpl"
             )
 
+        # Reserve before CUDA graph capture; re-requested on every call.
+        _get_workspace_buffer(self.need_to_return_lse_for_decode)
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         # Worst-case decode batch for the persistent trtllm-gen multi-CTA-KV
