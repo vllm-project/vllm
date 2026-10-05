@@ -38,7 +38,7 @@ def _reset_graph_pool_id():
 
 def _create_vllm_config() -> MagicMock:
     compilation_config = CompilationConfig(
-        cudagraph_mode="FULL",
+        cudagraph_mode=CUDAGraphMode.FULL,
         cudagraph_capture_sizes=[4],
     )
     compilation_config.max_cudagraph_capture_size = 4
@@ -50,6 +50,7 @@ def _create_vllm_config() -> MagicMock:
     vllm_config.parallel_config = ParallelConfig()
     vllm_config.speculative_config = None
     vllm_config.num_speculative_tokens = 0
+    vllm_config.use_cumem_cudagraph_pool = False
     return vllm_config
 
 
@@ -132,6 +133,7 @@ def test_piecewise_capture_uses_pcp_dummy_slot_mappings():
         pcp_world_size=pcp_world_size,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=False,
         max_num_reqs=num_reqs,
         max_num_tokens=num_tokens,
         block_tables=pcp_block_tables,
@@ -224,7 +226,9 @@ def test_speculator_capture_preserves_decode_query_bounds(
     )
     manager = SpeculatorCudaGraphManager.__new__(SpeculatorCudaGraphManager)
     manager.max_num_reqs = num_reqs
-    manager.dp_size = 1
+    manager.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_size=1)
+    )
     buffers = InputBuffers(num_reqs, num_tokens, torch.device("cpu"))
     block_tables = MagicMock()
     block_tables.cp_size = 1
@@ -262,7 +266,7 @@ def _create_decode_vllm_config(
     use_kda_recoverssm: bool = False,
 ) -> MagicMock:
     compilation_config = CompilationConfig(
-        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         cudagraph_capture_sizes=capture_sizes,
     )
     compilation_config.max_cudagraph_capture_size = capture_sizes[-1]
@@ -471,6 +475,7 @@ def test_dynamic_spec_decode_shared_token_count_stays_reachable(monkeypatch):
     assert any(len(descs) > 1 for descs in by_num_tokens.values())
 
     for desc in full_descs:
+        assert desc.num_reqs is not None
         assert desc in manager._candidates[(desc.num_tokens, 0)], desc
         assert (
             manager.dispatch(

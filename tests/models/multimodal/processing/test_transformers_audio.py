@@ -4,10 +4,7 @@ import numpy as np
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.model_executor.models.transformers.multimodal import LegacyMultiModalProcessor
 from vllm.multimodal import MULTIMODAL_REGISTRY
-
-from .transformers_backend import PROCESSOR_CLASSES, create_processor
 
 AUDIO_MODEL_SETTINGS = {
     "ibm-granite/granite-speech-3.3-2b": {
@@ -56,7 +53,6 @@ AUDIO_MODEL_SETTINGS = {
 }
 
 
-@pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
 @pytest.mark.parametrize(
     "model_id",
     [
@@ -78,10 +74,12 @@ AUDIO_MODEL_SETTINGS = {
         "zai-org/GLM-ASR-Nano-2512",
     ],
 )
-def test_audio_multimodal_processor(model_id, processor_cls):
+def test_audio_multimodal_processor(model_id):
     settings = AUDIO_MODEL_SETTINGS[model_id]
 
-    mm_processor = create_processor(model_id, processor_cls)
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
+    )
 
     audio = np.zeros(16000, dtype=np.float32)
     mm_data = {"audio": (audio, 16000)}
@@ -112,13 +110,14 @@ def test_audio_multimodal_processor(model_id, processor_cls):
     )
 
 
-@pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
 @pytest.mark.parametrize("separator", [" and ", ""])
-def test_audio_multiple_inputs(separator, processor_cls):
+def test_audio_multiple_inputs(separator):
     """Multiple audios per prompt are each detected as a separate placeholder
     and multi-modal item by the Transformers modelling backend."""
     model_id = "ibm-granite/granite-speech-3.3-2b"
-    mm_processor = create_processor(model_id, processor_cls)
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
+    )
 
     audio_token = mm_processor.info.get_hf_processor().audio_token
     # One token per audio; the processor expands each to its placeholder run.
@@ -128,21 +127,11 @@ def test_audio_multiple_inputs(separator, processor_cls):
     )
     audios = [np.zeros(16000, dtype=np.float32), np.zeros(24000, dtype=np.float32)]
 
-    def process():
-        return mm_processor(
-            prompt=prompt,
-            mm_items=mm_processor.info.parse_mm_data({"audio": audios}),
-            hf_processor_mm_kwargs={},
-        )
-
-    # The legacy path reads placeholders off contiguous runs of the audio token, so
-    # it cannot tell adjacent ones apart and says so instead of merging them
-    if processor_cls is LegacyMultiModalProcessor and not separator:
-        with pytest.raises(ValueError, match="Separate them in the prompt"):
-            process()
-        return
-
-    result = process()
+    result = mm_processor(
+        prompt=prompt,
+        mm_items=mm_processor.info.parse_mm_data({"audio": audios}),
+        hf_processor_mm_kwargs={},
+    )
 
     assert len(result["mm_placeholders"]["audio"]) == 2
     assert len(result["mm_kwargs"]["audio"]) == 2

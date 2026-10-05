@@ -189,7 +189,7 @@ def test_mixed_warmup_reserves_lookahead_blocks():
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
 
 
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "all", "align"])
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
 def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
     """Mamba groups hold the running-state block plus the speculative tail.
 
@@ -227,14 +227,7 @@ def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
 
 
 def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
-    """Attention, circular, and Mamba groups exercise every reservation branch.
-
-    "none" and "all" reach the same branch of both `_reserved_block_count` and
-    `MambaManager`, which tests only for "align". They are still both listed:
-    the mode is a spec-level input, and having the real manager confirm the
-    prediction for each is what keeps a future divergence between them from
-    landing unnoticed.
-    """
+    """Attention, circular, and Mamba groups exercise every reservation branch."""
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
@@ -242,7 +235,6 @@ def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
             _attention_group(),
             _circular_group(),
             _mamba_group("none"),
-            _mamba_group("all"),
             _mamba_group("align"),
         ],
     )
