@@ -270,9 +270,6 @@ def test_kda_recoverssm_derivation_is_revalidated():
     with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
     config.use_v2_model_runner = True
-    config.cache_config.mamba_cache_mode = "all"
-    with pytest.raises(ValueError, match="only none and align"):
-        VllmConfig.validate_mamba_cached_kernel(config)
     config.cache_config.mamba_cache_mode = "none"
 
     config.model_config.architecture = "NemotronHForCausalLM"
@@ -284,6 +281,12 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def test_mamba_cache_mode_all_is_rejected():
+    """The removed 'all' mode must fail validation instead of being ignored."""
+    with pytest.raises(ValidationError, match="mamba_cache_mode"):
+        CacheConfig(mamba_cache_mode="all")
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():
@@ -4111,3 +4114,47 @@ def test_revision_resolved_for_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+@pytest.mark.parametrize(
+    ("layer_types", "expected_attention"),
+    [
+        # Qwen3-Next / Qwen3.5 spell their attention layers "full_attention".
+        (["linear_attention", "full_attention"], 1),
+        # GLM-5.3-Flash and Qwen4-Exp use sparse attention, which still caches
+        # every token and so must count as attention.
+        (["linear_attention", "deepseek_sparse_attention"], 1),
+        (["linear_attention", "qwen_sparse_attention"], 1),
+        (["linear_attention", "linear_attention"], 0),
+    ],
+)
+def test_hybrid_layer_counts_sparse_attention_as_attention(
+    layer_types, expected_attention
+):
+    """Sparse-attention layer types consume a full attention KV cache."""
+    model_config = object.__new__(ModelConfig)
+    model_config.hf_config = SimpleNamespace()
+    model_config.hf_text_config = SimpleNamespace(layer_types=layer_types)
+    model_config.model_arch_config = SimpleNamespace(text_model_type="glm5_next")
+
+    parallel_config = SimpleNamespace()
+    with (
+        patch.object(ModelConfig, "is_hybrid", True),
+        patch.object(ModelConfig, "has_noops", False),
+        patch.object(ModelConfig, "is_attention_free", False),
+        patch.object(
+            ModelConfig,
+            "get_layers_start_end_indices",
+            return_value=(0, len(layer_types)),
+        ),
+    ):
+        assert (
+            model_config.get_num_layers_by_block_type(parallel_config, "attention")
+            == expected_attention
+        )
+        assert (
+            model_config.get_num_layers_by_block_type(
+                parallel_config, "linear_attention"
+            )
+            == len(layer_types) - expected_attention
+        )
