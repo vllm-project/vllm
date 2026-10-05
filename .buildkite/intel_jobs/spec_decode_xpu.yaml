@@ -16,7 +16,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 32+
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -m 'not slow_test' v1/spec_decode
@@ -187,7 +187,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/mtp/deepseek/
   - pytest -v -s v1/e2e/spec_decode/mtp/mimo/
@@ -446,7 +446,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2"
   source_file_dependencies:
@@ -504,7 +504,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   _raw_old_commands:
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi
