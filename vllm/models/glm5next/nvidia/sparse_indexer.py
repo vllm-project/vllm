@@ -176,7 +176,11 @@ def sparse_attn_indexer_kpool(
     has_prefill = attn_metadata_narrowed.num_prefills > 0
     num_decode_tokens = attn_metadata_narrowed.num_decode_tokens
     # Pools are the DCP sharding unit of the index K cache.
-    pool_cp_interleave = cp_kv_cache_interleave_size // max(index_kpool, 1)
+    pool_cp_interleave = (
+        cp_kv_cache_interleave_size // max(index_kpool, 1)
+        if dcp_world_size > 1
+        else cp_kv_cache_interleave_size
+    )
 
     # q_scale is required iff the FP4 cache path is enabled; the FP8 path
     # folds the Q scale into `weights` inside fused_indexer_q_rope_quant.

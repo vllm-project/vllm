@@ -1040,7 +1040,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # DCP interleave in units of compressed states.
         self.compressed_cp_interleave_size = (
             self.cp_kv_cache_interleave_size // self.compress_ratio
-            if self.compress_ratio > 1
+            if self.dcp_world_size > 1 and self.compress_ratio > 1
             else self.cp_kv_cache_interleave_size
         )
 
