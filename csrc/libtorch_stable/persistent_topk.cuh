@@ -88,10 +88,11 @@ struct PersistentTopKParams {
 // by: DarkSharpness
 // which at the same time is an optimized topk kernel copied from tilelang
 // kernel
+// Returns true when the caller must finish selection with the exact fallback.
 template <int TopK>
 __device__ __noinline__ bool histogram_medium_topk(
     const float* __restrict__ logits, int* __restrict__ output_indices,
-    int logits_offset, int seq_len) {
+    int seq_len) {
   // All shared state lives in dynamic shared memory to avoid static
   extern __shared__ char medium_smem[];
 
@@ -125,8 +126,7 @@ __device__ __noinline__ bool histogram_medium_topk(
   __syncthreads();
 
   for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
-    const uint32_t ordered =
-        convert_to_uint32_v2(logits[idx + logits_offset]);
+    const uint32_t ordered = convert_to_uint32_v2(logits[idx]);
     atomicAdd(&coarse->histogram[ordered >> 21], 1);
   }
   __syncthreads();
@@ -189,8 +189,7 @@ __device__ __noinline__ bool histogram_medium_topk(
 
   if (remaining_k == 0) {
     for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
-      const uint32_t bin =
-          convert_to_uint32_v2(logits[idx + logits_offset]) >> 21;
+      const uint32_t bin = convert_to_uint32_v2(logits[idx]) >> 21;
       if (bin > threshold_bin) {
         const int output_pos = atomicAdd(&shared_output_count, 1);
         output_indices[output_pos] = idx;
@@ -213,8 +212,8 @@ __device__ __noinline__ bool histogram_medium_topk(
   __syncthreads();
 
   for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
-    const float logit_value = logits[idx + logits_offset];
-    const uint32_t bin = convert_to_uint32_v2(logit_value) >> 21;
+    const uint32_t ordered = convert_to_uint32_v2(logits[idx]);
+    const uint32_t bin = ordered >> 21;
     if (bin > threshold_bin) {
       const int output_pos = atomicAdd(&shared_output_count, 1);
       output_indices[output_pos] = idx;
@@ -222,8 +221,7 @@ __device__ __noinline__ bool histogram_medium_topk(
       const int buffer_pos = atomicAdd(&shared_buffered_count[0], 1);
       if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
         buffered_indices[0][buffer_pos] = idx;
-        const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
-        const int next_bin = (fp32_bits >> 16) & 0xFF;
+        const int next_bin = (ordered >> 16) & 0xFF;
         atomicAdd(&shared_histogram[0][next_bin], 1);
       }
     }
@@ -255,8 +253,7 @@ __device__ __noinline__ bool histogram_medium_topk(
     if (remaining_k == 0) {
       for (int i = thread_id; i < num_buffered; i += kThreadsPerBlock) {
         const int idx = buffered_indices[src_buffer][i];
-        const uint32_t fp32_bits =
-            convert_to_uint32_v2(logits[idx + logits_offset]);
+        const uint32_t fp32_bits = convert_to_uint32_v2(logits[idx]);
         const int bin = (fp32_bits >> bit_offset) & 0xFF;
         if (bin > threshold_bin) {
           const int output_pos = atomicAdd(&shared_output_count, 1);
@@ -275,7 +272,7 @@ __device__ __noinline__ bool histogram_medium_topk(
 
     for (int i = thread_id; i < num_buffered; i += kThreadsPerBlock) {
       const int idx = buffered_indices[src_buffer][i];
-      const float logit_value = logits[idx + logits_offset];
+      const float logit_value = logits[idx];
       const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
       const int bin = (fp32_bits >> bit_offset) & 0xFF;
       if (bin > threshold_bin) {
@@ -353,7 +350,7 @@ __device__ __forceinline__ void wait_ge(int* ptr, int target_val,
 }
 
 // ============================================================================
-// Large path: multi-CTA radix select for sequences > 64K
+// Large path: multi-CTA radix select for sequences > 32K
 //
 // Each row is processed by a group of CTAs. Each CTA loads its chunk into
 // shared memory as ordered uint32, then participates in 4 rounds of
@@ -568,9 +565,7 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 }
 
 // ============================================================================
-// Persistent kernel — BS≤32, short/medium/large paths with RadixTopK
-// BS>32 uses standalone histogram_256_buffered_topk (separate kernel,
-// see filtered_topk.cuh)
+// Persistent kernel — short/medium/large paths with RadixTopK.
 // ============================================================================
 
 template <int TopK = 2048, uint32_t VEC_SIZE = 1>
@@ -649,20 +644,16 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
                i += kThreadsPerBlock) {
             row_output[i] = (i < seq_len) ? static_cast<int32_t>(i) : -1;
           }
-        } else {
-          if (seq_len <= static_cast<uint32_t>(SHORT_EXACT_THRESHOLD)) {
-            topk_histogram_4096::exact_topk_rescan<
-                TopK, kThreadsPerBlock, true, VEC_SIZE, true>(
-                row_input, row_output, seq_len, smem_raw);
-          } else {
-            if (__builtin_expect(
-                    histogram_medium_topk<TopK>(row_input, row_output, 0,
-                                                seq_len),
-                    0)) {
-              overflow::recover_medium<TopK, kThreadsPerBlock, VEC_SIZE>(
-                  row_input, row_output, seq_len, smem_raw);
-            }
-          }
+        } else if (seq_len <= static_cast<uint32_t>(SHORT_EXACT_THRESHOLD)) {
+          topk_histogram_4096::exact_topk_rescan<
+              TopK, kThreadsPerBlock, true, VEC_SIZE, true>(
+              row_input, row_output, seq_len, smem_raw);
+        } else if (__builtin_expect(
+                       histogram_medium_topk<TopK>(row_input, row_output,
+                                                   seq_len),
+                       0)) {
+          overflow::recover_medium<TopK, kThreadsPerBlock, VEC_SIZE>(
+              row_input, row_output, seq_len, smem_raw);
         }
       }
       continue;
@@ -680,18 +671,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
 }  // namespace persistent
 
 // ============================================================================
-// ============================================================================
-// Optimized FilteredTopK — single CTA per row for bs > 32.
-// Kept with persistent_topk so the portable fallback owns the non-cluster path.
+// FilteredTopK — one CTA per row, for the non-cluster path.
+// Adapted from https://github.com/flashinfer-ai/flashinfer/pull/2215
 // ============================================================================
 namespace filtered_topk {
 
 namespace hist4096 = topk_histogram_4096;
-
-// ============================================================================
-// FilteredTopK — single CTA per row for bs > 32
-// Adapted from https://github.com/flashinfer-ai/flashinfer/pull/2215
-// ============================================================================
 
 #define FLASHINFER_CUDA_CALL(func, ...) \
   {                                     \
@@ -765,6 +750,54 @@ struct FilteredTopKStorage {
   int last_remain;
 };
 
+template <int BlockSize, int CoarseRadix>
+struct FilteredCoarseSmem {
+  int histogram[CoarseRadix + 1];
+  typename cub::BlockScan<int, BlockSize>::TempStorage scan;
+};
+
+// Convert coarse counts to suffix counts and find the bin containing rank k.
+template <int BlockSize, int CoarseRadix>
+__device__ __forceinline__ void select_coarse_bin(
+    FilteredCoarseSmem<BlockSize, CoarseRadix>* coarse, int topk,
+    int* threshold_bin, int* input_count, int* output_count) {
+  constexpr int BINS_PER_THREAD = CoarseRadix / BlockSize;
+  static_assert(CoarseRadix % BlockSize == 0);
+  const int tx = threadIdx.x;
+  const int first_bin = BINS_PER_THREAD * tx;
+  int counts[BINS_PER_THREAD];
+  int local_sum = 0;
+#pragma unroll
+  for (int i = 0; i < BINS_PER_THREAD; ++i) {
+    counts[i] = coarse->histogram[first_bin + i];
+    local_sum += counts[i];
+  }
+  int lower_prefix;
+  int total;
+  cub::BlockScan<int, BlockSize>(coarse->scan)
+      .ExclusiveSum(local_sum, lower_prefix, total);
+  __syncthreads();
+  int suffix = total - lower_prefix;
+#pragma unroll
+  for (int i = 0; i < BINS_PER_THREAD; ++i) {
+    coarse->histogram[first_bin + i] = suffix;
+    suffix -= counts[i];
+  }
+  if (tx == 0) coarse->histogram[CoarseRadix] = 0;
+  __syncthreads();
+
+  for (int i = 0; i < BINS_PER_THREAD; ++i) {
+    const int bin = first_bin + i;
+    if (coarse->histogram[bin] > topk &&
+        coarse->histogram[bin + 1] <= topk) {
+      *threshold_bin = bin;
+      *input_count = 0;
+      *output_count = 0;
+    }
+  }
+  __syncthreads();
+}
+
 template <typename DType, typename IdType, int VEC_SIZE, uint32_t MAX_K,
           bool UsePredicatedShortLoads, bool UseWideCoarse>
 __device__ __forceinline__ void filtered_topk_row(
@@ -777,13 +810,7 @@ __device__ __forceinline__ void filtered_topk_row(
   constexpr int RADIX = 1 << Traits::REFINE_BITS;
   static_assert(RADIX == FilteredTopKStorage<MAX_K, UseWideCoarse>::RADIX);
   constexpr int COARSE_RADIX = Traits::COARSE_RADIX;
-  constexpr int COARSE_BINS_PER_THREAD = COARSE_RADIX / BLOCK_SIZE;
-  static_assert(COARSE_RADIX % BLOCK_SIZE == 0);
-  using CoarseScan = cub::BlockScan<int, BLOCK_SIZE>;
-  struct CoarseSmem {
-    int histogram[COARSE_RADIX + 1];
-    typename CoarseScan::TempStorage scan;
-  };
+  using CoarseSmem = FilteredCoarseSmem<BLOCK_SIZE, COARSE_RADIX>;
   static_assert(sizeof(CoarseSmem) <= FILTERED_TOPK_SMEM_DYNAMIC);
 
   const int tx = threadIdx.x;
@@ -823,7 +850,7 @@ __device__ __forceinline__ void filtered_topk_row(
 
   int topk = top_k;
 
-  // Stage 1: high 11 bits of the exact ordered-FP32 key.
+  // Stage 1: high bits of the exact ordered-FP32 key.
   for (int bin = tx; bin < COARSE_RADIX + 1; bin += BLOCK_SIZE) {
     s_coarse_histogram[bin] = 0;
   }
@@ -849,29 +876,6 @@ __device__ __forceinline__ void filtered_topk_row(
   }
   __syncthreads();
 
-  // One block scan covers a contiguous group of bins per thread.
-  const int coarse_bin0 = COARSE_BINS_PER_THREAD * tx;
-  int coarse_counts[COARSE_BINS_PER_THREAD];
-  int coarse_local_sum = 0;
-#pragma unroll
-  for (int i = 0; i < COARSE_BINS_PER_THREAD; ++i) {
-    coarse_counts[i] = s_coarse_histogram[coarse_bin0 + i];
-    coarse_local_sum += coarse_counts[i];
-  }
-  int coarse_lower_prefix;
-  int coarse_total;
-  CoarseScan(coarse_smem->scan)
-      .ExclusiveSum(coarse_local_sum, coarse_lower_prefix, coarse_total);
-  __syncthreads();
-  int coarse_suffix = coarse_total - coarse_lower_prefix;
-#pragma unroll
-  for (int i = 0; i < COARSE_BINS_PER_THREAD; ++i) {
-    s_coarse_histogram[coarse_bin0 + i] = coarse_suffix;
-    coarse_suffix -= coarse_counts[i];
-  }
-  if (tx == 0) s_coarse_histogram[COARSE_RADIX] = 0;
-  __syncthreads();
-
   // Suffix sum for the exact-refinement histograms.
   const auto run_refine_cumsum = [&]() {
 #pragma unroll
@@ -889,16 +893,8 @@ __device__ __forceinline__ void filtered_topk_row(
     }
   };
 
-  for (int i = 0; i < COARSE_BINS_PER_THREAD; ++i) {
-    const int bin = coarse_bin0 + i;
-    if (s_coarse_histogram[bin] > topk &&
-        s_coarse_histogram[bin + 1] <= topk) {
-      s_threshold_bin_id = bin;
-      s_num_input[0] = 0;
-      s_counter = 0;
-    }
-  }
-  __syncthreads();
+  select_coarse_bin<BLOCK_SIZE, COARSE_RADIX>(
+      coarse_smem, topk, &s_threshold_bin_id, &s_num_input[0], &s_counter);
 
   const auto threshold_bin = s_threshold_bin_id;
   topk -= s_coarse_histogram[threshold_bin + 1];
@@ -975,20 +971,18 @@ __device__ __forceinline__ void filtered_topk_row(
     }
     __syncthreads();
 
-    // Stage 2: refine with 8bit radix passes
+    // Stage 2: refine the selected coarse bin.
 #pragma unroll
     for (int round = 0; round < NUM_ROUNDS; ++round) {
       auto& s_last_remain = storage.last_remain;
       const auto r_idx = round % 2;
 
-      const auto _raw_num_input = s_num_input[r_idx];
+      const auto num_input = s_num_input[r_idx];
       if (overflow::recover_refinement_if_needed<
               MAX_K, BLOCK_SIZE, VEC_SIZE, SMEM_INPUT_SIZE>(
-              _raw_num_input, score, dst, length, s_input_idx)) {
+              num_input, score, dst, length, s_input_idx)) {
         return;
       }
-      const auto num_input =
-          (_raw_num_input < SMEM_INPUT_SIZE) ? _raw_num_input : SMEM_INPUT_SIZE;
 
       run_refine_cumsum();
       if (tx < RADIX && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
@@ -1107,6 +1101,18 @@ constexpr int ComputeFilteredTopKVecSize(uint32_t max_len) {
   return static_cast<int>(g);
 }
 
+template <typename DType, typename IdType, uint32_t MAX_K, int VEC_SIZE,
+          bool UseWideCoarse>
+cudaError_t LaunchFilteredTopKVariant(dim3 grid, dim3 block, void** args,
+                                      size_t smem_size, cudaStream_t stream) {
+  constexpr int MAX_VEC = 16 / sizeof(DType);
+  auto kernel = FilteredTopKUnifiedKernel<
+      DType, IdType, VEC_SIZE, MAX_K, (VEC_SIZE != MAX_VEC), UseWideCoarse>;
+  FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+  return cudaLaunchKernel((void*)kernel, grid, block, args, smem_size, stream);
+}
+
 template <typename DType, typename IdType, uint32_t MAX_K = 2048>
 cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         IdType* output_indices,
@@ -1131,22 +1137,12 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
   if (vec_size == VS) {                                                         \
     if constexpr (MAX_K == 1024) {                                              \
       if (use_wide_coarse) {                                                    \
-        auto kernel = FilteredTopKUnifiedKernel<                                \
-            DType, IdType, VS, MAX_K, (VS != MAX_VEC), true>;                   \
-        FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(                              \
-            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));   \
-        FLASHINFER_CUDA_CALL(cudaLaunchKernel(                                  \
-            (void*)kernel, grid, block, args, smem_size, stream));              \
-        return cudaSuccess;                                                     \
+        return LaunchFilteredTopKVariant<DType, IdType, MAX_K, VS, true>(      \
+            grid, block, args, smem_size, stream);                              \
       }                                                                         \
     }                                                                           \
-    auto kernel = FilteredTopKUnifiedKernel<                                    \
-        DType, IdType, VS, MAX_K, (VS != MAX_VEC), false>;                      \
-    FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(                                  \
-        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));       \
-    FLASHINFER_CUDA_CALL(cudaLaunchKernel(                                      \
-        (void*)kernel, grid, block, args, smem_size, stream));                  \
-    return cudaSuccess;                                                         \
+    return LaunchFilteredTopKVariant<DType, IdType, MAX_K, VS, false>(        \
+        grid, block, args, smem_size, stream);                                  \
   }
 
   DISPATCH_VEC_SIZE(1)
