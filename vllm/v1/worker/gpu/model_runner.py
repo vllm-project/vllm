@@ -2544,7 +2544,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Spec-decode and diffusion LLMs both use draft tokens but the latter does
         # not have a speculator (i.e. self.speculator is None).
-        self._publish_draft_tokens(input_batch, num_spec_tokens, zero_next_draft_req_ids)
+        self._publish_draft_tokens(
+            input_batch, num_spec_tokens, zero_next_draft_req_ids
+        )
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
