@@ -28,6 +28,12 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mxfp4_quantize,
 )
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_reload,
+    get_layerwise_info,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
 from vllm.model_executor.model_loader.utils import get_model_architecture
 from vllm.platforms import current_platform
 
@@ -271,6 +277,55 @@ def test_online_shared_expert_loads_bf16_weights_into_mxfp4_slot(
     )
     assert torch.equal(layer.w13_weight_scale[2, intermediate_size:], expected_up_scale)
     assert torch.equal(layer.w2_weight_scale[2], expected_down_scale)
+
+
+def test_online_shared_expert_reload_compatibility(
+    default_vllm_config,
+    dist_init,
+) -> None:
+    """Reload must stage a BF16 shared weight while its MXFP4 slot is on meta."""
+    default_vllm_config.model_config = ModelConfig()
+    online_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*shared_expert*": "mxfp4"})
+    )
+    quant_config = QuarkConfig(_QUARK_MXFP4_CONFIG)
+    quant_config.online_quantization_config = online_config
+
+    with torch.device(current_platform.device_type):
+        # Trigger FSE with `fuse_shared_experts=True`
+        layer = FusedMoEFactory(
+            num_experts=2,
+            top_k=1,
+            hidden_size=64,
+            intermediate_size=64,
+            n_shared_experts=1,
+            fuse_shared_experts=True,
+            shared_expert_prefix="model.layers.0.mlp.shared_expert",
+            prefix="model.layers.0.mlp.experts",
+            quant_config=quant_config,
+        ).routed_experts
+        shared_gate = torch.randn(64, 64, dtype=torch.bfloat16)
+        weight_name = f"{layer.layer_name}.w13_weight"
+
+        param = layer.w13_weight
+        param.weight_loader(param, shared_gate, weight_name, "w1", 2)
+        record_metadata_for_reloading(layer)
+        initialize_layerwise_reload(layer)
+
+        param = layer.w13_weight
+        assert param.is_meta
+        assert shared_gate.dtype != param.dtype
+
+        # NOTE: this crashes if `param.device` is used in `weight_loader`.
+        param.weight_loader(param, shared_gate, weight_name, "w1", 2)
+
+        assert len(get_layerwise_info(layer).loaded_weights) == 1
+        info = get_layerwise_info(layer)
+        info.loaded_weights.clear()
+        info.load_numel = 0
+
+        finalize_layerwise_reload(layer, default_vllm_config.model_config)
+        assert not layer.w13_weight.is_meta
 
 
 @pytest.mark.parametrize(

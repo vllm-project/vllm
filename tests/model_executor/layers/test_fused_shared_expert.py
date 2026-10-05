@@ -1004,6 +1004,23 @@ def test_online_targeting_only_one_shared_projection_rejects_fse() -> None:
     )
 
 
+def test_online_fp8_shared_expert_rejects_quark_mxfp4_fse() -> None:
+    shared_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig({**_QUARK_FSE_CONFIG, "exclude": []})
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={f"{shared_prefix}*": "fp8_per_tensor"})
+    )
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        shared_prefix,
+    ) == (
+        False,
+        "online shared-expert quantization keys do not match the routed expert keys",
+    )
+
+
 def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:
     """Excluding one layer's shared experts must not disable FSE elsewhere.
 

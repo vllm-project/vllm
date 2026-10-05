@@ -715,7 +715,7 @@ class RoutedExperts(PluggableLayer):
             and loaded_weight.dtype != param.dtype
         ):
             weight, weight_scale = self._fused_shared_expert_quantizer(
-                loaded_weight.to(param.device)
+                loaded_weight.to(self.moe_config.device)
             )
             stem = "w2" if shard_id == "w2" else "w13"
             self.weight_loader(
