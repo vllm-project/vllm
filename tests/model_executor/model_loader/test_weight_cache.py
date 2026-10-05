@@ -444,6 +444,30 @@ def test_hash_checkpoint_stable_across_directory_copies(tmp_path):
     assert hash_checkpoint(str(tmp_path / "a")) == hash_checkpoint(str(tmp_path / "b"))
 
 
+def test_hash_checkpoint_catches_single_tensor_change_among_many(tmp_path):
+    # Every tensor's head contributes to the key, so changing one tensor out
+    # of 64 flips it. The sampled reads run through a thread pool, and 64
+    # tensors exceed the worker count, so this also pins down that the digest
+    # does not depend on read scheduling.
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        hash_checkpoint,
+    )
+
+    tensors = {f"w{i:03d}": torch.full((8, 8), float(i)) for i in range(64)}
+    (tmp_path / "base").mkdir()
+    save_file(tensors, str(tmp_path / "base" / "model.safetensors"))
+    changed = dict(tensors)
+    changed["w037"] = torch.full((8, 8), -1.0)
+    (tmp_path / "changed").mkdir()
+    save_file(changed, str(tmp_path / "changed" / "model.safetensors"))
+    assert hash_checkpoint(str(tmp_path / "base")) != hash_checkpoint(
+        str(tmp_path / "changed")
+    )
+
+
 def test_hash_checkpoint_without_safetensors_returns_none(tmp_path):
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         hash_checkpoint,

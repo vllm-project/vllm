@@ -19,6 +19,7 @@ import socket
 import stat
 import struct
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, fields
 from typing import Any, NamedTuple
 
@@ -243,16 +244,25 @@ def _hash_quant_config(quant_config: Any, runtime_quant_config: Any = None) -> s
 
 
 _TENSOR_HEAD_BYTES = 1024
+# Bounded concurrency for the sampled reads. On NFS each pread costs one RPC
+# RTT, so sequential sampling of a K3-scale checkpoint (~70k tensors) would
+# take over a minute at 1 ms RTT; 32 in-flight reads keep that at a few
+# seconds without hammering the server.
+_FINGERPRINT_READ_WORKERS = 32
 
 
-def _mix_safetensors_fingerprint(path: str, hasher: Any) -> None:
+def _mix_safetensors_fingerprint(
+    path: str, hasher: Any, pool: ThreadPoolExecutor
+) -> None:
     """Mix one shard's layout and sampled weight bytes into ``hasher``.
 
     The header carries tensor names, dtypes, shapes and offsets but no weight
     values, so hashing it alone gives a base model and its fine-tune the same
     key (#59647). Sampling the head of every tensor's data region catches a
     value-only change at the cost of one small read per tensor, and stays
-    stable for byte-identical copies in different directories.
+    stable for byte-identical copies in different directories. The reads go
+    through ``pool`` but are mixed in sorted-name order, so the digest is
+    identical to sequential sampling.
     """
     hasher.update(str(os.path.getsize(path)).encode())
     with open(path, "rb") as f:
@@ -266,12 +276,21 @@ def _mix_safetensors_fingerprint(path: str, hasher: Any) -> None:
         except json.JSONDecodeError:
             return
         data_start = 8 + header_len
+        plan = []
         for name in sorted(entries):
             offsets = entries[name].get("data_offsets")
             if not offsets:
                 continue
-            f.seek(data_start + offsets[0])
-            hasher.update(f.read(min(_TENSOR_HEAD_BYTES, offsets[1] - offsets[0])))
+            plan.append(
+                (
+                    data_start + offsets[0],
+                    min(_TENSOR_HEAD_BYTES, offsets[1] - offsets[0]),
+                )
+            )
+        fd = f.fileno()
+        samples = pool.map(lambda spec: os.pread(fd, spec[1], spec[0]), plan)
+        for sample in samples:
+            hasher.update(sample)
 
 
 def hash_checkpoint(model: str) -> str | None:
@@ -294,9 +313,10 @@ def hash_checkpoint(model: str) -> str | None:
     if not files:
         return None
     hasher = safe_hash(b"", usedforsecurity=False)
-    for path in sorted(files, key=os.path.basename):
-        hasher.update(os.path.basename(path).encode())
-        _mix_safetensors_fingerprint(path, hasher)
+    with ThreadPoolExecutor(max_workers=_FINGERPRINT_READ_WORKERS) as pool:
+        for path in sorted(files, key=os.path.basename):
+            hasher.update(os.path.basename(path).encode())
+            _mix_safetensors_fingerprint(path, hasher, pool)
     return hasher.hexdigest()
 
 
