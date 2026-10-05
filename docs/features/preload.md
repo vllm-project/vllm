@@ -128,7 +128,15 @@ vllm preload --model /path/to/model --tensor-parallel-size 4 \
 `--weight-cache-seed` takes one source socket per local GPU, in device order,
 and rank *i* of the mirror is filled from rank *i* of the source — the cache
 fingerprints are compared first, so a mismatched pairing is rejected rather
-than silently mirroring the wrong shard.
+than silently mirroring the wrong shard. A mirror on a host without the
+checkpoint's safetensors cannot fingerprint them, so it matches the source by
+`--model` path instead, as an engine without the files matches its daemon;
+give both sides the same `--model` in that case.
+
+The mirror copies each of the source's allocations once and rebuilds every
+tensor on it at the source's offset and strides, so views that post-processing
+leaves on one allocation (such as MLA's `W_UV` and `W_UK_T`) keep their layout
+and stay shared, and the mirror uses as much memory as the source.
 
 `--weight-cache-device-offset` is required for a same-host mirror: a CUDA IPC
 handle names its device by index, so the mirror has to keep every GPU visible
@@ -154,8 +162,9 @@ vllm preload --model /path/to/model --tensor-parallel-size 8 \
 
 Each rank binds and dials `base_port + its global rank`, so one flag covers a
 whole replica; the draft daemon group's listeners sit past the target group's
-block. With speculative decoding, pass `--weight-cache-draft-seed` for the
-draft group.
+block. With speculative decoding, pass the same `host:base_port` as
+`--weight-cache-draft-seed`: draft ranks dial past the target group's block
+too. An IPv6 source is written `[address]:base_port`.
 
 !!! warning
     The seed listener is a network service. It is JSON only and
@@ -163,8 +172,11 @@ draft group.
     cannot reach the daemon's pickle protocol, but it is **unencrypted and
     unauthenticated beyond the shared token**. Only the two read-only seed
     commands are served remotely; exporting IPC handles and releasing weights
-    stay on the local, owner-verified Unix socket. Keep the listener on a
-    trusted network and treat the token as a secret.
+    stay on the local, owner-verified Unix socket. Seed peers are served on
+    their own thread and get 10 seconds to send their request, so a stalled
+    or unauthenticated peer cannot hold up the engines loading from the
+    daemon. Keep the listener on a trusted network and treat the token as a
+    secret.
 
 ## How it works
 

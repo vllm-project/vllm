@@ -82,8 +82,9 @@ import gc
 import hmac
 import multiprocessing
 import os
-import select
 import socket
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -103,7 +104,10 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
-from vllm.model_executor.model_loader.weight_cache.artifact_cache import ArtifactStore
+from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+    MAX_SEED_ARTIFACT_BYTES,
+    ArtifactStore,
+)
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     MAX_ARTIFACT_SIZE,
     ArtifactCacheKey,
@@ -116,6 +120,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     get_current_device_uuid,
     get_socket_path,
     json_to_dataclass,
+    parse_seed_address,
     recv_json,
     recv_msg,
     send_json,
@@ -147,6 +152,10 @@ logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 REMOTE_COMMANDS = frozenset({"fetch_manifest", "fetch_artifacts"})
 
 _SEED_TIMEOUT_S = 300.0
+# A remote peer is untrusted until it presents the token, so it gets only this
+# long, and this many bytes, to send its request (a command and a token).
+_REMOTE_REQUEST_TIMEOUT_S = 10.0
+_MAX_REMOTE_REQUEST_SIZE = 64 << 10
 
 
 @dataclass
@@ -165,29 +174,27 @@ class MirrorState:
     attrs: dict[str, bool] = field(default_factory=dict)
 
 
-def export_entries(
+def collect_tensors(
     model: torch.nn.Module,
-) -> tuple[dict[str, TensorEntry], dict[str, str]]:
-    """Export a model's tensors, preserving tied-parameter aliases.
+) -> tuple[dict[str, torch.Tensor], dict[str, str], dict[str, str]]:
+    """Collect a model's tensors, preserving tied-parameter aliases.
 
     ``named_parameters``/``named_buffers`` are iterated with
     ``remove_duplicate=False`` so tied weights (e.g. ``lm_head.weight`` sharing
     storage with ``embed_tokens.weight``) are not silently dropped. Each unique
-    tensor is exported once per call; every additional name that refers to the same
-    tensor object is recorded in the returned alias map so the client can
+    tensor is kept once; every additional name that refers to the same tensor
+    object is recorded in the returned alias map so the client can
     re-establish the shared identity instead of allocating uninitialized
     memory for it.
 
-    CUDA reduction arguments must be exported separately for each consumer so
-    that PyTorch registers a reference for each IPC mapping's lifetime.
-
     Returns:
-        A ``(entries, aliases)`` pair where ``entries`` maps a canonical name to
-        its ``TensorEntry`` and ``aliases`` maps each duplicate name to its
-        canonical name.
+        A ``(tensors, kinds, aliases)`` triple: ``tensors`` maps a canonical
+        name to its tensor, ``kinds`` maps it to "param" or "buffer", and
+        ``aliases`` maps each duplicate name to its canonical name.
 
     """
-    entries: dict[str, TensorEntry] = {}
+    tensors: dict[str, torch.Tensor] = {}
+    kinds: dict[str, str] = {}
     aliases: dict[str, str] = {}
     canonical_by_id: dict[int, str] = {}
 
@@ -197,17 +204,58 @@ def export_entries(
             aliases[name] = canonical
             return
         canonical_by_id[id(tensor)] = name
-        entries[name] = TensorEntry.from_tensor(tensor, kind)
+        tensors[name] = tensor
+        kinds[name] = kind
 
     for name, param in model.named_parameters(remove_duplicate=False):
         _add(name, param, "param")
     # named_buffers includes non-persistent buffers (e.g. rotary embedding
     # caches) that state_dict would miss.
     for name, buffer in model.named_buffers(remove_duplicate=False):
-        if name in entries or name in aliases:
+        if name in tensors or name in aliases:
             continue
         _add(name, buffer, "buffer")
+    return tensors, kinds, aliases
+
+
+def export_entries(
+    model: torch.nn.Module,
+) -> tuple[dict[str, TensorEntry], dict[str, str]]:
+    """Export a model's tensors as ``TensorEntry``s, preserving aliases.
+
+    CUDA reduction arguments must be exported separately for each consumer so
+    that PyTorch registers a reference for each IPC mapping's lifetime.
+
+    Returns:
+        A ``(entries, aliases)`` pair, as ``collect_tensors`` but with each
+        tensor exported.
+
+    """
+    tensors, kinds, aliases = collect_tensors(model)
+    entries = {
+        name: TensorEntry.from_tensor(tensor, kinds[name])
+        for name, tensor in tensors.items()
+    }
     return entries, aliases
+
+
+def seed_mismatches(
+    local: WeightCacheKey,
+    source: WeightCacheKey,
+    model: str,
+    source_model: str | None,
+) -> list[str]:
+    """Fields on which a seed source's shard differs from this daemon's.
+
+    A mirror on a host without the checkpoint's safetensors cannot hash
+    them, so its fingerprint falls back to the model path. It then matches
+    the source by that path, as an engine without the files matches its
+    daemon, rather than refusing every source that could hash its files.
+    """
+    mismatched = local.mismatched_fields(source)
+    if "checkpoint" in mismatched and local.checkpoint == model == source_model:
+        mismatched.remove("checkpoint")
+    return mismatched
 
 
 class WeightCacheDaemon:
@@ -287,6 +335,9 @@ class WeightCacheDaemon:
         # reading the checkpoint itself.
         self.mirror: MirrorState | None = None
         self._seed_sources: dict[str, WeightCacheSeedSource] = {}
+        # Seed peers are served on their own thread; this serializes their
+        # reads of the state with the local socket's requests.
+        self._state_lock = threading.Lock()
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
@@ -350,14 +401,14 @@ class WeightCacheDaemon:
         """Fill this rank from a peer daemon instead of the checkpoint."""
         assert self.seed_addr is not None
         source = self._seed_source(self.seed_backend)
-        remote = not self.seed_addr.startswith(("/", "./"))
-        if remote and source.is_node_local:
+        target = parse_seed_address(self.seed_addr)
+        if not isinstance(target, str) and source.is_node_local:
             raise ValueError(
                 f"Seed backend {self.seed_backend!r} copies through CUDA IPC, "
                 "which cannot cross hosts; seed from a Unix socket path or "
                 f"pass --weight-cache-seed-backend {RDMA_SEED_SOURCE}"
             )
-        response = self._request_seed(remote)
+        response = self._request_seed(target)
         if response.get("status") != "ok":
             raise RuntimeError(
                 f"Seed daemon {self.seed_addr} refused the mirror request: "
@@ -366,11 +417,24 @@ class WeightCacheDaemon:
         source_config = response.get("cache_config")
         if not isinstance(source_config, WeightCacheKey):
             raise RuntimeError("Seed daemon returned no compatible cache config")
-        mismatched = self.cache_config.mismatched_fields(source_config)
+        mismatched = seed_mismatches(
+            self.cache_config,
+            source_config,
+            self.model_config.model,
+            response.get("model"),
+        )
         if mismatched:
+            hint = (
+                f"; no safetensors under {self.model_config.model} to fingerprint "
+                "here, so the mirror needs the source's --model path or the "
+                "checkpoint files"
+                if mismatched == ["checkpoint"]
+                and self.cache_config.checkpoint == self.model_config.model
+                else ""
+            )
             raise RuntimeError(
                 f"Seed daemon cache differs on fields {mismatched}; refusing "
-                "to mirror a different weight shard"
+                f"to mirror a different weight shard{hint}"
             )
         manifest = response["manifest"]
         tensors = source.fill(
@@ -378,13 +442,13 @@ class WeightCacheDaemon:
             response["seed"],
             torch.device(current_platform.device_type, self.device_index),
         )
-        if set(tensors) != set(manifest):
+        if set(tensors) != set(manifest["tensors"]):
             raise RuntimeError("Seed backend did not fill the complete tensor manifest")
         self.mirror = MirrorState(
             tensors=tensors,
             kinds={
-                name: "param" if metadata["is_param"] else "buffer"
-                for name, metadata in manifest.items()
+                name: "param" if view["is_param"] else "buffer"
+                for name, view in manifest["tensors"].items()
             },
             aliases=dict(response.get("aliases") or {}),
             attrs=dict(response.get("attrs") or {}),
@@ -399,47 +463,34 @@ class WeightCacheDaemon:
                 self.seed_addr,
             )
 
-    def _request_seed(self, remote: bool) -> dict:
+    def _request_seed(self, target: str | tuple[str, int]) -> dict:
         """Ask the source daemon for this rank's manifest and transfer seed.
 
         A same-host peer is reached over its Unix socket and speaks the
         pickle protocol, since ``peer_ipc`` ships real CUDA IPC handles. A
-        remote peer speaks the JSON control plane instead.
+        remote ``(host, port)`` peer speaks the JSON control plane instead.
         """
-        assert self.seed_addr is not None
         request: dict[str, Any] = {
             "cmd": "fetch_manifest",
             "seed_backend": self.seed_backend,
         }
-        if not remote:
-            verify_socket_owner(self.seed_addr, strict_perms=False)
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            target: Any = self.seed_addr
-        else:
-            host, separator, port = self.seed_addr.rpartition(":")
-            if not separator or not host or not port.isdigit():
-                raise ValueError(
-                    f"A remote seed address must be host:port, got {self.seed_addr!r}"
-                )
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target = (host, int(port))
-            request["token"] = self.seed_token
-        sock.settimeout(_SEED_TIMEOUT_S)
-        try:
-            sock.connect(target)
-            if remote:
-                send_json(sock, request)
-                response = recv_json(sock)
-            else:
+        if isinstance(target, str):
+            verify_socket_owner(target, strict_perms=False)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(_SEED_TIMEOUT_S)
+                sock.connect(target)
                 send_msg(sock, request)
                 response = recv_msg(sock)
-        finally:
-            sock.close()
+        else:
+            request["token"] = self.seed_token
+            with socket.create_connection(target, timeout=_SEED_TIMEOUT_S) as sock:
+                send_json(sock, request)
+                response = recv_json(sock)
         if not isinstance(response, dict):
             raise RuntimeError(
                 f"Seed daemon returned a malformed response: {response!r}"
             )
-        if remote and response.get("status") == "ok":
+        if not isinstance(target, str) and response.get("status") == "ok":
             response["cache_config"] = json_to_dataclass(
                 WeightCacheKey, response.get("cache_config")
             )
@@ -499,11 +550,14 @@ class WeightCacheDaemon:
         server.listen()
         remote_server = None
         if self.listen_addr is not None:
-            remote_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            remote_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            remote_server.bind(self.listen_addr)
-            remote_server.listen()
-        listeners = [server] + ([remote_server] if remote_server is not None else [])
+            family = socket.AF_INET6 if ":" in self.listen_addr[0] else socket.AF_INET
+            remote_server = socket.create_server(self.listen_addr, family=family)
+            threading.Thread(
+                target=self._serve_remote,
+                args=(remote_server,),
+                name=f"vllm-weight-cache-seed-{self.global_rank}",
+                daemon=True,
+            ).start()
         logger.info(
             "Weight cache %s daemon rank %d serving on %s%s",
             self.role,
@@ -517,35 +571,29 @@ class WeightCacheDaemon:
             ready_callback()
         try:
             while True:
-                readable, _, _ = select.select(listeners, [], [], 1.0)
-                for listener in readable:
-                    conn, _ = listener.accept()
-                    remote = listener is remote_server
-                    reply = send_json if remote else send_msg
-                    with conn:
-                        try:
-                            if remote:
-                                self._handle_remote_connection(conn)
-                            else:
-                                verify_peer_is_owner(conn)
-                                self._handle_connection(conn)
-                        except (ConnectionError, EOFError):
-                            logger.warning("Client disconnected mid-request")
-                        except Exception as e:
-                            # Report the error back instead of just closing
-                            # the socket, but don't let it take the daemon
-                            # down.
-                            logger.exception(
-                                "Error handling weight cache client; continuing"
-                            )
-                            with contextlib.suppress(OSError):
-                                reply(conn, {"status": "error", "message": str(e)})
+                conn, _ = server.accept()
+                with conn:
+                    try:
+                        verify_peer_is_owner(conn)
+                        with self._state_lock:
+                            self._handle_connection(conn)
+                    except (ConnectionError, EOFError):
+                        logger.warning("Client disconnected mid-request")
+                    except Exception as e:
+                        # Report the error back instead of just closing the
+                        # socket, but don't let it take the daemon down.
+                        logger.exception(
+                            "Error handling weight cache client; continuing"
+                        )
+                        with contextlib.suppress(OSError):
+                            send_msg(conn, {"status": "error", "message": str(e)})
         finally:
             server.close()
             if remote_server is not None:
                 remote_server.close()
-            for source in self._seed_sources.values():
-                source.close()
+            with self._state_lock:
+                for source in self._seed_sources.values():
+                    source.close()
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
             os.close(lock_fd)
@@ -599,37 +647,35 @@ class WeightCacheDaemon:
         }
         return entries, dict(mirror.aliases), dict(mirror.attrs)
 
-    def _state_tensors(self) -> dict[str, torch.Tensor]:
-        """This rank's tensors by name, for a mover that copies by address."""
-        if self.mirror is not None:
-            return self.mirror.tensors
-        assert self.model is not None
-        tensors: dict[str, torch.Tensor] = {}
-        for name, tensor in self.model.named_parameters(remove_duplicate=False):
-            tensors.setdefault(name, tensor.detach())
-        for name, tensor in self.model.named_buffers(remove_duplicate=False):
-            tensors.setdefault(name, tensor.detach())
-        return tensors
+    def _seed_state(
+        self,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, str], dict[str, str], dict]:
+        """This rank's canonical tensors, their kinds, aliases and flags."""
+        if self.model is not None:
+            tensors, kinds, aliases = collect_tensors(self.model)
+            return tensors, kinds, aliases, export_model_attrs(self.model)
+        mirror = self.mirror
+        assert mirror is not None
+        return mirror.tensors, mirror.kinds, dict(mirror.aliases), dict(mirror.attrs)
 
     def _build_seed_response(self, backend: str) -> dict[str, Any]:
         """Describe this rank so a peer can mirror it."""
         source = self._seed_source(backend)
-        entries, aliases, attrs = self._export_state()
-        state_tensors = {
-            name: tensor
-            for name, tensor in self._state_tensors().items()
-            if name in entries
-        }
-        seed = source.prepare_seed(entries, state_tensors, get_current_device_uuid())
+        tensors, kinds, aliases, attrs = self._seed_state()
+        manifest, storages = build_manifest(tensors, kinds)
+        seed = source.prepare_seed(storages, get_current_device_uuid())
         return {
             "cache_config": self.cache_config,
-            "manifest": build_manifest(entries),
+            # Matched instead of the checkpoint fingerprint by a mirror
+            # without the safetensors to hash (see seed_mismatches).
+            "model": self.model_config.model,
+            "manifest": manifest,
             "aliases": aliases,
             "attrs": attrs,
             "seed": seed,
             # Kilobytes next to the weights, and it saves the mirror's first
             # engine the autotune pass, so every plane carries it.
-            "artifacts": self.artifacts.to_json(),
+            "artifacts": self.artifacts.to_json(MAX_SEED_ARTIFACT_BYTES),
         }
 
     def _handle_fetch_manifest(self, conn: socket.socket, request: dict) -> None:
@@ -644,16 +690,44 @@ class WeightCacheDaemon:
             return
         send_msg(conn, {"status": "ok", **response})
 
+    def _serve_remote(self, remote_server: socket.socket) -> None:
+        """Serve seed peers on their own thread, one connection at a time.
+
+        A peer is untrusted until it presents the token, so none may hold up
+        the engines on the local socket: requests are read here under a
+        deadline, and only an authenticated one takes the state lock.
+        """
+        torch.accelerator.set_device_index(self.device_index)
+        while True:
+            try:
+                conn, _ = remote_server.accept()
+            except OSError:
+                return  # The listener was closed on shutdown.
+            with conn:
+                try:
+                    self._handle_remote_connection(conn)
+                except (ConnectionError, EOFError, TimeoutError):
+                    logger.warning("Seed peer disconnected or stalled mid-request")
+                except Exception as e:
+                    logger.exception("Error handling seed peer; continuing")
+                    with contextlib.suppress(OSError):
+                        send_json(conn, {"status": "error", "message": str(e)})
+
     def _handle_remote_connection(self, conn: socket.socket) -> None:
         """Serve one request from a remote peer over the JSON control plane.
 
         The remote plane never unpickles: recv_msg would deserialize a
         peer's bytes before its token could be compared, which would make
         the listener an unauthenticated code-execution surface. JSON parsing
-        is memory-safe and the length cap bounds it, so the token is checked
-        against a decoded request rather than a decoded object graph.
+        is memory-safe and the size cap and deadline bound it, so the token
+        is checked against a decoded request rather than a decoded object
+        graph.
         """
-        request = recv_json(conn)
+        request = recv_json(
+            conn,
+            max_size=_MAX_REMOTE_REQUEST_SIZE,
+            deadline=time.monotonic() + _REMOTE_REQUEST_TIMEOUT_S,
+        )
         presented = request.get("token") if isinstance(request, dict) else None
         if (
             not self.seed_token
@@ -672,16 +746,23 @@ class WeightCacheDaemon:
                 },
             )
             return
+        # Authenticated: a full manifest may take a while to stream.
+        conn.settimeout(_SEED_TIMEOUT_S)
+        with self._state_lock:
+            response = self._remote_response(cmd, request)
+        send_json(conn, response)
+
+    def _remote_response(self, cmd: str, request: dict) -> dict[str, Any]:
         if cmd == "fetch_artifacts":
-            send_json(conn, {"status": "ok", "artifacts": self.artifacts.to_json()})
-            return
+            return {
+                "status": "ok",
+                "artifacts": self.artifacts.to_json(MAX_SEED_ARTIFACT_BYTES),
+            }
         if not self.has_weights:
-            send_json(conn, {"status": "error", "message": "Weights were released"})
-            return
+            return {"status": "error", "message": "Weights were released"}
         backend = request.get("seed_backend", RDMA_SEED_SOURCE)
         if not isinstance(backend, str):
-            send_json(conn, {"status": "error", "message": "Malformed seed_backend"})
-            return
+            return {"status": "error", "message": "Malformed seed_backend"}
         try:
             source = self._seed_source(backend)
             if source.is_node_local:
@@ -691,10 +772,9 @@ class WeightCacheDaemon:
                 )
             response = self._build_seed_response(backend)
         except Exception as error:
-            send_json(conn, {"status": "error", "message": str(error)})
-            return
+            return {"status": "error", "message": str(error)}
         response["cache_config"] = dataclass_to_json(response["cache_config"])
-        send_json(conn, {"status": "ok", **response})
+        return {"status": "ok", **response}
 
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
@@ -802,6 +882,9 @@ class WeightCacheDaemon:
         )
 
     def _handle_release(self, conn: socket.socket) -> None:
+        # Unregister from the NIC before the memory goes back to the driver.
+        for source in self._seed_sources.values():
+            source.release()
         self.model = None
         self.mirror = None
         torch.accelerator.empty_cache()

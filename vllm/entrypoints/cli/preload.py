@@ -38,6 +38,8 @@ from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
+    format_host_port,
+    parse_seed_address,
 )
 from vllm.model_executor.model_loader.weight_cache.seed import (
     PEER_IPC_SEED_SOURCE,
@@ -107,14 +109,16 @@ def _split_addresses(value: str | None) -> list[str]:
     return [address.strip() for address in (value or "").split(",") if address.strip()]
 
 
-def _seed_address(value: str | None, local_rank: int, global_rank: int) -> str | None:
+def _seed_address(
+    value: str | None, local_rank: int, global_rank: int, port_offset: int = 0
+) -> str | None:
     """Resolve one daemon's source address.
 
     One address per local GPU, in ``local_rank`` order, names each source's
     Unix socket, which is the same-host form. A single ``host:base_port``
-    instead makes every rank dial ``base_port + its global rank``, matching
-    how a source lays its listeners out, so one flag covers a whole
-    cross-host replica.
+    instead makes every rank dial ``base_port + port_offset + its global
+    rank``, matching how ``_listen_address`` lays a source's listeners out,
+    so one flag covers a whole cross-host replica and both daemon groups.
     """
     addresses = _split_addresses(value)
     if not addresses:
@@ -125,17 +129,18 @@ def _seed_address(value: str | None, local_rank: int, global_rank: int) -> str |
                 f"--weight-cache-seed has {len(addresses)} addresses but local "
                 f"GPU {local_rank} needs one; pass one address per local GPU"
             )
-        return addresses[local_rank]
-    only = addresses[0]
-    if only.startswith(("/", "./")):
-        return only
-    host, separator, port = only.rpartition(":")
-    if not separator or not host or not port.isdigit():
-        raise ValueError(
-            "--weight-cache-seed must be a Unix socket path or host:base_port, "
-            f"got {only!r}"
-        )
-    return f"{host}:{int(port) + global_rank}"
+        address = parse_seed_address(addresses[local_rank])
+        if not isinstance(address, str):
+            raise ValueError(
+                "Per-GPU --weight-cache-seed addresses must be Unix socket "
+                "paths; a remote source takes a single host:base_port"
+            )
+        return address
+    address = parse_seed_address(addresses[0])
+    if isinstance(address, str):
+        return address
+    host, port = address
+    return format_host_port(host, port + port_offset + global_rank)
 
 
 def _listen_address(
@@ -149,10 +154,11 @@ def _listen_address(
     """
     if not value:
         return None
-    host, separator, port = value.rpartition(":")
-    if not separator or not host or not port.isdigit():
+    address = parse_seed_address(value)
+    if isinstance(address, str):
         raise ValueError(f"--weight-cache-listen must be host:base_port, got {value!r}")
-    return host, int(port) + port_offset + global_rank
+    host, port = address
+    return host, port + port_offset + global_rank
 
 
 def _run_warmup_engine(args: argparse.Namespace, socket_dir: str | None) -> None:
@@ -232,7 +238,9 @@ class PreloadSubcommand(CLISubcommand):
             "--weight-cache-draft-seed",
             type=str,
             default=None,
-            help="Same as --weight-cache-seed for the speculative draft daemon group.",
+            help="Same as --weight-cache-seed for the speculative draft daemon "
+            "group: the source's draft Unix sockets, or the same host:base_port, "
+            "whose draft listeners each rank finds past the target group's block.",
         )
         parser.add_argument(
             "--weight-cache-device-offset",
@@ -337,7 +345,7 @@ class PreloadSubcommand(CLISubcommand):
                 "remote peer must authenticate before the daemon answers it"
             )
         remote_seed = any(
-            not address.startswith(("/", "./"))
+            not isinstance(parse_seed_address(address), str)
             for address in _split_addresses(args.weight_cache_seed)
             + _split_addresses(args.weight_cache_draft_seed)
         )
@@ -431,7 +439,8 @@ class PreloadSubcommand(CLISubcommand):
                 args.weight_cache_draft_seed if is_draft else args.weight_cache_seed
             )
             # The draft group's listeners sit past the target group's block, so
-            # one base port serves both roles without colliding.
+            # one base port serves both roles without colliding, and a mirror
+            # dials them with the same offset.
             port_offset = group_index * world_size
             for local_rank, dp_rank, pp_rank, tp_rank in placements:
                 global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
@@ -448,7 +457,9 @@ class PreloadSubcommand(CLISubcommand):
                             is_draft,
                             dp_rank,
                             pp_rank,
-                            _seed_address(seed_value, local_rank, global_rank),
+                            _seed_address(
+                                seed_value, local_rank, global_rank, port_offset
+                            ),
                             args.weight_cache_seed_backend,
                             _listen_address(
                                 args.weight_cache_listen, global_rank, port_offset

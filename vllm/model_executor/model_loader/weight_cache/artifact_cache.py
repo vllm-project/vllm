@@ -9,6 +9,7 @@ bytes, so the daemon can serve one to any local process that reaches its
 socket rather than only to the engine that owns its GPU.
 """
 
+from dataclasses import fields
 from typing import Any
 
 import pybase64 as base64
@@ -17,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     MAX_ARTIFACT_SIZE,
+    MAX_JSON_MSG_SIZE,
     ArtifactCacheKey,
     WeightCacheUnavailableError,
     connect_daemon,
@@ -36,6 +38,11 @@ _TIMEOUT_S = 5.0
 # of keys. Bounding the store keeps a client whose key keeps changing (e.g. one
 # restarting with different engine flags) from growing it forever.
 MAX_CACHED_ARTIFACTS = 8
+
+# Artifacts ride along in a seed response, which on the JSON plane must fit in
+# MAX_JSON_MSG_SIZE next to the weight manifest. Past this budget they are
+# left for the mirror's engines to recompute rather than failing the seed.
+MAX_SEED_ARTIFACT_BYTES = MAX_JSON_MSG_SIZE // 4
 
 
 class ArtifactStore:
@@ -63,12 +70,30 @@ class ArtifactStore:
             self._artifacts.pop(next(iter(self._artifacts)))
         self._artifacts[key] = data
 
-    def to_json(self) -> list[dict[str, Any]]:
-        """Render the store for the remote control plane."""
-        return [
-            {"key": dataclass_to_json(key), "data": base64.b64encode(data).decode()}
-            for key, data in self._artifacts.items()
-        ]
+    def to_json(self, max_bytes: int | None = None) -> list[dict[str, Any]]:
+        """Render the store for the remote control plane.
+
+        Args:
+            max_bytes: Budget for the encoded artifacts; any that would
+                exceed it are left out, since each is only a cache.
+
+        """
+        rendered: list[dict[str, Any]] = []
+        total = 0
+        for key, data in self._artifacts.items():
+            encoded = base64.b64encode(data).decode()
+            if max_bytes is not None and total + len(encoded) > max_bytes:
+                logger.warning(
+                    "Leaving the %r artifact out of a seed response: %d bytes "
+                    "exceed the %d byte budget",
+                    key.kind,
+                    total + len(encoded),
+                    max_bytes,
+                )
+                continue
+            total += len(encoded)
+            rendered.append({"key": dataclass_to_json(key), "data": encoded})
+        return rendered
 
     def merge_json(self, payload: Any) -> int:
         """Adopt a peer's artifacts, dropping anything malformed.
@@ -87,6 +112,10 @@ class ArtifactStore:
         for item in payload:
             try:
                 key = json_to_dataclass(ArtifactCacheKey, item["key"])
+                # A non-string field (e.g. a list) would make the key
+                # unhashable and fail the whole seed at put().
+                if not all(isinstance(getattr(key, f.name), str) for f in fields(key)):
+                    raise TypeError("ArtifactCacheKey fields must be strings")
                 data = base64.b64decode(item["data"], validate=True)
             except Exception:
                 logger.warning("Skipping a malformed artifact from a seed peer")

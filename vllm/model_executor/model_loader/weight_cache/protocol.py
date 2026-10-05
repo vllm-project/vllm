@@ -19,9 +19,11 @@ import socket
 import stat
 import struct
 import tempfile
+import time
 from dataclasses import asdict, dataclass, fields
 from typing import Any, NamedTuple, TypeVar
 
+import regex as re
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -394,19 +396,14 @@ class TensorEntry:
     """Either "param" or "buffer"."""
     ipc_args: tuple | None = None
     cpu_tensor: torch.Tensor | None = None
-    shape: tuple[int, ...] = ()
-    dtype: str = ""
-    """Recorded so a seeding peer can size its mirror without a handle."""
 
     @classmethod
     def from_tensor(cls, tensor: torch.Tensor, kind: str) -> "TensorEntry":
         tensor = tensor.detach()
-        shape = tuple(tensor.shape)
-        dtype = str(tensor.dtype)
         if tensor.is_cuda:
             _, ipc_args = reduce_tensor(tensor)
-            return cls(kind=kind, ipc_args=ipc_args, shape=shape, dtype=dtype)
-        return cls(kind=kind, cpu_tensor=tensor.cpu(), shape=shape, dtype=dtype)
+            return cls(kind=kind, ipc_args=ipc_args)
+        return cls(kind=kind, cpu_tensor=tensor.cpu())
 
     def rebuild(self, device_index: int, *, retarget: bool = True) -> torch.Tensor:
         if self.ipc_args is None:
@@ -431,6 +428,38 @@ class WeightCacheState(NamedTuple):
     """Duplicate (tied) weight names aliased to their canonical entry."""
     attrs: dict[str, bool]
     """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
+
+
+_HOST_PORT = re.compile(
+    r"\[(?P<v6>[^\]]+)\]:(?P<v6port>\d+)|(?P<host>[^:\[\]]+):(?P<port>\d+)"
+)
+
+
+def parse_seed_address(address: str) -> str | tuple[str, int]:
+    """Split a seed address into a Unix socket path or a ``(host, port)``.
+
+    Anything containing a slash, or no colon, is a socket path, so relative
+    paths such as ``run/sock0`` stay local. Otherwise it must be
+    ``host:port``, with an IPv6 host in brackets.
+
+    Raises:
+        ValueError: If a colon form is not ``host:port``.
+
+    """
+    if "/" in address or ":" not in address:
+        return os.path.expanduser(address)
+    match = _HOST_PORT.fullmatch(address)
+    if match is None:
+        raise ValueError(
+            f"Seed address must be a Unix socket path or host:port, got {address!r}"
+        )
+    if match["v6"] is not None:
+        return match["v6"], int(match["v6port"])
+    return match["host"], int(match["port"])
+
+
+def format_host_port(host: str, port: int) -> str:
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
 def connect_daemon(
@@ -492,11 +521,25 @@ def send_json(sock: socket.socket, obj: Any) -> None:
     sock.sendall(payload)
 
 
-def recv_json(sock: socket.socket) -> Any:
-    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size))
-    if length > MAX_JSON_MSG_SIZE:
-        raise ValueError(f"Message size {length} exceeds limit {MAX_JSON_MSG_SIZE}")
-    return json.loads(_recv_exact(sock, length))
+def recv_json(
+    sock: socket.socket,
+    max_size: int = MAX_JSON_MSG_SIZE,
+    deadline: float | None = None,
+) -> Any:
+    """Receive one JSON message.
+
+    Args:
+        sock: Connected socket.
+        max_size: Largest payload accepted.
+        deadline: ``time.monotonic()`` by which the whole message must have
+            arrived; a per-read timeout alone lets a peer trickle bytes
+            forever.
+
+    """
+    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size, deadline))
+    if length > max_size:
+        raise ValueError(f"Message size {length} exceeds limit {max_size}")
+    return json.loads(_recv_exact(sock, length, deadline))
 
 
 def send_msg(sock: socket.socket, obj: Any) -> None:
@@ -512,9 +555,16 @@ def recv_msg(sock: socket.socket) -> Any:
     return pickle.loads(_recv_exact(sock, length))
 
 
-def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
+def _recv_exact(
+    sock: socket.socket, num_bytes: int, deadline: float | None = None
+) -> bytes:
     buf = bytearray()
     while len(buf) < num_bytes:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Peer did not send its message in time")
+            sock.settimeout(remaining)
         chunk = sock.recv(num_bytes - len(buf))
         if not chunk:
             raise ConnectionError("Socket closed while receiving message")
