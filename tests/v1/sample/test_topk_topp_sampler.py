@@ -298,6 +298,28 @@ class TestTritonTopkTopp:
 
         self._compare_results(logits, k=None, p=p)
 
+    @pytest.mark.parametrize("batch_size", [1, 65])
+    @pytest.mark.parametrize("background_logit", [-200.0, -100.0])
+    @pytest.mark.parametrize("hot_tokens", [(0, 2000), (1000, 2000), (10000, 20000)])
+    def test_topp_sparse_probabilities(
+        self, batch_size: int, background_logit: float, hot_tokens: tuple[int, int]
+    ):
+        """Top-p must trim sparse rows regardless of hot-token positions."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.full((batch_size, 151936), background_logit)
+        logits[:, list(hot_tokens)] = 0.0
+        p = torch.full((batch_size,), 0.5)
+
+        expected = apply_top_k_top_p_pytorch(logits.clone(), None, p)
+        actual = apply_top_k_top_p_triton(logits.clone(), None, p)
+        expected_kept = torch.isfinite(expected).sum(dim=-1)
+        actual_kept = torch.isfinite(actual).sum(dim=-1)
+
+        assert torch.equal(actual_kept, expected_kept)
+        assert (actual_kept == 1).all()
+        assert (actual[torch.isfinite(actual)] == 0.0).all()
+
     @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
     def test_topk_and_topp(self, batch_size: int, vocab_size: int):
