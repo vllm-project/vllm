@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import weakref
 from typing import Any
 
 import torch
@@ -25,6 +26,11 @@ from vllm.utils.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
     has_flashinfer_b12x_moe,
 )
+
+# MoE layers run sequentially, so identically-shaped B12xMoEWrappers can share
+# one set of workspaces and output buffer: the first wrapper per shape owns
+# them and the rest borrow. Weak values free them together with the model.
+_buffer_owners: weakref.WeakValueDictionary[tuple, Any] = weakref.WeakValueDictionary()
 
 
 class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
@@ -239,6 +245,25 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
         from flashinfer.fused_moe import B12xMoEWrapper
 
+        buffer_key = (
+            self.global_num_experts,
+            self.topk,
+            self.hidden_dim,
+            self.intermediate_size_per_partition,
+            self.max_num_tokens,
+            self.num_local_experts,
+            self._activation_str,
+            torch.accelerator.current_device_index(),
+        )
+        owner = _buffer_owners.get(buffer_key)
+        shared_buffers: dict[str, Any] = {}
+        if owner is not None:
+            shared_buffers = {
+                "shared_static_workspace": owner._static_workspace,
+                "shared_dynamic_workspace": owner._dynamic_workspace,
+                "shared_output": owner._moe_output,
+            }
+
         self._wrapper = B12xMoEWrapper(
             num_experts=self.global_num_experts,
             top_k=self.topk,
@@ -248,7 +273,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=self.max_num_tokens,
             num_local_experts=self.num_local_experts,
             activation=self._activation_str,
+            **shared_buffers,
         )
+        if owner is None:
+            _buffer_owners[buffer_key] = self._wrapper
 
     def apply(
         self,
