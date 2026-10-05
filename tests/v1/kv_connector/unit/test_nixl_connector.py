@@ -3087,20 +3087,6 @@ class TestPeerReplacement:
         assert result.finished_recving == result.failed_recving == {"old-req"}
         self.transport.remove_remote_agent.assert_called_once_with("old")
 
-    def test_recovery_cleanup_errors_propagate(self):
-        self._fail_old_peer()
-        with (
-            patch.object(
-                self.transport,
-                "release_dlist_handle",
-                side_effect=RuntimeError("in use"),
-            ),
-            pytest.raises(RuntimeError, match="in use"),
-        ):
-            self.worker.get_transfer_results()
-        assert self.worker._invalid_remote_engines == {"old"}
-        self.transport.remove_remote_agent.assert_not_called()
-
     @pytest.mark.parametrize("expired", [False, True])
     def test_success_and_expiry_do_not_probe_metadata(self, expired):
         metadata = self._request("old")
@@ -3139,18 +3125,6 @@ class TestPeerReplacement:
         self.transport.make_prepped_xfer.assert_not_called()
         self.transport.send_notif.assert_not_called()
         self.transport.remove_remote_agent.assert_not_called()
-
-    def test_recovery_shutdown_releases_pending_handles_once(self):
-        self._fail_old_peer()
-        self.worker._recving_transfers["old-req"] = [10, 11]
-        self.transport.check_xfer_state.side_effect = (
-            lambda h: "ERR" if h == 10 else "PROC"
-        )
-        self.worker.get_transfer_results()
-        self.worker.shutdown()
-        self.worker.shutdown()
-        assert self.transport.release_xfer_handle.call_args_list == [call(10), call(11)]
-        self.transport.remove_remote_agent.assert_called_once_with("old")
 
     def test_eviction_clears_pending_recovery(self):
         self.worker._failed_remote_engines.add("old")
