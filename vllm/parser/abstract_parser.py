@@ -5,10 +5,21 @@ import contextlib
 import json
 from abc import abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
+from xgrammar import Grammar, StructuralTag
+from xgrammar.structural_tag import (
+    ConstStringFormat,
+    Format,
+    GrammarFormat,
+    JSONSchemaFormat,
+    OrFormat,
+    RegexFormat,
+    TagFormat,
+    TriggeredTagsFormat,
+)
 
 from vllm.entrypoints.chat_utils import (
     get_tool_call_id_type,
@@ -25,16 +36,22 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.parser.engine.adapters import ParserEngineToolAdapter
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.streaming import (
     extract_named_tool_call_streaming,
     extract_required_tool_call_streaming,
+)
+from vllm.tool_parsers.structural_tag_registry import (
+    limit_to_single_tool_call,
+    resolve_tool_strictness,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
@@ -98,6 +115,7 @@ class Parser:
     tool_parser_cls: type[ToolParser] | None = None
     # Server-side floor for tool-call structural tags (--tool-strict-level).
     tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
+    always_adjust_request: bool = False
 
     def __init__(
         self,
@@ -115,7 +133,15 @@ class Parser:
                 tokenizer, *args, model_config=model_config, **kwargs
             )
         if self.__class__.tool_parser_cls is not None:
-            self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
+            # Engine-based adapters take the same construction kwargs as
+            # the reasoning parser (e.g. chat_template_kwargs for per-request
+            # thinking toggles); legacy ToolParser classes take none.
+            if issubclass(self.__class__.tool_parser_cls, ParserEngineToolAdapter):
+                self._tool_parser = self.__class__.tool_parser_cls(
+                    tokenizer, tools, model_config=model_config, **kwargs
+                )
+            else:
+                self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
 
         self._engine_based = (
             self._reasoning_parser is None
@@ -181,6 +207,10 @@ class Parser:
         """
         return request
 
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        """Provide the exact rendered prompt to parsers that need prefix state."""
+        return
+
     @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         """Check if the reasoning content ends in the input_ids.
@@ -234,6 +264,67 @@ class Parser:
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         """Return the number of reasoning tokens in generated token IDs."""
         return 0
+
+
+def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | None:
+    """Map StructuredOutputsParams in a XGrammar Format."""
+    if params.json_object:
+        return JSONSchemaFormat(json_schema={"type": "object"})
+    if params.json is not None:
+        schema = params.json
+        if isinstance(schema, str):
+            schema = json.loads(schema)
+        return JSONSchemaFormat(json_schema=schema)
+    if params.regex is not None:
+        return RegexFormat(pattern=params.regex)
+    if params.choice is not None:
+        return OrFormat(
+            elements=[ConstStringFormat(value=choice) for choice in params.choice]
+        )
+    if params.grammar is not None:
+        from vllm.v1.structured_output.utils import grammar_is_likely_lark
+
+        grammar = params.grammar
+        # IMPORTANT(arpera):
+        # GrammarFormat only accepts EBNF.
+        if grammar_is_likely_lark(grammar):
+            try:
+                grammar = str(Grammar.from_lark(grammar))
+            except Exception as e:
+                raise VLLMValidationError("Invalid grammar specification.") from e
+        return GrammarFormat(grammar=grammar)
+    if params.structural_tag is not None:
+        s_tag = json.loads(params.structural_tag)
+        if "structures" in s_tag:
+            # LegacyStructuralTagResponseFormat
+            return TriggeredTagsFormat(
+                triggers=s_tag["triggers"],
+                tags=[
+                    TagFormat(
+                        begin=structure["begin"],
+                        content=JSONSchemaFormat(json_schema=structure["schema"]),
+                        end=structure["end"],
+                    )
+                    for structure in s_tag["structures"]
+                ],
+            )
+        # StructuralTagResponseFormat
+        return StructuralTag.model_validate(s_tag).format
+    return None
+
+
+def _xgrammar_supports(structured_outputs: StructuredOutputsParams) -> bool:
+    """Whether the constraint passes xgrammar validation on its own."""
+    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+
+    try:
+        # validate_xgrammar_grammar rewrites `choice` into `grammar` in place.
+        validate_xgrammar_grammar(
+            SamplingParams(structured_outputs=replace(structured_outputs))
+        )
+    except (TypeError, ValueError, VLLMValidationError):
+        return False
+    return True
 
 
 class DelegatingParser(Parser):
@@ -390,18 +481,14 @@ class DelegatingParser(Parser):
             request = self._reasoning_parser.adjust_request(request)
         if self._tool_parser is not None:
             request = self._apply_structural_tag(request)
-        if self._tool_parser is not None:
             request = self._tool_parser.adjust_request(request)
         return request
 
     def _apply_structural_tag(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        if (
-            self._tool_parser is None
-            or self._tool_parser.structural_tag_model is None
-            or not request.tools
-        ):
+        tool_parser = self._tool_parser
+        if tool_parser is None or not request.tools:
             return request
 
         need_tool_calling = (
@@ -415,17 +502,83 @@ class DelegatingParser(Parser):
         if not need_tool_calling:
             return request
 
-        structure_tag = self._tool_parser.get_structural_tag(
-            request,
-            reasoning=False,
-            strict_level=self.tool_strict_level,
-        )
-        if structure_tag is None:
+        structured_outputs = request.extract_structured_outputs()
+        is_auto = request.tool_choice == "auto"
+        single_call = request.parallel_tool_calls is False
+        strict_level = self.tool_strict_level
+        if (
+            strict_level == ToolStrictLevel.AUTO
+            and tool_parser.default_tool_strict_level is not None
+        ):
+            strict_level = tool_parser.default_tool_strict_level
+        if single_call and not (is_auto and structured_outputs is not None):
+            # Limiting the call count needs the call envelope in the grammar.
+            # Auto with structured outputs keeps its format-only grammar, so the
+            # flag never makes calls possible that are impossible without it.
+            strict_level = max(strict_level, ToolStrictLevel.FUNCTION)
+
+        resolved_tools = None
+        if tool_parser.structural_tag_model is not None:
+            resolved_tools = resolve_tool_strictness(
+                request.tools,
+                request.tool_choice,
+                strict_level,
+            )
+
+        output_format = None
+        if resolved_tools and is_auto and structured_outputs:
+            if not _xgrammar_supports(structured_outputs):
+                logger.warning_once(
+                    "Tool calls are not constrained for tool_choice=auto with "
+                    "structured outputs because xgrammar does not support the "
+                    "structured output constraint; the structured output "
+                    "constraint applies.",
+                    scope="local",
+                )
+                return request
+            output_format = structured_outputs_to_format(structured_outputs)
+
+        if resolved_tools is not None:
+            tag_request = request
+            if output_format is not None:
+                # IMPORTANT(arpera):
+                # The "auto" tag allows plain text in response.
+                # Use tag "required" here to ensure structured-output branch
+                # remains meaningful.
+                tag_request = request.model_copy(update={"tool_choice": "required"})
+            tools_structural_tag = tool_parser.get_structural_tag(
+                tag_request,
+                reasoning=False,
+                strict_level=strict_level,
+            )
+        else:
+            tools_structural_tag = None
+
+        if tools_structural_tag is None:
+            if is_auto and structured_outputs is not None:
+                logger.warning_once(
+                    "Tool calls are not constrained for tool_choice=auto with "
+                    "structured outputs because structural tags are unavailable; "
+                    "the structured output constraint applies.",
+                    scope="local",
+                )
             return request
 
-        structural_tag = json.dumps(structure_tag.model_dump())
+        if single_call:
+            limit_to_single_tool_call(tools_structural_tag)
+        structural_tag = tools_structural_tag
+        if output_format is not None:
+            structural_tag = StructuralTag(
+                format=OrFormat(elements=[tools_structural_tag.format, output_format])
+            )
+        elif structured_outputs is not None and not is_auto:
+            logger.warning_once(
+                "structured outputs are ignored because tool_choice forces tool call.",
+                scope="local",
+            )
+
         request.structured_outputs = StructuredOutputsParams(
-            structural_tag=structural_tag,
+            structural_tag=json.dumps(structural_tag.model_dump()),
         )
         if isinstance(request, ResponsesRequest):
             request.text = None
