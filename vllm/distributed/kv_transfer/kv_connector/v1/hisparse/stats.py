@@ -14,14 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
 
-_HISPARSE_LEVEL_KEYS = frozenset(
-    {
-        "host_blocks_used",
-        "host_blocks_total",
-        "host_blocks_usage",
-        "pending_page_transfers",
-    }
-)
+_HISPARSE_LEVEL_KEYS = frozenset({"host_cache_usage_perc", "pending_page_transfers"})
 
 
 @dataclass
@@ -45,9 +38,7 @@ class HiSparseKVConnectorStats(KVConnectorStats):
             "cache_hits": [],
             "cache_misses": [],
             "host_to_device_bytes": [],
-            "host_blocks_used": [],
-            "host_blocks_total": [],
-            "host_blocks_usage": [],
+            "host_cache_usage_perc": [],
             "pending_page_transfers": [],
         }
 
@@ -60,9 +51,7 @@ class HiSparseKVConnectorStats(KVConnectorStats):
         self, used: int, total: int, pending_page_transfers: int
     ) -> None:
         """Record scheduler-side host-tier level values."""
-        self.data["host_blocks_used"].append(used)
-        self.data["host_blocks_total"].append(total)
-        self.data["host_blocks_usage"].append(used / total if total else 0.0)
+        self.data["host_cache_usage_perc"].append(used / total if total else 0.0)
         self.data["pending_page_transfers"].append(pending_page_transfers)
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
@@ -85,13 +74,9 @@ class HiSparseKVConnectorStats(KVConnectorStats):
             "HiSparse hot-buffer misses": sum(self.data["cache_misses"]),
             "HiSparse host-to-device bytes": sum(self.data["host_to_device_bytes"]),
         }
-        if self.data["host_blocks_used"]:
-            used = self.data["host_blocks_used"][-1]
-            total = self.data["host_blocks_total"][-1]
-            reduced["HiSparse host pool used blocks"] = used
-            reduced["HiSparse host pool usage %"] = (
-                round(100 * used / total, 1) if total else 0.0
-            )
+        if self.data["host_cache_usage_perc"]:
+            usage = self.data["host_cache_usage_perc"][-1]
+            reduced["HiSparse host KV cache usage %"] = round(100 * usage, 1)
         return reduced
 
     def is_empty(self) -> bool:
@@ -137,24 +122,12 @@ class HiSparsePromMetrics(KVConnectorPromMetrics):
             ),
         }
 
-        gauge_host_blocks_used = self._gauge_cls(
-            name="vllm:hisparse_host_blocks_used",
+        gauge_host_cache_usage = self._gauge_cls(
+            name="vllm:hisparse_host_cache_usage_perc",
             documentation=(
-                "HiSparse host KV blocks held by running requests or in-flight "
-                "transfers. Evictable cached blocks are not counted."
+                "HiSparse host KV-cache usage. 1 means 100 percent usage. "
+                "Evictable cached blocks count as free."
             ),
-            multiprocess_mode="mostrecent",
-            labelnames=labelnames,
-        )
-        gauge_host_blocks_total = self._gauge_cls(
-            name="vllm:hisparse_host_blocks_total",
-            documentation="Total HiSparse host KV blocks (fixed at startup).",
-            multiprocess_mode="mostrecent",
-            labelnames=labelnames,
-        )
-        gauge_host_blocks_usage = self._gauge_cls(
-            name="vllm:hisparse_host_blocks_usage",
-            documentation="HiSparse host KV pool usage. 1 means 100 percent usage.",
             multiprocess_mode="mostrecent",
             labelnames=labelnames,
         )
@@ -167,14 +140,8 @@ class HiSparsePromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames,
         )
         self.hisparse_gauges: dict[str, Any] = {
-            "host_blocks_used": create_metric_per_engine(
-                gauge_host_blocks_used, self.per_engine_labelvalues
-            ),
-            "host_blocks_total": create_metric_per_engine(
-                gauge_host_blocks_total, self.per_engine_labelvalues
-            ),
-            "host_blocks_usage": create_metric_per_engine(
-                gauge_host_blocks_usage, self.per_engine_labelvalues
+            "host_cache_usage_perc": create_metric_per_engine(
+                gauge_host_cache_usage, self.per_engine_labelvalues
             ),
             "pending_page_transfers": create_metric_per_engine(
                 gauge_pending_page_transfers, self.per_engine_labelvalues

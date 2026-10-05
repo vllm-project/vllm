@@ -32,8 +32,7 @@ def test_record_host_usage_reports_latest_level():
     stats.record_host_usage(used=8, total=10, pending_page_transfers=0)
 
     reduced = stats.reduce()
-    assert reduced["HiSparse host pool used blocks"] == 8
-    assert reduced["HiSparse host pool usage %"] == 80.0
+    assert reduced["HiSparse host KV cache usage %"] == 80.0
 
 
 def test_aggregate_keeps_latest_host_usage_level():
@@ -46,9 +45,7 @@ def test_aggregate_keeps_latest_host_usage_level():
     first.aggregate(second)
 
     # Level values keep only the most recent observation.
-    assert first.data["host_blocks_used"] == [4, 6]
-    assert first.data["host_blocks_total"] == [10, 10]
-    assert first.data["host_blocks_usage"] == [0.4, 0.6]
+    assert first.data["host_cache_usage_perc"] == [0.4, 0.6]
     assert first.data["pending_page_transfers"] == [2, 1]
 
 
@@ -94,7 +91,7 @@ def test_build_kv_connector_stats_round_trip_with_host_usage():
     rebuilt = HiSparseConnector.build_kv_connector_stats(data=payload)
 
     assert rebuilt is not None
-    assert rebuilt.data["host_blocks_used"] == [6]
+    assert rebuilt.data["host_cache_usage_perc"] == [0.6]
     assert rebuilt.reduce() == stats.reduce()
 
 
@@ -146,7 +143,5 @@ def test_prom_metrics_observe_host_usage_gauges():
     assert created["vllm:hisparse_cache_hits"].increments == [3]
     assert created["vllm:hisparse_host_to_device_bytes"].increments == [32]
     # Level gauges record the latest observation.
-    assert created["vllm:hisparse_host_blocks_used"].set_values == [6]
-    assert created["vllm:hisparse_host_blocks_total"].set_values == [8]
-    assert created["vllm:hisparse_host_blocks_usage"].set_values == [0.75]
+    assert created["vllm:hisparse_host_cache_usage_perc"].set_values == [0.75]
     assert created["vllm:hisparse_pending_page_transfers"].set_values == [3]

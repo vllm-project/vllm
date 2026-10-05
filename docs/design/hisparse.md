@@ -46,7 +46,7 @@ full admission footprint.
 
 Host-tier observability flows through the KV-connector stats path: the
 scheduler samples the host block pool once per step and Prometheus exposes
-`vllm:hisparse_host_blocks_usage` (and its used/total companions) plus
+`vllm:hisparse_host_cache_usage_perc` plus
 `vllm:hisparse_pending_page_transfers`, alongside the worker's hot-buffer
 hit/miss counters. Used host blocks are those held by running requests or
 in-flight transfers; evictable cached prefixes count as free.
