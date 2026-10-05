@@ -28,8 +28,8 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderStreamState,
-    GenerateResponse,
-    GenerateStreamResponse,
+    GenerateTokensResponse,
+    GenerateTokensStreamResponse,
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -118,7 +118,7 @@ class OnlineDerenderer:
 
     async def derender_chat(
         self,
-        generate_response: GenerateResponse,
+        generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
     ) -> list[ChatCompletionResponseChoice]:
@@ -128,7 +128,7 @@ class OnlineDerenderer:
 
     def _derender_chat(
         self,
-        generate_response: GenerateResponse,
+        generate_response: GenerateTokensResponse,
         chat_request: ChatCompletionRequest | None = None,
         prompt_token_ids: list[int] | None = None,
     ) -> list[ChatCompletionResponseChoice]:
@@ -323,7 +323,7 @@ class OnlineDerenderer:
     async def derender_chat_stream(
         self,
         model: str,
-        generate_chunk: GenerateStreamResponse,
+        generate_chunk: GenerateTokensStreamResponse,
         state: DerenderStreamState | None = None,
         chat_request: ChatCompletionRequest | None = None,
         prompt_tokens: int | None = None,
@@ -472,7 +472,7 @@ class OnlineDerenderer:
         self,
         parser_cls: type[Parser],
         model: str,
-        generate_chunk: GenerateStreamResponse,
+        generate_chunk: GenerateTokensStreamResponse,
         state: DerenderStreamState,
         chat_request: ChatCompletionRequest,
         prompt_tokens: int | None,
@@ -682,7 +682,7 @@ class OnlineDerenderer:
 
     async def derender_completion(
         self,
-        generate_responses: list[GenerateResponse],
+        generate_responses: list[GenerateTokensResponse],
         prompt_tokens: list[int] | None = None,
         completion_request: CompletionRequest | None = None,
         prompt_token_ids: list[list[int] | None] | None = None,
@@ -693,7 +693,7 @@ class OnlineDerenderer:
 
     def _derender_completion(
         self,
-        generate_responses: list[GenerateResponse],
+        generate_responses: list[GenerateTokensResponse],
         prompt_tokens: list[int] | None = None,
         completion_request: CompletionRequest | None = None,
         prompt_token_ids: list[list[int] | None] | None = None,
@@ -761,7 +761,7 @@ class OnlineDerenderer:
     async def derender_completion_stream(
         self,
         model: str,
-        generate_chunk: GenerateStreamResponse,
+        generate_chunk: GenerateTokensStreamResponse,
         state: DerenderStreamState | None = None,
         prompt_tokens: int | None = None,
         completion_request: CompletionRequest | None = None,
