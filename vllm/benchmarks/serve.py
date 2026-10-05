@@ -1670,8 +1670,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "--input-len",
         type=int,
         default=None,
-        help="General input length for datasets. Maps to dataset-specific "
-        "input length arguments (e.g., --random-input-len, --sonnet-input-len). "
+        help="General input length for datasets. Maps to --random-input-len. "
         "If not specified, uses dataset defaults.",
     )
     parser.add_argument(
@@ -1679,7 +1678,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
         type=int,
         default=None,
         help="General output length for datasets. Maps to dataset-specific "
-        "output length arguments (e.g., --random-output-len, --sonnet-output-len). "
+        "output length arguments (e.g., --random-output-len, --hf-output-len). "
         "If not specified, uses dataset defaults.",
     )
     parser.add_argument(
@@ -2132,18 +2131,16 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"Cannot use '{args.dataset_name}' dataset with --dataset-path. "
             "Please specify the appropriate --dataset-name (e.g., "
-            "'sharegpt', 'custom', 'sonnet') for your dataset file: "
+            "'sharegpt', 'custom', 'hf') for your dataset file: "
             f"{args.dataset_path}"
         )
 
-    # Map general --input-len and --output-len to all dataset-specific arguments
+    # Map general length options to dataset-specific arguments.
     if args.input_len is not None:
         args.random_input_len = args.input_len
-        args.sonnet_input_len = args.input_len
 
     if args.output_len is not None:
         args.random_output_len = args.output_len
-        args.sonnet_output_len = args.output_len
         args.sharegpt_output_len = args.output_len
         args.custom_output_len = args.output_len
         args.hf_output_len = args.output_len
