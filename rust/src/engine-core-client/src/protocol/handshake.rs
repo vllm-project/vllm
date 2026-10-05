@@ -107,6 +107,9 @@ pub struct EngineCoreReadyResponse {
     /// Full-attention block size in tokens after initialization, or unavailable.
     #[serde(default)]
     pub effective_attention_block_size: Option<u64>,
+    /// Whether this engine can return the final prompt hidden state.
+    #[serde(default)]
+    pub supports_inline_hidden_states: bool,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

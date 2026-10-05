@@ -67,6 +67,7 @@ from vllm.entrypoints.generate.base.protocol import (
     TopLogprobsParam,
     resolve_return_mm_kwargs_alias,
     validate_cache_salt,
+    validate_inline_kv_request,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
@@ -598,6 +599,12 @@ class ResponsesRequest(OpenAIBaseModel):
     @classmethod
     def apply_return_mm_kwargs_alias(cls, data: Any) -> Any:
         return resolve_return_mm_kwargs_alias(data)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_inline_output(cls, data):
+        validate_inline_kv_request(data, supported=False)
+        return data
 
     @model_validator(mode="before")
     @classmethod

@@ -418,3 +418,65 @@ def test_standalone_draft_kv_dtype_override(monkeypatch, draft_dtype, expected_d
     assert draft_config.cache_config.cache_dtype == expected_dtype
     assert speculator.attn_vllm_config.cache_config.cache_dtype == expected_dtype
     assert target.cache_config.cache_dtype == "fp8_e4m3"
+
+
+@pytest.mark.skip_global_cleanup
+def test_inline_hidden_states_select_completed_prompt_rows_and_own_storage():
+    """Export only opted-in final prefill rows, independent of request-slot order."""
+    import numpy as np
+
+    requested = {"short", "partial", "cached"}
+    runner = SimpleNamespace(
+        _inline_req_ids=requested,
+        req_states=SimpleNamespace(prompt_len=SimpleNamespace(np=[2, 5, 3, 4])),
+    )
+    batch = SimpleNamespace(
+        req_ids=["normal", "short", "partial", "cached"],
+        idx_mapping_np=[2, 0, 3, 1],
+        num_computed_tokens_np=np.array([0, 0, 0, 4]),
+        num_scheduled_tokens=np.array([3, 2, 2, 1]),
+        query_start_loc_np=[0, 3, 5, 7, 8],
+    )
+    hidden = torch.arange(24, dtype=torch.float32).reshape(8, 3)
+    expected = {"short": hidden[4].tolist(), "cached": hidden[7].tolist()}
+    snapshot = GPUModelRunner._get_prompt_hidden_states(runner, hidden, batch)
+    assert snapshot is not None
+    hidden.zero_()
+    assert snapshot.to_cpu_nonblocking().tolists() == expected
+    requested.clear()
+    assert GPUModelRunner._get_prompt_hidden_states(runner, hidden, batch) is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA/ROCm")
+def test_inline_hidden_states_copy_completes_with_sampled_tokens():
+    """Return owned vectors after the runner's existing token-copy event."""
+    from vllm.v1.outputs import HiddenStatesTensors, ModelRunnerOutput
+    from vllm.v1.worker.gpu.async_utils import AsyncOutput
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+    source = torch.arange(12, dtype=torch.float32, device="cuda").reshape(4, 3)
+    snapshot = HiddenStatesTensors(["inline"], source[[2]])
+    tokens = torch.tensor([[42]], device="cuda")
+    output = ModelRunnerOutput(req_ids=["inline"], req_id_to_index={"inline": 0})
+    stream = torch.cuda.Stream()
+    pending = AsyncOutput(
+        output,
+        SamplerOutput(
+            sampled_token_ids=tokens,
+            logprobs_tensors=None,
+            num_nans=None,
+            num_sampled=torch.ones(1, dtype=torch.int32, device="cuda"),
+            num_rejected=torch.zeros(1, dtype=torch.int32, device="cuda"),
+        ),
+        torch.ones(1, dtype=torch.int32, device="cuda"),
+        torch.cuda.current_stream(),
+        stream,
+        check_ep_fault=False,
+        pending_aux_output=None,
+        hidden_states=snapshot,
+    )
+    source.zero_()
+    del snapshot
+    result = pending.get_output()
+    assert result.sampled_token_ids == [[42]]
+    assert result.hidden_states == {"inline": [6.0, 7.0, 8.0]}

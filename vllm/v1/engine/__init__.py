@@ -108,6 +108,7 @@ class EngineCoreReadyResponse:
     coord_store_port: int = 0
     coordinator_input_address: str | None = None
     coordinator_output_address: str | None = None
+    supports_inline_hidden_states: bool = False
 
 
 class EngineCoreRequest(
