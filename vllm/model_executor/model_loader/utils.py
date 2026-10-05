@@ -52,7 +52,7 @@ def initialize_model(
         as_expert_substitution_model,
     )
 
-    model_class = as_expert_substitution_model(model_class, model_config.hf_config)
+    model_class = as_expert_substitution_model(model_class, model_config)
 
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)

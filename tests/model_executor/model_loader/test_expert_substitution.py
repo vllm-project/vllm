@@ -3,10 +3,11 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import save_file
 from transformers import DeepseekV2Config, DeepseekV2ForCausalLM
 
 from vllm.config import (
@@ -18,7 +19,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.model_executor.layers.fused_moe.expert_substitution import (
-    make_expert_substitution,
+    ConstantExpertSubstitution,
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.models.expert_substitution import as_expert_substitution_model
@@ -26,163 +27,218 @@ from vllm.model_executor.models.utils import AutoWeightsLoader, PPMissingLayer
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+MODEL_CONFIG = SimpleNamespace(
+    hf_config=SimpleNamespace(approximate_experts={"0": [1, 2], "1": [1, 2]})
+)
 
-def _cpu_config(prefix: str = ""):
-    prefix = f"{prefix}." if prefix else ""
-    return SimpleNamespace(
-        compression_config={
-            "transform_config": {
-                "expert_substitution": {
-                    "version": 1,
-                    "router_semantics": {
-                        "preserve_logical_expert_ids": True,
-                        "preserve_router_weights": True,
-                        "renormalize_after_substitution": False,
-                    },
-                    "targets": {
-                        f"{prefix}model.layers.{layer}.experts": {
-                            "num_logical_experts": 3,
-                            "weight_layout": "compact_retained_experts",
-                            "replacements": {
-                                str(expert): {
-                                    "format": "constant-v1",
-                                    "tensors": {"value": name},
-                                }
-                                for expert, name in (
-                                    (1, "constants.shared"),
-                                    (2, f"constants.layer_{layer}"),
-                                )
-                            },
-                        }
-                        for layer in range(2)
-                    },
-                }
+
+def _compression_config(value_names: dict[int, dict[int, str]]) -> dict:
+    """Explicitly named constants given as ``{layer: {expert: tensor name}}``."""
+    targets = {
+        f"model.layers.{layer}.mlp.experts": {
+            "num_logical_experts": 3,
+            "weight_layout": "compact_retained_experts",
+            "replacements": {
+                str(expert): {"format": "constant-v1", "tensors": {"value": name}}
+                for expert, name in names.items()
+            },
+        }
+        for layer, names in value_names.items()
+    }
+    router_semantics = {
+        "preserve_logical_expert_ids": True,
+        "preserve_router_weights": True,
+        "renormalize_after_substitution": False,
+    }
+    return {
+        "transform_config": {
+            "expert_substitution": {
+                "version": 1,
+                "router_semantics": router_semantics,
+                "targets": targets,
             }
         }
+    }
+
+
+# Expert 1 of both layers shares one explicitly named constant.
+EXPLICIT_MODEL_CONFIG = SimpleNamespace(
+    hf_config=SimpleNamespace(
+        compression_config=_compression_config(
+            {
+                layer: {1: "constants.shared", 2: f"constants.layer_{layer}"}
+                for layer in (0, 1)
+            }
+        )
     )
+)
 
 
-def _cpu_model(config, *, local_layer=0, loader="auto", prefix=""):
+def _approx_value(layer: int, expert: int) -> str:
+    return f"model.layers.{layer}.mlp.experts.{expert}.approx_value"
+
+
+def _cpu_model(local_layers=(0, 1), tracked=True, model_config=MODEL_CONFIG):
+    """Two decoder layers; the others are placeholders as on another PP stage."""
+
     class Model(torch.nn.Module):
         def __init__(self, prefix=""):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(2), requires_grad=False)
             self.model = torch.nn.Module()
             self.model.layers = torch.nn.ModuleList()
-            self.finalize_calls = 0
             for index in range(2):
-                if index != local_layer:
+                if index not in local_layers:
                     self.model.layers.append(PPMissingLayer())
                     continue
                 layer = torch.nn.Module()
-                layer.experts = torch.nn.Module()
-                path = f"model.layers.{index}.experts"
-                path = f"{prefix}.{path}" if prefix else path
-                layer.experts.substitution = make_expert_substitution(
-                    config, path, 3, 2, torch.float32
+                layer.mlp = torch.nn.Module()
+                layer.mlp.experts = ConstantExpertSubstitution(
+                    index, 3, (1, 2), 2, torch.float32
                 )
                 self.model.layers.append(layer)
 
         def load_weights(self, weights):
-            if loader == "auto":
-                return AutoWeightsLoader(self).load_weights(weights)
-            loaded = set()
-            for name, value in weights:
-                self.get_parameter(name).data.copy_(value)
-                loaded.add(name)
-            return None if loader == "untracked" else loaded
+            loaded = AutoWeightsLoader(self).load_weights(weights)
+            return loaded if tracked else None
 
-        def process_weights_after_loading(self):
-            self.finalize_calls += 1
-
-    return as_expert_substitution_model(Model, config)(prefix=prefix)
+    return as_expert_substitution_model(Model, model_config)()
 
 
-@pytest.mark.parametrize("loader", ["auto", "legacy", "untracked"])
-def test_direct_substitution_loading_preserves_incremental_updates(loader):
-    """A direct reload must consume metadata names before the model's loader."""
-    model = _cpu_model(_cpu_config(), loader=loader)
-    substitution = model.model.layers[0].experts.substitution
-    model.load_weights([("constants.shared", torch.tensor([1.0, 2.0]))])
-    with pytest.raises(ValueError, match="missing 1 constant expert value"):
-        model.process_weights_after_loading()
-    model.load_weights([("constants.layer_0", torch.tensor([3.0, 4.0]))])
-    model.process_weights_after_loading()
-
+@pytest.mark.parametrize("local_layers", [(0, 1), (0,), (1,), ()])
+def test_loads_local_approx_values_and_passes_through_others(local_layers):
+    """Other PP stages and MTP drafts own none or some of the configured layers."""
+    model = _cpu_model(local_layers)
     loaded = model.load_weights(
         [
-            ("weight", torch.tensor([5.0, 6.0])),
-            ("constants.shared", torch.tensor([7.0, 8.0])),
-            ("constants.layer_0", torch.tensor([9.0, 10.0])),
+            ("weight", torch.tensor([1.0, 2.0])),
+            *(
+                (_approx_value(layer, expert), torch.full((2,), 10.0 * layer + expert))
+                for layer in range(2)
+                for expert in (1, 2)
+            ),
         ]
     )
-    if loader == "untracked":
-        assert loaded is None
-    else:
-        assert loaded == {"weight", "model.layers.0.experts.substitution.values"}
-    torch.testing.assert_close(model.weight, torch.tensor([5.0, 6.0]))
-    torch.testing.assert_close(
-        substitution.values, torch.tensor([[7.0, 8.0], [9.0, 10.0]])
-    )
-
-    model.load_weights([("constants.shared", torch.tensor([11.0, 12.0]))])
     model.process_weights_after_loading()
-    torch.testing.assert_close(
-        substitution.values, torch.tensor([[11.0, 12.0], [9.0, 10.0]])
-    )
-    assert model.finalize_calls == 2
-    with pytest.raises(ValueError, match="has shape"):
-        model.load_weights([("constants.shared", torch.ones(3))])
+
+    assert loaded == {"weight"} | {
+        f"model.layers.{layer}.mlp.experts.values" for layer in local_layers
+    }
+    for layer in local_layers:
+        torch.testing.assert_close(
+            model.model.layers[layer].mlp.experts.values,
+            torch.tensor([[1.0, 1.0], [2.0, 2.0]]) + 10.0 * layer,
+        )
 
 
-@pytest.mark.parametrize("local_layer", [0, 1])
-@pytest.mark.parametrize("prefix", ["", "language_model"])
-@pytest.mark.parametrize("suffix_paths", [False, True])
-def test_pipeline_stage_loads_local_constants_with_external_names(
-    local_layer, prefix, suffix_paths
-):
-    """Remote-only tensors are skipped; a shared local/remote tensor still loads."""
-    config = _cpu_config(prefix)
-    if suffix_paths:
-        schema = config.compression_config["transform_config"]["expert_substitution"]
-        schema["targets"] = {
-            "layers." + path.split(".layers.", 1)[1]: target
-            for path, target in schema["targets"].items()
-        }
-    model = _cpu_model(config, local_layer=local_layer, prefix=prefix)
-    model.load_weights(
+@pytest.mark.parametrize("local_layers", [(0, 1), (1,), ()])
+def test_loads_explicitly_named_values(local_layers):
+    """Named values are consumed even when their layer is built elsewhere."""
+    model = _cpu_model(local_layers, model_config=EXPLICIT_MODEL_CONFIG)
+    loaded = model.load_weights(
         [
-            ("constants.shared", torch.tensor([1.0, 2.0])),
-            ("constants.layer_0", torch.tensor([3.0, 4.0])),
-            ("constants.layer_1", torch.tensor([5.0, 6.0])),
+            ("weight", torch.tensor([1.0, 2.0])),
+            ("constants.shared", torch.full((2,), 1.0)),
+            ("constants.layer_0", torch.full((2,), 2.0)),
+            ("constants.layer_1", torch.full((2,), 3.0)),
         ]
     )
     model.process_weights_after_loading()
-    torch.testing.assert_close(
-        model.model.layers[local_layer].experts.substitution.values,
-        torch.tensor([[1.0, 2.0], [3.0 + 2 * local_layer, 4.0 + 2 * local_layer]]),
+
+    assert loaded == {"weight"} | {
+        f"model.layers.{layer}.mlp.experts.values" for layer in local_layers
+    }
+    for layer in local_layers:
+        torch.testing.assert_close(
+            model.model.layers[layer].mlp.experts.values,
+            torch.tensor([[1.0, 1.0], [2.0 + layer, 2.0 + layer]]),
+        )
+
+
+def test_direct_reload_updates_values_incrementally():
+    model = _cpu_model(local_layers=(0,), tracked=False)
+    values = model.model.layers[0].mlp.experts.values
+    model.load_weights([(_approx_value(0, 2), torch.ones(2))])
+    with pytest.raises(ValueError, match="missing approx_value .* \\[1\\]"):
+        model.process_weights_after_loading()
+
+    assert model.load_weights([(_approx_value(0, 1), torch.zeros(2))]) is None
+    model.process_weights_after_loading()
+    model.load_weights([(_approx_value(0, 2), torch.full((2,), 3.0))])
+    torch.testing.assert_close(values, torch.tensor([[0.0, 0.0], [3.0, 3.0]]))
+
+    with pytest.raises(ValueError, match="not listed"):
+        model.load_weights([(_approx_value(0, 0), torch.ones(2))])
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_layerwise_reload_updates_values_and_preserves_routes(partial):
+    from vllm.model_executor.model_loader.reload import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
     )
 
+    model = _cpu_model(local_layers=(0,))
+    record_metadata_for_reloading(model)
+    model.load_weights(
+        [(_approx_value(0, 1), torch.zeros(2)), (_approx_value(0, 2), torch.ones(2))]
+    )
+    model.process_weights_after_loading()
+    substitution = model.model.layers[0].mlp.experts
+    values = substitution.values
+    routes = substitution.expert_substitution_routes
 
-@pytest.mark.parametrize("bad_path", ["model.layers.0.typo", "model.layers.2.experts"])
-def test_pipeline_validation_rejects_unbound_local_targets(bad_path):
-    config = _cpu_config()
-    targets = config.compression_config["transform_config"]["expert_substitution"][
-        "targets"
+    initialize_layerwise_reload(model)
+    weights = [
+        ("weight", torch.tensor([3.0, 4.0])),
+        (_approx_value(0, 1), torch.tensor([5.0, 6.0])),
     ]
-    targets[bad_path] = targets.pop("model.layers.0.experts")
-    with pytest.raises(ValueError, match="unmatched targets"):
-        _cpu_model(config)
+    if not partial:
+        weights.append((_approx_value(0, 2), torch.tensor([7.0, 8.0])))
+    model.load_weights(weights)
+    if partial:
+        with pytest.raises(ValueError, match="layerwise reload requires all constant"):
+            finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+        torch.testing.assert_close(values, torch.tensor([[0.0, 0.0], [1.0, 1.0]]))
+        return
+    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+
+    torch.testing.assert_close(model.weight, torch.tensor([3.0, 4.0]))
+    assert substitution.values is values
+    torch.testing.assert_close(values, torch.tensor([[5.0, 6.0], [7.0, 8.0]]))
+    assert substitution.expert_substitution_routes is routes
+    assert routes.tolist() == [0, -1, -2]
+
+    initialize_layerwise_reload(model)
+    model.load_weights([(_approx_value(0, 1), torch.zeros(2))])
+    with pytest.raises(ValueError, match="layerwise reload requires all constant"):
+        finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+    torch.testing.assert_close(values, torch.tensor([[5.0, 6.0], [7.0, 8.0]]))
 
 
+@pytest.mark.parametrize("explicit_names", [False, True])
 @pytest.mark.parametrize("missing_value", [False, True])
-def test_tensorizer_finalizes_model_loading_on_cpu(monkeypatch, missing_value):
+def test_tensorizer_finalizes_local_substitution_values(
+    monkeypatch, explicit_names, missing_value
+):
+    """Raw Tensorizer loading must reject an unloaded local constant row."""
     from vllm.model_executor.model_loader import tensorizer_loader
 
-    model = _cpu_model(_cpu_config())
-    weights = [("constants.shared", torch.ones(2))]
+    model = _cpu_model(
+        local_layers=(0,),
+        model_config=EXPLICIT_MODEL_CONFIG if explicit_names else MODEL_CONFIG,
+    )
+    value_names = (
+        ("constants.shared", "constants.layer_0")
+        if explicit_names
+        else (_approx_value(0, 1), _approx_value(0, 2))
+    )
+    weights = [(value_names[0], torch.zeros(2))]
     if not missing_value:
-        weights.append(("constants.layer_0", torch.zeros(2)))
+        weights.append((value_names[1], torch.ones(2)))
+    finalize = Mock(wraps=model.process_weights_after_loading)
+    monkeypatch.setattr(model, "process_weights_after_loading", finalize)
     monkeypatch.setattr(tensorizer_loader, "initialize_model", lambda **kwargs: model)
     loader = object.__new__(tensorizer_loader.TensorizerLoader)
     monkeypatch.setattr(loader, "_get_weights_iterator", lambda: iter(weights))
@@ -190,64 +246,22 @@ def test_tensorizer_finalizes_model_loading_on_cpu(monkeypatch, missing_value):
         model_config=SimpleNamespace(dtype=torch.float32),
         device_config=SimpleNamespace(device="cpu"),
     )
+
     if missing_value:
-        with pytest.raises(ValueError, match="missing 1 constant expert value"):
+        with pytest.raises(ValueError, match=r"missing approx_value .* \[2\]"):
             loader._load_model_serialized_cpu(config)
     else:
         assert loader._load_model_serialized_cpu(config) is model
-        assert model.finalize_calls == 1
-
-
-@pytest.mark.parametrize("partial", [False, True])
-def test_layerwise_reload_updates_constants_and_preserves_routing(partial):
-    from vllm.model_executor.model_loader.reload import (
-        finalize_layerwise_reload,
-        initialize_layerwise_reload,
-        record_metadata_for_reloading,
-    )
-
-    model = _cpu_model(_cpu_config())
-    record_metadata_for_reloading(model)
-    model.load_weights(
-        [("constants.shared", torch.zeros(2)), ("constants.layer_0", torch.ones(2))]
-    )
-    model.process_weights_after_loading()
-    substitution = model.model.layers[0].experts.substitution
-    original_values = substitution.values
-    initialize_layerwise_reload(model)
-    weights = [
-        ("weight", torch.tensor([3.0, 4.0])),
-        ("constants.shared", torch.tensor([5.0, 6.0])),
-    ]
-    if not partial:
-        weights.append(("constants.layer_0", torch.tensor([7.0, 8.0])))
-    model.load_weights(weights)
-    if partial:
-        with pytest.raises(ValueError, match="layerwise reload requires all constant"):
-            finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
         torch.testing.assert_close(
-            original_values, torch.tensor([[0.0, 0.0], [1.0, 1.0]])
+            model.model.layers[0].mlp.experts.values,
+            torch.tensor([[0.0, 0.0], [1.0, 1.0]]),
         )
-        return
-    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
-    torch.testing.assert_close(model.weight, torch.tensor([3.0, 4.0]))
-    assert substitution.values is original_values
-    torch.testing.assert_close(
-        substitution.values, torch.tensor([[5.0, 6.0], [7.0, 8.0]])
-    )
-    assert substitution.logical_to_physical.tolist() == [0, -1, -1]
-    assert substitution.substitution_index.tolist() == [-1, 0, 1]
-
-    initialize_layerwise_reload(model)
-    model.load_weights([("constants.shared", torch.zeros(2))])
-    with pytest.raises(ValueError, match="layerwise reload requires all constant"):
-        finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
-    torch.testing.assert_close(original_values, torch.tensor([[5.0, 6.0], [7.0, 8.0]]))
+    finalize.assert_called_once_with()
 
 
-def _write_tiny_deepseek_substitution_checkpoint(
-    model_dir: Path, *, include_value: bool = True
-) -> torch.Tensor:
+def _write_tiny_deepseek_mone_checkpoint(
+    model_dir: Path, explicit_names: bool
+) -> tuple[dict[str, torch.Tensor], str]:
     config = DeepseekV2Config(
         architectures=["DeepseekV2ForCausalLM"],
         vocab_size=32,
@@ -259,7 +273,7 @@ def _write_tiny_deepseek_substitution_checkpoint(
         num_key_value_heads=2,
         max_position_embeddings=32,
         first_k_dense_replace=0,
-        n_routed_experts=2,
+        n_routed_experts=3,
         n_shared_experts=1,
         num_experts_per_tok=1,
         n_group=1,
@@ -273,74 +287,40 @@ def _write_tiny_deepseek_substitution_checkpoint(
         tie_word_embeddings=False,
         dtype="float16",
     )
-    value_name = "model.layers.0.mlp.expert_replacements.1.value"
-    config.compression_config = {
-        "producer": {"name": "llm-compressor"},
-        "transform_config": {
-            "expert_substitution": {
-                "version": 1,
-                "router_semantics": {
-                    "preserve_logical_expert_ids": True,
-                    "preserve_router_weights": True,
-                    "renormalize_after_substitution": False,
-                },
-                "targets": {
-                    "model.layers.0.mlp.experts": {
-                        "num_logical_experts": 2,
-                        "weight_layout": "compact_retained_experts",
-                        "replacements": {
-                            "1": {
-                                "format": "constant-v1",
-                                "tensors": {"value": value_name},
-                            }
-                        },
-                    }
-                },
-            }
-        },
-    }
+    experts = "model.layers.0.mlp.experts"
+    if explicit_names:
+        value_name = "model.layers.0.mlp.expert_replacements.1.value"
+        config.compression_config = _compression_config({0: {1: value_name}})
+    else:
+        value_name = f"{experts}.1.approx_value"
+        config.approximate_experts = {"0": [1]}
 
-    hf_model = DeepseekV2ForCausalLM(config).to(torch.float16)
-    hf_weights = hf_model.state_dict()
-    fused_gate_up_name = "model.layers.0.mlp.experts.gate_up_proj"
-    fused_down_name = "model.layers.0.mlp.experts.down_proj"
-    weights = {
-        name: value.contiguous()
-        for name, value in hf_weights.items()
-        if name not in (fused_gate_up_name, fused_down_name)
-    }
-    retained_gate_up = hf_weights[fused_gate_up_name][0]
-    retained_gate, retained_up = retained_gate_up.chunk(2, dim=0)
-    retained_prefix = "model.layers.0.mlp.experts.0"
-    weights[f"{retained_prefix}.gate_proj.weight"] = retained_gate.contiguous()
-    weights[f"{retained_prefix}.up_proj.weight"] = retained_up.contiguous()
-    weights[f"{retained_prefix}.down_proj.weight"] = hf_weights[fused_down_name][
-        0
-    ].contiguous()
-    substitution_value = torch.arange(config.hidden_size, dtype=torch.float16)
-    if include_value:
-        weights[value_name] = substitution_value
+    hf_weights = DeepseekV2ForCausalLM(config).to(torch.float16).state_dict()
+    gate_up = hf_weights.pop(f"{experts}.gate_up_proj")
+    down = hf_weights.pop(f"{experts}.down_proj")
+    weights = {name: value.contiguous() for name, value in hf_weights.items()}
+    for expert in (0, 2):
+        gate, up = gate_up[expert].chunk(2, dim=0)
+        weights[f"{experts}.{expert}.gate_proj.weight"] = gate.contiguous()
+        weights[f"{experts}.{expert}.up_proj.weight"] = up.contiguous()
+        weights[f"{experts}.{expert}.down_proj.weight"] = down[expert].contiguous()
+    weights[value_name] = torch.arange(16, dtype=torch.float16)
     config.save_pretrained(model_dir)
     save_file(weights, model_dir / "model.safetensors")
-    return substitution_value
+    return weights, value_name
 
 
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like device"
 )
 @pytest.mark.usefixtures("dist_init", "workspace_init")
-@pytest.mark.parametrize("load_format", ["safetensors", "runai_streamer", "tensorizer"])
 @pytest.mark.parametrize(
-    "missing_value", [False, True], ids=["complete", "missing-value"]
+    "explicit_names", [False, True], ids=["approximate_experts", "expert_substitution"]
 )
-def test_transform_only_config_loads_substituted_expert_checkpoint(
-    tmp_path: Path, load_format: str, missing_value: bool
+def test_loads_mone_checkpoint_into_compact_experts(
+    tmp_path: Path, explicit_names: bool
 ):
-    if load_format == "runai_streamer":
-        pytest.importorskip("runai_model_streamer")
-    expected_value = _write_tiny_deepseek_substitution_checkpoint(
-        tmp_path, include_value=not missing_value
-    )
+    weights, value_name = _write_tiny_deepseek_mone_checkpoint(tmp_path, explicit_names)
     model_config = ModelConfig(
         model=str(tmp_path),
         tokenizer=str(tmp_path),
@@ -349,24 +329,7 @@ def test_transform_only_config_loads_substituted_expert_checkpoint(
         max_model_len=32,
         enforce_eager=True,
     )
-
-    assert model_config.quantization is None
-    assert model_config.model_arch_config.quantization_config is None
-    assert "quant_method" not in model_config.hf_config.compression_config
-
-    extra_config = {}
-    if load_format == "tensorizer":
-        tensorizer = pytest.importorskip("tensorizer")
-        tensorizer_path = tmp_path / "model.tensors"
-        serializer = tensorizer.TensorSerializer(tensorizer_path)
-        serializer.write_state_dict(load_file(tmp_path / "model.safetensors"))
-        serializer.close()
-        extra_config = {"tensorizer_config": {"tensorizer_uri": str(tensorizer_path)}}
-    load_config = LoadConfig(
-        load_format=load_format,
-        use_tqdm_on_load=False,
-        model_loader_extra_config=extra_config,
-    )
+    load_config = LoadConfig(load_format="safetensors", use_tqdm_on_load=False)
     vllm_config = VllmConfig(
         model_config=model_config,
         device_config=DeviceConfig(device="cuda"),
@@ -374,26 +337,30 @@ def test_transform_only_config_loads_substituted_expert_checkpoint(
         attention_config=AttentionConfig(backend=AttentionBackendEnum.TRITON_MLA),
         kernel_config=KernelConfig(moe_backend="triton"),
     )
-    loader = get_model_loader(load_config)
-    if missing_value:
-        with pytest.raises(
-            ValueError, match="constant expert value|expert_substitution"
-        ):
-            loader.load_model(vllm_config, model_config)
-        return
-    model = loader.load_model(vllm_config, model_config)
+    model = get_model_loader(load_config).load_model(vllm_config, model_config)
 
-    substitution = model.model.layers[0].mlp.experts.routed_experts.expert_substitution
-    assert substitution is not None
-    assert substitution.num_compute_experts == 1
-    assert substitution.logical_to_physical.tolist() == [0, -1]
-    torch.testing.assert_close(substitution.values.cpu(), expected_value.unsqueeze(0))
-
-    updated_value = expected_value + 1
-    loaded = model.load_weights(
-        [("model.layers.0.mlp.expert_replacements.1.value", updated_value)]
+    experts = "model.layers.0.mlp.experts"
+    routed_experts = model.model.layers[0].mlp.experts.routed_experts
+    # Logical expert 2 is stored in physical row 1.
+    torch.testing.assert_close(
+        routed_experts.w13_weight[1].cpu(),
+        torch.cat(
+            [
+                weights[f"{experts}.2.gate_proj.weight"],
+                weights[f"{experts}.2.up_proj.weight"],
+            ]
+        ),
     )
-    assert loaded == {
-        "model.layers.0.mlp.experts.routed_experts.expert_substitution.values"
+    torch.testing.assert_close(
+        routed_experts.w2_weight[1].cpu(), weights[f"{experts}.2.down_proj.weight"]
+    )
+    substitution = routed_experts.expert_substitution
+    torch.testing.assert_close(
+        substitution.values.cpu(), weights[value_name].unsqueeze(0)
+    )
+
+    updated = weights[value_name] + 1
+    assert model.load_weights([(value_name, updated)]) == {
+        f"{experts}.routed_experts.expert_substitution.values"
     }
-    torch.testing.assert_close(substitution.values.cpu(), updated_value.unsqueeze(0))
+    torch.testing.assert_close(substitution.values.cpu(), updated.unsqueeze(0))

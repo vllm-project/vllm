@@ -1309,6 +1309,8 @@ class FusedMoEConfig:
     elastic_ep_max_dp_size: int | None = None
     has_bias: bool = False
     is_lora_enabled: bool = False
+    # Routes are adjusted between routing and expert execution.
+    require_decomposed_backend: bool = False
 
     # When True, the MoE skips its final cross-rank all-reduce (and the separate
     # shared-expert reduce), returning the partial per-rank sum. The caller is
@@ -1324,9 +1326,6 @@ class FusedMoEConfig:
     defer_moe_finalize: bool = False
     # Optional consumer capacity for deferred finalize. Negative means unbounded.
     defer_moe_finalize_max_num_tokens: int = -1
-
-    # Require routing to remain separate from expert execution.
-    require_decomposed_backend: bool = False
 
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle

@@ -314,53 +314,6 @@ def test_select_cuda_flashinfer_trtllm_modular_backend(
 
 
 @patch(
-    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsMonolithic.is_supported_config",
-    return_value=(True, None),
-)
-@patch(
-    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsModular.is_supported_config",
-    return_value=(False, "modular TRTLLM is unsupported"),
-)
-@patch(
-    "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe.FlashInferExperts.is_supported_config",
-    return_value=(True, None),
-)
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
-)
-def test_auto_decomposed_backend_skips_monolithic_candidate(
-    mock_is_supported_cutlass,
-    mock_is_supported_trtllm_modular,
-    mock_is_supported_trtllm_monolithic,
-):
-    """Auto selection must bypass a supported monolithic candidate."""
-    with (
-        patch.object(current_platform, "is_cuda", return_value=True),
-        patch.object(current_platform, "is_rocm", return_value=False),
-        patch.object(current_platform, "is_cpu", return_value=False),
-        patch.object(current_platform, "is_xpu", return_value=False),
-        patch.object(current_platform, "is_tpu", return_value=False),
-        patch.object(current_platform, "is_out_of_tree", return_value=False),
-        patch.object(
-            current_platform, "is_device_capability_family", return_value=False
-        ),
-    ):
-        moe_config = make_dummy_moe_config()
-        moe_config.require_decomposed_backend = True
-
-        selected_backend, experts_cls = select_unquantized_moe_backend(
-            moe_config=moe_config
-        )
-
-    assert selected_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS
-    assert experts_cls is not None
-    assert experts_cls.__name__ == "FlashInferExperts"
-    mock_is_supported_trtllm_monolithic.assert_not_called()
-    mock_is_supported_trtllm_modular.assert_called_once()
-    mock_is_supported_cutlass.assert_called_once()
-
-
-@patch(
     "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
     return_value=True,
 )
@@ -403,6 +356,41 @@ def test_select_cuda_flashinfer_trtllm_modular_for_standard_all2all(
         assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
         assert experts_cls is not None
         assert experts_cls.__name__ == "TrtLlmBf16ExpertsModular"
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
+    return_value=True,
+)
+@pytest.mark.parametrize("require_decomposed_backend", [False, True])
+def test_require_decomposed_backend_rejects_monolithic_kernels(
+    mock_supports_current_device,
+    require_decomposed_backend,
+):
+    """Expert substitution adjusts routes, so the kernel must not route itself."""
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
+        TrtLlmBf16ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+
+    moe_config = make_dummy_moe_config()
+    moe_config.routing_method = RoutingMethodType.Renormalize
+    moe_config.require_decomposed_backend = require_decomposed_backend
+
+    supported, reason = TrtLlmBf16ExpertsMonolithic.is_supported_config(
+        TrtLlmBf16ExpertsMonolithic,
+        moe_config,
+        None,
+        None,
+        FusedMoEActivationFormat.Standard,
+    )
+
+    assert supported != require_decomposed_backend
+    assert (reason is not None and "routes adjusted" in reason) == (
+        require_decomposed_backend
+    )
 
 
 @patch(

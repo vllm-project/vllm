@@ -1,32 +1,42 @@
-# Expert substitution
+# Expert substitution (MoNE)
 
-Expert substitution is an inference representation for routed MoE layers. It
-removes selected expert MLPs from a checkpoint and replaces each removed expert
-with an explicitly described executor. The first supported executor,
-`constant-v1`, returns a stored vector.
+[Mixture of Novices and Experts (MoNE)](https://arxiv.org/abs/2507.00390)
+prunes MoE layers by replacing redundant experts with "novices" that return a
+constant vector. vLLM loads the retained experts into compact weights and adds
+the novices' output separately, so pruned experts use no MLP weight memory and
+no MoE backend needs to know about them.
 
-The compression algorithm and the inference representation are separate. For
-example, MoNE may produce a `constant-v1` checkpoint, but vLLM does not execute
-MoNE calibration or select experts. It only executes the serialized
-representation.
+## Checkpoint format
 
-## Checkpoint contract
-
-Expert substitution is stored under the checkpoint's compression metadata. The
-model architecture is unchanged.
+The checkpoint keeps the original architecture. `config.json` lists the
+substituted experts of each decoder layer:
 
 ```json
 {
-  "model_type": "deepseek_v2",
   "architectures": ["DeepseekV2ForCausalLM"],
+  "n_routed_experts": 64,
+  "approximate_experts": {
+    "1": [1, 6, 8, 12],
+    "2": [0, 3, 17, 40]
+  }
+}
+```
+
+For VLMs, `approximate_experts` may live on the text config. Retained experts
+keep their logical checkpoint names. Each substituted expert stores one
+`[hidden_size]` tensor instead of its MLP:
+
+```text
+model.layers.1.mlp.experts.0.gate_proj.weight
+model.layers.1.mlp.experts.1.approx_value
+```
+
+Alternatively, `compression_config.transform_config.expert_substitution`
+declares the same information with explicitly named constant tensors:
+
+```json
+{
   "compression_config": {
-    "producer": {
-      "name": "llm-compressor",
-      "version": "..."
-    },
-    "provenance": {
-      "algorithm": "mone"
-    },
     "transform_config": {
       "expert_substitution": {
         "version": 1,
@@ -37,14 +47,12 @@ model architecture is unchanged.
         },
         "targets": {
           "model.layers.1.mlp.experts": {
-            "num_logical_experts": 256,
+            "num_logical_experts": 64,
             "weight_layout": "compact_retained_experts",
             "replacements": {
-              "3": {
+              "1": {
                 "format": "constant-v1",
-                "tensors": {
-                  "value": "model.layers.1.mlp.expert_replacements.3.value"
-                }
+                "tensors": {"value": "model.layers.1.mlp.expert_replacements.1.value"}
               }
             }
           }
@@ -55,102 +63,57 @@ model architecture is unchanged.
 }
 ```
 
-`producer` and `provenance` are informational. Runtime selection depends on the
-replacement `format`, not on the producing algorithm.
+Only the values shown for `version`, `router_semantics`, `weight_layout`, and
+`format` are supported. Each target path must contain exactly one layer index.
+This form is not yet accepted alongside compressed-tensors quantization, whose
+`transform_config` schema does not include `expert_substitution`.
 
-Version 1 accepts only the following contract:
+## Semantics
 
-- `weight_layout` is `compact_retained_experts`.
-- Every replacement is `constant-v1`.
-- Each replacement provides exactly one explicit `value` tensor reference.
-- Logical expert IDs and router weights are preserved.
-- Router weights are not renormalized after replacement routes are removed from
-  the MLP execution path.
-
-Unknown versions, formats, layouts, tensor contracts, or router semantics fail
-during model initialization.
-
-## Logical and physical experts
-
-Routers continue to produce stable logical expert IDs. Retained MLPs are stored
-in compact physical rows ordered by ascending logical ID. Replacements map to
-`-1` and never receive a physical MLP row.
-
-```text
-Logical expert IDs:  [0, 1, 2, 3, 4, 5]
-Replacements:            1        4
-Physical MLP rows:   [0,    1, 2,    3]
-Logical to physical: [0, -1, 1, 2, -1, 3]
-```
-
-Retained checkpoint tensors remain named by logical expert ID. The loader uses
-the layout to place them in compact physical order. Replacement tensors use the
-exact checkpoint names in `tensors.value`.
-
-## `constant-v1`
-
-For logical expert `j`, `constant-v1` defines
-
-\[
-E_j(x) = v_j
-\]
-
-where `v_j` is a one-dimensional tensor in the routed expert output space. If
-the router selects expert `j` with weight `w_j(x)`, its contribution is
-
-\[
-w_j(x) v_j.
-\]
-
-The vector length must equal the routed output hidden size. Values use the
-checkpoint parameter dtype and are replicated across tensor-parallel ranks.
+For a substituted expert `j` with constant `v_j` and router weight `w_j(x)`,
+the expert contributes `w_j(x) v_j`. Routing is unchanged: router weights are
+neither renormalized nor redistributed to retained experts.
 
 ## Execution
 
-The runtime performs the following sequence:
+`FusedMoEFactory` matches each MoE layer to `approximate_experts` by the layer
+index in its prefix and, for a match, builds `SubstitutedRoutedExperts`, which:
 
-1. Route against the full logical expert set.
-2. Compute constant contributions from the original IDs and router weights.
-3. Set replacement-route weights to zero for regular MoE computation.
-4. Map retained logical IDs to compact physical rows.
-5. Execute retained routes with a decomposed MoE backend.
-6. Add the constant contribution on one tensor-parallel rank, or locally when
-   the backend already returns reduced output.
-7. Continue through the runner's normal combine and reduction path.
+1. allocates weights only for retained experts, in ascending logical order;
+2. after routing, gathers `w_j(x) v_j` for substituted routes in FP32;
+3. rewrites substituted routes as zero-weight routes to physical expert 0 and
+   retained routes as compact physical IDs, preserving the `[num_tokens, top_k]`
+   contract of every decomposed backend;
+4. adds the constant output on one tensor-parallel rank, or on every rank when
+   the backend already returns a reduced output.
 
-The runtime replaces substituted routes with valid physical IDs carrying zero
-weights. This preserves the fixed `[num_tokens, top_k]` backend contract and
-works without substitution-specific backend support, but it may schedule dummy
-GEMMs. Full MLP weights are allocated only for retained experts, preserving the
-checkpoint's weight-memory saving.
+Zero-weight routes may schedule some unnecessary GEMM work; the memory savings
+are unaffected. Monolithic backends route internally and are not selected.
 
-`FusedMoEFactory` selects a specialized `RoutedExperts` implementation for
-substituted layers; the shared runner and backend do not interpret substitution
-metadata. Constant gathering, FP32 accumulation, and the output cast use an
-explicitly compiled helper, including when called inside the opaque MoE custom op.
+## Weight loading
 
-Substitution tensors are handled at the model's `load_weights` boundary, so
-initial checkpoint loading and direct weight reloads use the same path. Initial
-finalization checks that every local constant was loaded. Direct incremental
-updates preserve untouched values; a layerwise checkpoint reload requires all
-constant rows of each updated layer. Pipeline stages validate their local targets
-and ignore tensors belonging only to actual missing-layer placeholders.
+Retained experts are loaded through the standard expert mapping by logical ID
+and placed in their compact row. Substituted IDs map to no local row, the same
+way expert parallelism skips non-local experts.
+
+Constant tensors are consumed at the model's `load_weights` boundary, so
+initial loading and weight reloads share one path. `approx_value` tensors of
+layers that the model does not build (other pipeline stages, MTP layers) are
+passed through to the model's loader, which skips them like any other weight
+it does not own. Explicitly named constants are always consumed, and dropped
+when their layer is built elsewhere. Loading fails if a local substituted
+expert has no constant.
+
+Direct updates may change individual constants. Layerwise reloads must supply
+all constant rows of each updated layer; incomplete updates are rejected.
 
 ## Supported configurations
 
-Models use expert substitution automatically when:
+- Models whose MoE layers use `FusedMoEFactory` with the default
+  `RoutedExperts`, and whose MoE prefix contains exactly one layer index.
+- Unquantized experts.
+- Tensor and pipeline parallelism, including MTP draft models.
+- Any decomposed MoE backend.
 
-- They construct routed experts through `FusedMoEFactory` with an unambiguous
-  module prefix.
-- They use standard logical top-k routing and apply router weights to expert
-  outputs.
-- Replacement values are in the routed expert output space.
-- They use the standard `RoutedExperts` implementation and its per-expert
-  checkpoint loading contract.
-
-The initial implementation supports:
-
-- Homogeneous `constant-v1` substitutions.
-- Unquantized FP16 and BF16 retained experts.
-- Tensor parallelism.
-- Compatible decomposed MoE backends through the generic zero-weight path.
+Expert and data parallelism, EPLB, MoE LoRA, fused shared experts, quantized
+experts, and routed input/output transforms are rejected at initialization.
