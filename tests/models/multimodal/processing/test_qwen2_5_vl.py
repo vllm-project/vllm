@@ -15,8 +15,11 @@ from vllm.model_executor.models.openpangu_vl import (
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLMultiModalProcessor
 from vllm.model_executor.models.qwen2_vl import (
     Qwen2VLDummyInputsBuilder,
+    Qwen2VLForConditionalGeneration,
     Qwen2VLMultiModalProcessor,
+    _get_vision_token_offset,
 )
+from vllm.multimodal.inputs import PlaceholderRange
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -400,3 +403,70 @@ def test_dummy_text_emits_full_wrapper_dots_ocr(dots_ocr_style_processor):
     assert builder.get_dummy_text({"image": 2}) == (
         "<|img|><|imgpad|><|endofimg|><|img|><|imgpad|><|endofimg|>"
     )
+
+
+def test_dummy_text_falls_back_to_bare_pad_for_jina_video(
+    jina_style_processor,
+):
+    # Jina-VL defines no video placeholder string; the dummy must fall back
+    # to the bare pad token, consistent with get_wrapper_token_ids, so that
+    # profiling with video still matches the video replacement target.
+    builder = Qwen2VLDummyInputsBuilder(jina_style_processor.info)
+
+    assert builder.get_dummy_text({"image": 1, "video": 1}) == (
+        "<|vision_start|><|image_pad|><|vision_end|><|video_pad|>"
+    )
+
+
+def test_vision_token_offset_skips_leading_non_embedded_tokens():
+    # mm_position.offset points at the opening wrapper token; the first
+    # vision token starts after the leading non-embedded wrapper tokens.
+    assert (
+        _get_vision_token_offset(
+            PlaceholderRange(
+                offset=5,
+                length=6,
+                is_embed=torch.tensor([False, True, True, True, True, False]),
+            )
+        )
+        == 6
+    )
+    # No embed mask (or a bare pad target): the offset already points at
+    # the first vision token.
+    assert _get_vision_token_offset(PlaceholderRange(offset=5, length=4)) == 5
+    assert (
+        _get_vision_token_offset(
+            PlaceholderRange(offset=5, length=1, is_embed=torch.tensor([True]))
+        )
+        == 5
+    )
+
+
+def test_mrope_positions_skip_wrapper_prefix():
+    # The prompt-replacement target is the complete wrapper, so
+    # mm_position.offset points at <|vision_start|>. M-RoPE must assign
+    # vision positions starting from the first <|image_pad|> instead of
+    # shifting every position by one.
+    model = object.__new__(Qwen2VLForConditionalGeneration)
+    model.config = SimpleNamespace(
+        vision_config=SimpleNamespace(spatial_merge_size=2, tokens_per_second=1.0)
+    )
+    feature = SimpleNamespace(
+        modality="image",
+        mm_position=PlaceholderRange(
+            offset=5,
+            length=6,
+            is_embed=torch.tensor([False, True, True, True, True, False]),
+        ),
+        data={"image_grid_thw": SimpleNamespace(data=torch.tensor([1, 4, 4]))},
+    )
+    # 5 text tokens, wrapper (6 tokens), 2 text tokens.
+    positions, _ = model.get_mrope_input_positions(list(range(13)), [feature])
+
+    assert positions.shape == (3, 13)
+    # t positions: text 0-5, vision grid (1,2,2) t=0 -> 6, text 8-10.
+    assert positions[0].tolist() == [0, 1, 2, 3, 4, 5, 6, 6, 6, 6, 8, 9, 10]
+    # h positions: vision grid h=[0,0,1,1] -> [6,6,7,7].
+    assert positions[1].tolist() == [0, 1, 2, 3, 4, 5, 6, 6, 7, 7, 8, 9, 10]
+    # w positions: vision grid w=[0,1,0,1] -> [6,7,6,7].
+    assert positions[2].tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 6, 7, 8, 9, 10]

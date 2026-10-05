@@ -60,7 +60,10 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLMultiModalProcessor,
     Qwen2_5_VLProcessingInfo,
 )
-from vllm.model_executor.models.qwen2_vl import get_wrapper_token_ids
+from vllm.model_executor.models.qwen2_vl import (
+    _get_vision_token_offset,
+    get_wrapper_token_ids,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -1183,7 +1186,9 @@ class OpenPanguVLForConditionalGeneration(
     ) -> Iterator[tuple[str, int, int, int, int]]:
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
-            offset = mm_feature.mm_position.offset
+            # mm_position.offset points at the opening wrapper token;
+            # M-RoPE needs the offset of the first vision token.
+            offset = _get_vision_token_offset(mm_feature.mm_position)
             modality = mm_feature.modality
             feature_data = mm_feature.data
             assert feature_data is not None

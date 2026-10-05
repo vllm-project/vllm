@@ -68,6 +68,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
+    PlaceholderRange,
     VideoItem,
 )
 from vllm.multimodal.parse import (
@@ -1121,6 +1122,24 @@ def get_wrapper_token_ids(
     return [pad_id]
 
 
+def _get_vision_token_offset(mm_position: PlaceholderRange) -> int:
+    """Return the prompt offset of the first vision token.
+
+    The prompt-replacement target is the complete wrapper (e.g.
+    ``<|vision_start|><|image_pad|><|vision_end|>``), so
+    ``mm_position.offset`` points at the opening wrapper token. M-RoPE
+    position generation expects the offset of the first vision token,
+    so skip any leading non-embedded wrapper tokens.
+    """
+    offset = mm_position.offset
+    is_embed = mm_position.is_embed
+    if is_embed is not None:
+        embed_idx = torch.nonzero(is_embed.flatten())
+        if embed_idx.numel():
+            offset += int(embed_idx[0])
+    return offset
+
+
 class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         # Avoid circular import
@@ -1133,8 +1152,16 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
 
         # Emit the complete wrapper (not the bare pad token) so that the
         # dummy prompt matches the replacement targets in _get_prompt_updates.
-        image_placeholder = safe_placeholder_str(model_cls, "image") or ""
-        video_placeholder = safe_placeholder_str(model_cls, "video") or ""
+        # Fall back to the bare pad token when the model defines no
+        # placeholder string for the modality (e.g. Jina-VL video),
+        # consistent with the fallback in get_wrapper_token_ids.
+        hf_processor = self.info.get_hf_processor()
+        image_placeholder = (
+            safe_placeholder_str(model_cls, "image") or hf_processor.image_token
+        )
+        video_placeholder = (
+            safe_placeholder_str(model_cls, "video") or hf_processor.video_token
+        )
 
         return image_placeholder * num_images + video_placeholder * num_videos
 
@@ -1291,7 +1318,9 @@ class Qwen2VLForConditionalGeneration(
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
-            offset = mm_feature.mm_position.offset
+            # mm_position.offset points at the opening wrapper token;
+            # M-RoPE needs the offset of the first vision token.
+            offset = _get_vision_token_offset(mm_feature.mm_position)
             if mm_feature.modality == "image":
                 t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"

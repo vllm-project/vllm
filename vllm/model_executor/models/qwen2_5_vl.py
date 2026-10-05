@@ -26,12 +26,11 @@
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
-from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
 import einops
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -70,7 +69,6 @@ from vllm.model_executor.layers.rotary_embedding.common import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -1299,83 +1297,6 @@ class Qwen2_5_VLForConditionalGeneration(
     supports_encoder_tp_data = True
     supports_mm_device_do_normalize = True
     supports_tower_connector_lora = True
-
-    def iter_mm_grid_thw(
-        self, mm_features: list[MultiModalFeatureSpec]
-    ) -> Iterator[tuple[int, int, int, int, float]]:
-        """Iterate over multimodal features and yield grid information.
-
-        Args:
-            mm_features: List of multimodal feature specifications
-
-        Yields:
-            Tuple of (offset, grid_t, grid_h, grid_w, t_factor) for each frame/image
-
-        """
-        spatial_merge_size = self.config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
-        for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
-            offset = mm_feature.mm_position.offset
-            if mm_feature.modality == "image":
-                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
-                assert t == 1, f"Image must have 1 frame, got {t}"
-                yield offset, 1, h // spatial_merge_size, w // spatial_merge_size, 1.0
-            elif mm_feature.modality == "video":
-                t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
-                second_per_grid_ts = 1.0
-                if mm_feature.data.get("second_per_grid_ts", None):
-                    second_per_grid_ts = mm_feature.data[
-                        "second_per_grid_ts"
-                    ].data.item()
-                t_factor = second_per_grid_ts * tokens_per_second
-                yield (
-                    offset,
-                    t,
-                    h // spatial_merge_size,
-                    w // spatial_merge_size,
-                    t_factor,
-                )
-            else:
-                raise ValueError(f"Unsupported modality: {mm_feature.modality}")
-
-    def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
-    ) -> tuple[torch.Tensor, int]:
-        llm_pos_ids_list: list = []
-        st = 0
-
-        for (
-            offset,
-            llm_grid_t,
-            llm_grid_h,
-            llm_grid_w,
-            t_factor,
-        ) in self.iter_mm_grid_thw(mm_features):
-            text_len = offset - st
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-            llm_pos_ids_list.append(
-                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
-            )
-
-            grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w))
-            if t_factor != 1.0:
-                grid_indices[0] = (grid_indices[0] * t_factor).astype(np.int64)
-            llm_pos_ids_list.append(grid_indices.reshape(3, -1) + text_len + st_idx)
-            st = offset + llm_grid_t * llm_grid_h * llm_grid_w
-
-        if st < len(input_tokens):
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-            text_len = len(input_tokens) - st
-            llm_pos_ids_list.append(
-                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
-            )
-
-        llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
-        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-
-        return torch.from_numpy(llm_positions), mrope_position_delta
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
