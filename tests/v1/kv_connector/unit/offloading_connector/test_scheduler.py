@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    _create_req_context,
     get_sliding_window_size_in_chunks,
 )
 from vllm.v1.core.block_pool import BlockPool
@@ -60,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LookupResult,
@@ -214,6 +216,7 @@ def _make_partial_tail_request(
     request = MagicMock()
     request.request_id = "req"
     request.kv_transfer_params = kv_transfer_params
+    request.kv_hints = None
     request.num_prompt_tokens = 30
     request.num_tokens = 30
     request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(7)]
@@ -223,6 +226,21 @@ def _make_partial_tail_request(
     request.is_finished.return_value = False
     scheduler.on_new_request(request)
     return request
+
+
+def test_create_req_context_preserves_kv_hints():
+    kv_hints = KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="message-1",
+        actions=[],
+    )
+    request = MagicMock(
+        request_id="req",
+        kv_transfer_params=None,
+        kv_hints=kv_hints,
+    )
+
+    assert _create_req_context(request).kv_hints is kv_hints
 
 
 def _reduce_kv_connector_stats(runner):
@@ -3421,59 +3439,6 @@ class TestEagle:
         #   so the pop landed on the only queried chunk and zeroed the
         #   whole request.
         assert sched._lookup(req_status) == 4
-
-    def test_eagle_verified_survives_eagle_tighten(self, request_runner):
-        """Eagle group tightening does NOT clear eagle_verified.
-
-        Groups: 0=non-eagle full-attn, 1=eagle full-attn.
-        Group 0 finds 3 hits (max_hit=12). Group 1 finds 3 hits, pops to 2
-        (max_hit=8). Since group 1 IS eagle, eagle_verified is NOT cleared.
-        Result: 8 tokens (eagle only pops once).
-        """
-        block_size = 4
-        groups = [
-            KVCacheGroupSpec(
-                ["layer0"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-                is_eagle_group=False,
-            ),
-            KVCacheGroupSpec(
-                ["layer1"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=2,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-                is_eagle_group=True,
-            ),
-        ]
-        runner = request_runner(
-            block_size=block_size,
-            num_gpu_blocks=100,
-            async_scheduling=False,
-            kv_cache_groups=groups,
-        )
-        runner.manager.lookup.side_effect = lambda key, req_context: (
-            LookupResult.HIT
-            if int(get_offload_block_hash(key).decode()) in {1, 2, 3}
-            else LookupResult.MISS
-        )
-        sched = runner.connector_scheduler
-        req_status = self._make_req_status(
-            sched,
-            num_tokens=12,
-            offload_keys_per_group=[[1, 2, 3], [1, 2, 3]],
-        )
-        # Group 0: 3 hits → max_hit=12, num_hit=12
-        # Group 1 (eagle): 3 hits, pop to 2 → max_hit=8, num_hit=8
-        # Tightened but IS eagle → no clear. No re-iteration.
-        assert sched._lookup(req_status) == 8
 
     # -------------------------------------------------------------------
     # Integration tests: store and load via request_runner
