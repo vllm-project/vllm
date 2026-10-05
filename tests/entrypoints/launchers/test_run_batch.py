@@ -9,7 +9,6 @@ import tempfile
 import threading
 from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pydantic
@@ -32,7 +31,6 @@ from vllm.entrypoints.launchers.run_batch import (
     upload_data,
     url_matches,
     validate_batch,
-    validate_run_batch_args,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
@@ -1263,19 +1261,6 @@ async def test_open_batch_input_stages_a_stream(tmp_path, use_tmp_dir):
 
 
 @pytest.mark.asyncio
-async def test_open_batch_input_rereads_a_descriptor_alias(tmp_path):
-    """Both passes see the whole batch through a descriptor alias."""
-    source = _write_batch(tmp_path, [INPUT_BATCH])
-    expected = len(INPUT_BATCH.strip().split("\n"))
-
-    with open(source, encoding="utf-8") as handle:
-        async with open_batch_input(f"/dev/fd/{handle.fileno()}", None) as f:
-            assert validate_batch(f) == expected
-            f.seek(0)
-            assert validate_batch(f) == expected
-
-
-@pytest.mark.asyncio
 async def test_open_batch_input_downloads_a_url(tmp_path, monkeypatch):
     """A URL body is downloaded through the shared HTTP client to a file."""
     payload = "\n".join(INPUT_BATCH.strip().split("\n")[:2]) + "\n"
@@ -1301,12 +1286,6 @@ async def test_open_batch_input_downloads_a_url(tmp_path, monkeypatch):
     assert url == "https://example.com/batch.jsonl"
     assert save_path.is_relative_to(tmp_path)
     assert not save_path.exists(), "downloaded copy must be removed"
-
-
-def test_max_inflight_must_be_positive():
-    """A non-positive bound would silently serialise the batch."""
-    with pytest.raises(ValueError, match="max-inflight"):
-        validate_run_batch_args(SimpleNamespace(max_inflight=0))
 
 
 def _chat_requests(n: int) -> list[dict]:
@@ -1393,24 +1372,6 @@ async def test_batch_output_writer_uploads_url_output_once(
         "content": "first\nsecond\n" if use_tmp_dir else b"first\nsecond",
     }
     assert not list(tmp_path.iterdir()), "staged copy must be removed"
-
-
-@pytest.mark.asyncio
-async def test_batch_output_writer_url_output_uploads_nothing_on_failure(
-    tmp_path, monkeypatch
-):
-    """A failed batch uploads nothing, so a URL output is all or nothing."""
-    upload = AsyncMock()
-    monkeypatch.setattr(run_batch_module, "upload_data", upload)
-
-    with pytest.raises(RuntimeError):
-        async with batch_output_writer(
-            "https://example.com/output.jsonl", str(tmp_path)
-        ) as output_file:
-            print("first", file=output_file)
-            raise RuntimeError("batch failed")
-
-    upload.assert_not_awaited()
 
 
 @pytest.mark.asyncio

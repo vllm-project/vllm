@@ -20,7 +20,6 @@ from urllib.parse import urlparse
 import aiohttp
 import pybase64 as base64
 import pydantic
-import regex as re
 import torch
 from fastapi import UploadFile
 from prometheus_client import start_http_server
@@ -636,7 +635,7 @@ class EndpointConfig(TypedDict):
 
 def url_matches(endpoint_url: str, url: str) -> bool:
     """Unversioned endpoints (/score, /rerank) match by suffix; others exactly."""
-    if re.match(r"/v\d+/", endpoint_url):
+    if endpoint_url.startswith("/v1/"):
         return url == endpoint_url
     return url.endswith(endpoint_url)
 
@@ -882,8 +881,6 @@ async def run_one_request(
     """Route a single line of the batch to its endpoint handler."""
     request = BatchRequestInput.model_validate_json(request_json)
 
-    # Use the last segment of the URL as the endpoint key. The endpoint's own
-    # rule decides whether the full URL is one it serves.
     endpoint_key = request.url.split("/")[-1]
 
     result = None
