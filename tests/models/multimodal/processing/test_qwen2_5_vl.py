@@ -12,7 +12,10 @@ from transformers import PreTrainedTokenizerFast
 from vllm.model_executor.models.openpangu_vl import (
     OpenPanguVLMultiModalProcessor,
 )
-from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLMultiModalProcessor
+from vllm.model_executor.models.qwen2_5_vl import (
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen2_5_VLMultiModalProcessor,
+)
 from vllm.model_executor.models.qwen2_vl import (
     Qwen2VLDummyInputsBuilder,
     Qwen2VLForConditionalGeneration,
@@ -470,3 +473,31 @@ def test_mrope_positions_skip_wrapper_prefix():
     assert positions[1].tolist() == [0, 1, 2, 3, 4, 5, 6, 6, 7, 7, 8, 9, 10]
     # w positions: vision grid w=[0,1,0,1] -> [6,7,6,7].
     assert positions[2].tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 6, 7, 8, 9, 10]
+
+
+def test_qwen25_vl_mrope_positions_skip_wrapper_prefix():
+    # Qwen2.5-VL's model class does not inherit from Qwen2-VL's model class,
+    # so it needs its own M-RoPE implementation: falling back to
+    # SupportsMRoPE's empty method returns None and breaks unpacking in
+    # the runner. This also covers EXAONE 4.5 and OpenCUA, which inherit
+    # from Qwen2.5-VL's model class.
+    model = object.__new__(Qwen2_5_VLForConditionalGeneration)
+    model.config = SimpleNamespace(
+        vision_config=SimpleNamespace(spatial_merge_size=2, tokens_per_second=1.0)
+    )
+    feature = SimpleNamespace(
+        modality="image",
+        mm_position=PlaceholderRange(
+            offset=5,
+            length=6,
+            is_embed=torch.tensor([False, True, True, True, True, False]),
+        ),
+        data={"image_grid_thw": SimpleNamespace(data=torch.tensor([1, 4, 4]))},
+    )
+    # 5 text tokens, wrapper (6 tokens), 2 text tokens.
+    positions, _ = model.get_mrope_input_positions(list(range(13)), [feature])
+
+    assert positions is not None
+    assert positions.shape == (3, 13)
+    # h positions: text 0-5, vision grid h=[0,0,1,1] -> [6,6,7,7], text 8-10.
+    assert positions[1].tolist() == [0, 1, 2, 3, 4, 5, 6, 6, 7, 7, 8, 9, 10]
