@@ -202,9 +202,10 @@ impl ChatRequestProcessor {
             data_parallel_rank: request.data_parallel_rank,
             session_id: request.session_id,
             kv_hints: None,
-            reasoning_parser_kwargs: ReasoningParserKwargs {
-                chat_template_kwargs,
-            },
+            reasoning_parser_kwargs: ReasoningParserKwargs::from([(
+                "chat_template_kwargs".to_string(),
+                serde_json::Value::Object(chat_template_kwargs.into_iter().collect()),
+            )]),
             reasoning_ended: None,
             lora_request: request.lora_request,
             arrival_time: Some(arrival_time),

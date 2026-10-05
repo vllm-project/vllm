@@ -4,7 +4,6 @@
 use std::collections::{BTreeMap, HashMap};
 
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
@@ -61,11 +60,7 @@ impl EngineCoreRequestType {
 ///
 /// Original Python construction point:
 /// <https://github.com/vllm-project/vllm/blob/cec2ec11760f9f3beabd4c90451936078bf91533/vllm/entrypoints/openai/chat_completion/serving.py#L367-L369>
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ReasoningParserKwargs {
-    /// Effective kwargs visible to the chat template for this request.
-    pub chat_template_kwargs: HashMap<String, serde_json::Value>,
-}
+pub type ReasoningParserKwargs = HashMap<String, serde_json::Value>;
 
 /// Engine-core add-request payload sent from frontend to engine.
 ///

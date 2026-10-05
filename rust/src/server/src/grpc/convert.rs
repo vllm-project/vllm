@@ -139,16 +139,13 @@ pub fn to_text_request(
         kv_hints,
         reasoning_parser_kwargs: req
             .reasoning_parser_kwargs
-            .as_ref()
             .map(|kwargs| {
-                serde_json::from_value(proto_struct_to_json(kwargs)).map_err(|error| {
-                    Status::invalid_argument(format!(
-                        "invalid reasoning_parser_kwargs: {}",
-                        error.to_report_string()
-                    ))
-                })
+                kwargs
+                    .fields
+                    .into_iter()
+                    .map(|(key, value)| (key, proto_value_to_json(&value)))
+                    .collect()
             })
-            .transpose()?
             .unwrap_or_default(),
         reasoning_ended: req.reasoning_ended,
         lora_request: None,
@@ -627,16 +624,26 @@ mod tests {
     #[test]
     fn grpc_reasoning_controls_reach_engine_request_with_presence_intact() {
         let kwargs = serde_json::json!({
-            "chat_template_kwargs": {"enable_thinking": false, "reasoning_effort": "high"}
+            "chat_template_kwargs": {"enable_thinking": false, "reasoning_effort": "high"},
+            "plugin_options": {"values": [true, null, "low", 2.5]}
         });
-        for (reasoning_ended, budget) in [
-            (None, None),
-            (Some(false), Some(0)),
-            (Some(true), Some(128)),
-            (None, Some(-1)),
+        for (kwargs, reasoning_ended, budget) in [
+            (Some(kwargs), Some(false), Some(0)),
+            (Some(serde_json::json!({})), None, None),
+            (
+                Some(serde_json::json!({"plugin_options": {"enabled": true}})),
+                Some(true),
+                Some(128),
+            ),
+            (
+                Some(serde_json::json!({"chat_template_kwargs": null})),
+                None,
+                Some(-1),
+            ),
+            (None, None, None),
         ] {
             let request = pb::GenerateRequest {
-                reasoning_parser_kwargs: json_to_proto_struct(&kwargs),
+                reasoning_parser_kwargs: kwargs.as_ref().and_then(json_to_proto_struct),
                 reasoning_ended,
                 stopping: Some(pb::StoppingCriteria {
                     thinking_token_budget: budget,
@@ -670,7 +677,7 @@ mod tests {
                         engine.sampling_params.thinking_token_budget,
                     ),
                     (
-                        kwargs.clone(),
+                        kwargs.clone().unwrap_or_else(|| serde_json::json!({})),
                         reasoning_ended,
                         budget.filter(|v| *v >= 0).map(|v| v as u64),
                     ),
