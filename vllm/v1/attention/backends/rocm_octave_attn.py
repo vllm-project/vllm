@@ -36,6 +36,10 @@ from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops import rocm_octave as sq
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 # Per-architecture kernel tiers (gcnArchName prefix -> (decode, prefill)).
 # Decode always has the portable dot4 kernel; prefill needs a native kernel
@@ -59,6 +63,21 @@ def _arch_tiers() -> tuple[str, tuple[str, str | None]]:
 _DECODE_MAX_QUERY_LEN = 128
 _KERNEL_HEAD_SIZE = 256
 _KERNEL_ROPE_DIM = 64
+
+
+def _mid_o_shape(
+    num_q: int, num_heads: int, max_splits: int, capture_size: int
+) -> tuple[tuple[int, int, int, int], int]:
+    """Split-KV partials for num_q queries: every split up to the cudagraph
+    capture size, fewer splits past it so the buffer never outgrows that."""
+    splits = max_splits
+    if num_q > capture_size:
+        splits = max(1, min(max_splits, capture_size * max_splits // num_q))
+    return (num_q, num_heads, splits, _KERNEL_HEAD_SIZE + 2), splits
+
+
+def _max_capture_size(vllm_config: VllmConfig) -> int:
+    return vllm_config.compilation_config.max_cudagraph_capture_size or 4
 
 
 class RocmOctaveAttentionBackend(AttentionBackend):
@@ -149,6 +168,20 @@ class RocmOctaveMetadataBuilder(AttentionMetadataBuilder[RocmOctaveMetadata]):
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self._q_to_req = torch.empty(max_tokens, dtype=torch.int32, device=device)
         self._q_to_klen = torch.empty(max_tokens, dtype=torch.int32, device=device)
+        # Layers run one after another, so they share one set of split-KV
+        # partials; reserve it before the workspace is locked.
+        if is_workspace_manager_initialized():
+            num_heads = vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            )
+            capture_size = _max_capture_size(vllm_config)
+            shape, _ = _mid_o_shape(
+                capture_size,
+                num_heads,
+                vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph,
+                capture_size,
+            )
+            current_workspace_manager().get_simultaneous((shape, torch.float32))
 
     def build(
         self,
@@ -255,9 +288,7 @@ class RocmOctaveAttentionImpl(AttentionImpl):
         self.max_num_kv_splits = (
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
-        self._max_capture_size = (
-            vllm_config.compilation_config.max_cudagraph_capture_size or 4
-        )
+        self._max_capture_size = _max_capture_size(vllm_config)
         self._k_signs: torch.Tensor | None = None
         self._v_signs: torch.Tensor | None = None
         self._mid_o: torch.Tensor | None = None
@@ -272,31 +303,28 @@ class RocmOctaveAttentionImpl(AttentionImpl):
     def _mid_o_buffer(
         self, num_q: int, device: torch.device
     ) -> tuple[torch.Tensor, int]:
-        """Split-KV partials. The persistent buffer is allocated once at the
-        cudagraph capture size and never replaced (captured graphs hold its
-        address); larger eager batches get a bounded transient one."""
+        """Split-KV partials, from the workspace every layer shares. Without a
+        workspace, a buffer of this layer's own, allocated once at the
+        cudagraph capture size since captured graphs hold its address."""
+        shape, splits = _mid_o_shape(
+            num_q, self.num_heads, self.max_num_kv_splits, self._max_capture_size
+        )
+        if is_workspace_manager_initialized():
+            (buf,) = current_workspace_manager().get_simultaneous(
+                (shape, torch.float32)
+            )
+            return buf, splits
         if self._mid_o is None:
-            self._mid_o = torch.zeros(
+            full, _ = _mid_o_shape(
                 self._max_capture_size,
                 self.num_heads,
                 self.max_num_kv_splits,
-                self.head_size + 2,
-                dtype=torch.float32,
-                device=device,
+                self._max_capture_size,
             )
+            self._mid_o = torch.empty(full, dtype=torch.float32, device=device)
         if num_q <= self._mid_o.shape[0]:
-            return self._mid_o, self.max_num_kv_splits
-        budget = self._max_capture_size * self.max_num_kv_splits
-        splits = max(1, min(self.max_num_kv_splits, budget // num_q))
-        buf = torch.empty(
-            num_q,
-            self.num_heads,
-            splits,
-            self.head_size + 2,
-            dtype=torch.float32,
-            device=device,
-        )
-        return buf, splits
+            return self._mid_o, splits
+        return torch.empty(shape, dtype=torch.float32, device=device), splits
 
     def do_kv_cache_update(
         self,

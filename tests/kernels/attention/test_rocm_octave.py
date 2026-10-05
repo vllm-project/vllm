@@ -71,6 +71,38 @@ def test_store_matches_reference(cache_dtype):
     assert _rel(v_got, v) < (0.12 if fmt.v_bits == 4 else 0.22)
 
 
+@pytest.mark.parametrize(
+    "cache_dtype,slot_bytes",
+    [("octave_k3v4", 248), ("octave_k3v3", 216), ("octave_k3v3_compact", 196)],
+)
+def test_slot_bytes_match_kernel_layout(cache_dtype, slot_bytes):
+    """The cache is sized from the Python format; the kernels index it with
+    octave::Format in csrc/attention/octave_format.cuh."""
+    assert _format(cache_dtype).slot_bytes == slot_bytes
+
+
+@pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
+def test_store_skips_padding_slots(cache_dtype):
+    """Tokens with slot -1 (cudagraph padding) leave every byte unchanged."""
+    torch.manual_seed(0)
+    dev, fmt = "cuda", _format(cache_dtype)
+    ksg = vsg = sq.sign_bits(HEAD).to(dev)
+    t, hkv = 8, 2
+    k = torch.randn(t, hkv, HEAD, device=dev).bfloat16()
+    v = torch.randn(t, hkv, HEAD, device=dev).bfloat16()
+    cache = torch.randint(
+        0, 256, (2, hkv, BLOCK, fmt.slot_bytes), dtype=torch.uint8, device=dev
+    )
+    before = cache.clone()
+    slots = torch.full((t,), -1, dtype=torch.long, device=dev)
+    slots[3] = 21
+    torch.ops._C.octave_cache_store(k, v, cache, slots, ksg, vsg, fmt.kernel_code)
+    written = torch.zeros_like(cache, dtype=torch.bool)
+    written[1, :, 5] = True
+    assert torch.equal(cache[~written], before[~written])
+    assert not torch.equal(cache[written], before[written])
+
+
 @pytest.mark.parametrize("cache_dtype", CACHE_DTYPES)
 @pytest.mark.parametrize("query_group", [1, 4])
 @pytest.mark.parametrize("num_splits", [1, 7, 64])
