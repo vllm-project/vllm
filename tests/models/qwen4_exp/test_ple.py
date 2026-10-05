@@ -20,6 +20,7 @@ from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptNvFp4Config,
@@ -564,6 +565,24 @@ def test_ple_embedding_respects_modelopt_exclusion() -> None:
         Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
     )
+
+
+def test_ple_embedding_respects_inc_layer_config() -> None:
+    prefix = "model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = INCConfig(
+        weight_bits=4,
+        group_size=128,
+        block_name_to_quantize="model.layers",
+        extra_config={".*ple.*": {"bits": 16, "data_type": "float"}},
+    )
+    assert isinstance(
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix),
+        Qwen4ExpPLEUnquantizedEmbeddingMethod,
+    )
+
+    quant_config.extra_config = None
+    with pytest.raises(NotImplementedError, match="INCConfig"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(quant_config, prefix)
 
 
 def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
