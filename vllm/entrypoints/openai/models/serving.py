@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from asyncio import Lock
 from collections import defaultdict
 from http import HTTPStatus
@@ -49,12 +48,9 @@ class OpenAIModelRegistry:
         return self.base_model_paths[0].name
 
     def is_base_model(self, model_name: str) -> bool:
-        # /v1/models publishes each entry's root (the checkpoint path), so a
-        # client echoing it back must be served, not 404'd. Exact matches
-        # only: the served name, the full path, or the path's basename.
+        # /v1/models publishes model_path as each entry's root, so accept it too.
         return any(
-            model_name
-            in (model.name, model.model_path, os.path.basename(model.model_path))
+            model_name in (model.name, model.model_path)
             for model in self.base_model_paths
         )
 
