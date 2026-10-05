@@ -50,8 +50,7 @@ The following metrics are exposed:
 These metrics are exposed when the `HiSparseConnector` KV connector is
 configured. The host-pool gauges are reported by the scheduler once per engine
 step, for the host pool shared by all tensor-parallel ranks; evictable cached
-blocks count as free. The hot-buffer counters are sampled from the device
-every 2000 worker steps.
+blocks count as free.
 
 --8<-- "gen:metrics-hisparse"
 
