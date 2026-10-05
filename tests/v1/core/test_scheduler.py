@@ -841,6 +841,58 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     assert output2.num_scheduled_tokens[requests[2].request_id] == 800 - 224 - 224
 
 
+def test_pooling_prompt_at_max_model_len_fully_schedules():
+    """A pooling model never appends a sampled token, so input validation
+    accepts a prompt of exactly max_model_len (#60067). Reserving a
+    sampled-token slot in the scheduler clamp strands the last chunk: after
+    max_model_len - 1 computed tokens the clamp returns 0 and the request
+    is skipped every step. The reservation now drops at the source:
+    num_sampled_tokens_per_step is 0 for the pooling runner."""
+    from vllm.pooling_params import PoolingParams
+
+    max_model_len = 128
+    scheduler = create_scheduler(
+        model="Qwen/Qwen3-Embedding-0.6B",
+        max_num_batched_tokens=64,
+        max_model_len=max_model_len,
+    )
+    assert scheduler.num_sampled_tokens_per_step == 0
+    init_none_hash(sha256)
+    request = Request(
+        request_id="pooling",
+        prompt_token_ids=[7] * max_model_len,
+        sampling_params=None,
+        pooling_params=PoolingParams(),
+        block_hasher=get_request_block_hasher(16, sha256),
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 64
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    # The clamp must cover the whole remainder here; a sampled-token
+    # reservation schedules only 63 and strands the last token forever.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 64
+
+
+def test_num_sampled_tokens_per_step_by_runner():
+    # Generative models reserve one headroom slot for the sampled token;
+    # the pooling runner samples nothing and reserves none (#60067).
+    assert create_scheduler().num_sampled_tokens_per_step == 1
+    pooling = create_scheduler(model="Qwen/Qwen3-Embedding-0.6B")
+    assert pooling.num_sampled_tokens_per_step == 0
+
+
 def test_long_prefill_threshold_ignored_when_alone():
     """A lone long prefill is not capped by the threshold: it has no other
     request to starve."""
