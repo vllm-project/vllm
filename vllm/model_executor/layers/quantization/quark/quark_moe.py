@@ -1587,7 +1587,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             raise ValueError(
                 f"Unsupported OCP MX dtype combination for MoE: "
                 f"input_dtype={self.input_dtype}, weight_dtype={self.weight_dtype}. "
-                f"Please check that the combination is supported in OCP_MX_Scheme."
+                f"MXFP8 experts are not supported through the MoE path; only "
+                f"the linear path handles MXFP8. Supported MoE weight dtypes "
+                f"are mxfp4, mxfp6_e3m2, and mxfp6_e2m3."
             )
 
         # TODO(bowenbao): refactor and introduce backends for other OCP MX schemes,
@@ -1676,10 +1678,16 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if quant_dtype == "mxfp4":
             assert dim % 2 == 0
             return dim // 2
-        else:
+        elif quant_dtype in {"mxfp6_e3m2", "mxfp6_e2m3"}:
             # FP6 packs 4 * 6 = 24 bits on 3 bytes.
             assert (dim * 3) % 4 == 0
             return (dim * 3) // 4
+        else:
+            raise NotImplementedError(
+                f"Unsupported quant_dtype in QuarkOCP_MX_MoEMethod."
+                f"get_packed_dim: {quant_dtype}. MXFP8 is not supported for "
+                f"MoE experts."
+            )
 
     def create_weights(
         self,
@@ -1968,6 +1976,11 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
 

@@ -165,6 +165,7 @@ class OpenAIServingChat(GenerateBaseServing):
             tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            tokenizer=self.renderer.tokenizer,
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
@@ -198,6 +199,20 @@ class OpenAIServingChat(GenerateBaseServing):
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
+        )
+
+    def _make_parser(
+        self,
+        request: ChatCompletionRequest,
+        tokenizer: TokenizerLike,
+        chat_template_kwargs: dict[str, Any] | None,
+    ) -> Parser:
+        assert self.parser_cls is not None
+        return self.parser_cls(
+            tokenizer,
+            request.tools,
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
         )
 
     def _engine_chat_template_kwargs(
@@ -298,12 +313,7 @@ class OpenAIServingChat(GenerateBaseServing):
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
         parser: Parser | None = None
         if self.parser_cls is not None:
-            parser = self.parser_cls(
-                tokenizer,
-                request.tools,
-                chat_template_kwargs=chat_template_kwargs,
-                model_config=self.model_config,
-            )
+            parser = self._make_parser(request, tokenizer, chat_template_kwargs)
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
@@ -522,12 +532,7 @@ class OpenAIServingChat(GenerateBaseServing):
                         "Tokenizer not available when `skip_tokenizer_init=True`"
                     )
                 parsers: list[Parser | None] = [
-                    self.parser_cls(
-                        tokenizer,
-                        request.tools,
-                        chat_template_kwargs=chat_template_kwargs,
-                        model_config=self.model_config,
-                    )
+                    self._make_parser(request, tokenizer, chat_template_kwargs)
                     for _ in range(num_choices)
                 ]
             else:
@@ -658,6 +663,8 @@ class OpenAIServingChat(GenerateBaseServing):
                     if finish_reason_sent[i]:
                         continue
 
+                    self._raise_if_error(output.finish_reason, request_id)
+
                     if request.logprobs and (
                         request.top_logprobs is not None or request.logprob_token_ids
                     ):
@@ -704,11 +711,14 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
-                    if parser is not None:
+                    if parser is not None and self._include_reasoning_tokens_details:
                         generated_token_ids[i].extend(output.token_ids)
-                        previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
-                            tuple(generated_token_ids[i])
-                        )
+                        if include_continuous_usage:
+                            previous_reasoning_tokens[i] = (
+                                parser.count_reasoning_tokens(
+                                    tuple(generated_token_ids[i])
+                                )
+                            )
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
@@ -725,11 +735,13 @@ class OpenAIServingChat(GenerateBaseServing):
                         logprobs = None
 
                     if delta_message is None:
-                        # NOTE: If return_token_ids is enabled, we still need to
-                        # send a chunk with token_ids even if delta_message is None
+                        # NOTE: If return_token_ids or logprobs are enabled, we
+                        # still need to send a chunk even if delta_message is None
                         # to ensure all tokens are included in the response
-                        if output.finish_reason is None and (
-                            not request.return_token_ids or hide_stream_metadata
+                        if (
+                            output.finish_reason is None
+                            and logprobs is None
+                            and (not request.return_token_ids or hide_stream_metadata)
                         ):
                             continue
                         delta_message = DeltaMessage()
@@ -780,10 +792,6 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # if the model is finished generating
                     else:
-                        # check for error finish reason and abort streaming
-                        # finish_reason='error' indicates a retryable error
-                        self._raise_if_error(output.finish_reason, request_id)
-
                         # Send the finish response for each request.n only once
                         # In OpenAI's API, when a tool is called, the
                         # finish_reason is:
@@ -849,6 +857,13 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
+
+            if self._include_reasoning_tokens_details and not include_continuous_usage:
+                for i, parser in enumerate(parsers):
+                    if parser is not None and generated_token_ids[i]:
+                        previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
+                            tuple(generated_token_ids[i])
+                        )
 
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
@@ -981,10 +996,17 @@ class OpenAIServingChat(GenerateBaseServing):
         tool_parser_cls = (
             self.parser_cls.tool_parser_cls if self.parser_cls is not None else None
         )
-        for output in final_res.outputs:
+        for i, output in enumerate(final_res.outputs):
             # check for error finish reason and raise GenerationError
             # finish_reason='error' indicates a retryable request-level internal error
             self._raise_if_error(output.finish_reason, request_id)
+            if i > 0 and parser is not None:
+                # Parsers are stateful: like streaming, use one per choice.
+                parser = self._make_parser(
+                    request, tokenizer, self._effective_chat_template_kwargs(request)
+                )
+            if parser is not None and final_res.prompt_token_ids is not None:
+                parser.set_prompt_token_ids(final_res.prompt_token_ids)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
