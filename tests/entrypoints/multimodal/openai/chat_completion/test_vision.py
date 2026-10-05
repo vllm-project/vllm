@@ -10,7 +10,6 @@ from transformers import AutoProcessor
 
 from tests.entrypoints.multimodal.conftest import TEST_IMAGE_ASSETS
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
-from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.platforms import current_platform
 
@@ -196,9 +195,6 @@ def get_hf_prompt_tokens(model_name, content, image_url):
         }
     ]
     image = fetch_image(image_url)
-    # Unwrap MediaWithBytes if present
-    if isinstance(image, MediaWithBytes):
-        image = image.media
     images = [image]
 
     prompt = processor.tokenizer.apply_chat_template(

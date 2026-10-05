@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 from collections import UserDict
 from collections.abc import Callable, Iterator, Mapping, Sequence, Set
+from copy import copy
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -17,7 +18,7 @@ from typing import (
 
 import numpy as np
 import torch
-from typing_extensions import assert_never
+from typing_extensions import Self, assert_never
 
 from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalUUIDDict
 from vllm.utils.collection_utils import is_list_of
@@ -35,8 +36,7 @@ from .inputs import (
     MultiModalKwargsItems,
     VideoItem,
 )
-from .media import MediaWithBytes
-from .video import DecodedFrames
+from .media import MediaRef
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -67,6 +67,24 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
 
         self.data: _T = data
         self.modality = modality
+        self._original_indices: list[int] | None = None
+
+    def get_original_index(self, index: int) -> int:
+        return (
+            index if self._original_indices is None else self._original_indices[index]
+        )
+
+    @abstractmethod
+    def select(self, indices: Sequence[int]) -> Self:
+        """Select parsed items without repeating validation or normalization."""
+        raise NotImplementedError
+
+    def _copy_selected(self, indices: Sequence[int]) -> Self:
+        selected = copy(self)
+        selected._original_indices = [
+            self.get_original_index(index) for index in indices
+        ]
+        return selected
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(modality={self.modality!r}, len={len(self)})"
@@ -95,11 +113,19 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
         """Get all data items."""
         return [self.get(idx) for idx in range(self.get_count())]
 
-    def get_item_for_hash(self, index: int) -> object:
+    def get_raw(self, index: int) -> object:
+        """Get a data item as stored, without decoding it.
+
+        For fetched media this is the
+        [`MediaRef`][vllm.multimodal.media.base.MediaRef] itself, whose
+        precomputed `key` is the cache identity. Hashing, cache-miss
+        selection and byte release all read items through here so that none
+        of them pays for a decode.
+        """
         return self.get(index)
 
-    def get_all_items_for_hash(self) -> list[object]:
-        return [self.get_item_for_hash(idx) for idx in range(self.get_count())]
+    def get_all_raw(self) -> list[object]:
+        return [self.get_raw(idx) for idx in range(self.get_count())]
 
     @abstractmethod
     def get_processor_data(self) -> Mapping[str, object]:
@@ -112,21 +138,35 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
         raise NotImplementedError
 
 
-class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
+class ProcessorBatchItems(ModalityDataItems[Sequence[_T | MediaRef[_T]], _T]):
     """Base class for data items that are arranged in a list."""
 
-    def _unwrap(self, item: _T | MediaWithBytes[_T]) -> _T:
-        """Extract media from wrapper if present."""
-        return item.media if isinstance(item, MediaWithBytes) else item
+    def select(self, indices: Sequence[int]) -> Self:
+        selected = self._copy_selected(indices)
+        selected.data = [self.data[index] for index in indices]
+        return selected
+
+    def map_raw(
+        self, transform: Callable[[_T | MediaRef[_T]], _T | MediaRef[_T]]
+    ) -> Self:
+        """Replace raw items in a copy, preserving their request indices."""
+        mapped = copy(self)
+        mapped.data = [transform(item) for item in self.data]
+        return mapped
 
     def get_count(self) -> int:
         return len(self.data)
 
     def get(self, index: int) -> _T:
-        return self._unwrap(self.data[index])
+        """Get the decoded data item.
 
-    def get_item_for_hash(self, index: int) -> _T | MediaWithBytes[_T]:
-        # Return raw item for hashing (preserves original_bytes if present)
+        A `MediaRef` decodes here; by the time items are consumed the
+        processor's batch decode has already run, so this is a cache read.
+        """
+        item = self.data[index]
+        return item.decode() if isinstance(item, MediaRef) else item
+
+    def get_raw(self, index: int) -> _T | MediaRef[_T]:
         return self.data[index]
 
     def get_processor_data(self) -> Mapping[str, object]:
@@ -225,17 +265,19 @@ class EmbeddingItems(
                         f"Embedding shape: {tuple(tensor.shape)}"
                     )
 
-    def _unwrap(
-        self, item: torch.Tensor | MediaWithBytes[torch.Tensor]
-    ) -> torch.Tensor:
-        """Extract media from wrapper if present."""
-        return item.media if isinstance(item, MediaWithBytes) else item
+    def select(self, indices: Sequence[int]) -> Self:
+        selected = self._copy_selected(indices)
+        if isinstance(self.data, torch.Tensor):
+            selected.data = self.data[list(indices)]
+        else:
+            selected.data = [self.data[index] for index in indices]
+        return selected
 
     def get_count(self) -> int:
         return len(self.data)
 
     def get(self, index: int) -> torch.Tensor:
-        return self._unwrap(self.data[index])
+        return self.data[index]
 
     def get_processor_data(self) -> Mapping[str, object]:
         return {}
@@ -324,6 +366,14 @@ class DictEmbeddingItems(
     def get_count(self) -> int:
         return len(self._kwargs[self.modality])
 
+    def select(self, indices: Sequence[int]) -> Self:
+        selected = self._copy_selected(indices)
+        selected._kwargs = MultiModalKwargsItems(
+            {self.modality: [self._kwargs[self.modality][index] for index in indices]}
+        )
+        selected.data = selected._kwargs.get_data()  # type: ignore[assignment]
+        return selected
+
     def get(self, index: int) -> Mapping[str, torch.Tensor]:
         return self._kwargs[self.modality][index].get_data()
 
@@ -334,8 +384,13 @@ class DictEmbeddingItems(
         return self.data
 
 
+NormalizedAudio: TypeAlias = np.ndarray
+
+
 class AudioProcessorItems(ProcessorBatchItems[HfAudioItem | None]):
-    def __init__(self, data: Sequence[HfAudioItem | None]) -> None:
+    def __init__(
+        self, data: Sequence[HfAudioItem | MediaRef[NormalizedAudio] | None]
+    ) -> None:
         super().__init__(data, "audio")
 
     def get_audio_length(self, item_idx: int) -> int:
@@ -393,39 +448,71 @@ class ImageEmbeddingItems(EmbeddingItems):
         super().__init__(data, "image", expected_hidden_size)
 
 
-class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
+DecodedVideo: TypeAlias = HfVideoItem | tuple[HfVideoItem, dict[str, Any] | None]
+
+
+class VideoProcessorItems(ProcessorBatchItems[DecodedVideo | None]):
     def __init__(
         self,
-        data: Sequence[HfVideoItem | None],
+        data: Sequence[DecodedVideo | MediaRef[DecodedVideo] | None],
         metadata: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        *,
+        video_needs_metadata: bool = True,
     ) -> None:
         super().__init__(data, "video")
 
-        self.metadata = metadata
+        self._metadata = metadata
+        self.video_needs_metadata = video_needs_metadata
 
-    def _unwrap(self, item: Any) -> Any:
-        if isinstance(item, tuple):
-            frames, metadata = item
-            return super()._unwrap(frames), metadata
-        return super()._unwrap(item)
+    def select(self, indices: Sequence[int]) -> Self:
+        selected = super().select(indices)
+        if isinstance(self._metadata, list):
+            selected._metadata = [self._metadata[index] for index in indices]
+        return selected
 
-    def get_item_for_hash(self, index: int) -> Any:
-        item = self.data[index]
-        if isinstance(item, MediaWithBytes) and isinstance(self.metadata, list):
-            metadata = self.metadata[index]
-            if metadata is not None:
-                return item, metadata
-        return item
+    def get(self, index: int) -> DecodedVideo | None:
+        video = super().get(index)
+        if isinstance(video, tuple):
+            frames, metadata = video
+            if isinstance(self._metadata, list) and self._metadata[index] is None:
+                self._metadata[index] = metadata
+            return video if self.video_needs_metadata else frames
+        return video
+
+    def get_frames(self, index: int) -> HfVideoItem | None:
+        """Return frames regardless of the HF processor's metadata setting."""
+        video = super().get(index)
+        return video[0] if isinstance(video, tuple) else video
+
+    def get_metadata(self, index: int) -> dict[str, Any] | None:
+        """Resolve metadata for one video without decoding its siblings."""
+        if isinstance(self._metadata, dict):
+            return self._metadata
+        if isinstance(self._metadata, list) and self._metadata[index] is not None:
+            return self._metadata[index]
+        video = super().get(index)
+        metadata = video[1] if isinstance(video, tuple) else None
+        if isinstance(self._metadata, list):
+            self._metadata[index] = metadata
+        return metadata
+
+    @property
+    def metadata(self) -> dict[str, Any] | list[dict[str, Any] | None] | None:
+        """Resolve fetched video metadata when a consumer requests it."""
+        if isinstance(self._metadata, list):
+            for index in range(self.get_count()):
+                self.get_metadata(index)
+        return self._metadata
 
     def get_num_frames(self, item_idx: int) -> int:
-        video = self.get(item_idx)
+        video = self.get_frames(item_idx)
         if video is None:
             raise ValueError(f"Cannot get length of cached video at {item_idx}")
 
         return len(video)
 
     def get_frame_size(self, item_idx: int) -> ImageSize:
-        video = self.get(item_idx)
+        video = self.get_frames(item_idx)
         if video is None:
             raise ValueError(f"Cannot get size of cached video at {item_idx}")
         if len(video) == 0:
@@ -642,16 +729,32 @@ class MultiModalDataParser:
             return audio, None
         if isinstance(audio, torch.Tensor):
             return audio.numpy(), None
+        if isinstance(audio, MediaRef):
+            # Only reached by transforms stacked via MediaRef.map(), whose
+            # input is the decoded media by construction.
+            return audio.decode()
 
         assert_never(audio)
 
     def _get_video_with_metadata(
         self,
         video: VideoItem,
-    ) -> tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any] | None]:
-        if isinstance(video, MediaWithBytes):
-            new_video, metadata = self._get_video_with_metadata(video.media)
-            return MediaWithBytes(new_video, video.original_bytes), metadata
+    ) -> tuple[HfVideoItem | MediaRef[DecodedVideo], dict[str, Any] | None]:
+        if isinstance(video, MediaRef):
+            # Keep metadata in the raw ref so cache miss reparsing preserves it.
+            def unpack(decoded: DecodedVideo) -> DecodedVideo:
+                if isinstance(decoded, tuple):
+                    frames, metadata = decoded
+                else:
+                    frames, metadata = decoded, None
+                if self.video_needs_metadata and metadata is None:
+                    raise ValueError(
+                        "Video metadata is required but not found in mm input. "
+                        "Please check your video input in `multi_modal_data`"
+                    )
+                return (frames, metadata) if metadata is not None else frames
+
+            return video.map(unpack), None
         if isinstance(video, tuple):
             return video
         if isinstance(video, list):
@@ -663,6 +766,20 @@ class MultiModalDataParser:
             return video, None
 
         assert_never(video)
+
+    def _resample_normalize_audio(self, loaded: AudioItem) -> NormalizedAudio:
+        audio, orig_sr = self._get_audio_with_sr(loaded)
+        if orig_sr is None:
+            new_audio = audio
+        else:
+            new_audio = self.audio_resampler.resample(audio, orig_sr=orig_sr)
+
+        # Apply channel normalization if target_channels is set
+        if self.target_channels is not None:
+            spec = AudioSpec(target_channels=self.target_channels)
+            new_audio = normalize_audio(new_audio, spec)
+
+        return new_audio
 
     def _parse_audio_embedding_data(
         self, data: dict[str, torch.Tensor]
@@ -720,7 +837,7 @@ class MultiModalDataParser:
         if (
             (is_list_of(data, float) and len(data) > 0)
             or (isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 1)
-            or isinstance(data, tuple)
+            or isinstance(data, (tuple, MediaRef))
         ):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
@@ -728,25 +845,29 @@ class MultiModalDataParser:
         else:
             data_items = data  # type: ignore[assignment]
 
-        new_audios = list[np.ndarray | None]()
+        new_audios = list[NormalizedAudio | MediaRef[NormalizedAudio] | None]()
         for data_item in data_items:
             # Requests can omit audio samples when reusing a cached UUID.
             if data_item is None:
                 new_audios.append(None)
                 continue
 
-            audio, orig_sr = self._get_audio_with_sr(data_item)
-            if orig_sr is None:
-                new_audio = audio
-            else:
-                new_audio = self.audio_resampler.resample(audio, orig_sr=orig_sr)
+            if isinstance(data_item, MediaRef):
+                # Defer decoding; resampling and channel normalization are
+                # stacked onto the decode so they run in the parallel decode
+                # phase. Their settings extend the spec, so a change to
+                # either cannot reuse a stale cache entry.
+                new_audios.append(
+                    data_item.map(
+                        self._resample_normalize_audio,
+                        target_sr=self.audio_resampler.target_sr,
+                        resample_method=self.audio_resampler.method,
+                        target_channels=self.target_channels,
+                    )
+                )
+                continue
 
-            # Apply channel normalization if target_channels is set
-            if self.target_channels is not None:
-                spec = AudioSpec(target_channels=self.target_channels)
-                new_audio = normalize_audio(new_audio, spec)
-
-            new_audios.append(new_audio)
+            new_audios.append(self._resample_normalize_audio(data_item))
 
         return AudioProcessorItems(new_audios)
 
@@ -760,7 +881,7 @@ class MultiModalDataParser:
         if self.is_embeddings(data):
             return ImageEmbeddingItems(data, self.expected_hidden_size)
 
-        if isinstance(data, (PILImage.Image, MediaWithBytes)) or (
+        if isinstance(data, (PILImage.Image, MediaRef)) or (
             isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 3
         ):
             data_items = [data]
@@ -801,15 +922,15 @@ class MultiModalDataParser:
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             data_items = [elem for elem in data]
-        elif isinstance(data, tuple) and len(data) == 2:
+        elif isinstance(data, MediaRef) or (isinstance(data, tuple) and len(data) == 2):
             data_items = [data]
         else:
             data_items = data  # type: ignore[assignment]
 
         new_videos = list[
-            DecodedFrames
-            | MediaWithBytes[DecodedFrames]
-            | tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any]]
+            HfVideoItem
+            | MediaRef[DecodedVideo]
+            | tuple[HfVideoItem, dict[str, Any]]
             | None
         ]()
         metadata_lst: list[dict[str, Any] | None] = []
@@ -820,19 +941,30 @@ class MultiModalDataParser:
                 new_videos.append(None)
                 metadata_lst.append(None)
                 continue
+
             video, metadata = self._get_video_with_metadata(data_item)
-            if self.video_needs_metadata:
-                if metadata is None:
-                    raise ValueError(
-                        "Video metadata is required but not found in mm input. "
-                        "Please check your video input in `multi_modal_data`"
-                    )
+            if (
+                self.video_needs_metadata
+                and metadata is None
+                and not isinstance(video, MediaRef)
+            ):
+                raise ValueError(
+                    "Video metadata is required but not found in mm input. "
+                    "Please check your video input in `multi_modal_data`"
+                )
+            if metadata is not None:
                 new_videos.append((video, metadata))
             else:
+                # For refs the metadata check is deferred to decode time
+                # (see _get_video_with_metadata).
                 new_videos.append(video)
             metadata_lst.append(metadata)
 
-        return VideoProcessorItems(new_videos, metadata=metadata_lst)
+        return VideoProcessorItems(
+            new_videos,
+            metadata=metadata_lst,
+            video_needs_metadata=self.video_needs_metadata,
+        )
 
     def _parse_vision_chunk_data(
         self,

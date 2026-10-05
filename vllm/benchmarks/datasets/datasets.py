@@ -424,8 +424,7 @@ def process_image(
 
         if ensure_client_side_data and not image_url.startswith("data:image/"):
             try:
-                fetched_image = fetch_image(image_url)
-                image_url = encode_image_url(fetched_image)
+                image_url = encode_image_url(fetch_image(image_url))
             except Exception as e:
                 raise ValueError(f"Invalid image URL: {image_url}") from e
         return {"type": "image_url", "image_url": {"url": image_url}}

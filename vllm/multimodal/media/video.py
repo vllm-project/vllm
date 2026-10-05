@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from functools import partial
 from io import BytesIO
 from pathlib import Path
@@ -21,13 +22,13 @@ from vllm.utils.sparse_utils import (
 
 from ..video import VIDEO_LOADER_REGISTRY, DecodedFrames
 from ..video_decoders import incompatible_backend_options
-from .base import MediaIO, MediaWithBytes
+from .base import DecodeSpec, MediaIO, MediaRef
 from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 
 logger = init_logger(__name__)
 
 
-class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]):
+class VideoMediaIO(MediaIO[tuple[DecodedFrames, dict[str, Any]]]):
     """Configuration values can be user-provided either by --media-io-kwargs or
     by the runtime API field "media_io_kwargs". Ensure proper validation and
     error handling.
@@ -114,91 +115,123 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
             kwargs.pop("video_backend", None) or envs.VLLM_VIDEO_LOADER_BACKEND
         )
         self.kwargs = kwargs
+        self.video_loader_backend = video_loader_backend
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
-    def load_bytes(
-        self, data: bytes
-    ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
-        video = self.video_loader.load_bytes(
+    def get_decode_spec(self) -> DecodeSpec:
+        return DecodeSpec(
+            {
+                **self.kwargs,
+                "num_frames": self.num_frames,
+                "video_backend": self.video_loader_backend,
+            }
+        )
+
+    def load_bytes(self, data: bytes) -> tuple[DecodedFrames, dict[str, Any]]:
+        return self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
-        return MediaWithBytes(video, data)
 
-    def load_base64(
-        self, media_type: str, data: str
-    ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
-        if media_type.lower() == "video/jpeg":
+    def _prepare_jpeg_sequence(
+        self, data: str
+    ) -> tuple[Callable[[], npt.NDArray], dict[str, Any]]:
+        """Split a base64 jpeg frame sequence and validate its arguments.
+
+        Splitting and argument validation (num_frames/frames_indices/
+        total_num_frames/duration) run eagerly; the per-frame decode and
+        np.stack are deferred into the returned callable.
+        """
+        if self.num_frames > 0:
+            frame_parts = data.split(",", self.num_frames)[: self.num_frames]
+        elif self.num_frames == 0:
+            raise ValueError("num_frames must be greater than 0 or -1")
+        else:
+            frame_parts = data.split(",")
+
+        total = len(frame_parts)
+        fps = float(self.kwargs.get("fps", 1))
+
+        # validate and extract frames_indices
+        frames_indices = self.kwargs.get("frames_indices")
+        if frames_indices is not None:
+            if not (
+                isinstance(frames_indices, list)
+                and all(isinstance(i, int) for i in frames_indices)
+            ):
+                raise ValueError("frames_indices must be a list of integers")
+            if len(frames_indices) != total:
+                raise ValueError(
+                    f"frames_indices length ({len(frames_indices)}) must "
+                    f"match number of frames sent ({total})"
+                )
+        else:
+            frames_indices = list(range(total))
+
+        # validate and extract total_num_frames
+        total_num_frames = self.kwargs.get("total_num_frames", total)
+        if not isinstance(total_num_frames, int) or total_num_frames < 1:
+            raise ValueError("total_num_frames must be a positive integer")
+        if total_num_frames < total:
+            raise ValueError(
+                f"total_num_frames ({total_num_frames}) must be >= "
+                f"number of frames sent ({total})"
+            )
+
+        # validate and extract duration
+        duration = self.kwargs.get("duration")
+        if duration is not None:
+            if not isinstance(duration, (int, float)) or duration < 0:
+                raise ValueError("duration must be a non-negative number")
+        else:
+            duration = total_num_frames / fps if fps > 0 else 0.0
+
+        metadata = {
+            "total_num_frames": total_num_frames,
+            "fps": fps,
+            "duration": duration,
+            "video_backend": "jpeg_sequence",
+            "frames_indices": frames_indices,
+            "do_sample_frames": self.kwargs.get("do_sample_frames", False),
+        }
+
+        def decode_frames() -> npt.NDArray:
             load_frame = partial(
                 self.image_io.load_base64,
                 "image/jpeg",
             )
-
-            if self.num_frames > 0:
-                frame_parts = data.split(",", self.num_frames)[: self.num_frames]
-            elif self.num_frames == 0:
-                raise ValueError("num_frames must be greater than 0 or -1")
-            else:
-                frame_parts = data.split(",")
-
-            frames = np.stack(
+            return np.stack(
                 [np.asarray(load_frame(frame_data)) for frame_data in frame_parts]
             )
-            total = int(frames.shape[0])
-            fps = float(self.kwargs.get("fps", 1))
 
-            # validate and extract frames_indices
-            frames_indices = self.kwargs.get("frames_indices")
-            if frames_indices is not None:
-                if not (
-                    isinstance(frames_indices, list)
-                    and all(isinstance(i, int) for i in frames_indices)
-                ):
-                    raise ValueError("frames_indices must be a list of integers")
-                if len(frames_indices) != total:
-                    raise ValueError(
-                        f"frames_indices length ({len(frames_indices)}) must "
-                        f"match number of frames sent ({total})"
-                    )
-            else:
-                frames_indices = list(range(total))
+        return decode_frames, metadata
 
-            # validate and extract total_num_frames
-            total_num_frames = self.kwargs.get("total_num_frames", total)
-            if not isinstance(total_num_frames, int) or total_num_frames < 1:
-                raise ValueError("total_num_frames must be a positive integer")
-            if total_num_frames < total:
-                raise ValueError(
-                    f"total_num_frames ({total_num_frames}) must be >= "
-                    f"number of frames sent ({total})"
-                )
-
-            # validate and extract duration
-            duration = self.kwargs.get("duration")
-            if duration is not None:
-                if not isinstance(duration, (int, float)) or duration < 0:
-                    raise ValueError("duration must be a non-negative number")
-            else:
-                duration = total_num_frames / fps if fps > 0 else 0.0
-
-            metadata = {
-                "total_num_frames": total_num_frames,
-                "fps": fps,
-                "duration": duration,
-                "video_backend": "jpeg_sequence",
-                "frames_indices": frames_indices,
-                "do_sample_frames": self.kwargs.get("do_sample_frames", False),
-            }
-            return MediaWithBytes((frames, metadata), data.encode())
+    def load_base64(
+        self, media_type: str, data: str
+    ) -> tuple[DecodedFrames, dict[str, Any]]:
+        if media_type.lower() == "video/jpeg":
+            decode_frames, metadata = self._prepare_jpeg_sequence(data)
+            return decode_frames(), metadata
 
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
-    def load_file(
-        self, filepath: Path
-    ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
-        with filepath.open("rb") as f:
-            data = f.read()
+    def load_base64_ref(
+        self, media_type: str, data: str
+    ) -> MediaRef[tuple[DecodedFrames, dict[str, Any]]]:
+        if media_type.lower() == "video/jpeg":
+            decode_frames, metadata = self._prepare_jpeg_sequence(data)
+            spec = self.get_decode_spec().extend(
+                video_backend="jpeg_sequence",
+                image_decode=dict(self.image_io.get_decode_spec().settings),
+            )
+            return MediaRef(
+                lambda: (decode_frames(), metadata),
+                data.encode(),
+                spec,
+            )
+        return super().load_base64_ref(media_type, data)
 
-        return self.load_bytes(data)
+    def load_file(self, filepath: Path) -> tuple[DecodedFrames, dict[str, Any]]:
+        return self.load_bytes(filepath.read_bytes())
 
     def encode_base64(
         self,

@@ -1,15 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import asyncio
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from http import HTTPStatus
+from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.serve import create_error_response
-from vllm.multimodal.parse import parse_mm_uuids
+from vllm.multimodal.media import MediaRef
+from vllm.multimodal.parse import MultiModalDataParser, parse_mm_uuids
+from vllm.multimodal.processing import MultiModalApplyState, ProcessorInputs
+from vllm.multimodal.processing.context import TimingContext
+from vllm.multimodal.processing.processor import MediaDecodeJob
+from vllm.renderers.base import BaseRenderer
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
@@ -223,3 +232,182 @@ def test_multi_modal_uuids_preserved_when_caching_disabled(mm_uuids, expected):
     )
 
     assert processed_mm_uuids == expected
+
+
+def test_validate_mm_uuids_does_not_decode_lazy_media():
+    """UUID validation only checks None-ness, so it must not unwrap lazy
+    items (unwrapping would decode every item on the single _mm_executor
+    worker, defeating cache-hit-skips-decode)."""
+    renderer = _build_renderer()
+
+    decoder_calls = 0
+
+    def decode():
+        nonlocal decoder_calls
+        decoder_calls += 1
+        return baby_reading_video
+
+    mm_data = {"video": [MediaRef(decode, b"video-bytes")]}
+
+    mm_processor = renderer.get_mm_processor()
+    mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_uuid_items = parse_mm_uuids({"video": [None]})
+
+    renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-lazy")
+
+    assert decoder_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_process_multimodal_async_does_not_block_mm_worker_on_decode():
+    """Two-phase `_process_multimodal_async` must free the single
+    `_mm_executor` worker while a lazy decode is in flight, so a second
+    request's phase 1 can interleave (cross-request decode overlap)."""
+    renderer = _build_renderer()
+    processor = renderer.get_mm_processor()
+    assert processor.supports_two_phase_apply
+
+    tokenizer = renderer.tokenizer
+    prompt = tokenizer.encode("<|vision_start|><|image_pad|><|vision_end|>")
+
+    decode_entered = threading.Event()
+    release_decode = threading.Event()
+
+    def gated_decode():
+        decode_entered.set()
+        release_decode.wait(timeout=60)
+        return stop_pil_image
+
+    try:
+        task_a = asyncio.create_task(
+            renderer._process_multimodal_async(
+                prompt, {"image": [MediaRef(gated_decode, b"a-bytes")]}, None, None
+            )
+        )
+        await asyncio.to_thread(decode_entered.wait, 60)
+
+        # B runs to completion while A's decode is still blocked; with the
+        # old single-call blocking apply, B would queue behind A on the
+        # single mm worker.
+        result_b = await asyncio.wait_for(
+            renderer._process_multimodal_async(
+                prompt, {"image": [cherry_pil_image]}, None, None
+            ),
+            timeout=60,
+        )
+        assert not release_decode.is_set()
+        assert result_b["mm_kwargs"]["image"][0] is not None
+
+        release_decode.set()
+        result_a = await asyncio.wait_for(task_a, timeout=60)
+        assert result_a["mm_kwargs"]["image"][0] is not None
+    finally:
+        release_decode.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stage",
+    ["phase1", "decode", "decode_error", "phase2_queued", "phase2_running"],
+)
+async def test_multimodal_cancellation_drains_executor_work(stage, monkeypatch):
+    """Cancellation must drain running work and release even queued phase 2."""
+    source = MediaRef(lambda: stop_pil_image, b"payload")
+    inputs = ProcessorInputs(
+        [], MultiModalDataParser().parse_mm_data({"image": source})
+    ).fork_media_refs()
+    owned = inputs.mm_data_items["image"].get_raw(0)
+    decoded: Future[Image.Image] = Future()
+    state = MultiModalApplyState(
+        inputs,
+        TimingContext(enabled=False),
+        None,
+        [MediaDecodeJob("image", 0, decoded)],
+    )
+    entered = threading.Event()
+    proceed = threading.Event()
+    decode_waiting = asyncio.Event()
+    phase2_submitted = asyncio.Event()
+    phase2_called = False
+
+    def block_worker():
+        entered.set()
+        assert proceed.wait(timeout=10)
+
+    def phase1(*args, **kwargs):
+        if stage == "phase1":
+            block_worker()
+        return processor, state
+
+    def phase2(*args):
+        nonlocal phase2_called
+        phase2_called = True
+        if stage == "phase2_running":
+            block_worker()
+        return {"prompt_token_ids": []}
+
+    wait_decodes = state.wait_decodes_async
+
+    async def tracked_wait():
+        decode_waiting.set()
+        await wait_decodes()
+
+    monkeypatch.setattr(state, "wait_decodes_async", tracked_wait)
+    loop = asyncio.get_running_loop()
+    run_in_executor = loop.run_in_executor
+
+    def tracked_submit(executor, func, *args):
+        future = run_in_executor(executor, func, *args)
+        if getattr(func, "__name__", None) == "finish_processing":
+            phase2_submitted.set()
+        return future
+
+    monkeypatch.setattr(loop, "run_in_executor", tracked_submit)
+    processor = SimpleNamespace(supports_two_phase_apply=True)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        renderer = SimpleNamespace(
+            get_mm_processor=lambda: processor,
+            _mm_executor=executor,
+            _process_multimodal_phase1=phase1,
+            _process_multimodal_phase2=phase2,
+        )
+        task = asyncio.create_task(
+            BaseRenderer._process_multimodal_async(renderer, [], {}, None, None)
+        )
+        try:
+            if stage == "phase1":
+                assert await asyncio.to_thread(entered.wait, 10)
+            else:
+                await asyncio.wait_for(decode_waiting.wait(), timeout=10)
+                if stage == "phase2_queued":
+                    executor.submit(block_worker)
+                    assert await asyncio.to_thread(entered.wait, 10)
+                if stage.startswith("phase2"):
+                    decoded.set_result(owned.decode())
+                    await asyncio.wait_for(phase2_submitted.wait(), timeout=10)
+                    if stage == "phase2_running":
+                        assert await asyncio.to_thread(entered.wait, 10)
+
+            for _ in range(2):
+                task.cancel()
+                await asyncio.sleep(0)
+            assert not task.done()
+            assert owned.data == b"payload"
+            proceed.set()
+            if not decoded.done():
+                if stage == "decode_error":
+                    decoded.set_exception(ValueError("corrupt media"))
+                else:
+                    decoded.set_result(owned.decode())
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=10)
+            assert owned.data == b""
+            assert source.data == b"payload"
+            assert phase2_called == (stage == "phase2_running")
+        finally:
+            proceed.set()
+            if not decoded.done():
+                decoded.set_result(source.decode())
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

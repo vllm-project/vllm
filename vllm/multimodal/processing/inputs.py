@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.inputs import MultiModalHashes
 
 from ..cache import BaseMultiModalProcessorCache
 from ..hasher import MultiModalHasher
-from ..parse import MultiModalDataItems, MultiModalUUIDItems
+from ..media import MediaRef
+from ..parse import MultiModalDataItems, MultiModalUUIDItems, ProcessorBatchItems
 
 _HF_MODALITY_PROCESSOR_KWARGS = {
     "image": "images_kwargs",
@@ -30,6 +31,24 @@ class ProcessorInputs:
     media_io_kwargs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
     cache: BaseMultiModalProcessorCache | None = None
+
+    def fork_media_refs(self) -> "ProcessorInputs":
+        """Give processing releasable wrappers around borrowed media refs."""
+        owned_items = MultiModalDataItems()
+        for modality, items in self.mm_data_items.items():
+            if isinstance(items, ProcessorBatchItems):
+                items = items.map_raw(
+                    lambda item: item.fork() if isinstance(item, MediaRef) else item
+                )
+            owned_items[modality] = items
+        return replace(self, mm_data_items=owned_items)
+
+    @property
+    def can_use_cache(self) -> bool:
+        """Whether these inputs can use the processor cache."""
+        return self.cache is not None and not any(
+            items.get_passthrough_data() for items in self.mm_data_items.values()
+        )
 
     def get_mm_hashes(
         self,
@@ -72,7 +91,6 @@ class ProcessorInputs:
                 "mm_processor_kwargs": mm_processor_kwargs,
             }
             hash_factors = {key: value for key, value in hash_factors.items() if value}
-            has_hash_factors = bool(hash_factors)
 
             uuid_items = (
                 mm_uuid_items[modality]
@@ -82,13 +100,25 @@ class ProcessorInputs:
 
             # For None entries, compute a hash; otherwise, use provided ID.
             hashes: list[str] = []
-            for i, item in enumerate(data_items.get_all_items_for_hash()):
+            for i, item in enumerate(data_items.get_all_raw()):
                 uuid_item = uuid_items[i]
+
+                # A MediaRef's decode spec is already folded into its key, so
+                # media_io_kwargs must not be counted twice for it. When the
+                # client supplies a UUID the key is not consulted at all, so
+                # every factor still has to be hashed in.
+                item_factors = hash_factors
+                if uuid_item is None and isinstance(item, MediaRef):
+                    item_factors = {
+                        key: value
+                        for key, value in hash_factors.items()
+                        if key != "media_io_kwargs"
+                    }
 
                 # NOTE: Even if a uuid_item is provided, model output depends
                 # on the current modality's hash factors, so they are taken
                 # into account.
-                if uuid_item is None or has_hash_factors:
+                if uuid_item is None or item_factors:
                     # NOTE: use provided hash string to hash with kwargs
                     # if available for better performance.
                     item = uuid_item if uuid_item is not None else item
@@ -97,7 +127,7 @@ class ProcessorInputs:
                             hash_algorithm,
                             model_id=model_id,
                             **{modality: item},
-                            **hash_factors,
+                            **item_factors,
                         )
                     )
                 else:

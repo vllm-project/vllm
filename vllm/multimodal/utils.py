@@ -28,7 +28,6 @@ from .media import (
     AudioMediaIO,
     ImageMediaIO,
     MediaConnector,
-    MediaWithBytes,
     VideoMediaIO,
 )
 
@@ -340,12 +339,10 @@ def fetch_audio(
         to be called by user code. Never call this from the online server!
 
     """
-    media_io_kwargs = None if not audio_io_kwargs else {"audio": audio_io_kwargs}
-    media_connector = MediaConnector(
-        media_io_kwargs=media_io_kwargs,
-        allowed_local_media_path="/",
-    )
-    return media_connector.fetch_audio(audio_url)
+    media_connector = MediaConnector(allowed_local_media_path="/")
+    audio_io = AudioMediaIO(**(audio_io_kwargs or {}))
+
+    return media_connector.fetch_audio(audio_url, audio_io).decode()
 
 
 def fetch_image(
@@ -361,18 +358,16 @@ def fetch_image(
         to be called by user code. Never call this from the online server!
 
     """
-    media_io_kwargs = None if not image_io_kwargs else {"image": image_io_kwargs}
-    media_connector = MediaConnector(
-        media_io_kwargs=media_io_kwargs,
-        allowed_local_media_path="/",
-    )
-    return media_connector.fetch_image(image_url)
+    media_connector = MediaConnector(allowed_local_media_path="/")
+    image_io = ImageMediaIO(**(image_io_kwargs or {}))
+
+    return media_connector.fetch_image(image_url, image_io).decode()
 
 
 def fetch_video(
     video_url: str,
     video_io_kwargs: dict[str, Any] | None = None,
-) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
+) -> tuple[npt.NDArray, dict[str, Any]]:
     """Args:
         video_url: URL of the video file to fetch.
         video_io_kwargs: Additional kwargs passed to handle video IO.
@@ -382,12 +377,10 @@ def fetch_video(
         to be called by user code. Never call this from the online server!
 
     """
-    media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
-    media_connector = MediaConnector(
-        media_io_kwargs=media_io_kwargs,
-        allowed_local_media_path="/",
-    )
-    return media_connector.fetch_video(video_url)
+    media_connector = MediaConnector(allowed_local_media_path="/")
+    video_io = VideoMediaIO(ImageMediaIO(), **(video_io_kwargs or {}))
+
+    return media_connector.fetch_video(video_url, video_io).decode()
 
 
 def set_mm_embedding_modality(embed: "torch.Tensor", modality: str) -> "torch.Tensor":

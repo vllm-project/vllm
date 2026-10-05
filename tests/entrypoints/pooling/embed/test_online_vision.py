@@ -9,7 +9,6 @@ from transformers import AutoProcessor
 
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
-from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import encode_image_url, fetch_image
 
 MODEL_NAME = "TIGER-Lab/VLM2Vec-Full"
@@ -169,9 +168,6 @@ def get_hf_prompt_tokens(model_name, content, image_url):
     placeholder = "<|image_1|> "
     prompt = f"{placeholder}{content}"
     image = fetch_image(image_url)
-    # Unwrap MediaWithBytes if present
-    if isinstance(image, MediaWithBytes):
-        image = image.media
     images = [image]
     inputs = processor(prompt, images, return_tensors="pt")
     return inputs.input_ids.shape[1]
