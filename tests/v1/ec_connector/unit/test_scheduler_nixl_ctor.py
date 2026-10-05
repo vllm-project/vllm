@@ -80,6 +80,48 @@ def test_missing_nixl_releases_shared_region(monkeypatch):
         region.cleanup()
 
 
+@pytest.mark.cpu_test
+def test_control_transport_failure_releases_nixl_and_shared_region(monkeypatch):
+    import vllm.distributed.ec_transfer.ec_connector.cpu.control.zmq as zmq_mod
+    import vllm.distributed.ec_transfer.ec_connector.cpu.data.nixl as data_mod
+
+    class RegisteredData:
+        registered = True
+
+        def deregister(self):
+            self.registered = False
+
+    data = RegisteredData()
+    error = RuntimeError("control transport failed")
+
+    def fail_control_transport():
+        raise error
+
+    region = _region()
+    monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: region)
+    monkeypatch.setattr(nixl_utils, "NixlWrapper", object())
+    monkeypatch.setattr(nixl_utils, "nixl_agent_config", object())
+    monkeypatch.setattr(data_mod, "NixlDataTransport", lambda **kwargs: data)
+    monkeypatch.setattr(zmq_mod, "ZmqClientTransport", fail_control_transport)
+    cfg = create_ec_vllm_config(ec_role="ec_consumer")
+    cfg.model_config.hf_config = None
+    cfg.model_config.get_inputs_embeds_size.return_value = 8
+    cfg.model_config.model = "test-model"
+    cfg.ec_transfer_config.ec_connector_extra_config["ec_enable_nixl"] = True
+
+    try:
+        with pytest.raises(RuntimeError, match="control transport failed") as exc:
+            ECCPUScheduler(cfg)
+
+        assert exc.value is error
+        assert not data.registered
+        assert not Path(region._mmap_path).exists()
+        assert region._fd is None
+        assert region._mmap_obj is None
+    finally:
+        region.cleanup()
+
+
 @pytest.mark.skipif(NixlWrapper is None, reason="Requires NIXL package")
 def test_gate_on_wires_data_transport_and_producer_session(monkeypatch):
     # Port 0 lets the OS pick an ephemeral port so the real ZMQ ROUTER bind
