@@ -259,6 +259,28 @@ class PyNvVideoCodecVideoBackendMixin:
         return default
 
     @classmethod
+    def _validate_decoder_caps(cls, file_path: str, nvc) -> None:
+        demuxer = nvc.CreateDemuxer(file_path)
+        width = demuxer.Width()
+        height = demuxer.Height()
+        caps = nvc.GetDecoderCaps(
+            cls._DEVICE_INDEX,
+            demuxer.GetNvCodecId(),
+            demuxer.ChromaFormat(),
+            demuxer.BitDepth(),
+        )
+        macroblock_count = ((width + 15) // 16) * ((height + 15) // 16)
+        if (
+            not caps["supported"]
+            or width < caps["width_min"]
+            or width > caps["width_max"]
+            or height < caps["height_min"]
+            or height > caps["height_max"]
+            or macroblock_count > caps["mb_num_max"]
+        ):
+            raise ValueError("Invalid or unsupported video file.")
+
+    @classmethod
     def _read_source_metadata(
         cls,
         file_path: str,
@@ -269,8 +291,11 @@ class PyNvVideoCodecVideoBackendMixin:
                 decoder = decoder_slot.get_decoder(
                     file_path, nvc, device_index=cls._DEVICE_INDEX
                 )
-                metadata = decoder.get_stream_metadata()
-                total_frames_num = len(decoder)
+                try:
+                    metadata = decoder.get_stream_metadata()
+                    total_frames_num = len(decoder)
+                finally:
+                    del decoder
             width = int(cls._metadata_value(metadata, "width", default=0))
             height = int(cls._metadata_value(metadata, "height", default=0))
             original_fps = float(
@@ -312,18 +337,22 @@ class PyNvVideoCodecVideoBackendMixin:
         with cls._borrow_decoder_slot() as decoder_slot:
             stream = decoder_slot.stream
             with cls._torch_stream_context(stream):
+                invalid_video = False
                 try:
                     decoder = decoder_slot.get_decoder(
                         file_path, nvc, device_index=cls._DEVICE_INDEX
                     )
                     decoded_frames = decoder.get_batch_frames_by_index(frame_idx)
                 except Exception as exc:
+                    decoder = None
                     if not isinstance(
                         exc,
                         _pynvvideocodec_exception_types(nvc) + (IndexError,),
                     ):
                         raise
-                    raise ValueError("Invalid or unsupported video file.") from exc
+                    invalid_video = True
+                if invalid_video:
+                    raise ValueError("Invalid or unsupported video file.")
                 if len(decoded_frames) < len(frame_idx):
                     logger.warning(
                         "pynvvideocodec video loading: expected %d frames but got %d.",
@@ -369,12 +398,26 @@ class PyNvVideoCodecVideoBackendMixin:
             with os.fdopen(temp_fd, "wb") as temp_file:
                 temp_file.write(data)
 
+            invalid_video = False
+            try:
+                cls._validate_decoder_caps(temp_path, nvc)
+            except Exception as exc:
+                if not isinstance(
+                    exc, _pynvvideocodec_exception_types(nvc) + (ValueError,)
+                ):
+                    raise
+                invalid_video = True
+            if invalid_video:
+                raise ValueError("Invalid or unsupported video file.")
+
             try:
                 gpu_source = cls._read_source_metadata(temp_path, nvc)
             except Exception as exc:
                 if not isinstance(exc, _pynvvideocodec_exception_types(nvc)):
                     raise
-                raise ValueError("Invalid or unsupported video file.") from exc
+                invalid_video = True
+            if invalid_video:
+                raise ValueError("Invalid or unsupported video file.")
             check_frame_pixel_limit(gpu_source.width, gpu_source.height)
             source = loader_cls._prepare_source(gpu_source.source)
             frame_idx = loader_cls.compute_frames_index_to_sample(
