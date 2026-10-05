@@ -383,10 +383,14 @@ async def test_completion_suffix_supports_text_prompt_list():
 
     assert result == [{"ok": True}]
     assert online_renderer.preprocess_completion.call_args.kwargs["prompt_input"] == [
-        f"{DEEPSEEK_V4_FIM_BEGIN}prefix A"
-        f"{DEEPSEEK_V4_FIM_HOLE} suffix{DEEPSEEK_V4_FIM_END}",
-        f"{DEEPSEEK_V4_FIM_BEGIN}prefix B"
-        f"{DEEPSEEK_V4_FIM_HOLE} suffix{DEEPSEEK_V4_FIM_END}",
+        (
+            f"{DEEPSEEK_V4_FIM_BEGIN}prefix A"
+            f"{DEEPSEEK_V4_FIM_HOLE} suffix{DEEPSEEK_V4_FIM_END}"
+        ),
+        (
+            f"{DEEPSEEK_V4_FIM_BEGIN}prefix B"
+            f"{DEEPSEEK_V4_FIM_HOLE} suffix{DEEPSEEK_V4_FIM_END}"
+        ),
     ]
 
 
@@ -619,7 +623,8 @@ async def test_renderer_only_completion_request_skips_mm_cache():
 
 
 @pytest.mark.asyncio
-async def test_completion_error_stream():
+@pytest.mark.parametrize("include_usage", [False, True])
+async def test_completion_error_stream(include_usage: bool):
     """Test finish_reason='error' returns 500 InternalServerError (streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
@@ -684,6 +689,67 @@ async def test_completion_error_stream():
         prompt="Test prompt",
         max_tokens=10,
         stream=True,
+        stream_options={"include_usage": include_usage},
+    )
+
+    response = await serving_completion.create_completion(request)
+
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    assert len(chunks) >= 2
+    assert any("Internal server error" in chunk for chunk in chunks), (
+        f"Expected error message in chunks: {chunks}"
+    )
+    assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_usage", [False, True])
+async def test_completion_error_stream_first_chunk(include_usage: bool):
+    """An error before the first token must reach the streaming client."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_completion = _build_serving_completion(mock_engine)
+
+    completion_output = CompletionOutput(
+        index=0,
+        text="",
+        token_ids=[],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="error",
+    )
+
+    request_output = RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[completion_output],
+        finished=True,
+        metrics=None,
+        lora_request=None,
+        encoder_prompt=None,
+        encoder_prompt_token_ids=None,
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield request_output
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        stream=True,
+        stream_options={"include_usage": include_usage},
     )
 
     response = await serving_completion.create_completion(request)
