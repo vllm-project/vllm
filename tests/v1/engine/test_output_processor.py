@@ -45,8 +45,9 @@ from vllm.v1.outputs import SamplingMaskLists
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])
+@pytest.mark.parametrize("synthetic_output", [False, True])
 def test_delta_output_without_new_tokens_returns_empty_logprobs(
-    flat_logprobs: bool,
+    flat_logprobs: bool, synthetic_output: bool
 ) -> None:
     accumulated = FlatLogprobs() if flat_logprobs else []
     accumulated.append({1: Logprob(logprob=-0.5, rank=1)})
@@ -58,6 +59,7 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
     state.logprobs_processor.logprobs = accumulated
     state.logprobs_processor.cumulative_logprob = -0.5
     state.output_kind = RequestOutputKind.DELTA
+    state.synthetic_output = synthetic_output
     state.request_index = 0
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
@@ -65,8 +67,39 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
 
     output = state._new_completion_output([], None, None)
 
+    assert output.text == ""
     assert isinstance(output.logprobs, FlatLogprobs if flat_logprobs else list)
     assert len(output.logprobs) == 0
+
+
+@pytest.mark.parametrize(
+    ("output_kind", "expected_token_ids"),
+    [
+        (RequestOutputKind.DELTA, [12]),
+        (RequestOutputKind.CUMULATIVE, [10, 11, 12]),
+    ],
+)
+def test_synthetic_output_preserves_token_ids(
+    output_kind: RequestOutputKind, expected_token_ids: list[int]
+) -> None:
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = "real model text"
+    state.detokenizer.output_token_ids = [10, 11, 12]
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = None
+    state.logprobs_processor.cumulative_logprob = None
+    state.output_kind = output_kind
+    state.synthetic_output = True
+    state.request_index = 0
+    state.sampling_mask_chunks = []
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+
+    output = state._new_completion_output([12], None, None)
+
+    assert output.text == "synthetic " * len(expected_token_ids)
+    assert output.token_ids == expected_token_ids
 
 
 def test_completion_output_preserves_each_sampling_mask_position() -> None:
@@ -77,6 +110,7 @@ def test_completion_output_preserves_each_sampling_mask_position() -> None:
     state.logprobs_processor.logprobs = None
     state.logprobs_processor.cumulative_logprob = None
     state.output_kind = RequestOutputKind.DELTA
+    state.synthetic_output = False
     state.request_index = 0
     state.sampling_mask_chunks = [
         SamplingMaskLists(
@@ -115,13 +149,18 @@ def _ref_convert_id_to_token(
     "request_output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )
 @pytest.mark.parametrize("stream_interval", [1, 5, 10])
+@pytest.mark.parametrize("synthetic_output", [False, True])
 def test_incremental_detokenization(
     request_output_kind: RequestOutputKind,
     stream_interval: int,
+    synthetic_output: bool,
     dummy_test_vectors,
 ):
     output_processor = OutputProcessor(
-        dummy_test_vectors.tokenizer, log_stats=False, stream_interval=stream_interval
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=stream_interval,
+        synthetic_output=synthetic_output,
     )
 
     # Make N requests.
@@ -199,7 +238,10 @@ def test_incremental_detokenization(
         gen_str = gen_strings[f"request-{idx}"]
         gen_toks = gen_tokens[f"request-{idx}"]
 
-        assert gen_str == ref_gen_str, f"{gen_str=}, {ref_gen_str=}"
+        expected_text = (
+            "synthetic " * len(ref_gen_toks) if synthetic_output else ref_gen_str
+        )
+        assert gen_str == expected_text, f"{gen_str=}, {expected_text=}"
         assert gen_toks == ref_gen_toks, f"{gen_toks=}, {ref_gen_toks=}"
 
     assert output_processor.get_num_unfinished_requests() == 0
@@ -207,12 +249,17 @@ def test_incremental_detokenization(
 
 
 @pytest.mark.parametrize("do_remote_prefill", [True, False])
-def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
+@pytest.mark.parametrize("synthetic_output", [False, True])
+def test_remote_prefill_cached_tokens_override(
+    do_remote_prefill: bool, synthetic_output: bool
+):
     """P/D disaggregation: num_cached_tokens should report the P worker's
     cache hits (passed via kv_transfer_params) instead of the local count,
     which sees the KVs pulled from the remote prefill as a ~100% hit.
     """
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(
+        tokenizer=None, log_stats=False, synthetic_output=synthetic_output
+    )
 
     prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
     kv_transfer_params = {
@@ -252,6 +299,8 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
         ]
     )
     request_output = processed.request_outputs[0]
+    assert request_output.outputs[0].text == ""
+    assert request_output.outputs[0].token_ids == [42]
     if do_remote_prefill:
         assert request_output.num_cached_tokens == 5
     else:
@@ -782,11 +831,13 @@ def test_logprobs_processor(
         (False, "eos_token_id", True, None),
     ],
 )
+@pytest.mark.parametrize("synthetic_output", [False, True])
 def test_stop_token(
     include_stop_str_in_output: bool,
     num_sample_logprobs: int | None,
     stop_token_type: str,
     ignore_eos: bool,
+    synthetic_output: bool,
     dummy_test_vectors,
 ):
     """Test output processor EOS/stop token handling.
@@ -818,6 +869,9 @@ def test_stop_token(
       (i.e. first control token causes stop but is not represented
       in output text.)
 
+    Synthetic presentation replaces the delivered text per output token ID
+    without changing which control token stops generation.
+
     Note: some test details are tuned for meta-llama/Llama-3.2-1B,
     another model should work only if the test is modified.
 
@@ -826,6 +880,7 @@ def test_stop_token(
         num_sample_logprobs: number of sample logprobs (`None` for no logprobs)
         stop_token_type: "eos_token_id" for EOS, "stop_token_ids" for stop token
         ignore_eos: if True, EOS stops are disabled
+        synthetic_output: if True, render one placeholder per output token ID
         dummy_test_vectors: dummy engine core outputs and other data structures
 
     """
@@ -844,7 +899,11 @@ def test_stop_token(
     )  # '<|end_of_text|>'
     stop_token_ids = [128009] if not is_eos_test else None  # '<|eot_id|>'
 
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        synthetic_output=synthetic_output,
+    )
     # Dummy engine core outputs, with control tokens suffixed to test stops
     suffix_token = [eos_token_id] if is_eos_test else stop_token_ids
     assert suffix_token is not None and isinstance(suffix_token[0], int)
@@ -937,7 +996,8 @@ def test_stop_token(
     else:
         # Stop token triggered but not in output
         ref_str = generation_string
-    assert gen_string == ref_str, f"{gen_string=}, {ref_str=}"
+    expected_text = "synthetic " * len(gen_tokens) if synthetic_output else ref_str
+    assert gen_string == expected_text, f"{gen_string=}, {expected_text=}"
 
     if do_logprobs:
         # Validate number of sample logprobs
@@ -954,12 +1014,18 @@ def test_stop_token(
 
 @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
 @pytest.mark.parametrize("num_sample_logprobs", [None, NUM_SAMPLE_LOGPROBS_UNDER_TEST])
+@pytest.mark.parametrize("synthetic_output", [False, True])
 def test_stop_string(
     include_stop_str_in_output: bool,
     num_sample_logprobs: int | None,
+    synthetic_output: bool,
     dummy_test_vectors,
 ):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        synthetic_output=synthetic_output,
+    )
 
     # Make N requests.
     request_id_list = [
@@ -1071,7 +1137,9 @@ def test_stop_string(
         ref_str_exc_stop = ref_gen_str[:stop_str_idx]
         ref_str_inc_stop = ref_gen_str[:stop_str_idx] + stop_str
 
-        if include_stop_str_in_output:
+        if synthetic_output:
+            assert gen_str == "synthetic " * len(gen_tokens[request_id])
+        elif include_stop_str_in_output:
             assert gen_str == ref_str_inc_stop, f"{gen_str=}, {ref_str_inc_stop=}"
         else:
             assert gen_str == ref_str_exc_stop, f"{gen_str=}, {ref_str_exc_stop=}"

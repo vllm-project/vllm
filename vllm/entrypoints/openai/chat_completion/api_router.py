@@ -66,10 +66,16 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
             content=generator.model_dump(), status_code=generator.error.code
         )
 
-    elif isinstance(generator, ChatCompletionResponse):
+    synthetic_headers = (
+        {"x-vllm-synthetic-output": "true"} if handler.synthetic_output else {}
+    )
+    if isinstance(generator, ChatCompletionResponse):
         return JSONResponse(
             content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
+            headers={
+                **(metrics_header(metrics_header_format) or {}),
+                **synthetic_headers,
+            },
         )
 
     args = getattr(raw_request.app.state, "args", None)
@@ -77,6 +83,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     return StreamingResponse(
         content=with_sse_keep_alive(generator, float(keep_alive_interval)),
         media_type="text/event-stream",
+        headers=synthetic_headers,
     )
 
 

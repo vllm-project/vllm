@@ -329,6 +329,10 @@ class OpenAIServingResponses(GenerateBaseServing):
         | ResponsesResponse
         | ErrorResponse
     ):
+        if self.synthetic_output:
+            return self.create_error_response(
+                "The Responses API is unsupported with synthetic acceptance"
+            )
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
