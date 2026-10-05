@@ -4,13 +4,93 @@
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
+# Token logprobs = logits[token_ids] - logsumexp(logits), per row.
+#
+# Memory traffic: each row's vocabulary is read exactly ONCE. The only loop
+# over the vocabulary is `_online_max_sumexp`, which keeps a running
+# (max, sum of exp) so no separate max pass is needed. After that, only the
+# `num_logprobs` requested logits are re-loaded by `_gather_token_logprobs`
+# (a gather, not a vocab pass). Two kernel layouts share these helpers:
+#   * fused  (`_topk_log_softmax_kernel`): one program per row.
+#   * split  (`_partial_max_sumexp_kernel` + `_merge_and_gather_kernel`): each
+#     row's vocab is cut into disjoint chunks reduced by separate programs, so
+#     small batches can use more than `batch_size` programs. Each logit still
+#     belongs to exactly one chunk and is read once; stage 2 only reads the
+#     [batch_size, num_splits] partials.
+
 # Upper bound on the topk kernel's per-iteration gather width.
 _MAX_TOPK_BLOCK = 1024
+# Vocab tile width of the logsumexp loops.
+_BLOCK_SIZE = 1024
+# Split-vocab heuristic (see `_get_num_vocab_splits`).
+_SPLIT_TARGET_PROGRAMS_PER_SM = 2
+_SPLIT_MIN_CHUNK_SIZE = 8192
+_MAX_VOCAB_SPLITS = 64
+
+
+@triton.jit
+def _online_max_sumexp(
+    row_ptr,
+    start,
+    end,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Single-pass (online) max and sum(exp(x - max)) over row[start:end].
+
+    This is the only loop over the vocabulary: every logit in [start, end) is
+    loaded once, and the running sum is rescaled by exp(m_old - m_new)
+    whenever the running max grows.
+
+    Returns (m, s) in FP32 such that logsumexp(row[start:end]) = m + log(s).
+    An empty or all -inf range returns (-inf, 0), which is the identity of the
+    merge `M = max(m_i); S = sum(s_i * exp(m_i - M))`.
+    """
+    m = tl.full((), float("-inf"), tl.float32)
+    s = tl.zeros((), tl.float32)
+    for i in range(start, end, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < end
+        # NOTE(woosuk): Make sure that logits and all following operations use FP32.
+        x = tl.load(row_ptr + block, mask=mask, other=float("-inf")).to(tl.float32)
+        m_new = tl.maximum(m, tl.max(x, axis=0))
+        # While the running max is still -inf (only -inf seen so far), shift
+        # by 0 instead to avoid (-inf) - (-inf) = NaN. exp(-inf - 0) = 0, so
+        # masked lanes and -inf logits contribute nothing either way.
+        m_safe = tl.where(m_new == float("-inf"), 0.0, m_new)
+        s = s * tl.exp(m - m_safe) + tl.sum(tl.exp(x - m_safe), axis=0)
+        m = m_new
+    return m, s
+
+
+@triton.jit
+def _gather_token_logprobs(
+    output_ptr,
+    row_ptr,
+    topk_ids_ptr,
+    topk_ids_stride,
+    req_idx,
+    topk,
+    max_val,
+    lse,
+    TOPK_BLOCK_SIZE: tl.constexpr,
+):
+    for j in range(0, topk, TOPK_BLOCK_SIZE):
+        k_offset = j + tl.arange(0, TOPK_BLOCK_SIZE)
+        k_mask = k_offset < topk
+        topk_ids = tl.load(
+            topk_ids_ptr + req_idx * topk_ids_stride + k_offset, mask=k_mask, other=0
+        )
+        logits = tl.load(row_ptr + topk_ids, mask=k_mask)
+        logits = logits.to(tl.float32)
+        o = logits - max_val - lse
+        tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
 
 @triton.jit
@@ -25,37 +105,101 @@ def _topk_log_softmax_kernel(
     BLOCK_SIZE: tl.constexpr,
     TOPK_BLOCK_SIZE: tl.constexpr,
 ):
+    # One program per row; single (online) pass over the vocab.
     req_idx = tl.program_id(0).to(tl.int64)
     row_ptr = logits_ptr + req_idx * logits_stride
 
-    max_val = float("-inf")
-    for i in range(0, vocab_size, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
-        max_val = tl.max(tl.maximum(logits, max_val))
-    max_val = max_val.to(tl.float32)  # type: ignore
-
-    se = 0.0
-    for i in range(0, vocab_size, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=0.0)
-        # NOTE(woosuk): Make sure that logits and all following operations use FP32.
-        logits = logits.to(tl.float32)
-        e = tl.exp(logits - max_val)
-        e = tl.where(block < vocab_size, e, 0.0)
-        se += tl.sum(e)
+    max_val, se = _online_max_sumexp(row_ptr, 0, vocab_size, BLOCK_SIZE)
     lse = tl.log(se)
+    _gather_token_logprobs(
+        output_ptr,
+        row_ptr,
+        topk_ids_ptr,
+        topk_ids_stride,
+        req_idx,
+        topk,
+        max_val,
+        lse,
+        TOPK_BLOCK_SIZE,
+    )
 
-    for j in range(0, topk, TOPK_BLOCK_SIZE):
-        k_offset = j + tl.arange(0, TOPK_BLOCK_SIZE)
-        k_mask = k_offset < topk
-        topk_ids = tl.load(
-            topk_ids_ptr + req_idx * topk_ids_stride + k_offset, mask=k_mask, other=0
-        )
-        logits = tl.load(row_ptr + topk_ids, mask=k_mask)
-        logits = logits.to(tl.float32)
-        o = logits - max_val - lse
-        tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
+
+@triton.jit
+def _partial_max_sumexp_kernel(
+    # [batch_size, num_splits]
+    partial_max_ptr,
+    # [batch_size, num_splits]
+    partial_sumexp_ptr,
+    num_splits,
+    logits_ptr,
+    logits_stride,
+    vocab_size,
+    chunk_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Split-vocab stage 1: grid = (batch_size, num_splits). Each program
+    # reduces one contiguous vocab chunk of its row to a local (max, sumexp).
+    req_idx = tl.program_id(0).to(tl.int64)
+    split_idx = tl.program_id(1)
+    row_ptr = logits_ptr + req_idx * logits_stride
+
+    start = split_idx * chunk_size
+    end = tl.minimum(start + chunk_size, vocab_size)
+    m, s = _online_max_sumexp(row_ptr, start, end, BLOCK_SIZE)
+    tl.store(partial_max_ptr + req_idx * num_splits + split_idx, m)
+    tl.store(partial_sumexp_ptr + req_idx * num_splits + split_idx, s)
+
+
+@triton.jit
+def _merge_and_gather_kernel(
+    output_ptr,
+    logits_ptr,
+    logits_stride,
+    topk_ids_ptr,
+    topk_ids_stride,
+    topk,
+    # [batch_size, num_splits]
+    partial_max_ptr,
+    # [batch_size, num_splits]
+    partial_sumexp_ptr,
+    num_splits,
+    PADDED_NUM_SPLITS: tl.constexpr,
+    TOPK_BLOCK_SIZE: tl.constexpr,
+):
+    # Split-vocab stage 2: grid = (batch_size,). Merge the per-chunk partials
+    # into the row's logsumexp, then gather logprobs at `topk_ids`.
+    req_idx = tl.program_id(0).to(tl.int64)
+    row_ptr = logits_ptr + req_idx * logits_stride
+
+    splits = tl.arange(0, PADDED_NUM_SPLITS)
+    split_mask = splits < num_splits
+    maxes = tl.load(
+        partial_max_ptr + req_idx * num_splits + splits,
+        mask=split_mask,
+        other=float("-inf"),
+    )
+    sumexps = tl.load(
+        partial_sumexp_ptr + req_idx * num_splits + splits,
+        mask=split_mask,
+        other=0.0,
+    )
+    max_val = tl.max(maxes, axis=0)
+    # Empty / all -inf chunks carry (-inf, 0) and add 0 * exp(-inf - M) = 0.
+    # If every chunk is -inf (an all -inf row), M = -inf and the result is
+    # NaN, which matches torch.log_softmax and the fused path.
+    se = tl.sum(sumexps * tl.exp(maxes - max_val), axis=0)
+    lse = tl.log(se)
+    _gather_token_logprobs(
+        output_ptr,
+        row_ptr,
+        topk_ids_ptr,
+        topk_ids_stride,
+        req_idx,
+        topk,
+        max_val,
+        lse,
+        TOPK_BLOCK_SIZE,
+    )
 
 
 @triton.jit
@@ -81,28 +225,127 @@ def _ranks_kernel(
     tl.store(output_ptr + req_idx, n)
 
 
+def _get_num_compute_units(device: torch.device) -> int:
+    try:
+        return num_compute_units(
+            device.index if device.index is not None else torch.cuda.current_device()
+        )
+    except Exception:
+        # Platform does not expose its compute-unit count; disable splitting.
+        return 0
+
+
+def _get_num_vocab_splits(
+    batch_size: int, vocab_size: int, device: torch.device
+) -> int:
+    """Number of programs to split each row's vocab across.
+
+    One program per row leaves most SMs idle for small decode batches (the
+    common case), so split each row across up to `_SPLIT_TARGET_PROGRAMS_PER_SM
+    * num_SMs / batch_size` programs, each handling at least
+    `_SPLIT_MIN_CHUNK_SIZE` logits. Returns 1 (the fused single-kernel path)
+    when splitting would not help, and always under VLLM_BATCH_INVARIANT since
+    the split count depends on the batch size and changes the FP32
+    accumulation order.
+    """
+    if envs.VLLM_BATCH_INVARIANT:
+        return 1
+    target_programs = _get_num_compute_units(device) * _SPLIT_TARGET_PROGRAMS_PER_SM
+    num_splits = min(
+        target_programs // max(batch_size, 1),
+        triton.cdiv(vocab_size, _SPLIT_MIN_CHUNK_SIZE),
+        _MAX_VOCAB_SPLITS,
+    )
+    if num_splits < 2:
+        return 1
+    # Round down to a power of 2 to bound the number of compiled variants of
+    # the merge kernel (PADDED_NUM_SPLITS is a constexpr).
+    return 1 << (num_splits.bit_length() - 1)
+
+
 def compute_token_logprobs(
-    logits: torch.Tensor, token_ids: torch.Tensor
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+    num_vocab_splits: int | None = None,
 ) -> torch.Tensor:
+    """Compute log_softmax(logits)[i, token_ids[i, j]] for every (i, j).
+
+    Args:
+        logits: [batch_size, vocab_size] logits (fp32/bf16/fp16). The row
+            stride may be arbitrary (e.g. a slice of a padded buffer).
+        token_ids: [batch_size, num_logprobs] integer token ids.
+        num_vocab_splits: Override for the number of programs per row (testing
+            and benchmarking only). None picks it from the batch size and the
+            device's SM count; 1 forces the fused single-kernel path.
+
+    Returns:
+        [batch_size, num_logprobs] FP32 logprobs.
+
+    """
     # NOTE(woosuk): To save GPU memory, we do not materialize the full
-    # [batch_size, vocab_size] logprobs tensor. The kernel computes
-    # max + logsumexp per row and only emits logprobs at `token_ids`.
+    # [batch_size, vocab_size] logprobs tensor. The kernels compute the row
+    # max + logsumexp in a single online pass and only emit logprobs at
+    # `token_ids`.
     batch_size, vocab_size = logits.shape
     token_ids = token_ids.to(torch.int64)
     num_logprobs = token_ids.shape[1]
     logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
+    if batch_size == 0 or num_logprobs == 0:
+        return logprobs
+    # The kernels index columns with unit stride (rows may be strided).
+    if logits.stride(1) != 1:
+        logits = logits.contiguous()
+    if token_ids.stride(1) != 1:
+        token_ids = token_ids.contiguous()
     # Cap the kernel's per-iteration width so very large num_logprobs requests
     # stream the gather in bounded-size chunks, avoiding excessive mem use.
     topk_block_size = min(triton.next_power_of_2(num_logprobs), _MAX_TOPK_BLOCK)
-    _topk_log_softmax_kernel[(batch_size,)](
+
+    if num_vocab_splits is None:
+        num_vocab_splits = _get_num_vocab_splits(batch_size, vocab_size, logits.device)
+    assert num_vocab_splits >= 1
+
+    if num_vocab_splits == 1:
+        _topk_log_softmax_kernel[(batch_size,)](
+            logprobs,
+            logits,
+            logits.stride(0),
+            token_ids,
+            token_ids.stride(0),
+            num_logprobs,
+            vocab_size,
+            BLOCK_SIZE=_BLOCK_SIZE,  # type: ignore
+            TOPK_BLOCK_SIZE=topk_block_size,
+        )
+        return logprobs
+
+    # Split-vocab path: stage 1 reduces each (row, chunk) to a local
+    # (max, sumexp); stage 2 merges them and gathers the requested logprobs.
+    chunk_size = triton.cdiv(triton.cdiv(vocab_size, num_vocab_splits), _BLOCK_SIZE)
+    chunk_size *= _BLOCK_SIZE
+    partial_max = logits.new_empty((batch_size, num_vocab_splits), dtype=torch.float32)
+    partial_sumexp = torch.empty_like(partial_max)
+    _partial_max_sumexp_kernel[(batch_size, num_vocab_splits)](
+        partial_max,
+        partial_sumexp,
+        num_vocab_splits,
+        logits,
+        logits.stride(0),
+        vocab_size,
+        chunk_size,
+        BLOCK_SIZE=_BLOCK_SIZE,  # type: ignore
+    )
+    _merge_and_gather_kernel[(batch_size,)](
         logprobs,
         logits,
         logits.stride(0),
         token_ids,
         token_ids.stride(0),
         num_logprobs,
-        vocab_size,
-        BLOCK_SIZE=1024,  # type: ignore
+        partial_max,
+        partial_sumexp,
+        num_vocab_splits,
+        PADDED_NUM_SPLITS=triton.next_power_of_2(num_vocab_splits),
         TOPK_BLOCK_SIZE=topk_block_size,
     )
     return logprobs

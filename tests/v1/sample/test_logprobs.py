@@ -3,6 +3,7 @@
 
 import itertools
 import math
+import os
 from collections.abc import Generator
 from types import SimpleNamespace
 from typing import get_args
@@ -1600,3 +1601,229 @@ def test_token_logprobs_large_batch_int64_row_offset():
     assert torch.allclose(logprobs[last, 0], ref, atol=1e-2), (
         f"logprob {logprobs[last, 0].item()} != ref {ref.item()}"
     )
+
+
+# ---------------------------------------------------------------------------
+# compute_token_logprobs kernel correctness (Model Runner V2).
+#
+# Runs on GPU, or on CPU tensors under Triton's interpreter
+# (TRITON_INTERPRET=1), so sizes are kept small. `num_vocab_splits=1` forces
+# the fused one-program-per-row kernel; >1 forces the split-vocab kernels
+# (3 is non-power-of-2, 8 exceeds the number of 1024-wide tiles for small
+# vocabs so some chunks are empty); None uses the auto heuristic.
+# ---------------------------------------------------------------------------
+_TOKEN_LOGPROB_SPLITS = [None, 1, 2, 3, 8]
+
+
+def _token_logprobs_device() -> str:
+    if os.environ.get("TRITON_INTERPRET") == "1":
+        return "cpu"
+    if not current_platform.is_cuda_alike():
+        pytest.skip("needs a CUDA/ROCm GPU or TRITON_INTERPRET=1")
+    return "cuda"
+
+
+def _ref_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor):
+    ref = torch.log_softmax(logits.double(), dim=-1)
+    return ref.gather(-1, token_ids.long()).float()
+
+
+def _assert_token_logprobs_close(out, ref, atol=1e-4, rtol=1e-5):
+    assert out.dtype == torch.float32 and out.shape == ref.shape
+    # Matching +-inf compare equal; NaN rows (all -inf / +inf / NaN input)
+    # must be NaN in both.
+    torch.testing.assert_close(out, ref, atol=atol, rtol=rtol, equal_nan=True)
+
+
+def _apply_neg_inf_mask(logits: torch.Tensor, pattern: str) -> None:
+    vocab_size = logits.shape[1]
+    ninf = float("-inf")
+    if pattern == "partial":  # scattered mask (top-k/top-p, bad words)
+        logits[:, 1::3] = ninf
+    elif pattern == "prefix":  # running max is -inf for the first tiles
+        logits[:, : max(vocab_size - 3, 0)] = ninf
+    elif pattern == "suffix":  # trailing tiles / chunks fully masked
+        logits[:, 3:] = ninf
+    elif pattern == "single":  # one finite logit -> logprob 0 there
+        logits[:] = ninf
+        logits[:, vocab_size // 2] = 1.5
+    elif pattern == "full":  # all -inf -> NaN, as torch.log_softmax
+        logits[1] = ninf
+
+
+@pytest.mark.parametrize("num_vocab_splits", _TOKEN_LOGPROB_SPLITS)
+@pytest.mark.parametrize(
+    "mask", ["none", "partial", "prefix", "suffix", "single", "full"]
+)
+@pytest.mark.parametrize("vocab_size", [1, 7, 1023, 1025, 3001])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+def test_compute_token_logprobs_matches_torch(
+    dtype, vocab_size, mask, num_vocab_splits
+):
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    device = _token_logprobs_device()
+    torch.manual_seed(0)
+    batch_size, num_logprobs = 3, 6
+    logits = (torch.randn(batch_size, vocab_size, device=device) * 4).to(dtype)
+    _apply_neg_inf_mask(logits, mask)
+    token_ids = torch.randint(0, vocab_size, (batch_size, num_logprobs), device=device)
+    # Always gather the first, middle and last vocab entries.
+    token_ids[:, 0] = 0
+    token_ids[:, 1] = vocab_size // 2
+    token_ids[:, 2] = vocab_size - 1
+
+    out = compute_token_logprobs(logits, token_ids, num_vocab_splits)
+    ref = _ref_token_logprobs(logits, token_ids)
+    _assert_token_logprobs_close(out, ref)
+    if mask == "full":
+        assert torch.isnan(out[1]).all()
+        assert not torch.isnan(out[[0, 2]]).any()  # other rows unaffected
+    elif mask == "single":
+        assert torch.all(out[:, 1] == 0)
+    else:
+        assert not torch.isnan(out).any()
+
+
+@pytest.mark.parametrize("num_vocab_splits", [1, 4])
+@pytest.mark.parametrize("num_logprobs", [1, 1023, 1024, 1025, 2100])
+def test_compute_token_logprobs_many_logprobs(num_logprobs, num_vocab_splits):
+    """num_logprobs around and above the 1024-wide gather tile."""
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    device = _token_logprobs_device()
+    torch.manual_seed(0)
+    vocab_size = 3001
+    logits = torch.randn(2, vocab_size, device=device) * 3
+    token_ids = torch.randint(0, vocab_size, (2, num_logprobs), device=device)
+    out = compute_token_logprobs(logits, token_ids, num_vocab_splits)
+    _assert_token_logprobs_close(out, _ref_token_logprobs(logits, token_ids))
+
+
+@pytest.mark.parametrize("num_vocab_splits", [1, 3])
+def test_compute_token_logprobs_strided_and_int32(num_vocab_splits):
+    """Row-strided logits (slice of a padded buffer whose padding is +inf /
+    NaN, so any read past vocab_size would show up), int32 token ids, and
+    non-unit-stride inputs (fall back to a contiguous copy)."""
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    device = _token_logprobs_device()
+    torch.manual_seed(0)
+    vocab_size = 2050
+    buf = torch.randn(4, vocab_size + 30, device=device)
+    buf[:, vocab_size:] = float("inf")
+    buf[::2, vocab_size:] = float("nan")
+    logits = buf[:, :vocab_size]
+    token_ids = torch.randint(0, vocab_size, (4, 5), device=device)
+    token_ids[:, 0] = vocab_size - 1
+    out = compute_token_logprobs(logits, token_ids.int(), num_vocab_splits)
+    assert torch.isfinite(out).all()
+    _assert_token_logprobs_close(out, _ref_token_logprobs(logits, token_ids))
+
+    logits_t = torch.randn(vocab_size, 3, device=device).t()  # stride (1, 3)
+    ids_t = torch.randint(0, vocab_size, (5, 3), device=device).t()
+    out = compute_token_logprobs(logits_t, ids_t, num_vocab_splits)
+    _assert_token_logprobs_close(out, _ref_token_logprobs(logits_t, ids_t))
+
+
+@pytest.mark.parametrize("bad_value", [float("inf"), float("nan")])
+@pytest.mark.parametrize("position", [0, 1500, 2999])
+@pytest.mark.parametrize("num_vocab_splits", [1, 3])
+def test_compute_token_logprobs_non_finite_row_isolated(
+    bad_value, position, num_vocab_splits
+):
+    """+inf / NaN logits make their row NaN (as torch) and nothing else."""
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    device = _token_logprobs_device()
+    torch.manual_seed(0)
+    logits = torch.randn(3, 3000, device=device)
+    logits[1, position] = bad_value
+    token_ids = torch.randint(0, 3000, (3, 4), device=device)
+    out = compute_token_logprobs(logits, token_ids, num_vocab_splits)
+    assert torch.isnan(out[1]).all()
+    ref = _ref_token_logprobs(logits, token_ids)
+    _assert_token_logprobs_close(out[[0, 2]], ref[[0, 2]])
+
+
+@pytest.mark.parametrize("num_vocab_splits", [1, 3])
+@pytest.mark.parametrize(
+    "dtype,offset,scale",
+    [
+        (torch.float32, 1e4, 1.0),  # needs the max shift to avoid overflow
+        (torch.float32, -1e4, 1.0),
+        (torch.float32, 0.0, 1e3),  # very peaked
+        (torch.float16, 6e4, 1.0),  # near fp16 max
+        (torch.float32, 0.0, 1e-6),  # nearly uniform
+    ],
+)
+def test_compute_token_logprobs_extreme_values(num_vocab_splits, dtype, offset, scale):
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    device = _token_logprobs_device()
+    torch.manual_seed(0)
+    logits = (torch.randn(2, 3000, device=device) * scale + offset).to(dtype)
+    # Put the row max in the last tile so the running sum is rescaled late.
+    logits[:, -1] = logits.max(dim=-1).values
+    token_ids = torch.randint(0, 3000, (2, 5), device=device)
+    token_ids[:, 0] = 2999
+    out = compute_token_logprobs(logits, token_ids, num_vocab_splits)
+    assert torch.isfinite(out).all() and (out <= 1e-5).all()
+    atol = 1e-4 + 2 * torch.finfo(torch.float32).eps * abs(offset)
+    _assert_token_logprobs_close(out, _ref_token_logprobs(logits, token_ids), atol=atol)
+
+
+def test_compute_token_logprobs_fused_and_split_agree():
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    device = _token_logprobs_device()
+    torch.manual_seed(0)
+    logits = torch.randn(3, 5000, device=device) * 4
+    token_ids = torch.arange(5000, device=device).repeat(3, 1)  # full vocab
+    fused = compute_token_logprobs(logits, token_ids, 1)
+    for splits in (2, 3, 4, 5, 8):
+        split = compute_token_logprobs(logits, token_ids, splits)
+        torch.testing.assert_close(split, fused, atol=2e-5, rtol=1e-6)
+    # exp(logprobs) over the whole vocab sums to 1.
+    sums = fused.double().exp().sum(dim=-1)
+    torch.testing.assert_close(sums, torch.ones_like(sums), atol=1e-5, rtol=0)
+
+
+@pytest.mark.parametrize("num_vocab_splits", [None, 1, 3])
+def test_compute_token_logprobs_empty(num_vocab_splits):
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    device = _token_logprobs_device()
+    logits = torch.randn(0, 100, device=device)
+    out = compute_token_logprobs(
+        logits, torch.zeros(0, 4, dtype=torch.long, device=device), num_vocab_splits
+    )
+    assert out.shape == (0, 4)
+    logits = torch.randn(2, 100, device=device)
+    out = compute_token_logprobs(
+        logits, torch.zeros(2, 0, dtype=torch.long, device=device), num_vocab_splits
+    )
+    assert out.shape == (2, 0)
+
+
+@pytest.mark.parametrize("num_sms", [0, 1, 108, 132])
+@pytest.mark.parametrize("batch_size", [0, 1, 3, 64, 256, 4096])
+@pytest.mark.parametrize("vocab_size", [1, 8192, 8193, 151936, 262400])
+def test_num_vocab_splits_heuristic(monkeypatch, num_sms, batch_size, vocab_size):
+    import vllm.envs as envs
+    from vllm.v1.worker.gpu.sample import logprob as logprob_mod
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False, raising=False)
+    monkeypatch.setattr(logprob_mod, "_get_num_compute_units", lambda _: num_sms)
+    dev = torch.device("cpu")
+    n = logprob_mod._get_num_vocab_splits(batch_size, vocab_size, dev)
+    assert 1 <= n <= logprob_mod._MAX_VOCAB_SPLITS and n & (n - 1) == 0
+    if n > 1:
+        assert batch_size * n <= 2 * num_sms  # never oversubscribe
+        assert vocab_size > (n - 1) * logprob_mod._SPLIT_MIN_CHUNK_SIZE
+    if num_sms == 132 and vocab_size == 151936:
+        assert n == {0: 16, 1: 16, 3: 16, 64: 4, 256: 1, 4096: 1}[batch_size]
+
+    # Split count depends on batch size, so batch-invariant mode disables it.
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True, raising=False)
+    assert logprob_mod._get_num_vocab_splits(batch_size, vocab_size, dev) == 1
