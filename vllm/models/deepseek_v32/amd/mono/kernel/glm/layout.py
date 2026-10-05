@@ -9,7 +9,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 # Modified by the vLLM project contributors (Apache-2.0 sec. 4(b)): import paths rewritten to this package;
 #   POLL_STAGES and the poll_err / poll_abort scratch words, scratch regions of the in-kernel indexer,
-#   a split_keys override of the sparse-MLA split task size.
+#   a split_keys override of the sparse-MLA split task size; the DCP region and unused helpers removed.
 
 """Compile-time storage layout and CTA schedule for the GLM-5 MonoKernel."""
 

@@ -11,7 +11,7 @@
 #   host wrapper options for the kernel changes in glm/kernel.py (poll limit / early-out, step epochs,
 #   in-kernel indexer tables and options, build-time stage options), the cross-rank poll-expiry flag
 #   and per-launch argument caching;
-#   torch.accelerator in place of torch.cuda device calls.
+#   torch.accelerator in place of torch.cuda device calls; the unused format / DCP / timeline options removed.
 
 """Host wrapper for the GLM-5 indexed decode MonoKernel."""
 
