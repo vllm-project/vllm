@@ -702,6 +702,21 @@ class NixlBaseConnectorWorker:
                         start(rank, 1, remote, remote_num_blocks[remote_region]),
                     )
                 )
+        if any(units > 1 and remote_units > 1 for _, units, remote_units in model_wide):
+            block_size = self.vllm_config.cache_config.block_size
+            # The remote block size is its smallest attention page.
+            remote_block_size = (
+                nixl_agent_meta.physical_blocks_per_logical_kv_block
+                * min(tokens for *_, tokens in remote_of.values() if tokens)
+            )
+            logger.info_once(
+                "KV pages of engine %s and this engine don't divide each other, so "
+                "they transfer in small token units. --block-size %d on %s gives "
+                "both engines the same block size, at some KV cache capacity there.",
+                nixl_agent_meta.engine_id,
+                max(block_size, remote_block_size),
+                "this engine" if block_size < remote_block_size else "that engine",
+            )
         # The model-wide mapping reads whole remote pages: pull fills larger
         # local pages from one remote rank only, push writes equal pages at
         # equal logical block sizes. Without Mamba, it does not map heads
