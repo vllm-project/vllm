@@ -44,6 +44,7 @@ impl TokenizeCompletionRequest {
         TextRequest {
             request_id,
             prompt: Prompt::Text(self.prompt),
+            prompt_token_offsets: None,
             mm_features: None,
             sampling_params: SamplingParams::default(),
             decode_options: TextDecodeOptions::default(),

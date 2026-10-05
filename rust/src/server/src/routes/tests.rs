@@ -48,6 +48,7 @@ use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
+use vllm_tokenizer::HuggingFaceTokenizer;
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -435,6 +436,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 struct FakeChatBackend {
     model_id: String,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
+    tokenizer: Option<DynTokenizer>,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -459,6 +461,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: None,
+            tokenizer: None,
         }
     }
 
@@ -466,6 +469,7 @@ impl FakeChatBackend {
         Self {
             model_id: model_id.into(),
             multimodal_model_info: None,
+            tokenizer: None,
         }
     }
 
@@ -475,6 +479,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
+            tokenizer: None,
         }
     }
 }
@@ -489,7 +494,7 @@ impl fmt::Debug for FakeChatBackend {
 
 impl TextBackend for FakeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(fake_chat_tokenizer())
+        self.tokenizer.clone().unwrap_or_else(|| Arc::new(fake_chat_tokenizer()))
     }
 
     fn model_id(&self) -> &str {
@@ -690,19 +695,28 @@ fn test_render_app_with_parser_selections(
     tool_call_parser: ParserSelection,
     reasoning_parser: ParserSelection,
 ) -> axum::Router {
-    test_render_app_with(Some(128), tool_call_parser, reasoning_parser)
+    test_render_app_with(Some(128), tool_call_parser, reasoning_parser, None)
 }
 
 fn test_render_app_with_max_model_len(max_model_len: Option<u32>) -> axum::Router {
-    test_render_app_with(max_model_len, ParserSelection::Auto, ParserSelection::Auto)
+    test_render_app_with(
+        max_model_len,
+        ParserSelection::Auto,
+        ParserSelection::Auto,
+        None,
+    )
 }
 
 fn test_render_app_with(
     max_model_len: Option<u32>,
     tool_call_parser: ParserSelection,
     reasoning_parser: ParserSelection,
+    tokenizer: Option<DynTokenizer>,
 ) -> axum::Router {
-    let backend = Arc::new(FakeChatBackend::new());
+    let backend = Arc::new(FakeChatBackend {
+        tokenizer,
+        ..FakeChatBackend::new()
+    });
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
         served_model_names: vec!["render-model".to_string()],
@@ -711,6 +725,33 @@ fn test_render_app_with(
         chat: ChatRequestProcessor::render_only(backend)
             .with_parser_selections(tool_call_parser, reasoning_parser),
     }))
+}
+
+fn test_render_app_with_offsets() -> axum::Router {
+    let dir = tempfile::tempdir().expect("create tokenizer directory");
+    let path = dir.path().join("tokenizer.json");
+    fs::write(
+        &path,
+        json!({
+            "version": "1.0",
+            "added_tokens": [],
+            "pre_tokenizer": {"type": "WhitespaceSplit"},
+            "model": {
+                "type": "WordLevel",
+                "vocab": {"<unk>": 0, "café": 1, "🙂": 2, "user:": 3, "assistant:": 4},
+                "unk_token": "<unk>"
+            }
+        })
+        .to_string(),
+    )
+    .expect("write tokenizer");
+    let tokenizer = HuggingFaceTokenizer::new_hf(&path).expect("load tokenizer");
+    test_render_app_with(
+        Some(128),
+        ParserSelection::Auto,
+        ParserSelection::Auto,
+        Some(Arc::new(tokenizer)),
+    )
 }
 
 async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
@@ -1366,6 +1407,7 @@ async fn render_chat_returns_generate_request_with_header_request_id() {
     assert!(!json["token_ids"].as_array().unwrap().is_empty());
     assert!(json.get("prompt_token_ids").is_none());
     assert!(json.get("mm_features").is_none());
+    assert_eq!(json.get("token_offsets"), Some(&serde_json::Value::Null));
 }
 
 #[tokio::test]
@@ -1438,6 +1480,98 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert!(json[0].get("mm_features").is_none());
     assert!(json[0].get("reasoning_ended").is_none());
     assert!(json[0].get("reasoning_parser_kwargs").is_none());
+    assert_eq!(json[0].get("token_offsets"), Some(&serde_json::Value::Null));
+}
+
+#[tokio::test]
+async fn render_offsets_use_prompt_characters_and_follow_truncation() {
+    let mut app = test_render_app_with_offsets();
+    for (route, input, expected_ids, expected_offsets) in [
+        (
+            "completions",
+            json!({"prompt": "café 🙂"}),
+            json!([1, 2]),
+            json!([[0, 4], [5, 6]]),
+        ),
+        (
+            "chat/completions",
+            json!({"messages": [{"role": "user", "content": "café 🙂"}]}),
+            json!([3, 1, 2, 4]),
+            json!([[0, 5], [6, 10], [11, 12], [13, 23]]),
+        ),
+    ] {
+        for side in [None, Some("left"), Some("right")] {
+            let mut request = input.clone();
+            request["model"] = json!("render-model");
+            request["max_tokens"] = json!(8);
+            request["add_special_tokens"] = json!(false);
+            request["return_token_offsets"] = json!(true);
+            if let Some(side) = side {
+                request["truncate_prompt_tokens"] = json!(1);
+                request["truncation_side"] = json!(side);
+            }
+            let (status, json) = post_json(&mut app, &format!("/v1/{route}/render"), request).await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            let rendered = if route == "completions" {
+                &json[0]
+            } else {
+                &json
+            };
+            let ids = expected_ids.as_array().unwrap();
+            let offsets = expected_offsets.as_array().unwrap();
+            let range = match side {
+                Some("left") => ids.len() - 1..ids.len(),
+                Some("right") => 0..1,
+                _ => 0..ids.len(),
+            };
+            assert_eq!(rendered["token_ids"], json!(ids[range.clone()]));
+            assert_eq!(rendered["token_offsets"], json!(offsets[range]));
+        }
+    }
+}
+
+#[tokio::test]
+async fn render_offsets_are_opt_in_and_require_source_text() {
+    let mut app = test_render_app_with_offsets();
+    for (prompt, flag) in [
+        (json!("café 🙂"), json!(false)),
+        (json!("café 🙂"), serde_json::Value::Null),
+        (json!([1, 2]), json!(true)),
+    ] {
+        let (status, body) = post_json(
+            &mut app,
+            "/v1/completions/render",
+            json!({"model": "render-model", "prompt": prompt, "return_token_offsets": flag}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body[0].get("token_offsets"), Some(&serde_json::Value::Null));
+    }
+}
+
+#[tokio::test]
+async fn render_request_preserves_normalization_and_validation() {
+    let mut app = test_render_app_with_offsets();
+    let request = json!({
+        "model": "render-model", "prompt": "café 🙂",
+        "max_tokens": null, "return_token_offsets": true
+    });
+    let (status, body) = post_json(&mut app, "/v1/completions/render", request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body[0]["sampling_params"]["max_tokens"], 16);
+    for (route, mut request) in [
+        ("completions", json!({"prompt": "café 🙂"})),
+        (
+            "chat/completions",
+            json!({"messages": [{"role": "user", "content": "café 🙂"}]}),
+        ),
+    ] {
+        request["model"] = json!("render-model");
+        request["cache_salt"] = json!("");
+        let (status, body) = post_json(&mut app, &format!("/v1/{route}/render"), request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"]["message"].as_str().unwrap().contains("cache_salt"));
+    }
 }
 
 #[tokio::test]
@@ -1463,7 +1597,7 @@ async fn render_list_models_reports_configured_max_model_len() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
-    let mut render_app = test_render_app();
+    let mut render_app = test_render_app_with_offsets();
     let render_response = render_app
         .call(
             Request::builder()
@@ -1476,6 +1610,7 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                         "model": "render-model",
                         "messages": [{"role": "user", "content": "hello"}],
                         "max_completion_tokens": 8,
+                        "return_token_offsets": true,
                         "bad_words": ["blocked"],
                         "vllm_xargs": {"custom": 1},
                         "chat_template_kwargs": {"enable_thinking": false}
@@ -1495,6 +1630,10 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         serde_json::from_slice(&render_body).expect("decode render response");
     let token_ids: Vec<u32> = serde_json::from_value(render_json["token_ids"].clone())
         .expect("decode rendered token IDs");
+    assert_eq!(
+        render_json["token_offsets"],
+        json!([[0, 5], [6, 11], [12, 22]])
+    );
 
     assert_eq!(
         render_json["sampling_params"]["bad_words"],
