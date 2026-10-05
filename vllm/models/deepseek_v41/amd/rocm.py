@@ -205,12 +205,16 @@ def combine_topk_swa_indices(
 
     # query_start_loc may have a non-zero base for a narrowed mixed batch.
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    # query_lens sums to num_tokens; passing it as output_size keeps
+    # repeat_interleave from syncing with the host to size its output.
     req_ids = torch.repeat_interleave(
-        torch.arange(seq_lens.shape[0], device=seq_lens.device), query_lens
+        torch.arange(seq_lens.shape[0], device=seq_lens.device),
+        query_lens,
+        output_size=num_tokens,
     )
     query_starts = query_start_loc[:-1] - query_start_loc[0]
     token_offsets = torch.arange(num_tokens, device=seq_lens.device) - (
-        torch.repeat_interleave(query_starts, query_lens)
+        torch.repeat_interleave(query_starts, query_lens, output_size=num_tokens)
     )
     positions = seq_lens[req_ids] - query_lens[req_ids] + token_offsets
 
