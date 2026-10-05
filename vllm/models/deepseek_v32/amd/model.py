@@ -258,7 +258,6 @@ class DeepseekV32Model(torch.nn.Module):
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -270,7 +269,7 @@ class DeepseekV32Model(torch.nn.Module):
             if _try_load_fp8_indexer_wk(
                 name,
                 loaded_weight,
-                _pending_wk_fp8,
+                self,
                 params_dict,
                 loaded_params,
                 pp_missing_layer_names,

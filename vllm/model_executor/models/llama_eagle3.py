@@ -19,6 +19,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.models.llama import (
     LlamaAttention,
     LlamaForCausalLM,
@@ -447,7 +450,11 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
 
-        if not includes_mask_hidden and self.use_parallel_drafting:
+        if (
+            not includes_mask_hidden
+            and self.use_parallel_drafting
+            and is_mtp_completeness_check_enabled()
+        ):
             raise ValueError(
                 "mask_hidden not found in weights but "
                 "model is configured for parallel drafting. "

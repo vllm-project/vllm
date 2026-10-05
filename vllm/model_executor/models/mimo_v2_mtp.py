@@ -37,7 +37,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    stash_weight_part,
+)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (
@@ -271,13 +274,6 @@ class MiMoV2MTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        # The pairing state must outlive this call: AutoWeightsLoader delegates
-        # per contiguous group of names, so a pair can straddle two calls and
-        # would otherwise be dropped silently.
-        pending_qkv_proj = getattr(self, "_pending_qkv_proj", None)
-        if pending_qkv_proj is None:
-            self._pending_qkv_proj = pending_qkv_proj = {}
-
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -310,12 +306,16 @@ class MiMoV2MTP(nn.Module):
                         or f"{prefix}.weight_scale_inv" not in params_dict
                     ):
                         continue
-                    entry = pending_qkv_proj.setdefault(prefix, {})
-                    entry[kind] = loaded_weight
-                    if "weight" not in entry or "weight_scale_inv" not in entry:
+                    entry = stash_weight_part(
+                        self,
+                        prefix,
+                        kind,
+                        loaded_weight,
+                        ("weight", "weight_scale_inv"),
+                    )
+                    if entry is None:
                         # Waiting for the other half of the fused projection.
                         continue
-                    del pending_qkv_proj[prefix]
 
                     # Geometry comes from the module the weights belong to.
                     attn = self.get_submodule(prefix.rsplit(".", 1)[0])

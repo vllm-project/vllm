@@ -773,8 +773,6 @@ class HYV4MTP(nn.Module):
             (".wk_weights_proj", ".wk", 0),
             (".wk_weights_proj", ".weights_proj", 1),
         ]
-        # FP8 indexer wk dequant buffer (weight and scale arrive separately).
-        pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
 
         for name, loaded_weight in weights:
             if name in shared_weights:
@@ -835,7 +833,7 @@ class HYV4MTP(nn.Module):
             if _try_load_fp8_indexer_wk(
                 name,
                 loaded_weight,
-                pending_wk_fp8,
+                self,
                 params_dict,
                 loaded_params,
                 pp_missing_layer_names,

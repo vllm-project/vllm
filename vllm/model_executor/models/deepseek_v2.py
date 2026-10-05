@@ -93,6 +93,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    stash_weight_part,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -855,7 +856,7 @@ class Indexer(nn.Module):
 
 
 def _try_load_fp8_indexer_wk(
-    name, tensor, buf, params_dict, loaded_params, pp_missing_layer_names
+    name, tensor, module, params_dict, loaded_params, pp_missing_layer_names
 ):
     """We fuse the WK and weights_proj projections, but in some checkpoints WK is stored
     in FP8 with a separate weight_scale_inv, while weights_proj is stored in BF16.
@@ -877,14 +878,14 @@ def _try_load_fp8_indexer_wk(
         for missing_layer_name in pp_missing_layer_names
     ):
         return True
-    entry = buf.setdefault(layer_prefix, {})
-    entry["weight" if is_weight else "scale"] = tensor
-    if "weight" not in entry or "scale" not in entry:
+    entry = stash_weight_part(
+        module, layer_prefix, "weight" if is_weight else "scale", tensor
+    )
+    if entry is None:
         return True  # still waiting for the other param
 
     # We have both weight and scale: dequantize FP8 to BF16.
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
-    del buf[layer_prefix]
     if scale_inv.dtype in (torch.uint8, torch.float8_e8m0fnu):
         # MXFP8 checkpoints store power-of-two E8M0 scales, decode them to float.
         scale_inv = scale_inv.view(torch.float8_e8m0fnu).to(torch.float32)
@@ -1607,10 +1608,6 @@ class DeepseekV2Model(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
-        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
-        if _pending_wk_fp8 is None:
-            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
-
         indexer_fused_mapping = [
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
@@ -1666,7 +1663,7 @@ class DeepseekV2Model(nn.Module):
             if _try_load_fp8_indexer_wk(
                 name,
                 loaded_weight,
-                _pending_wk_fp8,
+                self,
                 params_dict,
                 loaded_params,
                 pp_missing_layer_names,

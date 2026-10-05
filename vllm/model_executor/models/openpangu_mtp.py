@@ -45,7 +45,7 @@ from vllm.model_executor.models.deepseek_mtp import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
 
-from .openpangu import OpenPanguDecoderLayer
+from .openpangu import OpenPanguDecoderLayer, run_post_weight_load
 
 
 class OpenPanguMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
@@ -240,6 +240,9 @@ class OpenPanguMTP(nn.Module):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        run_post_weight_load(self)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite the weight name to match the format of the original model.

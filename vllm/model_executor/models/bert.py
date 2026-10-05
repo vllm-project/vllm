@@ -955,6 +955,7 @@ class BertForMaskedLM(nn.Module):
             vocab_size=config.vocab_size,
             layer_norm_eps=getattr(config, "layer_norm_eps", 1e-12),
         )
+        self.tie_word_embeddings = getattr(config, "tie_word_embeddings", True)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -967,17 +968,16 @@ class BertForMaskedLM(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self.tie_word_embeddings:
+            loaded.add("mlm_head.decoder.weight")
+        return loaded
 
-        # The MLM decoder shares its weight with the input embeddings. When the
-        # checkpoint relies on `tie_word_embeddings` (e.g. google-bert/*) it
-        # doesn't ship an explicit decoder weight, so tie it here. Copy the
-        # first `vocab_size` rows since VocabParallelEmbedding may pad the vocab.
-        if "mlm_head.decoder.weight" not in loaded:
+    def process_weights_after_loading(self) -> None:
+        # Tied MLM decoder; copy `vocab_size` rows as VocabParallelEmbedding may pad.
+        if self.tie_word_embeddings:
             emb = self.bert.embeddings.word_embeddings.weight
             decoder = self.mlm_head.decoder.weight
             decoder.data.copy_(emb.data[: decoder.shape[0]])
-            loaded.add("mlm_head.decoder.weight")
-        return loaded
 
     def forward(
         self,
