@@ -521,20 +521,22 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
         "replicated_layout",
         "device_index",
         "world_size",
+        "tp_size",
         "data_parallel_size",
         "per_rank_engine",
         "expected_rank",
         "expected_owner",
     ),
     [
-        (True, 5, 4, 1, False, 0, False),  # shared slot, worker rank 1
-        (True, 0, 4, 1, False, 0, True),  # shared slot, worker rank 0
-        (False, 5, 4, 1, False, 1, False),  # 5 % 4 == 1
-        (False, 7, 4, 1, False, 3, False),  # 7 % 4 == 3
-        (False, 4, 4, 1, False, 0, True),  # next DP engine's worker rank 0
-        (True, 2, 4, 2, True, 0, True),  # replicated layout, next DP rank 0
-        (False, 2, 4, 2, True, 0, True),  # external DP engine 1, rank 0
-        (False, 3, 4, 2, True, 1, False),  # external DP engine 1, rank 1
+        (True, 5, 4, 4, 1, False, 0, False),  # shared slot, worker rank 1
+        (True, 0, 4, 4, 1, False, 0, True),  # shared slot, worker rank 0
+        (False, 5, 4, 4, 1, False, 1, False),  # 5 % 4 == 1
+        (False, 7, 4, 4, 1, False, 3, False),  # 7 % 4 == 3
+        (False, 4, 4, 4, 1, False, 0, True),  # next DP engine's worker rank 0
+        (True, 2, 4, 2, 2, True, 0, True),  # replicated layout, next DP rank 0
+        (False, 2, 4, 2, 2, True, 0, True),  # external DP engine 1, rank 0
+        (False, 3, 4, 2, 2, True, 1, False),  # external DP engine 1, rank 1
+        (False, 2, 4, 2, 1, True, 0, True),  # independent DP config, rank 0
     ],
 )
 def test_cpu_spec_create_worker_rank_assignment(
@@ -542,6 +544,7 @@ def test_cpu_spec_create_worker_rank_assignment(
     replicated_layout,
     device_index,
     world_size,
+    tp_size,
     data_parallel_size,
     per_rank_engine,
     expected_rank,
@@ -556,7 +559,7 @@ def test_cpu_spec_create_worker_rank_assignment(
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
         world_size=world_size,
-        tp_size=world_size // data_parallel_size if per_rank_engine else None,
+        tp_size=tp_size,
         data_parallel_size=data_parallel_size,
         per_rank_engine=per_rank_engine,
         replicated_layout=replicated_layout,
