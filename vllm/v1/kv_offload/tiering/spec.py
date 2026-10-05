@@ -356,9 +356,29 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     rank=None,
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
-                    unlink_owner=True,
+                    # The scheduler removes the name explicitly after the
+                    # worker-ordering check below; construction itself must
+                    # not unlink before that check runs.
+                    unlink_owner=False,
                 )
                 self._scheduler_mmap = scheduler_mmap
+                # EngineCore constructs this scheduler-side mapping only after
+                # synchronous worker initialize_from_config RPCs complete, so
+                # every TP worker has already mapped this generation.
+                # Except under torchrun, where each rank runs its own engine
+                # and there are no such RPCs to order us behind the other ranks'
+                # workers: a rank that has not opened the path yet would win
+                # O_EXCL and map a second, disjoint region.
+                if self.config.parallel.per_rank_engine:
+                    _all_workers_barrier()
+                # Unlinking is only safe because we joined a region the workers
+                # already created. Had we won O_EXCL we would be dropping the
+                # name of a region nobody else has mapped, and every worker
+                # opening afterwards would get its own private file.
+                assert not scheduler_mmap._creator, (
+                    "scheduler created the offload region instead of joining it"
+                )
+                scheduler_mmap.unlink()
 
                 # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(
