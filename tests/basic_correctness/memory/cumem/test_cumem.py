@@ -235,6 +235,38 @@ def test_discard_tags():
     assert torch.allclose(weights, torch.ones_like(weights))
 
 
+def host_rss() -> int:
+    """Resident host bytes of this process; pinned host memory counts here."""
+    with open("/proc/self/smaps_rollup") as f:
+        return next(int(line.split()[1]) << 10 for line in f if line[:4] == "Rss:")
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Pinned CPU backup")
+def test_wake_releases_pinned_cpu_backup():
+    """The CPU backup is held only while its tag is asleep and is returned to
+    the OS on wake, not kept resident (e.g. in torch's pinned host cache)."""
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("weights"):
+        weights = torch.arange(256 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
+    with allocator.use_memory_pool("kv_cache"):
+        kv = torch.empty(32 << 20, dtype=torch.uint8, device=DEVICE_TYPE)
+    expected = weights.clone()  # outside the pool, on the device: no host memory
+    half = weights.nbytes // 2
+
+    for _ in range(2):
+        awake = host_rss()
+        allocator.sleep(offload_tags="weights")
+        asleep = host_rss()
+        assert asleep >= awake + weights.nbytes
+        allocator.wake_up(tags=["kv_cache"])  # weights stay asleep: keep backup
+        assert host_rss() > asleep - half
+        allocator.wake_up(tags=["weights"])
+        assert host_rss() < asleep - half
+        assert torch.equal(weights, expected)
+    del kv
+
+
 @pytest.mark.parametrize("tag", ["workspace", None], ids=["workspace", "default"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_selective_wake_restores_internal_tags(tag):

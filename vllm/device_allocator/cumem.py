@@ -9,6 +9,7 @@
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
 import atexit
+import ctypes
 import gc
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -59,6 +60,23 @@ def create_and_map(allocation_handle: HandleType) -> None:
 
 def unmap_and_release(allocation_handle: HandleType) -> None:
     python_unmap_and_release(*allocation_handle)
+
+
+def alloc_cpu_backup(size: int) -> torch.Tensor:
+    # Pinned backups are owned here, not by torch's caching host allocator, so
+    # they are exact-sized and free_cpu_backup returns them to the OS.
+    if not PIN_MEMORY:
+        return torch.empty(size, dtype=torch.uint8)
+    ptr = libcudart.cudaHostAlloc(size).value
+    return torch.frombuffer(
+        (ctypes.c_uint8 * size).from_address(ptr), dtype=torch.uint8
+    )
+
+
+def free_cpu_backup(data: AllocationData) -> None:
+    if data.cpu_backup_tensor is not None and PIN_MEMORY:
+        libcudart.cudaFreeHost(data.cpu_backup_tensor.data_ptr())
+    data.cpu_backup_tensor = None
 
 
 def get_pluggable_allocator(
@@ -133,6 +151,8 @@ class CuMemAllocator:
             return
         try:
             instance.release_pools()
+            for data in instance.pointer_to_data.values():
+                free_cpu_backup(data)
         except Exception:
             logger.exception("CuMemAllocator singleton shutdown failed")
 
@@ -206,8 +226,7 @@ class CuMemAllocator:
         when memory is freed in the memory pool.
         """
         data = self.pointer_to_data.pop(ptr)
-        if data.cpu_backup_tensor is not None:
-            data.cpu_backup_tensor = None
+        free_cpu_backup(data)
         if data.is_asleep and current_platform.is_rocm():
             # On ROCm, sleep() already unmapped and released this allocation's
             # physical chunks and holds its virtual address as a placeholder
@@ -265,12 +284,7 @@ class CuMemAllocator:
             if data.tag in offload_tags:
                 backup_bytes += handle[1]
                 size_in_bytes = handle[1]
-                cpu_backup_tensor = torch.empty(
-                    size_in_bytes,
-                    dtype=torch.uint8,
-                    device="cpu",
-                    pin_memory=PIN_MEMORY,
-                )
+                cpu_backup_tensor = alloc_cpu_backup(size_in_bytes)
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
@@ -350,14 +364,9 @@ class CuMemAllocator:
                 create_and_map(handle)
                 data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
-                    cpu_backup_tensor = data.cpu_backup_tensor
-                    if cpu_backup_tensor is not None:
-                        size_in_bytes = (
-                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        )
-                        cpu_ptr = cpu_backup_tensor.data_ptr()
-                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                        data.cpu_backup_tensor = None
+                    backup = data.cpu_backup_tensor
+                    libcudart.cudaMemcpy(ptr, backup.data_ptr(), backup.nbytes)
+                    free_cpu_backup(data)
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
