@@ -332,6 +332,76 @@ def test_profiling_fallback_declines_off_rocm(rocm):
     assert maybe_rocm_profiling_fallback(result) is None
 
 
+@pytest.mark.parametrize("estimate_cudagraphs", ["1", "0"])
+@pytest.mark.parametrize("rocm_fallback", [False, True])
+def test_kv_cache_init_memory_is_consumed(
+    monkeypatch, rocm_fallback, estimate_cudagraphs
+):
+    """KV cache init memory counts as consumed once, apart from the graph
+    estimate and its opt-out flag, survives the ROCm fallback, and leaves the
+    profile result as measured."""
+    from vllm.config.compilation import CUDAGraphMode
+
+    graphs, init, headroom = 5 * GiB_bytes, 2 * GiB_bytes, GiB_bytes
+    result = _profile_result(
+        consumed=-RELEASED_BY_OTHERS if rocm_fallback else MEASURED_DROP,
+        reserved_after=TORCH_RESERVED,
+    )
+    result.transient_peak_headroom = headroom
+    result.non_kv_cache_memory = result.total_consumed + headroom
+
+    def profile_cudagraph_memory():
+        runner.kv_cache_init_memory = init
+        return graphs
+
+    runner = SimpleNamespace(
+        profile_run=lambda **_: None,
+        model_memory_usage=0,
+        profile_cudagraph_memory=profile_cudagraph_memory,
+    )
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+        ),
+        cache_config=SimpleNamespace(
+            kv_cache_memory_bytes=None, gpu_memory_utilization=0.9
+        ),
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        model_runner=runner,
+        init_snapshot=_snapshot(ANY_FREE_MEMORY),
+        requested_memory=8 * ANY_FREE_MEMORY,
+        randomize_dummy_inputs=False,
+        _scoped_allocator_max_split=lambda **_: nullcontext(),
+    )
+    worker.init_snapshot.total_memory = worker.requested_memory
+    monkeypatch.setenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", estimate_cudagraphs)
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker, "memory_profiling", lambda *_, **__: nullcontext(result)
+    )
+    monkeypatch.setattr(
+        gpu_worker,
+        "current_platform",
+        SimpleNamespace(
+            is_cuda_alike=lambda: True, is_xpu=lambda: False, is_rocm=lambda: True
+        ),
+    )
+
+    gpu_worker.Worker.determine_available_memory(worker)
+
+    consumed = (TORCH_RESERVED if rocm_fallback else MEASURED_DROP) + init
+    assert worker.total_consumed == consumed
+    assert result.total_consumed == consumed - init
+    assert result.non_kv_cache_memory == consumed - init + headroom
+    assert worker.available_kv_cache_memory_bytes == (
+        worker.requested_memory
+        - consumed
+        - headroom
+        - (graphs if estimate_cudagraphs == "1" else 0)
+    )
+
+
 class _OrderedHandle:
     """Send handle that logs when it is waited."""
 

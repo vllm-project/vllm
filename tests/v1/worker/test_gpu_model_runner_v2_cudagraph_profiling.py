@@ -63,6 +63,7 @@ def _make_profiling_runner(
         needs_capture, num_full_descs, piecewise_only
     )
     runner.vllm_config = SimpleNamespace()
+    runner.kv_caches = []
 
     events: list[str] = []
     runner.events = events
@@ -178,6 +179,27 @@ def test_profile_cudagraph_memory_piecewise_only_returns_measured(monkeypatch):
 
     # No FULL graphs to sample or extrapolate: the measured delta is exact.
     assert result == captured_bytes
+
+
+def test_profile_cudagraph_memory_measures_kv_cache_init_apart(monkeypatch):
+    """What the KV cache init allocates beside the cache is measured apart from
+    the graph estimate, and a cache shared by two layers is excluded once."""
+    _patch_module(monkeypatch)
+    mib = 1 << 20
+    kv_cache = torch.empty(3 * mib, dtype=torch.uint8)
+    free = iter([100 * mib, (100 - 3 - 7) * mib])
+    monkeypatch.setattr(
+        cgu.torch.accelerator, "get_memory_info", lambda: (next(free), 0)
+    )
+
+    def _init(r):
+        r.kv_caches = [kv_cache, kv_cache[:mib]]
+
+    monkeypatch.setattr(cgu, "_init_minimal_kv_cache_for_profiling", _init)
+    runner = _make_profiling_runner(CUDAGraphMode.FULL, captured_bytes=5 * mib)
+
+    assert cgu.profile_cudagraph_memory(runner) == 5 * mib
+    assert runner.kv_cache_init_memory == 7 * mib
 
 
 def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
