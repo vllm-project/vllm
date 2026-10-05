@@ -251,6 +251,7 @@ impl ChatRequestProcessor {
         let text_request = TextRequest {
             request_id: request.request_id,
             prompt,
+            prompt_token_offsets: None,
             mm_features,
             sampling_params: request.sampling_params,
             decode_options: request.decode_options,

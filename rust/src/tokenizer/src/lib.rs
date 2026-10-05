@@ -21,9 +21,27 @@ pub use incremental::{DecodedText, IncrementalDecoder, TokenAnchor, TokenAttribu
 pub use tekken::TekkenTokenizer;
 pub use tiktoken::TiktokenTokenizer;
 
+/// Token IDs and optional character spans in the original prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedPrompt {
+    pub token_ids: Vec<u32>,
+    pub token_offsets: Option<Vec<(usize, usize)>>,
+}
+
 pub trait Tokenizer: Send + Sync {
     /// Encode one prompt string into token IDs.
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>>;
+
+    /// Encode with character offsets when the backend supports them.
+    fn encode_with_offsets(&self, text: &str, add_special_tokens: bool) -> Result<EncodedPrompt> {
+        Ok(EncodedPrompt {
+            token_ids: self.encode(text, add_special_tokens)?,
+            token_offsets: None,
+        })
+    }
+
+    /// Warm offset resources; async callers should use a blocking task.
+    fn warm_offsets(&self) {}
 
     /// Equivalent to `encode(text, false)`, except that every added,
     /// special, and control-token matcher is bypassed.

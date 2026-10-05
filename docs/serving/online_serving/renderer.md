@@ -26,6 +26,17 @@ vllm serve <model> --enable-scale-out
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render a self-contained Responses request
 
+## Rust renderer token offsets
+
+For `vllm-rs render`, set `return_token_offsets: true` on completion or chat
+render requests to include per-token `[start, end]` spans in `token_offsets`.
+Spans count Unicode code points; chat spans refer to the templated prompt.
+Truncation preserves the original coordinates. The field is `null` when not requested,
+for pre-tokenized prompts, or when the tokenizer cannot supply matching offsets.
+The Rust render server rejects multimodal requests.
+Fastokens uses an additional cached HF tokenizer for this
+opt-in path, adding memory usage and a second encoding.
+
 ## Get Responses prompt token IDs
 
 Use `/v1/responses/render` to get prompt token IDs before choosing a model

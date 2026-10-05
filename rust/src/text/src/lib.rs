@@ -28,7 +28,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{GenerateOutputStream, Llm};
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DynTokenizer, EncodedPrompt};
 
 pub mod backend;
 mod error;
@@ -45,6 +45,7 @@ trait_set! {
 }
 
 /// Text request preparation shared by inference and render-only frontends.
+#[derive(Clone)]
 pub struct TextRequestProcessor {
     /// Tokenizer/model metadata backend responsible for prompt encode/decode
     /// and sampling hints.
@@ -56,6 +57,7 @@ pub struct TextRequestProcessor {
     max_logprobs: i32,
     /// Backend that compiles every structured-output constraint.
     structured_outputs_backend: StructuredOutputBackend,
+    return_token_offsets: bool,
 }
 
 impl TextRequestProcessor {
@@ -66,6 +68,7 @@ impl TextRequestProcessor {
             max_model_len,
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
             structured_outputs_backend: StructuredOutputBackend::default(),
+            return_token_offsets: false,
         }
     }
 
@@ -88,6 +91,12 @@ impl TextRequestProcessor {
         self.structured_outputs_backend
     }
 
+    /// Collect source character offsets when the tokenizer supports them.
+    pub fn with_token_offsets(mut self, enabled: bool) -> Self {
+        self.return_token_offsets = enabled;
+        self
+    }
+
     /// Return the tokenizer used by this processor.
     pub fn tokenizer(&self) -> DynTokenizer {
         self.backend.tokenizer()
@@ -98,23 +107,34 @@ impl TextRequestProcessor {
         self.max_model_len
     }
 
-    fn prepare_prompt_tokens(
-        &self,
-        prompt: Prompt,
-        add_special_tokens: bool,
-        prompt_truncation: Option<PromptTruncation>,
-    ) -> Result<Vec<u32>> {
+    fn prepare_prompt_tokens(&self, request: &mut TextRequest) -> Result<Vec<u32>> {
         let tokenizer = self.backend.tokenizer();
-        let mut prompt_token_ids = match prompt {
-            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens)?,
+        let EncodedPrompt {
+            mut token_ids,
+            mut token_offsets,
+        } = match take(&mut request.prompt) {
+            Prompt::Text(text) if self.return_token_offsets && request.mm_features.is_none() => {
+                tokenizer.encode_with_offsets(&text, request.add_special_tokens)?
+            }
+            Prompt::Text(text) => EncodedPrompt {
+                token_ids: tokenizer.encode(&text, request.add_special_tokens)?,
+                token_offsets: None,
+            },
             // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
             // and infra workloads bypass chat rendering and tokenizer overhead entirely.
-            Prompt::TokenIds(token_ids) => token_ids,
+            Prompt::TokenIds(token_ids) => EncodedPrompt {
+                token_ids,
+                token_offsets: request.prompt_token_offsets.take(),
+            },
         };
-        if let Some(prompt_truncation) = prompt_truncation {
-            prompt_truncation.apply(&mut prompt_token_ids, self.max_model_len)?;
+        if let Some(truncation) = request.prompt_truncation {
+            truncation.apply(&mut token_ids, self.max_model_len)?;
+            if let Some(offsets) = &mut token_offsets {
+                truncation.apply(offsets, self.max_model_len)?;
+            }
         }
-        Ok(prompt_token_ids)
+        request.prompt_token_offsets = token_offsets;
+        Ok(token_ids)
     }
 
     /// Tokenize and truncate the prompt in place, so that later preparation
@@ -125,11 +145,8 @@ impl TextRequestProcessor {
     /// and then hand the same request to [`TextLlm::generate`].
     pub fn tokenize_in_place<'r>(&self, request: &'r mut TextRequest) -> Result<&'r [u32]> {
         request.validate()?;
-        let prompt_token_ids = self.prepare_prompt_tokens(
-            take(&mut request.prompt),
-            request.add_special_tokens,
-            request.prompt_truncation.take(),
-        )?;
+        let prompt_token_ids = self.prepare_prompt_tokens(request)?;
+        request.prompt_truncation = None;
         request.prompt = Prompt::TokenIds(prompt_token_ids);
         match &request.prompt {
             Prompt::TokenIds(prompt_token_ids) => Ok(prompt_token_ids),
@@ -138,13 +155,9 @@ impl TextRequestProcessor {
     }
 
     /// Prepare one request's prompt tokens without generation-specific lowering.
-    pub fn tokenize(&self, request: TextRequest) -> Result<Vec<u32>> {
+    pub fn tokenize(&self, mut request: TextRequest) -> Result<Vec<u32>> {
         request.validate()?;
-        self.prepare_prompt_tokens(
-            request.prompt,
-            request.add_special_tokens,
-            request.prompt_truncation,
-        )
+        self.prepare_prompt_tokens(&mut request)
     }
 
     /// Tokenize and lower one request without submitting it to an engine.
@@ -155,11 +168,7 @@ impl TextRequestProcessor {
             request.arrival_time = Some(vllm_llm::current_unix_timestamp_secs());
         }
 
-        let prompt_token_ids = self.prepare_prompt_tokens(
-            take(&mut request.prompt),
-            request.add_special_tokens,
-            request.prompt_truncation,
-        )?;
+        let prompt_token_ids = self.prepare_prompt_tokens(&mut request)?;
         let tokenizer = self.backend.tokenizer();
         let sampling_hints = self.backend.sampling_hints()?;
         let sampling_limits = SamplingLimits {
@@ -366,6 +375,45 @@ mod tests {
                 (6..15).collect::<Vec<_>>()
             );
             assert_eq!(generate_request.sampling_params.max_tokens, 1);
+        }
+    }
+
+    #[test]
+    fn token_offsets_survive_truncation_and_repeated_preparation() {
+        let processor =
+            TextRequestProcessor::new(Arc::new(TestTextBackend), 4).with_token_offsets(true);
+        for (side, expected_ids, expected_offsets) in [
+            (
+                TruncationSide::Left,
+                vec![3, 4, 5],
+                vec![(2, 3), (3, 4), (4, 5)],
+            ),
+            (
+                TruncationSide::Right,
+                vec![1, 2, 3],
+                vec![(0, 1), (1, 2), (2, 3)],
+            ),
+        ] {
+            let mut request = TextRequest {
+                prompt: Prompt::TokenIds(vec![1, 2, 3, 4, 5]),
+                prompt_token_offsets: Some((0..5).map(|i| (i, i + 1)).collect()),
+                prompt_truncation: Some(PromptTruncation {
+                    limit: PromptTruncationLimit::InputBudget,
+                    side,
+                }),
+                sampling_params: SamplingParams {
+                    max_tokens: Some(2),
+                    ..Default::default()
+                },
+                ..TextRequest::for_test()
+            };
+            processor.tokenize_in_place(&mut request).unwrap();
+            let prepared = processor.prepare(request).unwrap();
+            assert_eq!(prepared.generate_request.prompt_token_ids, expected_ids);
+            assert_eq!(
+                prepared.text_request.prompt_token_offsets,
+                Some(expected_offsets.clone())
+            );
         }
     }
 }
