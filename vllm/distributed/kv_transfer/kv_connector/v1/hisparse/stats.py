@@ -34,7 +34,7 @@ class HiSparseKVConnectorStats(KVConnectorStats):
 
     def reset(self):
         # Must be serializable
-        self.data: dict[str, Any] = {
+        self.data: dict[str, list[int | float]] = {
             "cache_hits": [],
             "cache_misses": [],
             "host_to_device_bytes": [],
@@ -47,11 +47,8 @@ class HiSparseKVConnectorStats(KVConnectorStats):
         self.data["cache_misses"].append(misses)
         self.data["host_to_device_bytes"].append(host_to_device_bytes)
 
-    def record_host_usage(
-        self, used: int, total: int, pending_page_transfers: int
-    ) -> None:
-        """Record scheduler-side host-tier level values."""
-        self.data["host_cache_usage_perc"].append(used / total if total else 0.0)
+    def record_host_usage(self, usage: float, pending_page_transfers: int) -> None:
+        self.data["host_cache_usage_perc"].append(usage)
         self.data["pending_page_transfers"].append(pending_page_transfers)
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
@@ -60,7 +57,6 @@ class HiSparseKVConnectorStats(KVConnectorStats):
                 accumulator = self.data[k]
                 assert isinstance(accumulator, list)
                 if k in _HISPARSE_LEVEL_KEYS:
-                    # Level values: keep the most recent observation only.
                     accumulator.extend(v[-1:])
                 else:
                     accumulator.extend(v)
@@ -68,7 +64,6 @@ class HiSparseKVConnectorStats(KVConnectorStats):
 
     def reduce(self) -> dict[str, int | float]:
         # Compute compact representative stats suitable for CLI logging.
-        # The host gauges are level values, so report the latest snapshot.
         reduced: dict[str, int | float] = {
             "HiSparse hot-buffer hits": sum(self.data["cache_hits"]),
             "HiSparse hot-buffer misses": sum(self.data["cache_misses"]),
@@ -155,5 +150,4 @@ class HiSparsePromMetrics(KVConnectorPromMetrics):
         for name, gauge in self.hisparse_gauges.items():
             values = transfer_stats_data.get(name, [])
             if values:
-                # Level values: each observation replaces the previous one.
                 gauge[engine_idx].set(values[-1])

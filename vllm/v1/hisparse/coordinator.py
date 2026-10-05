@@ -237,22 +237,6 @@ class HiSparseCoordinator:
         manager = self.host_manager
         return manager.block_pool if manager is not None else None
 
-    def host_usage(self) -> tuple[int, int] | None:
-        """Host blocks held by running requests or in-flight transfers, and
-        pool capacity.
-
-        Cached blocks no request references are free to evict, so the pool
-        counts them as free and they are not included.
-        """
-        pool = self.get_host_block_pool()
-        if pool is None:
-            return None
-        total = pool.num_gpu_blocks - 1  # Exclude the null block.
-        return pool.num_gpu_blocks - pool.get_num_free_blocks() - 1, total
-
-    def num_pending_page_transfers(self) -> int:
-        return len(self.pending_spills)
-
     # ------------------------------------------------------------------
     # GPU copies of published host pages
     # ------------------------------------------------------------------

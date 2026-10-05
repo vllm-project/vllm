@@ -40,16 +40,10 @@ to complete host blocks.
 Startup logs report two concurrency bounds at `max_model_len`. The generic
 `Maximum concurrency` line charges each request its full admission footprint,
 including the in-flight window of every resident group. The `HiSparse
-steady-state maximum concurrency` line assumes running requests read from host
-and pin only their active tail pages, while the newest request still needs its
-full admission footprint.
-
-Host-tier observability flows through the KV-connector stats path: the
-scheduler samples the host block pool once per step and Prometheus exposes
-`vllm:hisparse_host_cache_usage_perc` plus
-`vllm:hisparse_pending_page_transfers`, alongside the worker's hot-buffer
-hit/miss counters. Used host blocks are those held by running requests or
-in-flight transfers; evictable cached prefixes count as free.
+steady-state maximum concurrency` line charges running requests that read from
+host only their active tail pages, plus one request being admitted at its full
+footprint. Host-pool metrics are listed in
+[Metrics](../usage/metrics.md#hisparse-kv-connector-metrics).
 
 ## Ownership
 

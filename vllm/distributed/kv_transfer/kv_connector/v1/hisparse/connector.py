@@ -98,25 +98,20 @@ class HiSparseConnectorScheduler:
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
         self.requests: dict[str, Request] = {}
-        # Level gauges are always on: unlike the worker's device counters,
-        # sampling the scheduler-side host pool costs no synchronization.
-        self.stats = HiSparseKVConnectorStats()
 
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
         assert self.coordinator is None
         self.coordinator = coordinator
 
-    def get_kv_connector_stats(self) -> HiSparseKVConnectorStats:
-        """Sample the host tier's level gauges for this stats interval."""
-        if self.coordinator is not None:
-            usage = self.coordinator.host_usage()
-            if usage is not None:
-                used, total = usage
-                self.stats.record_host_usage(
-                    used, total, self.coordinator.num_pending_page_transfers()
-                )
-        stats = self.stats
-        self.stats = HiSparseKVConnectorStats()
+    def get_kv_connector_stats(self) -> HiSparseKVConnectorStats | None:
+        if self.coordinator is None:
+            return None
+        host_pool = self.coordinator.get_host_block_pool()
+        assert host_pool is not None
+        stats = HiSparseKVConnectorStats()
+        stats.record_host_usage(
+            host_pool.get_usage(), len(self.coordinator.pending_spills)
+        )
         return stats
 
     def build_connector_meta(

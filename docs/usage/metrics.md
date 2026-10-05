@@ -48,13 +48,10 @@ The following metrics are exposed:
 ## HiSparse KV Connector Metrics
 
 These metrics are exposed when the `HiSparseConnector` KV connector is
-configured (with a `--attention-hisparse-config` sparse-MLA model, e.g.
-DeepSeek V3.2). The host-tier gauges are reported by the scheduler process
-once per engine step and reflect the logical host KV pool shared by all
-tensor-parallel ranks; the hot-buffer counters are sampled from the device
-every 2000 worker steps. `vllm:hisparse_host_cache_usage_perc` counts blocks
-held by running requests or in-flight transfers; evictable cached blocks count
-as free.
+configured. The host-pool gauges are reported by the scheduler once per engine
+step, for the host pool shared by all tensor-parallel ranks; evictable cached
+blocks count as free. The hot-buffer counters are sampled from the device
+every 2000 worker steps.
 
 --8<-- "gen:metrics-hisparse"
 
