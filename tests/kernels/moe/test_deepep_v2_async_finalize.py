@@ -103,8 +103,10 @@ def _run(pf, output: torch.Tensor, do_async: bool):
 
 @requires_deep_ep_v2
 def test_prepare_switches_layout_and_preserves_deferred_receiver_mode(monkeypatch):
-    """One instance must follow each forward and retain its dispatch metadata."""
+    """Capture state controls dispatch even when the runtime mode disagrees."""
     context = None
+    capturing = False
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing)
     monkeypatch.setattr(
         _dv2, "is_forward_context_available", lambda: context is not None
     )
@@ -112,12 +114,16 @@ def test_prepare_switches_layout_and_preserves_deferred_receiver_mode(monkeypatc
     monkeypatch.setattr(_dv2, "_globalize_recv_topk_idx", lambda ids, *args: ids)
     tokens = torch.ones(3, 8, dtype=torch.bfloat16)
     pf = _make_pf(tokens)
-    for mode in (
-        None,
-        CUDAGraphMode.NONE,
-        CUDAGraphMode.FULL,
-        CUDAGraphMode.PIECEWISE,
-        CUDAGraphMode.NONE,
+    for mode, capturing in (
+        (None, False),
+        (CUDAGraphMode.NONE, False),
+        (CUDAGraphMode.FULL, False),
+        (CUDAGraphMode.PIECEWISE, False),
+        (None, True),
+        (CUDAGraphMode.NONE, True),
+        (CUDAGraphMode.FULL, True),
+        (CUDAGraphMode.PIECEWISE, True),
+        (CUDAGraphMode.NONE, False),
     ):
         context = (
             None
@@ -134,13 +140,14 @@ def test_prepare_switches_layout_and_preserves_deferred_receiver_mode(monkeypatc
             FusedMoEQuantConfig.make(None),
             defer_input_quant=True,
         )
-        expanded = mode in (None, CUDAGraphMode.NONE)
+        expanded = not capturing
         call = pf.buffer.calls[-1]
         assert call["do_expand"] is expanded
         assert call["do_cpu_sync"] is expanded
         assert call["num_max_tokens_per_rank"] == (None if expanded else 4)
 
-        # The receiver may run after the forward context has changed.
+        # The receiver may run after capture and the forward context change.
+        capturing = not capturing
         context = SimpleNamespace(
             cudagraph_runtime_mode=CUDAGraphMode.FULL
             if expanded
