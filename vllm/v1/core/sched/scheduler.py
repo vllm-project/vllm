@@ -289,6 +289,11 @@ class Scheduler(SchedulerInterface):
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
             if group.kv_cache_spec.prefix_replay_tokens > 0
         )
+        self.prefix_replay_transfer_group_ids = tuple(
+            group_id
+            for group_id in self.prefix_replay_group_ids
+            if kv_cache_config.kv_cache_groups[group_id].enable_kv_transfer
+        )
         replay_windows = {
             kv_cache_config.kv_cache_groups[group_id].kv_cache_spec.prefix_replay_tokens
             for group_id in self.prefix_replay_group_ids
@@ -975,16 +980,31 @@ class Scheduler(SchedulerInterface):
                             skip_request(request_queue)
                             continue
 
-                        # A load of the request's own blocks (P/D) carries the
-                        # window; prefix-cache hits lack it.
-                        loads_window = bool(
+                        loaded_group_ids = (
+                            set(self.connector.get_loaded_kv_cache_group_ids(request))
+                            if ext_tokens
+                            else set()
+                        )
+                        # Preserve an exact P/D endpoint when every transferable
+                        # replay group is loaded. Local-only groups are rebuilt
+                        # by replay and must not force the endpoint down.
+                        loads_transfer_window = bool(
+                            self.prefix_replay_transfer_group_ids
+                            and ext_tokens
+                            and set(self.prefix_replay_transfer_group_ids).issubset(
+                                loaded_group_ids
+                            )
+                        )
+                        # Replay can be skipped only when every replay group,
+                        # including local-only groups, was restored.
+                        loads_all_windows = bool(
                             self.prefix_replay_group_ids
                             and ext_tokens
                             and set(self.prefix_replay_group_ids).issubset(
-                                self.connector.get_loaded_kv_cache_group_ids(request)
+                                loaded_group_ids
                             )
                         )
-                        if self.prefix_replay_tokens and not loads_window:
+                        if self.prefix_replay_tokens and not loads_transfer_window:
                             # SWA bounded replay recomputes the hit's last
                             # window, from the block holding its first
                             # token; the sliding-window groups retire
@@ -1017,7 +1037,7 @@ class Scheduler(SchedulerInterface):
                         else:
                             num_external_computed_tokens = ext_tokens
                         window_loaded = (
-                            loads_window and num_external_computed_tokens > 0
+                            loads_all_windows and num_external_computed_tokens > 0
                         )
 
                         if hit_diverged and num_external_computed_tokens == 0:

@@ -1177,6 +1177,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         attended). This is needed for multi-module spec decoding which can
         re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
         of the sequence, and thus needs to delay freeing/caching of blocks.
+        Bounded replay retains one additional token so an exact external
+        endpoint cannot retire the block containing the replay start.
 
         Args:
             num_computed_tokens: The number of tokens that have been computed.
@@ -1185,9 +1187,14 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             The number of tokens that will be skipped for attention computation.
 
         """
+        replay_retained_tokens = int(self.kv_cache_spec.prefix_replay_tokens > 0)
         return max(
             0,
-            num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
+            num_computed_tokens
+            - self.sliding_window
+            + 1
+            - self.extra_retained_tokens
+            - replay_retained_tokens,
         )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:

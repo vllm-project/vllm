@@ -2000,6 +2000,66 @@ async def test_build_transfer_params_sends_packed_region_once(
     assert lengths == [n_blocks * block_len]
 
 
+@pytest.mark.asyncio
+async def test_build_transfer_params_pairs_exact_pd_endpoint():
+    """A 512+86-token load ending at 598 pairs logical blocks 8 and 9."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.use_mla = True
+    worker.kv_cache_config = _make_packed_mla_kv_cache_config(
+        num_blocks=1024, num_groups=1
+    )
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.transfer_topo = SimpleNamespace(
+        local_replicates_kv_cache=False,
+        total_num_kv_heads=1,
+    )
+
+    block_len = 256
+    local_region = _region(0x1000, block_len=block_len, group_index=0)
+    remote_region = _region(0xA000, block_len=block_len, group_index=0)
+    transfer_id = "xfer-exact-endpoint"
+    send_meta = SendBlockMeta(
+        p_req_id="p-exact-endpoint",
+        transfer_id=transfer_id,
+        local_block_ids=[[100, 101, 102, 103, 104, 105, 106, 107, 829, 499]],
+        ready=asyncio.Event(),
+    )
+    xfer_meta = _xfer_meta(
+        [remote_region],
+        {"d-exact-endpoint": (transfer_id, [[76, 77]])},
+    )
+
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        ready_reqs=[("d-exact-endpoint", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=[local_region],
+        remote_regions=[remote_region],
+    )
+
+    assert err_reqs == []
+    assert err_msg is None
+    assert src_ptrs == [
+        0x1000 + 829 * block_len,
+        0x1000 + 499 * block_len,
+    ]
+    assert dst_ptrs == [
+        0xA000 + 76 * block_len,
+        0xA000 + 77 * block_len,
+    ]
+    assert lengths == [block_len, block_len]
+
+
 def test_coalesce_promotes_padding_only_for_a_full_row():
     """A full-row merge includes the padding tail; a partial row does not."""
     page, row = 1024, 2560

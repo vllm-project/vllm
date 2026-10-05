@@ -35,11 +35,14 @@ def _replay_scheduler(
     *,
     long_prefill_token_threshold: int = 0,
     use_kv_connector: MockKVConfig | None = None,
+    block_size: int = BLOCK_SIZE,
+    window: int = WINDOW,
+    include_local_replay_group: bool = False,
 ) -> Scheduler:
     """A hybrid layout: one prefix-cacheable full-attention group and one
     replayed sliding-window group."""
     base = create_scheduler(
-        block_size=BLOCK_SIZE,
+        block_size=block_size,
         enable_prefix_caching=True,
         long_prefill_token_threshold=long_prefill_token_threshold,
         use_kv_connector=use_kv_connector,
@@ -52,7 +55,7 @@ def _replay_scheduler(
             KVCacheGroupSpec(
                 ["full"],
                 FullAttentionSpec(
-                    block_size=BLOCK_SIZE,
+                    block_size=block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
@@ -61,25 +64,41 @@ def _replay_scheduler(
             KVCacheGroupSpec(
                 ["swa"],
                 SlidingWindowMLASpec(
-                    block_size=BLOCK_SIZE,
+                    block_size=block_size,
                     num_kv_heads=1,
                     head_size=64,
                     dtype=torch.bfloat16,
-                    sliding_window=WINDOW,
+                    sliding_window=window,
                     bounded_replay=True,
                 ),
             ),
         ],
     )
+    if include_local_replay_group:
+        kv_cache_config.kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["draft_swa"],
+                SlidingWindowMLASpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=64,
+                    dtype=torch.bfloat16,
+                    sliding_window=window,
+                    bounded_replay=True,
+                ),
+                is_eagle_group=True,
+                enable_kv_transfer=False,
+            )
+        )
     scheduler = Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
-        block_size=BLOCK_SIZE,
+        block_size=block_size,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
     scheduler.use_v2_model_runner = True
-    assert scheduler.prefix_replay_tokens == WINDOW
+    assert scheduler.prefix_replay_tokens == window
     return scheduler
 
 
@@ -272,6 +291,105 @@ def test_kv_load_carrying_window_does_not_replay(is_async, matched):
     assert new_req.num_computed_tokens == matched
     assert new_req.replay_start == 0
     assert out.num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS - matched
+
+
+@pytest.mark.parametrize(
+    ("block_size", "peer_endpoint"),
+    [(64, 598), (32, 575), (64, 639)],
+    ids=["observed", "block32-boundary-minus-one", "block64-boundary-minus-one"],
+)
+def test_pd_load_keeps_exact_endpoint_and_replays_local_group(
+    block_size, peer_endpoint
+):
+    """A direct P/D load keeps the peer endpoint when every transferable
+    window is loaded, while replay still rebuilds a local-only draft window."""
+    window = 128
+    local_hit = 512
+    external_hit = peer_endpoint - local_hit
+    prompt_tokens = peer_endpoint + 1
+    local_draft = 2
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig(matched_tokens=0, is_async=True),
+        block_size=block_size,
+        window=window,
+        include_local_replay_group=True,
+    )
+    cached = create_requests(
+        num_requests=1,
+        num_tokens=local_hit,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["cached"],
+    )[0]
+    _prefill(scheduler, cached)
+
+    scheduler.connector.config = dataclasses.replace(
+        scheduler.connector.config,
+        matched_tokens=external_hit,
+        is_async=True,
+    )
+    scheduler.connector.get_loaded_kv_cache_group_ids = lambda request: (FULL, SWA)
+    request = create_requests(
+        num_requests=1,
+        num_tokens=prompt_tokens,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["load"],
+    )[0]
+    scheduler.add_request(request)
+    load = scheduler.schedule()
+
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert request.num_computed_tokens == peer_endpoint
+    assert request.replay_start == peer_endpoint - window
+    scheduler.update_from_output(
+        load, create_model_runner_output([], finished_recving={request.request_id})
+    )
+
+    out = scheduler.schedule()
+    replay_start = peer_endpoint - window
+    new_req = _new_req_data(out, request)
+    assert new_req.num_computed_tokens == replay_start
+    assert new_req.replay_start == replay_start
+    assert out.num_scheduled_tokens[request.request_id] == prompt_tokens - replay_start
+
+    draft_manager = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        local_draft
+    ]
+    draft_blocks = scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[
+        local_draft
+    ]
+    assert draft_blocks[replay_start // block_size] is not draft_manager._null_block
+
+
+@pytest.mark.parametrize("include_replay_group", [False, True])
+def test_zero_external_hit_does_not_query_loaded_groups(include_replay_group):
+    """A connector miss has no selected child/capability state to query."""
+    connector_config = MockKVConfig(matched_tokens=0, is_async=True)
+    if include_replay_group:
+        scheduler = _replay_scheduler(use_kv_connector=connector_config)
+    else:
+        scheduler = create_scheduler(
+            block_size=BLOCK_SIZE,
+            enable_prefix_caching=True,
+            use_kv_connector=connector_config,
+        )
+        assert isinstance(scheduler, Scheduler)
+    assert scheduler.connector is not None
+    scheduler.connector.get_loaded_kv_cache_group_ids = lambda request: pytest.fail(
+        "loaded groups queried without an external hit"
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=NUM_PROMPT_TOKENS,
+        block_size=BLOCK_SIZE,
+    )[0]
+
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+
+    assert request.status == RequestStatus.RUNNING
+    assert out.num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS
 
 
 @pytest.mark.parametrize("via_connector", [False, True])
