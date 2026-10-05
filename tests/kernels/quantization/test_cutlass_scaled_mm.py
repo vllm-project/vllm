@@ -586,7 +586,7 @@ def test_cutlass_subset():
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
 
-    if capability >= 90:
+    if capability_int >= 90:
         with pytest.raises(
             RuntimeError, match="requires packed operands; A is not packed"
         ):
@@ -604,13 +604,13 @@ def test_cutlass_subset():
     ("padded_tensor", "operand"), [("a", "A"), ("b", "B"), ("out", "output")]
 )
 @pytest.mark.skipif(
-    capability < 90,
+    capability_int < 90,
     reason="Packed-only validation applies to CUTLASS 3.x.",
 )
 def test_cutlass_c3x_rejects_padded_operand(
     padded_tensor: str, operand: str, dtype: torch.dtype
 ):
-    if dtype == torch.int8 and capability >= 100:
+    if dtype == torch.int8 and capability_int >= 100:
         pytest.skip("CUTLASS INT8 scaled_mm is not supported on SM100+.")
 
     big_m = big_n = big_k = 1024
@@ -638,7 +638,7 @@ def test_cutlass_c3x_rejects_padded_operand(
 
 
 @pytest.mark.skipif(
-    capability < 90,
+    capability_int < 90,
     reason="Packed-only validation applies to CUTLASS 3.x.",
 )
 def test_cutlass_c3x_accepts_size_one_leading_dimension():
@@ -656,7 +656,7 @@ def test_cutlass_c3x_accepts_size_one_leading_dimension():
 
 
 @pytest.mark.skipif(
-    capability < 90,
+    capability_int < 90,
     reason="Packed-only validation applies to CUTLASS 3.x.",
 )
 def test_cutlass_c3x_azp_rejects_padded_operand():
@@ -680,7 +680,7 @@ def test_cutlass_c3x_azp_rejects_padded_operand():
     [("a", "A"), ("b", "B"), ("out", "output")],
 )
 @pytest.mark.skipif(
-    capability < 90,
+    capability_int < 90,
     reason="Pointer validation applies to CUTLASS 3.x.",
 )
 def test_cutlass_c3x_rejects_misaligned_pointer(misaligned_tensor: str, operand: str):
