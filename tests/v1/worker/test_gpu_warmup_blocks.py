@@ -314,24 +314,28 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
 
 
 @pytest.mark.parametrize(
-    ("method", "expected"),
+    ("method", "draft_hf_config", "expected"),
     [
-        ("eagle", NUM_SPEC_STEPS),
-        ("eagle3", NUM_SPEC_STEPS),
-        ("mtp", NUM_SPEC_STEPS),
-        ("dspark", NUM_SPEC_STEPS),
-        ("draft_model", NUM_SPEC_STEPS),
+        ("eagle", None, NUM_SPEC_STEPS),
+        ("eagle3", None, NUM_SPEC_STEPS),
+        ("mtp", None, NUM_SPEC_STEPS),
+        ("dspark", None, NUM_SPEC_STEPS),
+        ("dspark", {"sample_from_anchor": True}, NUM_SPEC_STEPS),
+        ("dspark", {"sample_from_anchor": False}, NUM_SPEC_STEPS + 1),
+        ("draft_model", None, NUM_SPEC_STEPS),
         # DFlash's in-fill decoding adds a query for the last sampled token.
-        ("dflash", NUM_SPEC_STEPS + 1),
-        ("ngram", 0),
-        ("ngram_gpu", 0),
-        ("medusa", 0),
-        ("mlp_speculator", 0),
-        ("suffix", 0),
-        ("extract_hidden_states", 0),
+        ("dflash", None, NUM_SPEC_STEPS + 1),
+        ("ngram", None, 0),
+        ("ngram_gpu", None, 0),
+        ("medusa", None, 0),
+        ("mlp_speculator", None, 0),
+        ("suffix", None, 0),
+        ("extract_hidden_states", None, 0),
     ],
 )
-def test_num_lookahead_tokens_per_method(method: str, expected: int):
+def test_num_lookahead_tokens_per_method(
+    method: str, draft_hf_config: dict | None, expected: int
+):
     """`VllmConfig.num_lookahead_tokens` is the single source of the reservation.
 
     Both the scheduler and the warmup read it, so a wrong answer here silently
@@ -350,6 +354,12 @@ def test_num_lookahead_tokens_per_method(method: str, expected: int):
     speculative_config = object.__new__(SpeculativeConfig)
     object.__setattr__(speculative_config, "method", method)
     object.__setattr__(speculative_config, "num_speculative_tokens", NUM_SPEC_STEPS)
+    hf_config = SimpleNamespace(**(draft_hf_config or {}))
+    object.__setattr__(
+        speculative_config,
+        "draft_model_config",
+        SimpleNamespace(hf_config=hf_config),
+    )
 
     config = _Config()
     config.speculative_config = speculative_config
