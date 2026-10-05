@@ -1,0 +1,10 @@
+# GPU check / benchmark harness scripts for the GLM-5.2 MonoKernel (run by hand on an
+# 8x gfx950 box, not imported by vLLM). Repo config applies, except two rules the scripts
+# use on purpose: one-shot open() reads/appends in short-lived processes (SIM115) and
+# helpers defined in a loop body that are only called within that iteration (B023).
+extend = "../../pyproject.toml"
+# first-party detection (isort) relative to the repo root, as without this file
+src = ["../.."]
+
+[lint.extend-per-file-ignores]
+"*.py" = ["SIM115", "B023"]

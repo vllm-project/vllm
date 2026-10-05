@@ -1,0 +1,9 @@
+# Vendored FlyDSL / ATOM MonoKernel sources (see the per-file headers): keep the upstream layout so the files stay
+# diffable against their source PRs. Lint and format are off here; the rest of the repo's config still applies.
+extend = "../../../../../../pyproject.toml"
+
+[lint]
+ignore = ["ALL"]
+
+[format]
+exclude = ["*.py"]
