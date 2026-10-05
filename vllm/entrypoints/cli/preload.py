@@ -99,6 +99,38 @@ def _start_health_server(
     return server, thread
 
 
+def _run_warmup_engine(args: argparse.Namespace, socket_dir: str | None) -> None:
+    """Boot one throwaway engine against the ready daemons.
+
+    The engine's own startup path is what runs the FlashInfer autotune pass
+    and the JIT/CUDA graph compilation, so booting one here pays those costs
+    at preload time and leaves the tuned table on the daemons for every
+    engine that follows. Runs in its own process so the engine's CUDA and
+    distributed state dies with it.
+    """
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.usage.usage_lib import UsageContext
+    from vllm.v1.engine.llm_engine import LLMEngine
+
+    engine_args = EngineArgs.from_cli_args(args)
+    engine_args.load_format = "ipc_cache"
+    # Any preload --model-loader-extra-config is for the daemons' disk loader,
+    # whose keys IpcModelLoader rejects. "copy" would tell the daemons to
+    # release the weights this engine only borrows; fallback=False turns a
+    # daemon that cannot serve them into an error rather than a silent disk
+    # load that doubles the GPU footprint.
+    engine_args.model_loader_extra_config = {
+        "socket_dir": socket_dir,
+        "mode": "zero_copy",
+        "fallback": False,
+    }
+    # Resolve batch defaults as `vllm serve` does: they feed the config hash
+    # the tuned table is keyed by.
+    LLMEngine.from_engine_args(
+        engine_args, usage_context=UsageContext.OPENAI_API_SERVER
+    )
+
+
 class PreloadSubcommand(CLISubcommand):
     """The `preload` subcommand for the vLLM CLI."""
 
@@ -129,6 +161,17 @@ class PreloadSubcommand(CLISubcommand):
             help="Rendezvous port for the MTP draft daemon group. Defaults to "
             "--weight-cache-master-port + 1 for multi-node, or a free port "
             "for single-node.",
+        )
+        parser.add_argument(
+            "--preload-autotune",
+            action="store_true",
+            help="After the daemons are ready, run one throwaway engine "
+            "against them so the FlashInfer autotune pass and the JIT/CUDA "
+            "graph compilation happen once, at preload time. The tuned table "
+            "is left on the daemons, so engines started later skip the pass. "
+            "Pass the same engine flags you pass `vllm serve`, otherwise the "
+            "table is keyed to a different configuration and ignored. "
+            "Single-node, single-DP only.",
         )
         parser.add_argument(
             "--weight-cache-health-port",
@@ -169,6 +212,13 @@ class PreloadSubcommand(CLISubcommand):
         check_ipc_platform_support()
         parallel_config = vllm_config.parallel_config
         _reject_unsupported_parallelism(parallel_config)
+        if args.preload_autotune and (
+            parallel_config.nnodes > 1 or parallel_config.data_parallel_size > 1
+        ):
+            raise ValueError(
+                "--preload-autotune runs one local engine, so it supports "
+                "neither --nnodes > 1 nor --data-parallel-size > 1"
+            )
         tp_size = parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         dp_size = parallel_config.data_parallel_size
@@ -267,6 +317,9 @@ class PreloadSubcommand(CLISubcommand):
                 tp_rank,
             ) in product(groups, placements)
         ]
+        # Held in a list so the signal handler below reaches the warmup
+        # engine once it exists.
+        warmup_procs: list[BaseProcess] = []
         health_state = _HealthState(procs)
         health_server = None
         health_thread = None
@@ -282,7 +335,7 @@ class PreloadSubcommand(CLISubcommand):
         def _shutdown(signum, frame):
             if health_server is not None:
                 health_server.should_exit = True
-            for proc in procs:
+            for proc in (*warmup_procs, *procs):
                 proc.terminate()
 
         signal.signal(signal.SIGINT, _shutdown)
@@ -309,6 +362,8 @@ class PreloadSubcommand(CLISubcommand):
                     if health_thread is not None:
                         health_thread.join()
                     sys.exit(max((p.exitcode or 0) for p in procs))
+        if args.preload_autotune:
+            _warm_up_kernels(ctx, args, warmup_procs)
         health_state.mark_ready()
         socket_dir_msg = args.weight_cache_socket_dir or "the default socket dir"
         logger.info_once(
@@ -343,6 +398,42 @@ class PreloadSubcommand(CLISubcommand):
         self.add_cli_args(preload_parser)
         preload_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return preload_parser
+
+
+def _warm_up_kernels(
+    ctx: "multiprocessing.context.SpawnContext",
+    args: argparse.Namespace,
+    warmup_procs: list[BaseProcess],
+) -> None:
+    """Run the one-time warmup engine, reporting but not raising failures.
+
+    A failed warmup only means engines tune for themselves, so the daemons
+    keep serving the weights they already hold.
+    """
+    logger.info_once(
+        "===== Daemons ready; booting one warmup engine against them to "
+        "autotune and JIT-compile once ====="
+    )
+    proc = ctx.Process(
+        target=_run_warmup_engine,
+        args=(args, args.weight_cache_socket_dir),
+        name="vllm-weight-cache-warmup",
+    )
+    warmup_procs.append(proc)
+    proc.start()
+    proc.join()
+    warmup_procs.remove(proc)
+    if proc.exitcode == 0:
+        logger.info_once(
+            "Kernel warmup finished; the daemons now hold the FlashInfer "
+            "autotune table."
+        )
+    else:
+        logger.error(
+            "Kernel warmup engine exited with code %s; engines will run the "
+            "FlashInfer autotune pass themselves.",
+            proc.exitcode,
+        )
 
 
 def cmd_init() -> list[CLISubcommand]:

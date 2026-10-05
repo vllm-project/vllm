@@ -7,7 +7,10 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import argparse
+import contextlib
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -369,3 +372,147 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     )
     loader = IpcModelLoader(copy_mode)
     assert loader.get_external_weight_memory(None) == 0
+
+
+@contextlib.contextmanager
+def _artifact_daemon(tmp_path):
+    """Serve the daemon's real artifact handlers on a throwaway socket.
+
+    Only those handlers are exercised, so __init__ (which loads a model onto a
+    GPU) is skipped and just the state they touch is provided.
+    """
+    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+        ArtifactStore,
+    )
+    from vllm.model_executor.model_loader.weight_cache.daemon import WeightCacheDaemon
+
+    daemon = WeightCacheDaemon.__new__(WeightCacheDaemon)
+    daemon.artifacts = ArtifactStore()
+    daemon.role = "target"
+    daemon.global_rank = 0
+
+    socket_path = str(tmp_path / "daemon.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(socket_path)
+    server.listen()
+
+    def _serve():
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            with conn:
+                daemon._handle_connection(conn)
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    try:
+        yield socket_path
+    finally:
+        server.close()
+        thread.join(timeout=5)
+
+
+def test_daemon_artifact_round_trip_serves_only_the_exact_key(tmp_path):
+    """The client and the daemon's handlers must agree on the wire format, and
+    an artifact must never be handed to a key it was not produced for: the
+    key is the only evidence that reusing it is safe."""
+    from dataclasses import replace
+
+    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+        DaemonArtifactCache,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
+
+    key = ArtifactCacheKey(kind="flashinfer_autotune", content_hash="abc")
+    with _artifact_daemon(tmp_path) as socket_path:
+        cache = DaemonArtifactCache(socket_path=socket_path)
+        assert cache.get(key) is None
+        assert cache.put(key, b"tuned")
+        assert cache.get(key) == b"tuned"
+        assert cache.get(replace(key, content_hash="def")) is None
+        assert cache.get(replace(key, vllm_version="other")) is None
+
+
+def test_daemon_artifact_cache_misses_without_a_daemon(tmp_path):
+    """An engine must start even when there is no daemon to fetch from, so
+    both directions degrade to a miss instead of raising."""
+    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+        DaemonArtifactCache,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
+
+    cache = DaemonArtifactCache(socket_path=str(tmp_path / "absent.sock"))
+    key = ArtifactCacheKey(kind="flashinfer_autotune", content_hash="abc")
+    assert cache.get(key) is None
+    assert not cache.put(key, b"tuned")
+
+
+def test_artifact_store_evicts_oldest_past_its_cap():
+    """A client whose key keeps changing must not grow the daemon's store
+    without bound."""
+    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+        ArtifactStore,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
+
+    store = ArtifactStore(max_entries=2)
+    keys = [ArtifactCacheKey(kind="k", content_hash=h) for h in "abc"]
+    for i, key in enumerate(keys):
+        store.put(key, str(i).encode())
+
+    assert len(store) == 2
+    assert store.get(keys[0]) is None
+    assert store.get(keys[1]) == b"1"
+    assert store.get(keys[2]) == b"2"
+
+
+def _boot_warmup_engine(monkeypatch, **preload_engine_args):
+    """Run the --preload-autotune engine entrypoint without booting an engine.
+
+    Returns:
+        The EngineArgs it would boot with and the from_engine_args kwargs.
+
+    """
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.entrypoints.cli.preload import _run_warmup_engine
+    from vllm.v1.engine.llm_engine import LLMEngine
+
+    booted: dict[str, Any] = {}
+
+    def from_engine_args(cls, engine_args, **kwargs):
+        booted.update(engine_args=engine_args, **kwargs)
+
+    monkeypatch.setattr(
+        EngineArgs,
+        "from_cli_args",
+        classmethod(lambda cls, args: EngineArgs(model="m", **preload_engine_args)),
+    )
+    monkeypatch.setattr(LLMEngine, "from_engine_args", classmethod(from_engine_args))
+    _run_warmup_engine(argparse.Namespace(), socket_dir="/run/vllm")
+    return booted.pop("engine_args"), booted
+
+
+def test_preload_warmup_engine_resolves_defaults_like_vllm_serve(monkeypatch):
+    """The warmup engine's table is keyed by the config hash, which covers the
+    batch defaults that depend on the usage context; booted under a different
+    context than `vllm serve`, its table would never be hit."""
+    from vllm.usage.usage_lib import UsageContext
+
+    _, kwargs = _boot_warmup_engine(monkeypatch)
+    assert kwargs["usage_context"] == UsageContext.OPENAI_API_SERVER
+
+
+def test_preload_warmup_engine_drops_the_daemon_loader_config(monkeypatch):
+    """Preload's loader config is for the daemons' disk loader; handed to the
+    warmup engine's IPC loader, its unknown keys would fail the warmup."""
+    engine_args, _ = _boot_warmup_engine(
+        monkeypatch, model_loader_extra_config={"enable_multithread_load": True}
+    )
+    assert engine_args.load_format == "ipc_cache"
+    assert engine_args.model_loader_extra_config == {
+        "socket_dir": "/run/vllm",
+        "mode": "zero_copy",
+        "fallback": False,
+    }
