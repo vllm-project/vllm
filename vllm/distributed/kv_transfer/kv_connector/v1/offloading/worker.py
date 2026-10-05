@@ -109,6 +109,18 @@ class OffloadingConnectorWorker:
                     if isinstance(layer_kv_cache_spec, AttentionSpec)
                     else page
                 )
+                if block_stride_bytes < page:
+                    # A block's page is not one contiguous region (LHBNC puts
+                    # the heads of a block a whole layer of blocks apart). Both
+                    # transfer paths below assume it is, and would copy only
+                    # part of the page while the block still counts as stored.
+                    raise ValueError(
+                        f"OffloadingConnector cannot offload layer {layer_name}: "
+                        f"its KV cache page is not contiguous within a block "
+                        f"(block stride {block_stride_bytes} B < page {page} B), "
+                        f"as with the LHBNC KV cache layout. Use a layout whose "
+                        f"pages are contiguous, e.g. VLLM_KV_CACHE_LAYOUT=LBHNC."
+                    )
                 tensors_per_block[layer_name] = (
                     torch.tensor([], dtype=torch.int8, device=ref.device).set_(
                         ref.untyped_storage(),
