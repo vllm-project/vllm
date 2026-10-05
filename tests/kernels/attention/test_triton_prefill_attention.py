@@ -7,7 +7,10 @@ import torch.nn.functional as F
 
 import vllm.v1.attention.ops.triton_prefill_attention as prefill_ops
 from vllm.platforms import current_platform
-from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
+from vllm.triton_utils import triton
+from vllm.v1.attention.ops.triton_prefill_attention import (
+    context_attention_fwd,
+)
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -80,7 +83,7 @@ def ref_masked_attention(
 @pytest.mark.parametrize("max_seq_len", [1024])
 @pytest.mark.parametrize("H_Q", [32])
 @pytest.mark.parametrize("H_KV", [32, 8])
-@pytest.mark.parametrize("D", [128])
+@pytest.mark.parametrize("D", [64, 72, 80, 96, 128])
 @pytest.mark.parametrize("is_causal", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_context_attention(
@@ -158,7 +161,7 @@ def test_context_attention(
 @pytest.mark.parametrize("max_seq_len", [1024])
 @pytest.mark.parametrize("H_Q", [32])
 @pytest.mark.parametrize("H_KV", [32, 8])
-@pytest.mark.parametrize("D", [128])
+@pytest.mark.parametrize("D", [64, 72, 80, 96, 128])
 @pytest.mark.parametrize("sliding_window", [(32, 32), (32, 0), (0, 32)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_context_attention_sliding_window(
@@ -248,7 +251,13 @@ class _LaunchCapture:
 
 
 def _capture_tile_config(
-    monkeypatch, *, is_rocm: bool, on_gfx1x: bool, dtype=torch.bfloat16
+    monkeypatch,
+    *,
+    is_rocm: bool,
+    on_gfx1x: bool,
+    dtype=torch.bfloat16,
+    head_dim: int = 128,
+    on_gfx1151: bool = False,
 ) -> _LaunchCapture:
     """Capture the tile configuration with the platform predicates mocked.
 
@@ -266,6 +275,7 @@ def _capture_tile_config(
         import vllm.platforms.rocm as rocm_platform
 
         monkeypatch.setattr(rocm_platform, "on_gfx1x", lambda: on_gfx1x)
+        monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: on_gfx1151)
 
     capture = _LaunchCapture()
     monkeypatch.setattr(prefill_ops, "_fwd_kernel", capture)
@@ -275,10 +285,10 @@ def _capture_tile_config(
 
     seq_lens = torch.empty(2, dtype=torch.int32, device="meta")
     context_attention_fwd(
-        meta(256, 8, 128),
-        meta(256, 2, 128),
-        meta(256, 2, 128),
-        meta(256, 8, 128),
+        meta(256, 8, head_dim),
+        meta(256, 2, head_dim),
+        meta(256, 2, head_dim),
+        meta(256, 8, head_dim),
         seq_lens,
         seq_lens,
         128,
@@ -315,3 +325,69 @@ def test_rdna_narrows_the_kv_tile_and_nothing_else(monkeypatch) -> None:
     assert tuned.kwargs.pop("BLOCK_N") != stock.kwargs.pop("BLOCK_N")
     assert tuned.kwargs == stock.kwargs
     assert tuned.grid == stock.grid
+
+
+@pytest.mark.parametrize(
+    ("head_dim", "expected"),
+    [
+        (64, (64, 0)),  # already a power of 2
+        (72, (64, 16)),  # SigLIP, Qwen3-VL
+        (80, (64, 16)),  # Qwen2.5-VL
+        (96, (64, 32)),  # the other tail width the kernel can emit
+        (112, (128, 0)),  # 64 + 64 covers the same 128 lanes, so don't split
+        (128, (128, 0)),
+    ],
+)
+def test_gfx1151_splits_the_head_dim(monkeypatch, head_dim, expected) -> None:
+    """A non-power-of-2 head dim is covered by a main block plus a tail."""
+    capture = _capture_tile_config(
+        monkeypatch, is_rocm=True, on_gfx1x=True, on_gfx1151=True, head_dim=head_dim
+    )
+    got = (capture.kwargs["BLOCK_DMODEL"], capture.kwargs["BLOCK_DMODEL_TAIL"])
+    assert got == expected
+
+
+@pytest.mark.parametrize("head_dim", [72, 96])
+def test_nothing_changes_off_gfx1151(monkeypatch, head_dim) -> None:
+    """Every other part keeps the launch configuration it has today."""
+    with pytest.MonkeyPatch.context() as m:
+        tuned = _capture_tile_config(
+            m, is_rocm=True, on_gfx1x=True, on_gfx1151=True, head_dim=head_dim
+        )
+    stock = _capture_tile_config(
+        monkeypatch, is_rocm=True, on_gfx1x=True, on_gfx1151=False, head_dim=head_dim
+    )
+    assert stock.kwargs["BLOCK_DMODEL"] == triton.next_power_of_2(head_dim)
+    assert stock.kwargs["BLOCK_DMODEL_TAIL"] == 0
+    assert stock.kwargs != tuned.kwargs
+
+
+@pytest.mark.parametrize("head_dim", [72, 96])
+def test_gfx1151_split_matches_the_reference(monkeypatch, head_dim) -> None:
+    """Run the split-D kernel for real, so CI covers it off gfx1151 too."""
+    import vllm.platforms.rocm as rocm_platform
+
+    if not current_platform.is_rocm():
+        pytest.skip("needs the ROCm platform module")
+    monkeypatch.setattr(rocm_platform, "on_gfx1151", lambda: True)
+
+    torch.manual_seed(42)
+    B, S, H = 2, 256, 8
+    seq_lens = torch.full((B,), S, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc = torch.zeros(B, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc[1:] = torch.cumsum(seq_lens[:-1], dim=0)
+    q, k, v = (
+        torch.randn(B * S, H, head_dim, dtype=torch.bfloat16, device=DEVICE_TYPE)
+        for _ in range(3)
+    )
+    o = torch.zeros_like(q)
+    context_attention_fwd(q, k, v, o, b_start_loc, seq_lens, S, is_causal=True)
+
+    o_ref = torch.zeros_like(o)
+    for i in range(B):
+        start = b_start_loc[i].item()
+        end = start + seq_lens[i].item()
+        o_ref[start:end] = ref_masked_attention(
+            q[start:end], k[start:end], v[start:end], is_causal=True
+        )
+    torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
