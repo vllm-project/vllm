@@ -44,10 +44,11 @@ def compute_plan_fingerprint(
     """Hash everything the profiled KV-cache memory value depends on.
 
     ``VllmConfig.compute_hash()`` covers the vLLM version and the model,
-    cache, parallel, and compilation configs, but deliberately contains no
-    device identity (``DeviceConfig.compute_hash`` is empty), so device
-    name, total memory, compute capability, and the torch/CUDA build are
-    added here. The vLLM version is also pinned as an explicit factor so
+    cache, parallel, and compilation configs, but deliberately excludes
+    the GPU-memory utilization budget and device identity
+    (``DeviceConfig.compute_hash`` is empty). The utilization budget,
+    device name, total memory, compute capability, and the torch/CUDA build
+    are added here. The vLLM version is also pinned as an explicit factor so
     version invalidation holds no matter how ``compute_hash`` evolves.
     Rank is included because per-rank memory use differs under TP/PP.
     Driver-only changes are not part of the key; the free-memory gate at
@@ -62,6 +63,7 @@ def compute_plan_fingerprint(
         "schema": PLAN_SCHEMA_VERSION,
         "vllm": vllm_version,
         "vllm_config": vllm_config.compute_hash(),
+        "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
         "device_name": current_platform.get_device_name(),
         "device_total_memory": current_platform.get_device_total_memory(),
         "device_capability": str(capability) if capability else "",
