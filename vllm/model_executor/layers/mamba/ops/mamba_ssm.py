@@ -714,8 +714,6 @@ def selective_scan_fn(
     cache_indices=None,
     has_initial_state=None,
     null_block_id=NULL_BLOCK_ID,
-    cu_chunk_seqlen=None,
-    last_chunk_indices=None,
 ) -> torch.Tensor:
     """u: (dim, total_length) for varlen or (batch, dim, seqlen)
         applies changes in place.
@@ -792,8 +790,6 @@ def selective_scan_fn(
             has_initial_state,
             ssm_states,
             null_block_id,
-            cu_chunk_seqlen=cu_chunk_seqlen,
-            last_chunk_indices=last_chunk_indices,
         )
     else:
         ops.selective_scan_fwd(
@@ -811,8 +807,6 @@ def selective_scan_fn(
             has_initial_state,
             ssm_states,
             null_block_id,
-            cu_chunk_seqlen,
-            last_chunk_indices,
         )
 
     if z is None:

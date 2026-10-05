@@ -127,8 +127,6 @@ def selective_scan_opcheck_fn(
     has_initial_state=None,
     ssm_states=None,
     null_block_id=NULL_BLOCK_ID,
-    cu_chunk_seqlen=None,
-    last_chunk_indices=None,
 ):
     """If return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate).
@@ -173,8 +171,6 @@ def selective_scan_opcheck_fn(
             has_initial_state,
             ssm_states,
             null_block_id,
-            cu_chunk_seqlen,
-            last_chunk_indices,
         ),
         test_utils=["test_schema", "test_faketensor"],
     )

@@ -69,8 +69,6 @@ struct SSMParamsBase {
     void *__restrict__ cache_indices_ptr;
     void *__restrict__ has_initial_state_ptr;
 
-    void *__restrict__ cu_chunk_seqlen_ptr;      // (nchunks+1,) - cumulative chunk token offsets
-    void *__restrict__ last_chunk_indices_ptr;   // (batch,) - index of last chunk per sequence
 };
 
 

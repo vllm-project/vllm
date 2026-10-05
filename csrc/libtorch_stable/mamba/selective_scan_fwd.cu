@@ -145,31 +145,12 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     }
 
     const int chunk_size = 2048;
-
-    const int* cu_chunk_seqlen = params.cu_chunk_seqlen_ptr != nullptr ?
-                                 reinterpret_cast<const int*>(params.cu_chunk_seqlen_ptr) : nullptr;
-    const int* last_chunk_indices = params.last_chunk_indices_ptr != nullptr ?
-                                    reinterpret_cast<const int*>(params.last_chunk_indices_ptr) : nullptr;
-
-    // Determine chunk boundaries from pre-computed metadata, or fall back to
-    // fixed-size chunking.
-    int first_chunk_idx, n_chunks;
-
-    if (cu_chunk_seqlen != nullptr && last_chunk_indices != nullptr) {
-        const int last_chunk_idx = last_chunk_indices[batch_id];
-        first_chunk_idx = (batch_id == 0) ? 0 : last_chunk_indices[batch_id - 1] + 1;
-        n_chunks = last_chunk_idx - first_chunk_idx + 1;
-    } else {
-        first_chunk_idx = 0;
-        n_chunks = (seqlen + chunk_size - 1) / chunk_size;
-    }
+    const int n_chunks = (seqlen + chunk_size - 1) / chunk_size;
 
     int tokens_processed = 0;
 
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
-        const int chunk_tokens = (cu_chunk_seqlen != nullptr)
-            ? cu_chunk_seqlen[first_chunk_idx + chunk + 1] - cu_chunk_seqlen[first_chunk_idx + chunk]
-            : min(chunk_size, seqlen - tokens_processed);
+        const int chunk_tokens = min(chunk_size, seqlen - tokens_processed);
         if (chunk_tokens <= 0) break;
         input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
 
@@ -461,9 +442,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         const std::optional<torch::stable::Tensor>& cache_indices,
                         const std::optional<torch::stable::Tensor>& has_initial_state,
                         bool varlen,
-                        int64_t null_block_id,
-                        const std::optional<torch::stable::Tensor> &cu_chunk_seqlen,
-                        const std::optional<torch::stable::Tensor> &last_chunk_indices) {
+                        int64_t null_block_id) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -497,8 +476,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.cache_indices_ptr = cache_indices.has_value() ? cache_indices.value().data_ptr() : nullptr;
     params.has_initial_state_ptr = has_initial_state.has_value() ? has_initial_state.value().data_ptr() : nullptr;
 
-    params.cu_chunk_seqlen_ptr = cu_chunk_seqlen.has_value() ? cu_chunk_seqlen.value().data_ptr() : nullptr;
-    params.last_chunk_indices_ptr = last_chunk_indices.has_value() ? last_chunk_indices.value().data_ptr() : nullptr;
 
     // All stride are in elements, not bytes.
     params.A_d_stride = A.stride(0);
@@ -578,9 +555,7 @@ void selective_scan_fwd(const torch::stable::Tensor &u, const torch::stable::Ten
                   const torch::stable::Tensor &ssm_states,
                   // used to identify padding entries if cache_indices provided
                   // in case of padding, the kernel will return early
-                  int64_t null_block_id,
-                  const std::optional<torch::stable::Tensor> &cu_chunk_seqlen,
-                  const std::optional<torch::stable::Tensor> &last_chunk_indices) {
+                  int64_t null_block_id) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     STD_TORCH_CHECK(input_type == torch::headeronly::ScalarType::Float || input_type == torch::headeronly::ScalarType::Half || input_type == torch::headeronly::ScalarType::BFloat16);
@@ -712,9 +687,7 @@ void selective_scan_fwd(const torch::stable::Tensor &u, const torch::stable::Ten
                        cache_indices,
                        has_initial_state,
                        varlen,
-                       null_block_id,
-                       cu_chunk_seqlen,
-                       last_chunk_indices
+                       null_block_id
                        );
 
     

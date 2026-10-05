@@ -500,9 +500,7 @@ void selective_scan_fwd(
     const std::optional<torch::stable::Tensor>& query_start_loc,
     const std::optional<torch::stable::Tensor>& cache_indices,
     const std::optional<torch::stable::Tensor>& has_initial_state,
-    const torch::stable::Tensor& ssm_states, int64_t null_block_id,
-    const std::optional<torch::stable::Tensor>& cu_chunk_seqlen,
-    const std::optional<torch::stable::Tensor>& last_chunk_indices);
+    const torch::stable::Tensor& ssm_states, int64_t null_block_id);
 
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
