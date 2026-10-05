@@ -280,7 +280,7 @@ class KernelConfig:
 
     flashinfer_moe_search_strategy: Literal["exhaustive", "factorized"] = "exhaustive"
     """Experimental search policy for uncached ordinary FlashInfer MoE calls.
-    Requires enable_flashinfer_autotune=True. Factorized search needs a
+    Used when FlashInfer autotuning is enabled. Factorized search needs a
     FlashInfer build that supports moe_search_strategy. Existing cached choices
     are reused across strategies; use an empty tuning cache to retune.
     This changes startup search, not the MoE backend or serving precision.
