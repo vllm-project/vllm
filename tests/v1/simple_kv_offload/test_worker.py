@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side unit tests for SimpleCPUOffloadConnector.
 
-Covers the GPU->CPU store cross-stream synchronization: the store copy must be
-ordered after the compute stream that writes the KV blocks, otherwise it can
-read partially written / stale blocks and silently corrupt the CPU cache.
+Covers cross-stream synchronization for both transfer directions: a
+GPU->CPU store must be ordered after the compute stream that writes the KV
+blocks (or it can read partially written / stale blocks), and a CPU->GPU
+load must be ordered after any compute op still reading the destination
+block (or it can overwrite that block mid-read).
 """
 
 from __future__ import annotations
@@ -258,6 +260,88 @@ def test_store_orders_after_compute_write():
     assert fixed == 0, f"store raced compute even with the barrier: {fixed} corrupt"
 
 
+def _drive_load(
+    backend: DmaCopyBackend,
+    gpu: torch.Tensor,
+    cpu: torch.Tensor,
+    *,
+    with_barrier: bool,
+) -> int:
+    """Run ITERS load cycles; return how many captured a torn compute read.
+
+    Each cycle fills the GPU block with a known pre-load value, lets a
+    compute stream read it (after a deliberate delay) into a readback
+    buffer, then issues the CPU->GPU load with a different value. The load
+    is issued *after* the read in host program order, mirroring
+    start_load_kv being called once the forward pass is already launched.
+    Only the compute-done event creates a real device-side happens-before
+    edge that keeps the load from overwriting the block mid-read.
+    """
+    block_ids = list(range(gpu.shape[0]))
+    compute_stream = torch.cuda.Stream()
+    readback = torch.zeros_like(gpu)
+    corrupt = 0
+    for it in range(ITERS):
+        pre_val = (it % 126) + 1
+        load_val = ((it + 63) % 126) + 1  # always distinct from pre_val
+        cpu.fill_(load_val)
+
+        with torch.cuda.stream(compute_stream):
+            gpu.fill_(pre_val)
+            torch.cuda._sleep(SLEEP_CYCLES)
+            readback.copy_(gpu)
+
+        wait_event = None
+        if with_barrier:
+            wait_event = torch.Event()
+            wait_event.record(compute_stream)
+
+        load_events: list[tuple[int, torch.Event]] = []
+        backend.launch_copy(
+            block_ids,
+            block_ids,
+            is_store=False,
+            event_idx=it,
+            events_list=load_events,
+            wait_event=wait_event,
+        )
+
+        deadline = time.time() + 10.0
+        while not load_events and time.time() < deadline:
+            time.sleep(0.0005)
+        assert load_events, "background copy was never enqueued"
+        load_events[0][1].synchronize()
+        compute_stream.synchronize()
+
+        if int((readback[:, 0].to(torch.int32) != pre_val).sum().item()):
+            corrupt += 1
+
+    return corrupt
+
+
+def test_load_orders_after_compute_read():
+    """The load must wait for the compute-read event; without it, it races.
+
+    Mirrors test_store_orders_after_compute_write for the opposite data
+    direction: here a load (CPU->GPU) can overwrite a block a pending
+    compute op (e.g. a queued speculative decode step) has not finished
+    reading yet. See #47282 / #59768 for the production symptom (Xid 13
+    from a stale MRoPE position read).
+    """
+    backend, gpu, cpu = _make_backend()
+    try:
+        control = _drive_load(backend, gpu, cpu, with_barrier=False)
+        fixed = _drive_load(backend, gpu, cpu, with_barrier=True)
+    finally:
+        backend.shutdown()
+
+    assert control > 0, (
+        "no-barrier load did not race the compute read; the test no longer "
+        "exercises the hazard it is meant to guard"
+    )
+    assert fixed == 0, f"load raced compute even with the barrier: {fixed} corrupt"
+
+
 class _RecordingBackend:
     """Captures launch_copy calls without touching the GPU."""
 
@@ -276,8 +360,9 @@ class _RecordingBackend:
         self.calls.append({"is_store": is_store, "wait_event": wait_event})
 
 
-def test_transfer_hooks_pass_wait_event_for_store_only():
-    """wait_for_save gates stores on a compute-done event; start_load_kv does not."""
+def test_transfer_hooks_pass_wait_event_for_both_load_and_store():
+    """Both wait_for_save and start_load_kv gate their copy on a compute-done
+    event, each recorded on the stream active when that hook runs."""
     worker = _make_worker(
         kv_cache_config=None,
         cpu_capacity_bytes=0,
@@ -301,7 +386,7 @@ def test_transfer_hooks_pass_wait_event_for_store_only():
     assert len(store_calls) == 1
     assert len(load_calls) == 1
     assert isinstance(store_calls[0]["wait_event"], torch.Event)
-    assert load_calls[0]["wait_event"] is None
+    assert isinstance(load_calls[0]["wait_event"], torch.Event)
 
 
 def test_build_params_src_access_order():
