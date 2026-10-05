@@ -82,8 +82,8 @@ def test_scheduler_stats_report_host_pool_usage():
     coordinator = scheduler.coordinator
 
     stats = scheduler.get_kv_connector_stats()
-    assert stats.data["host_cache_usage_perc"] == [[0, 0.0]]
-    assert stats.data["pending_page_transfers"] == [[0, 0]]
+    assert stats.data["host_cache_usage_perc"] == [0.0]
+    assert stats.data["pending_page_transfers"] == [0]
 
     request = make_request(
         "request", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
@@ -97,7 +97,7 @@ def test_scheduler_stats_report_host_pool_usage():
     assert 0 < num_used <= 7
     for _ in range(2):
         stats = scheduler.get_kv_connector_stats()
-        assert stats.data["host_cache_usage_perc"] == [[0, expected]]
+        assert stats.data["host_cache_usage_perc"] == [expected]
 
 
 def test_no_forward_enqueues_deferred_hisparse_transfers():
