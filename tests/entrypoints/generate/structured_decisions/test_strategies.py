@@ -22,11 +22,13 @@ def model(architecture: str, logprobs_mode: str = "raw_logprobs") -> Any:
 
 
 def test_strategy_selection():
-    assert select_read_strategy(model("Qwen3ForCausalLM")) is NextTokenStrategy
-    assert select_read_strategy(model("LlamaForCausalLM")) is None
     qwen = "Qwen3ForCausalLM"
+    assert select_read_strategy(model(qwen)) is NextTokenStrategy
     assert select_read_strategy(model(qwen, "processed_logprobs")) is NextTokenStrategy
-    assert select_read_strategy(model(qwen, "raw_logits")) is None
+    with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
+        select_read_strategy(model("LlamaForCausalLM"))
+    with pytest.raises(ValueError, match="not raw_logits"):
+        select_read_strategy(model(qwen, "raw_logits"))
 
 
 def test_route_needs_the_flag():

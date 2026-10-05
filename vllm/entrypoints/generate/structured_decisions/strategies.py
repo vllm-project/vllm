@@ -16,7 +16,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.inputs import EngineInput
-from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -25,8 +24,6 @@ from vllm.tokenizers import TokenizerLike
 
 from .protocol import ReadPromptRequest
 from .question_types import LABELS, Question, StructuredDecisionError, label_softmax
-
-logger = init_logger(__name__)
 
 
 @dataclass
@@ -214,14 +211,18 @@ NEXT_TOKEN_ARCHITECTURES = frozenset(
 LOGPROBS_MODES = frozenset({"raw_logprobs", "processed_logprobs"})
 
 
-def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy] | None:
+def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy]:
+    """Raises ValueError when the model cannot serve structured decisions. The
+    server opted in with --enable-structured-decisions, so startup fails."""
     if model_config.architecture not in NEXT_TOKEN_ARCHITECTURES:
-        return None
-    if model_config.logprobs_mode not in LOGPROBS_MODES:
-        logger.warning(
-            "Structured decisions need --logprobs-mode raw_logprobs or "
-            "processed_logprobs, not %s. /v1/systemone will return 501.",
-            model_config.logprobs_mode,
+        raise ValueError(
+            "--enable-structured-decisions does not support "
+            f"{model_config.architecture}. Supported architectures: "
+            f"{sorted(NEXT_TOKEN_ARCHITECTURES)}"
         )
-        return None
+    if model_config.logprobs_mode not in LOGPROBS_MODES:
+        raise ValueError(
+            "--enable-structured-decisions needs --logprobs-mode raw_logprobs or "
+            f"processed_logprobs, not {model_config.logprobs_mode}"
+        )
     return NextTokenStrategy
