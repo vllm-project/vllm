@@ -109,11 +109,6 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     ):
         draft_head = target_lm_head
         if speculative_config.draft_lm_head_quantization is not None:
-            if draft_model_config.head_dtype != draft_model_config.dtype:
-                raise ValueError(
-                    "draft_lm_head_quantization needs the lm_head to run in the "
-                    f"model dtype, got head_dtype={draft_model_config.head_dtype}."
-                )
             draft_head = QuantizedDraftLMHead(
                 target_lm_head, speculative_config.draft_lm_head_quantization
             )
