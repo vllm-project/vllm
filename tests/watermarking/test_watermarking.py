@@ -29,9 +29,8 @@ from vllm.v1.watermarking.spec_decode import (
     speculative_target_watermark_key,
 )
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
-from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
-from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu import buffer_utils
+from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.watermark import (
     draft_watermarking_mask,
     philox_gumbel_sample,

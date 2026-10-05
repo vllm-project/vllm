@@ -1,20 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable, Sequence
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from vllm import CompletionOutput, RequestOutput, SamplingParams
+from vllm import CompletionOutput, PromptType, RequestOutput, SamplingParams
 from vllm import logger as vllm_logger
 from vllm.config import VllmConfig
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
-from vllm.inputs import TokensInput
-from vllm.entrypoints.generate.beam_search.utils import BeamSearchSequence
+from vllm.entrypoints.generate.beam_search.utils import (
+    BeamSearchInstance,
+    BeamSearchSequence,
+)
+from vllm.inputs import EngineInput, TokensInput
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.sampling_params import BeamSearchParams
+from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
 
 @pytest.fixture
@@ -44,7 +50,9 @@ class _Renderer:
 class _VllmConfig:
     watermark_config = object()
     speculative_config = None
-    _check_supports_watermarking = VllmConfig._check_supports_watermarking
+
+    def _check_supports_watermarking(self, params: BeamSearchParams) -> bool:
+        return VllmConfig._check_supports_watermarking(cast(VllmConfig, self), params)
 
 
 class _InputProcessor:
@@ -95,14 +103,30 @@ class _OfflineServing(BeamSearchOfflineMixin):
     renderer = _Renderer()
     llm_engine = _EngineClient()
 
-    def _preprocess_cmpl(self, prompts):
-        return prompts
+    def _preprocess_cmpl(
+        self,
+        prompts: Sequence[PromptType],
+        tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> Sequence[EngineInput]:
+        return cast(Sequence[EngineInput], prompts)
 
     def _lora_request_to_seq(self, lora_request, num_requests):
         return [None] * num_requests
 
-    def _beam_search_step(self, **kwargs):
-        assert kwargs["base_sampling_params"].watermarking is False
+    def _beam_search_step(
+        self,
+        instances_batch: list[BeamSearchInstance],
+        base_sampling_params: SamplingParams,
+        eos_token_id: int | None,
+        ignore_eos: bool,
+        beam_width: int,
+        sort_beams_key: Callable[..., Any],
+        structured_output_backend: StructuredOutputBackend | None,
+        structured_output_key: tuple[Any, ...] | None,
+        structured_output_bitmask: torch.Tensor | None,
+    ) -> bool:
+        assert base_sampling_params.watermarking is False
         return True
 
 
@@ -244,7 +268,8 @@ def test_offline_beam_search_warns_and_disables_watermarking(
 
     with caplog_vllm.at_level("WARNING"):
         outputs = _OfflineServing().beam_search(
-            [{"type": "token", "prompt_token_ids": [1]}], params
+            cast(list[PromptType], [{"type": "token", "prompt_token_ids": [1]}]),
+            params,
         )
 
     assert "beam search requests will run without watermarking" in caplog_vllm.text
@@ -255,7 +280,7 @@ def test_offline_beam_search_warns_and_disables_watermarking(
 
 def test_offline_beam_search_disables_internal_watermarking() -> None:
     outputs = _OfflineServing().beam_search(
-        [{"type": "token", "prompt_token_ids": [1]}],
+        cast(list[PromptType], [{"type": "token", "prompt_token_ids": [1]}]),
         BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False),
     )
 
