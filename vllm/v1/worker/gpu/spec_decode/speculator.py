@@ -104,8 +104,6 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
-    # Speculators that draft one token per step and can stop between steps.
-    supports_draft_confidence_stop: bool = False
     confidence_stop: DraftConfidenceStop | None = None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -215,17 +213,6 @@ class DraftModelSpeculator(BaseSpeculator):
 
         threshold = self.speculative_config.draft_confidence_threshold
         if threshold is not None:
-            if not self.supports_draft_confidence_stop:
-                raise ValueError(
-                    "draft_confidence_threshold is not supported by "
-                    f"{type(self).__name__}."
-                )
-            if self.dp_size > 1:
-                raise ValueError(
-                    "draft_confidence_threshold is not supported with data "
-                    "parallelism, whose ranks could stop drafting at different "
-                    "depths."
-                )
             self.confidence_stop = DraftConfidenceStop(
                 threshold, self.max_num_reqs, self.num_speculative_steps, device
             )

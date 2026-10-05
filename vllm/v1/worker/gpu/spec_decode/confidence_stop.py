@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Confidence-based early exit for autoregressive drafting."""
-
 import numpy as np
 import torch
 
@@ -10,6 +8,9 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_max_and_sumexp,
 )
+
+# Same vocab tile as the rejection sampler's vocab-wide reductions.
+VOCAB_BLOCK_SIZE = 8192
 
 
 @triton.jit
@@ -32,7 +33,7 @@ def _draft_confidence_kernel(
     if step > 0:
         alive = alive & (tl.load(alive_ptr + row) != 0)
     if alive:
-        # The top-1 probability is exp(m - m) / sum(exp(x - m)) = 1 / sumexp.
+        # Top-1 probability: exp(max - max) / sum(exp(x - max)) = 1 / sumexp.
         running_max = float("-inf")
         running_sumexp = 0.0
         row_ptr = logits_ptr + row.to(tl.int64) * logits_stride
@@ -63,20 +64,11 @@ def _draft_confidence_kernel(
 class DraftConfidenceStop:
     """Ends a draft round once no request's chain is confident enough to go on.
 
-    A request's chain continues while every draft so far has a drafter top-1
-    probability of at least the threshold; its first draft is kept regardless.
-    The device keeps per-row chain state and the number of live chains, which
-    the CPU reads after each draft step to decide whether to launch the next.
-    Since all rows run every launched step, every request in the round ends up
-    with the same number of verifiable drafts:
-
-    * no chain alive after step j (0-based): j drafts, but at least one, since
-      step j's drafts were all below the threshold;
-    * all steps launched: num_steps drafts if a chain survived the last step,
-      else num_steps - 1.
-
-    The decision only reads the drafter's distributions, never the tokens drawn
-    from them, so stopping does not bias rejection sampling.
+    A chain continues while every draft so far has a drafter top-1 probability
+    of at least the threshold; its first draft is always kept. The CPU reads the
+    number of live chains after each step to decide whether to launch the next.
+    All rows run every launched step, so every request in a round ends with the
+    same number of drafts: j (at least 1) if no chain survived step j, else all.
     """
 
     def __init__(
@@ -86,30 +78,23 @@ class DraftConfidenceStop:
         num_steps: int,
         device: torch.device,
     ):
-        self.num_steps = num_steps
         self.threshold = torch.tensor([threshold], dtype=torch.float32, device=device)
+        self.num_steps = num_steps
         self.alive = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
         self.num_alive = torch.zeros(1, dtype=torch.int32, device=device)
         self._num_alive_cpu = torch.zeros(1, dtype=torch.int32, pin_memory=True)
         self._num_alive_ready = torch.cuda.Event()
-
         # Verifiable drafts per request-state slot, from the slot's last round.
         self._num_drafts_np = np.full(max_num_reqs, num_steps, dtype=np.int32)
-        # Slots of a round whose last step's outcome is still on the device.
-        self._pending_slots: np.ndarray | None = None
         self._round_slots: np.ndarray | None = None
+        # A round that ran every step; its last outcome is read when next needed.
+        self._pending_slots: np.ndarray | None = None
         self._steps_launched = 0
 
     def update(
-        self,
-        logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        draft_step: torch.Tensor,
+        self, logits: torch.Tensor, idx_mapping: torch.Tensor, draft_step: torch.Tensor
     ) -> None:
-        """Fold this step's drafter distributions into the chain state.
-
-        Graph-capturable: everything it touches is a persistent buffer.
-        """
+        """Fold this step's drafter logits into the chain state (graph-safe)."""
         num_rows, vocab_size = logits.shape
         self.num_alive.zero_()
         _draft_confidence_kernel[(num_rows,)](
@@ -121,7 +106,7 @@ class DraftConfidenceStop:
             self.threshold,
             self.alive,
             self.num_alive,
-            BLOCK_SIZE=8192,
+            BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         )
 
     def begin_round(self, idx_mapping_np: np.ndarray) -> None:
@@ -136,7 +121,6 @@ class DraftConfidenceStop:
         self._round_slots = None
 
     def step_launched(self) -> None:
-        """Start copying the number of live chains after the step just launched."""
         self._steps_launched += 1
         self._num_alive_cpu.copy_(self.num_alive, non_blocking=True)
         self._num_alive_ready.record()
@@ -150,33 +134,20 @@ class DraftConfidenceStop:
         """Whether any chain survived the last launched step. Waits for it."""
         if self._read_num_alive() > 0:
             return True
-        self._end_round(max(1, self._steps_launched - 1))
+        assert self._round_slots is not None
+        self._num_drafts_np[self._round_slots] = max(1, self._steps_launched - 1)
+        self._round_slots = None
         return False
 
     def end_round(self) -> None:
-        """Close a round that launched every step without stopping early.
-
-        Its last step's outcome is resolved when next needed, so the CPU does
-        not wait for that step here.
-        """
-        if self._round_slots is None:
-            return
-        self._pending_slots = self._round_slots
-        self._round_slots = None
-
-    def _end_round(self, num_drafts: int) -> None:
-        assert self._round_slots is not None
-        self._num_drafts_np[self._round_slots] = num_drafts
-        self._round_slots = None
+        """Close a round that launched every step, without waiting for it."""
+        self._pending_slots, self._round_slots = self._round_slots, None
 
     def _resolve_pending(self) -> None:
-        if self._pending_slots is None:
-            return
-        num_drafts = self.num_steps
-        if self._read_num_alive() == 0:
-            num_drafts -= 1
-        self._num_drafts_np[self._pending_slots] = num_drafts
-        self._pending_slots = None
+        if self._pending_slots is not None:
+            survived = self._read_num_alive() > 0
+            self._num_drafts_np[self._pending_slots] = self.num_steps - (not survived)
+            self._pending_slots = None
 
     def num_verifiable_drafts(self, idx_mapping_np: np.ndarray) -> np.ndarray:
         """Drafts each request may verify, from its slot's last draft round."""

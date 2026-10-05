@@ -2,18 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import numpy as np
 import pytest
 import torch
 
-from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-    AutoRegressiveSpeculator,
-)
 from vllm.v1.worker.gpu.spec_decode.confidence_stop import DraftConfidenceStop
 
 VOCAB = 20000  # Spans several kernel blocks.
@@ -105,71 +99,40 @@ def test_full_round_resolves_last_step_lazily(last_prob, expected):
     assert stop.num_verifiable_drafts(np.array([2])).tolist() == [expected]
 
 
-class _TestSpeculator(AutoRegressiveSpeculator):
-    def load_draft_model(self, target_model, target_attn_layer_names):
-        raise NotImplementedError
-
-
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    ("decisions", "expected_launches", "expect_end_round"),
-    [
-        # Stop before the second decode step.
-        ([True, False], 1, False),
-        ([False], 0, False),
-        # Never stopped: the round ends with its last step still pending.
-        ([True, True, True], 3, True),
-    ],
-)
-def test_multi_step_decode_stops_launching(
-    decisions, expected_launches, expect_end_round
-):
-    speculator = object.__new__(_TestSpeculator)
-    speculator.num_speculative_steps = NUM_STEPS
-    speculator.current_draft_step = torch.tensor(0)
-    speculator.input_buffers = SimpleNamespace(
-        positions=torch.arange(2), query_start_loc=torch.arange(3)
-    )
-    speculator.idx_mapping = torch.arange(2)
-    run_fullgraph = Mock()
-    speculator.decode_cudagraph_manager = SimpleNamespace(run_fullgraph=run_fullgraph)
-    stop = Mock()
-    stop.should_continue.side_effect = decisions
-
-    speculator._multi_step_decode(
-        num_reqs=2,
-        skip_attn=True,
-        batch_desc=BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.FULL, num_tokens=2, num_reqs=2
-        ),
-        num_tokens_across_dp=None,
-        seq_lens_cpu_upper_bound=None,
-        confidence_stop=stop,
-    )
-
-    assert run_fullgraph.call_count == expected_launches
-    assert stop.step_launched.call_count == expected_launches
-    assert stop.end_round.called == expect_end_round
-
-
-@pytest.mark.parametrize(
-    ("is_cuda", "is_sm12x", "kept"),
+    ("is_cuda", "is_sm12x", "ok"),
     [(True, True, True), (True, False, False), (False, False, False)],
 )
-def test_confidence_stop_only_enabled_on_sm12x(monkeypatch, is_cuda, is_sm12x, kept):
-    """Elsewhere the per-step readback stalls the GPU, so the key is dropped."""
+def test_confidence_stop_requires_sm12x(monkeypatch, is_cuda, is_sm12x, ok):
+    """Elsewhere the per-step readback stalls the GPU, so the key is rejected."""
     from vllm.config import VllmConfig
 
-    fake_platform = SimpleNamespace(
-        is_cuda=lambda: is_cuda,
-        is_device_capability_family=lambda capability: (is_sm12x and capability == 120),
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform",
+        SimpleNamespace(
+            is_cuda=lambda: is_cuda,
+            is_device_capability_family=lambda cap: is_sm12x and cap == 120,
+        ),
     )
-    monkeypatch.setattr("vllm.platforms.current_platform", fake_platform)
+    spec = SimpleNamespace(
+        draft_confidence_threshold=THRESHOLD,
+        method="mtp",
+        num_speculative_tokens=NUM_STEPS,
+        use_multi_module_mtp=lambda: False,
+        use_gemma4_mtp=lambda: False,
+        uses_dynamic_speculative_decoding=lambda: False,
+        enable_adaptive_verification=False,
+        use_local_argmax_reduction=False,
+        parallel_drafting=False,
+    )
     config = SimpleNamespace(
-        speculative_config=SimpleNamespace(
-            draft_confidence_threshold=THRESHOLD, num_speculative_tokens=NUM_STEPS
-        )
+        speculative_config=spec,
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(data_parallel_size=1),
     )
-    VllmConfig._maybe_disable_draft_confidence_stop(config)
-    expected = THRESHOLD if kept else None
-    assert config.speculative_config.draft_confidence_threshold == expected
+    if ok:
+        VllmConfig._verify_draft_confidence_threshold(config)
+    else:
+        with pytest.raises(ValueError, match="SM12x"):
+            VllmConfig._verify_draft_confidence_threshold(config)

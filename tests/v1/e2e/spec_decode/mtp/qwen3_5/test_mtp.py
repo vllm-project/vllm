@@ -5,7 +5,13 @@ import pytest
 
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
+from vllm.platforms import current_platform
 
+from ...utils import (
+    assert_request_outputs_match,
+    compute_acceptance_len,
+    get_test_prompts,
+)
 from .._correctness import check_mtp_correctness
 
 
@@ -37,3 +43,50 @@ def test_mtp_correctness(
         expected_accuracy_threshold,
         vllm_runner,
     )
+
+
+@single_gpu_only
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
+    ),
+    reason="draft_confidence_threshold is SM12x only",
+)
+def test_mtp_draft_confidence_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    vllm_runner,
+):
+    """The stop only shortens drafting: greedy outputs match fixed-depth MTP,
+    and a deeper capped chain keeps at least 90% of the fixed chain's AL."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    prompts = get_test_prompts(mm_enabled=False)
+    results = {}
+    for num_spec, threshold in ((3, None), (4, 0.6)):
+        with vllm_runner(
+            "Qwen/Qwen3.5-0.8B-Base",
+            block_size=None,
+            enable_chunked_prefill=None,
+            max_model_len=2048,
+            limit_mm_per_prompt={"image": 0, "video": 0},
+            speculative_config={
+                "method": "mtp",
+                "num_speculative_tokens": num_spec,
+                "draft_confidence_threshold": threshold,
+            },
+            disable_log_stats=False,
+        ) as runner:
+            outputs = runner.llm.chat(prompts, sampling_config)
+            results[threshold] = (
+                outputs,
+                compute_acceptance_len(runner.llm.get_metrics()),
+            )
+
+    (ref_outputs, ref_al), (outputs, al) = results[None], results[0.6]
+    assert_request_outputs_match(
+        ref_outputs,
+        outputs,
+        required_matches=int(0.8 * len(ref_outputs)) + 1,
+        context="draft_confidence_threshold=0.6",
+    )
+    assert al >= 0.9 * ref_al, f"acceptance length {al:.3f} vs {ref_al:.3f}"

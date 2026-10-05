@@ -78,4 +78,4 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   Spark) makes `num_speculative_tokens` a maximum depth: drafting stops once no
   request's next draft is that confident, and only the drafted prefix is
   verified. It waits on the GPU after every draft step, which costs more than it
-  saves on faster GPUs, so it is ignored with a warning outside SM12x.
+  saves on faster GPUs, so it is rejected outside SM12x.
