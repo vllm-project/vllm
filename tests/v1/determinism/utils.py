@@ -52,6 +52,12 @@ if os.getenv("VLLM_TEST_MODEL"):
             available=DEVICE_BACKENDS["xpu"].available,
             backends=[],
         )
+    elif getattr(config, "model_type", "") == "granite_swa":
+        # FLEX_ATTENTION does not support attention sinks used by GraniteSWA.
+        DEVICE_BACKENDS["cuda"] = DeviceConfig(
+            available=DEVICE_BACKENDS["cuda"].available,
+            backends=["FLASH_ATTN", "TRITON_ATTN"],
+        )
 
 # Only include backends for devices that are actually available.
 BACKENDS: list[str] = sorted(
