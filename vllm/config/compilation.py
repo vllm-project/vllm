@@ -577,12 +577,10 @@ class CompilationConfig:
     PP ranks."""
 
     decoder_replay_cudagraph_capture_sizes: list[int] = field(default_factory=list)
-    """Decoder replay CUDA graph sizes for YOCO models (e.g. DeepSeek-V4.1).
-    If empty, capture 8 sizes per power-of-two interval (e.g. step 128 in
-    [1024, 2048), step 256 in [2048, 4096)) up to
-    min(max_cudagraph_capture_size, max_num_seqs * sliding_window), including
-    that upper bound. Explicit sizes override this inference and must not exceed
-    max_num_batched_tokens. Larger replay batches run eagerly."""
+    """Decoder replay CUDA graph sizes for YOCO models (e.g. DeepSeek-V4.1), at
+    most max_num_batched_tokens. If empty: multiples of sliding_window up to
+    min(max_cudagraph_capture_size, max_num_seqs * sliding_window), coarser past
+    16 * sliding_window. Larger replay batches run eagerly."""
 
     decoder_replay_trim_threshold: int = Field(default=768, ge=0)
     """For YOCO models (e.g. DeepSeek-V4.1), PIECEWISE graphs with at least this

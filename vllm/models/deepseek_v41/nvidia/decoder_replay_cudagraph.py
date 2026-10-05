@@ -32,11 +32,12 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
                 compilation.max_cudagraph_capture_size,
                 scheduler.max_num_seqs * layers.window,
             )
-            # 8 sizes per power-of-two interval, e.g. step 256 in [2048, 4096).
-            sizes, s = [bound], 1
+            # Replay batches hold at least `window` rows: step by window, or by 1/8
+            # of the power-of-two interval once wider (256 in [2048, 4096)).
+            sizes, s = [bound], layers.window
             while s < bound:
                 sizes.append(s)
-                s += 1 << max(s.bit_length() - 4, 0)
+                s += max(layers.window, 1 << max(s.bit_length() - 4, 0))
         sizes = sorted(set(sizes))
         if max(sizes) > scheduler.max_num_batched_tokens:
             raise ValueError(
