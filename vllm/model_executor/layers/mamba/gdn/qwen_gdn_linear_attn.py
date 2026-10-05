@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
+import itertools
 import os
 from dataclasses import replace
 from typing import Literal
@@ -220,6 +221,7 @@ def fi_chunk_gated_delta_rule(
     state_checkpoints: torch.Tensor | None = None,
     checkpoint_cu_starts: torch.Tensor | None = None,
     checkpoint_every_n_tokens: int = 0,
+    use_cp: Literal["auto"] | bool = "auto",
 ):
     from flashinfer.gdn_prefill import (
         chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
@@ -253,6 +255,7 @@ def fi_chunk_gated_delta_rule(
         state_checkpoints=state_checkpoints,
         checkpoint_cu_starts=checkpoint_cu_starts,
         checkpoint_every_n_tokens=checkpoint_every_n_tokens,
+        use_cp=use_cp,
         backend="flashinfer",
     )
     # FlashInfer returns (output, state) when output_final_state=True,
@@ -1214,6 +1217,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_offsets=chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
             )
+            if self.gdn_prefill_backend == "flashinfer":
+                self._warmup_flashinfer_prefill_variants(q, k, v, g, beta, state)
         except Exception:
             logger.warning(
                 "GDN prefill kernel warmup (T=%d) failed for "
@@ -1246,6 +1251,50 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
 
         torch.accelerator.empty_cache()
+
+    def _warmup_flashinfer_prefill_variants(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        state: torch.Tensor,
+    ) -> None:
+        """Compile every FlashInfer GDN prefill kernel a batch can dispatch to.
+
+        FlashInfer builds separate kernels for its context-parallel route (few
+        sequences) and its regular route, each with and without checkpoint
+        output. A single sequence under ``use_cp="auto"`` takes the CP route
+        wherever the heuristic can pick it; ``use_cp=False`` forces the other.
+        """
+        checkpoint_kwargs: list[dict] = [{}]
+        if self._checkpoint_buffer_spec is not None:
+            (state_checkpoints,) = current_workspace_manager().get_simultaneous(
+                self._checkpoint_buffer_spec
+            )
+            checkpoint_kwargs.append(
+                dict(
+                    state_checkpoints=state_checkpoints[:1],
+                    checkpoint_cu_starts=torch.tensor([0, 1], device=q.device),
+                    checkpoint_every_n_tokens=q.shape[1],
+                )
+            )
+        cu_seqlens = torch.tensor([0, q.shape[1]], device=q.device, dtype=torch.int32)
+        for use_cp, kwargs in itertools.product(("auto", False), checkpoint_kwargs):
+            fi_chunk_gated_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=state,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=False,
+                use_cp=use_cp,
+                **kwargs,
+            )
 
     def _forward_core_rocm(
         self,
