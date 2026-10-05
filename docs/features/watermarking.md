@@ -48,12 +48,12 @@ callers, or strip and validate the field at the ingress boundary.
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
-contexts. Values above 16 are allowed but emit a warning.
+contexts. Values above 16 are allowed; Gumbel-max emits a warning for them.
 
 `allow_target_only_watermarking` defaults to false and only has an effect when
-speculative decoding is enabled. It permits speculative decoding with a
-watermarking algorithm that does not support it natively, at the cost of
-weaker detectability. See
+speculative decoding is enabled. It permits target-only Gumbel-max watermarking
+at the cost of weaker detectability. SynthID-Text does not support speculative
+decoding with either value of this setting. See
 [Speculative decoding](#speculative-decoding).
 
 ## Architecture
@@ -100,13 +100,12 @@ Watermarking requires speculative decoding to use probabilistic draft sampling,
 standard rejection sampling, and an autoregressive model-based method (`dspark`,
 `eagle`, `eagle3`, or `mtp`). Parallel drafting is supported only by `dspark`.
 
-A watermarking algorithm without native speculative-decoding support is
-rejected before model loading. Set
-`"allow_target_only_watermarking": true` to allow it: accepted draft tokens are
-not watermarked, while target-side rejection recovery and bonus sampling remain
-watermarked. The watermark signal is diluted in proportion to the share of
-output tokens supplied by accepted drafts; rejected drafts do not dilute it
-because their recovery tokens are watermarked.
+For `gumbel`, set `"allow_target_only_watermarking": true` to leave accepted
+draft tokens unwatermarked while watermarking target-side rejection recovery
+and bonus sampling. The signal is diluted in proportion to the share of output
+tokens supplied by accepted drafts. SynthID-Text is rejected before model
+loading even with this setting, because the target-side speculative recovery
+path does not support SynthID reweighting.
 
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
@@ -198,8 +197,47 @@ vllm serve MODEL \
 
 ### SynthID-Text
 
-[SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) is planned but
-not currently implemented.
+[SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) reweights the
+categorical distribution before vLLM's ordinary random sampler selects a token.
+Configure it with one secret key and a tournament `depth` from 1 to 32
+(default 32):
+
+```bash
+vllm serve MODEL \
+  --watermark-config \
+  '{"algorithm":"synthid","key":42,"context_width":4,"depth":32}'
+```
+
+`context_width` is the number of previous generated tokens used in each PRF
+input; the corresponding n-gram length is `context_width + 1`. Missing tokens
+at the start of a completion use vLLM's native `-1` context value. The usual
+`deduplicate_contexts` policy applies: repeated contexts use ordinary sampling,
+and `"all"` also leaves the first `context_width` generated tokens unwatermarked.
+
+SynthID uses the `philox` PRF. For each context and candidate token, one Philox
+32-bit word supplies the binary values for all configured depths: depth `d`
+uses bit `(word >> d) & 1`. The watermark is applied after top-k and top-p
+filtering. It requires stochastic sampling; requests with `temperature=0` use
+ordinary greedy sampling without a watermark.
+
+`SynthIDWatermarkDetector` recomputes those bits from generated token IDs using
+the same key, `context_width`, `depth`, and PRF. Its score is their mean. Its
+one-sided p-value assumes independent Bernoulli(0.5) bits under the null;
+repeated contexts are deduplicated by default. As with other detectors, measure
+false-positive behavior on representative unwatermarked traffic before relying
+on the threshold:
+
+```python
+from vllm.v1.watermarking import SynthIDWatermarkDetector
+
+result = SynthIDWatermarkDetector(key=42, context_width=4, depth=32).detect(
+    generated_token_ids
+)
+print(result.score, result.p_value, result.is_watermarked)
+```
+
+SynthID-Text does not currently support speculative decoding, including
+target-only watermarking with `allow_target_only_watermarking=true`.
 
 ## Pseudorandom functions
 
@@ -276,6 +314,8 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 - Watermarking is currently available only with Model Runner V2.
 - Not all watermarking algorithms have native speculative-decoding support.
+- Beam search expands candidates from model log probabilities and does not
+  support configured watermarking.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
 - Global custom logits processors are unavailable because Model Runner V2 does
