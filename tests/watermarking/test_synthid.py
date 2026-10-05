@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+
 import pytest
 import torch
 from pydantic import ValidationError
@@ -8,7 +10,10 @@ from pydantic import ValidationError
 from vllm.config.watermarking import WatermarkConfig
 from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.prfs import PhiloxPRF
-from vllm.v1.watermarking.synthid import SynthIDWatermarker
+from vllm.v1.watermarking.synthid import (
+    SynthIDWatermarkDetector,
+    SynthIDWatermarker,
+)
 
 
 def test_synthid_config_and_factory():
@@ -44,9 +49,8 @@ def test_synthid_rejects_invalid_constructor_args(kwargs, match):
         SynthIDWatermarker(**({"key": 42} | kwargs))
 
 
-@pytest.mark.parametrize("depth", [1, 5, 32])
-def test_synthid_logits_follow_philox_bits_and_reweighting(depth):
-    key = 42
+@pytest.mark.parametrize("key, depth", [(0, 1), (42, 5), (2**64 - 1, 32)])
+def test_synthid_logits_follow_philox_bits_and_reweighting(key, depth):
     contexts = torch.tensor([[-1, -1, 7], [11, 12, 13]])
     logits = torch.tensor([[0.2, -0.3, 0.7, -1.1], [0.4, 1.3, -0.8, 0.1]])
     words = PhiloxPRF(key).uint32(contexts, torch.arange(logits.shape[1]))
@@ -106,3 +110,77 @@ def test_synthid_sample_uses_watermarked_logits_and_skip_mask():
 def test_synthid_requires_random_sampler():
     with pytest.raises(ValueError, match="SynthID requires a random sampler"):
         SynthIDWatermarker(42).sample(torch.zeros(1, 3), torch.zeros(1, 4))
+
+
+@pytest.mark.parametrize(
+    "key, context_width, depth",
+    [(0, 1, 1), (42, 2, 3), (2**64 - 1, 4, 32)],
+)
+def test_synthid_detector_matches_independent_bit_count(key, context_width, depth):
+    tokens = [3, 5, 7, 11, 13, 17]
+    contexts = torch.tensor(
+        [
+            ([-1] * context_width + tokens[:position])[-context_width:]
+            for position in range(len(tokens))
+        ]
+    )
+    words = PhiloxPRF(key).uint32(contexts, torch.tensor(tokens)[:, None]).flatten()
+    trials = len(tokens) * depth
+    hits = sum((int(word) // (2**bit)) % 2 for word in words for bit in range(depth))
+    expected_p_value = sum(math.comb(trials, k) for k in range(hits, trials + 1)) / (
+        2**trials
+    )
+
+    result = SynthIDWatermarkDetector(key, context_width, depth).detect(tokens)
+
+    assert result.num_scored_tokens == len(tokens)
+    assert result.score == hits / trials
+    assert result.p_value == pytest.approx(expected_p_value)
+
+
+def test_synthid_detector_empty_and_repeated_contexts():
+    detector = SynthIDWatermarkDetector(42, context_width=1, depth=4)
+
+    empty = detector.detect([])
+    repeated = detector.detect([1, 1, 1, 1, 1])
+
+    assert empty.num_scored_tokens == 0
+    assert empty.p_value == 1
+    assert not empty.is_watermarked
+    assert repeated.num_scored_tokens == 2
+
+
+def test_synthid_detector_recognizes_generated_tokens():
+    key = 42
+    width = 4
+    depth = 4
+    watermarker = SynthIDWatermarker(key, width, depth)
+    generator = torch.Generator().manual_seed(123)
+    logits = torch.zeros(1, 32)
+    tokens: list[int] = []
+
+    def random_sampler(scores):
+        return torch.multinomial(
+            scores.softmax(dim=-1), 1, generator=generator
+        ).flatten()
+
+    for _ in range(96):
+        context = ([-1] * width + tokens)[-width:]
+        sample = watermarker.sample(logits, torch.tensor([context]), random_sampler)
+        tokens.append(int(sample.token_ids.item()))
+
+    matched = SynthIDWatermarkDetector(key, width, depth).detect(tokens)
+    wrong_key = SynthIDWatermarkDetector(key + 1, width, depth).detect(tokens)
+
+    assert matched.is_watermarked
+    assert matched.p_value < 0.01
+    assert not wrong_key.is_watermarked
+
+
+def test_synthid_detector_does_not_flag_unwatermarked_tokens():
+    generator = torch.Generator().manual_seed(123)
+    tokens = torch.randint(0, 32, (96,), generator=generator).tolist()
+
+    result = SynthIDWatermarkDetector(42, context_width=4, depth=4).detect(tokens)
+
+    assert not result.is_watermarked
