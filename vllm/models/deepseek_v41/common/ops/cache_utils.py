@@ -995,11 +995,12 @@ class CombineTopkSwaIndicesKernel(
                 topk_indices_ptr + token_idx * topk_indices_stride + offset,
                 mask=mask,
             )
-            # A failed candidate (-1) must stay -1, not land in the previous
-            # request's rows.
+            # A failed (-1) or out-of-pool candidate stays -1 instead of landing
+            # in the previous request's rows or this request's SWA rows.
+            valid = (topk_indices >= 0) & (topk_indices < N)
             tl.store(
                 combined_indices_ptr + token_idx * combined_indices_stride + offset,
-                tl.where(topk_indices >= 0, topk_indices + M * batch_idx, -1),
+                tl.where(valid, topk_indices + M * batch_idx, -1),
                 mask=mask,
             )
             # Index into gathered buffer: N + (position - gather_start)
