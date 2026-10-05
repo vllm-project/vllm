@@ -396,7 +396,11 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        kv_b_proj_lora: object | None = None,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> None:
+        if token_lora_mapping is not None and (token_lora_mapping >= 0).any():
+            raise NotImplementedError("AMX MLA prefill does not support kv_b_proj LoRA")
         assert output_scale is None, (
             "AMXMLAImpl.forward_mha does not support fused output quantization"
         )
