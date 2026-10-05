@@ -197,12 +197,13 @@ class MambaHybridModelState(DefaultModelState):
         mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
         ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
 
-        # The state-advance + pre-copy kernels run every step; they fast-exit per
-        # request when src_col < 0 or src_col == dst_col, so no copy happens on
-        # steps that don't cross a block boundary. (Skipping the launch entirely
-        # would need a V1-style async-D2H of the actual num_computed, since
-        # num_computed_tokens_np is an optimistic mirror under async scheduling;
-        # the launch cost is ~0.3% of TPOT, so the GPU fast-exit suffices.)
+        # The state-advance + pre-copy kernels are launched every step. They
+        # fast-exit per request when src_col < 0 or src_col == dst_col, avoiding
+        # state copies on steps that don't cross a block boundary. Skipping the
+        # launch entirely would require reading the actual num_computed back to
+        # the CPU, since num_computed_tokens_np is an optimistic mirror under
+        # async scheduling. The fast-exit avoids unnecessary copies, but the
+        # launches and metadata work can still add per-step overhead.
         block = 256
         grid = (triton.cdiv(num_reqs, block),)
         preprocess_mamba_align_fused_kernel[grid](
