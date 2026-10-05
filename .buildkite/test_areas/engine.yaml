@@ -135,6 +135,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) E2E Core Large Memory"
   device: h200_35gb
   key: e2e-core-large-memory
+  automatic_shard: true
   timeout_in_minutes: 50
   source_file_dependencies:
     - vllm/v1/
