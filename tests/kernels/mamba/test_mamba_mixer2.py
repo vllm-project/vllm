@@ -96,15 +96,17 @@ def mixer2_gated_norm_tensor_parallel(
     gate_states = torch.randn(batch_size, seq_len, hidden_size)
 
     # create gated-norm with TP
-    mixer = Mixer2RMSNormGated(
-        full_hidden_size=hidden_size,
-        full_n_groups=n_groups,
-    )
+    with ensure_current_vllm_config():
+        mixer = Mixer2RMSNormGated(
+            full_hidden_size=hidden_size,
+            full_n_groups=n_groups,
+        )
     mixer.weight.weight_loader(mixer.weight, weight)  # load
 
     # create gated-norm without TP to compute reference
     # - utilize mock patching to disable TP when
     with (
+        ensure_current_vllm_config(),
         unittest.mock.patch(
             "vllm.model_executor.layers.mamba.mamba_mixer2."
             "get_tensor_model_parallel_world_size",
