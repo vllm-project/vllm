@@ -159,7 +159,6 @@ class DraftWatermarker:
         use_fp64: bool = False,
     ) -> torch.Tensor:
         """Sample drafts flattened as (request, step), one step at a time.
-
         The target verifies each draft with a context that includes the earlier
         drafts of its request, so steps must be sampled in order even when
         their logits were computed in parallel.
