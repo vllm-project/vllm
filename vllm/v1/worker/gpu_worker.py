@@ -615,7 +615,10 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+            with set_current_vllm_config(self.vllm_config):
+                self.model_runner.profile_run(
+                    randomize_inputs=self.randomize_dummy_inputs
+                )
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -651,6 +654,7 @@ class Worker(WorkerBase):
             # limit are never split, so they stay releasable. Exits before
             # memory_profiling measures, restoring the original limit.
             self._scoped_allocator_max_split(max_split_size_mb=20),
+            set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
@@ -1016,7 +1020,9 @@ class Worker(WorkerBase):
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        set_random_seed(
+            self.model_config.seed, self.parallel_config.data_parallel_index
+        )
 
         # Eagerly trigger inductor's once-per-process lazy inits during
         # warmup (rather than on a later compile cache-miss at runtime).

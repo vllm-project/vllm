@@ -364,17 +364,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     session_id=session_id,
                 )
             else:
-                if not request.include_reasoning:
-                    reasoning_ended = True
-                elif request._grammar_from_parser:
-                    # The Mistral grammar already includes an optional
-                    # `think?` rule that handles both reasoning and
-                    # non-reasoning outputs.
-                    reasoning_ended = True
-                elif parser is not None and parser.reasoning_parser is not None:
-                    reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
-                else:
-                    reasoning_ended = None
+                reasoning_ended = request.resolve_reasoning_ended(
+                    parser, prompt_token_ids or []
+                )
 
                 generator = self.engine_client.generate(
                     engine_input,
@@ -631,6 +623,8 @@ class OpenAIServingChat(GenerateBaseServing):
                     if finish_reason_sent[i]:
                         continue
 
+                    self._raise_if_error(output.finish_reason, request_id)
+
                     if request.logprobs and (
                         request.top_logprobs is not None or request.logprob_token_ids
                     ):
@@ -758,10 +752,6 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # if the model is finished generating
                     else:
-                        # check for error finish reason and abort streaming
-                        # finish_reason='error' indicates a retryable error
-                        self._raise_if_error(output.finish_reason, request_id)
-
                         # Send the finish response for each request.n only once
                         # In OpenAI's API, when a tool is called, the
                         # finish_reason is:

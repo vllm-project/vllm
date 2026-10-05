@@ -79,6 +79,10 @@ from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
 
+# Transformers v5.18 renamed `qwen_sparse_attention` to `indexed_attention`
+# TODO: Delete qwen_... once Transformers 5.18.0 is the minimum required version.
+_QSA_LAYER_TYPES = ("qwen_sparse_attention", "indexed_attention")
+
 
 def without_modelopt_fp4(
     quant_config: QuantizationConfig | None,
@@ -209,7 +213,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
             )
-        elif layer_type == "qwen_sparse_attention":
+        elif layer_type in _QSA_LAYER_TYPES:
             use_qsa = getattr(config, "indexer_n_heads", None) is not None
             if not use_qsa:
                 self.self_attn = Qwen3NextAttention(
@@ -293,7 +297,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
         if self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
-        elif self.layer_type == "qwen_sparse_attention":
+        elif self.layer_type in _QSA_LAYER_TYPES:
             attn_out = self.self_attn(
                 hidden_states=block_input,
                 positions=positions,
@@ -373,7 +377,7 @@ class Qwen4ExpModel(nn.Module):
         self._qsa_layer_ids = frozenset(
             layer_idx
             for layer_idx, layer_type in enumerate(config.layer_types)
-            if layer_type == "qwen_sparse_attention"
+            if layer_type in _QSA_LAYER_TYPES
             and getattr(config, "indexer_n_heads", None) is not None
         )
         self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
@@ -618,7 +622,7 @@ class Qwen4ExpForCausalLM(
     IsHybrid,
 ):
     packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj", "indexer.index_qk_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "kv_proj": ["key_proj", "value_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -637,6 +641,12 @@ class Qwen4ExpForCausalLM(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
+        if vllm_config.lora_config is not None:
+            # LoRA does not support the merged QKV/indexer projection, so its
+            # packed mapping must keep the indexer separate.
+            self.packed_modules_mapping = self.packed_modules_mapping | {
+                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+            }
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.quant_config = vllm_config.quant_config
@@ -862,6 +872,7 @@ class Qwen4ExpForConditionalGeneration(
     requires_raw_input_tokens = True
 
     packed_modules_mapping = Qwen3_5ForConditionalGeneration.packed_modules_mapping | {
+        "qkv_proj": Qwen4ExpForCausalLM.packed_modules_mapping["qkv_proj"],
         "kv_proj": ["key_proj", "value_proj"],
         "input_mix_weight_down_block_inject": [
             "input_mix_weight_down",
@@ -879,6 +890,12 @@ class Qwen4ExpForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
         nn.Module.__init__(self)
         config: Qwen4ExpConfig = vllm_config.model_config.hf_config
+        if vllm_config.lora_config is not None:
+            # LoRA does not support the merged QKV/indexer projection, so its
+            # packed mapping must keep the indexer separate.
+            self.packed_modules_mapping = self.packed_modules_mapping | {
+                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+            }
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         if multimodal_config is None:

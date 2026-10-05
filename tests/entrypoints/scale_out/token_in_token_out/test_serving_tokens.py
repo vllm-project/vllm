@@ -318,11 +318,11 @@ async def test_generate_logprobs(client, logprobs_value):
 @pytest.mark.asyncio
 async def test_generate_prompt_token_id_logprobs(client):
     token_ids = [11, 22, 33, 44, 55]
-    candidates = [22, 33, 44, 55]
+    rows = [[33], [44, 100], [55]]
     sampling_params = {
         "max_tokens": 1,
         "prompt_logprobs": 0,
-        "prompt_logprob_token_ids": candidates,
+        "prompt_logprob_token_ids": rows,
         "prompt_logprob_start": 1,
     }
     payload = {
@@ -335,14 +335,13 @@ async def test_generate_prompt_token_id_logprobs(client):
     data = resp.json()
 
     scores = np.load(io.BytesIO(base64.b64decode(data["prompt_token_id_logprobs"])))
-    assert scores.shape == (len(token_ids) - 2, len(candidates))
+    assert scores.shape == (3, 2)
     for row, target in enumerate(token_ids[2:]):
         expected = data["prompt_logprobs"][row + 2][str(target)]["logprob"]
-        assert scores[row, candidates.index(target)] == pytest.approx(
-            expected, abs=1e-3
-        )
+        assert scores[row, 0] == pytest.approx(expected, abs=1e-3)
+    assert np.isneginf(scores[[0, 2], 1]).all()
 
-    stream_only_ids = {"prompt_logprob_token_ids": candidates}
+    stream_only_ids = {"prompt_logprob_token_ids": rows}
     resp = await client.post(
         GEN_ENDPOINT,
         json={**payload, "sampling_params": stream_only_ids, "stream": True},
@@ -350,15 +349,12 @@ async def test_generate_prompt_token_id_logprobs(client):
     assert resp.status_code == 400
     assert "prompt_logprob_token_ids" in resp.text
 
-    past_end = {**sampling_params, "prompt_logprob_start": len(token_ids)}
+    too_few_rows = {**sampling_params, "prompt_logprob_token_ids": rows[:2]}
     resp = await client.post(
-        GEN_ENDPOINT, json={**payload, "sampling_params": past_end}
+        GEN_ENDPOINT, json={**payload, "sampling_params": too_few_rows}
     )
-    resp.raise_for_status()
-    empty = np.load(
-        io.BytesIO(base64.b64decode(resp.json()["prompt_token_id_logprobs"]))
-    )
-    assert empty.shape == (0, len(candidates))
+    assert resp.status_code == 400
+    assert "scored rows" in resp.text
 
 
 @pytest.mark.asyncio
@@ -593,6 +589,83 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
     assert generate_res == completions_res
 
 
+def _structured_chat_body(messages, **overrides) -> dict:
+    return {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "max_tokens": 64,
+        "temperature": 0.0,
+        "chat_template_kwargs": {"enable_thinking": True},
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                    "required": ["count"],
+                },
+            },
+        },
+        **overrides,
+    }
+
+
+async def _render_then_generate(client, body) -> tuple[dict, list[int]]:
+    render_resp = await client.post("/v1/chat/completions/render", json=body)
+    render_resp.raise_for_status()
+    generate_request = render_resp.json()
+    generate_resp = await client.post(GEN_ENDPOINT, json=generate_request)
+    generate_resp.raise_for_status()
+    return generate_request, generate_resp.json()["choices"][0]["token_ids"]
+
+
+# deepseek_v3 reads `enable_thinking` from the template kwargs and uses Qwen3's
+# <think> tokens, so the engine gates structured outputs differently when
+# either reasoning field is dropped between render and generate.
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not forward reasoning fields to the engine",
+)
+@pytest.mark.parametrize(
+    "server", [["--reasoning-parser", "deepseek_v3"]], indirect=True
+)
+async def test_render_then_generate_forwards_reasoning_parser_kwargs(client, messages):
+    """With thinking on, structured outputs must wait for the reasoning to
+    end on generate, the same as on chat."""
+    body = _structured_chat_body(messages, return_token_ids=True)
+    chat_resp = await client.post("/v1/chat/completions", json=body)
+    chat_resp.raise_for_status()
+
+    generate_request, token_ids = await _render_then_generate(client, body)
+
+    assert generate_request["reasoning_ended"] is False
+    assert token_ids == chat_resp.json()["choices"][0]["token_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not forward reasoning fields to the engine",
+)
+@pytest.mark.parametrize(
+    "server", [["--reasoning-parser", "deepseek_v3"]], indirect=True
+)
+async def test_render_then_generate_forwards_reasoning_ended(
+    client, tokenizer, messages
+):
+    """`include_reasoning=false` constrains from the first token on chat, so
+    generate must too, even though the engine's parser expects thinking."""
+    body = _structured_chat_body(messages, include_reasoning=False)
+
+    generate_request, token_ids = await _render_then_generate(client, body)
+
+    assert generate_request["reasoning_ended"] is True
+    output = json.loads(tokenizer.decode(token_ids, skip_special_tokens=True))
+    assert isinstance(output["count"], int)
+
+
 def _chat_prompt_token_ids(tokenizer, messages) -> list[int]:
     return tokenizer.apply_chat_template(
         messages,
@@ -714,21 +787,23 @@ async def test_text_mode_rejected_when_tokens_only(client):
 @pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
-    reason="output_mode is not supported by the Rust frontend",
+    reason="the Rust frontend does not serve /inference/v1/abort_requests",
 )
-async def test_text_mode_stream_delivers_abort_finish_chunk(
-    client, tokenizer, messages
+@pytest.mark.parametrize("output_mode", ["tokens", "text"])
+async def test_stream_delivers_abort_finish_chunk(
+    client, tokenizer, messages, output_mode
 ):
-    """The final output after an abort has no new token IDs, so it
-    reaches a text stream only because text mode emits finish-only chunks."""
+    """The final output after an abort has no new token IDs, but the
+    stream must still deliver its finish reason."""
     payload = {
         **_text_mode_payload(
             _chat_prompt_token_ids(tokenizer, messages),
             max_tokens=900,
             ignore_eos=True,
         ),
+        "output_mode": output_mode,
         "stream": True,
-        "request_id": "text-abort-e2e",
+        "request_id": f"{output_mode}-abort-e2e",
     }
 
     chunks = []
@@ -740,7 +815,7 @@ async def test_text_mode_stream_delivers_abort_finish_chunk(
                 continue
             chunk = json.loads(line[len("data: ") :])
             chunks.append(chunk)
-            if not aborted and chunk["choices"] and chunk["choices"][0]["text"]:
+            if not aborted and chunk["choices"] and chunk["choices"][0]["token_ids"]:
                 abort = await client.post(
                     ABORT_ENDPOINT,
                     json={"request_ids": [chunk["request_id"]]},
@@ -749,7 +824,7 @@ async def test_text_mode_stream_delivers_abort_finish_chunk(
                 aborted = True
 
     assert aborted
-    assert {chunk["output_mode"] for chunk in chunks} == {"text"}
+    assert {chunk["output_mode"] for chunk in chunks} == {output_mode}
     final_choice = chunks[-1]["choices"][0]
     assert final_choice["finish_reason"] == "abort"
     generated = sum(len(chunk["choices"][0]["token_ids"] or []) for chunk in chunks)
