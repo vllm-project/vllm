@@ -260,7 +260,7 @@ def test_loading_warns_unless_the_cast_only_widens(caplog, stored, declared, war
     module = torch.nn.Module()
     module.register_parameter("w", torch.nn.Parameter(torch.empty(4, dtype=declared)))
 
-    with caplog.at_level(logging.WARNING, logger="vllm.model_executor.models.utils"):
+    with caplog.at_level(logging.DEBUG, logger="vllm.model_executor.models.utils"):
         loaded = list(
             AutoWeightsLoader(module).load_weights(
                 [("w", torch.zeros(4, dtype=stored))]
@@ -269,4 +269,9 @@ def test_loading_warns_unless_the_cast_only_widens(caplog, stored, declared, war
 
     assert loaded == ["w"]
     assert module.w.dtype == declared
-    assert ("Attempted to load weight" in caplog.text) is warns
+    levels = {
+        record.levelno
+        for record in caplog.records
+        if "Attempted to load weight" in record.getMessage()
+    }
+    assert levels == {logging.WARNING if warns else logging.DEBUG}

@@ -321,13 +321,16 @@ class AutoWeightsLoader:
                     f"into a single parameter {base_prefix!r}"
                 )
 
-            # An exact widening -- an fp32 accumulator reading a bf16 table,
-            # say -- reports nothing. Every other mismatch still warns.
-            if param.dtype != weight_data.dtype and not (
-                weight_data.dtype in (torch.float16, torch.bfloat16, torch.float32)
-                and param.dtype in (torch.float32, torch.float64)
-            ):
-                logger.warning(
+            if param.dtype != weight_data.dtype:
+                # An exact widening -- an fp32 accumulator reading a bf16
+                # table, say -- keeps every stored value, so it is a debug
+                # line. Every other mismatch still warns.
+                exact = weight_data.dtype in (
+                    torch.float16,
+                    torch.bfloat16,
+                    torch.float32,
+                ) and param.dtype in (torch.float32, torch.float64)
+                (logger.debug if exact else logger.warning)(
                     "Attempted to load weight %s with dtype %s into "
                     "parameter with dtype %s",
                     weight_qualname,
