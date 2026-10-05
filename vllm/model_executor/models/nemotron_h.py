@@ -168,6 +168,13 @@ class NemotronHMoE(nn.Module):
         self.gate.e_score_correction_bias = nn.Parameter(
             torch.empty(config.n_routed_experts, dtype=torch.float32)
         )
+        # The MoE runner applies the gate inside its opaque op, where GateLinear
+        # picks its GEMM tier per batch. In the compiled model forward the tier
+        # was fixed when the graph was traced at a large batch, i.e. the cuBLAS
+        # tier for every batch size. Keep that GEMM so the router logits stay
+        # bitwise identical: the low-latency tier for small batches rounds
+        # differently.
+        self.gate.allow_ll_bf16_gemm = False
         # Load balancing settings.
         self.enable_eplb = parallel_config.enable_eplb
 
@@ -229,6 +236,9 @@ class NemotronHMoE(nn.Module):
 
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
+            # The runner applies the gate, so that with latent MoE it can run
+            # concurrently with fc1_latent_proj on the aux stream.
+            gate=self.gate,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=self.moe_hidden_size,
@@ -260,11 +270,9 @@ class NemotronHMoE(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
-
+        # The runner computes the router logits with self.gate.
         final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
+            hidden_states=hidden_states, router_logits=hidden_states
         )
 
         if self.is_sequence_parallel:
