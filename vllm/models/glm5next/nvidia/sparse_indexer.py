@@ -706,9 +706,10 @@ class SparseAttnIndexerKpool(CustomOp):
             else "auto"
         )
         _parallel = _cfg.parallel_config if _cfg is not None else None
+        self._parallel_config = _parallel
+        self._cp_kv_cache_interleave_size: int | None = None
         self.dcp_world_size = 1
         self.dcp_rank = 0
-        self.cp_kv_cache_interleave_size = 1
         if _parallel is not None and _parallel.decode_context_parallel_size > 1:
             if _parallel.prefill_context_parallel_size > 1:
                 raise NotImplementedError(
@@ -716,7 +717,22 @@ class SparseAttnIndexerKpool(CustomOp):
                 )
             self.dcp_world_size = _parallel.decode_context_parallel_size
             self.dcp_rank = get_dcp_group().rank_in_group
-            self.cp_kv_cache_interleave_size = _parallel.cp_kv_cache_interleave_size
+
+    @property
+    def cp_kv_cache_interleave_size(self) -> int:
+        """Resolved lazily like ``SparseAttnIndexer``: NIXL P/D can adjust it
+        after the model is built, and the indexer metadata builder sees the
+        adjusted value.
+        """
+        if self.dcp_world_size == 1:
+            return 1
+        if self._cp_kv_cache_interleave_size is None:
+            assert self._parallel_config is not None
+            value = self._parallel_config.cp_kv_cache_interleave_size
+            if isinstance(get_forward_context().attn_metadata, dict):
+                self._cp_kv_cache_interleave_size = value
+            return value
+        return self._cp_kv_cache_interleave_size
 
     def forward_native(
         self,
