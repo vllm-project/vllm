@@ -13,7 +13,8 @@ Engines then load from the daemons with:
 
     vllm serve /path/to/model --tensor-parallel-size 4 --load-format ipc_cache
 
-Tensor, expert and data parallelism are supported, including across nodes;
+Tensor, pipeline, expert and data parallelism are supported, including across
+nodes;
 see vllm/model_executor/model_loader/weight_cache/daemon.py for the rank
 layout and rendezvous details.
 """
