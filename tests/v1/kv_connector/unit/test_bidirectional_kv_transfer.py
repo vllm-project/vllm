@@ -465,7 +465,7 @@ def test_p_node_pull_then_send_kv(dist_init):
     assert "req-p2" in done_recving
     worker._reqs_to_send["req-p2"] = time.perf_counter() + 60
     worker._reqs_to_process.add("req-p2")
-    notif = f"req-p2:{worker.world_size}".encode()
+    notif = f"req-p2:{worker.world_size}:1".encode()
     orig = worker.nixl_wrapper.get_new_notifs
     worker.nixl_wrapper.get_new_notifs = lambda: {"agent": [notif]}
     done_sending, _ = connector.get_finished(finished_req_ids=set())

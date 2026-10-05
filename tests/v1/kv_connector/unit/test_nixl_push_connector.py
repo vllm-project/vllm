@@ -362,7 +362,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
 
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
-        w._pending_recv_notifs = {}
+        w._remaining_read_notifs = {}
         w._failed_recv_reqs = queue.Queue()
         w._recv_failures = set()
         w._recving_transfers = defaultdict(list)
@@ -969,7 +969,7 @@ class TestPushWriterNotifs:
         w.xfer_stats = MagicMock()
         w._log_failure = MagicMock()  # type: ignore[method-assign]
         w._invalid_block_ids = queue.Queue()
-        w._pending_recv_notifs = {}
+        w._remaining_read_notifs = {}
         w._replicated_pcp_done_sending = set()
         w.use_host_buffer = False
         return w
@@ -1043,7 +1043,7 @@ class TestPushWriterNotifs:
         assert request_id in w._reqs_to_send
         assert w._evict_finished_inbox.empty()
 
-        w.expected_consumer_notifications_by_req = {}
+        w._remaining_read_notifs = {}
         w._reqs_to_send[request_id] = time.perf_counter() - 1
         assert w.get_transfer_results().finished_sending == {request_id}
         assert request_id not in w._send_failures
@@ -1104,7 +1104,7 @@ class TestPushWriterNotifs:
         ]
         assert w.get_transfer_results().finished_sending == set()
 
-        w.expected_consumer_notifications_by_req = {}
+        w._remaining_read_notifs = {}
         w._reqs_to_send[request_id] = time.perf_counter() - 1
         assert w.get_transfer_results().finished_sending == {request_id}
         assert w._evict_finished_inbox.get_nowait() == request_id
