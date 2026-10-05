@@ -728,10 +728,11 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
 @pytest.mark.parametrize(
     "capability,expected_plans",
     [
-        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS),
+        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_SM103_GEMM_PLANS),
         ((10, 0), qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS),
         ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
         ((12, 1), qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS),
+        ((12, 0), {}),
         ((8, 0), {}),
     ],
 )
