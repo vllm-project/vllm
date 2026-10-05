@@ -42,6 +42,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -226,6 +227,13 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Worker-side methods
     # ==============================
+
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        """Return a custom KV cache allocation context, if configured.
+
+        Returning None uses the engine's default memory pool.
+        """
+        return None
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         """Set the connector metadata from the scheduler.
@@ -473,6 +481,16 @@ class KVConnectorBase_V1(ABC):
 
         """
         return
+
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        """KV cache groups restored by this connector's load for ``request``.
+
+        Called after ``get_num_new_matched_tokens`` returned a positive count.
+        Defaults to the prefix-cacheable groups, all a hash-addressed store
+        holds; a connector transferring the request's own blocks restores
+        every transfer group.
+        """
+        return self._kv_cache_config.prefix_cacheable_group_ids
 
     @abstractmethod
     def get_num_new_matched_tokens(

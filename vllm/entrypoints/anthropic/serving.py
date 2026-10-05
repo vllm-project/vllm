@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Any, get_args
+from typing import Any, Literal, get_args
 
 import jinja2
 from fastapi import Request
@@ -31,6 +31,8 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicOutputConfig,
     AnthropicStreamEvent,
     AnthropicThinkingConfig,
+    AnthropicTool,
+    AnthropicToolChangeDefinition,
     AnthropicUsage,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
@@ -51,9 +53,11 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.logger import init_logger
+from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 def _build_anthropic_usage(
@@ -93,6 +97,46 @@ def _build_anthropic_usage(
 
         kwargs["input_tokens"] = max(0, input_tokens)
     return AnthropicUsage(**kwargs)
+
+
+def _to_anthropic_stop_reason(
+    finish_reason: str | None,
+    stop_reason: int | str | None,
+    tool_used: bool,
+    tool_complete: bool,
+) -> tuple[
+    Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None,
+    str | None,
+]:
+    """Map an OpenAI finish reason to Anthropic ``(stop_reason, stop_sequence)``.
+
+    Anthropic reports ``tool_use`` whenever the model invoked a tool. The chat
+    layer reports ``finish_reason="stop"`` for a named (forced) tool call, so
+    ``tool_used`` records whether a ``tool_use`` block was produced.
+    ``max_tokens`` always wins. A matched stop string wins unless the tool
+    calls are complete (``tool_complete``): a call it cut short must not run.
+    """
+    if finish_reason == "length":
+        return "max_tokens", None
+    if finish_reason not in ("stop", "tool_calls"):
+        return None, None
+    if tool_complete:
+        return "tool_use", None
+    # vLLM reports the matched stop string in stop_reason (a str);
+    # an int stop-token-id or None (natural EOS) is not a stop sequence.
+    if isinstance(stop_reason, str):
+        return "stop_sequence", stop_reason
+    if finish_reason == "tool_calls" or tool_used:
+        return "tool_use", None
+    return "end_turn", None
+
+
+def _is_json(text: str) -> bool:
+    try:
+        json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return True
 
 
 def wrap_data_with_event(data: str, event: str):
@@ -139,12 +183,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             enable_force_include_usage=enable_force_include_usage,
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
-        self.stop_reason_map = {
-            "stop": "end_turn",
-            "length": "max_tokens",
-            "tool_calls": "tool_use",
-        }
-        self._merge_inline_system = self._detect_merge_inline_system(chat_template)
+        self._merge_inline_system = self._should_merge_inline_system(online_renderer)
         # Resolved lazily from the renderer when "auto".
         self._disabled_thinking_effort: AnthropicDisabledThinkingEffort | None = (
             None if disabled_thinking_effort == "auto" else disabled_thinking_effort
@@ -192,6 +231,39 @@ class AnthropicServingMessages(OpenAIServingChat):
         _, (engine_input,) = result
         components = self._extract_prompt_components(engine_input)
         return components.token_ids, components.text
+
+    @classmethod
+    def _should_merge_inline_system(cls, online_renderer: OnlineRenderer) -> bool:
+        """Probe the chat templates the renderer applies, not the CLI override.
+
+        Both the tool and non-tool templates are checked since they may differ.
+        """
+        renderer = online_renderer.renderer
+        tool_variants: tuple[list[dict[str, Any]] | None, ...] = (None, [])
+        if not isinstance(renderer, HfRenderer) or renderer.tokenizer is None:
+            merge = cls._detect_merge_inline_system(online_renderer.chat_template)
+        else:
+            merge = any(
+                cls._detect_merge_inline_system(
+                    resolve_chat_template(
+                        renderer.tokenizer,
+                        online_renderer.chat_template,
+                        tools,
+                        model_config=online_renderer.model_config,
+                    )
+                )
+                for tools in tool_variants
+            )
+        if merge:
+            logger.warning_once(
+                "The chat template requires system-first ordering, so inline "
+                "system messages in /v1/messages requests (e.g. Claude Code's "
+                "per-turn reminders) are merged into the leading system prompt. "
+                "Each new one changes the prompt prefix, so the rest of the "
+                "conversation misses the prefix cache. Pass a --chat-template "
+                "that accepts non-leading system messages to avoid this."
+            )
+        return merge
 
     @staticmethod
     def _detect_merge_inline_system(chat_template: str | None) -> bool:
@@ -641,17 +713,63 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
 
     @classmethod
+    def _resolve_tools(
+        cls,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+    ) -> list[AnthropicTool] | None:
+        """Apply tool_addition/tool_removal blocks in ``messages`` to ``tools``.
+
+        Chat templates see a single tool list, so this resolves the tools in
+        effect at the end of the conversation: a tool added by reference is no
+        longer deferred, a tool added by value is declared, and a removed tool
+        is dropped.
+        """
+        changes = [
+            block
+            for msg in anthropic_request.messages
+            if not isinstance(msg.content, str)
+            for block in msg.content
+            if block.type in ("tool_addition", "tool_removal")
+        ]
+        if not changes:
+            return anthropic_request.tools
+
+        tools = {tool.name: tool for tool in anthropic_request.tools or []}
+        removed: set[str] = set()
+        for block in changes:
+            change = block.tool
+            assert change is not None
+            if isinstance(change, AnthropicToolChangeDefinition):
+                name = change.definition.name
+                tools[name] = change.definition
+            else:
+                name = change.name
+                if name not in tools:
+                    raise ValueError(
+                        f"{block.type} references tool {name!r}, "
+                        "which is not declared in tools"
+                    )
+                if block.type == "tool_addition":
+                    tools[name] = tools[name].model_copy(update={"defer_loading": None})
+            if block.type == "tool_removal":
+                removed.add(name)
+            else:
+                removed.discard(name)
+        return [tool for name, tool in tools.items() if name not in removed]
+
+    @classmethod
     def _convert_tools(
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
         """Convert Anthropic tools to OpenAI format."""
-        if anthropic_request.tools is None:
+        anthropic_tools = cls._resolve_tools(anthropic_request)
+        if anthropic_tools is None:
             return
 
         tools = []
-        for tool in anthropic_request.tools:
+        for tool in anthropic_tools:
             tools.append(
                 ChatCompletionToolsParam.model_validate(
                     {
@@ -716,18 +834,13 @@ class AnthropicServingMessages(OpenAIServingChat):
             ec_transfer_params=generator.ec_transfer_params,
         )
         choice = generator.choices[0]
-        if choice.finish_reason == "stop":
-            # vLLM reports the matched stop string in stop_reason (a str);
-            # an int stop-token-id or None (natural EOS) maps to end_turn.
-            if isinstance(choice.stop_reason, str):
-                result.stop_reason = "stop_sequence"
-                result.stop_sequence = choice.stop_reason
-            else:
-                result.stop_reason = "end_turn"
-        elif choice.finish_reason == "length":
-            result.stop_reason = "max_tokens"
-        elif choice.finish_reason == "tool_calls":
-            result.stop_reason = "tool_use"
+        result.stop_reason, result.stop_sequence = _to_anthropic_stop_reason(
+            choice.finish_reason,
+            choice.stop_reason,
+            tool_used=bool(choice.message.tool_calls),
+            # Their arguments are json-decoded below, so parsed calls are complete.
+            tool_complete=bool(choice.message.tool_calls),
+        )
 
         content: list[AnthropicContentBlock] = []
         if choice.message.reasoning:
@@ -810,6 +923,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             # Matched stop string, when generation stopped on one (a str);
             # int stop-token-id / None are not stop sequences.
             stop_sequence: int | str | None = None
+            tool_used = False
+            # Arguments of the latest tool_use block; only the last call can be
+            # cut short by a stop string.
+            last_tool_args: list[str] = []
             state = _ActiveBlockState()
             # Map from tool call index to tool_use_id
             tool_index_to_id: dict[int, str] = {}
@@ -919,19 +1036,21 @@ class AnthropicServingMessages(OpenAIServingChat):
                         if len(origin_chunk.choices) == 0:
                             for event in stop_and_flush():
                                 yield event
-                            if isinstance(stop_sequence, str):
-                                stop_delta = AnthropicDelta(
-                                    stop_reason="stop_sequence",
-                                    stop_sequence=stop_sequence,
-                                )
-                            else:
-                                stop_delta = AnthropicDelta(
-                                    stop_reason=self.stop_reason_map.get(
-                                        finish_reason or "stop"
+                            anthropic_stop_reason, anthropic_stop_sequence = (
+                                _to_anthropic_stop_reason(
+                                    finish_reason or "stop",
+                                    stop_sequence,
+                                    tool_used=tool_used,
+                                    tool_complete=(
+                                        tool_used and _is_json("".join(last_tool_args))
                                     ),
-                                    # Set explicitly so exclude_unset=True keeps it.
-                                    stop_sequence=None,
                                 )
+                            )
+                            stop_delta = AnthropicDelta(
+                                stop_reason=anthropic_stop_reason,
+                                # Set explicitly so exclude_unset=True keeps it.
+                                stop_sequence=anthropic_stop_sequence,
+                            )
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=stop_delta,
@@ -1025,6 +1144,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     ):
                                         for event in stop_and_flush():
                                             yield event
+                                        tool_used = True
+                                        last_tool_args = []
                                         start_event = start_block(
                                             AnthropicContentBlock(
                                                 type="tool_use",
@@ -1040,6 +1161,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         and tool_call.function.arguments
                                         and state.tool_use_id == tool_call.id
                                     ):
+                                        last_tool_args.append(
+                                            tool_call.function.arguments
+                                        )
                                         chunk = AnthropicStreamEvent(
                                             index=(
                                                 state.block_index
@@ -1065,6 +1189,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         and tool_call.function.arguments
                                         and state.tool_use_id == tool_use_id
                                     ):
+                                        last_tool_args.append(
+                                            tool_call.function.arguments
+                                        )
                                         chunk = AnthropicStreamEvent(
                                             index=(
                                                 state.block_index

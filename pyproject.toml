@@ -117,6 +117,11 @@ ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
 
+[[tool.mypy.overrides]]
+module = "tests.*"
+disable_error_code = ["arg-type", "assignment"]
+enable_error_code = ["method-assign"]
+
 [tool.pytest.ini_options]
 markers = [
     "slow_test",
@@ -192,7 +197,7 @@ extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizer
     "examples/pooling/token_embed/*", "tests/models/language/pooling/*",
     "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*",
     "tests/entrypoints/speech_to_text/transcription/test_transcription_validation.py",
-    "docs/governance/process.md", "docs/assets/contributing/vllm_bench_serve_timeline.html", 
+    "docs/governance/process.md", "docs/community/reviewers.md", "docs/assets/contributing/vllm_bench_serve_timeline.html", 
     "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*", "csrc/cpu/sgl-kernels/*",
     "rust/src/chat/src/renderer/deepseek_v32/fixtures/*", "rust/src/parser/**",
     "rust/src/text/src/output/decoded.rs",
@@ -258,3 +263,8 @@ CANN = "CANN"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]
+# vLLM depends on oss-harmony, a fork that ships the same `openai_harmony`
+# module without downloading tiktoken vocabularies at runtime. Installing
+# openai-harmony alongside it silently overwrites those files, so keep it out
+# of every resolution; gpt-oss pulls it in transitively.
+exclude-dependencies = ["openai-harmony"]
