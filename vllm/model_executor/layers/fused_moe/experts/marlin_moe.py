@@ -934,8 +934,8 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         assert self.max_num_tokens is not None
         assert self.num_dispatchers is not None
-        batch_tokens = max(M, self.max_num_tokens * self.num_dispatchers)
-        scratch_tokens = self._batched_workspace_tokens(M)  # same
+        batch_tokens = self._batched_workspace_tokens(M)
+        scratch_tokens = batch_tokens
         num_experts = local_num_experts
         workspace13 = (num_experts * scratch_tokens, max(K, N * 2))
         workspace2 = (num_experts * scratch_tokens, N)

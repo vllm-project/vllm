@@ -324,6 +324,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
+    def supports_batched_compaction(self, use_fp8_dispatch: bool) -> bool:
+        return use_fp8_dispatch and self.quant_config.use_fp8_w8a8
+
     @staticmethod
     def _supports_current_device() -> bool:
         return is_deep_gemm_supported()
@@ -377,8 +380,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         # end up sending their tokens. This needs to be fixed.
         assert self.max_num_tokens is not None
         assert self.num_dispatchers is not None
-        batch_tokens = max(M, self.max_num_tokens * self.num_dispatchers)
-        scratch_tokens = self._batched_workspace_tokens(M)
+        batch_tokens = self._batched_workspace_tokens(M)
+        scratch_tokens = batch_tokens
         num_experts = local_num_experts
         activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace13 = (num_experts, scratch_tokens, max(K, N))

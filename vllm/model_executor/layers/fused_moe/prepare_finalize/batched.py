@@ -22,6 +22,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
 
     supports_token_dropping = True
+    uses_batched_compaction = True
 
     def __init__(
         self,

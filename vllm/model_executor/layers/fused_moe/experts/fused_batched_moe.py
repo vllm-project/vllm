@@ -633,12 +633,8 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         assert self.max_num_tokens is not None
         assert self.num_dispatchers is not None
-        batch_tokens = max(M, self.max_num_tokens * self.num_dispatchers)
+        batch_tokens = self._batched_workspace_tokens(M)
         scratch_tokens = batch_tokens
-        if self.expert_capacity is not None:
-            scratch_tokens = min(
-                scratch_tokens, self.expert_capacity * self.num_dispatchers
-            )
         num_experts = local_num_experts
         workspace13 = (num_experts, batch_tokens, K)
         workspace2 = (scratch_tokens, N)
@@ -806,6 +802,11 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
+    def supports_batched_compaction(self, use_fp8_dispatch: bool) -> bool:
+        return not self.quant_config.is_quantized or (
+            use_fp8_dispatch and self.quant_config.use_fp8_w8a8
+        )
+
     @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.is_cuda_alike() or current_platform.is_xpu()
@@ -878,8 +879,8 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         assert self.max_num_tokens is not None
         assert self.num_dispatchers is not None
-        batch_tokens = max(M, self.max_num_tokens * self.num_dispatchers)
-        scratch_tokens = self._batched_workspace_tokens(M)
+        batch_tokens = self._batched_workspace_tokens(M)
+        scratch_tokens = batch_tokens
         num_experts = local_num_experts
         activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace13 = (num_experts, scratch_tokens, max(K, N))

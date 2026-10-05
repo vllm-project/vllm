@@ -208,8 +208,8 @@ class SupportsBatchedCompaction(Protocol):
         max_tokens_per_rank: int,
         num_dispatchers: int,
         supports_token_dropping: bool,
-        supports_compaction: bool,
-        contiguous_scales: bool,
+        experts: "SupportsBatchedCompactionExperts",
+        use_fp8_dispatch: bool,
     ) -> int | None: ...
 
     def compact(
@@ -223,6 +223,15 @@ class SupportsBatchedCompaction(Protocol):
         output: torch.Tensor,
         ubatch_id: int,
     ) -> tuple[torch.Tensor, Callable[[], None]]: ...
+
+
+class SupportsBatchedCompactionExperts(Protocol):
+    """Expert capabilities needed by batched-expert payload compaction."""
+
+    def supports_batched_compaction(self, use_fp8_dispatch: bool) -> bool: ...
+
+    @property
+    def use_row_major_dispatch_scales(self) -> bool: ...
 
 
 ################################################################################
@@ -380,16 +389,15 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     def _configure_batched_compaction(
         self,
         expert_capacity: int | None,
-        supports_compaction: bool,
-        contiguous_scales: bool,
+        experts: SupportsBatchedCompactionExperts,
     ) -> int | None:
         return self._get_batched_compaction().configure(
             expert_capacity,
             self.max_num_tokens_per_rank() or 0,
             self.num_dispatchers(),
             self.supports_token_dropping,
-            supports_compaction,
-            contiguous_scales,
+            experts,
+            getattr(self, "use_fp8_dispatch", False),
         )
 
     def _compact_batched_experts(
@@ -652,13 +660,10 @@ class FusedMoEExperts(ABC):
         self.expert_capacity: int | None = None
 
     def _batched_workspace_tokens(self, dispatched_tokens: int) -> int:
-        """Bound scratch rows while retaining the physical dispatch padding."""
+        """Return the rows required by the batched dispatch layout."""
         assert self.max_num_tokens is not None
         assert self.num_dispatchers is not None
-        tokens_per_dispatcher = self.max_num_tokens
-        if self.expert_capacity is not None:
-            tokens_per_dispatcher = min(tokens_per_dispatcher, self.expert_capacity)
-        return max(dispatched_tokens, tokens_per_dispatcher * self.num_dispatchers)
+        return max(dispatched_tokens, self.max_num_tokens * self.num_dispatchers)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
@@ -675,6 +680,15 @@ class FusedMoEExperts(ABC):
 
         Sample subclasses that override are AITER and FlashInfer CUTLASS.
         """
+        return False
+
+    def supports_batched_compaction(self, use_fp8_dispatch: bool) -> bool:
+        """Whether the expert consumes compacted batched-dispatch payloads."""
+        return False
+
+    @property
+    def use_row_major_dispatch_scales(self) -> bool:
+        """Whether the expert expects row-major dispatched activation scales."""
         return False
 
     @staticmethod
@@ -992,13 +1006,12 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         - expert_tokens_meta: number of tokens per expert metadata for batched
                               format.
 
-        Scratch shapes may use self.expert_capacity as a bound on valid
-        assignments per expert per dispatcher, preserving required padding.
-        It is None when prepare/finalize does not support token dropping.
-        Standard layouts use the dispatched M directly unless the dispatcher
-        removes rows whose assignments were all dropped.
-        The output shape must cover the full dispatched layout regardless of
-        capacity.
+        For batched activations, M is the physical per-expert batch size after
+        dispatcher compaction and max_num_tokens is the physical per-dispatcher
+        row capacity. Workspace shapes should use those values rather than
+        expert_capacity, which only controls routing. Standard layouts use the
+        dispatched M directly unless the dispatcher removes rows whose
+        assignments were all dropped.
 
         Returns a tuple of:
         - workspace13 shape tuple: must be large enough to hold the
@@ -1347,16 +1360,9 @@ class FusedMoEKernelModularImpl:
         if not self.prepare_finalize.uses_batched_compaction:
             return
 
-        from .prepare_finalize.batched_compaction import BatchedExpertCompaction
-
-        use_fp8_dispatch = getattr(self.prepare_finalize, "use_fp8_dispatch", False)
         compact_tokens = self.prepare_finalize._configure_batched_compaction(
             self.expert_capacity,
-            BatchedExpertCompaction.supports_experts(
-                self.fused_experts,
-                use_fp8_dispatch,
-            ),
-            BatchedExpertCompaction.uses_contiguous_scales(self.fused_experts),
+            self.fused_experts,
         )
         if compact_tokens is not None:
             self.fused_experts.max_num_tokens = compact_tokens

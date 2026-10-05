@@ -206,8 +206,8 @@ def test_standard_compaction_copies_output_when_not_compacted():
 
 
 @pytest.mark.parametrize("supports_dropping", [False, True])
-def test_dispatch_support_controls_batched_workspace_capacity(supports_dropping):
-    """An unsupported dispatcher must retain the original workspace sizes."""
+def test_dispatch_support_controls_batched_physical_capacity(supports_dropping):
+    """Compaction updates the physical row limit used by workspaces."""
     from tests.kernels.moe.utils import make_dummy_moe_config
     from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
         BatchedTritonExperts,
@@ -228,14 +228,14 @@ def test_dispatch_support_controls_batched_workspace_capacity(supports_dropping)
     dispatcher = BatchedPrepareAndFinalize(128, 2, 1, 0, expert_capacity=7)
     dispatcher.supports_token_dropping = supports_dropping
     experts = BatchedTritonExperts(config, FusedMoEQuantConfig.make(None), 128, 1)
-    mk.FusedMoEKernelModularImpl(dispatcher, experts)
+    mk.FusedMoEKernel(dispatcher, experts)
     scratch13, scratch2, output = experts.workspace_shapes(
         16, 256, 128, 2, 2, 2, None, config.activation
     )
     rows = 16 if supports_dropping else 128
     assert scratch13 == (2, rows, 256)
     assert scratch2 == (2, rows, 128)
-    assert output == (2, 128, 128)
+    assert output == (2, rows, 128)
 
 
 def test_dropping_rejects_compilation(monkeypatch):
@@ -338,7 +338,7 @@ def test_dropping_triton_matches_retained_expert_contributions(
             None,
             config.activation,
         )
-        assert shapes[2][1] == 4
+        assert shapes[2][1] == max(1, capacity)
 
 
 @pytest.mark.parametrize("expert_name", ["naive", "triton", "deep_gemm", "marlin"])
@@ -347,7 +347,7 @@ def test_dropping_triton_matches_retained_expert_contributions(
 def test_batched_workspaces_follow_dispatch_layout(
     expert_name, capacity, dispatched_tokens
 ):
-    """Capacity may shrink dispatch, but padding must still fit every workspace."""
+    """Workspace padding follows the configured physical dispatch layout."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts,
@@ -381,11 +381,10 @@ def test_batched_workspaces_follow_dispatch_layout(
         MoEActivation.SILU,
     )
     rows = max(512, dispatched_tokens)
-    scratch_rows = rows if capacity is None else max(dispatched_tokens, capacity * 4)
+    scratch_rows = rows
     assert output == (4, rows, 32)
     if expert_name == "naive":
         assert workspace13 == (4, rows, 32)
-        scratch_rows = rows if capacity is None else min(rows, capacity * 4)
         assert workspace2 == (scratch_rows, 64)
     elif expert_name == "marlin":
         assert workspace13 == (4 * scratch_rows, 128)
@@ -443,7 +442,7 @@ def test_batched_compaction_handles_fp8_dispatch_scale_layout(
 ):
     """Quantized dispatch payloads compact values and scales together.
 
-    Humming receives contiguous scales; the other kernels retain the native
+    Humming receives row-major scales; the other kernels retain the native
     dispatch stride, including packed UE8M0's TMA-friendly layout.
     """
     from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
@@ -469,9 +468,8 @@ def test_batched_compaction_handles_fp8_dispatch_scale_layout(
     experts.quant_config = SimpleNamespace(is_quantized=True, use_fp8_w8a8=True)
 
     compaction = BatchedExpertCompaction()
-    tokens_per_expert = compaction.configure(
-        2, 8, 2, True, True, expert_name == "humming"
-    )
+    use_row_major_dispatch_scales = experts.use_row_major_dispatch_scales
+    tokens_per_expert = compaction.configure(2, 8, 2, True, experts, True)
     assert tokens_per_expert == 2
     assert experts.max_num_tokens == 8
 
@@ -499,7 +497,7 @@ def test_batched_compaction_handles_fp8_dispatch_scale_layout(
     torch.testing.assert_close(compact_scales, scales[:, :4])
     expected_stride = (
         (4 * scale_columns, scale_columns, 1)
-        if expert_name == "humming"
+        if use_row_major_dispatch_scales
         else (4 * scale_columns, 1, 4)
     )
     assert compact_scales.stride() == expected_stride
@@ -557,7 +555,7 @@ def test_batched_compaction_feeds_deep_gemm_fp8(workspace_init):
     experts.expert_capacity = 2
 
     compaction = BatchedExpertCompaction()
-    experts.max_num_tokens = compaction.configure(2, 8, 2, True, True, False)
+    experts.max_num_tokens = compaction.configure(2, 8, 2, True, experts, True)
     states = (
         torch.randn(
             num_experts, full_rows, hidden_dim, device="cuda", dtype=torch.bfloat16
@@ -657,11 +655,7 @@ def test_batched_compaction_restores_combine_layout(
         combine = buffer.low_latency_combine
     compact_tokens = dispatcher._configure_batched_compaction(
         capacity,
-        BatchedExpertCompaction.supports_experts(
-            experts,
-            dispatcher.use_fp8_dispatch,
-        ),
-        BatchedExpertCompaction.uses_contiguous_scales(experts),
+        experts,
     )
     if compact_tokens is not None:
         experts.max_num_tokens = compact_tokens

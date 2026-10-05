@@ -482,10 +482,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if self.is_batched():
             assert self.max_num_tokens is not None
             assert self.num_dispatchers is not None
-            batch_tokens = max(M, self.max_num_tokens * self.num_dispatchers)
-            real_shape_m = num_experts * self._batched_workspace_tokens(
-                M
-            )  # bit redundant
+            batch_tokens = self._batched_workspace_tokens(M)
+            real_shape_m = num_experts * batch_tokens
             input_shape_m = real_shape_m
             output_shape = (num_experts, batch_tokens, K)
         else:
@@ -992,6 +990,13 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
+
+    def supports_batched_compaction(self, use_fp8_dispatch: bool) -> bool:
+        return use_fp8_dispatch and self.quant_config.use_fp8_w8a8
+
+    @property
+    def use_row_major_dispatch_scales(self) -> bool:
+        return True
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
