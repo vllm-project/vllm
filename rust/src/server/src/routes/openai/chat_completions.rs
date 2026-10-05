@@ -48,6 +48,13 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
+fn chat_per_request_metrics(
+    enabled: bool,
+    usage: &vllm_chat::ChatTokenUsage,
+) -> Option<PerRequestMetrics> {
+    enabled.then(|| PerRequestMetrics::from_timestamps(usage.timestamps, usage.output_token_count))
+}
+
 pub(crate) fn lower_chat_request(
     request: ChatCompletionRequest,
     lora_resolution: &LoraModelResolution,
@@ -204,8 +211,7 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let metrics = enable_per_request_metrics
-        .then(|| PerRequestMetrics::from_timestamps(usage.timestamps, usage.output_token_count));
+    let metrics = chat_per_request_metrics(enable_per_request_metrics, &usage);
     let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
@@ -842,7 +848,7 @@ mod tests {
 
     use super::{
         ApiServerOptions, ChatCompletionStreamResponse, ResponseOptions, StreamResponseEnvelope,
-        block_delta_chunk, chat_completion_chunk_stream, final_chunk,
+        block_delta_chunk, chat_completion_chunk_stream, chat_per_request_metrics, final_chunk,
     };
 
     /// Terminal usage with the given engine-level counts and zero reasoning tokens.
@@ -866,6 +872,25 @@ mod tests {
             1,
             "model".to_string(),
         ))
+    }
+
+    #[test]
+    fn non_streaming_chat_metrics_follow_enable_flag() {
+        let usage = ChatTokenUsage {
+            timestamps: vllm_llm::RequestTimestamps {
+                queued_ts: 10.0,
+                scheduled_ts: 10.2,
+                first_token_ts: 10.5,
+                last_token_ts: 11.0,
+            },
+            ..done_usage(1, 2, 0)
+        };
+
+        assert!(chat_per_request_metrics(false, &usage).is_none());
+
+        let metrics = chat_per_request_metrics(true, &usage).expect("per-request metrics");
+        assert!((metrics.time_to_first_token_ms.unwrap() - 300.0).abs() < 1e-9);
+        assert!((metrics.tokens_per_second.unwrap() - 2.5).abs() < 1e-9);
     }
 
     #[test]
