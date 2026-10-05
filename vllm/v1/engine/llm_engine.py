@@ -16,7 +16,7 @@ from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import EngineInput, PromptType
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
@@ -34,6 +34,7 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
@@ -59,6 +60,7 @@ class LLMEngine:
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         multiprocess_mode: bool = False,
     ) -> None:
+        configure_logging_if_needed(vllm_config.logging_config)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
@@ -230,6 +232,7 @@ class LLMEngine:
         priority: int = 0,
         session_id: str | None = None,
         prompt_text: str | None = None,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> str:
         # Validate the request_id type.
         if not isinstance(request_id, str):
@@ -251,6 +254,13 @@ class LLMEngine:
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
+            request_params = request.params
+            if isinstance(request_params, SamplingParams):
+                # This request object is owned by the engine from here on.
+                self.input_processor.apply_watermarking(
+                    request_params,
+                    self.input_processor.resolve_watermarking(request_params),
+                )
         else:
             request = self.input_processor.process_inputs(
                 request_id,
@@ -263,6 +273,7 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 priority=priority,
                 session_id=session_id,
+                kv_hints=kv_hints,
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
@@ -319,6 +330,14 @@ class LLMEngine:
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
             )
+
+            mm_processor_cache = self.renderer.mm_processor_cache
+            if mm_processor_cache is not None:
+                for engine_core_output in outputs.outputs:
+                    if engine_core_output.mm_cache_miss_hashes:
+                        for mm_hash in engine_core_output.mm_cache_miss_hashes:
+                            mm_processor_cache.invalidate(mm_hash)
+
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
@@ -382,11 +401,13 @@ class LLMEngine:
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, 0)
 
-    def wake_up(self, tags: list[str] | None = None):
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         fully_awake = self.engine_core.wake_up(tags)
 
         if self.logger_manager is not None and fully_awake:
             self.logger_manager.record_sleep_state(0, 0)
+
+        return fully_awake
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
