@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -98,7 +99,14 @@ def test_torch_profiler_rebuilds_one_shot_profiler_each_round(tmp_path):
 
 
 def test_torch_profiler_records_each_profile_round(tmp_path):
-    traces: list[torch.profiler.profile] = []
+    trace_paths: list[str] = []
+
+    def export_trace(prof: torch.profiler.profile) -> None:
+        # Export as each round stops instead of parsing every round at the end.
+        path = str(tmp_path / f"round_{len(trace_paths)}.json")
+        prof.export_chrome_trace(path)
+        trace_paths.append(path)
+
     wrapper = TorchProfilerWrapper(
         ProfilerConfig(
             profiler="torch",
@@ -108,7 +116,7 @@ def test_torch_profiler_records_each_profile_round(tmp_path):
         worker_name="worker",
         local_rank=1,
         activities=["CPU"],
-        on_trace_ready=traces.append,
+        on_trace_ready=export_trace,
     )
 
     for run in range(2):
@@ -117,10 +125,16 @@ def test_torch_profiler_records_each_profile_round(tmp_path):
             pass
         wrapper.stop()
 
-    assert len(traces) == 2
-    for run, trace in enumerate(traces):
+    assert len(trace_paths) == 2
+    for run, path in enumerate(trace_paths):
+        # The CPU profiler records every thread in the process, and an event
+        # name from elsewhere in a long session can hold invalid UTF-8.
+        with open(path, encoding="utf-8", errors="replace") as f:
+            events = json.load(f)["traceEvents"]
         assert {
-            event.name for event in trace.events() if event.name.startswith("run_")
+            event["name"]
+            for event in events
+            if event.get("name", "").startswith("run_")
         } == {f"run_{run}"}
 
 
