@@ -2306,21 +2306,35 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
       chunk_gated_delta_rule_fwd_intra<CHUNK_SIZE>(key_, value, g_, beta, cu_seqlens, chunk_indices);
 
   // fused `chunk_gated_delta_rule_fwd_h` + `chunk_fwd_o`
-  auto launch_inter = [&](auto state_tag) {
+  auto launch_inter = [local_query = query_,
+                       local_key = key_,
+                       local_w = w,
+                       local_u = u,
+                       local_decay_mask = decay_mask,
+                       local_chunk_offsets = chunk_offsets,
+                       g_,
+                       initial_state,
+                       output_final_state,
+                       cu_seqlens,
+                       initial_state_indices](auto state_tag) {
     using state_t = decltype(state_tag);
     return chunk_gated_delta_rule_fwd_inter<state_t, CHUNK_SIZE>(
-        query_,
-        key_,
-        w,
-        u,
+        local_query,
+        local_key,
+        local_w,
+        local_u,
         g_,
-        decay_mask,
+        local_decay_mask,
         initial_state,
         output_final_state,
         cu_seqlens,
-        chunk_offsets,
+        local_chunk_offsets,
         initial_state_indices);
   };
+
+
+
+
   auto output_and_state =
       initial_state.scalar_type() == at::kFloat
           ? launch_inter(float{})

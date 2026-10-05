@@ -502,6 +502,17 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
         )
 
 
+def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    with pytest.raises(ValueError, match="does not support cudagraph_mode=FULL"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
+        )
+
+
 def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
@@ -4114,3 +4125,47 @@ def test_revision_resolved_for_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+@pytest.mark.parametrize(
+    ("layer_types", "expected_attention"),
+    [
+        # Qwen3-Next / Qwen3.5 spell their attention layers "full_attention".
+        (["linear_attention", "full_attention"], 1),
+        # GLM-5.3-Flash and Qwen4-Exp use sparse attention, which still caches
+        # every token and so must count as attention.
+        (["linear_attention", "deepseek_sparse_attention"], 1),
+        (["linear_attention", "qwen_sparse_attention"], 1),
+        (["linear_attention", "linear_attention"], 0),
+    ],
+)
+def test_hybrid_layer_counts_sparse_attention_as_attention(
+    layer_types, expected_attention
+):
+    """Sparse-attention layer types consume a full attention KV cache."""
+    model_config = object.__new__(ModelConfig)
+    model_config.hf_config = SimpleNamespace()
+    model_config.hf_text_config = SimpleNamespace(layer_types=layer_types)
+    model_config.model_arch_config = SimpleNamespace(text_model_type="glm5_next")
+
+    parallel_config = SimpleNamespace()
+    with (
+        patch.object(ModelConfig, "is_hybrid", True),
+        patch.object(ModelConfig, "has_noops", False),
+        patch.object(ModelConfig, "is_attention_free", False),
+        patch.object(
+            ModelConfig,
+            "get_layers_start_end_indices",
+            return_value=(0, len(layer_types)),
+        ),
+    ):
+        assert (
+            model_config.get_num_layers_by_block_type(parallel_config, "attention")
+            == expected_attention
+        )
+        assert (
+            model_config.get_num_layers_by_block_type(
+                parallel_config, "linear_attention"
+            )
+            == len(layer_types) - expected_attention
+        )
