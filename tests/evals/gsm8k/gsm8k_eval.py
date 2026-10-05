@@ -21,7 +21,6 @@ from tqdm.asyncio import tqdm
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 
 INVALID = -9999999
-DEFAULT_STOP = ["Question", "Assistant:", "<|separator|>"]
 
 
 def download_and_cache_file(url: str, filename: str | None = None) -> str:
@@ -84,7 +83,7 @@ def _optional_params(**params: object) -> dict[str, object]:
 async def call_vllm_api(
     session: aiohttp.ClientSession,
     prompt: str,
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
     stop: list[str] | None = None,
     url: str | None = None,
@@ -100,11 +99,12 @@ async def call_vllm_api(
     """
     data = {
         "prompt": prompt,
-        "temperature": temperature,
         "max_tokens": max_tokens,
         "stop": stop,
     }
-    data.update(_optional_params(seed=seed, top_p=top_p, top_k=top_k))
+    data.update(
+        _optional_params(temperature=temperature, seed=seed, top_p=top_p, top_k=top_k)
+    )
 
     try:
         async with session.post(f"{url}/v1/completions", json=data) as response:
@@ -120,9 +120,9 @@ async def call_vllm_api(
 
 async def call_vllm_chat_api(
     session: aiohttp.ClientSession,
-    model: str,
+    model: str | None,
     prompt: str,
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
     stop: list[str] | None = None,
     url: str | None = None,
@@ -134,20 +134,24 @@ async def call_vllm_chat_api(
 ) -> tuple[str, int]:
     """Call vLLM's OpenAI-compatible chat completions endpoint.
 
+    ``model``, ``temperature`` and the other optional fields are omitted from
+    the request when ``None``, so the server defaults apply (vLLM uses its
+    served model when ``model`` is omitted).
+
     Returns:
         Tuple of (final answer content, completion_tokens). Reasoning returned
         separately by a reasoning parser is not part of the answer.
 
     """
     data = {
-        "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": temperature,
         "max_tokens": max_tokens,
         "stop": stop,
     }
     data.update(
         _optional_params(
+            model=model,
+            temperature=temperature,
             seed=seed,
             top_p=top_p,
             top_k=top_k,
@@ -237,7 +241,7 @@ def evaluate_gsm8k(
     use_chat_completions: bool = False,
     host: str = "http://127.0.0.1",
     port: int = 8000,
-    temperature: float = 0.0,
+    temperature: float | None = 0.0,
     seed: int | None = 42,
     request_timeout_seconds: float = 600,
     gen_prefix: str = "",
@@ -246,13 +250,14 @@ def evaluate_gsm8k(
     top_k: int | None = None,
     reasoning_effort: str | None = None,
     chat_template_kwargs: dict[str, object] | None = None,
-    stop: list[str] | None = None,
 ) -> dict[str, float | int]:
     """Evaluate GSM8K accuracy using vLLM serve endpoint.
 
-    ``top_p``/``top_k`` are sent only when set. ``reasoning_effort`` and
-    ``chat_template_kwargs`` require ``use_chat_completions=True``. ``stop``
-    defaults to ``DEFAULT_STOP``; pass ``[]`` to disable stop strings.
+    ``temperature``, ``top_p`` and ``top_k`` are sent only when not ``None``;
+    otherwise the server default applies. ``model`` is used only in chat mode,
+    where it may be ``None`` (the server uses its served model).
+    ``reasoning_effort`` and ``chat_template_kwargs`` require
+    ``use_chat_completions=True``.
 
     Returns dict with accuracy, invalid_rate, latency, etc.
     """
@@ -263,10 +268,6 @@ def evaluate_gsm8k(
             "reasoning_effort and chat_template_kwargs require "
             "use_chat_completions=True"
         )
-    if use_chat_completions and model is None:
-        raise ValueError("model is required for chat completions")
-    if stop is None:
-        stop = DEFAULT_STOP
     base_url = f"{host}:{port}"
     prompts, labels = _build_gsm8k_prompts(num_questions, num_shots, gen_prefix)
     num_questions = len(prompts)
@@ -276,8 +277,8 @@ def evaluate_gsm8k(
         output_tokens: list[int] = [0] * num_questions
 
         async def get_answer(session: aiohttp.ClientSession, i: int) -> tuple[str, int]:
+            stop = ["Question", "Assistant:", "<|separator|>"]
             if use_chat_completions:
-                assert model is not None
                 answer, tokens = await call_vllm_chat_api(
                     session=session,
                     model=model,
@@ -356,7 +357,7 @@ def evaluate_gsm8k_offline(
     sampling_params = SamplingParams(
         temperature=temperature,
         max_tokens=max_tokens,
-        stop=DEFAULT_STOP,
+        stop=["Question", "Assistant:", "<|separator|>"],
     )
     mode = "chat" if use_chat_completions else "completion"
     print(
@@ -399,7 +400,10 @@ def main() -> None:
     parser.add_argument("--host", type=str, default="http://127.0.0.1", help="Host URL")
     parser.add_argument("--port", type=int, default=8000, help="Port number")
     parser.add_argument(
-        "--temperature", type=float, default=0.0, help="Temperature for generation"
+        "--temperature",
+        type=float,
+        help="Temperature for generation (default: 0 for completions; "
+        "server default with --use-chat-completions)",
     )
     parser.add_argument(
         "--top-p", type=float, help="Top-p for generation (server default if unset)"
@@ -416,7 +420,8 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        help="Served model name (required with --use-chat-completions)",
+        help="Model name to send with chat requests (default: omitted, so the "
+        "server uses its served model)",
     )
     parser.add_argument(
         "--reasoning-effort",
@@ -427,13 +432,6 @@ def main() -> None:
         "--chat-template-kwargs",
         type=json.loads,
         help="JSON chat_template_kwargs, e.g. '{\"enable_thinking\": false}'",
-    )
-    parser.add_argument(
-        "--stop",
-        type=str,
-        nargs="*",
-        help=f"Stop strings (default: {DEFAULT_STOP}); pass --stop with no "
-        "values to disable, e.g. when stop strings may appear in reasoning",
     )
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility"
@@ -452,6 +450,9 @@ def main() -> None:
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
 
     args = parser.parse_args()
+    temperature = args.temperature
+    if temperature is None and not args.use_chat_completions:
+        temperature = 0.0
 
     result = evaluate_gsm8k(
         num_questions=args.num_questions,
@@ -459,7 +460,7 @@ def main() -> None:
         max_tokens=args.max_tokens,
         host=args.host,
         port=args.port,
-        temperature=args.temperature,
+        temperature=temperature,
         seed=args.seed,
         max_concurrency=args.max_concurrency,
         request_timeout_seconds=args.request_timeout_seconds,
@@ -469,7 +470,6 @@ def main() -> None:
         top_k=args.top_k,
         reasoning_effort=args.reasoning_effort,
         chat_template_kwargs=args.chat_template_kwargs,
-        stop=args.stop,
     )
 
     # Print results to terminal
@@ -483,6 +483,17 @@ def main() -> None:
 
     # Optional file saving
     if args.save_results:
+        # None means the field was not sent and the server default applied.
+        result["request_params"] = {
+            "endpoint": "chat" if args.use_chat_completions else "completions",
+            "model": args.model,
+            "temperature": temperature,
+            "top_p": args.top_p,
+            "top_k": args.top_k,
+            "seed": args.seed,
+            "reasoning_effort": args.reasoning_effort,
+            "chat_template_kwargs": args.chat_template_kwargs,
+        }
         with open(args.save_results, "w") as f:
             json.dump(result, f, indent=2)
         print(f"Results saved to {args.save_results}")
