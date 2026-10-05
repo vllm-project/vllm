@@ -388,6 +388,7 @@ class CPUOffloadingManager(OffloadingManager):
                     keys=removed_keys,
                     medium=self.medium,
                     removed=True,
+                    metadata_only=True,
                 )
             )
 
@@ -447,7 +448,15 @@ class CPUOffloadingManager(OffloadingManager):
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:
-            yield from self.events
+            for event in self.events:
+                if event.metadata_only:
+                    # A retry may already own this key before cleanup is drained.
+                    event.keys = [
+                        key for key in event.keys if self._policy.get(key) is None
+                    ]
+                    if not event.keys:
+                        continue
+                yield event
             self.events.clear()
 
     def get_stats(self) -> OffloadingConnectorStats | None:

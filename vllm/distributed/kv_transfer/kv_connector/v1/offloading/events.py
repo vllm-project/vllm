@@ -412,6 +412,10 @@ class OffloadingEventsTracker:
         by_group: dict[int, list] = {}
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
+            if event.metadata_only:
+                if meta is not None:
+                    meta.active_residencies.discard((event.medium, event.ownership))
+                continue
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
