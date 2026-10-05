@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import fields
+from dataclasses import asdict, fields
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -505,6 +505,7 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
         ),
     ],
 )
+@pytest.mark.parametrize("share_metadata", [False, True])
 def test_kimi_k3_kda_metadata_matches_shared_gdn(
     batch: BatchSpec,
     num_decode_draft_tokens: list[int] | None,
@@ -512,6 +513,7 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
     full_cuda_graph: bool,
     is_prefilling: list[bool],
     expected_uniform_spec_sequence_length: int | None,
+    share_metadata: bool,
 ):
     kwargs: dict[str, torch.Tensor] = {}
     if num_decode_draft_tokens is not None:
@@ -536,6 +538,17 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
         common_attn_metadata,
         **kwargs,
     )
+    if share_metadata:
+        common_attn_metadata = common_attn_metadata.replace(_cross_group_cache={})
+        _make_builder(
+            KimiK3KDAMetadataBuilder, num_speculative_tokens, full_cuda_graph
+        ).build(
+            0,
+            common_attn_metadata.replace(
+                block_table_tensor=common_attn_metadata.block_table_tensor + 100
+            ),
+            **kwargs,
+        )
     actual = _make_builder(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens,
@@ -547,6 +560,71 @@ def test_kimi_k3_kda_metadata_matches_shared_gdn(
     assert (
         reference.uniform_spec_sequence_length == expected_uniform_spec_sequence_length
     )
+
+
+def test_cross_group_build_recoverssm_checkpoint(monkeypatch: pytest.MonkeyPatch):
+    """RecoverSSM commits and prefill checkpoints use each group's block table."""
+    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
+    monkeypatch.setattr("vllm.v1.attention.backends.utils.PIN_MEMORY", False)
+    batch = BatchSpec(seq_lens=[50, 32, 20], query_lens=[50, 16, 3])
+    first, second, ref = (
+        _make_builder(
+            KimiK3KDAMetadataBuilder,
+            num_speculative_tokens=2,
+            full_cuda_graph=False,
+            use_recoverssm=True,
+            mamba_cache_mode="align",
+            num_prefill_checkpoint_blocks=1,
+        )
+        for _ in range(3)
+    )
+    kwargs = {
+        "num_decode_draft_tokens_cpu": torch.tensor([-1, -1, 2], dtype=torch.int32),
+        "num_accepted_tokens": torch.ones(batch.batch_size, dtype=torch.int32),
+    }
+    cache: dict = {}
+    first_common = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE, arange_block_indices=True
+    ).replace(is_prefilling=torch.tensor([True, True, False]), _cross_group_cache=cache)
+    second_common = first_common.replace(
+        block_table_tensor=first_common.block_table_tensor + 100
+    )
+    for builder, common in (
+        (first, first_common),
+        (second, second_common),
+        (ref, second_common),
+    ):
+        builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+            common.block_table_tensor,
+            common.seq_lens,
+            builder.kv_cache_spec,
+            "align",
+        )
+    first_meta = first.build(0, first_common, **kwargs)
+    meta = second.build(0, second_common, **kwargs)
+    expected = ref.build(0, second_common.replace(_cross_group_cache=None), **kwargs)
+
+    assert first_meta.checkpoint is not None
+    assert meta.checkpoint is not None
+
+    state_fields = (
+        "spec_state_indices_tensor",
+        "non_spec_state_indices_tensor",
+        "recoverssm_commit",
+        "checkpoint",
+    )
+    for field in fields(KimiK3KDAMetadata):
+        actual = getattr(meta, field.name)
+        if field.name == "recoverssm_context":
+            assert actual is second.recoverssm_context
+        elif field.name not in state_fields:
+            assert actual is getattr(first_meta, field.name)
+        elif field.name in {"recoverssm_commit", "checkpoint"} and actual is not None:
+            torch.testing.assert_close(
+                asdict(actual), asdict(getattr(expected, field.name))
+            )
+        else:
+            torch.testing.assert_close(actual, getattr(expected, field.name))
 
 
 def test_mixed_regular_and_spec_decode_uses_packed_decode_metadata():

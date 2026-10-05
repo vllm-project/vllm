@@ -141,18 +141,12 @@ class Mamba2AttentionMetadataBuilder(
             vllm_config, kv_cache_spec
         )
 
-    def build(
+    def _compute_common_metadata(
         self,
-        common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
-        fast_build: bool = False,
         **kwargs: Any,
     ) -> Mamba2AttentionMetadata:
-        common = self._compute_common_metadata(
-            common_attn_metadata,
-            num_accepted_tokens=kwargs.get("num_accepted_tokens"),
-            num_decode_draft_tokens_cpu=kwargs.get("num_decode_draft_tokens_cpu"),
-        )
+        common = super()._compute_common_metadata(common_attn_metadata, **kwargs)
 
         seq_idx_p = None
         cu_chunk_seqlen_p = None
@@ -210,13 +204,10 @@ class Mamba2AttentionMetadataBuilder(
             checkpoint_meta=checkpoint_meta,
         )
 
-    def update_block_table(
-        self,
-        metadata: Mamba2AttentionMetadata,
-        blk_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
+    def _update_state_indices(
+        self, metadata: Mamba2AttentionMetadata, blk_table: torch.Tensor
     ) -> Mamba2AttentionMetadata:
-        new_metadata = super().update_block_table(metadata, blk_table, slot_mapping)
+        new_metadata = super()._update_state_indices(metadata, blk_table)
         if metadata.checkpoint_meta is None:
             return new_metadata
         # Checkpoint destinations are block-table entries, so each group

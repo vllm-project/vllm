@@ -472,6 +472,8 @@ class CommonAttentionMetadata:
 
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
+    _cross_group_cache: dict[Any, Any] | None = None
+    """Per-pass scratch shared by KV cache groups; populated only by MRV2."""
 
     def batch_size(self) -> int:
         return self.seq_lens.shape[0]
