@@ -7,6 +7,7 @@
 //! - Engine args: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
+mod ssl;
 mod unsupported;
 
 use std::collections::HashMap;
@@ -22,17 +23,20 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
-use vllm_chat::ReasoningParserFactory;
+use vllm_chat::GenerationConfigMode;
+use vllm_chat::ToolStrictLevel;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RenderConfig, RendererSelection,
-    TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
+    RendererSelection,
 };
+use vllm_text::backend::hf::HfOverrides;
 
+use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
 
 /// Top-level parser for the `vllm-rs` binary.
@@ -108,6 +112,12 @@ pub enum BenchCommand {
 pub struct RenderArgs {
     /// Model identifier or local model directory containing tokenizer files.
     model: String,
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    #[arg(long)]
+    revision: Option<String>,
+    /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
+    #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
+    hf_overrides: HfOverrides,
     /// HTTP bind host.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -125,6 +135,10 @@ pub struct RenderArgs {
     /// `none` to disable parsing.
     #[arg(long, default_value_t)]
     reasoning_parser: ParserSelection,
+    /// Server-side floor for structural-tag based tool calling: `auto`,
+    /// `function`, or `parameter`.
+    #[arg(long, default_value_t)]
+    tool_strict_level: ToolStrictLevel,
     /// Select the native chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
@@ -137,29 +151,39 @@ pub struct RenderArgs {
     /// How message content is exposed to the chat template.
     #[arg(long, default_value_t)]
     chat_template_content_format: ChatTemplateContentFormatOption,
-    /// Maximum model context length used for request validation.
+    /// Maximum model context length used for request validation. When not set,
+    /// prompt-length validation is skipped and the engine enforces its own limit in later stage.
     #[arg(long)]
-    max_model_len: u32,
+    max_model_len: Option<u32>,
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
+    /// TLS options for HTTPS/mTLS.
+    #[command(flatten)]
+    ssl: SslArgs,
 }
 
 impl RenderArgs {
     pub(super) fn into_config(self) -> RenderConfig {
+        let tls = self.ssl.tls_config();
+
         RenderConfig {
             model: self.model,
+            revision: self.revision,
+            hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             host: self.host,
             port: self.port,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
+            tls,
         }
     }
 }
@@ -186,6 +210,23 @@ pub struct SharedRuntimeArgs {
     /// public model ID.
     pub model: String,
 
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    #[arg(long)]
+    #[serde(default)]
+    pub revision: Option<String>,
+
+    /// JSON Merge Patch (RFC 7396) for config.json; null removes a field.
+    /// Objects merge recursively and arrays/scalars replace existing values.
+    #[arg(long, value_parser = parse_json::<HfOverrides>, default_value = "{}", value_name = "JSON")]
+    #[serde(default)]
+    pub hf_overrides: HfOverrides,
+
+    /// The source of generation-config sampling defaults. `"auto"` loads the
+    /// model's defaults, while `"vllm"` uses vLLM's neutral defaults.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub generation_config: GenerationConfigMode,
+
     /// Maximum time to wait for the expected engines to register on the
     /// frontend transport.
     #[arg(
@@ -206,6 +247,14 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t)]
     #[serde(default = "default_py_bootstrap_parser_selection")]
     pub reasoning_parser: ParserSelection,
+    /// Server-side floor for structural-tag based tool calling, applied on
+    /// top of the per-tool `strict` field: `auto` follows the request's
+    /// tool choice and per-tool strictness,
+    /// `function` constrains the tool-call envelope for every request with
+    /// tools, `parameter` additionally pins argument schemas.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub tool_strict_level: ToolStrictLevel,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
@@ -219,11 +268,6 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     #[serde(default)]
     pub max_logprobs: Option<i32>,
-    /// TCP port for the gRPC Inference service. When not set, no gRPC server is
-    /// started.
-    #[arg(long)]
-    #[serde(default)]
-    pub grpc_port: Option<u16>,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -263,6 +307,13 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
 
+    /// LoRA adapters to load before serving, each as `name=path` or a JSON
+    /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
+    /// Requires `--enable-lora`; startup fails if any adapter cannot be loaded.
+    #[arg(long, num_args = 1.., value_name = "MODULE")]
+    #[serde(default)]
+    pub lora_modules: Vec<LoraModulePath>,
+
     /// The format to render message content within a chat template.
     ///
     /// * "auto" detects the format from the template
@@ -298,6 +349,23 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_request_id_headers: bool,
 
+    /// Register the scale-out `/inference/v1/generate` endpoint.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_scale_out: bool,
+
+    /// Send an SSE keep-alive comment line every this many seconds when a
+    /// streaming response is idle (queued, prefill, or between tokens), to
+    /// prevent reverse proxies/tunnels with read timeouts from closing the
+    /// connection. Defaults to 0, which disables keep-alive comments entirely.
+    #[arg(long, default_value_t = 0)]
+    #[serde(default)]
+    pub sse_keep_alive_interval: u64,
+
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
     #[educe(Debug(ignore))]
@@ -307,7 +375,9 @@ pub struct SharedRuntimeArgs {
     pub api_key: Vec<String>,
 
     /// Disable periodic logging of engine statistics (throughput, queue depth,
-    /// cache usage).
+    /// cache usage). Engines also stop recording stats, so metrics derived from
+    /// engine-reported scheduler stats and request lifecycle events are not
+    /// exported.
     #[arg(long)]
     #[serde(default)]
     pub disable_log_stats: bool,
@@ -347,33 +417,10 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub allow_credentials: bool,
 
-    /// The file path to the SSL key file. When omitted, the key is read from
-    /// `--ssl-certfile` (combined PEM).
-    #[arg(long)]
-    #[serde(default)]
-    pub ssl_keyfile: Option<String>,
-
-    /// The file path to the SSL cert file. Enables TLS when set.
-    #[arg(long)]
-    #[serde(default)]
-    pub ssl_certfile: Option<String>,
-
-    /// The CA certificates file used to verify client certificates (mTLS).
-    #[arg(long)]
-    #[serde(default)]
-    pub ssl_ca_certs: Option<String>,
-
-    /// Whether a client certificate is required: 0 = none, 1 = optional,
-    /// 2 = required (mirrors Python's `ssl.CERT_*`).
-    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i32).range(0..=2))]
-    #[serde(default)]
-    pub ssl_cert_reqs: i32,
-
-    /// OpenSSL cipher string for HTTPS (TLS 1.2 and below).
-    /// When unset, the linked OpenSSL's default suites are used.
-    #[arg(long)]
-    #[serde(default)]
-    pub ssl_ciphers: Option<String>,
+    /// TLS options for HTTPS/mTLS.
+    #[command(flatten)]
+    #[serde(default, flatten)]
+    pub ssl: SslArgs,
 
     /// Profiler configuration forwarded by the Python supervisor.
     ///
@@ -453,6 +500,7 @@ impl SharedRuntimeArgs {
     fn into_bootstrapped_config(
         self,
         listen_fd: i32,
+        grpc_listen_fd: Option<i32>,
         input_address: String,
         output_address: String,
         coordinator_address: Option<String>,
@@ -465,7 +513,7 @@ impl SharedRuntimeArgs {
         let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
-        let tls = self.tls_config();
+        let tls = self.ssl.tls_config();
         let profiler = self.profiler();
 
         Config {
@@ -482,15 +530,21 @@ impl SharedRuntimeArgs {
                 None => CoordinatorMode::None,
             },
             model: self.model,
+            revision: self.revision,
+            hf_overrides: self.hf_overrides,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
+            grpc_listener_mode: grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
@@ -498,8 +552,9 @@ impl SharedRuntimeArgs {
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
-            grpc_port: self.grpc_port,
             shutdown_timeout,
+            // The engine is launched and supervised by another process.
+            manages_engine: false,
             keep_alive_timeout,
             profiler,
         }
@@ -510,18 +565,20 @@ impl SharedRuntimeArgs {
     fn into_managed_config(
         self,
         listener_mode: HttpListenerMode,
+        grpc_listener_mode: Option<HttpListenerMode>,
         handshake_address: String,
         advertised_host: String,
         engine_count: usize,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
+        manages_engine: bool,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
         let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
-        let tls = self.tls_config();
+        let tls = self.ssl.tls_config();
         let profiler = self.profiler();
 
         Config {
@@ -535,15 +592,21 @@ impl SharedRuntimeArgs {
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
+            revision: self.revision,
+            hf_overrides: self.hf_overrides,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
+            grpc_listener_mode,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            tool_strict_level: self.tool_strict_level,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
@@ -551,8 +614,8 @@ impl SharedRuntimeArgs {
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
-            grpc_port: self.grpc_port,
             shutdown_timeout,
+            manages_engine,
             keep_alive_timeout,
             profiler,
         }
@@ -563,6 +626,9 @@ impl SharedRuntimeArgs {
             enable_log_requests: self.enable_log_requests,
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             enable_request_id_headers: self.enable_request_id_headers,
+            enable_scale_out: self.enable_scale_out,
+            sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
+                .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
         }
     }
 
@@ -573,23 +639,6 @@ impl SharedRuntimeArgs {
             allow_headers: self.allowed_headers.0.clone(),
             allow_credentials: self.allow_credentials,
         }
-    }
-
-    /// Build the TLS config: `Some` when any `ssl_*` argument is set, else
-    /// `None` (plaintext). The combination is validated in [`Config::validate`].
-    fn tls_config(&self) -> Option<TlsConfig> {
-        let tls_requested = self.ssl_certfile.is_some()
-            || self.ssl_keyfile.is_some()
-            || self.ssl_ca_certs.is_some()
-            || self.ssl_cert_reqs != 0
-            || self.ssl_ciphers.is_some();
-        tls_requested.then(|| TlsConfig {
-            cert_file: self.ssl_certfile.clone(),
-            key_file: self.ssl_keyfile.clone(),
-            ca_certs: self.ssl_ca_certs.clone(),
-            cert_reqs: self.ssl_cert_reqs,
-            ciphers: self.ssl_ciphers.clone(),
-        })
     }
 }
 
@@ -644,6 +693,10 @@ pub struct FrontendArgs {
     /// supervisor.
     #[arg(long)]
     pub listen_fd: i32,
+    /// Inherited gRPC listening socket file descriptor passed by the Python
+    /// supervisor. When not set, no gRPC server is started.
+    #[arg(long)]
+    pub grpc_listen_fd: Option<i32>,
     /// Frontend input ROUTER socket address that the Python engines will
     /// connect to.
     #[arg(long)]
@@ -679,6 +732,7 @@ impl FrontendArgs {
         let data_parallel_size = self.data_parallel_size.unwrap_or(self.engine_count);
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
+            self.grpc_listen_fd,
             self.input_address,
             self.output_address,
             self.coordinator_address,
@@ -708,6 +762,10 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
+    /// TCP port for the gRPC Inference and Control services. When not set, no
+    /// gRPC server is started.
+    #[arg(long)]
+    pub grpc_port: Option<u16>,
 
     /// Flag to print debug information about CLI argument parsing and exit.
     #[educe(Debug(ignore))]
@@ -737,14 +795,27 @@ impl ServeArgs {
                 port: self.port,
             },
         };
+        // gRPC follows the HTTP TCP host. With a Unix socket it defaults to IPv4
+        // loopback rather than all interfaces, so the side-car is never
+        // accidentally network-exposed.
+        let grpc_listener_mode = self.grpc_port.map(|port| HttpListenerMode::BindTcp {
+            host: match self.uds {
+                Some(_) => "127.0.0.1".to_string(),
+                None => self.host.clone(),
+            },
+            port,
+        });
 
         self.runtime.clone().into_managed_config(
             listener_mode,
+            grpc_listener_mode,
             handshake_address,
             self.managed_engine.handshake_host.clone(),
             self.managed_engine.data_parallel_size,
             local_input_address,
             local_output_address,
+            // `--data-parallel-size-local 0` runs the frontend without a local engine.
+            self.managed_engine.data_parallel_size_local != Some(0),
         )
     }
 
@@ -754,9 +825,13 @@ impl ServeArgs {
         let reasoning_parser =
             effective_engine_reasoning_parser(&self.runtime.reasoning_parser, &self.runtime.model);
         let profiler_config = self.runtime.profiler_config_json();
+        let hf_overrides = (!self.runtime.hf_overrides.is_empty()).then(|| {
+            serde_json::to_string(&self.runtime.hf_overrides).expect("JSON object serializes")
+        });
 
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
+            self.runtime.revision.clone(),
             self.runtime.max_logprobs,
             profiler_config,
             reasoning_parser.as_deref(),
@@ -765,18 +840,13 @@ impl ServeArgs {
             self.runtime.shutdown_timeout,
             handshake_port,
             self.runtime.limit_mm_per_prompt_json(),
+            hf_overrides,
         )
     }
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
-    match selection {
-        ParserSelection::Auto => ReasoningParserFactory::global()
-            .resolve_name_for_model(model)
-            .map(str::to_string),
-        ParserSelection::None => None,
-        ParserSelection::Explicit(name) => Some(name.clone()),
-    }
+    selection.resolve_reasoning_name(model).map(str::to_owned)
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.

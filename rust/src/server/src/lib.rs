@@ -29,7 +29,7 @@ use axum::body::Body;
 use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    HttpListenerMode, TlsConfig,
+    HttpListenerMode, LoraModulePath, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -37,7 +37,6 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 pub use render::{RenderConfig, serve_render};
-use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
@@ -45,7 +44,9 @@ use tonic_health::server::health_reporter;
 use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
-pub use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
+pub use vllm_chat::{
+    ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
+};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::TextLlm;
@@ -72,19 +73,8 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
     }
 }
 
-/// Choose the gRPC listener host. It follows the HTTP TCP host when there is
-/// one; otherwise (unix socket or inherited fd) it defaults to IPv4 loopback
-/// rather than all interfaces, so the side-car is never accidentally
-/// network-exposed.
-fn grpc_bind_host(listener_mode: &HttpListenerMode) -> &str {
-    match listener_mode {
-        HttpListenerMode::BindTcp { host, .. } => host.as_str(),
-        HttpListenerMode::BindUnix { .. } | HttpListenerMode::InheritedFd { .. } => "127.0.0.1",
-    }
-}
-
 /// Build the shared application state for one configured model and one engine
-/// client.
+/// client, including any static LoRA adapters from `--lora-modules`.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     // If no served names are specified, fall back to the backend model path so
     // that the API always has at least one valid model ID. Use the same primary
@@ -96,6 +86,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let loaded = load_model_backends(
         &config.model,
         LoadModelBackendsOptions {
+            revision: config.revision.clone(),
+            hf_overrides: config.hf_overrides.clone(),
+            generation_config: config.generation_config,
             renderer: config.renderer,
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
@@ -125,6 +118,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         coordinator_mode,
         model_name: metrics_model_name,
         client_index: 0,
+        engine_stats_enabled: !config.disable_log_stats,
     })
     .await
     .context("failed to connect to engine core")?;
@@ -134,9 +128,10 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
 
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())
-        .with_reasoning_parser(config.reasoning_parser.clone());
+        .with_reasoning_parser(config.reasoning_parser.clone())
+        .with_tool_strict_level(config.tool_strict_level);
 
-    Ok(Arc::new(
+    let state = Arc::new(
         AppState::new(served_model_names, chat)
             .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
@@ -144,7 +139,31 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_profiler(config.profiler.clone()),
-    ))
+    );
+
+    // Load operator-configured static LoRA adapters before serving, failing
+    // startup on any error like Python's `init_static_loras` does.
+    load_static_loras(&state, &config.lora_modules).await?;
+
+    Ok(state)
+}
+
+async fn load_static_loras(state: &AppState, modules: &[LoraModulePath]) -> Result<()> {
+    for module in modules {
+        let request = state.load_static_lora(module).await.with_context(|| {
+            format!(
+                "failed to load LoRA adapter `{}` from --lora-modules",
+                module.name
+            )
+        })?;
+        info!(
+            lora_name = %request.lora_name,
+            lora_int_id = request.lora_int_id,
+            lora_path = %request.lora_path,
+            "loaded static LoRA adapter"
+        );
+    }
+    Ok(())
 }
 
 /// Run the OpenAI-compatible HTTP server until the supplied shutdown token is
@@ -179,7 +198,8 @@ where
         .transpose()
         .context("invalid TLS configuration")?;
 
-    // Also check shutdown during the (potentially long) startup handshake.
+    // Also check shutdown during the (potentially long) startup handshake and
+    // static LoRA loading.
     let state = tokio::select! {
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
@@ -197,13 +217,11 @@ where
     // Optionally bind the gRPC Inference server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
     // surface before serving rather than being deferred until shutdown.
-    let grpc_setup = if let Some(grpc_port) = config.grpc_port {
-        let grpc_host = grpc_bind_host(&config.listener_mode);
-        let grpc_listener = TcpListener::bind((grpc_host, grpc_port))
+    let grpc_setup = if let Some(grpc_listener_mode) = &config.grpc_listener_mode {
+        let grpc_listener = Listener::bind(grpc_listener_mode)
             .await
-            .with_context(|| format!("failed to bind gRPC listener on {grpc_host}:{grpc_port}"))?;
-        let addr = grpc_listener.local_addr()?;
-        let grpc_listener = Listener::Tcp(grpc_listener);
+            .with_context(|| format!("failed to bind gRPC listener for {grpc_listener_mode:?}"))?;
+        let addr = grpc_listener.local_addr_display()?;
         // gRPC reuses the HTTP TLS config (same SslContext) plus ALPN h2.
         let grpc_tls = config
             .tls
@@ -215,9 +233,11 @@ where
         let engine_health = state.engine_core_client().subscribe_health();
         health_reporter.set_serving::<grpc::InferenceGrpcService>().await;
         health_reporter.set_serving::<grpc::ControlGrpcService>().await;
-        let control_service =
-            grpc::ControlGrpcService::new(grpc::ControlServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        let control_service = grpc::ControlGrpcService::new(
+            grpc::ControlServiceImpl::new(state.clone())
+                .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
+        )
+        .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
         let inference_service =
             grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
                 .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
@@ -444,24 +464,5 @@ mod tests {
             effective_served_model_names("backend-model", &served_names),
             served_names
         );
-    }
-
-    #[test]
-    fn grpc_bind_host_follows_http_tcp_host() {
-        let mode = HttpListenerMode::BindTcp {
-            host: "0.0.0.0".to_string(),
-            port: 8000,
-        };
-        assert_eq!(grpc_bind_host(&mode), "0.0.0.0");
-    }
-
-    #[test]
-    fn grpc_bind_host_defaults_to_loopback_without_tcp_host() {
-        let unix = HttpListenerMode::BindUnix {
-            path: "/tmp/vllm.sock".to_string(),
-        };
-        let inherited = HttpListenerMode::InheritedFd { fd: 3 };
-        assert_eq!(grpc_bind_host(&unix), "127.0.0.1");
-        assert_eq!(grpc_bind_host(&inherited), "127.0.0.1");
     }
 }

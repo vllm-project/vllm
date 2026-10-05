@@ -61,12 +61,12 @@ AUDIO_MODEL_SETTINGS = {
         pytest.param(
             "mistralai/Voxtral-Mini-3B-2507",
             marks=pytest.mark.xfail(
-                reason="MistralCommonBackend.encode does not produce the audio "
-                "placeholder token (ID 24) from raw text. apply_chat_template "
-                "yields token IDs with placeholders, but MultiModalProcessor."
-                "apply() decodes the prompt back to text and re-tokenizes, at "
-                "which point the placeholders are lost. Fix belongs in "
-                "mistral_common or in the Voxtral-specific path.",
+                reason="Voxtral's mistral_common processor does not compose with "
+                "the Transformers modelling backend. Loading it currently fails "
+                "outright, because MistralCommonBackend.from_pretrained rejects "
+                "the kwargs vLLM passes, and it implements no "
+                "`replace_audio_token`, so it would report no replacement "
+                "offsets. Both fixes belong in mistral_common or transformers.",
                 strict=False,
             ),
         ),
@@ -77,12 +77,9 @@ AUDIO_MODEL_SETTINGS = {
 def test_audio_multimodal_processor(model_id):
     settings = AUDIO_MODEL_SETTINGS[model_id]
 
-    model_config = ModelConfig(
-        model=model_id,
-        model_impl="transformers",
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
     )
-
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
     audio = np.zeros(16000, dtype=np.float32)
     mm_data = {"audio": (audio, 16000)}
@@ -113,10 +110,14 @@ def test_audio_multimodal_processor(model_id):
     )
 
 
-def _process_granite_speech(separator: str):
+@pytest.mark.parametrize("separator", [" and ", ""])
+def test_audio_multiple_inputs(separator):
+    """Multiple audios per prompt are each detected as a separate placeholder
+    and multi-modal item by the Transformers modelling backend."""
     model_id = "ibm-granite/granite-speech-3.3-2b"
-    model_config = ModelConfig(model=model_id, model_impl="transformers")
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
+    )
 
     audio_token = mm_processor.info.get_hf_processor().audio_token
     # One token per audio; the processor expands each to its placeholder run.
@@ -126,17 +127,11 @@ def _process_granite_speech(separator: str):
     )
     audios = [np.zeros(16000, dtype=np.float32), np.zeros(24000, dtype=np.float32)]
 
-    return mm_processor(
+    result = mm_processor(
         prompt=prompt,
         mm_items=mm_processor.info.parse_mm_data({"audio": audios}),
         hf_processor_mm_kwargs={},
     )
-
-
-def test_audio_multiple_inputs():
-    """Multiple audios per prompt are each detected as a separate placeholder
-    and multi-modal item by the Transformers modelling backend."""
-    result = _process_granite_speech(separator=" and ")
 
     assert len(result["mm_placeholders"]["audio"]) == 2
     assert len(result["mm_kwargs"]["audio"]) == 2
@@ -167,9 +162,3 @@ def test_unclaimed_fields_warn_rather_than_raise():
 
     assert owned["audio"] == ["input_features"]
     assert owned["image"] == []
-
-
-def test_audio_adjacent_inputs():
-    """Adjacent audios are rejected rather than silently merged into one placeholder."""
-    with pytest.raises(ValueError, match="told apart"):
-        _process_granite_speech(separator="")

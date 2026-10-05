@@ -123,6 +123,37 @@ impl [AssistantContentBlock] {
     }
 }
 
+/// Chat-level token usage for one completed request.
+///
+/// Extends the engine-level [`TokenUsage`] with reasoning attribution measured
+/// by the chat output pipeline. [`TokenUsage`] itself stays engine-level and
+/// is not touched by parsing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChatTokenUsage {
+    /// Engine-level token usage.
+    pub engine: TokenUsage,
+    /// Number of generated tokens attributed to reasoning; 0 when the
+    /// configured parser has no reasoning channel.
+    pub reasoning_tokens: usize,
+}
+
+impl From<TokenUsage> for ChatTokenUsage {
+    fn from(engine: TokenUsage) -> Self {
+        Self {
+            engine,
+            reasoning_tokens: 0,
+        }
+    }
+}
+
+impl Deref for ChatTokenUsage {
+    type Target = TokenUsage;
+
+    fn deref(&self) -> &Self::Target {
+        &self.engine
+    }
+}
+
 /// Final structured assistant message assembled from the event stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssistantMessage {
@@ -172,6 +203,8 @@ pub enum ChatEvent {
         index: usize,
         kind: AssistantBlockKind,
         delta: String,
+        /// Number of generated tokens attributed to this delta, when available.
+        token_count: Option<usize>,
     },
     /// Per-decoded-update sample metadata: logprobs and/or output token IDs.
     LogprobsDelta {
@@ -201,7 +234,7 @@ pub enum ChatEvent {
     /// metadata.
     Done {
         message: AssistantMessage,
-        usage: TokenUsage,
+        usage: ChatTokenUsage,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<serde_json::Value>,

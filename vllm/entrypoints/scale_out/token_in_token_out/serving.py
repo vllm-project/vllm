@@ -6,31 +6,37 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
+from typing import Any
 
 import msgspec
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    RequestResponseMetadata,
+)
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
+    build_spec_decoding_metrics,
     clamp_prompt_logprobs,
+    format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
-    GenerationError,
     PromptTokenUsageInfo,
-    RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -42,19 +48,54 @@ from vllm.multimodal.inputs import (
 from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
-from .mm_serde import decode_mm_kwargs_item
+from .mm_features import (
+    mm_kwargs_from_features,
+    placeholder_ranges_from_engine_input,
+)
 from .protocol import (
     GenerateRequest,
     GenerateResponse,
-    GenerateResponseChoice,
-    GenerateResponseStreamChoice,
-    GenerateStreamResponse,
+    GenerateTextChoice,
+    GenerateTextResponse,
+    GenerateTextStreamChoice,
+    GenerateTextStreamResponse,
+    GenerateTokensChoice,
+    GenerateTokensResponse,
+    GenerateTokensStreamChoice,
+    GenerateTokensStreamResponse,
 )
 
 logger = init_logger(__name__)
+
+
+def _logprob_token(
+    token_id: int, logprob: Logprob | None, tokenizer: TokenizerLike | None
+) -> tuple[str, list[int] | None]:
+    """Token string and UTF-8 bytes for one logprob entry.
+
+    Without a tokenizer the token is a ``token_id:N`` placeholder with no bytes.
+    """
+    if tokenizer is None:
+        return format_token_id_placeholder(token_id), None
+    token = (
+        tokenizer.decode([token_id])
+        if logprob is None
+        else GenerateBaseServing._get_decoded_token(logprob, token_id, tokenizer)
+    )
+    return token, list(token.encode("utf-8", errors="replace"))
+
+
+def _top_logprob(
+    token_id: int, logprob: Logprob, tokenizer: TokenizerLike | None
+) -> ChatCompletionLogProb:
+    token, token_bytes = _logprob_token(token_id, logprob, tokenizer)
+    return ChatCompletionLogProb(
+        token=token, logprob=max(logprob.logprob, -9999.0), bytes=token_bytes
+    )
 
 
 class ServingTokens(GenerateBaseServing):
@@ -82,6 +123,9 @@ class ServingTokens(GenerateBaseServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
+        self.has_tokenizer = (
+            not force_no_detokenize and self.renderer.tokenizer is not None
+        )
         if force_no_detokenize:
             logger.info(
                 "Tokens-only mode is enabled, skipping detokenization "
@@ -100,6 +144,23 @@ class ServingTokens(GenerateBaseServing):
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
 
+    def _validate_mm_cache_handles(
+        self,
+        mm_kwargs: dict[str, list[MultiModalKwargsItem | None]],
+        mm_hashes: dict[str, list[str]],
+    ) -> ErrorResponse | None:
+        cache = self.online_renderer.renderer.mm_processor_cache
+        if cache is None:
+            return None
+        try:
+            for modality, items in mm_kwargs.items():
+                for mm_hash, item in zip(mm_hashes[modality], items, strict=True):
+                    if item is not None:
+                        cache.validate_input_item(item, mm_hash)
+        except ValueError as error:
+            return self.create_error_response(error)
+        return None
+
     async def serve_tokens(
         self,
         request: GenerateRequest,
@@ -110,11 +171,7 @@ class ServingTokens(GenerateBaseServing):
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight()
 
         lora_request = None
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
@@ -136,8 +193,38 @@ class ServingTokens(GenerateBaseServing):
                 f"sampling_params.n must be at most the server's max_num_seqs "
                 f"({max_num_seqs}), got {sampling_params.n}."
             )
+        # The stream schema has no field for the scores.
+        if request.stream and sampling_params.prompt_logprob_token_ids is not None:
+            return self.create_error_response(
+                "prompt_logprob_token_ids are not available when stream=true."
+            )
+        if self.force_no_detokenize and sampling_params.stop:
+            # SamplingParams rejects stop with detokenize=False at request
+            # validation, but this server forces detokenize=False afterwards,
+            # so the combination must be rejected here or stop strings are
+            # silently never applied.
+            return self.create_error_response(
+                "stop strings are not supported on a --tokens-only server "
+                "because detokenization is disabled. Check stop strings on "
+                "the coordinator, or use stop_token_ids."
+            )
+        if request.output_mode != "tokens" and not self.has_tokenizer:
+            # The no-op detokenizer returns "", so without this check the
+            # request would succeed with empty text.
+            return self.create_error_response(
+                f"output_mode={request.output_mode!r} requires a tokenizer, but "
+                "this server does not load one (--tokens-only or "
+                "--skip-tokenizer-init). Send the request to a server that "
+                "loads a tokenizer, or use output_mode='tokens'."
+            )
         try:
-            msgspec.msgpack.encode(sampling_params)
+            msgspec.msgpack.encode(
+                (
+                    sampling_params,
+                    request.kv_transfer_params,
+                    request.ec_transfer_params,
+                )
+            )
         except (OverflowError, TypeError, ValueError) as e:
             return self.create_error_response(e)
 
@@ -157,6 +244,8 @@ class ServingTokens(GenerateBaseServing):
                     mm_parser.parse_video(url, uuid)
             mm_data, mm_uuids = await tracker.resolve_items()
             prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+            if request.cache_salt is not None:
+                prompt["cache_salt"] = request.cache_salt
             if mm_data:
                 prompt["multi_modal_data"] = mm_data
             if mm_uuids:
@@ -173,17 +262,11 @@ class ServingTokens(GenerateBaseServing):
                 for modality, ranges in features.mm_placeholders.items()
             }
 
-            # Deserialize tensor data when present; None → cache hit.
-            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
-            if features.kwargs_data is not None:
-                for modality, items in features.kwargs_data.items():
-                    mm_kwargs[modality] = [
-                        decode_mm_kwargs_item(item) if item is not None else None
-                        for item in items
-                    ]
-            else:
-                for modality, hashes in features.mm_hashes.items():
-                    mm_kwargs[modality] = [None] * len(hashes)
+            # Deserialize full tensor data and optional metadata-only data.
+            # Metadata-only items are valid when ec_transfer_params is set.
+            mm_kwargs = mm_kwargs_from_features(features)
+            if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
+                return error
 
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
@@ -200,8 +283,26 @@ class ServingTokens(GenerateBaseServing):
                 skip_mm_cache=True,
             )
 
+        # Offsets are relative to the decoder prompt, so they are not
+        # meaningful for encoder-decoder models.
+        request._response_mm_placeholders = (
+            placeholder_ranges_from_engine_input(engine_input)
+            if request.return_token_ids and not self.model_config.is_encoder_decoder
+            else None
+        )
+
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
+
+        # Pass disaggregated-serving parameters through to the engine.
+        if request.kv_transfer_params is not None:
+            extra = sampling_params.extra_args or {}
+            extra["kv_transfer_params"] = request.kv_transfer_params
+            sampling_params.extra_args = extra
+        if request.ec_transfer_params is not None:
+            extra = sampling_params.extra_args or {}
+            extra["ec_transfer_params"] = request.ec_transfer_params
+            sampling_params.extra_args = extra
 
         # Apply server-side ``max_tokens`` defaulting when the client did
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
@@ -276,6 +377,8 @@ class ServingTokens(GenerateBaseServing):
         created_time = int(time.time())
         final_res: RequestOutput | None = None
         sampling_params: SamplingParams = request.sampling_params
+        text_mode = request.output_mode == "text"
+        tokenizer = self._logprobs_tokenizer(text_mode)
 
         try:
             async for res in result_generator:
@@ -285,9 +388,12 @@ class ServingTokens(GenerateBaseServing):
 
         assert final_res is not None
 
-        choices: list[GenerateResponseChoice] = []
+        tokens_choices: list[GenerateTokensChoice] = []
+        text_choices: list[GenerateTextChoice] = []
         num_generated_tokens = 0
         for output in final_res.outputs:
+            self._raise_if_error(output.finish_reason, request_id)
+
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
@@ -298,6 +404,7 @@ class ServingTokens(GenerateBaseServing):
                     token_ids=token_ids,
                     top_logprobs=out_logprobs,
                     num_output_top_logprobs=sampling_params.logprobs,
+                    tokenizer=tokenizer,
                 )
             else:
                 logprobs = None
@@ -312,7 +419,7 @@ class ServingTokens(GenerateBaseServing):
             if output.sampling_mask is not None:
                 sampling_mask = output.sampling_mask.token_ids
 
-            choice_data = GenerateResponseChoice(
+            choice_fields: dict[str, Any] = dict(
                 index=output.index,
                 logprobs=logprobs,
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
@@ -320,8 +427,12 @@ class ServingTokens(GenerateBaseServing):
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
             )
-
-            choices.append(choice_data)
+            if text_mode:
+                text_choices.append(
+                    GenerateTextChoice(text=output.text, **choice_fields)
+                )
+            else:
+                tokens_choices.append(GenerateTokensChoice(**choice_fields))
             num_generated_tokens += len(output.token_ids)
 
         assert final_res.prompt_token_ids is not None
@@ -345,20 +456,39 @@ class ServingTokens(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
-        response = GenerateResponse(
+        per_request_metrics = None
+        if request.sampling_params.n == 1:
+            spec_stats = build_spec_decoding_metrics(final_res)
+            if spec_stats is not None:
+                per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
+        response_fields: dict[str, Any] = dict(
             request_id=request_id,
             created=created_time,
             model=model_name,
-            choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            prompt_token_id_logprobs=(
+                numpy2base64(final_res.prompt_token_id_logprobs)
+                if final_res.prompt_token_id_logprobs is not None
+                else None
+            ),
+            prompt_token_ids=(
+                final_res.prompt_token_ids if request.return_token_ids else None
+            ),
+            mm_placeholders=request._response_mm_placeholders,
+            metrics=per_request_metrics,
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
+        response: GenerateTokensResponse | GenerateTextResponse
+        if text_mode:
+            response = GenerateTextResponse(choices=text_choices, **response_fields)
+        else:
+            response = GenerateTokensResponse(choices=tokens_choices, **response_fields)
 
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
-            for choice in choices:
+            for choice in response.choices:
                 # Get the corresponding output token IDs
                 output_token_ids = None
                 if choice.index < len(final_res.outputs):
@@ -386,10 +516,15 @@ class ServingTokens(GenerateBaseServing):
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         num_prompt_tokens = 0
-        num_generated_tokens: list[int] = []
         first_iteration = True
+        prompt_token_ids: list[int] | None = None
         num_cached_tokens = None
         sampling_params: SamplingParams = request.sampling_params
+        # With n > 1, the first output may not include every choice yet.
+        num_generated_tokens = [0] * sampling_params.n
+        last_res: RequestOutput | None = None
+        text_mode = request.output_mode == "text"
+        tokenizer = self._logprobs_tokenizer(text_mode)
 
         include_usage, include_continuous_usage = should_include_usage(
             request.stream_options, False
@@ -397,13 +532,15 @@ class ServingTokens(GenerateBaseServing):
 
         try:
             async for res in result_generator:
+                last_res = res
                 if first_iteration:
                     if res.prompt_token_ids is not None:
                         num_prompt_tokens = len(res.prompt_token_ids)
+                        if request.return_token_ids:
+                            prompt_token_ids = res.prompt_token_ids
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
                     num_cached_tokens = res.num_cached_tokens
-                    num_generated_tokens = [0] * len(res.outputs)
                     first_iteration = False
 
                 for output in res.outputs:
@@ -414,7 +551,15 @@ class ServingTokens(GenerateBaseServing):
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
-                    if not delta_token_ids:
+                    # Terminal outputs are always emitted so the client sees
+                    # the finish reason, e.g. an abort, which has no new
+                    # tokens. Text mode also emits text held back for stop
+                    # string matching, which can arrive without token IDs.
+                    if not (
+                        delta_token_ids
+                        or finish_reason is not None
+                        or (text_mode and output.text)
+                    ):
                         continue
 
                     if sampling_params.logprobs is not None:
@@ -424,6 +569,7 @@ class ServingTokens(GenerateBaseServing):
                             token_ids=delta_token_ids,
                             top_logprobs=out_logprobs,
                             num_output_top_logprobs=sampling_params.logprobs,
+                            tokenizer=tokenizer,
                         )
                     else:
                         logprobs = None
@@ -434,18 +580,37 @@ class ServingTokens(GenerateBaseServing):
                         else None
                     )
 
-                    chunk = GenerateStreamResponse(
-                        request_id=request_id,
-                        choices=[
-                            GenerateResponseStreamChoice(
-                                index=i,
-                                logprobs=logprobs,
-                                finish_reason=finish_reason,
-                                token_ids=as_list(delta_token_ids),
-                                routed_experts=routed_experts_b64,
-                            )
-                        ],
+                    sampling_mask = None
+                    if output.sampling_mask is not None:
+                        sampling_mask = output.sampling_mask.token_ids
+                    choice_fields: dict[str, Any] = dict(
+                        index=i,
+                        logprobs=logprobs,
+                        finish_reason=finish_reason,
+                        token_ids=as_list(delta_token_ids),
+                        routed_experts=routed_experts_b64,
+                        sampling_mask=sampling_mask,
                     )
+                    chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
+                    if text_mode:
+                        chunk = GenerateTextStreamResponse(
+                            request_id=request_id,
+                            choices=[
+                                GenerateTextStreamChoice(
+                                    text=output.text, **choice_fields
+                                )
+                            ],
+                        )
+                    else:
+                        chunk = GenerateTokensStreamResponse(
+                            request_id=request_id,
+                            choices=[GenerateTokensStreamChoice(**choice_fields)],
+                        )
+
+                    if prompt_token_ids is not None:
+                        chunk.prompt_token_ids = prompt_token_ids
+                        chunk.mm_placeholders = request._response_mm_placeholders
+                        prompt_token_ids = None
                     if include_continuous_usage:
                         chunk.usage = UsageInfo(
                             prompt_tokens=num_prompt_tokens,
@@ -453,7 +618,13 @@ class ServingTokens(GenerateBaseServing):
                             total_tokens=(num_prompt_tokens + num_generated_tokens[i]),
                         )
 
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    # Omit fields that are absent from token-bearing chunks.
+                    exclude = {
+                        name
+                        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
+                        if getattr(chunk, name) is None
+                    }
+                    yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
 
             total_completion_tokens = sum(num_generated_tokens)
             final_usage_info = UsageInfo(
@@ -468,11 +639,28 @@ class ServingTokens(GenerateBaseServing):
                 )
 
             if include_usage:
-                final_chunk = GenerateStreamResponse(
-                    request_id=request_id,
-                    choices=[],
-                    usage=final_usage_info,
-                )
+                per_request_metrics = None
+                if sampling_params.n == 1:
+                    spec_stats = build_spec_decoding_metrics(last_res)
+                    if spec_stats is not None:
+                        per_request_metrics = PerRequestMetrics(
+                            speculative_decoding=spec_stats
+                        )
+                final_chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
+                if text_mode:
+                    final_chunk = GenerateTextStreamResponse(
+                        request_id=request_id,
+                        choices=[],
+                        usage=final_usage_info,
+                        metrics=per_request_metrics,
+                    )
+                else:
+                    final_chunk = GenerateTokensStreamResponse(
+                        request_id=request_id,
+                        choices=[],
+                        usage=final_usage_info,
+                        metrics=per_request_metrics,
+                    )
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 
             request_metadata.final_usage_info = final_usage_info
@@ -487,41 +675,56 @@ class ServingTokens(GenerateBaseServing):
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
 
+    def _logprobs_tokenizer(self, text_mode: bool) -> TokenizerLike | None:
+        """Tokenizer that resolves logprob tokens, or None for placeholders.
+
+        ``--return-tokens-as-token-ids`` keeps placeholders at every level, as
+        it does on ``/v1/completions``.
+        """
+        if not text_mode or self.return_tokens_as_token_ids:
+            return None
+        return self.renderer.tokenizer
+
     def _create_tokens_logprobs(
         self,
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int | None = None,
+        tokenizer: TokenizerLike | None = None,
     ) -> ChatCompletionLogProbs:
-        """Create OpenAI-style logprobs."""
+        """Create OpenAI-style logprobs.
+
+        Tokens are ``token_id:N`` placeholders. With a ``tokenizer`` they are
+        decoded strings and carry ``bytes``.
+        """
         logprobs_content: list[ChatCompletionLogProbsContent] = []
 
         for i, token_id in enumerate(token_ids):
-            token = f"token_id:{token_id}"
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
+                token, token_bytes = _logprob_token(token_id, None, tokenizer)
                 logprobs_content.append(
-                    ChatCompletionLogProbsContent(
-                        token=token,
-                    )
+                    ChatCompletionLogProbsContent(token=token, bytes=token_bytes)
                 )
             else:
                 step_token = step_top_logprobs[token_id]
+                token, token_bytes = _logprob_token(token_id, step_token, tokenizer)
 
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
                         token=token,
                         logprob=max(step_token.logprob, -9999.0),
+                        bytes=token_bytes,
                         top_logprobs=[
-                            ChatCompletionLogProb(
-                                token=f"token_id:{token_id}",
-                                logprob=max(logprob.logprob, -9999.0),
-                            )
-                            for i, (token_id, logprob) in enumerate(
+                            _top_logprob(top_id, logprob, tokenizer)
+                            for i, (top_id, logprob) in enumerate(
                                 step_top_logprobs.items()
                             )
                             if num_output_top_logprobs is not None
-                            and i < max(num_output_top_logprobs, 1)
+                            and (
+                                num_output_top_logprobs == -1
+                                or i < max(num_output_top_logprobs, 1)
+                            )
                         ],
                     )
                 )

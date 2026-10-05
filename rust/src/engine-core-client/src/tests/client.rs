@@ -20,10 +20,11 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
+use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::multimodal::{
-    MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, PlaceholderRange,
-    SliceSpec,
+    MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmModality, MmSlice,
+    PlaceholderRange, SliceSpec,
 };
 use crate::protocol::output::{
     DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
@@ -31,7 +32,7 @@ use crate::protocol::output::{
 };
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
-use crate::protocol::stats::SchedulerStats;
+use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
@@ -151,6 +152,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
         prompt_token_ids: Some(vec![11, 22]),
         sampling_params: Some(EngineCoreSamplingParams {
             temperature: 0.8,
+            watermarking: false,
             top_p: 0.9,
             top_k: 8,
             max_tokens: 32,
@@ -164,6 +166,16 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
         }),
         arrival_time: 42.5,
         session_id: Some("session-1".to_string()),
+        kv_hints: Some(KvHintsEnvelope {
+            protocol_version: "0.1".to_string(),
+            message_id: "msg-1".to_string(),
+            actions: vec![KvHintAction {
+                action_id: "action-1".to_string(),
+                action_type: "example.action".to_string(),
+                action_version: "1.0".to_string(),
+                payload: BTreeMap::from([("key".to_string(), serde_json::json!("value"))]),
+            }],
+        }),
         ..EngineCoreRequest::default()
     }
 }
@@ -191,7 +203,7 @@ fn sample_multimodal_request() -> EngineCoreRequest {
                     }),
                 },
             )])),
-            modality: "image".to_string(),
+            modality: MmModality::Image,
             identifier: "mm-cache-key".to_string(),
             mm_position: PlaceholderRange {
                 offset: 1,
@@ -287,6 +299,7 @@ fn handshake_test_config(
         coordinator_mode,
         model_name: model_name.to_string(),
         client_index,
+        engine_stats_enabled: true,
     }
 }
 
@@ -310,6 +323,7 @@ fn bootstrapped_test_config(
         coordinator_mode,
         model_name: "test-model".to_string(),
         client_index,
+        engine_stats_enabled: true,
     }
 }
 
@@ -2277,6 +2291,89 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wake_up_requires_every_engine_to_be_fully_awake() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut engines = Vec::new();
+    for engine_index in 0..2 {
+        let engine = spawn_mock_engine_task(
+            handshake_address.clone(),
+            EngineId::from_engine_index(engine_index).into_frame().to_vec(),
+            move |dealer, push| {
+                Box::pin(async move {
+                    let results = if engine_index == 0 {
+                        [true, false, true]
+                    } else {
+                        [false, true, true]
+                    };
+                    for (attempt, fully_awake) in results.into_iter().enumerate() {
+                        let utility = recv_engine_message(dealer).await;
+                        assert_eq!(utility[0].as_ref(), &[0x03]);
+                        let payload = decode_value(&utility[1]);
+                        let array = payload.as_array().expect("utility payload array");
+                        let call_id = array[1].as_u64().expect("call_id");
+                        assert_eq!(array[2], Value::from("wake_up"));
+                        let tags = if attempt == 1 {
+                            Value::Array(vec![Value::from("weights")])
+                        } else {
+                            Value::Nil
+                        };
+                        assert_eq!(array[3], Value::Array(vec![tags]));
+                        send_outputs(
+                            push,
+                            UtilityCallOutput {
+                                engine_index: u32::from(engine_index),
+                                timestamp: 0.0,
+                                output: UtilityOutput {
+                                    call_id: call_id.into(),
+                                    failure_message: None,
+                                    result: Some(utility_result_value(fully_awake)),
+                                },
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        );
+        engines.push(engine);
+    }
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    for (tags, expected) in [
+        (None, false),
+        (Some(vec!["weights".to_owned()]), false),
+        (None, true),
+    ] {
+        assert_eq!(
+            timeout(Duration::from_secs(2), client.wake_up(tags))
+                .await
+                .expect("wake timeout")
+                .expect("wake result"),
+            expected
+        );
+    }
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn collective_rpc_flattens_results_from_all_engines() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
@@ -2635,7 +2732,12 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let inline_prompt_frames = lines.next().expect("missing inline prompt logprobs fixture line");
     let multipart_prompt_frames =
         lines.next().expect("missing multipart prompt logprobs fixture line");
+    let nixl_stats_hex = lines.next().expect("missing NIXL stats fixture line");
+    let mooncake_stats_hex = lines.next().expect("missing Mooncake stats fixture line");
+    let multi_connector_stats_hex =
+        lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
+    let extended_outputs_hex = lines.next().expect("missing extended outputs fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2658,6 +2760,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         sampling,
         EngineCoreSamplingParams {
             temperature: 1.0,
+            watermarking: true,
             top_p: 1.0,
             top_k: 0,
             seed: None,
@@ -2666,6 +2769,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: 0.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
@@ -2705,17 +2810,25 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         decode_value(&rmp_serde::to_vec_named(&expected_multimodal_request.mm_features).unwrap());
     assert_eq!(python_mm_features, rust_mm_features);
 
-    let decoded_sampling_mask_outputs: EngineCoreOutputs =
-        rmp_serde::from_slice(&sampling_mask_outputs_bytes).unwrap();
+    let decoded_sampling_mask_outputs =
+        decode_engine_core_outputs(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
     let sampling_mask_output =
         &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
     assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
-    assert!(matches!(
-        sampling_mask_output.new_sampling_mask.as_ref(),
-        Some(Value::Array(fields)) if fields.len() == 3
-    ));
+    assert_eq!(
+        sampling_mask_output.new_sampling_mask.as_ref().unwrap().rows,
+        vec![vec![2, 12, 16, 17, 18]]
+    );
 
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
+    // Match msgspec's base-schema result for the same extended Python message.
+    let extended_frames = [bytes::Bytes::from(
+        hex::decode(extended_outputs_hex).unwrap(),
+    )];
+    assert_eq!(
+        decode_engine_core_outputs(&extended_frames).unwrap(),
+        decoded_outputs
+    );
     expect_test::expect![[r#"
         RequestBatch(
             RequestBatchOutputs {
@@ -2743,6 +2856,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         num_nans_in_logits: 0,
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
+                        spec_decode_metrics: None,
+                        prompt_token_id_logprobs: None,
                     },
                 ],
                 scheduler_stats: None,
@@ -2798,6 +2913,28 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             .expect("multipart prompt logprobs decoded"),
     );
 
+    let nixl_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(nixl_stats_hex).unwrap()).unwrap();
+    assert!(matches!(nixl_stats, KvConnectorStats::Nixl(_)));
+
+    let mooncake_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(mooncake_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        mooncake_stats,
+        KvConnectorStats::Mooncake(stats)
+            if stats.0.contains_key(&MooncakeOperation::LoadGet)
+    ));
+
+    let multi_connector_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        multi_connector_stats,
+        KvConnectorStats::Multi(stats)
+            if stats.nixl.is_some()
+                && stats.mooncake.is_some()
+                && stats.other.contains_key("UnsupportedConnector")
+    ));
+
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
         match decode_value(bytes) {
             Value::Map(entries) => entries
@@ -2817,6 +2954,11 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let ready_response: EngineCoreReadyResponse =
         rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
+    let mut legacy_ready = serde_json::to_value(&ready_response).unwrap();
+    legacy_ready.as_object_mut().unwrap().remove("effective_attention_block_size");
+    let legacy_ready: EngineCoreReadyResponse =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy_ready).unwrap()).unwrap();
+    assert!(legacy_ready.effective_attention_block_size.is_none());
     assert!(ready_response.supports_lora);
     assert_eq!(ready_response.max_loras, 8);
     assert_eq!(
@@ -2825,6 +2967,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     );
     assert!(ready_response.enable_sleep_mode);
     assert!(ready_response.supports_draft_weight_updates);
+    assert_eq!(ready_response.effective_attention_block_size, Some(64));
     let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
     assert!(kv_events_config.enable_kv_cache_events);
     assert_eq!(kv_events_config.publisher, "zmq");

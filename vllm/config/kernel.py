@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, fields
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import Field, field_validator
 
@@ -12,14 +12,14 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.parallel import ParallelConfig
 
 logger = init_logger(__name__)
 
 
 @config
 class IrOpPriorityConfig:
-    """
-    Configuration for vLLM IR op priority for dispatching/lowering during the
+    """Configuration for vLLM IR op priority for dispatching/lowering during the
     forward pass. Each member is a list of strings, which will be installed
     in worker init via vllm.ir.ops.<op_name>.set_default().
     A single comma-separated string is accepted as well,
@@ -34,9 +34,11 @@ class IrOpPriorityConfig:
     fused_add_rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.fused_add_rms_norm"""
 
+    gelu_and_mul_sparse: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.gelu_and_mul_sparse"""
+
     def compute_hash(self) -> str:
-        """
-        Produces a hash unique to the pass configuration.
+        """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
 
@@ -47,6 +49,9 @@ class IrOpPriorityConfig:
         # Implementations are hidden from Dynamo,
         # so they don't show up in the traced files list.
         from vllm.ir.op import IrOp
+        from vllm.platforms import current_platform
+
+        current_platform.import_ir_kernels()
 
         assert "_impls" not in factors
         factors["_impls"] = {
@@ -68,8 +73,7 @@ class IrOpPriorityConfig:
         return value
 
     def _iter_op_priorities(self):
-        """
-        Yield (IrOp, priority_list) for each field, after importing platform
+        """Yield (IrOp, priority_list) for each field, after importing platform
         kernels and validating each entry.
         """
         from vllm.ir.op import IrOp
@@ -86,16 +90,13 @@ class IrOpPriorityConfig:
             yield IrOp.registry[field.name], op_priority
 
     def set_default(self) -> None:
-        """
-        Permanently set the IR op priority for all op members.
-        """
+        """Permanently set the IR op priority for all op members."""
         for ir_op, op_priority in self._iter_op_priorities():
             ir_op.set_default(op_priority)
 
     @contextlib.contextmanager
     def set_priority(self):
-        """
-        Context manager to set the IR op priority for all op members.
+        """Context manager to set the IR op priority for all op members.
         It also imports IR kernel implementations for the current platform
         to ensure all implementations are made available.
         """
@@ -108,8 +109,7 @@ class IrOpPriorityConfig:
     def with_default(
         cls, default: list[str], /, **kwargs: list[str]
     ) -> "IrOpPriorityConfig":
-        """
-        A helper to create an IrOpPriorityConfig where fields not specified in kwargs
+        """A helper to create an IrOpPriorityConfig where fields not specified in kwargs
         use the given default list.
         """
         for field in fields(cls):  # type: ignore[arg-type]
@@ -129,15 +129,116 @@ MoEBackend = Literal[
     "flashinfer_trtllm",
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
+    "flashinfer_moe_ep_cutedsl",
     "flashinfer_b12x",
+    "b12x",
+    "flashinfer_moe_ep_mega_deep_gemm",
     "marlin",
     "humming",
     "triton_unfused",
     "aiter",
+    "aiter_triton_mxfp4_bf16",
     "flydsl",
     "hpc",
     "emulation",
+    "rdna3",
 ]
+
+FLASHINFER_MOE_EP_CUTEDSL = "flashinfer_moe_ep_cutedsl"
+FLASHINFER_MOE_EP_DEEP_GEMM = "flashinfer_moe_ep_mega_deep_gemm"
+
+# Backends implemented by the shared FlashInfer MoE-EP adapter.
+FLASHINFER_MOE_EP_BACKENDS = frozenset(
+    {
+        FLASHINFER_MOE_EP_CUTEDSL,
+        FLASHINFER_MOE_EP_DEEP_GEMM,
+    }
+)
+# Those backends dispatch and combine themselves, so the framework must not
+# run a separate all2all around them.
+PASSTHROUGH_ALL2ALL_BACKEND: Final = "passthrough"
+
+# "Native" here meaning that the backend does not use the fused MoE path.
+# Currently only relevant for the vLLM provided DeepGEMM MegaMoE.,
+# TODO: migrate to the fused MoE path ultimately.
+NATIVE_MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe"})
+
+# Every megakernel backend. The FlashInfer variants run through the standard
+# fused-MoE model path; the quantization method binds the kernel.
+MEGA_MOE_BACKENDS = NATIVE_MEGA_MOE_BACKENDS | FLASHINFER_MOE_EP_BACKENDS
+
+SparseIndexerTopkBackend = Literal[
+    "auto",
+    "deep_select",
+    "cooperative",
+    "persistent",
+    "per_row",
+    "flashinfer",
+    "torch",
+    "aiter",
+]
+
+# DeepGEMM consumes the DeepSeek-V4 MXFP4 checkpoint recipe. CuTeDSL is
+# selected by quantization methods and is not architecture-specific.
+FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
+    {
+        "DeepseekV4ForCausalLM",
+        "DeepSeekV4MTPModel",
+        "DeepseekV41ForCausalLM",
+    }
+)
+
+
+def bind_passthrough_all2all_backend(
+    moe_backend: str, parallel_config: "ParallelConfig"
+) -> None:
+    """Bind ``all2all_backend="passthrough"`` to MoE backends that own their
+    expert-parallel communication (currently the FlashInfer MoE-EP megakernels).
+
+    Such a deployment gets ``passthrough`` when the all2all backend is left at
+    its default and rejects any other explicit choice; the value is meaningless
+    with a MoE backend that relies on the framework to communicate. The CLI does
+    not offer the value; the early return keeps repeated
+    ``set_platform_defaults`` calls idempotent.
+    """
+    a2a = parallel_config.all2all_backend
+    if moe_backend in FLASHINFER_MOE_EP_BACKENDS:
+        if a2a == PASSTHROUGH_ALL2ALL_BACKEND:
+            return
+        if a2a != "allgather_reducescatter":
+            raise ValueError(
+                f"moe_backend={moe_backend!r} dispatches and combines itself and "
+                f"cannot be paired with all2all_backend={a2a!r}; leave "
+                f"--all2all-backend unset."
+            )
+        logger.info_once(
+            "moe_backend=%r: using all2all_backend=%r (dispatch and combine run "
+            "inside the MoE backend).",
+            moe_backend,
+            PASSTHROUGH_ALL2ALL_BACKEND,
+        )
+        parallel_config.all2all_backend = PASSTHROUGH_ALL2ALL_BACKEND
+    elif a2a == PASSTHROUGH_ALL2ALL_BACKEND:
+        raise ValueError(
+            f"all2all_backend={a2a!r} is only valid with a moe_backend that "
+            f"dispatches and combines itself ({sorted(FLASHINFER_MOE_EP_BACKENDS)}),"
+            f" got moe_backend={moe_backend!r}."
+        )
+
+
+def validate_flashinfer_moe_ep_model(
+    moe_backend: str, architectures: Iterable[str]
+) -> None:
+    """Reject model-specific FlashInfer MoE-EP backends."""
+    if moe_backend != FLASHINFER_MOE_EP_DEEP_GEMM:
+        return
+    if not any(arch in FLASHINFER_MOE_EP_ARCHITECTURES for arch in architectures):
+        raise ValueError(
+            f"moe_backend={moe_backend!r} is only supported for DeepSeek-V4 "
+            f"models ({sorted(FLASHINFER_MOE_EP_ARCHITECTURES)}), but the "
+            f"model is {list(architectures)}."
+        )
+
 
 LinearBackend = Literal[
     "auto",
@@ -186,9 +287,6 @@ class KernelConfig:
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
 
-    enable_bf16x3_router_gemm: bool = False
-    """If True, use the experimental SM100 BF16x3 CuteDSL router GEMM."""
-
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
@@ -202,25 +300,57 @@ class KernelConfig:
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
+    - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP
+      mega-kernel with NVFP4 weights (MXFP4 checkpoints are requantized at
+      load); requires Blackwell, expert parallelism, and NVSHMEM
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
+    - "b12x": Use b12x FP4 MoE kernels on SM12x
+    - "flashinfer_moe_ep_mega_deep_gemm": Use the FlashInfer moe_ep
+      expert-parallel mega-MoE with the DeepGEMM megakernel, which consumes an
+      MXFP4 checkpoint verbatim (Blackwell, requires expert parallel;
+      DeepSeek-V4 only)
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
+    - "aiter_triton_mxfp4_bf16": Use the AITER Triton MXFP4 W4A16
+      (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
+    - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm gfx1100 only)
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
     """
 
+    sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
+    """Backend for the DSA sparse indexer decode top-k kernel. Available options:
+
+    - "auto": The pre-existing chain (cooperative -> persistent -> per_row);
+      the other backends are opt-in
+    - "deep_select": Use DeepSelect kernels (SM100a/SM103a only)
+    - "cooperative": Use vLLM's cooperative_topk kernel
+    - "persistent": Use vLLM's persistent_topk kernel
+    - "per_row": Use vLLM's top_k_per_row_decode kernel
+    - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
+    - "torch": Use a plain torch.topk implementation (debug reference)
+    - "aiter": Use AITER's top_k_per_row_decode kernel (ROCm gfx950 only,
+      requires VLLM_ROCM_USE_AITER)
+
+    Explicit values raise RuntimeError when their constraints are not met.
+    """
+
     linear_backend: LinearBackend = "auto"
-    """Backend for quantized linear layer GEMM kernels. Available options:
+    """Backend for linear layer GEMM kernels. Available options:
+
+    Layer types without an implementation from the requested backend use
+    automatic selection.
 
     - "auto": Automatically select the best backend based on model and hardware
     - "cutlass": Use CUTLASS-based kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
-    - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL kernels (NVFP4, MXFP8)
+    - "flashinfer_cutedsl": Use FlashInfer with CuTe-DSL kernels
+      (BF16, NVFP4, MXFP8, W4A16_NVFP4)
     - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
     - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4 GEMM (SM120+)
@@ -239,6 +369,13 @@ class KernelConfig:
     - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
     """
 
+    linear_backend_per_quant: dict[str, LinearBackend] | None = Field(
+        default=None, min_length=1
+    )
+    """Backend overrides keyed by linear quantization scheme. Overrides take
+    precedence over ``linear_backend``; for example,
+    ``{"nvfp4_w4a16": "humming"}``."""
+
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
@@ -253,9 +390,15 @@ class KernelConfig:
             return value.lower().replace("-", "_")
         return value
 
+    @field_validator("sparse_indexer_topk_backend", mode="before")
+    @classmethod
+    def _normalize_sparse_indexer_topk_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
     def compute_hash(self) -> str:
-        """
-        Produces a hash unique to the pass configuration.
+        """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
@@ -265,6 +408,8 @@ class KernelConfig:
             "enable_flashinfer_autotune",
             "ir_op_priority",  # handled separately below
         }
+        if self.linear_backend_per_quant is None:
+            ignored_factors.add("linear_backend_per_quant")
         factors = get_hash_factors(self, ignored_factors)
         factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
         return hash_factors(factors)
@@ -285,6 +430,12 @@ class KernelConfig:
     def set_platform_defaults(self, vllm_config: "VllmConfig") -> None:
         """Set platform-specific defaults for the kernel config."""
         from vllm.platforms import current_platform
+
+        if vllm_config.model_config is not None:
+            validate_flashinfer_moe_ep_model(
+                self.moe_backend, vllm_config.model_config.architectures
+            )
+        bind_passthrough_all2all_backend(self.moe_backend, vllm_config.parallel_config)
 
         platform_op_priority = current_platform.get_default_ir_op_priority(vllm_config)
         logger.debug(

@@ -7,7 +7,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -20,7 +20,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.longcat_flash import FlashConfig
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import DeepseekV2DecoderLayer
@@ -30,7 +29,7 @@ from .utils import maybe_prefix
 class LongCatMultiTokenPredictorLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
         quant_config: QuantizationConfig | None = None,
@@ -80,9 +79,9 @@ class LongCatMultiTokenPredictor(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
-        vllm_config.model_config.hf_config.intermediate_size = config.intermediate_size
-        self.mtp_start_layer_idx = config.num_hidden_layers * 2
+        config = vllm_config.model_config.hf_config
+        # TODO: Use `num_hidden_layers` once Transformers 5.18.0 is the minimum
+        self.mtp_start_layer_idx = config.num_layers * 2
         self.num_mtp_layers = 1
         self.layers = torch.nn.ModuleDict(
             {
@@ -130,7 +129,7 @@ class LongCatFlashMTP(nn.Module):
         # builds a dense MLP. object.__setattr__ bypasses the ngram remote
         # config's strict validation (it rejects setting the int field to None).
         object.__setattr__(vllm_config.model_config.hf_config, "n_routed_experts", None)
-        self.config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
+        self.config = vllm_config.model_config.hf_config
         self.quant_config = (
             None
             if "mtp" in getattr(self.config, "disable_quant_module", [])
@@ -264,13 +263,16 @@ class LongCatFlashMTP(nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
-        spec_layer_id = self.config.num_hidden_layers * 2
+        spec_layer_id = self.model.mtp_start_layer_idx
         self_attn = self.model.layers[str(spec_layer_id)].mtp_block.self_attn
-        if hasattr(
-            self.quant_config, "weight_block_size"
-        ) and self_attn.kv_b_proj.weight.dtype in (
-            torch.float8_e4m3fn,
-            torch.float8_e4m3fnuz,
+        if (
+            self.quant_config is not None
+            and hasattr(self.quant_config, "weight_block_size")
+            and self_attn.kv_b_proj.weight.dtype
+            in (
+                torch.float8_e4m3fn,
+                torch.float8_e4m3fnuz,
+            )
         ):
             weight_block_size = self.quant_config.weight_block_size
             if weight_block_size is not None:
@@ -310,8 +312,7 @@ class LongCatFlashMTP(nn.Module):
     def _rewrite_spec_layer_name(
         self, spec_layer: int, name: str, new_to_old_names_mapping: dict
     ) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """
@@ -351,8 +352,8 @@ class LongCatFlashMTP(nn.Module):
         return name
 
     def get_spec_layer_idx_from_weight_name(
-        self, config: PretrainedConfig, weight_name: str
+        self, config: PreTrainedConfig, weight_name: str
     ) -> int | None:
         if "model.mtp" in weight_name:
-            return config.num_hidden_layers * 2
+            return self.model.mtp_start_layer_idx
         return None

@@ -948,20 +948,10 @@ def context_attention_fwd(
         extra_kargs = {}
 
     real_block_size = v_cache.shape[3]
-    is_pow2 = real_block_size > 0 and (real_block_size & (real_block_size - 1) == 0)
-    # For standard models involving powers of 2,
-    # follow the original logic (Llama 128/64)
-    # For non-standard models (Qwen3-next block_size 544), set to 32.
-    if is_pow2:
-        BLOCK_M = 128
-        BLOCK_N = 64
-    else:
-        BLOCK_M = 32
-        BLOCK_N = 32
-
-    # TRITON_BLOCK_SIZE is kept at 32 to ensure
-    # correct alignment logic when the kernel handles
-    # non-standard sizes (such as 544).
+    # _paged_kv_cache_offsets resolves context tokens against PHYSICAL_BLOCK_SIZE
+    # individually, so tiles need not divide the page size.
+    BLOCK_M = 128
+    BLOCK_N = 64
     TRITON_BLOCK_SIZE = 32
 
     grid_fn = lambda META: (batch, head, triton.cdiv(max_input_len, META["BLOCK_M"]))
