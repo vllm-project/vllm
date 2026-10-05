@@ -821,6 +821,13 @@ def test_ple_embedding_dtype_overrides_modelopt_exclusion() -> None:
     )
 
 
+def test_ple_embedding_dtype_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="got 'fp4'"):
+        Qwen4ExpPLEEmbeddingMethod.from_quant_config(
+            None, "model.layers.1.ple.ple_embedding.ngram_embedding", "fp4"
+        )
+
+
 def test_pinned_embedding_forward_finalizes_prefetched_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

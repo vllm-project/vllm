@@ -183,6 +183,11 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
             return Qwen4ExpPLENvFp4EmbeddingMethod()
         if embedding_dtype == "float8_e4m3fn":
             return Qwen4ExpPLEFp8EmbeddingMethod()
+        if embedding_dtype is not None:
+            raise ValueError(
+                "ple_embedding_dtype must be 'nvfp4' or 'float8_e4m3fn', "
+                f"got {embedding_dtype!r}"
+            )
         if quant_config is None:
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if isinstance(quant_config, ModelOptMixedPrecisionConfig):
