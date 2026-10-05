@@ -2890,35 +2890,13 @@ class TestPeerReplacement:
 
 
 class _StallingNixlWrapper(FakeNixlWrapper):
-    """READs stay in flight until ``resolve()``.
-
-    With ``fail_on_disconnect``, a READ to a removed remote agent reports ERR,
-    as NIXL does once ``remove_remote_agent`` has run.
-    """
+    """READs stay in flight until ``resolve()``."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.stall = True
-        self.fail_on_disconnect = True
-        self.removed_agents: set[str] = set()
         self.posted: list[int] = []
         self.notified: list[bytes] = []
         self._stalled: set[int] = set()
-        self._dlist_agents: dict[int, str] = {}
-        self._xfer_agents: dict[int, str] = {}
-
-    def add_remote_agent(self, agent_metadata: bytes) -> str:
-        agent = super().add_remote_agent(agent_metadata)
-        self.removed_agents.discard(agent)
-        return agent
-
-    def remove_remote_agent(self, agent: str) -> None:
-        self.removed_agents.add(agent)
-
-    def prep_xfer_dlist(self, agent_name: str, descs: list) -> int:
-        handle = super().prep_xfer_dlist(agent_name, descs)
-        self._dlist_agents[handle] = agent_name
-        return handle
 
     def make_prepped_xfer(
         self,
@@ -2937,9 +2915,7 @@ class _StallingNixlWrapper(FakeNixlWrapper):
             remote_block_descs_ids,
             notif_msg,
         )
-        self._xfer_agents[handle] = self._dlist_agents[remote_xfer_side_handle]
-        if self.stall:
-            self._stalled.add(handle)
+        self._stalled.add(handle)
         self.posted.append(handle)
         return handle
 
@@ -2950,8 +2926,6 @@ class _StallingNixlWrapper(FakeNixlWrapper):
         self._stalled.clear()
 
     def check_xfer_state(self, handle: int) -> str:
-        if self.fail_on_disconnect and self._xfer_agents[handle] in self.removed_agents:
-            return "ERR"
         return "PROC" if handle in self._stalled else "DONE"
 
 
@@ -3093,15 +3067,10 @@ def test_abort_before_read_releases_blocks(make_pull_worker):
 
 
 @pytest.mark.cpu_test
-def test_stalled_read_fails_request_and_is_reclaimed_after_disconnect(
-    make_pull_worker,
-):
-    """A READ outstanding past kv_load_timeout fails its request at once.
-
-    The blocks stay allocated while the READ can still write to them, and
-    are freed when the READ fails after its remote engine is released.
-    """
-    harness = _DecodeHarness(make_pull_worker, kv_load_timeout_disconnect=True)
+def test_stalled_read_fails_request_at_kv_load_timeout(make_pull_worker):
+    """A READ outstanding past kv_load_timeout fails its request at once and
+    counts as a failed transfer. The remote engine stays connected."""
+    harness = _DecodeHarness(make_pull_worker)
     worker = harness.workers[0]
     req_id = harness.add_request(1)
     harness.step()
@@ -3114,27 +3083,16 @@ def test_stalled_read_fails_request_and_is_reclaimed_after_disconnect(
         harness.step()
     assert harness.status(req_id) == RequestStatus.FINISHED_ERROR
     assert worker.xfer_stats.data["num_failed_transfers"] == [1]
-    assert worker.nixl_wrapper.removed_agents == {FakeNixlWrapper.REMOTE_AGENT_NAME}
-
-    harness.step()
-    assert harness.status(req_id) is None
-    assert harness.all_blocks_free()
+    assert _DecodeHarness.ENGINE_ID in worker._remote_agents
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "finish,disconnect",
-    [("abort", False), ("timeout", False), ("timeout", True)],
-)
-def test_stalled_read_keeps_blocks_until_it_resolves(
-    make_pull_worker, finish, disconnect
-):
+@pytest.mark.parametrize("finish", ["abort", "timeout"])
+def test_stalled_read_keeps_blocks_until_it_resolves(make_pull_worker, finish):
     """Blocks a READ may still write to are freed only once it resolves,
-    whether the request was aborted or timed out, and also when the READ
-    stays in flight after its remote engine is released."""
-    harness = _DecodeHarness(make_pull_worker, kv_load_timeout_disconnect=disconnect)
+    whether the request was aborted or timed out."""
+    harness = _DecodeHarness(make_pull_worker)
     wrapper = harness.workers[0].nixl_wrapper
-    wrapper.fail_on_disconnect = False
     req_id = harness.add_request(1)
     harness.step()
     harness.connect()
@@ -3146,9 +3104,6 @@ def test_stalled_read_keeps_blocks_until_it_resolves(
     else:
         with _advance_worker_clock(481):
             harness.step()
-    assert wrapper.removed_agents == (
-        {FakeNixlWrapper.REMOTE_AGENT_NAME} if disconnect else set()
-    )
     for _ in range(3):
         harness.step()
         assert harness.status(req_id) in (
@@ -3166,11 +3121,7 @@ def test_stalled_read_keeps_blocks_until_it_resolves(
 @pytest.mark.parametrize("kv_load_timeout", [0, -1])
 def test_kv_load_timeout_disabled(make_pull_worker, kv_load_timeout):
     """kv_load_timeout <= 0 never fails an outstanding READ."""
-    harness = _DecodeHarness(
-        make_pull_worker,
-        kv_load_timeout=kv_load_timeout,
-        kv_load_timeout_disconnect=True,
-    )
+    harness = _DecodeHarness(make_pull_worker, kv_load_timeout=kv_load_timeout)
     worker = harness.workers[0]
     req_id = harness.add_request(1)
     harness.step()
@@ -3181,46 +3132,6 @@ def test_kv_load_timeout_disabled(make_pull_worker, kv_load_timeout):
         harness.step()
     assert harness.status(req_id) == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert worker.xfer_stats.data["num_failed_transfers"] == []
-    assert not worker.nixl_wrapper.removed_agents
-
-
-@pytest.mark.cpu_test
-def test_disconnect_fails_sibling_reads_and_rehandshakes(make_pull_worker):
-    """Releasing a stalled engine fails every READ from it through the normal
-    failure path, and the next request for it handshakes again."""
-    harness = _DecodeHarness(make_pull_worker, kv_load_timeout_disconnect=True)
-    worker = harness.workers[0]
-    wrapper = worker.nixl_wrapper
-    stalled = harness.add_request(1)
-    harness.step()
-    harness.connect()
-    harness.step()
-    with _advance_worker_clock(400):
-        sibling = harness.add_request(2)
-        harness.step()
-    assert len(wrapper.posted) == 2
-
-    with _advance_worker_clock(481):
-        harness.step()
-    assert harness.status(stalled) == RequestStatus.FINISHED_ERROR
-    assert harness.status(sibling) == RequestStatus.WAITING_FOR_REMOTE_KVS
-
-    harness.step()
-    assert harness.status(stalled) is None
-    assert harness.status(sibling) is None
-    assert harness.all_blocks_free()
-    # One timeout plus the two READs that failed after the disconnect.
-    assert worker.xfer_stats.data["num_failed_transfers"] == [1, 1, 1]
-
-    wrapper.stall = False
-    later = harness.add_request(3)
-    harness.step()
-    assert _DecodeHarness.ENGINE_ID in worker._handshake_futures
-    harness.connect()
-    harness.step()
-    assert len(wrapper.posted) == 3
-    assert later in harness.scheduler.finished_recving_kv_req_ids
-    assert later not in harness.scheduler.failed_recving_kv_req_ids
 
 
 def test_transfer_topology_unregister():

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
@@ -56,13 +56,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 self.kv_transfer_config.get_from_extra_config(
                     "decoder_kv_blocks_ttl", 480
                 ),
-            )
-        )
-        # Also release the remote engine of a timed-out request, so that NIXL
-        # fails every READ still outstanding to it.
-        self._kv_load_timeout_disconnect = bool(
-            self.kv_transfer_config.get_from_extra_config(
-                "kv_load_timeout_disconnect", False
             )
         )
         # Deadlines of requests with READs posted, by request.
@@ -721,7 +714,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             for req_id, deadline in self._recv_deadlines.items()
             if now >= deadline and req_id in self._recving_transfers
         ]
-        stalled_engines: set[EngineId] = set()
         for req_id in timed_out:
             del self._recv_deadlines[req_id]
             meta = self._recving_metadata[req_id]
@@ -738,27 +730,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._recv_failures.add(req_id)
             if not self._is_hma_required:
                 self._invalid_block_ids.put(set(meta.local_block_ids[0]))
-            stalled_engines.add(meta.remote.engine_id)
-        if self._kv_load_timeout_disconnect:
-            for engine_id in stalled_engines:
-                self._disconnect_remote_engine(engine_id)
-
-    def _disconnect_remote_engine(self, engine_id: EngineId) -> None:
-        """Release a remote engine whose READs stalled.
-
-        Every request still reading from it is failed. Once its remote agents
-        are removed, NIXL reports their handles as failed, and they are
-        released and reported through the normal path. The next request for
-        the engine handshakes again.
-        """
-        if engine_id not in self._remote_agents:
-            return
-        for req_id in self._recving_transfers:
-            meta = self._recving_metadata.get(req_id)
-            if meta and meta.remote and meta.remote.engine_id == engine_id:
-                self._recv_failures.add(req_id)
-        logger.warning("Releasing remote engine %s after a KV load timeout.", engine_id)
-        self._cleanup_remote_engine(engine_id, log_eviction=False)
 
     def _get_new_notifs(self) -> set[str]:
         """Get req_ids which got a remote xfer message. When multiple consumers
