@@ -16,6 +16,10 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.vocab_parallel_argmax import (
+    local_argmax_candidates,
+    pick_from_candidates,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
@@ -228,10 +232,18 @@ class LogitsProcessor(PluggableLayer):
         if num_pad > 0:
             logits[..., -num_pad:] = -float("inf")
 
+        vocab_start = lm_head.shard_indices.org_vocab_start_index
+        if tp_size > 1 and logits.dim() == 2 and current_platform.is_cuda():
+            # Same result as the torch path below (torch.argmax order incl.
+            # NaN and ties), in one shard pass, a 64 B/row gather and a pick.
+            logger.info_once("Using the fused vocab-parallel argmax kernels.")
+            candidates = local_argmax_candidates(logits, vocab_start)
+            gathered = tensor_model_parallel_all_gather(candidates, dim=0)
+            return pick_from_candidates(gathered, logits.shape[0], tp_size)
+
         local_max_vals, local_max_indices = logits.max(dim=-1)
 
         # Convert shard-local indices to global vocab indices.
-        vocab_start = lm_head.shard_indices.org_vocab_start_index
         global_indices = local_max_indices + vocab_start
 
         if tp_size == 1:
