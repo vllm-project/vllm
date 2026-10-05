@@ -181,6 +181,25 @@ class TestInitialState:
 
 
 class TestStreaming:
+    def test_split_parameter_start_is_buffered(self, mock_tokenizer, mock_request):
+        chunks = [
+            DSML_FUNC_START,
+            f"{DSML_INVOKE_PREFIX}edit{DSML_INVOKE_NAME_END}",
+            f"<{_PARAM_OPEN.format(name='expr', is_str='true')}a<b><｜DSML｜parameter",
+            ' name="date" string="true">tomorrow',
+            _PARAM_CLOSE,
+            DSML_INVOKE_END,
+            DSML_FUNC_END,
+        ]
+
+        results = simulate_tool_streaming(
+            DeepSeekV32Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        arguments = collect_tool_arguments(results)
+        assert "<｜DSML｜parameter" not in arguments
+        assert json.loads(arguments) == {"expr": "a<b>", "date": "tomorrow"}
+
     def test_single_tool_streaming(self, mock_tokenizer, mock_request):
         text = _func_calls(
             _invoke("get_weather", _param("city", "true", "SF")),
@@ -266,3 +285,27 @@ class TestStreaming:
         assert collect_function_name(results) == "fn"
         args = json.loads(collect_tool_arguments(results))
         assert args == {"k": "v"}
+
+
+class TestMissingFunctionCallsWrapper:
+    """An invoke without the ``<｜DSML｜function_calls>`` wrapper is still a
+    tool call (V3.2 counterpart of #48931)."""
+
+    def test_non_streaming(self, mock_tokenizer, mock_request):
+        text = _invoke("fn", _param("k", "true", "v"))
+        parser = DeepSeekV32Parser(mock_tokenizer)
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "fn"
+        assert json.loads(result.tool_calls[0].function.arguments) == {"k": "v"}
+        assert result.content is None
+
+    def test_streaming(self, mock_tokenizer, mock_request):
+        text = "Sure.\n" + _invoke("fn", _param("k", "true", "v"))
+        parser = DeepSeekV32Parser(mock_tokenizer)
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+
+        assert collect_function_name(results) == "fn"
+        assert json.loads(collect_tool_arguments(results)) == {"k": "v"}
+        assert "DSML" not in collect_content(results)

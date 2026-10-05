@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-HRM-Text: Hierarchical Reasoning Model — Text variant.
+"""HRM-Text: Hierarchical Reasoning Model — Text variant.
 
 Reference Hugging Face implementation:
     src/transformers/models/hrm_text/modeling_hrm_text.py
@@ -26,7 +25,7 @@ from typing import Literal
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -123,7 +122,7 @@ class HrmTextAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_idx_in_stack: int,
         stack_kind: Literal["L", "H"],
         cache_config: CacheConfig | None = None,
@@ -246,9 +245,9 @@ class HrmTextAttention(nn.Module):
 class HrmTextDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_idx_in_stack: int,
-        stack_kind: str,
+        stack_kind: Literal["L", "H"],
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -311,8 +310,8 @@ class HrmTextStack(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
-        stack_kind: str,
+        config: PreTrainedConfig,
+        stack_kind: Literal["L", "H"],
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",

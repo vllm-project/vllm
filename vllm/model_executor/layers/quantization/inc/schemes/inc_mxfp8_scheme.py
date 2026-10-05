@@ -29,3 +29,15 @@ class INCMxfp8Scheme(INCScheme):
         from .inc_mxfp8_linear import INCMxfp8LinearScheme
 
         return INCLinearMethod(INCMxfp8LinearScheme())
+
+    def get_moe_method(
+        self,
+        config: "INCConfig",
+        layer: "torch.nn.Module",
+        prefix: str,
+        layer_config: "INCLayerConfig",
+    ):
+        del config, prefix, layer_config
+        from .inc_mxfp8_moe import INCMxfp8MoEMethod
+
+        return INCMxfp8MoEMethod(layer.moe_config)

@@ -16,7 +16,9 @@ template <uint32_t TopK, uint32_t CS>
 void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
                                 size_t smem, cudaStream_t stream) {
   auto kernel = []() {
-    if constexpr (CS == 16) {
+    if constexpr (CS == 2) {
+      return &ct::cooperative_topk_cs2<TopK>;
+    } else if constexpr (CS == 16) {
       return &ct::cooperative_topk_cs16<TopK>;
     } else if constexpr (CS == 8) {
       return &ct::cooperative_topk_cs8<TopK>;
@@ -58,11 +60,9 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
   const cudaStream_t stream = get_current_cuda_stream();
 
   const uint32_t stride = static_cast<uint32_t>(logits.stride(0));
-  // 32 = max clusters for CS=4 (32 x 4 = 128 CTAs = 66% of SMs, leaves
-  // headroom)
   STD_TORCH_CHECK(
-      num_rows <= 32,
-      "cooperative_topk supports <=32 rows; use persistent_topk for "
+      num_rows <= 64,
+      "cooperative_topk supports <=64 rows; use persistent_topk for "
       "larger batches");
 
   STD_TORCH_CHECK(stride % 4 == 0,
@@ -96,8 +96,10 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
     launch_cooperative_cluster<TopK, 16>(params, ct::kSmemSize8, stream);
   } else if (num_rows <= 8) {
     launch_cooperative_cluster<TopK, 8>(params, ct::kSmemSize8, stream);
-  } else {
+  } else if (num_rows <= 33) {
     launch_cooperative_cluster<TopK, 4>(params, ct::kSmemSize4, stream);
+  } else {
+    launch_cooperative_cluster<TopK, 2>(params, ct::kSmemSize2, stream);
   }
 }
 #endif  // USE_ROCM

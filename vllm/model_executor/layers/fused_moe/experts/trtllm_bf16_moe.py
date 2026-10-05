@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     fi_moe_largest_bucket,
-    trtllm_moe_pack_topk_ids_weights,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
@@ -32,9 +31,17 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
+def view_as_block_major_k(weight: torch.Tensor) -> torch.Tensor:
+    """View packed storage, including legacy 4D IPC cache entries."""
+    if weight.ndim == 4:
+        return weight
+    experts, rows, cols = weight.shape
+    block_k = 128 // weight.element_size()
+    return weight.view(experts, cols // block_k, rows, block_k)
+
+
 class TrtLlmBf16ExpertsBase:
-    """
-    BF16 unquantized TRTLLM-Gen MoE kernels. Shared base for modular and
+    """BF16 unquantized TRTLLM-Gen MoE kernels. Shared base for modular and
     monolithic interfaces.
     """
 
@@ -125,9 +132,7 @@ class TrtLlmBf16ExpertsBase:
 
 
 class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular):
-    """
-    BF16 unquantized TRTLLM-Gen MoE kernels. Supports modular interface.
-    """
+    """BF16 unquantized TRTLLM-Gen MoE kernels. Supports modular interface."""
 
     @staticmethod
     def _supports_parallel_config(
@@ -199,14 +204,13 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
         import flashinfer
         from flashinfer.fused_moe import WeightLayout
 
-        # Pack topk ids and weights into format expected by the TRTLLM kernel.
-        packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
+        topk_ids = topk_ids.to(dtype=torch.int32)
 
         result = flashinfer.fused_moe.trtllm_bf16_routed_moe(
-            topk_ids=packed_topk_ids,
+            topk_ids=(topk_ids, topk_weights),
             hidden_states=hidden_states,
-            gemm1_weights=w1,
-            gemm2_weights=w2,
+            gemm1_weights=view_as_block_major_k(w1),
+            gemm2_weights=view_as_block_major_k(w2),
             num_experts=global_num_experts,
             top_k=topk_ids.size(1),
             n_group=None,
@@ -226,9 +230,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
 
 
 class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonolithic):
-    """
-    BF16 unquantized TRTLLM-Gen MoE kernels. Supports monolithic interface.
-    """
+    """BF16 unquantized TRTLLM-Gen MoE kernels. Supports monolithic interface."""
 
     @staticmethod
     def _supports_parallel_config(
@@ -270,6 +272,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
@@ -280,16 +283,12 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         # dummy 0-token forward has to keep the finalized (empty) form.
         defer = self.moe_config.should_defer_moe_finalize(num_tokens)
 
-        routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=num_tokens,
-            device=hidden_states.device,
-        )
         flashinfer_output = flashinfer.fused_moe.trtllm_bf16_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
-            gemm1_weights=w1,
-            gemm2_weights=w2,
+            gemm1_weights=view_as_block_major_k(w1),
+            gemm2_weights=view_as_block_major_k(w2),
             num_experts=global_num_experts,
             top_k=self.topk,
             n_group=num_expert_group,
@@ -310,5 +309,4 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             num_tokens=num_tokens,
             top_k=self.topk,
         )
-        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
         return routed_output

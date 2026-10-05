@@ -1,7 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
@@ -39,8 +50,7 @@ def eagle_step_slot_mapping_metadata_kernel(
     PAD_ID: tl.constexpr,
     batch_size,
 ):
-    """
-    Fused kernel for EAGLE autoregressive step: updates positions, slot mapping,
+    """Fused kernel for EAGLE autoregressive step: updates positions, slot mapping,
     and sequence lengths in a single kernel to reduce launch overhead.
 
     Launched with input_batch_size threads. Threads with req_idx >= batch_size
@@ -85,6 +95,49 @@ def eagle_step_slot_mapping_metadata_kernel(
     tl.store(seq_lens_ptr + req_idx, new_seq_len)
 
 
+def _eagle_step_warmup_inputs(*, max_model_len: int, max_batch_size: int):
+    block_size = WarmupIntRange(1, 257, advance=lambda value: value * 2)
+    n_blocks_per_req = triton.cdiv(max_model_len, block_size)
+    return dict(
+        positions=TritonWarmupTensor(torch.int64),
+        block_table=TritonWarmupTensor(
+            torch.int32, shape=(1, n_blocks_per_req), strides=(n_blocks_per_req, 1)
+        ),
+        block_table_stride=n_blocks_per_req,
+        seq_lens=TritonWarmupTensor(torch.int32),
+        out_clamped_positions=TritonWarmupTensor(torch.int64),
+        out_slot_mapping=TritonWarmupTensor(torch.int64),
+        block_size=block_size,
+        max_model_len=max_model_len,
+        n_blocks_per_req=n_blocks_per_req,
+        PAD_ID=PADDING_SLOT_ID,
+        batch_size=WarmupIntRange(1, max_batch_size + 1),
+        input_batch_size=1,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=eagle_step_slot_mapping_metadata_kernel,
+    warmup_inputs=_eagle_step_warmup_inputs,
+)
+def _eagle_step_slot_mapping_metadata(
+    positions: torch.Tensor,
+    block_table: torch.Tensor,
+    block_table_stride: int,
+    seq_lens: torch.Tensor,
+    out_clamped_positions: torch.Tensor,
+    out_slot_mapping: torch.Tensor,
+    *,
+    block_size: int,
+    max_model_len: int,
+    n_blocks_per_req: int,
+    PAD_ID: int,
+    batch_size: int,
+    input_batch_size: int,
+) -> DispatchSpec:
+    return (input_batch_size,), {}
+
+
 def eagle_step_update_slot_mapping_and_metadata(
     positions_1d: torch.Tensor,
     block_table_tensor: torch.Tensor,
@@ -95,8 +148,7 @@ def eagle_step_update_slot_mapping_and_metadata(
     out_slot_mapping: torch.Tensor,
     input_batch_size: int | None = None,
 ) -> None:
-    """
-    Fused update of slot mapping and metadata for one EAGLE autoregressive step.
+    """Fused update of slot mapping and metadata for one EAGLE autoregressive step.
     Updates seq_lens in place. Writes to out_clamped_positions and out_slot_mapping.
 
     When input_batch_size > batch_size, threads beyond batch_size write
@@ -112,13 +164,14 @@ def eagle_step_update_slot_mapping_and_metadata(
         out_slot_mapping: [input_batch_size] output buffer for slot mapping
         input_batch_size: total batch size including cudagraph padding;
             defaults to batch_size (no padding)
+
     """
     batch_size = positions_1d.shape[0]
     if input_batch_size is None:
         input_batch_size = batch_size
 
     n_blocks_per_req = block_table_tensor.shape[1]
-    eagle_step_slot_mapping_metadata_kernel[(input_batch_size,)](
+    _eagle_step_slot_mapping_metadata(
         positions_1d,
         block_table_tensor,
         block_table_tensor.stride(0),
@@ -130,6 +183,7 @@ def eagle_step_update_slot_mapping_and_metadata(
         n_blocks_per_req=n_blocks_per_req,
         PAD_ID=PADDING_SLOT_ID,
         batch_size=batch_size,
+        input_batch_size=input_batch_size,
     )
 
 
@@ -142,8 +196,7 @@ def eagle_prepare_inputs_padded_kernel(
     num_rejected_tokens_gpu_ptr,  # [num_reqs] (output)
     num_reqs,  # tl.int32
 ):
-    """
-    Fused kernel for Eagle prepare_input_padded. This kernel computes the
+    """Fused kernel for Eagle prepare_input_padded. This kernel computes the
     token index to sample for each request, taking into account the number
     of draft tokens and the number of valid sampled tokens (which is one more than
     the number of accepted tokens).
@@ -175,6 +228,33 @@ def eagle_prepare_inputs_padded_kernel(
     tl.store(num_rejected_tokens_gpu_ptr + req_idx, num_rejected_tokens)
 
 
+def _eagle_prepare_inputs_warmup_inputs(*, max_batch_size: int):
+    int32 = TritonWarmupTensor(torch.int32)
+    return dict(
+        cu_num_draft_tokens=int32,
+        valid_sampled_tokens_count=int32,
+        query_start_loc_gpu=int32,
+        token_indices_to_sample=int32,
+        num_rejected_tokens_gpu=int32,
+        num_reqs=WarmupIntRange(1, max_batch_size + 1),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=eagle_prepare_inputs_padded_kernel,
+    warmup_inputs=_eagle_prepare_inputs_warmup_inputs,
+)
+def _eagle_prepare_inputs_padded(
+    cu_num_draft_tokens: torch.Tensor,
+    valid_sampled_tokens_count: torch.Tensor,
+    query_start_loc_gpu: torch.Tensor,
+    token_indices_to_sample: torch.Tensor,
+    num_rejected_tokens_gpu: torch.Tensor,
+    num_reqs: int,
+) -> DispatchSpec:
+    return (num_reqs,), {}
+
+
 @triton.jit
 def eagle_prepare_next_token_padded_kernel(
     sampled_token_ids_ptr,  # [num_reqs, num_sampled_tokens_per_req]
@@ -188,8 +268,7 @@ def eagle_prepare_next_token_padded_kernel(
     stride_sampled_token_ids,  # tl.int32 (stride for dim 0)
     BLOCK_SIZE_TOKENS: tl.constexpr,  # Power-of-2 >= num_sampled_tokens_per_req
 ):
-    """
-    Fused kernel for Eagle prepare_next_token_ids_padded. This kernel computes the
+    """Fused kernel for Eagle prepare_next_token_ids_padded. This kernel computes the
     number of valid (1 + accepted) tokens for each request, and the corresponding
     "next" token id to sample from during speculative decoding. This is the
     "last accepted token" from the sampled tokens, or the backup token if no
@@ -238,6 +317,49 @@ def eagle_prepare_next_token_padded_kernel(
         tl.store(valid_sampled_tokens_count_ptr + req_idx, valid_count)
 
 
+def _eagle_prepare_next_token_warmup_inputs(
+    *, vocab_size: int, num_sampled_tokens_per_req: int, max_batch_size: int
+):
+    int32 = TritonWarmupTensor(torch.int32)
+    sampled_width: Any = WarmupIntRange(1, num_sampled_tokens_per_req + 1)
+    return dict(
+        sampled_token_ids=TritonWarmupTensor(
+            torch.int32,
+            shape=(1, sampled_width),
+            strides=(sampled_width, 1),
+        ),
+        discard_request_mask=TritonWarmupTensor(torch.bool),
+        backup_next_token_ids=int32,
+        next_token_ids=int32,
+        valid_sampled_tokens_count=int32,
+        vocab_size=vocab_size,
+        num_sampled_tokens_per_req=sampled_width,
+        num_reqs=WarmupIntRange(1, max_batch_size + 1),
+        stride_sampled_token_ids=sampled_width,
+        BLOCK_SIZE_TOKENS=next_power_of_2(sampled_width),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=eagle_prepare_next_token_padded_kernel,
+    warmup_inputs=_eagle_prepare_next_token_warmup_inputs,
+)
+def _eagle_prepare_next_token_padded(
+    sampled_token_ids: torch.Tensor,
+    discard_request_mask: torch.Tensor,
+    backup_next_token_ids: torch.Tensor,
+    next_token_ids: torch.Tensor,
+    valid_sampled_tokens_count: torch.Tensor,
+    vocab_size: int,
+    num_sampled_tokens_per_req: int,
+    num_reqs: int,
+    stride_sampled_token_ids: int,
+    *,
+    BLOCK_SIZE_TOKENS: int,
+) -> DispatchSpec:
+    return (num_reqs,), {}
+
+
 def compute_new_slot_mapping(
     cad: CommonAttentionMetadata,
     new_positions: torch.Tensor,
@@ -276,8 +398,7 @@ def extend_all_queries_by_N(
     arange: torch.Tensor,
     new_slot_mapping: torch.Tensor,
 ) -> CommonAttentionMetadata:
-    """
-    Creates a new CommonAttentionMetadata with all query lengths increased by N.
+    """Creates a new CommonAttentionMetadata with all query lengths increased by N.
     Also all seq lens are increased by N.
     This is useful e.g. in speculative decoding with parallel drafting, where we
     extend each sequence by N tokens and predict all tokens in one pass.
@@ -328,8 +449,7 @@ def copy_and_expand_eagle_inputs_kernel(
     shift_input_ids,  # tl.bool
     BLOCK_SIZE_TOKENS: tl.constexpr,  # Blocks along token dim to handle prefills
 ):
-    """
-    Copy and expand inputs from the target model to the drafting buffers for Eagle
+    """Copy and expand inputs from the target model to the drafting buffers for Eagle
     speculative decoding. This kernel handles padding slots and parallel drafting
     tokens, if enabled.
     """
@@ -454,6 +574,68 @@ def copy_and_expand_eagle_inputs_kernel(
     )
 
 
+def _copy_and_expand_eagle_warmup_inputs(
+    *,
+    parallel_drafting_token_id: int,
+    num_padding_slots_per_request: int,
+    shift_input_ids: bool,
+    max_num_tokens: int,
+):
+    int32 = TritonWarmupTensor(torch.int32)
+    int64 = TritonWarmupTensor(torch.int64)
+    boolean = TritonWarmupTensor(torch.bool)
+    return dict(
+        target_token_ids_ptr=int32,
+        target_positions_ptr=int64,
+        next_token_ids_ptr=int32,
+        out_input_ids_ptr=int32,
+        out_positions_ptr=int64,
+        out_is_rejected_token_mask_ptr=boolean,
+        out_is_masked_token_mask_ptr=boolean,
+        out_new_token_indices_ptr=int32,
+        out_hidden_state_mapping_ptr=int32,
+        query_start_loc_ptr=int32,
+        query_end_loc_ptr=int32,
+        padding_token_id=0,
+        parallel_drafting_token_id=parallel_drafting_token_id,
+        total_input_tokens=WarmupIntRange(1, max_num_tokens + 1),
+        num_padding_slots_per_request=num_padding_slots_per_request,
+        shift_input_ids=shift_input_ids,
+        BLOCK_SIZE_TOKENS=WarmupIntRange(1, 257, advance=lambda value: value * 2),
+        batch_size=1,
+        num_blocks=1,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=copy_and_expand_eagle_inputs_kernel,
+    warmup_inputs=_copy_and_expand_eagle_warmup_inputs,
+)
+def _copy_and_expand_eagle_inputs(
+    target_token_ids_ptr: torch.Tensor,
+    target_positions_ptr: torch.Tensor,
+    next_token_ids_ptr: torch.Tensor,
+    out_input_ids_ptr: torch.Tensor,
+    out_positions_ptr: torch.Tensor,
+    out_is_rejected_token_mask_ptr: torch.Tensor,
+    out_is_masked_token_mask_ptr: torch.Tensor,
+    out_new_token_indices_ptr: torch.Tensor,
+    out_hidden_state_mapping_ptr: torch.Tensor,
+    query_start_loc_ptr: torch.Tensor,
+    query_end_loc_ptr: torch.Tensor,
+    padding_token_id: int,
+    parallel_drafting_token_id: int,
+    total_input_tokens: int,
+    num_padding_slots_per_request: int,
+    shift_input_ids: bool,
+    *,
+    BLOCK_SIZE_TOKENS: int,
+    batch_size: int,
+    num_blocks: int,
+) -> DispatchSpec:
+    return (batch_size, num_blocks), {}
+
+
 @triton.jit
 def copy_and_expand_dflash_inputs_kernel(
     # Inputs
@@ -481,8 +663,7 @@ def copy_and_expand_dflash_inputs_kernel(
     BLOCK_SIZE: tl.constexpr,
     HAS_NUM_REJECTED: tl.constexpr = False,
 ):
-    """
-    Fused kernel for DFlash first-pass input setup.
+    """Fused kernel for DFlash first-pass input setup.
 
     Per request, this kernel:
       1. Copies context positions from target_positions to
@@ -559,6 +740,75 @@ def copy_and_expand_dflash_inputs_kernel(
         out_token_indices_ptr + sample_out_idx,
         query_out,
         mask=is_sample,
+    )
+
+
+def _copy_and_expand_dflash_warmup_inputs(
+    *,
+    block_table_stride: int,
+    parallel_drafting_token_id: int,
+    block_size: int,
+    num_speculative_tokens: int,
+):
+    int32 = TritonWarmupTensor(torch.int32)
+    int64 = TritonWarmupTensor(torch.int64)
+    triton_block_size = WarmupIntRange(1, 257, advance=lambda value: value * 2)
+    has_num_rejected = WarmupChoices(False, True)
+    return dict(
+        next_token_ids_ptr=int32,
+        target_positions_ptr=int64,
+        out_input_ids_ptr=int32,
+        out_context_positions_ptr=int64,
+        out_query_positions_ptr=int64,
+        out_context_slot_mapping_ptr=int64,
+        out_query_slot_mapping_ptr=int64,
+        out_token_indices_ptr=int32,
+        block_table_ptr=int32,
+        query_start_loc_ptr=int32,
+        num_rejected_tokens_ptr=(int32 if has_num_rejected else 0),
+        block_table_stride=block_table_stride,
+        parallel_drafting_token_id=parallel_drafting_token_id,
+        block_size=block_size,
+        num_query_per_req=1 + num_speculative_tokens,
+        num_speculative_tokens=num_speculative_tokens,
+        total_input_tokens=WarmupChoices(1, 2, 16),
+        max_tokens_per_req=triton_block_size,
+        triton_block_size=triton_block_size,
+        has_num_rejected=has_num_rejected,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=copy_and_expand_dflash_inputs_kernel,
+    warmup_inputs=_copy_and_expand_dflash_warmup_inputs,
+)
+def _copy_and_expand_dflash_inputs(
+    *,
+    next_token_ids_ptr: torch.Tensor,
+    target_positions_ptr: torch.Tensor,
+    out_input_ids_ptr: torch.Tensor,
+    out_context_positions_ptr: torch.Tensor,
+    out_query_positions_ptr: torch.Tensor,
+    out_context_slot_mapping_ptr: torch.Tensor,
+    out_query_slot_mapping_ptr: torch.Tensor,
+    out_token_indices_ptr: torch.Tensor,
+    block_table_ptr: torch.Tensor,
+    query_start_loc_ptr: torch.Tensor,
+    num_rejected_tokens_ptr: torch.Tensor | int,
+    block_table_stride: int,
+    parallel_drafting_token_id: int,
+    block_size: int,
+    num_query_per_req: int,
+    num_speculative_tokens: int,
+    total_input_tokens: int,
+    max_tokens_per_req: int,
+    triton_block_size: int,
+    has_num_rejected: bool,
+) -> DispatchSpec:
+    num_reqs = query_start_loc_ptr.shape[0] - 1
+    num_blocks = triton.cdiv(max_tokens_per_req, triton_block_size)
+    return (num_reqs, num_blocks), dict(
+        BLOCK_SIZE=triton_block_size,
     )
 
 

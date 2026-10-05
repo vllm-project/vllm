@@ -75,6 +75,7 @@ PREDICTABLE_LLAMA_MODEL_CLS = (
 )
 
 
+@create_new_process_for_each_test()
 def test_extract_hidden_states_with_predictable_dummy_model(
     predictable_llama_config_path, tmp_path, monkeypatch
 ):
@@ -82,7 +83,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
 
     Tests 3 scenarios:
 
-    1. **Basic extraction**: non-sequential layer ordering, multiple prompts
+    1. **Basic extraction**: unsorted layer selection, multiple prompts
        of varying length — verifies correct layer association and
        deterministic values.
     2. **Chunked prefill**: max_num_batched_tokens=128 with ~500-token
@@ -95,6 +96,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
     layer_ids = [5, 2, 10]
+    expected_layer_ids = sorted(layer_ids)
     num_layers = len(layer_ids)
     max_num_batched_tokens = 128
 
@@ -146,7 +148,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
         )
         _token_ids, hidden_states = get_and_check_output(output, expected_shape)
 
-        for idx, layer_id in enumerate(layer_ids):
+        for idx, layer_id in enumerate(expected_layer_ids):
             layer_hidden = hidden_states[:, idx, :]
             assert torch.allclose(
                 layer_hidden,
@@ -174,7 +176,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
         expected_shape = (prompt_len, num_layers, hidden_size)
         _token_ids, hidden_states = get_and_check_output(output, expected_shape)
 
-        for idx, layer_id in enumerate(layer_ids):
+        for idx, layer_id in enumerate(expected_layer_ids):
             layer_hidden = hidden_states[:, idx, :]
             assert torch.allclose(
                 layer_hidden,
@@ -236,7 +238,7 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     assert hidden_states.shape == (total_tokens, num_layers, hidden_size)
 
     # Verify predictable layer values hold for all tokens (prompt + output)
-    for idx, layer_id in enumerate(layer_ids):
+    for idx, layer_id in enumerate(expected_layer_ids):
         layer_hidden = hidden_states[:, idx, :]
         assert torch.allclose(
             layer_hidden,
