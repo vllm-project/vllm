@@ -187,18 +187,22 @@ step *N+1*.
 Each scheduled decode step adds one or more **output placeholders**
 (`num_output_placeholders`) to the request — one for the main token plus any
 speculative (draft/spec) tokens the GPU is producing but has not yet
-returned. When a request is preempted while async scheduling is active,
-`AsyncScheduler` may additionally reset these fields to prevent spurious
-duplicate output tokens if the GPU has speculative output in flight. If
-`update_from_output` receives output for a request that has
-`discard_latest_async_tokens = True`, the speculative output is silently
-dropped rather than appended to the token sequence.
+returned.
 
-Currently, `num_output_placeholders` is reset to `0` and
-`discard_latest_async_tokens` is set to `True` during a forced prefix-cache
-reset (`reset_prefix_cache` with `reset_running_requests=True`), which
-preempts all running requests before returning them to the waiting queue.
-Regular KV-exhaustion preemption does not modify these fields.
+Every preemption (`_preempt_request`), not only a forced prefix-cache reset,
+resets `num_output_placeholders` to `0` and marks any in-flight output as
+**stale** by setting `num_stale_output_tokens` to the request's
+`num_in_flight_tokens`. By default these stale tokens are still delivered
+once the GPU returns them — dropping them would perturb spec-decode
+acceptance — they just no longer advance the reset counters;
+`update_from_output` drains the stale share step by step as it arrives.
+
+A caller can instead request that stale output be dropped by passing
+`drop_stale_output=True` to `_preempt_request`. `reset_prefix_cache` (with
+`reset_running_requests=True`) does this for every running request before
+returning them to the waiting queue, since its same-step preempt-and-resume
+would otherwise deliver tokens out of order. Regular KV-exhaustion
+preemption does not set `drop_stale_output`, so its stale output is kept.
 
 ## LLM Engine
 
