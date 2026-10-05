@@ -50,6 +50,7 @@ from vllm.tool_parsers.streaming import (
     extract_required_tool_call_streaming,
 )
 from vllm.tool_parsers.structural_tag_registry import (
+    get_structural_tag_tools,
     limit_to_single_tool_call,
     resolve_tool_strictness,
 )
@@ -115,6 +116,7 @@ class Parser:
     tool_parser_cls: type[ToolParser] | None = None
     # Server-side floor for tool-call structural tags (--tool-strict-level).
     tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
+    always_adjust_request: bool = False
 
     def __init__(
         self,
@@ -205,6 +207,10 @@ class Parser:
 
         """
         return request
+
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        """Provide the exact rendered prompt to parsers that need prefix state."""
+        return
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
@@ -501,6 +507,11 @@ class DelegatingParser(Parser):
         is_auto = request.tool_choice == "auto"
         single_call = request.parallel_tool_calls is False
         strict_level = self.tool_strict_level
+        if (
+            strict_level == ToolStrictLevel.AUTO
+            and tool_parser.default_tool_strict_level is not None
+        ):
+            strict_level = tool_parser.default_tool_strict_level
         if single_call and not (is_auto and structured_outputs is not None):
             # Limiting the call count needs the call envelope in the grammar.
             # Auto with structured outputs keeps its format-only grammar, so the
@@ -510,7 +521,11 @@ class DelegatingParser(Parser):
         resolved_tools = None
         if tool_parser.structural_tag_model is not None:
             resolved_tools = resolve_tool_strictness(
-                request.tools,
+                get_structural_tag_tools(
+                    tool_parser.structural_tag_model,
+                    request.tools,
+                    request.tool_choice,
+                ),
                 request.tool_choice,
                 strict_level,
             )
