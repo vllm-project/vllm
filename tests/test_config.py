@@ -3662,7 +3662,7 @@ def test_speculative_context_dedup_logs_no_unsupported_warning(
 
     caplog_vllm.clear()
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "dedup" not in caplog_vllm.text.lower()
 
