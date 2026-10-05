@@ -47,6 +47,8 @@ class TritonMLASparseImpl(XPUMLASparseImpl):
     """Triton sparse-MLA impl with split-KV decode (3-7× faster than the
     single-pass XPU base for single-query decode on SM80 / SM121)."""
 
+    can_return_lse_for_decode: bool = True
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._sm_count: int | None = None
@@ -72,6 +74,7 @@ class TritonMLASparseImpl(XPUMLASparseImpl):
                 sm_scale=self.softmax_scale,
                 num_kv_splits=splits,
                 sm_count=self._sm_count,
+                return_lse=self.need_to_return_lse_for_decode,
             )
         indexer_num_heads = getattr(indexer, "n_head", _INDEXER_NUM_HEADS)
         indexer_head_dim = getattr(indexer, "head_dim", _INDEXER_HEAD_DIM)
@@ -93,20 +96,23 @@ class TritonMLASparseImpl(XPUMLASparseImpl):
         kv_c_and_k_pe_cache: torch.Tensor,  # [blocks, heads, d_qk]
         topk_indices: torch.Tensor,  # [sq, topk]
         attn_metadata: XPUMLASparseMetadata,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output = triton_mla_sparse_attention(
+        result = triton_mla_sparse_attention(
             q,
             kv_c_and_k_pe_cache,
             topk_indices,
             sm_scale=self.softmax_scale,
             sm_count=self._sm_count,
+            return_lse=self.need_to_return_lse_for_decode,
         )
-        return output[:, : self.num_heads, :]
+        if isinstance(result, tuple):
+            return result
+        return result, None
 
 
 class TritonMLASparseBackend(AttentionBackend):

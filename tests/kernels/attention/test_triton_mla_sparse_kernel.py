@@ -39,26 +39,34 @@ def _assert_split_matches_single_pass(
     indices = torch.randint(
         0, kv_cache.shape[0], (num_tokens, 1, topk), dtype=torch.int32, device="cuda"
     )
-    out_ref = triton_mla_sparse_attention(
+    ref = triton_mla_sparse_attention(
         q,
         kv_cache,
         indices,
         sm_scale=0.1,
         num_kv_splits=1,
+        return_lse=True,
     )
-    out = triton_mla_sparse_attention(
+    result = triton_mla_sparse_attention(
         q,
         kv_cache,
         indices,
         sm_scale=0.1,
         num_kv_splits=num_kv_splits,
+        return_lse=True,
     )
+    assert isinstance(ref, tuple)
+    assert isinstance(result, tuple)
+    out_ref, lse_ref = ref
+    out, lse = result
+    assert lse.shape == (num_tokens, num_heads)
     torch.testing.assert_close(
         out.float(),
         out_ref.float(),
         atol=5e-2,
         rtol=5e-3,
     )
+    torch.testing.assert_close(lse, lse_ref, atol=5e-3, rtol=5e-3)
 
 
 @pytest.mark.parametrize(
@@ -114,3 +122,53 @@ def test_short_prefill_no_nan(num_kv_splits, kv_cache):
     )
     assert not torch.isnan(out).any()
     assert not torch.isinf(out).any()
+
+
+@pytest.mark.parametrize("num_kv_splits", [1, 4])
+def test_return_lse_matches_dense_reference(num_kv_splits: int) -> None:
+    torch.manual_seed(1)
+    num_tokens, num_heads, topk = 2, 16, 128
+    scale = _DIM_QK**-0.5
+    q = torch.randn(num_tokens, num_heads, _DIM_QK, dtype=torch.bfloat16, device="cuda")
+    kv = torch.randn(256, 1, _DIM_QK, dtype=torch.bfloat16, device="cuda")
+    indices = torch.stack(
+        [torch.randperm(kv.shape[0], device="cuda")[:topk] for _ in range(num_tokens)]
+    ).to(torch.int32)[:, None, :]
+
+    result = triton_mla_sparse_attention(
+        q,
+        kv,
+        indices,
+        sm_scale=scale,
+        num_kv_splits=num_kv_splits,
+        return_lse=True,
+    )
+
+    assert isinstance(result, tuple)
+    _, lse = result
+    for token in range(num_tokens):
+        selected_kv = kv[indices[token, 0].long(), 0].float()
+        logits = (q[token].float() @ selected_kv.T) * scale
+        expected_lse = torch.logsumexp(logits, dim=-1)
+        torch.testing.assert_close(lse[token], expected_lse, atol=5e-3, rtol=5e-3)
+
+
+@pytest.mark.parametrize("num_kv_splits", [1, 4])
+def test_empty_sparse_row_returns_merge_identity(num_kv_splits: int) -> None:
+    q = torch.zeros(1, 16, _DIM_QK, dtype=torch.bfloat16, device="cuda")
+    kv = torch.zeros(1, 1, _DIM_QK, dtype=torch.bfloat16, device="cuda")
+    indices = torch.full((1, 1, 128), -1, dtype=torch.int32, device="cuda")
+
+    result = triton_mla_sparse_attention(
+        q,
+        kv,
+        indices,
+        sm_scale=0.1,
+        num_kv_splits=num_kv_splits,
+        return_lse=True,
+    )
+
+    assert isinstance(result, tuple)
+    output, lse = result
+    assert torch.count_nonzero(output) == 0
+    assert torch.isneginf(lse).all()

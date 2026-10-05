@@ -23,8 +23,9 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MLAAttentionImpl,
 )
-from vllm.v1.attention.backends.mla.flashmla_sparse import (
+from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
+    triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -96,6 +97,7 @@ class XPUMLASparseMetadata(AttentionMetadata):
 
     block_size: int = 1
     topk_tokens: int = 2048
+    cp_kv_cache_interleave_size: int = 1
 
 
 @dataclass
@@ -112,6 +114,7 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
         self.kv_cache_spec = kv_cache_spec
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
+        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         self.device = device
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
@@ -166,6 +169,7 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
         )
         return metadata
 
@@ -210,7 +214,7 @@ class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,  # [blocks, heads, d_qk]
         topk_indices: torch.Tensor,  # [sq, topk]
         attn_metadata: XPUMLASparseMetadata,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
@@ -225,7 +229,7 @@ class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata]):
             sm_scale=self.softmax_scale,
         )
 
-        return output[:, : self.num_heads, :]
+        return output[:, : self.num_heads, :], None
 
     def forward_mqa(
         self,
@@ -249,16 +253,27 @@ class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata]):
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        topk_indices_global = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
-        )
+        if self.dcp_world_size > 1:
+            topk_indices_global = triton_filter_and_convert_dcp_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                dcp_size=self.dcp_world_size,
+                dcp_rank=self.dcp_rank,
+                cp_kv_cache_interleave_size=(attn_metadata.cp_kv_cache_interleave_size),
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
+                compact_valid_to_front=False,
+            )
+        else:
+            topk_indices_global = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
+            )
 
-        attn_out = self._forward_bf16_kv(
+        return self._forward_bf16_kv(
             q, kv_c_and_k_pe_cache, topk_indices_global, attn_metadata
         )
-
-        return attn_out, None
