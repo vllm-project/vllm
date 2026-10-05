@@ -592,11 +592,12 @@ class TestTritonTopkTopp:
             assert q[keep].sum() >= p - 1e-4, f"{name}: kept mass below p"
 
     def test_topp_outlier_gate_overshoot_searches_full_row(self):
-        """Regression: the outlier-only gate sums the buffer in fp32 while
+        """Regression: the outlier-only gate summed the buffer in fp32 while
         the search sums it in fp64. When p lands between the two sums, the
         outlier search stalled below p and kept the whole row (32768 tokens
-        where 8192 reach p). A violated gate now falls through to the
-        full-row search instead of keeping everything."""
+        where 8192 reach p). The gate now sums in fp64 like the search, so
+        a p the buffer cannot reach fails the gate and the full-row search
+        resolves the boundary instead."""
         from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
         def ulps(v, d):  # v moved by d fp32 ulps

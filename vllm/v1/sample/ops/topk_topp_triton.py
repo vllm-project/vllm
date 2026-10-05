@@ -821,7 +821,12 @@ def _topk_topp_kernel(
                 outlier_pivot = avg_logit + std_logit * sigma
 
                 outlier_prob = tl.exp(outlier_pivot - max_sample) / sum_exp_logits
-                sum_outlier_probs = 0.0
+                # fp64 accumulator: the outlier search and the stall
+                # fallback sum this same buffer in fp64, so an fp32 gate can
+                # promise a few ulps more mass than the buffer can reach. If
+                # p lands in that gap the search stalls below p and the row
+                # is kept whole.
+                sum_outlier_probs = tl.zeros((), dtype=tl.float64)
                 num_outliers = tl.zeros((), dtype=tl.uint32)
 
                 # Second pass: Calculate softmax and gather outliers
@@ -846,8 +851,6 @@ def _topk_topp_kernel(
 
                 max_range = tl.exp(max_logit - max_sample) / sum_exp_logits
                 min_range = tl.exp(min_logit - max_sample) / sum_exp_logits
-                row_min_range = min_range
-                row_max_range = max_range
 
                 p_pivot = 1.0
                 num_iters = 0
@@ -965,17 +968,7 @@ def _topk_topp_kernel(
                                     BLOCK_SIZE_TRUNC,
                                 )
                                 found_pivot = 1
-                if topp_mask == 0:
-                    # Full-row search. Runs when the outlier gate fails, and
-                    # also when the gate passed but its fp32 estimate
-                    # overshot: the buffer's true mass is then below p, the
-                    # outlier search stalls without reaching it, and
-                    # topp_mask stays 0. Falling through here resolves the
-                    # boundary over the whole row instead of keeping
-                    # everything. Reset the state the outlier search moved.
-                    min_range = row_min_range
-                    max_range = row_max_range
-                    num_iters = 0
+                else:
                     # Re-populate the buffer with full softmax probabilities
                     for i in range(0, NUM_TILES):
                         offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
