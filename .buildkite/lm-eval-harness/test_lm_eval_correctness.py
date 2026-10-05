@@ -81,8 +81,10 @@ def _wait_for_memory_release(gpu_memory_utilization: float) -> None:
 
 
 def _shutdown_lm(lm) -> None:
+    if not current_platform.is_rocm():
+        return
     llm = getattr(lm, "model", None)
-    if not current_platform.is_rocm() or not isinstance(llm, LLM):
+    if not isinstance(llm, LLM):
         return
     gpu_memory_utilization = (
         llm.llm_engine.vllm_config.cache_config.gpu_memory_utilization
@@ -134,12 +136,17 @@ def launch_lm_eval(eval_config, tp_size):
 
     env_vars = eval_config.get("env_vars", None)
     with scoped_env_vars(env_vars):
-        lm = get_model(backend).create_from_arg_string(
-            model_args,
-            {"batch_size": batch_size, "max_batch_size": None, "device": None},
-        )
+        if current_platform.is_rocm():
+            model = get_model(backend).create_from_arg_string(
+                model_args,
+                {"batch_size": batch_size, "max_batch_size": None, "device": None},
+            )
+            model_kwargs = {"metadata": simple_parse_args_string(model_args)}
+        else:
+            model = backend
+            model_kwargs = {"model_args": model_args}
         results = lm_eval.simple_evaluate(
-            model=lm,
+            model=model,
             tasks=[task["name"] for task in eval_config["tasks"]],
             num_fewshot=eval_config["num_fewshot"],
             limit=eval_config["limit"],
@@ -153,9 +160,9 @@ def launch_lm_eval(eval_config, tp_size):
             # Forward decoding and early-stop controls (e.g., max_gen_toks, until=...)
             gen_kwargs=eval_config.get("gen_kwargs"),
             batch_size=batch_size,
-            metadata=simple_parse_args_string(model_args),
+            **model_kwargs,
         )
-    _shutdown_lm(lm)
+    _shutdown_lm(model)
     return results
 
 
