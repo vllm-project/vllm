@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
+from vllm.config import CacheConfig
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -196,14 +197,25 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
 
 
-def _plan_worker(config_hash="abc123", free_memory=78 * GiB_bytes, kv_bytes=None):
+def _plan_worker(
+    config_hash="abc123",
+    free_memory=78 * GiB_bytes,
+    kv_bytes=None,
+    gpu_memory_utilization=0.9,
+):
     """The minimal Worker surface the startup-plan entry points touch."""
+    cache_config = CacheConfig(
+        kv_cache_memory_bytes=kv_bytes,
+        gpu_memory_utilization=gpu_memory_utilization,
+    )
     return SimpleNamespace(
-        vllm_config=SimpleNamespace(compute_hash=lambda: config_hash),
+        vllm_config=SimpleNamespace(
+            compute_hash=lambda: config_hash, cache_config=cache_config
+        ),
         rank=0,
         parallel_config=SimpleNamespace(world_size=1),
         init_snapshot=SimpleNamespace(free_memory=free_memory),
-        cache_config=SimpleNamespace(kv_cache_memory_bytes=kv_bytes),
+        cache_config=cache_config,
     )
 
 
@@ -231,6 +243,12 @@ def test_startup_plan_fingerprint_sensitivity(plan_env):
     base = fp(_plan_worker().vllm_config, 0, 1)
     assert base == fp(_plan_worker().vllm_config, 0, 1)
     assert base != fp(_plan_worker("other").vllm_config, 0, 1)
+    lower_budget = _plan_worker(gpu_memory_utilization=0.5)
+    assert (
+        lower_budget.cache_config.compute_hash()
+        == _plan_worker().cache_config.compute_hash()
+    )
+    assert base != fp(lower_budget.vllm_config, 0, 1)
     assert base != fp(_plan_worker().vllm_config, 1, 2)
     with patch.object(startup_plan, "current_platform", _plan_platform("NVIDIA A100")):
         assert base != fp(_plan_worker().vllm_config, 0, 1)
@@ -248,7 +266,8 @@ def test_startup_plan_apply_gate(plan_env):
 
     less_memory = _plan_worker(free_memory=60 * GiB_bytes)
     other_config = _plan_worker(config_hash="zzz999")
-    for refused in (less_memory, other_config):
+    lower_budget = _plan_worker(gpu_memory_utilization=0.5)
+    for refused in (less_memory, other_config, lower_budget):
         maybe_apply_startup_plan(refused)
         assert refused.cache_config.kv_cache_memory_bytes is None
 
