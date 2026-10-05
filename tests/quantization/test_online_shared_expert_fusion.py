@@ -30,7 +30,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
-    get_layerwise_info,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
@@ -282,8 +281,9 @@ def test_online_shared_expert_loads_bf16_weights_into_mxfp4_slot(
 def test_online_shared_expert_reload_compatibility(
     default_vllm_config,
     dist_init,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reload must stage a BF16 shared weight while its MXFP4 slot is on meta."""
+    """Reload a BF16 shared weight into its MXFP4 slot via meta staging."""
     default_vllm_config.model_config = ModelConfig()
     online_config = OnlineQuantizationConfig(
         QuantizationConfigArgs(targets={"*shared_expert*": "mxfp4"})
@@ -292,7 +292,6 @@ def test_online_shared_expert_reload_compatibility(
     quant_config.online_quantization_config = online_config
 
     with torch.device(current_platform.device_type):
-        # Trigger FSE with `fuse_shared_experts=True`
         layer = FusedMoEFactory(
             num_experts=2,
             top_k=1,
@@ -304,28 +303,48 @@ def test_online_shared_expert_reload_compatibility(
             prefix="model.layers.0.mlp.experts",
             quant_config=quant_config,
         ).routed_experts
-        shared_gate = torch.randn(64, 64, dtype=torch.bfloat16)
-        weight_name = f"{layer.layer_name}.w13_weight"
+        monkeypatch.setattr(
+            layer.quant_method, "process_weights_after_loading", lambda _: None
+        )
 
-        param = layer.w13_weight
-        param.weight_loader(param, shared_gate, weight_name, "w1", 2)
+        routed_weights = []
+        for expert_id in range(2):
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                weight, scale = mxfp4_quantize(
+                    torch.randn(64, 64, dtype=torch.bfloat16)
+                )
+                prefix = f"{expert_id}.{projection}"
+                routed_weights.extend(
+                    [(f"{prefix}.weight", weight), (f"{prefix}.weight_scale", scale)]
+                )
+
+        shared_gate = torch.randn(64, 64, dtype=torch.bfloat16)
+        shared_up = torch.randn(64, 64, dtype=torch.bfloat16)
+        shared_down = torch.randn(64, 64, dtype=torch.bfloat16)
+
+        def checkpoint_weights(gate: torch.Tensor):
+            return [
+                *routed_weights,
+                ("2.gate_proj.weight", gate),
+                ("2.up_proj.weight", shared_up),
+                ("2.down_proj.weight", shared_down),
+            ]
+
+        list(layer.load_weights(checkpoint_weights(shared_gate)))
+        old_weight = layer.w13_weight[2, :64].clone()
+        reloaded_gate = shared_gate + 1
+        expected_weight, expected_scale = mxfp4_quantize(reloaded_gate)
+        assert not torch.equal(old_weight, expected_weight)
+
         record_metadata_for_reloading(layer)
         initialize_layerwise_reload(layer)
 
-        param = layer.w13_weight
-        assert param.is_meta
-        assert shared_gate.dtype != param.dtype
-
-        # NOTE: this crashes if `param.device` is used in `weight_loader`.
-        param.weight_loader(param, shared_gate, weight_name, "w1", 2)
-
-        assert len(get_layerwise_info(layer).loaded_weights) == 1
-        info = get_layerwise_info(layer)
-        info.loaded_weights.clear()
-        info.load_numel = 0
-
+        assert layer.w13_weight.is_meta
+        list(layer.load_weights(checkpoint_weights(reloaded_gate)))
         finalize_layerwise_reload(layer, default_vllm_config.model_config)
         assert not layer.w13_weight.is_meta
+        assert torch.equal(layer.w13_weight[2, :64], expected_weight)
+        assert torch.equal(layer.w13_weight_scale[2, :64], expected_scale)
 
 
 @pytest.mark.parametrize(
