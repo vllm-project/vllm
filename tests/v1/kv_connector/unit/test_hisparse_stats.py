@@ -28,24 +28,32 @@ def test_record_snapshot_and_reduce():
 
 def test_record_host_usage_reports_latest_level():
     stats = HiSparseKVConnectorStats()
-    stats.record_host_usage(usage=0.4, pending_page_transfers=2)
-    stats.record_host_usage(usage=0.8, pending_page_transfers=0)
+    stats.record_host_usage(0, usage=0.4, pending_page_transfers=2)
+    stats.record_host_usage(0, usage=0.8, pending_page_transfers=0)
 
     reduced = stats.reduce()
     assert reduced["HiSparse host KV cache usage %"] == 80.0
 
 
-def test_aggregate_keeps_latest_host_usage_level():
+def test_aggregate_keeps_latest_host_usage_level_per_engine():
+    """Data-parallel engines share one CLI accumulator; each keeps its own level."""
     first = HiSparseKVConnectorStats()
-    first.record_host_usage(usage=0.4, pending_page_transfers=2)
+    first.record_host_usage(0, usage=0.4, pending_page_transfers=2)
     second = HiSparseKVConnectorStats()
-    second.record_host_usage(usage=0.8, pending_page_transfers=0)
-    second.record_host_usage(usage=0.6, pending_page_transfers=1)
+    second.record_host_usage(0, usage=0.8, pending_page_transfers=0)
+    second.record_host_usage(0, usage=0.6, pending_page_transfers=1)
+    other_engine = HiSparseKVConnectorStats()
+    other_engine.record_host_usage(1, usage=0.1, pending_page_transfers=4)
 
     first.aggregate(second)
+    first.aggregate(other_engine)
 
-    assert first.data["host_cache_usage_perc"] == [0.4, 0.6]
-    assert first.data["pending_page_transfers"] == [2, 1]
+    assert first.data["host_cache_usage_perc"] == [[0, 0.6], [1, 0.1]]
+    assert first.data["pending_page_transfers"] == [[0, 1], [1, 4]]
+    reduced = first.reduce()
+    assert reduced["HiSparse host KV cache usage % (DP0)"] == 60.0
+    assert reduced["HiSparse host KV cache usage % (DP1)"] == 10.0
+    assert "HiSparse host KV cache usage %" not in reduced
 
 
 def test_aggregate_extends_snapshot_deltas():
@@ -123,8 +131,8 @@ def test_prom_metrics_observe_host_usage_gauges():
 
     stats = HiSparseKVConnectorStats()
     stats.record_snapshot(hits=3, misses=2, host_to_device_bytes=32)
-    stats.record_host_usage(usage=0.5, pending_page_transfers=1)
-    stats.record_host_usage(usage=0.75, pending_page_transfers=3)
+    stats.record_host_usage(0, usage=0.5, pending_page_transfers=1)
+    stats.record_host_usage(0, usage=0.75, pending_page_transfers=3)
     prom.observe(stats.to_dict())
 
     assert created["vllm:hisparse_cache_hits"].increments == [3]

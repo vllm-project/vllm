@@ -93,10 +93,12 @@ class HiSparseConnectorScheduler:
         *,
         async_speculative: bool,
         draft_kv_lookahead: int = 0,
+        engine_index: int = 0,
     ) -> None:
         self.coordinator: HiSparseCoordinator | None = None
         self.async_speculative = async_speculative
         self.draft_kv_lookahead = draft_kv_lookahead
+        self.engine_index = engine_index
         self.requests: dict[str, Request] = {}
 
     def bind_coordinator(self, coordinator: HiSparseCoordinator) -> None:
@@ -110,7 +112,9 @@ class HiSparseConnectorScheduler:
         assert host_pool is not None
         stats = HiSparseKVConnectorStats()
         stats.record_host_usage(
-            host_pool.get_usage(), len(self.coordinator.pending_spills)
+            self.engine_index,
+            host_pool.get_usage(),
+            len(self.coordinator.pending_spills),
         )
         return stats
 
@@ -237,6 +241,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                     and speculative_config is not None
                 ),
                 draft_kv_lookahead=vllm_config.num_lookahead_tokens,
+                engine_index=vllm_config.parallel_config.data_parallel_index,
             )
             max_model_len = vllm_config.model_config.max_model_len
             steady_concurrency = get_hisparse_steady_state_concurrency(

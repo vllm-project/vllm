@@ -23,8 +23,9 @@ class HiSparseKVConnectorStats(KVConnectorStats):
 
     Each list entry is the delta recorded over one device counter snapshot
     interval, so a list can hold multiple snapshots per logging interval.
-    The host-tier gauges are level values, not deltas: aggregation keeps
-    only the most recent observation.
+    The host-tier gauges are level values, not deltas, recorded as
+    ``[engine_index, value]`` pairs: aggregation keeps the most recent
+    observation per engine.
     """
 
     def __post_init__(self):
@@ -34,7 +35,7 @@ class HiSparseKVConnectorStats(KVConnectorStats):
 
     def reset(self):
         # Must be serializable
-        self.data: dict[str, list[int | float]] = {
+        self.data: dict[str, list[Any]] = {
             "cache_hits": [],
             "cache_misses": [],
             "host_to_device_bytes": [],
@@ -47,9 +48,13 @@ class HiSparseKVConnectorStats(KVConnectorStats):
         self.data["cache_misses"].append(misses)
         self.data["host_to_device_bytes"].append(host_to_device_bytes)
 
-    def record_host_usage(self, usage: float, pending_page_transfers: int) -> None:
-        self.data["host_cache_usage_perc"].append(usage)
-        self.data["pending_page_transfers"].append(pending_page_transfers)
+    def record_host_usage(
+        self, engine_index: int, usage: float, pending_page_transfers: int
+    ) -> None:
+        self.data["host_cache_usage_perc"].append([engine_index, usage])
+        self.data["pending_page_transfers"].append(
+            [engine_index, pending_page_transfers]
+        )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
@@ -57,7 +62,8 @@ class HiSparseKVConnectorStats(KVConnectorStats):
                 accumulator = self.data[k]
                 assert isinstance(accumulator, list)
                 if k in _HISPARSE_LEVEL_KEYS:
-                    accumulator.extend(v[-1:])
+                    latest = {engine: value for engine, value in accumulator + v}
+                    accumulator[:] = [list(item) for item in latest.items()]
                 else:
                     accumulator.extend(v)
         return self
@@ -69,9 +75,12 @@ class HiSparseKVConnectorStats(KVConnectorStats):
             "HiSparse hot-buffer misses": sum(self.data["cache_misses"]),
             "HiSparse host-to-device bytes": sum(self.data["host_to_device_bytes"]),
         }
-        if self.data["host_cache_usage_perc"]:
-            usage = self.data["host_cache_usage_perc"][-1]
-            reduced["HiSparse host KV cache usage %"] = round(100 * usage, 1)
+        usage_by_engine = dict(self.data["host_cache_usage_perc"])
+        for engine, usage in sorted(usage_by_engine.items()):
+            key = "HiSparse host KV cache usage %"
+            if len(usage_by_engine) > 1:
+                key += f" (DP{engine})"
+            reduced[key] = round(100 * usage, 1)
         return reduced
 
     def is_empty(self) -> bool:
@@ -150,4 +159,4 @@ class HiSparsePromMetrics(KVConnectorPromMetrics):
         for name, gauge in self.hisparse_gauges.items():
             values = transfer_stats_data.get(name, [])
             if values:
-                gauge[engine_idx].set(values[-1])
+                gauge[engine_idx].set(values[-1][1])
