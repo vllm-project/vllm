@@ -17,6 +17,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
@@ -306,6 +307,7 @@ class KimiK25ForConditionalGeneration(
 
     supports_encoder_tp_data = True
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
+    supports_mm_device_do_normalize = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -350,6 +352,7 @@ class KimiK25ForConditionalGeneration(
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             if self._maybe_ignore_quant_config(quant_config) is not None:
@@ -404,9 +407,6 @@ class KimiK25ForConditionalGeneration(
                 pixel_values.shape[0] * pixel_values.shape[1], *pixel_values.shape[2:]
             )
 
-        # The batch dimension of pixel_values has been flattened into shape[0]
-        target_dtype = next(self.vision_tower.parameters()).dtype
-        pixel_values = pixel_values.to(target_dtype)
         assert isinstance(grid_thws, torch.Tensor), (
             f"expect grid_thws to be a tensor, got {type(grid_thws)}"
         )
@@ -623,7 +623,12 @@ class KimiK25ForConditionalGeneration(
             ps = (ps, ps)
         total_patches = max_batch_size * ho * kh * wo * kw
         dummy_pixel_values = torch.zeros(
-            total_patches, 3, ps[0], ps[1], device=device, dtype=dtype
+            total_patches,
+            3,
+            ps[0],
+            ps[1],
+            device=device,
+            dtype=self.vision_tower.patch_embed.input_norm.input_dtype or dtype,
         )
 
         # max_seqlen must cover the worst case: one item consuming the full

@@ -152,6 +152,7 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
         for key in ("do_normalize", "do_rescale", "image_mean", "image_std")
     ):
         config = model_config.hf_image_processor_config
+    config = config.get("media_proc_cfg", config)
 
     has_norm_params = "image_mean" in config and "image_std" in config
     do_normalize = bool(config.get("do_normalize", has_norm_params))
