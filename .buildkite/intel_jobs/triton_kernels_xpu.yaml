@@ -418,7 +418,8 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pytest tests/kernels/quantization/test_per_token_group_quant.py::test_per_token_group_quant_fp8 -v || true'
+    'pytest tests/kernels/quantization/test_per_token_group_quant.py::test_per_token_group_quant_fp8 -v || true &&
+    pytest tests/kernels/moe/test_silu_mul_per_token_group_quant_fp8_colmajor.py::test_silu_mul_fp8_quant_deep_gemm -v || true'
 - label: R07
   key: r07
   device: intel_gpu
