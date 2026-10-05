@@ -158,6 +158,7 @@ class WorkerLoRAManager:
             lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
 
             # Validate classification-head weights.
+            self._adapter_manager._validate_lora_module_names(lora)
             self._adapter_manager._validate_modules_to_save(lora)
             self._adapter_manager._validate_token_classification_lora(lora)
 
