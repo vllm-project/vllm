@@ -163,8 +163,7 @@ __device__ __noinline__ bool histogram_medium_topk(
 
   if (thread_id == 0) {
     shared_threshold_bin = threshold_bin;
-    shared_buffered_count[0] = overflow::initial_buffered_count(
-        threshold_bin_count, MAX_BUFFERED_ITEMS);
+    shared_buffered_count[0] = 0;
     shared_output_count = 0;
   }
   __syncthreads();
@@ -200,7 +199,7 @@ __device__ __noinline__ bool histogram_medium_topk(
   }
 
   if (overflow::prepare_medium_fallback(
-          shared_buffered_count[0], MAX_BUFFERED_ITEMS, threshold_bin,
+          threshold_bin_count, MAX_BUFFERED_ITEMS, threshold_bin,
           remaining_k, medium_smem)) {
     return true;
   }

@@ -3,6 +3,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime.h>
+#include <cub/cub.cuh>
+
+#include "topk_histogram_4096.cuh"
 
 namespace vllm::persistent::overflow {
 
@@ -12,15 +16,10 @@ struct MediumFallbackState {
   uint32_t remaining;
 };
 
-__device__ __forceinline__ int initial_buffered_count(int coarse_count,
-                                                       int capacity) {
-  return coarse_count > capacity ? capacity + 1 : 0;
-}
-
 __device__ __forceinline__ bool prepare_medium_fallback(
-    int buffered_count, int capacity, int threshold_bin, int remaining,
+    int threshold_bin_count, int capacity, int threshold_bin, int remaining,
     void* smem) {
-  if (!__builtin_expect(buffered_count > capacity, 0)) return false;
+  if (!__builtin_expect(threshold_bin_count > capacity, 0)) return false;
   if (threadIdx.x == 0) {
     auto* state = static_cast<MediumFallbackState*>(smem);
     state->prefix = static_cast<uint32_t>(threshold_bin) << 21;
