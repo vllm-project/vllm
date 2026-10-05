@@ -1106,8 +1106,7 @@ class VllmConfig:
 
         logger.warning_once(
             "Dynamic speculative decoding is not supported with the '%s' "
-            "speculative method, which always proposes a fixed number of "
-            "speculative tokens. Disabling num_speculative_tokens_per_batch_size "
+            "speculative method. Disabling num_speculative_tokens_per_batch_size "
             "and falling back to static num_speculative_tokens=%d.",
             speculative_config.method,
             speculative_config.num_speculative_tokens,

@@ -82,6 +82,7 @@ def create_scheduler(
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
+    speculative_model: str = "ngram",
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -166,7 +167,7 @@ def create_scheduler(
     speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
         spec_kwargs: dict = dict(
-            model="ngram", num_speculative_tokens=num_speculative_tokens
+            model=speculative_model, num_speculative_tokens=num_speculative_tokens
         )
         if num_speculative_tokens_per_batch_size is not None:
             spec_kwargs["num_speculative_tokens_per_batch_size"] = (

@@ -251,35 +251,45 @@ def test_scheduler_passes_max_num_seqs_as_dsd_runtime_batch_limit():
     "method, expect_disabled",
     [
         ("ngram_gpu", True),
+        ("custom_class", True),
         ("ngram", False),
     ],
 )
-def test_dynamic_sd_disabled_for_fixed_k_method(method, expect_disabled, caplog_vllm):
-    schedule = [(1, 16, 3), (64, 128, 2), (256, 4096, 0)]
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_dynamic_sd_method_fallback(method, expect_disabled, dynamic, caplog_vllm):
+    schedule = [(1, 16, 3), (64, 128, 2), (256, 4096, 0)] if dynamic else None
     with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
         scheduler = create_scheduler(
             max_num_seqs=256,
             max_num_batched_tokens=2560,
             num_speculative_tokens=3,
             speculative_method=method,
+            speculative_model=(
+                "custom_proposer.CustomProposer"
+                if method == "custom_class"
+                else "ngram"
+            ),
             num_speculative_tokens_per_batch_size=schedule,
         )
 
     speculative_config = scheduler.vllm_config.speculative_config
     assert speculative_config is not None
-    if expect_disabled:
-        # Fixed-K proposers crash on a runtime K below the configured max, so
-        # dynamic SD is disabled and we fall back to a static schedule.
+    if expect_disabled or not dynamic:
         assert speculative_config.num_speculative_tokens_per_batch_size is None
         assert not speculative_config.uses_dynamic_speculative_decoding()
         assert scheduler.dynamic_sd_lookup is None
-        assert (
-            "Dynamic speculative decoding is not supported with the "
-            "'ngram_gpu' speculative method" in caplog_vllm.text
-        )
     else:
         # Proposers that honor a runtime K keep the dynamic schedule.
         assert speculative_config.num_speculative_tokens_per_batch_size == schedule
         assert speculative_config.uses_dynamic_speculative_decoding()
         assert scheduler.dynamic_sd_lookup is not None
+    if dynamic and expect_disabled:
+        assert f"'{method}' speculative method" in caplog_vllm.text
+        assert "falling back to static num_speculative_tokens=3" in caplog_vllm.text
+    else:
         assert "is not supported with the" not in caplog_vllm.text
+
+    output = _add_requests_and_schedule(scheduler, 256)
+    assert output.num_spec_tokens_to_schedule == (
+        0 if dynamic and not expect_disabled else 3
+    )

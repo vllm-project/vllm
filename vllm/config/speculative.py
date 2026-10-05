@@ -1955,12 +1955,16 @@ class SpeculativeConfig:
         return self.num_speculative_tokens_per_batch_size is not None
 
     def supports_dynamic_speculative_decoding(self) -> bool:
-        # Fixed-K proposers assert the runtime count equals the configured max.
-        return self.method not in (
-            "ngram_gpu",
-            "suffix",
-            "medusa",
-            "extract_hidden_states",
+        # Only these runner/proposer paths consume the scheduler's runtime K.
+        # Legacy MTP method names have already been normalized to "mtp".
+        return self.method in (
+            "ngram",
+            "eagle",
+            "eagle3",
+            "mtp",
+            "draft_model",
+            "dflash",
+            "dspark",
         )
 
     def uses_draft_model(self) -> bool:
