@@ -101,20 +101,26 @@ The heartbeat is deferred to the next step once the handshake completes --- the 
 
 ### Pull transfer completion
 
-Each READ carries a native NIXL completion notification encoded as
-`request_id:expected_readers:transfers_from_this_reader`. NIXL identifies the
-sending agent, so P counts completions separately for each reader. Topology
-determines how many readers must finish; each reader reports how many transfers
-it needs for that producer. These counts can differ between readers, for example
-when one has a local cache hit or only one nonempty memory-type slice.
+Every READ carries a native NIXL completion notification encoded as
+`request_id:expected_readers:transfers_from_this_reader`, so a reader sends one
+notification per transfer it issues, not one per request: a read split across
+memory types (a mixed DRAM/device read posts one READ per nonempty slice)
+produces one notification per READ. The `transfers_from_this_reader` field
+declares, in every notification from that reader, how many transfers it will
+issue for that producer. NIXL identifies the sending agent, so P counts
+notifications down separately for each reader and retires a reader only after
+its declared count has arrived. These counts can differ between readers: a
+reader with a single transfer declares one, while a reader with a fully local
+cache hit posts no READ at all and instead sends one immediate standalone
+acknowledgement with a transfer count of zero, which retires it right away.
 
-A mixed DRAM/device read attaches the same count to both transfer handles. P can
-release its blocks only after both complete and every other expected reader has
-finished. Notification delivery does not require D to poll completion. A reader
-that needs no data sends one explicit notification with a transfer count of zero.
-If a split read only partially posts or completes, its missing notification keeps
-P's blocks retained until lease expiry; successful siblings do not authorize an
-early release.
+Topology determines how many readers (`expected_readers`) must finish before P
+may release the request's blocks. A mixed DRAM/device read attaches the same
+declared count to both transfer handles, so P can release its blocks only after
+both complete and every other expected reader has finished. Notification
+delivery does not require D to poll completion. If a split read only partially
+posts or completes, its missing notification keeps P's blocks retained until
+lease expiry; successful siblings do not authorize an early release.
 
 This wire format requires matching NIXL connector protocol versions on P and D.
 It does not establish pause/resume safety for queued reads, lease renewal, local
