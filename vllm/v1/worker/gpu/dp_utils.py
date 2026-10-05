@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 import torch
-import torch.distributed as dist
 
 from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -15,6 +14,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
+from vllm.v1.worker.gpu.dp_metadata import all_reduce_dp_metadata
 from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
 
 
@@ -63,7 +63,7 @@ def sync_cudagraph_and_dp_padding(
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
-    group = get_dp_group().cpu_group
+    group = get_dp_group()
     tensor = torch.zeros(6, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
@@ -74,7 +74,7 @@ def sync_cudagraph_and_dp_padding(
     if should_skip_dp_coordination():
         tensor[:] = tensor[:, dp_rank, None].clone()
     else:
-        dist.all_reduce(tensor, group=group)
+        all_reduce_dp_metadata(tensor, group)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]

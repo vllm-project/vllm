@@ -177,6 +177,7 @@ if TYPE_CHECKING:
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
+    VLLM_DP_METADATA_TRANSPORT: Literal["gloo", "gloo-tree"] = "gloo"
     VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_ENABLE_PREGRAD_PASSES: bool = True
     VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
@@ -1475,6 +1476,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # World size of the data parallel setting
     "VLLM_DP_SIZE": lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
+    # CPU transport for V2 DP metadata synchronization. gloo-tree uses
+    # recursive doubling and requires a power-of-two DP group.
+    "VLLM_DP_METADATA_TRANSPORT": env_with_choices(
+        "VLLM_DP_METADATA_TRANSPORT", "gloo", ["gloo", "gloo-tree"]
+    ),
     # IP address of the master node in the data parallel setting
     "VLLM_DP_MASTER_IP": lambda: os.getenv("VLLM_DP_MASTER_IP", "127.0.0.1"),
     # Port of the master node in the data parallel setting
@@ -2305,6 +2311,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
+        # CPU metadata transport does not affect compiled graphs.
+        "VLLM_DP_METADATA_TRANSPORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_MODEL_REDIRECT_PATH",
