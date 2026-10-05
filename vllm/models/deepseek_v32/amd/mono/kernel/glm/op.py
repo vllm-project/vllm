@@ -17,13 +17,10 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import torch
 
 from vllm.models.deepseek_v32.amd.mono.kernel.config import (
     AttentionWeight,
-    GLM5_CONFIG,
     GLM5_KERNEL_SAMPLES,
     HIDDEN,
     KV_LORA,
@@ -32,16 +29,9 @@ from vllm.models.deepseek_v32.amd.mono.kernel.config import (
     NOPE_DIM,
     PE_DIM,
     Q_LORA,
+    SCALE_BM,
     V_DIM,
-    KvCacheLayout,
-    MoeMode,
-    Mxfp4ScaleLayout,
-    Mxfp4WeightLayout,
-    RouterWeightLayout,
-    as_kv_cache_layout,
-    glm5_attention_heads,
     glm5_tp_config,
-    validate_shard,
 )
 from vllm.models.deepseek_v32.amd.mono.kernel.glm.kernel import build_glm5_monokernel
 from vllm.models.deepseek_v32.amd.mono.kernel.glm.layout import (
@@ -51,20 +41,11 @@ from vllm.models.deepseek_v32.amd.mono.kernel.glm.layout import (
     stage_tasks,
 )
 from vllm.models.deepseek_v32.amd.mono.kernel.layout import TL_COLS
-from vllm.models.deepseek_v32.amd.mono.kernel.packing import (
-    pack_bf16,
-    pack_fp8,
-    pack_layer_weights,
-    pack_ptpc_fp8,
-)
+from vllm.models.deepseek_v32.amd.mono.kernel.packing import pack_bf16, pack_fp8, pack_mxfp4
 from vllm.models.deepseek_v32.amd.mono.kernel.runtime import SymmetricPeerBuffer
-from vllm.models.deepseek_v32.amd.mono.kernel.weights import LayerWeights, prepare_mxfp4_expert_storage
+from vllm.models.deepseek_v32.amd.mono.kernel.weights import LayerWeights
 
 __all__ = ["Glm5MonoKernel"]
-
-_FP8_DTYPES = frozenset(
-    d for d in (getattr(torch, "float8_e4m3fn", None), getattr(torch, "float8_e4m3fnuz", None)) if d is not None
-)
 
 
 def _tsig(t):
@@ -75,56 +56,23 @@ def _tsig(t):
 def prepare_glm5_weights(
     W: LayerWeights, attention_weight: AttentionWeight | str
 ) -> dict[str, torch.Tensor]:
-    """Pack one layer once for every graph bucket using it."""
+    """Pack one layer once for every graph bucket using it: attention (FP8 or BF16),
+    MXFP4 experts (scales stay native) and the BF16 router."""
 
     t = W.t
-    expert_mxfp4 = t["w_ug"].dtype is torch.uint8
-    moe_mode = MoeMode.A16W4 if expert_mxfp4 else MoeMode.W8A8
-    profile = replace(W.config, attention_weight=AttentionWeight(attention_weight))
-    if profile.attention_weight is AttentionWeight.FP8_PTPC:
-        attention = {
-            "w_qkv_a": t["w_qkv_a"],
-            "w_q_b": t["w_q_b"],
-            "w_uk": pack_ptpc_fp8(t["w_uk"]),
-            "w_uv": pack_ptpc_fp8(t["w_uv"]),
-            "w_o": t["w_o"],
-        }
-    else:
-        attention = pack_layer_weights(t, moe_mode, profile, attention_only=True)
-    atom_experts = (
-        expert_mxfp4
-        and W.mxfp4_weight_layout is Mxfp4WeightLayout.ATOM
-        and W.mxfp4_scale_layout is Mxfp4ScaleLayout.ATOM
-    )
-    if (
-        W.mxfp4_weight_layout is Mxfp4WeightLayout.ATOM
-        or W.mxfp4_scale_layout is Mxfp4ScaleLayout.ATOM
-    ) and not atom_experts:
-        raise ValueError(
-            "ATOM expert storage requires MXFP4 values and scales together"
-        )
-    if atom_experts:
-        packed = attention
-        packed["w_r"] = pack_bf16(t["w_r"])
-        packed.update(
-            dict(
-                zip(
-                    ("w_ug", "s_ug", "w_dn", "s_dn"),
-                    prepare_mxfp4_expert_storage(W, canonical=False),
-                )
-            )
-        )
-        return packed
-    if profile.attention_weight is AttentionWeight.FP8_PTPC:
-        raise ValueError("PTPC attention currently requires ATOM expert storage")
-    return pack_layer_weights(
-        t,
-        moe_mode,
-        profile,
-        mxfp4_weight_layout=Mxfp4WeightLayout.NATIVE,
-        mxfp4_scale_layout=Mxfp4ScaleLayout.NATIVE,
-        router_weight_layout=RouterWeightLayout.NATIVE,
-    )
+    names = ("w_qkv_a", "w_q_b", "w_uk", "w_uv", "w_o", "w_ug", "w_dn", "w_r")
+    missing = [name for name in names if name not in t]
+    if missing:
+        raise ValueError(f"missing layer weights: {', '.join(missing)}")
+    if t["w_ug"].dtype is not torch.uint8:
+        raise ValueError("the GLM-5 MonoKernel needs MXFP4 (uint8) expert weights")
+    bf16 = AttentionWeight(attention_weight) is AttentionWeight.BF16
+    packed = {
+        name: (pack_bf16 if bf16 else pack_fp8)(t[name]) for name in names[:5]
+    }
+    packed.update({name: pack_mxfp4(t[name]) for name in ("w_ug", "w_dn")})
+    packed["w_r"] = pack_bf16(t["w_r"])
+    return packed
 
 
 class Glm5MonoKernel:
@@ -152,11 +100,8 @@ class Glm5MonoKernel:
         with_indexer: bool = False,
         index_max_seq: int = 4096,
         attention_weight: AttentionWeight | str = AttentionWeight.FP8_BLOCK128,
-        kv_cache_layout: KvCacheLayout | str = KvCacheLayout.SPLIT,
-        kv_cache_dtype: str = "bf16",
         prepared_weights: dict[str, torch.Tensor] | None = None,
         runtime: "Glm5MonoKernel | None" = None,
-        dcp_size: int = 1,
         timeline=False,
         poll_limit: int | None = None,
         poll_early_out: bool = False,
@@ -174,18 +119,14 @@ class Glm5MonoKernel:
             raise ValueError(
                 f"Glm5MonoKernel requires {expected_config}, got {W.config}"
             )
-        output_heads = expected_config.local_heads
-        attention_heads = glm5_attention_heads(npes, dcp_size)
-        validate_shard(
-            samples,
-            W.heads,
-            rank,
-            npes,
-            topk,
-            W.config,
-            supported_samples=GLM5_KERNEL_SAMPLES,
-            expected_heads=attention_heads,
-        )
+        if samples not in GLM5_KERNEL_SAMPLES:
+            raise ValueError(f"samples must be one of {GLM5_KERNEL_SAMPLES}, got {samples}")
+        if W.heads != expected_config.local_heads:
+            raise ValueError(f"expected {expected_config.local_heads} local heads, got {W.heads}")
+        if not 0 <= rank < npes:
+            raise ValueError(f"rank must be in [0, {npes}), got {rank}")
+        if topk <= 0 or topk % 64:
+            raise ValueError(f"topk must be a positive multiple of 64, got {topk}")
         if not 1 <= launches_per_step <= 128:
             raise ValueError(
                 f"launches_per_step must be in [1, 128], got {launches_per_step}"
@@ -202,19 +143,12 @@ class Glm5MonoKernel:
             raise ValueError("index_paged requires with_indexer=True")
         self.index_max_seq = index_max_seq
         self.attention_weight = AttentionWeight(attention_weight)
-        self.kv_cache_layout = as_kv_cache_layout(kv_cache_layout)
-        if kv_cache_dtype not in ("bf16", "fp8"):
-            raise ValueError(f"unsupported KV cache dtype {kv_cache_dtype!r}")
-        self.kv_cache_dtype = kv_cache_dtype
-        self.dcp_size = dcp_size
-        self.output_heads = output_heads
         t = W.t
-        self.expert_mxfp4 = t["w_ug"].dtype is torch.uint8
-        self.atom_experts = (
-            self.expert_mxfp4
-            and W.mxfp4_weight_layout is Mxfp4WeightLayout.ATOM
-            and W.mxfp4_scale_layout is Mxfp4ScaleLayout.ATOM
-        )
+        if (
+            self.attention_weight is AttentionWeight.FP8_BLOCK128
+            and t["w_uv"].shape[0] // t["s_uv"].shape[0] != SCALE_BM
+        ):
+            raise ValueError("w_uv FP8 scales must cover 128-row blocks")
         self.packed = dict(
             prepare_glm5_weights(W, self.attention_weight)
             if prepared_weights is None
@@ -246,8 +180,6 @@ class Glm5MonoKernel:
             with_indexer,
             index_max_seq,
             inter=W.config.inter,
-            output_heads=output_heads,
-            dcp_size=dcp_size,
             split_keys=64 if split_keys64 else None,
         )
         dev = torch.device("cuda", torch.accelerator.current_device_index())
@@ -257,7 +189,6 @@ class Glm5MonoKernel:
             topk,
             with_indexer,
             index_max_seq,
-            self.expert_mxfp4,
             inter=W.config.inter,
             split_keys=64 if split_keys64 else None,
         )
@@ -326,20 +257,8 @@ class Glm5MonoKernel:
             launches_per_step=launches_per_step,
             with_indexer=with_indexer,
             index_max_seq=index_max_seq,
-            expert_mxfp4=self.expert_mxfp4,
-            atom_experts=self.atom_experts,
             attention_weight=self.attention_weight,
-            kv_cache_layout=self.kv_cache_layout,
-            kv_cache_dtype=self.kv_cache_dtype,
             inter=W.config.inter,
-            output_heads=output_heads,
-            dcp_size=dcp_size,
-            uv_scale_rows=(
-                128
-                if self.attention_weight
-                in (AttentionWeight.BF16, AttentionWeight.FP8_PTPC)
-                else W.t["w_uv"].shape[0] // W.t["s_uv"].shape[0]
-            ),
             timeline=timeline,
             poll_limit=poll_limit,
             poll_early_out=poll_early_out,
@@ -447,12 +366,9 @@ class Glm5MonoKernel:
                 p(h) + row * HIDDEN * h.element_size(),
                 p(x_out) + row * HIDDEN * x_out.element_size(),
                 p(cur_pos),
-                p(cur_pos if positions is None else positions)
-                + (0 if positions is None else row * 8),
-                p(cur_pos if slot_mapping is None else slot_mapping)
-                + (0 if slot_mapping is None else row * 8),
-                p(cur_pos if sparse_kv_indptr is None else sparse_kv_indptr)
-                + (0 if sparse_kv_indptr is None else row * 4),
+                p(positions) + row * 8,
+                p(slot_mapping) + row * 8,
+                p(sparse_kv_indptr) + row * 4,
                 p(kv_cache),
                 p(pe_cache),
                 p(index_cache) if (self.with_indexer and not self.index_paged) else p(indices),
@@ -506,40 +422,30 @@ class Glm5MonoKernel:
                     f"index_cache must be bf16 [{self.index_max_seq}, {INDEX_DIM}], got "
                     f"{tuple(index_cache.shape)} {index_cache.dtype}"
                 )
-        if self.kv_cache_layout is KvCacheLayout.ATOM:
-            cache_width = GLM5_CONFIG.kv_lora + GLM5_CONFIG.pe_dim
-            expected_dtype = (
-                kv_cache.dtype in _FP8_DTYPES
-                if self.kv_cache_dtype == "fp8"
-                else kv_cache.dtype is torch.bfloat16
+        cache_width = KV_LORA + PE_DIM
+        if kv_cache.dtype is not torch.bfloat16 or not kv_cache.is_contiguous():
+            raise ValueError("the MLA KV cache must be contiguous bf16")
+        if kv_cache.shape[-1] != cache_width:
+            raise ValueError(
+                f"MLA KV cache last dimension must be {cache_width}, got {tuple(kv_cache.shape)}"
             )
-            if not expected_dtype or not kv_cache.is_contiguous():
-                raise ValueError(
-                    f"ATOM KV cache must be contiguous {self.kv_cache_dtype}"
-                )
-            if kv_cache.shape[-1] != cache_width:
-                raise ValueError(
-                    f"ATOM KV cache last dimension must be {cache_width}, got {tuple(kv_cache.shape)}"
-                )
-            if kv_cache.data_ptr() != pe_cache.data_ptr():
-                raise ValueError(
-                    "ATOM KV cache layout requires the same fused tensor for kv_cache and pe_cache"
-                )
-            for name, value, dtype, size in (
-                ("positions", positions, torch.int64, total_samples),
-                ("slot_mapping", slot_mapping, torch.int64, total_samples),
-                ("sparse_kv_indptr", sparse_kv_indptr, torch.int32, total_samples + 1),
+        if kv_cache.data_ptr() != pe_cache.data_ptr():
+            raise ValueError("kv_cache and pe_cache must be the same fused [slots, 576] tensor")
+        for name, value, dtype, size in (
+            ("positions", positions, torch.int64, total_samples),
+            ("slot_mapping", slot_mapping, torch.int64, total_samples),
+            ("sparse_kv_indptr", sparse_kv_indptr, torch.int32, total_samples + 1),
+        ):
+            if (
+                value is None
+                or value.dtype is not dtype
+                or value.numel() < size
+                or not value.is_contiguous()
             ):
-                if (
-                    value is None
-                    or value.dtype is not dtype
-                    or value.numel() < size
-                    or not value.is_contiguous()
-                ):
-                    got = None if value is None else (tuple(value.shape), value.dtype)
-                    raise ValueError(
-                        f"{name} must be contiguous {dtype} with at least {size} values, got {got}"
-                    )
+                got = None if value is None else (tuple(value.shape), value.dtype)
+                raise ValueError(
+                    f"{name} must be contiguous {dtype} with at least {size} values, got {got}"
+                )
 
     def _weight_ptrs(self) -> tuple[int, ...]:
         """The 20 fixed weight / scale pointers of the launch ABI, in order (built once, on the first
@@ -658,7 +564,7 @@ class Glm5MonoKernel:
             q_nope=self.debug("q_nope", (S, H, NOPE_DIM), bf2=True),
             q_pe=self.debug("q_pe", (S, H, PE_DIM), bf2=True),
             q_lat=self.debug("q_lat", (S, H, KV_LORA), bf2=True),
-            o=self.debug("o", (S, self.output_heads * V_DIM), bf2=True),
+            o=self.debug("o", (S, H * V_DIM), bf2=True),
             a=self.debug("a", (S, HIDDEN), bf2=True).to(torch.bfloat16),
             scores=self.debug("scores", (S, N_EXPERTS)),
             sel=self.debug("sel", (S, MOE_SLOTS), torch.int32),

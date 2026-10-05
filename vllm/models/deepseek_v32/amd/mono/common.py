@@ -92,7 +92,6 @@ def build_width_ops(
     packed weights to reuse or None. ``extra_kwargs_for(L)`` -> extra Glm5MonoKernel
     kwargs (e.g. the fused indexer) or None; layers with a different scratch geometry
     (with_indexer) get their own shared runtime (the first such op owns it)."""
-    from vllm.models.deepseek_v32.amd.mono.kernel.config import KvCacheLayout
     from vllm.models.deepseek_v32.amd.mono.kernel.glm.op import Glm5MonoKernel
 
     ops: dict[tuple[int, int], Any] = {}
@@ -108,8 +107,6 @@ def build_width_ops(
             group=group,
             topk=TOPK,
             attention_weight=attention_weight,
-            kv_cache_layout=KvCacheLayout.ATOM,
-            kv_cache_dtype="bf16",
             poll_limit=poll_limit,
             prepared_weights=None if prepared_for is None else prepared_for(L),
             runtime=runtimes.get(key),
