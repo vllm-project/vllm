@@ -36,7 +36,11 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory, MoERunner
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    MoERunner,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -69,6 +73,7 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 
@@ -306,11 +311,11 @@ class SarvamMLAMoE(nn.Module):
         else:
             self.router_dtype = torch.bfloat16
 
-        self.gate = nn.Linear(
+        self.gate = GateLinear(
             self.hidden_size,
             self.num_experts,
-            bias=False,
-            dtype=self.router_dtype,
+            out_dtype=self.router_dtype,
+            prefix=f"{prefix}.gate",
         )
 
         if getattr(config, "moe_router_enable_expert_bias", True):
@@ -365,12 +370,7 @@ class SarvamMLAMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        router_logits = self.gate(
-            hidden_states.to(self.router_dtype)
-            if self.router_dtype is not None
-            else hidden_states
-        )
-        router_logits = router_logits.to(hidden_states.dtype)
+        router_logits, _ = self.gate(hidden_states)
         final_hidden = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -461,7 +461,9 @@ class SarvamMLABlock(nn.Module):
     }
 )
 class SarvamMLAModel(nn.Module, EagleModelMixin):
-    """Sarvam MLA backbone with stage-local EAGLE3 auxiliary capture."""
+    """Sarvam MLA backbone with EAGLE3 auxiliary capture across pipeline stages."""
+
+    supports_aux_hidden_states_over_pp = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
@@ -488,8 +490,10 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
         self.vocab_size = config.vocab_size
         self.embed_dim = config.hidden_size
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
-        if get_pp_group().is_first_rank or (
-            self.tie_word_embeddings and get_pp_group().is_last_rank
+        if (
+            get_pp_group().is_first_rank
+            or (self.tie_word_embeddings and get_pp_group().is_last_rank)
+            or spec_decode_needs_target_embed(vllm_config)
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
@@ -531,13 +535,11 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         """Run this stage and optionally return its auxiliary hidden states.
 
-        Auxiliary captures are local to this stage, matching Qwen3 MoE.
-        Pipeline transport carries only hidden states and residual; EAGLE3
-        capture across pipeline stages is not supported by this model.
-
         Returns:
-            Intermediate tensors on non-final stages. On the final stage,
-            normalized hidden states, paired with auxiliary states if captured.
+            Intermediate tensors with local auxiliary states on non-final stages.
+            On the final stage, normalized hidden states paired with the ordered
+            auxiliary states from all stages if captured.
+
         """
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -551,9 +553,12 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state(
-            [], self.start_layer, hidden_states, residual
-        )
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -569,13 +574,18 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         if residual is None:
             hidden_states = self.norm(hidden_states)
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
 
+        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -643,9 +653,21 @@ class SarvamMLAForCausalLM(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    @staticmethod
+    def _remap_config(config) -> None:
+        """Default the routing keys the released checkpoints omit."""
+        defaults = {
+            "n_group": 1,
+            "topk_group": 1,
+        }
+        for attr, default in defaults.items():
+            if getattr(config, attr, None) is None:
+                setattr(config, attr, default)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
+        self._remap_config(config)
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
