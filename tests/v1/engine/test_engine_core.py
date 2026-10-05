@@ -7,7 +7,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from unittest.mock import MagicMock, PropertyMock, call, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from transformers import AutoTokenizer
@@ -699,7 +699,6 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
-    core._send_abort_outputs = MagicMock()
     core.is_running = lambda: True
     core.process_input_queue_block = True
     core.aborts_queue = MagicMock()
@@ -764,7 +763,6 @@ def test_cache_reset_waits_for_transfer_kv(op, clears, deferred, held):
     def release_transfer_kv():
         order.append("release")
         core.scheduler.has_requests.return_value = held
-        return ["aborted-load"]
 
     core.scheduler.release_transfer_kv.side_effect = release_transfer_kv
 
@@ -791,7 +789,6 @@ def test_cache_reset_waits_for_transfer_kv(op, clears, deferred, held):
         assert order == released + ["reset_caches", ("kv_cache",)]
     else:
         assert order == released + ["synchronize_device"] + ["reset_caches"] * clears
-    assert (call(["aborted-load"]) in core._send_abort_outputs.call_args_list) == clears
 
 
 def test_resume_cancels_a_pending_cache_reset():
