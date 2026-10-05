@@ -3022,10 +3022,8 @@ class GPUModelRunner(
             )
             self.lora_manager.set_active_adapters(lora_requests, tower_mapping)
 
-            # Only set connector mapping if the model actually has a connector.
-            # Some multimodal models inherit a stub `get_num_mm_connector_tokens`
-            # from `SupportsMultiModal`, which returns None and should not be
-            # treated as a signal that connector LoRA is supported.
+            # Only set connector mapping if the model actually has a connector
+            # and reports connector token counts.
             mm_mapping = (
                 self.model.get_mm_mapping()  # type: ignore[attr-defined]
                 if hasattr(self.model, "get_mm_mapping")
