@@ -202,6 +202,20 @@ def mc() -> MultiConnector:
     return mc
 
 
+@pytest.mark.parametrize("chosen", [0, 1])
+def test_loaded_groups_follow_the_connector_serving_the_request(mc, chosen):
+    request = MagicMock(request_id="request")
+    for i, connector in enumerate(mc._connectors):
+        connector.get_num_new_matched_tokens.return_value = (
+            (16, True) if i == chosen else (0, False)
+        )
+        connector.get_loaded_kv_cache_group_ids.return_value = (i,)
+
+    assert mc.get_num_new_matched_tokens(request, 0) == (16, True)
+    assert mc.get_loaded_kv_cache_group_ids(request) == (chosen,)
+    mc._connectors[1 - chosen].get_loaded_kv_cache_group_ids.assert_not_called()
+
+
 def test_multi_connector_mem_pool_context_none(mc: MultiConnector):
     assert mc.get_mem_pool_context() is None
 
@@ -601,6 +615,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             }
         }
 
@@ -626,6 +641,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             },
             "MockConnector": {"mock_field": [1, 2, 3]},
         }
@@ -657,6 +673,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             },
         }
 
@@ -678,6 +695,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             }
         )
         mock_stats = MockConnectorStats(data={"mock_field": [1, 2, 3]})
@@ -709,6 +727,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             }
         )
 
@@ -742,6 +761,7 @@ class TestMultiConnectorStats:
                 "num_failed_notifications": [],
                 "num_failed_handshakes": [],
                 "num_kv_expired_reqs": [],
+                "num_notifications_after_expiry": [],
             },
             "ExampleConnector": {"some_field": [1, 2, 3]},
         }
@@ -781,6 +801,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }
@@ -798,6 +819,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }
@@ -831,6 +853,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }
@@ -859,6 +882,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }
@@ -887,6 +911,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }
@@ -918,6 +943,7 @@ class TestMultiConnectorStats:
                         "num_failed_notifications": [],
                         "num_failed_handshakes": [],
                         "num_kv_expired_reqs": [],
+                        "num_notifications_after_expiry": [],
                     }
                 )
             }

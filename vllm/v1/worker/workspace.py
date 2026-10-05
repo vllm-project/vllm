@@ -4,7 +4,7 @@
 import inspect
 import os
 from collections.abc import Callable, Hashable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from itertools import accumulate
 from math import prod
@@ -58,8 +58,10 @@ class WorkspaceManager:
         device: torch.device,
         num_ubatches: int | None = None,
         num_lanes: int = 1,
+        alloc_context: Callable[[], AbstractContextManager] = nullcontext,
     ):
         self._device = device
+        self._alloc_context = alloc_context
         # Cache num ubatches at init based on configuration (default to 1)
         self._num_ubatches = num_ubatches if num_ubatches is not None else 1
         if num_lanes < 1:
@@ -261,9 +263,11 @@ class WorkspaceManager:
             # dead segment in reserved memory which can cause higher peak
             # memory usage.
             torch.accelerator.empty_cache()
-            self._current_workspaces[workspace_id] = torch.empty(
-                (required_bytes,), dtype=torch.uint8, device=self._device
-            )
+            # In sleep mode, entering the pool also trims outgrown buffers.
+            with self._alloc_context():
+                self._current_workspaces[workspace_id] = torch.empty(
+                    (required_bytes,), dtype=torch.uint8, device=self._device
+                )
             current_workspace = self._current_workspaces[workspace_id]
 
             if envs.VLLM_DEBUG_WORKSPACE:
@@ -308,6 +312,7 @@ def init_workspace_manager(
     device: torch.device,
     num_ubatches: int | None = None,
     num_lanes: int = 1,
+    alloc_context: Callable[[], AbstractContextManager] = nullcontext,
 ) -> None:
     """Initialize the workspace manager with a device.
 
@@ -318,6 +323,7 @@ def init_workspace_manager(
         device: The device to allocate workspace on.
         num_ubatches: Number of workspace ubatch slots. Defaults to 1.
         num_lanes: Number of independent execution lanes per ubatch. Defaults to 1.
+        alloc_context: Factory for the context scratch is allocated in.
 
     """
     global _manager
@@ -328,7 +334,7 @@ def init_workspace_manager(
             _manager._device,
             device,
         )
-    _manager = WorkspaceManager(device, num_ubatches, num_lanes)
+    _manager = WorkspaceManager(device, num_ubatches, num_lanes, alloc_context)
 
 
 def lock_workspace() -> None:

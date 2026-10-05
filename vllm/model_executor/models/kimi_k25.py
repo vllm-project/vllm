@@ -17,6 +17,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
@@ -136,9 +137,9 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         # may remap token IDs vs config.json.
         config_token_id = hf_config.media_placeholder_token_id
         resolved_token_id = tokenizer.convert_tokens_to_ids("<|media_pad|>")
+        unk_token_id = getattr(tokenizer, "unk_token_id", None)
         is_valid_resolved = isinstance(resolved_token_id, int) and (
-            tokenizer.unk_token_id is None
-            or resolved_token_id != tokenizer.unk_token_id
+            unk_token_id is None or resolved_token_id != unk_token_id
         )
         if is_valid_resolved and resolved_token_id != config_token_id:
             logger.warning_once(
@@ -165,7 +166,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         )
         self.media_tokens_calculator = image_processor.media_tokens_calculator
 
-    def get_hf_processor(self):
+    def get_hf_processor(self, **kwargs: object):
         return self.hf_processor
 
     def get_hf_config(self):
@@ -191,7 +192,11 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
         )
 
         video_chunk_dummy_item = VisionChunkVideo(
-            type="video_chunk", video_chunk=dummy_videos
+            type="video_chunk",
+            video_chunk=dummy_videos,
+            uuid=None,
+            prompt="",
+            video_idx=0,
         )
         video_chunk_num_tokens = self.info.media_tokens_calculator(
             video_chunk_dummy_item
@@ -204,6 +209,7 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
                 width=MaxImageTokenMeta.width,
                 num_images=1,
             )[0],
+            uuid=None,
         )
         image_num_tokens = self.info.media_tokens_calculator(image_dummy_item)
         # return the larger one
@@ -301,6 +307,7 @@ class KimiK25ForConditionalGeneration(
 
     supports_encoder_tp_data = True
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
+    supports_mm_device_do_normalize = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -345,6 +352,7 @@ class KimiK25ForConditionalGeneration(
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
                 quant_config=self._maybe_ignore_quant_config(quant_config),
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             if self._maybe_ignore_quant_config(quant_config) is not None:
@@ -377,7 +385,7 @@ class KimiK25ForConditionalGeneration(
         )
         self.media_placeholder: int = self.config.media_placeholder_token_id
 
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig | None):
         if isinstance(quant_config, compressed_tensors.CompressedTensorsConfig):
             return None
         return quant_config
@@ -392,15 +400,13 @@ class KimiK25ForConditionalGeneration(
 
         if isinstance(pixel_values, list):
             pixel_values = torch.cat(pixel_values, dim=0)
+        assert isinstance(pixel_values, torch.Tensor)
 
         if len(pixel_values.shape) == 5 or len(pixel_values.shape) == 3:
             pixel_values = pixel_values.reshape(
                 pixel_values.shape[0] * pixel_values.shape[1], *pixel_values.shape[2:]
             )
 
-        # The batch dimension of pixel_values has been flattened into shape[0]
-        target_dtype = next(self.vision_tower.parameters()).dtype
-        pixel_values = pixel_values.to(target_dtype)
         assert isinstance(grid_thws, torch.Tensor), (
             f"expect grid_thws to be a tensor, got {type(grid_thws)}"
         )
@@ -612,12 +618,17 @@ class KimiK25ForConditionalGeneration(
 
         grid_thw_list = [[1, ho * kh, wo * kw] for _ in range(max_batch_size)]
 
-        ps = self.vision_tower.patch_size
+        ps: int | tuple[int, int] = self.vision_tower.patch_size
         if isinstance(ps, int):
             ps = (ps, ps)
         total_patches = max_batch_size * ho * kh * wo * kw
         dummy_pixel_values = torch.zeros(
-            total_patches, 3, ps[0], ps[1], device=device, dtype=dtype
+            total_patches,
+            3,
+            ps[0],
+            ps[1],
+            device=device,
+            dtype=self.vision_tower.patch_embed.input_norm.input_dtype or dtype,
         )
 
         # max_seqlen must cover the worst case: one item consuming the full

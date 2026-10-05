@@ -103,6 +103,9 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
+    # [num_reqs] only populated for non-dummy pipeline-parallel batches.
+    max_seq_len_np: np.ndarray | None = None
+
     # Longest query the batch may contain. Set when a cudagraph descriptor promises
     # a query length this batch's own split does not reach, so attention metadata
     # stays valid for every replay the graph serves.
@@ -203,6 +206,7 @@ class InputBatch:
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
             has_prefill=False,
+            max_seq_len_np=None,
             decode_graph_eligible=True,
             input_ids=input_ids,
             positions=positions,

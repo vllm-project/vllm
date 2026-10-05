@@ -139,7 +139,7 @@ class TestValidatePrompt:
 
         with pytest.raises(TypeError, match="should be a list of integers"):
             renderer.render_prompts(
-                _preprocess_prompt(renderer.model_config, [[1, 2], ["foo", "bar"]])  # type: ignore[arg-type]
+                _preprocess_prompt(renderer.model_config, [[1, 2], ["foo", "bar"]])
             )
 
 

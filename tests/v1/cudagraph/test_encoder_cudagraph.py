@@ -652,7 +652,7 @@ def test_eonly_capture_preserves_outputs_across_replay_and_fallback(profile_only
     encoder.device = device
     encoder.cudagraph_manager = manager
     runner = object.__new__(MMEncoderModelRunner)
-    runner.model_state = SimpleNamespace(encoder_runner=encoder)  # type: ignore[assignment]
+    runner.model_state = SimpleNamespace(encoder_runner=encoder)
     # No decoder manager is installed: capture must be encoder-only.
     with patch(
         "vllm.v1.worker.mm_encoder_model_runner.lock_workspace", wraps=lock_workspace
@@ -673,7 +673,7 @@ def test_eonly_capture_preserves_outputs_across_replay_and_fallback(profile_only
     with patch(
         "vllm.v1.worker.gpu.ec_connector.get_ec_transfer", return_value=connector
     ):
-        ec = ActiveECConnector(SimpleNamespace(), cache)  # type: ignore[arg-type]
+        ec = ActiveECConnector(SimpleNamespace(), cache)
     scheduled = cast(
         SchedulerOutput,
         SimpleNamespace(
@@ -716,7 +716,7 @@ def test_eonly_without_encoder_graph_skips_capture():
     encoder = object.__new__(EncoderRunner)
     encoder.cudagraph_manager = None
     runner = object.__new__(MMEncoderModelRunner)
-    runner.model_state = SimpleNamespace(encoder_runner=encoder)  # type: ignore[assignment]
+    runner.model_state = SimpleNamespace(encoder_runner=encoder)
     assert runner.capture_model() == 0
 
 
@@ -1023,7 +1023,7 @@ class TestInitInvariantValidation:
         vllm_config = _MockVllmConfig(token_budgets, max_mm_items)
         model = _MockModel(min_budget, max_budget)
         return EncoderCudaGraphManager(
-            vllm_config=vllm_config,  # type: ignore[arg-type]
+            vllm_config=vllm_config,
             device=torch.device("cpu"),
             dtype=torch.float32,
             model=model,

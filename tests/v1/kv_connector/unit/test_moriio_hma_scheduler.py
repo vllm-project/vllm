@@ -67,7 +67,6 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
         self._num_ssm_scratch_blocks = 0
-        self._ssm_state_slots_are_positional = False
         self._is_hma_required = False
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
@@ -130,7 +129,7 @@ def _mamba_spec(num_states: int = 2, *, num_speculative_blocks: int = 0):
         block_size=16,
         shapes=shapes,
         dtypes=(torch.float32,) * num_states,
-        mamba_cache_mode="all",
+        mamba_cache_mode="align",
         num_speculative_blocks=num_speculative_blocks,
     )
 
@@ -146,7 +145,7 @@ def _gate_vllm_config(
     block_size: int = 16,
     num_lookahead_tokens: int = 0,
     num_speculative_tokens: int = 0,
-    mamba_cache_mode: str = "all",
+    mamba_cache_mode: str = "align",
     dcp_size: int = 1,
 ):
     return SimpleNamespace(
@@ -193,7 +192,7 @@ def test_split_block_groups_ignores_transfer_disabled_group():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="all",
+        mamba_cache_mode="align",
     )
     config = SimpleNamespace(
         kv_cache_groups=[
@@ -361,7 +360,6 @@ def test_scheduler_accepts_dspark_with_wrapped_full_attention(
         block_size=4,
         num_lookahead_tokens=7,
         num_speculative_tokens=7,
-        mamba_cache_mode="align",
         dcp_size=dcp_size,
     )
     scheduler = moriio_connector.MoRIIOConnectorScheduler(vllm_config, "engine", config)
@@ -398,21 +396,6 @@ def test_scheduler_accepts_dspark_with_wrapped_full_attention(
         )
 
 
-def test_scheduler_rejects_dspark_with_positional_mamba_cache():
-    """Positional mode counts lookahead in the Mamba allocation, so the
-    one-block recurrent-state tail bound no longer holds."""
-    with pytest.raises(moriio_common.MoRIIOError, match="mamba_cache_mode"):
-        moriio_connector.MoRIIOConnectorScheduler(
-            _gate_vllm_config(
-                speculative_config=_spec_config("dspark"),
-                block_size=4,
-                mamba_cache_mode="all",
-            ),
-            "engine",
-            _dspark_wrapped_attention_config(),
-        )
-
-
 def test_scheduler_rejects_hybrid_write():
     config = SimpleNamespace(
         kv_cache_groups=[
@@ -441,20 +424,7 @@ def test_split_block_groups_accepts_empty_abort_payload():
     assert sched.split_block_groups(()) == ([], [])
 
 
-def test_split_block_groups_keeps_positional_slots_in_all_mode():
-    # mamba_cache_mode="all" keeps a state per block position.
-    sched = _FakeScheduler(
-        _has_mamba=True,
-        _attn_group_ids=[0],
-        _mamba_group_ids=[1],
-        _ssm_state_slots_are_positional=True,
-    )
-    attn, mamba = sched.split_block_groups(([1], [40, 41, 42]))
-    assert attn == [1]
-    assert mamba == [[40, 41, 42]]
-
-
-def test_split_block_groups_keeps_only_running_state_outside_all_mode():
+def test_split_block_groups_keeps_only_running_state():
     sched = _FakeScheduler(
         _has_mamba=True,
         _attn_group_ids=[0],
@@ -464,24 +434,21 @@ def test_split_block_groups_keeps_only_running_state_outside_all_mode():
 
 
 @pytest.mark.parametrize(
-    "positional,blocks,expected",
+    "blocks,expected",
     [
-        # Trailing scratch slots go in either cache mode.
-        (True, [40, 41, 42], [40]),
-        # Outside "all" the running state is picked only after they are gone.
-        (False, [40, 41, 42, 43], [41]),
+        # The running state is picked only after the scratch slots are gone.
+        ([40, 41, 42, 43], [41]),
         # Never empty: a list shorter than the scratch count keeps one state.
-        (True, [40], [40]),
-        (False, [], []),
+        ([40], [40]),
+        ([], []),
     ],
 )
-def test_split_block_groups_strips_dspark_scratch_slots(positional, blocks, expected):
+def test_split_block_groups_strips_dspark_scratch_slots(blocks, expected):
     sched = _FakeScheduler(
         _has_mamba=True,
         _attn_group_ids=[0],
         _mamba_group_ids=[1],
         _num_ssm_scratch_blocks=2,
-        _ssm_state_slots_are_positional=positional,
     )
 
     assert sched.split_block_groups(([1], blocks)) == ([1], [expected])
@@ -555,7 +522,6 @@ def _make_read_scheduler():
         _has_mamba=True,
         _attn_group_ids=[0],
         _mamba_group_ids=[1],
-        _ssm_state_slots_are_positional=True,
         request_id_to_transfer_id={},
         transfer_id_to_request_id={},
         _reqs_need_recv={},
@@ -578,17 +544,17 @@ def _make_read_request(remote_block_ids):
 
 def test_update_state_drops_decode_recompute_tail_block():
     sched = _make_read_scheduler()
-    request = _make_read_request([[10, 11], [90, 91]])
+    request = _make_read_request([[10, 11], [91]])
     blocks = _FakeBlocks(
         all_groups=([100, 101, 102], [200, 201, 202]),
     )
 
     sched.update_state_after_alloc(request, blocks, num_external_tokens=256)
 
-    assert sched._reqs_need_recv["req"][1] == [[100, 101], [200, 201]]
+    assert sched._reqs_need_recv["req"][1] == [[100, 101], [202]]
     assert sched._req_kv_params["req"]["remote_block_ids"] == [
         [10, 11],
-        [90, 91],
+        [91],
     ]
 
 
@@ -609,7 +575,6 @@ def test_update_state_pairs_trimmed_mamba_state_with_remote_state():
     """The DSpark shape end to end: scratch slots are stripped, the running
     state is then selected, and the attention list loses its lookahead tail."""
     sched = _make_read_scheduler()
-    sched._ssm_state_slots_are_positional = False
     sched._num_ssm_scratch_blocks = 2
     sched._max_decode_tail_blocks = 2
     request = _make_read_request([[10, 11], [90]])

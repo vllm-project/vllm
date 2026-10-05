@@ -472,9 +472,11 @@ class HiSparseResidentSpec(KVCacheSpec):
         return cdiv(num_tokens, self.block_size)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        return cdiv(vllm_config.model_config.max_model_len, self.block_size) * (
-            self.page_size
+        max_blocks = self.max_admission_blocks_per_request(
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_model_len=vllm_config.model_config.max_model_len,
         )
+        return max_blocks * self.page_size
 
     @property
     def has_layer_views(self) -> bool:
@@ -484,6 +486,9 @@ class HiSparseResidentSpec(KVCacheSpec):
 @dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
     dcp_sharded: bool = True
+    max_tp_shards: int | None = None
+    """Distinct shards this cache splits into across TP; TP ranks beyond this
+    hold replicas. None: unknown, treated as not replicated."""
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
@@ -618,6 +623,7 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             dcp_sharded=specs[0].dcp_sharded,
+            max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -705,6 +711,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             dcp_sharded=specs[0].dcp_sharded,
+            max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -768,6 +775,7 @@ class RSWASpec(FullAttentionSpec):
             dtype=base.dtype,
             kv_quant_mode=base.kv_quant_mode,
             dcp_sharded=base.dcp_sharded,
+            max_tp_shards=base.max_tp_shards,
             page_size_padded=base.page_size_padded,
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
@@ -960,6 +968,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         bounded_replay_set = set(spec.bounded_replay for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
         assert len({spec.dcp_sharded for spec in specs}) == 1
+        assert len({spec.max_tp_shards for spec in specs}) == 1
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
@@ -980,6 +989,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             dcp_sharded=specs[0].dcp_sharded,
+            max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -1071,12 +1081,7 @@ class MambaSpec(KVCacheSpec):
         return None
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        if vllm_config.cache_config.mamba_cache_mode == "all":
-            max_model_len = vllm_config.model_config.max_model_len
-            return (
-                cdiv(max_model_len, self.block_size) + self.num_speculative_blocks
-            ) * self.page_size_bytes
-        elif vllm_config.cache_config.mamba_cache_mode == "align":
+        if vllm_config.cache_config.mamba_cache_mode == "align":
             return self.page_size_bytes * (
                 2 + self.num_speculative_blocks + self.num_prefill_checkpoint_blocks
             )
@@ -1197,6 +1202,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             dcp_sharded=specs[0].dcp_sharded,
+            max_tp_shards=specs[0].max_tp_shards,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -1482,6 +1488,9 @@ class KVCacheConfig:
 
     hisparse_shared_host_pool: bool = False
     """Whether local TP ranks share one physical HiSparse host pool."""
+
+    kv_tp_replicas: int = 1
+    """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:

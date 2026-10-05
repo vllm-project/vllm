@@ -194,6 +194,7 @@ def _slice_input_batch(
             if input_batch.prompt_lens is None
             else input_batch.prompt_lens[req_start:req_stop]
         ),
+        max_seq_len_np=None,
         fast_prefill=None,
     )
 

@@ -662,6 +662,10 @@ class HiSparseIndexGroup:
         self.lru_init = torch.arange(region_stride, dtype=torch.int16, device=device)
         self.lru_slots = self.lru_init.repeat(max_num_reqs, 1).contiguous()
         self.shared_topk = _create_shared_topk_state(device, max_swap_rows, top_k)
+        # Request ids the resolver reads, built on the copy stream: a
+        # compute-stream write would race with its logical_topk_ready wait.
+        self.row_indices = torch.arange(max_swap_rows, dtype=torch.int32, device=device)
+        self.request_ids = torch.empty_like(self.row_indices)
         self.copy_stream = (
             copy_stream if copy_stream is not None else _create_copy_stream(device)
         )
@@ -997,6 +1001,7 @@ class HiSparseRuntime:
         shared_rows: slice,
         attention_indices_out: torch.Tensor | None,
         valid_counts_out: torch.Tensor | None,
+        num_valid_rows: torch.Tensor,
     ) -> None:
         group = self.index_group
         compute_stream = current_stream()
@@ -1005,9 +1010,17 @@ class HiSparseRuntime:
         else:
             group.copy_stream.wait_stream(compute_stream)
         with group.copy_stream:
+            # CUDA-graph padding rows past the batch's tokens map to request 0;
+            # mark them -1 so residency resolution skips them.
+            num_tokens = logical_topk_indices.shape[0]
+            request_ids = group.request_ids[:num_tokens]
+            request_ids.copy_(req_id_per_token)
+            request_ids.masked_fill_(
+                group.row_indices[:num_tokens] >= num_valid_rows, -1
+            )
             self._resolve_residency(
                 resident=resident,
-                req_id_per_token=req_id_per_token,
+                req_id_per_token=request_ids,
                 block_table=block_table,
                 topk_indices=logical_topk_indices,
                 block_size=block_size,
@@ -1051,6 +1064,7 @@ class HiSparseRuntime:
         block_table: torch.Tensor,
         logical_topk_indices: torch.Tensor,
         block_size: int,
+        num_valid_rows: torch.Tensor,
         return_valid_counts: bool = False,
         attention_indices_out: torch.Tensor | None = None,
         valid_counts_out: torch.Tensor | None = None,
@@ -1074,6 +1088,7 @@ class HiSparseRuntime:
                 shared_rows=shared_rows,
                 attention_indices_out=attention_indices_out,
                 valid_counts_out=valid_counts_out,
+                num_valid_rows=num_valid_rows,
             )
 
         if not self._swap_staged:
@@ -1110,6 +1125,8 @@ class HiSparseCacheHandle:
         self.mirror_staging_cache: torch.Tensor | None = None
         self.mirror_staging_slots: torch.Tensor | None = None
         self.submit_layer_mirror: Callable[[], None] | None = None
+        # Speculator layers write their rows after the target forward.
+        self.draft_layer = False
         self.index_group_caches: list[HiSparseCacheHandle] = [self]
 
     def prepare_group_for_batch(self, attn_metadata: Any | None) -> None:
@@ -1203,6 +1220,7 @@ class HiSparseCacheHandle:
         logical_topk_indices: torch.Tensor,
         *,
         block_size: int,
+        num_valid_rows: torch.Tensor,
         return_valid_counts: bool = False,
         attention_indices_out: torch.Tensor | None = None,
         valid_counts_out: torch.Tensor | None = None,
@@ -1216,6 +1234,7 @@ class HiSparseCacheHandle:
             return_valid_counts=return_valid_counts,
             attention_indices_out=attention_indices_out,
             valid_counts_out=valid_counts_out,
+            num_valid_rows=num_valid_rows,
         )
 
 

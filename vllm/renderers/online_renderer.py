@@ -103,7 +103,7 @@ def _extract_allowed_tools_from_mcp_requests(
 
 
 def _reused_prompt_token_ids(
-    request: Any, messages: list[Any] | None = None
+    request: Any, renderer: BaseRenderer, messages: list[Any] | None = None
 ) -> list[int] | None:
     """Pop prompt token ids forwarded for decode-side reuse, if any.
 
@@ -113,7 +113,8 @@ def _reused_prompt_token_ids(
 
     Returns None without checking the ids when ``echo`` is set or ``messages``
     has non-text content, since both need ``messages`` to be rendered.
-    Otherwise raises VLLMValidationError if the ids are malformed.
+    Otherwise raises VLLMValidationError if the ids are malformed or out of
+    vocabulary.
     """
     kv = getattr(request, "kv_transfer_params", None)
     if not isinstance(kv, dict):
@@ -144,6 +145,8 @@ def _reused_prompt_token_ids(
             "of non-negative integers.",
             parameter="kv_transfer_params.prompt_token_ids",
         )
+    # The engine checks this too, but only after a streamed response starts.
+    renderer.validate_token_ids(ids, parameter="kv_transfer_params.prompt_token_ids")
     return ids
 
 
@@ -180,6 +183,7 @@ class OnlineRenderer:
             tool_strict_level=tool_strict_level,
             model_name=model_config.model,
             is_harmony=self.use_harmony,
+            tokenizer=renderer.tokenizer,
         )
 
         self.chat_template = chat_template
@@ -530,7 +534,7 @@ class OnlineRenderer:
         should_include_tools: bool = True,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
-        reuse_ids = _reused_prompt_token_ids(request)
+        reuse_ids = _reused_prompt_token_ids(request, self.renderer)
         if reuse_ids:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine. Harmony has no adjust_request hook to preserve.
@@ -781,7 +785,7 @@ class OnlineRenderer:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        reuse_ids = _reused_prompt_token_ids(request, messages)
+        reuse_ids = _reused_prompt_token_ids(request, renderer, messages)
         if reuse_ids:
             # Decode-side token reuse: feed the forwarded ids straight to the
             # engine, skipping templating and tokenization. ``messages`` are not
@@ -822,7 +826,8 @@ class OnlineRenderer:
                 and tokenizer.supports_grammar
             )
             should_adjust_request = (
-                parser.reasoning_parser_cls is not None
+                parser.always_adjust_request
+                or parser.reasoning_parser_cls is not None
                 or tool_choice != "none"
                 or is_mistral_grammar_eligible
             )

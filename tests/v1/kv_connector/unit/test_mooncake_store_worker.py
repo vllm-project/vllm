@@ -1543,7 +1543,7 @@ def test_store_sending_thread_reports_job_when_the_preamble_raises():
     # every dequeue leaves through the same exit.
     thread = _make_store_sending_thread(MagicMock())
     req = _make_store_req("req-a", [b"a0", b"a1"])
-    req.token_len_chunk = None  # type: ignore[assignment]
+    req.token_len_chunk = None
 
     with contextlib.suppress(TypeError):
         _run_store_req(thread, req)

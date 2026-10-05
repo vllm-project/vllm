@@ -46,6 +46,7 @@ from vllm.parser.engine.registered_adapters import (
     Plamo3Parser,
     Qwen3Parser,
     SeedOssParser,
+    Step3p5Parser,
 )
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -446,6 +447,19 @@ def _build_mimo(scenario: Scenario, validate: bool = True) -> Sample:
         parser_cls=MiMoParser,
         validate=validate,
         tool_segments=_mimo_tool_segments,
+    )
+
+
+# ── Step-3.5 (Qwen3 XML, trailing reasoning whitespace stripped) ────
+
+
+def _build_step3p5(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="step3p5",
+        parser_cls=Step3p5Parser,
+        strip_trailing_ws=True,
+        validate=validate,
     )
 
 
@@ -1268,6 +1282,7 @@ _BUILDERS: dict[str, Any] = {
     "kimi_k2": _build_kimi_k2,
     "qwen3": _build_qwen3,
     "mimo": _build_mimo,
+    "step3p5": _build_step3p5,
     "inkling": _build_inkling,
     "plamo3": _build_plamo3,
 }

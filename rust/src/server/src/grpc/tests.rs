@@ -366,6 +366,7 @@ where
         engine_id,
         default_ready_response(),
         backend,
+        None,
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
@@ -387,6 +388,7 @@ async fn setup_grpc_service_with_engine_script<F>(
     engine_id: impl Into<EngineId>,
     ready: EngineCoreReadyResponse,
     backend: Arc<dyn ChatTextBackend>,
+    engine_shutdown: Option<tokio_util::sync::CancellationToken>,
     script: F,
 ) -> (
     InferenceServer<InferenceServiceImpl>,
@@ -425,7 +427,7 @@ where
     (
         InferenceServer::new(InferenceServiceImpl::new(state.clone()))
             .max_decoding_message_size(crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES),
-        ControlServer::new(ControlServiceImpl::new(state)),
+        ControlServer::new(ControlServiceImpl::new(state).with_engine_shutdown(engine_shutdown)),
         engine_health,
         engine_task,
     )
@@ -1920,6 +1922,7 @@ async fn control_reports_server_and_model_info() {
             b"engine-grpc-info".to_vec(),
             ready,
             Arc::new(FakeTextBackend),
+            None,
             |_, _| boxed_test_future(async {}),
         )
         .await;
@@ -1987,6 +1990,7 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
             b"engine-grpc-lora".to_vec(),
             ready,
             Arc::new(FakeTextBackend),
+            None,
             |dealer, push| {
                 boxed_test_future(async move {
                     reply_utility_bool(dealer, push, "add_lora", true).await;
@@ -2111,6 +2115,7 @@ async fn control_list_loras_requires_lora_enabled_engine() {
             b"engine-grpc-lora-disabled".to_vec(),
             default_ready_response(),
             Arc::new(FakeTextBackend),
+            None,
             |_, _| boxed_test_future(async move {}),
         )
         .await;
@@ -2143,6 +2148,7 @@ async fn control_forwards_weight_update_without_pause_guard() {
             b"engine-grpc-rl".to_vec(),
             ready,
             Arc::new(FakeTextBackend),
+            None,
             |dealer, push| {
                 boxed_test_future(async move {
                     let frames = recv_engine_message(dealer).await;
@@ -2392,9 +2398,9 @@ async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn grpc_health_watch_closes_on_graceful_shutdown() {
+async fn grpc_shutdown_requires_managed_engine() {
     let (inference_service, control_service, engine_health, _engine_task) = setup_grpc_service(
-        b"engine-grpc-health-shutdown",
+        b"engine-grpc-external-shutdown",
         default_stream_output_specs(),
     )
     .await;
@@ -2406,6 +2412,47 @@ async fn grpc_health_watch_closes_on_graceful_shutdown() {
         shutdown.clone(),
     )
     .await;
+    let mut control_client = ControlClient::new(channel.clone());
+
+    let status = control_client
+        .shutdown(pb::ShutdownRequest {})
+        .await
+        .expect_err("external engine shutdown must be rejected");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert!(!shutdown.is_cancelled());
+
+    let health = HealthClient::new(channel)
+        .check(HealthCheckRequest {
+            service: "vllm.Inference".to_string(),
+        })
+        .await
+        .expect("server remains healthy after rejected shutdown")
+        .into_inner();
+    assert_eq!(health.status, HealthServingStatus::Serving as i32);
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_shutdown_closes_health_watch_and_server() {
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-health-shutdown",
+            default_ready_response(),
+            Arc::new(FakeTextBackend),
+            Some(shutdown.clone()),
+            |_, _| boxed_test_future(async {}),
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        shutdown.child_token(),
+    )
+    .await;
+    let mut control_client = ControlClient::new(channel.clone());
     let mut health_client = HealthClient::new(channel);
     let mut stream = health_client
         .watch(HealthCheckRequest {
@@ -2426,7 +2473,14 @@ async fn grpc_health_watch_closes_on_graceful_shutdown() {
         "unexpected initial health status for vllm.Inference"
     );
 
-    shutdown.cancel();
+    control_client
+        .shutdown(pb::ShutdownRequest {})
+        .await
+        .expect("accept managed engine shutdown");
+    assert!(
+        shutdown.is_cancelled(),
+        "engine owner must receive shutdown"
+    );
 
     let update = tokio::time::timeout(Duration::from_secs(2), stream.message())
         .await

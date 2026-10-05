@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -187,6 +188,7 @@ class MoonVision3dPatchEmbed(nn.Module):
         pos_emb_type: str = "divided_fixed",
         patch_embed_proj_bias: bool = True,
         pos_emb_interpolation_mode: str = "bicubic",
+        input_norm: nn.Module | None = None,
     ):
         super().__init__()
         assert isinstance(patch_size, int | Sequence), (
@@ -206,6 +208,7 @@ class MoonVision3dPatchEmbed(nn.Module):
             stride=patch_size,
             bias=patch_embed_proj_bias,
         )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         if pos_emb_type == "divided_fixed":
             self.pos_emb = Learnable2DInterpPosEmbDivided_fixed(
@@ -225,6 +228,7 @@ class MoonVision3dPatchEmbed(nn.Module):
         *,
         pos_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        x = self.input_norm(x.flatten(1), self.proj.weight.dtype).view_as(x)
         # forward_native dispatches this non-overlapping patch projection to GEMM.
         x = self.proj.forward_native(x).view(x.size(0), self.proj.out_channels)
         if pos_embeds is not None:
@@ -703,6 +707,7 @@ class MoonViT3dPretrainedModel(nn.Module):
         self,
         config: KimiK25VisionConfig,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -723,6 +728,7 @@ class MoonViT3dPretrainedModel(nn.Module):
             pos_emb_interpolation_mode=getattr(
                 config, "pos_emb_interpolation_mode", "bicubic"
             ),
+            input_norm=input_norm,
         )
 
         self.encoder = MoonViT3dEncoder(
@@ -804,7 +810,7 @@ class MoonViT3dPretrainedModel(nn.Module):
         self,
         grid_thw_list: list[list[int]],
         *,
-        max_batch_size: int,
+        max_batch_size: int | None,
         max_seqlen_override: int | None = None,
         device: torch.device,
     ) -> dict[str, torch.Tensor | None]:

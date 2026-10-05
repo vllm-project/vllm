@@ -165,6 +165,7 @@ class OpenAIServingChat(GenerateBaseServing):
             tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            tokenizer=self.renderer.tokenizer,
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
@@ -630,6 +631,8 @@ class OpenAIServingChat(GenerateBaseServing):
                     if finish_reason_sent[i]:
                         continue
 
+                    self._raise_if_error(output.finish_reason, request_id)
+
                     if request.logprobs and (
                         request.top_logprobs is not None or request.logprob_token_ids
                     ):
@@ -757,10 +760,6 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # if the model is finished generating
                     else:
-                        # check for error finish reason and abort streaming
-                        # finish_reason='error' indicates a retryable error
-                        self._raise_if_error(output.finish_reason, request_id)
-
                         # Send the finish response for each request.n only once
                         # In OpenAI's API, when a tool is called, the
                         # finish_reason is:
@@ -974,6 +973,8 @@ class OpenAIServingChat(GenerateBaseServing):
                 parser = self._make_parser(
                     request, tokenizer, self._effective_chat_template_kwargs(request)
                 )
+            if parser is not None and final_res.prompt_token_ids is not None:
+                parser.set_prompt_token_ids(final_res.prompt_token_ids)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 

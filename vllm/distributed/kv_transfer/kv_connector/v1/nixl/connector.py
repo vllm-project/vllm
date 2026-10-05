@@ -164,6 +164,9 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished_count(self) -> int | None:
         return None
 
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        return self._kv_cache_config.transfer_group_ids
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:

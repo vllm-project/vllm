@@ -27,6 +27,11 @@ async def client(server):
         yield http_client
 
 
+@pytest.fixture(scope="module")
+def tokenizer():
+    return get_tokenizer(MODEL_NAME)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -372,6 +377,58 @@ async def test_derender_chat_model_omitted_resolves_served_name(client):
     assert response.json()["model"] == MODEL_NAME
 
 
+@pytest.mark.asyncio
+async def test_derender_chat_leading_space_seeded_from_prompt(client, tokenizer):
+    """prompt_token_ids keeps the first token's leading space on this
+    Metaspace tokenizer, matching the coupled path."""
+    gen_req = await _render_chat(client)
+    prompt_token_ids = gen_req["token_ids"]
+    output_ids = tokenizer.encode("Hello there, output", add_special_tokens=False)
+
+    unseeded = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(output_ids),
+        },
+    )
+    seeded = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(output_ids),
+            "prompt_token_ids": prompt_token_ids,
+        },
+    )
+    assert unseeded.status_code == 200
+    assert seeded.status_code == 200
+    unseeded_content = unseeded.json()["choices"][0]["message"]["content"]
+    seeded_content = seeded.json()["choices"][0]["message"]["content"]
+
+    assert not unseeded_content.startswith(" ")
+    assert seeded_content.startswith(" ")
+    assert seeded_content.lstrip(" ") == unseeded_content
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_oversized_prompt_token_ids_rejected(client):
+    """prompt_token_ids longer than max_model_len returns 400."""
+    gen_req = await _render_chat(client)
+    synthetic_ids = gen_req["token_ids"][:3]
+    oversized_prompt_ids = [42] * 1_000_000
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(synthetic_ids),
+            "prompt_token_ids": oversized_prompt_ids,
+        },
+    )
+    assert response.status_code == 400
+    assert "max_model_len" in response.json()["error"]["message"]
+
+
 # ---------------------------------------------------------------------------
 # Completion derender tests
 # ---------------------------------------------------------------------------
@@ -484,6 +541,84 @@ async def test_derender_completion_prompt_tokens_length_mismatch(client):
         },
     )
     assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_prompt_token_ids_length_mismatch(client):
+    """len(prompt_token_ids) != len(generate_responses) returns 400, the
+    same as the existing prompt_tokens length check."""
+    gr1 = await _render_completion(client, "Hello")
+    ids1 = gr1["token_ids"][:3]
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(ids1, gr1["request_id"]),
+            ],
+            "prompt_token_ids": [[1, 2], [3, 4]],
+        },
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_leading_space_seeded_from_prompt(client, tokenizer):
+    """Completions counterpart of
+    test_derender_chat_leading_space_seeded_from_prompt."""
+    gr1 = await _render_completion(client, "Hello world")
+    prompt_token_ids = gr1["token_ids"]
+    output_ids = tokenizer.encode("Hello there, output", add_special_tokens=False)
+
+    unseeded = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(output_ids, gr1["request_id"]),
+            ],
+        },
+    )
+    seeded = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(output_ids, gr1["request_id"]),
+            ],
+            "prompt_token_ids": [prompt_token_ids],
+        },
+    )
+    assert unseeded.status_code == 200
+    assert seeded.status_code == 200
+    unseeded_text = unseeded.json()["choices"][0]["text"]
+    seeded_text = seeded.json()["choices"][0]["text"]
+
+    assert not unseeded_text.startswith(" ")
+    assert seeded_text.startswith(" ")
+    assert seeded_text.lstrip(" ") == unseeded_text
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_oversized_prompt_token_ids_rejected(client):
+    """A prompt_token_ids entry longer than max_model_len returns 400."""
+    gr1 = await _render_completion(client, "Hello")
+    ids1 = gr1["token_ids"][:3]
+    oversized_prompt_ids = [42] * 1_000_000
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(ids1, gr1["request_id"]),
+            ],
+            "prompt_token_ids": [oversized_prompt_ids],
+        },
+    )
+    assert response.status_code == 400
+    assert "max_model_len" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio

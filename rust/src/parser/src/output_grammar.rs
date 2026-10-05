@@ -17,6 +17,10 @@ use xgrammar_structural_tag::{
 
 use crate::tool::Tool;
 
+pub mod arguments;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_utils;
+
 /// Result alias for output grammar construction.
 pub type Result<T> = std::result::Result<T, OutputGrammarError>;
 

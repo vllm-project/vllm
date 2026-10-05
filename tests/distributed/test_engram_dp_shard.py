@@ -39,10 +39,10 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.forward_context import set_forward_context
-from vllm.models.deepseek_v41.common.engram import EngramLayout
-from vllm.models.deepseek_v41.nvidia import engram as engram_ops
-from vllm.models.deepseek_v41.nvidia.engram import (
+from vllm.models.deepseek_v41.common import engram as engram_ops
+from vllm.models.deepseek_v41.common.engram import (
     Engram,
+    EngramLayout,
     ParallelEngramEmbedding,
     engram_head_shard_rank,
     gather_engram_hashes,
@@ -177,7 +177,9 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
     # Supply the resolved Engram settings without constructing a full model.
     vllm_config.engram_config = EngramConfig()
     vllm_config.model_config = SimpleNamespace(
-        architecture="DeepseekV41ForCausalLM", is_moe=True
+        architecture="DeepseekV41ForCausalLM",
+        is_moe=True,
+        sleep_mode_offload_cudagraph=False,
     )
     try:
         init_distributed_environment()
@@ -511,7 +513,7 @@ def _check_dummy_hash_model_forward(
 
     model = model_ops.DeepseekV4Model.__new__(model_ops.DeepseekV4Model)
     torch.nn.Module.__init__(model)
-    model.use_mega_moe = False
+    model.use_native_mega_moe = False
     model.use_sequence_parallel = False
     model.fuse_mhc_all_reduce = False
     model.engram_hash = state
@@ -686,11 +688,30 @@ def test_engram_dp_shared_memory_runtime_requirements(
         )
 
 
-def test_engram_tables_too_large_for_shm_are_not_shared(monkeypatch):
-    """A /dev/shm smaller than the tables must fall back instead of failing startup."""
+@pytest.mark.parametrize("query_fails", [False, True])
+def test_engram_tables_too_large_for_shm_are_not_shared(monkeypatch, query_fails):
+    """A /dev/shm that is too small or cannot be queried must fall back, and the
+    leader must still broadcast that decision so its peers do not hang."""
+    broadcasts = []
+
+    def broadcast(obj):
+        broadcasts.append(obj)
+        return obj
+
+    def query(*args, **kwargs):
+        raise OSError("statvfs failed")
+
     monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: 2)
+    monkeypatch.setattr(
+        engram_ops,
+        "get_engram_dp_group",
+        lambda: SimpleNamespace(rank_in_group=0, broadcast_object=broadcast),
+    )
+    if query_fails:
+        monkeypatch.setattr(engram_ops, "check_shm_free_space", query)
     layout = SimpleNamespace(num_embeddings=(1 << 50,), head_dim=DIM)
     assert not engram_ops.can_share_engram_tables(layout)
+    assert len(broadcasts) == 1 and broadcasts[0] is not None
 
 
 @pytest.mark.parametrize(

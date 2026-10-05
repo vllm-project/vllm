@@ -13,6 +13,7 @@ import soundfile as sf
 import vllm.benchmarks.datasets.datasets as datasets_module
 import vllm.benchmarks.lib.endpoint_request_func as request_func_module
 from vllm.benchmarks.lib.endpoint_request_func import RequestFuncInput
+from vllm.tokenizers import TokenizerLike
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -42,6 +43,10 @@ class CohereAsrTokenizer(_Tokenizer):
 class _CohereNameOnlyTokenizer(_Tokenizer):
     def __init__(self) -> None:
         super().__init__("cohere/some-local-checkpoint")
+
+
+def _as_tokenizer(tokenizer: _Tokenizer) -> TokenizerLike:
+    return cast(TokenizerLike, tokenizer)
 
 
 def _write_wav(path: Path, duration_s: float = 0.1, sample_rate: int = 16_000) -> None:
@@ -109,7 +114,7 @@ def test_asr_dataset_sample_handles_local_audio_paths(tmp_path: Path) -> None:
     ]
 
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=_as_tokenizer(_Tokenizer()),
         num_requests=1,
         output_len=32,
         asr_min_audio_len_sec=0.0,
@@ -146,7 +151,7 @@ def test_asr_dataset_sample_handles_embedded_audio_bytes(
     ]
 
     samples = dataset.sample(
-        tokenizer=_Tokenizer(),
+        tokenizer=_as_tokenizer(_Tokenizer()),
         num_requests=1,
         output_len=32,
         asr_min_audio_len_sec=0.0,
@@ -240,7 +245,7 @@ def _make_asr_dataset(tmp_path: Path) -> datasets_module.ASRDataset:
 def test_asr_dataset_cohere_class_name_gets_decoder_prompt(tmp_path: Path) -> None:
     dataset = _make_asr_dataset(tmp_path)
     samples = dataset.sample(
-        tokenizer=CohereAsrTokenizer(),
+        tokenizer=_as_tokenizer(CohereAsrTokenizer()),
         num_requests=1,
         output_len=32,
         asr_min_audio_len_sec=0.0,
@@ -255,7 +260,7 @@ def test_asr_dataset_cohere_name_or_path_fallback_gets_decoder_prompt(
 ) -> None:
     dataset = _make_asr_dataset(tmp_path)
     samples = dataset.sample(
-        tokenizer=_CohereNameOnlyTokenizer(),
+        tokenizer=_as_tokenizer(_CohereNameOnlyTokenizer()),
         num_requests=1,
         output_len=32,
         asr_min_audio_len_sec=0.0,
@@ -268,7 +273,7 @@ def test_asr_dataset_cohere_name_or_path_fallback_gets_decoder_prompt(
 def test_asr_dataset_unknown_tokenizer_gets_empty_prompt(tmp_path: Path) -> None:
     dataset = _make_asr_dataset(tmp_path)
     samples = dataset.sample(
-        tokenizer=_Tokenizer(name_or_path="some-other/asr-model"),
+        tokenizer=_as_tokenizer(_Tokenizer(name_or_path="some-other/asr-model")),
         num_requests=1,
         output_len=32,
         asr_min_audio_len_sec=0.0,

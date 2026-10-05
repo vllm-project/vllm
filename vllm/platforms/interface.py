@@ -698,6 +698,7 @@ class Platform:
 
         # Phase 2: Align block/mamba sizes for hybrid models
         # (may override user settings).
+        pre_block_size = cache_config.block_size
         if model_config.is_hybrid:
             cls._align_hybrid_block_size(vllm_config, backend_classes[0])
 
@@ -706,6 +707,36 @@ class Platform:
         # May override the user's --block-size.
         if cache_config.kv_cache_dtype_skip_layers:
             cls._align_heterogeneous_kv_block_size(vllm_config, backend_classes[0])
+        cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
+
+    @classmethod
+    def _check_aligned_block_size(
+        cls,
+        vllm_config: "VllmConfig",
+        backend_classes: "list[type[AttentionBackend]]",
+        pre_block_size: int,
+    ) -> None:
+        """Fail now, not at worker setup, if alignment left a rejected size.
+
+        Alignment rounds by the first backend's kernel block only, so it can
+        land on a size a sibling backend rejects.
+        """
+        from vllm.config.vllm import set_current_vllm_config
+
+        block_size = vllm_config.cache_config.block_size
+        if block_size == pre_block_size:
+            return
+        with set_current_vllm_config(vllm_config):
+            rejecting = [
+                b.get_name()
+                for b in backend_classes
+                if not b.supports_block_size(block_size)
+            ]
+        if rejecting:
+            raise ValueError(
+                f"Aligned KV cache block size {block_size} is not supported by "
+                f"attention backend(s): {', '.join(rejecting)}."
+            )
 
     @classmethod
     def _align_heterogeneous_kv_block_size(
@@ -939,13 +970,6 @@ class Platform:
         if mamba_page_size == 0:
             return
 
-        # mamba_block_size here should either be user specified value or None
-        mamba_block_size = (
-            cache_config.mamba_block_size
-            if cache_config.user_specified_mamba_block_size
-            else None
-        )
-
         # Get kernel block alignment from the backend's supported sizes
         with set_current_vllm_config(vllm_config):
             kernel_block_alignment_size = max(
@@ -962,27 +986,15 @@ class Platform:
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
 
-        if cache_config.mamba_cache_mode == "all":
-            # With prefix caching, align to mamba chunk size for kernel perf
-            # TODO(tdoublep): this constraint can be relaxed fairly
-            # easily by changing the way we layout chunks in the
-            # mamba2 kernels.
-            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
-            assert base_chunk_size is not None
-            attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
-            chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
-            attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
-            cache_config.mamba_block_size = attn_block_size
-        else:
-            # Without prefix caching, use minimum block size that satisfies
-            # both backend alignment and mamba page size compatibility
-            attn_block_size = kernel_block_alignment_size * cdiv(
-                mamba_page_size,
-                kernel_block_alignment_size * attn_page_size_1_token,
-            )
-            indexer_align = cls._get_indexer_block_alignment(vllm_config)
-            if indexer_align:
-                attn_block_size = indexer_align * cdiv(attn_block_size, indexer_align)
+        # Use minimum block size that satisfies both backend alignment and
+        # mamba page size compatibility
+        attn_block_size = kernel_block_alignment_size * cdiv(
+            mamba_page_size,
+            kernel_block_alignment_size * attn_page_size_1_token,
+        )
+        indexer_align = cls._get_indexer_block_alignment(vllm_config)
+        if indexer_align:
+            attn_block_size = indexer_align * cdiv(attn_block_size, indexer_align)
 
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
@@ -1098,11 +1110,6 @@ class Platform:
     def can_update_inplace(cls) -> bool:
         """Checks if the platform allows inplace memory updates."""
         return True
-
-    @classmethod
-    def get_lora_vocab_padding_size(cls) -> int:
-        """Returns how much padding the LoRA logits need for kernels."""
-        return 256
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

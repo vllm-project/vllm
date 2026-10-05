@@ -39,8 +39,6 @@ class SparseMLAIndexGroup:
     logical_topk_indices: torch.Tensor
     physical_topk_indices: torch.Tensor
     valid_topk_counts: torch.Tensor
-    row_indices: torch.Tensor
-    request_ids: torch.Tensor
     side_stream: torch.Stream
     logical_topk_ready: torch.Event
     physical_topk_ready: torch.Event
@@ -252,19 +250,13 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             )
         source_block_table = cache.source_block_table
         assert source_block_table is not None
-        # CUDA-graph padding rows past the batch's tokens map to request 0;
-        # mark them -1 so residency resolution skips them.
-        request_ids = self.request_ids[:num_tokens]
-        request_ids.copy_(req_id_per_token)
-        request_ids.masked_fill_(
-            self.row_indices[:num_tokens] >= attn_metadata.query_start_loc[-1], -1
-        )
         return cache.swap_in(
-            request_ids,
+            req_id_per_token,
             block_table=source_block_table,
             logical_topk_indices=logical_topk_indices,
             block_size=attn_metadata.block_size,
             return_valid_counts=return_valid_counts,
+            num_valid_rows=attn_metadata.query_start_loc[-1:],
         )
 
     def stage_prefill_rows(
@@ -381,16 +373,6 @@ class SparseMLAIndexGroupBuilder:
                 physical_topk_indices=physical_topk_indices,
                 valid_topk_counts=torch.empty(
                     workspace_rows + 1,
-                    dtype=torch.int32,
-                    device=self.logical_topk_indices.device,
-                ),
-                row_indices=torch.arange(
-                    workspace_rows,
-                    dtype=torch.int32,
-                    device=self.logical_topk_indices.device,
-                ),
-                request_ids=torch.empty(
-                    workspace_rows,
                     dtype=torch.int32,
                     device=self.logical_topk_indices.device,
                 ),

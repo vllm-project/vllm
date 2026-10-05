@@ -3,10 +3,11 @@
 
 # This lists cover the "core" components of vLLM that require careful review
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg @BoyuanFeng
-/vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi @ivanium
+/vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi @ivanium @wzhao18
+/vllm/distributed/kv_transfer/kv_connector/v1/hisparse @MatthewBonanni @LucasWilkinson
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
-/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye
+/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye @wzhao18
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
 /vllm/model_executor/layers/mamba @tdoublep @tomeras91
 /vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
@@ -67,7 +68,7 @@
 /vllm/v1/attention @LucasWilkinson @MatthewBonanni
 /vllm/v1/attention/backend.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @njhill
 /vllm/v1/attention/backends/mla @pavanimajety
-/vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety @vadiklyutiy
+/vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety @vadiklyutiy @wzhao18
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 /vllm/v1/attention/backends/gdn_attn.py @ZJY0516 @vadiklyutiy
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
@@ -77,6 +78,7 @@
 /vllm/v1/kv_cache_interface.py @heheda12345 @ivanium
 /vllm/v1/kv_offload @ApostaC @orozery
 /vllm/v1/simple_kv_offload @ivanium
+/vllm/v1/hisparse @MatthewBonanni @LucasWilkinson
 /vllm/v1/engine @njhill
 /vllm/v1/executor @njhill
 /vllm/v1/worker @njhill
@@ -113,7 +115,7 @@
 /tests/lora @jeejeelee
 /tests/models/language/generation/test_hybrid.py @tdoublep @tomeras91
 /tests/v1/kv_connector/nixl_integration @NickLucche
-/tests/v1/kv_connector @ApostaC @orozery @ivanium
+/tests/v1/kv_connector @ApostaC @orozery @ivanium @wzhao18
 /tests/v1/kv_offload @ApostaC @orozery
 /tests/v1/simple_kv_offload @ivanium
 /tests/v1/determinism @yewentao256
@@ -158,6 +160,7 @@ mkdocs.yaml @hmellor
 # Qwen-specific files
 /vllm/model_executor/models/qwen* @sighingnow @vadiklyutiy
 /vllm/transformers_utils/configs/qwen* @sighingnow @vadiklyutiy
+/vllm/models/qwen4_exp @gau-nernst
 
 # MTP-specific files
 /vllm/model_executor/models/deepseek_mtp.py @luccafong
@@ -165,6 +168,9 @@ mkdocs.yaml @hmellor
 # DeepseekV4-specific files
 /vllm/models/deepseek_v4 @zyongye
 /vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
+
+# Kimi-K3-specific files
+/vllm/models/kimi_k3/nvidia/kda.py @gau-nernst
 
 # Mistral-specific files
 /vllm/model_executor/models/mistral*.py @patrickvonplaten
@@ -178,6 +184,10 @@ mkdocs.yaml @hmellor
 /vllm/v1/attention/ops/chunked_prefill_paged_decode.py @tdoublep
 /vllm/v1/attention/ops/triton_unified_attention.py @tdoublep
 /vllm/third_party/flash_linear_attention @ZJY0516 @vadiklyutiy
+/vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl @gau-nernst
+/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py @gau-nernst
+/vllm/model_executor/kernels/linear/cute_dsl/gemm_rs_ar.py @gau-nernst
+/vllm/cute_utils @gau-nernst
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
 /vllm/**/*rocm* @tjtanaa @dllehr-amd @shen-shanshan

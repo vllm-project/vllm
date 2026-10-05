@@ -67,7 +67,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.parser.harmony import Segment
+from vllm.parser.harmony import ChunkResult, HarmonyParser, Segment
 from vllm.renderers import TokenizeParams
 from vllm.renderers.online_renderer import (
     OnlineRenderer,
@@ -2127,6 +2127,87 @@ async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
     _, message, function_call = streamed
     assert [lp.token for lp in message.content[0].logprobs] == ["Hi"]
     assert function_call.call_id == "chatcmpl-tool-parser-id"
+
+
+def _harmony_msg(channel: str, text: str, recipient: str | None = None):
+    msg = OpenAIHarmonyMessage.from_role_and_content(Role.ASSISTANT, text)
+    msg = msg.with_channel(channel)
+    return msg.with_recipient(recipient) if recipient else msg
+
+
+def _harmony_segments(msg, *, streamed: bool = True) -> list[Segment]:
+    """Segments the parser yields for one message: a content delta (absent
+    for a zero-delta message), then the completed message."""
+    delta = [Segment(msg.channel, msg.recipient, msg.content[0].text)]
+    completed = Segment(msg.channel, msg.recipient, "", completed_message=msg)
+    return (delta if streamed else []) + [completed]
+
+
+async def _harmony_stream_events(segment_chunks: list[list[Segment]]):
+    serving = _make_serving_instance()
+    serving.use_harmony = True
+    parser = MagicMock(spec=HarmonyParser)
+    parser.process_chunk.side_effect = [
+        ChunkResult(segments=segments, reasoning_token_count=0)
+        for segments in segment_chunks
+    ]
+    context = HarmonyContext([], [], frozenset({"get_weather"}), parser)
+
+    async def result_generator():
+        for token_id in range(len(segment_chunks)):
+            context.append_output(_make_request_output("", [token_id]))
+            yield context
+
+    return [
+        event
+        async for event in serving.responses_stream_generator(
+            request=ResponsesRequest(input="hi", stream=True, store=False),
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=result_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_harmony_stream_completed_response_reuses_streamed_ids():
+    """response.completed must carry the id and call_id each item was streamed
+    with, not ones minted when the harmony messages are converted again."""
+    messages = [
+        _harmony_msg("analysis", "think"),
+        _harmony_msg("commentary", '{"city": "Paris"}', "functions.get_weather"),
+        _harmony_msg("final", "Sunny"),
+    ]
+
+    events = await _harmony_stream_events([_harmony_segments(msg) for msg in messages])
+
+    streamed = [e.item for e in events if e.type == "response.output_item.done"]
+    output = events[-1].response.output
+    assert [item.type for item in output] == ["reasoning", "function_call", "message"]
+    assert [item.id for item in output] == [item.id for item in streamed]
+    assert output[1].call_id == streamed[1].call_id
+    assert output[2].content[0].text == "Sunny"
+
+
+@pytest.mark.asyncio
+async def test_harmony_stream_unstreamed_item_keeps_own_id():
+    """An item with no done event (zero-delta) must not take the streamed id
+    of a later item of the same type."""
+    unstreamed = _harmony_msg("analysis", "skipped")
+    reasoning = _harmony_msg("analysis", "think")
+
+    events = await _harmony_stream_events(
+        [_harmony_segments(unstreamed, streamed=False), _harmony_segments(reasoning)]
+    )
+
+    (streamed,) = [e.item for e in events if e.type == "response.output_item.done"]
+    first, second = events[-1].response.output
+    assert first.content[0].text == "skipped"
+    assert first.id != streamed.id
+    assert second.id == streamed.id
 
 
 @pytest.mark.asyncio

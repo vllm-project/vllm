@@ -71,7 +71,7 @@ SLEEP_CYCLES = 50_000_000
 def _make_worker(
     kv_cache_config: KVCacheConfig | None, cpu_capacity_bytes: int
 ) -> SimpleCPUOffloadWorker:
-    return SimpleCPUOffloadWorker(None, kv_cache_config, cpu_capacity_bytes)  # type: ignore[arg-type]
+    return SimpleCPUOffloadWorker(None, kv_cache_config, cpu_capacity_bytes)
 
 
 def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
@@ -121,7 +121,7 @@ def test_no_forward_step_completes_cpu_store(monkeypatch, use_v2):
             monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
             result = active.no_forward(output)
         else:
-            result = KVConnectorModelRunnerMixin.kv_connector_no_forward(output, None)  # type: ignore[arg-type]
+            result = KVConnectorModelRunnerMixin.kv_connector_no_forward(output, None)
         completion = (
             result.kv_connector_output.kv_connector_worker_meta
             if result.kv_connector_output is not None
@@ -283,7 +283,7 @@ def test_transfer_hooks_pass_wait_event_for_store_only():
         cpu_capacity_bytes=0,
     )
     recording = _RecordingBackend()
-    worker._backend = recording  # type: ignore[assignment]
+    worker._backend = recording
     worker._connector_metadata = SimpleCPUOffloadMetadata(
         load_event=0,
         load_gpu_blocks=[0],

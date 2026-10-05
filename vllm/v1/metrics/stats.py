@@ -182,6 +182,16 @@ class SchedulerIterationDetails:
     is_dummy: bool = False
 
 
+KV_FETCH_WAITING_TO_START = "waiting_to_start"
+KV_FETCH_IN_PROGRESS = "in_progress"
+KV_FETCH_COMPLETED_WAITING = "completed_waiting"
+KV_FETCH_STAGES = (
+    KV_FETCH_WAITING_TO_START,
+    KV_FETCH_IN_PROGRESS,
+    KV_FETCH_COMPLETED_WAITING,
+)
+
+
 @dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
@@ -191,6 +201,8 @@ class SchedulerStats:
     num_waiting_reqs: int = 0  # waiting requests not deferred
     # waiting requests deferred by transient constraints or a blocked status
     num_skipped_waiting_reqs: int = 0
+
+    num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0

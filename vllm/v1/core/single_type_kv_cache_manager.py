@@ -112,7 +112,7 @@ class SingleTypeKVCacheManager(ABC):
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
-        self._max_admission_blocks_per_request = max_admission_blocks_per_request
+        self.max_admission_blocks_per_request = max_admission_blocks_per_request
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
         self._record_new_block_ids = (
@@ -184,6 +184,7 @@ class SingleTypeKVCacheManager(ABC):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         """Get the number of blocks needed to be allocated for the request.
 
@@ -201,15 +202,19 @@ class SingleTypeKVCacheManager(ABC):
                 model in spec decode). w/o spec decode, it is num_tokens;
                 with spec decode, it is num_tokens - num_lookahead_tokens.
             apply_admission_cap: If True, clamp by `num_required_blocks` by
-                `_max_admission_blocks_per_request`for recycling-aware specs
+                `max_admission_blocks_per_request`for recycling-aware specs
                 (SWA, chunked-local).
+            prefill_end: The token index the request's prefill ends at, the
+                same value the scheduler splits chunks against. Mamba reserves
+                a prefill checkpoint only on the chunk reaching it; 0 (dense
+                retention) reserves one on every chunk.
 
         Returns:
             The number of blocks to allocate.
 
         """
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        if apply_admission_cap and self._max_admission_blocks_per_request is not None:
+        if apply_admission_cap and self.max_admission_blocks_per_request is not None:
             # Recycling-aware specs (SWA, chunked-local) cap the per-request
             # reservation here so admission matches the startup pool sizer
             # (`SlidingWindowSpec.max_admission_blocks_per_request` / its
@@ -220,7 +225,7 @@ class SingleTypeKVCacheManager(ABC):
             # Drift between the two would re-introduce the deadlock from
             # issue #39734 or, worse, mid-prefill OOM.
             num_required_blocks = min(
-                num_required_blocks, self._max_admission_blocks_per_request
+                num_required_blocks, self.max_admission_blocks_per_request
             )
         num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
 
@@ -326,6 +331,7 @@ class SingleTypeKVCacheManager(ABC):
         request_id: str,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
     ) -> None:
         """Allocate new blocks for external (KV-connector) computed tokens.
 
@@ -337,6 +343,8 @@ class SingleTypeKVCacheManager(ABC):
             request_id: The request ID.
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
+            record_for_zeroing: Whether the new blocks need zeroing. False when
+                the load writes them after this step, which zeroing would race.
 
         """
         num_total_computed_tokens = (
@@ -358,7 +366,7 @@ class SingleTypeKVCacheManager(ABC):
         )
         allocated_blocks = self.block_pool.get_new_blocks(num_new_blocks)
         req_blocks.extend(allocated_blocks)
-        if self._record_new_block_ids:
+        if self._record_new_block_ids and record_for_zeroing:
             self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
     def allocate_new_blocks(
@@ -1196,13 +1204,15 @@ class CircularBufferManager(FullAttentionManager):
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
-    def _claim_ring_block(self, request_id: str) -> list[KVCacheBlock]:
+    def _claim_ring_block(
+        self, request_id: str, record_for_zeroing: bool = True
+    ) -> list[KVCacheBlock]:
         req_blocks = self.req_to_blocks[request_id]
         if req_blocks:
             return []
         new_blocks = self.block_pool.get_new_blocks(1)
         req_blocks.extend(new_blocks)
-        if self._record_new_block_ids:
+        if self._record_new_block_ids and record_for_zeroing:
             self.new_block_ids.extend(block.block_id for block in new_blocks)
         return new_blocks
 
@@ -1215,6 +1225,7 @@ class CircularBufferManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         return 0 if self.req_to_blocks.get(request_id) else 1
 
@@ -1228,8 +1239,9 @@ class CircularBufferManager(FullAttentionManager):
         request_id: str,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
     ) -> None:
-        self._claim_ring_block(request_id)
+        self._claim_ring_block(request_id, record_for_zeroing)
 
     @classmethod
     def find_longest_cache_hit(
@@ -1678,12 +1690,14 @@ class MambaManager(SingleTypeKVCacheManager):
         query_start: int,
         query_end: int,
         checkpoint_position: int,
+        prefill_end: int,
     ) -> bool:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         checkpoint_idx = cdiv(query_end, self.block_size) - 2
         blocks = self.req_to_blocks[request_id]
         return (
             self.has_prefill_checkpoint_blocks
+            and query_end >= prefill_end
             and is_mamba_prefill_checkpoint_valid(
                 query_start=query_start,
                 query_end=query_end,
@@ -1712,6 +1726,7 @@ class MambaManager(SingleTypeKVCacheManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if (
@@ -1738,6 +1753,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 num_local_computed_tokens,
                 num_tokens_main_model,
                 apply_admission_cap=apply_admission_cap,
+                prefill_end=prefill_end,
             )
         else:
             # We don't allocate blocks for lookahead tokens in align mode, because if
@@ -1765,6 +1781,11 @@ class MambaManager(SingleTypeKVCacheManager):
             )
             if has_partial_hit:
                 num_new_blocks = max(num_new_blocks, 0) + 1
+            # Keyed on the chunk end like the worker's
+            # `compute_mamba_prefill_checkpoints`, which writes the state there.
+            # The helper returns a boundary strictly below its input, so every
+            # chunk has one; under sparse retention only the prefill-end chunk's
+            # is kept, so `prefill_end` skips reserving blocks for the others.
             checkpoint_position = get_mamba_prefill_checkpoint_position(
                 num_tokens,
                 self.block_pool.hash_block_size,
@@ -1775,6 +1796,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 total_computed_tokens,
                 num_tokens,
                 checkpoint_position,
+                prefill_end,
             ):
                 checkpoint_position = 0
             checkpoint_block = int(checkpoint_position > 0)
@@ -2150,6 +2172,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         request_id: str,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
     ) -> None:
         # Cross-attention does not use prefix caching / external KV loads.
         return
@@ -2247,7 +2270,7 @@ class HiSparseSourceManager(FullAttentionManager):
             enable_caching=self.enable_caching and self.kv_cache_spec.prefix_cacheable,
             hash_block_size=device_pool.hash_block_size,
             enable_kv_cache_events=device_pool.enable_kv_cache_events,
-            metrics_collector=device_pool.metrics_collector,
+            metrics_collector=None,
             medium=MEDIUM_CPU,
             event_owner=device_pool,
         )
@@ -2272,6 +2295,7 @@ class HiSparseSourceManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         required = super().get_num_blocks_to_allocate(
             request_id,
@@ -2294,6 +2318,7 @@ class HiSparseSourceManager(FullAttentionManager):
         request_id: str,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
     ) -> None:
         if num_external_computed_tokens <= 0:
             return
@@ -2304,7 +2329,10 @@ class HiSparseSourceManager(FullAttentionManager):
             request_id, num_local_computed_tokens + num_external_computed_tokens
         )
         super().allocate_external_computed_blocks(
-            request_id, num_local_computed_tokens, num_external_computed_tokens
+            request_id,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+            record_for_zeroing,
         )
 
     def cache_blocks(
@@ -2348,12 +2376,6 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
     """Base for ephemeral groups whose host source owns prefix caching."""
 
     coordinator: "HiSparseCoordinator | None" = None
-
-    def __init__(self, kv_cache_spec: KVCacheSpec, **kwargs) -> None:
-        # Never prefix-cached, but the per-step ``cache_blocks`` hook is where
-        # residency work runs, so stay opted in regardless of prefix caching.
-        kwargs["enable_caching"] = True
-        super().__init__(kv_cache_spec, **kwargs)
 
     def cache_blocks(
         self,
@@ -2407,6 +2429,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         assert not new_computed_blocks
         # A hot region is needed to read host-backed history: an external
@@ -2444,6 +2467,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         request_id: str,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
     ) -> None:
         self.require_hot(request_id)
 
@@ -2470,6 +2494,8 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     """Track GPU-resident pages for otherwise host-backed KV."""
 
+    max_admission_blocks_per_request: int
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -2479,6 +2505,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         del num_tokens_main_model
         assert not new_computed_blocks
@@ -2495,8 +2522,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         host_pages = cdiv(num_local_computed_tokens, self.block_size)
         required = cdiv(num_tokens, self.block_size)
         if apply_admission_cap:
-            assert self._max_admission_blocks_per_request is not None
-            required = min(required, self._max_admission_blocks_per_request)
+            required = min(required, self.max_admission_blocks_per_request)
         return max(required - max(existing, host_pages), 0)
 
     def allocate_external_computed_blocks(
@@ -2504,6 +2530,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         request_id: str,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
     ) -> None:
         """Reserve a writable final page; earlier imported pages stay on host."""
         assert num_external_computed_tokens > 0
@@ -2530,18 +2557,6 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         self.num_cached_block[request_id] = 0
         assert self.coordinator is not None
         self.coordinator.commit_computed_blocks(request_id, num_host_pages)
-
-    def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        retention_interval: int | None = None,
-        *,
-        replay_boundaries: Sequence[int],
-    ) -> None:
-        assert self.coordinator is not None
-        self.coordinator.plan_prefix_materialization(request.request_id, num_tokens)
-        self.coordinator.update_residency(request.request_id)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
