@@ -4,12 +4,14 @@
 
 from types import SimpleNamespace
 
+import httpx
 import msgspec
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from benchmarks.programmable_kv_cache.recovery import check_protocol
 from vllm.config import KVControlConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -27,7 +29,7 @@ pytestmark = pytest.mark.cpu_test
 @pytest.fixture
 def control_client():
     registry = OperationRegistry("engine", engine_epoch="epoch")
-    index = SessionPrefixIndex("namespace", registry.engine_epoch)
+    index = SessionPrefixIndex("namespace", registry.engine_epoch, max_events=2)
     service = KVControlService(
         NativeKVController(registry, index, RetentionDeclarations(index))
     )
@@ -96,66 +98,111 @@ def test_http_submission_and_python_query_share_results_and_retries(control_clie
     assert events[-1] == query
 
 
-def test_http_association_events_recover_from_gaps_without_residency_claims(
+def test_protocol_probe_uses_fresh_ids_and_checks_engine_results(control_client):
+    client, _ = control_client
+    first = check_protocol(client, "http://testserver", "engine")
+    second = check_protocol(client, "http://testserver", "engine")
+    assert first["operation"]["message_id"] != second["operation"]["message_id"]
+    assert first["operation"]["status"] == "unsupported"
+    assert first["duplicate"]["replayed"]
+    with pytest.raises(ValueError, match="engine_id"):
+        check_protocol(client, "http://testserver", "absent")
+
+
+@pytest.mark.parametrize("incorrect", ["version", "gap"])
+def test_protocol_probe_rejects_incorrect_server_outcomes(
+    control_client,
+    monkeypatch,
+    incorrect,
+):
+    client, _ = control_client
+    post = client.post
+
+    def corrupted_response(*args, **kwargs):
+        response = post(*args, **kwargs)
+        result = response.json()
+        if incorrect == "version" and "results" in result:
+            result["results"][0]["status"] = "completed"
+            return httpx.Response(200, json=result, request=response.request)
+        if incorrect == "gap" and result.get("error", {}).get("code") == "event_gap":
+            return httpx.Response(200, json=[], request=response.request)
+        return response
+
+    monkeypatch.setattr(client, "post", corrupted_response)
+    with pytest.raises(AssertionError):
+        check_protocol(client, "http://testserver", "engine")
+
+
+def test_http_association_snapshot_supplies_cursor_after_real_history_loss(
     control_client,
 ):
     client, service = control_client
-    invocation = {
-        "engine_id": "engine",
-        "engine_epoch": "epoch",
-        "namespace": "namespace",
-    }
-    envelope = {
-        "protocol_version": "0.1",
-        "message_id": "association",
-        "actions": [
-            {
-                "action_id": "a",
-                "action_type": "associate",
-                "action_version": "1",
-                "payload": {
-                    "session_id": "s",
-                    "continuation_id": "c",
-                    "expected_revision": 0,
-                    "target": {
-                        "kind": "hashes",
-                        "namespace": "namespace",
-                        "blocks": [],
-                    },
+
+    def associate(session):
+        response = client.post(
+            "/v1/kv/control",
+            json=body(
+                "submit",
+                {
+                    "protocol_version": "0.1",
+                    "message_id": session,
+                    "actions": [
+                        {
+                            "action_id": "a",
+                            "action_type": "associate",
+                            "action_version": "1",
+                            "payload": {
+                                "session_id": session,
+                                "continuation_id": "c",
+                                "expected_revision": 0,
+                                "target": {
+                                    "kind": "hashes",
+                                    "namespace": "namespace",
+                                    "blocks": [
+                                        {
+                                            "block_hash": "abcd",
+                                            "group_id": 0,
+                                            "start_token": 0,
+                                            "end_token": 16,
+                                        }
+                                    ],
+                                },
+                            },
+                        }
+                    ],
                 },
-            }
-        ],
-    }
-    submitted = client.post(
+            ),
+        )
+        assert response.status_code == 200
+        assert response.json()["results"][0]["status"] == "completed"
+
+    associate("a")
+    associate("b")
+    gap = client.post("/v1/kv/control", json=body("events", {"stream": "association"}))
+    assert gap.status_code == 409
+    assert gap.json()["error"]["code"] == "event_gap"
+    snapshot = client.post("/v1/kv/control", json=body("associations", {})).json()
+    assert [item["session_id"] for item in snapshot["items"]] == ["a", "b"]
+    assert snapshot["engine_epoch"] == "epoch"
+    assert snapshot["namespace"] == "namespace"
+    associate("c")
+    deltas = client.post(
         "/v1/kv/control",
-        json={"method": "submit", "invocation": invocation, "payload": envelope},
+        json=body(
+            "events",
+            {
+                "stream": "association",
+                "after": snapshot["event_sequence"],
+            },
+        ),
     ).json()
-    assert submitted["results"][0]["status"] == "completed"
-    events = client.post(
-        "/v1/kv/control",
-        json={
-            "method": "events",
-            "invocation": invocation,
-            "payload": {"stream": "association"},
-        },
-    ).json()
-    assert {event["kind"] for event in events} == {"updated"}
-    state = client.post(
-        "/v1/kv/control",
-        json={"method": "associations", "invocation": invocation, "payload": {}},
-    ).json()
-    assert state["items"][0]["session_id"] == "s"
-    assert state["items"][0]["blocks"] == []
-    stale = client.post(
-        "/v1/kv/control",
-        json={
-            "method": "events",
-            "invocation": {**invocation, "engine_epoch": "restarted"},
-            "payload": {"stream": "association"},
-        },
+    assert [event["kind"] for event in deltas] == ["associated", "updated"]
+    assert {event["session_id"] for event in deltas} == {"c"}
+    assert service.controller.index.members(0, "abcd") == (
+        ("a", "c"),
+        ("b", "c"),
+        ("c", "c"),
     )
-    assert stale.status_code == 409
-    assert stale.json()["error"]["code"] == "stale_epoch"
 
 
 @pytest.mark.parametrize(

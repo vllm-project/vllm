@@ -575,10 +575,11 @@ following run:
   tests/v1/kv_offload/tiering/test_kvcr_tier.py -q
 ```
 
-Result: **34 passed**, 14 warnings, 11.31 seconds. `coverage_check.py` reports
-all control/state/movement/policy/workload artifact rows have concrete files.
-`rollout.py` and `verl_agent_loop.py` deterministic plan generation was run
-without a live server; `recovery.py` still requires a running HTTP engine.
+These were separate commands: HTTP **13 passed** (4.45 seconds) and KVCR
+**21 passed** (6.89 seconds), each with 14 warnings. The original combined-command
+wording did not match the execution record. File-existence checks and deterministic
+plan generation from the placeholder scripts did not establish workload coverage;
+see the October 6 correction below.
 
 The real CPU/Mooncake transfer, local Qwen cross-engine, and GSM8K correctness
 results above remain the acceptance evidence for those paths. Policy pressure,
@@ -616,3 +617,140 @@ final targeted regression was rerun:
 Result: **399 passed**, 14 warnings, 193.93 seconds. The broader 574-test
 control/cache/scheduler run and the 399-test final run cover overlapping suites;
 no failures were observed after the final changes.
+
+## Quality review corrections (2026-10-06)
+
+The October 2 completion count and workload claims above overstate the evidence.
+`rollout.py` submitted empty targets and never generated real pressure/inference.
+`verl_agent_loop.py` used an unverified JSONL format, sent only resume signals,
+and did not invalidate weights. `coverage_check.py` tested file existence only.
+These placeholders were removed; `coverage.md`, `tasks.md`, the benchmark README,
+PR draft and follow-up tracker now distinguish implemented mechanisms from
+unexecuted acceptance. The delivery is **40/52**, with the previously overstated
+items reopened. The existing real CPU/Mooncake artifacts remain historical
+results; no previous run is relabeled as policy or rollout validation.
+
+Changes in this quality pass:
+
+- Polling prunes terminal messages using a single bounded expiry-heap entry per
+  message, keeping active siblings and duplicate TTL semantics intact.
+- Guidance observations honor the configured interval; elapsed waiting still
+  enforces the admission bound between refreshes. Cache counts distinguish
+  physical copies from aliases and choose sparse-index/dense-pool traversal.
+- Invalid composer output terminates every registered child, so records become
+  reclaimable instead of remaining received forever. Pending-snapshot limits
+  include the retained hash target and empty-prefix records.
+- Association query pages supply epoch/namespace/event sequence for resuming
+  replay after a real history gap. Event pages avoid building an unused tail.
+- Real quota/scheduler tests replace fake-policy wiring tests. The HTTP test
+  actually exceeds the association replay buffer, reconstructs state and reads
+  the next delta. The protocol probe asserts every outcome and selects an
+  explicit engine using fresh IDs; it makes no restart/residency recovery claim.
+
+A 628-case intermediate run reported **627 passed, 1 failed** (572.83 seconds):
+using the alias-only reverse map for occupancy omitted primary copies. The fix
+uses the primary hash map and dense-pool fallback. Targeted tests now cover both
+paths, duplicate physical copies, aliases, active references and eviction.
+A full cache/scheduler run passed **415 tests** (195.33 seconds); after the final
+counting refinement the complete prefix-cache suite passed **216 tests**
+(74.71 seconds). These suites overlap; counts must not be summed.
+
+The reproducible `control_overhead.py` microbenchmark was run against detached
+baseline `a41f867f69` and the updated source with identical arguments. Median
+microseconds per call, five samples per measurement:
+
+| Case | Baseline | Updated |
+| --- | ---: | ---: |
+| Poll 64 retained results | 3.675 | 0.188 |
+| Poll 4,096 retained results | 220.817 | 0.190 |
+| Cached guidance, 100,000 blocks | 10,987.637 | 0.153 |
+| Fresh observation, empty 100,000-block pool | 8,441.472 | 4.109 |
+| Fresh observation, populated 100,000-block pool | 11,334.206 | 9,593.808 |
+
+Raw samples, interpreter, source hashes and command are in
+`benchmarks/programmable_kv_cache/results/control-overhead-2026-10-06.json.gz`.
+These are isolated CPU costs with no requests and a fixed observation clock.
+They do not measure serving throughput, fairness, or disabled-feature overhead.
+
+Final regression after the runtime/counting changes:
+
+```bash
+.venv/bin/python -m pytest tests/v1/test_kv_hint_control.py \
+  tests/v1/test_kv_hint_state.py tests/v1/engine/test_kv_control.py \
+  tests/entrypoints/serve/kv_control/test_api.py tests/v1/core/test_prefix_caching.py \
+  tests/v1/core/test_scheduler.py -q
+```
+
+**603 passed**, 20 warnings, 252.98 seconds. The additional warnings are from
+Starlette's in-process client ignoring socket timeouts in the HTTP probe tests;
+the original 14 Torch deprecation warnings remain. The earlier 628-case run also
+covered the complete async and randomized priority scheduler suites; its sole
+failure was the occupancy assertion fixed above. The final targeted suite covers
+that correction and all newly added behaviors.
+
+All normal pre-commit hooks on changed files and manual `mypy-3.12` passed.
+The rebuilt Qwen TP=2 server also passed `recovery.py` with explicit engine ID
+`quality-quota`. This validates protocol errors/replay, not actual engine restart.
+
+### Live weight-version guard
+
+The quality review found that the version setter could silently preserve an old
+native namespace. It now rejects changed versions while programmable control is
+enabled; unchanged-version calls and the disabled feature path keep their behavior.
+This is an explicit unsupported boundary, not a live invalidation implementation.
+Callers must restart with the intended weights/version. Out-of-band tensor changes
+are not intercepted. Task 7.2 remains incomplete.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python -m pytest \
+  tests/v1/engine/test_kv_control.py -q
+```
+
+**29 passed**, 14 warnings, 10.80 seconds. Normal hooks and manual mypy 3.12 also
+pass for the guard. An additional attempt to run all of `test_engine_core.py`
+was stopped after its real-model/GPU cases reported failures. A completed failure
+summary was not collected before cancellation, so no cause is attributed to those
+failures. That file is not a CPU-only suite; this stopped attempt is not counted
+as passing validation. The real serving checks below supply the model/EngineCore evidence.
+
+### Qwen TP=2 with quota guidance enabled
+
+The October 6 run uses the README native CPU server configuration on GPUs **0/3**,
+with the following control configuration:
+
+```json
+{"engine_id":"quality-quota","policies":[{"name":"quota","implementation":"quota"}]}
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python \
+  benchmarks/programmable_kv_cache/http_control.py \
+  --base-url http://127.0.0.1:18083 \
+  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
+  --validate-movement cpu --validate-request-associations \
+  --evaluation-samples 128 --output /tmp/kv-quality-qwen-quota-cpu-final.json
+```
+
+Recomputation and explicit CPU preparation both score **124/128 (96.875%)**,
+with **zero** truncated answers and **zero** final numeric-answer mismatches.
+Cached tokens are **0 / 100,352**. Driver times are **859.53 / 883.55 seconds**;
+concurrent CPU tests and component benchmarks ran during portions of the workload,
+so these times are not a controlled performance comparison. This configuration
+exercises guidance in serving, not quota fairness or an adverse-pressure matrix.
+
+The full report is saved in
+`benchmarks/programmable_kv_cache/results/qwen3.8-27b-tp2-quality-quota-cpu.json.gz`.
+The final dense-pool traversal optimization and weight-version setter guard were
+added after this long-run server started. The fresh-server HTTP validation below
+covers the final source; the 128-question report identifies this process boundary.
+
+The final source was then loaded into a fresh Qwen TP=2 server with the same CPU
+and quota configuration. Running the command above without `--evaluation-samples`
+passes the complete HTTP movement/request-association workflow: **four** copies
+reclaimed/restored, **784** cached tokens on resume and identical short greedy
+outputs. An actual stop/restart also verifies a changed engine epoch, rejection
+of the captured previous epoch, absence of the last old operation ID and an empty
+new association snapshot. This does not complete the full failure/race matrix.
+The complete responses and final source hashes are in
+`results/qwen3.8-27b-tp2-quality-head-http.json.gz` under the benchmark directory.
+All model servers started for this quality review were stopped after validation.

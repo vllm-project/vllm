@@ -61,7 +61,10 @@ three fields. Invocation names `engine_id`, `engine_epoch`, `consumer` (default
 `native`), and optional `namespace`. `submit` accepts the unchanged envelope as
 payload; `operation` takes message/action IDs; `associations` takes optional
 session/cursor/revision/limit; `events` takes stream (`operation` or `association`),
-after and limit. Discovery can query all connected engines, while a mutation
+after and limit. Association pages also return engine epoch, namespace and the
+event sequence at the snapshot. Recovery resumes from the first page’s sequence
+after revision-consistent pagination. Physical residency queries/events remain
+unimplemented (task 6.3). Discovery can query all connected engines, while a mutation
 targets exactly one engine without using DP's broadcast utility method. Results
 use the same JSON shape in process, through MP utility, and over HTTP.
 Native request-attached envelopes are consumed before connector admission, then
@@ -201,6 +204,10 @@ unsupported. New movement is deferred while the engine is paused or sleeping;
 logical control remains available. The in-process Python client has no busy loop
 and advances idle connector work cooperatively when callers submit/query control.
 Live weight-version transition integration and its RL validation remain task 7.2.
+With programmable control enabled, `set_weight_version` rejects a changed version
+before updating metadata; same-version calls remain idempotent. Restart the engine
+with the new weights/version. This guard does not intercept out-of-band changes
+to model tensors.
 
 ## Execution environment
 
@@ -220,3 +227,13 @@ uses an isolated master on `127.0.0.1:19151`, metrics/admin on `127.0.0.1:19153`
 and TCP transfer. The real-buffer integration suite also supports starting and
 stopping its own isolated master, so its correctness checks are reproducible
 without this particular development process.
+
+## Control-path performance contract
+
+Terminal message expiry is scheduled once in a bounded heap; polling a result
+visits expired messages only, rather than scanning all retained records. Replay
+never refreshes expiry and an active sibling keeps the whole message alive.
+Scheduler guidance refreshes at `policy_interval_seconds`, or after a new signal
+or transfer generation change. Cached guidance remains advisory, with the maximum
+policy waiting time checked against the current clock on every admission. Signal
+observations remain fresh and execution always revalidates physical resources.

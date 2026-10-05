@@ -85,8 +85,8 @@ completion alone never finishes a task. The recorded snapshot/hit prefixes conta
 request hits 784 cached tokens. These checks use the common logical index and
 actual engine observations, rather than application-invented residency.
 
-Native Mooncake movement is validated below. CPU movement and policy workload
-acceptance remain separate gates. No serving speedup is inferred from these runs.
+Native Mooncake and CPU movement are validated below. Policy workload
+acceptance remains a separate gate. No serving speedup is inferred from these runs.
 
 ## Native Mooncake movement and cross-engine preparation
 
@@ -178,17 +178,19 @@ final numeric-answer difference. Cached tokens are **0 / 100,352**. Full outputs
 and control results are in the `cpu-*.json.gz` result files. These are correctness
 evaluations, not evidence that movement improves model accuracy or serving speed.
 
-## Policy, rollout and recovery controllers
+## Optional policy configuration
 
-The native policy runtime is configured at engine startup. An empty `policies`
-list keeps signal actions unconsumed while explicit Retain/Release/Prefetch
-commands continue to work. A minimal configuration is:
+Policies load at startup; changing them requires restart. An empty `policies`
+list leaves native signals unconsumed. Built-in implementations are `retention`,
+`tool_wait` and `quota`. Each instance has a unique name, an implementation name
+(or an importable `KVPolicy` subclass) and constructor `options`. `composer`
+selects `priority` or an importable `KVPlanComposer` subclass.
 
 ```json
 {
   "engine_id": "policy-validation",
   "policies": [
-    {"name": "retention", "implementation": "retention", "options": {"ttl_seconds": 30}},
+    {"name": "retain", "implementation": "retention", "options": {"ttl_seconds": 30}},
     {"name": "movement", "implementation": "tool_wait", "options": {"tier": "mooncake"}},
     {"name": "quota", "implementation": "quota", "options": {"max_wait_seconds": 1}}
   ],
@@ -196,29 +198,70 @@ commands continue to work. A minimal configuration is:
 }
 ```
 
-Policies receive immutable pressure/request observations and submit proposals
-through the same engine approval path as application commands. They cannot
-rewrite explicit destinations or mutate scheduler queues; changing the policy
-set requires an engine restart. The policy tests cover shared proposals,
-cancellation, capacity competition, request scoring and prediction invalidation.
+Policies receive immutable observations and submit proposals through engine
+approval. Signal completion reports consumption; each entry in
+`derived_operations` must be queried to determine movement completion. The
+configured composer chooses compatible proposals in configuration order. Explicit
+retention or movement takes precedence over conflicting policy movement.
 
-`rollout.py` generates a seeded multi-round, multi-branch plan with a finite
-pressure budget. With `--base-url` it sends association, retention, prefetch
-and release actions through HTTP and records every result:
+Quota observations/guidance refresh at `policy_interval_seconds` (default 0.05).
+Signals invalidate the cached guidance. The scheduler bypasses optional deferral
+at `max_policy_wait_seconds` even between observations; physical capacity checks
+still apply. Request scores respect explicit scheduler priorities and use arrival
+order to break ties. Observation overflow disables guidance until a complete
+bounded observation is available. These are advisory estimates; selection still
+scans the waiting queue and no end-to-end performance gain is established.
+
+## Protocol probes and remaining workload coverage
 
 ```bash
-.venv/bin/python benchmarks/programmable_kv_cache/rollout.py \
-  --base-url http://127.0.0.1:18083 --rounds 3 --branches 4 \
-  --pressure-blocks 8 --seed 7 --output /tmp/programmable-rollout.json
+.venv/bin/python benchmarks/programmable_kv_cache/recovery.py \
+  --base-url http://127.0.0.1:18083 --engine-id http-validation \
+  --output /tmp/kv-protocol-checks.json
 ```
 
-`recovery.py` exercises duplicate replay, unknown action versions, event gaps
-and a stale restarted epoch. `verl_agent_loop.py` consumes a JSONL export from
-the open-source verl Agent Loop, emits supported envelope actions, and records
-the weight version so obsolete local or remote results can be rejected after a
-version change. `coverage_check.py` verifies that each implemented coverage row
-has source, tests and a runnable workload artifact.
+The probe checks unknown-version rejection, exact duplicate replay, operation
+query agreement and invalid epoch/cursor errors. It uses fresh IDs and explicitly
+selects one engine. A stale epoch probe does not restart a server; a future cursor
+probe does not reproduce lost event history. Real bounded association-history
+loss and reconstruction are covered by the HTTP control tests.
 
-These adapters provide reproducible control/workload evidence. They do not
-replace the required real-transfer and external-model evaluations; those remain
-listed as incomplete when their environment is unavailable.
+Association query pages include `engine_epoch`, `namespace`, `revision` and
+`event_sequence`. For recovery, paginate at the first page's revision and resume
+association events from the first page's event sequence. Restart pagination on
+`stale_revision`; take a fresh snapshot on `event_gap`. Association state does
+not establish GPU residency. Physical residency queries/events remain incomplete.
+Live weight-version changes are explicitly rejected with programmable control
+enabled; restart with the new weights/version until task 7.2 is implemented.
+
+The earlier `rollout.py`, `verl_agent_loop.py` and `coverage_check.py` were removed:
+empty-target commands, an unverified trace format and file-existence checks could
+not establish their claimed workload/coverage behavior. Multi-round pressure,
+application-directed rollout, real verl integration, weight-update invalidation,
+policy comparisons and restart/failure recovery remain in the OpenSpec task list.
+
+## CPU control overhead
+
+```bash
+.venv/bin/python benchmarks/programmable_kv_cache/control_overhead.py \
+  --output /tmp/control-overhead.json
+```
+
+This measures result polling and policy observations with a fixed clock, no
+inference requests, and empty/full CPU cache metadata. The October 6 comparison
+against `a41f867f69` records all five samples in
+`results/control-overhead-2026-10-06.json.gz`. Median polling with 4,096 retained
+results changes from 220.82 to 0.19 microseconds. Repeated guidance within one
+observation interval changes from 10.99 milliseconds to 0.15 microseconds for
+100,000 blocks. A fresh full-cache observation remains a scan (11.33 / 9.59 ms).
+These are CPU component measurements, not throughput, fairness or disabled-path
+serving measurements. No timing threshold is asserted in pytest.
+
+The October 6 quality check additionally enables the built-in `quota` policy on
+this CPU server. The 128-question recompute/prefetch runs both score 124/128 with
+zero final numeric-answer mismatches, no truncation and 0/100,352 cached tokens.
+`quality-quota-cpu.json.gz` records the long run; `quality-head-http.json.gz`
+records a fresh-server run of the final source and actual restart/epoch checks
+(both filenames carry the `qwen3.8-27b-tp2-` prefix). Process boundaries and exact
+commands are recorded in the OpenSpec validation log. These do not establish
+quota fairness or the complete policy/failure workload matrix.

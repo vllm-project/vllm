@@ -6068,6 +6068,25 @@ def test_retention_applies_to_a_new_partial_alias_on_an_idle_cached_copy():
     assert blocks[0].block_hash is not None
 
 
+@pytest.mark.parametrize("extra_free", [1, 100])
+def test_policy_occupancy_counts_shared_copies_once_per_block_and_excludes_aliases(
+    extra_free,
+):
+    pool, _, _, request, blocks = make_retention_pool(
+        num_blocks=1, extra_free=extra_free, block_size=8
+    )
+    copy = pool.get_new_blocks(1)[0]
+    pool.cache_full_blocks(request, [copy], 0, 1, 8, 0)
+    pool.cache_partial_block(
+        request, blocks[0], num_tokens=4, block_size=8, kv_cache_group_id=0
+    )
+    assert pool.get_cached_block_counts() == (2, 1)
+    pool.free_blocks([copy])
+    assert pool.get_cached_block_counts() == (2, 2)
+    pool.evict_blocks({copy.block_id})
+    assert pool.get_cached_block_counts() == (1, 1)
+
+
 def test_cache_reset_cannot_leave_priority_on_a_reused_physical_block():
     pool, declarations, _, request, blocks = make_retention_pool()
     retain_cached(declarations, request, 0, 90)
@@ -6953,6 +6972,50 @@ def test_partial_policy_admission_keeps_every_registered_step_correlated():
     children = derived_results(controller, parent)
     assert len(children) == 1 and children[0].status == OperationStatus.DEFERRED
     assert not adapter.jobs and not runtime.has_pending
+
+
+def test_policy_snapshot_budget_counts_hash_target_entries_outside_selected_range():
+    manager, _, controller, adapter, target = make_movement_controller()
+    runtime, _ = install_movement_policies(
+        manager, controller, "movement", max_policy_target_entries=1
+    )
+    parent = submit_movement(
+        controller,
+        "prediction",
+        "signal",
+        {
+            "target": {**target, "start_token": 4},
+            "signal": "resume_prediction",
+            "resume_after_seconds": 10,
+        },
+    )
+    child = derived_results(controller, parent)[0]
+    assert child.status == OperationStatus.DEFERRED
+    assert "snapshot capacity" in child.reason
+    assert not adapter.jobs and not runtime.has_pending
+
+
+@pytest.mark.parametrize("decisions", [None, (True, False), (1,)])
+def test_invalid_composer_output_terminates_children_and_releases_record_capacity(
+    decisions,
+    monkeypatch,
+):
+    manager, _, controller, adapter, target = make_movement_controller()
+    runtime, now = install_movement_policies(manager, controller, "movement")
+    controller.registry._clock = lambda: now[0]
+    controller.registry.max_records = 2
+    monkeypatch.setattr(runtime.composer, "compose", lambda *_: decisions)
+    result = submit_movement(
+        controller, "resume", "signal", {"target": target, "signal": "resume"}
+    )
+    assert result.status == OperationStatus.PARTIAL
+    assert derived_results(controller, result)[0].status == OperationStatus.FAILED
+    assert not runtime.has_pending and not adapter.jobs
+    now[0] += controller.registry.result_ttl
+    result = submit_movement(
+        controller, "next", "prefetch", {"target": target, "source": "mooncake"}
+    )
+    assert result.status == OperationStatus.RUNNING
 
 
 def test_policy_cancel_preserves_an_explicit_shared_transfer_interest():

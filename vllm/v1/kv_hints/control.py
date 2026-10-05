@@ -3,6 +3,7 @@
 """Bounded, engine-owned correlation for programmable cache operations."""
 
 import hashlib
+import heapq
 import json
 import math
 import time
@@ -11,6 +12,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
+from itertools import islice
 from typing import Literal
 
 from vllm.v1.kv_hints.protocol import KvHintAction, KvHintsEnvelope
@@ -100,7 +102,6 @@ class Submission:
 class _Message:
     fingerprint: bytes
     results: dict[str, OperationResult]
-    expires_at: float | None = None
 
     @property
     def size(self) -> int:
@@ -242,6 +243,7 @@ class OperationRegistry:
         self.result_ttl = result_ttl
         self._clock = clock
         self._messages: dict[str, _Message] = {}
+        self._expiry: list[tuple[float, str]] = []
         self._record_count = 0
         self._sequence = 0
         self._events: deque[OperationResult] = deque(maxlen=max_events)
@@ -307,11 +309,9 @@ class OperationRegistry:
             )
             results[action.action_id] = result
             self._events.append(result)
-        self._messages[envelope.message_id] = _Message(
-            fingerprint,
-            results,
-            None if results else self._clock() + self.result_ttl,
-        )
+        self._messages[envelope.message_id] = _Message(fingerprint, results)
+        if not results:
+            self._schedule_expiry(envelope.message_id)
         self._record_count += size
         return Submission(False, tuple(results.values()))
 
@@ -432,7 +432,7 @@ class OperationRegistry:
         message = self._messages[operation.message_id]
         message.results[operation.action_id] = result
         if all(item.status.terminal for item in message.results.values()):
-            message.expires_at = self._clock() + self.result_ttl
+            self._schedule_expiry(operation.message_id)
         self._events.append(result)
         return result
 
@@ -454,14 +454,14 @@ class OperationRegistry:
             raise ControlError(
                 "event_gap", "Event history has been pruned; query state"
             )
-        return tuple(event for event in self._events if event.sequence > after)[:limit]
+        return tuple(islice((e for e in self._events if e.sequence > after), limit))
+
+    def _schedule_expiry(self, message_id: str) -> None:
+        # Terminal messages are immutable: exactly one expiry per message.
+        heapq.heappush(self._expiry, (self._clock() + self.result_ttl, message_id))
 
     def prune(self) -> None:
         now = self._clock()
-        expired = [
-            key
-            for key, message in self._messages.items()
-            if message.expires_at is not None and message.expires_at <= now
-        ]
-        for key in expired:
+        while self._expiry and self._expiry[0][0] <= now:
+            _, key = heapq.heappop(self._expiry)
             self._record_count -= self._messages.pop(key).size

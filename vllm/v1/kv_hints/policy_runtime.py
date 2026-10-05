@@ -28,6 +28,7 @@ from vllm.v1.kv_hints.control import (
 from vllm.v1.kv_hints.native import (
     DemotePayload,
     EvictPayload,
+    HashTarget,
     NativePayload,
     PrefetchPayload,
     ReleasePayload,
@@ -156,6 +157,7 @@ class KVPolicyRuntime:
         self._declaration_owners: dict[str, tuple[str, ...]] = {}
         self._last_tick = -math.inf
         self._view: CacheObservation | None = None
+        self._view_generation = -1
         self.errors: dict[str, str] = {}
 
     @property
@@ -231,6 +233,7 @@ class KVPolicyRuntime:
         )
         pool = self.manager.block_pool
         total, free = pool.num_gpu_blocks - 1, pool.get_num_free_blocks()
+        cached, reclaimable = pool.get_cached_block_counts()
         view = CacheObservation(
             now,
             total,
@@ -242,18 +245,23 @@ class KVPolicyRuntime:
             tuple(demands),
             tuple((session, len(blocks)) for session, blocks in session_blocks.items()),
             truncated,
-            cached_blocks=sum(b.block_hash is not None for b in pool.blocks),
-            reclaimable_cached_blocks=sum(
-                b.block_hash is not None and b.ref_cnt == 0 for b in pool.blocks
-            ),
+            cached_blocks=cached,
+            reclaimable_cached_blocks=reclaimable,
             pending_policy_actions=len(self._pending) + len(self._running),
         )
-        self._view = view
-        self._request_views = {r.request_id: r for r in demands}
         return view
 
     def observe_requests(self) -> None:
+        if (
+            self._view is not None
+            and self._view_generation == self._generation()
+            and self.clock() - self._view.now < self.settings.policy_interval_seconds
+        ):
+            return
         view = self.observation()
+        self._view = view
+        self._view_generation = self._generation()
+        self._request_views = {r.request_id: r for r in view.requests}
         guidance: list[RequestGuidance] = []
         if not view.truncated_requests:
             for name, policy in self.policies.items():
@@ -299,10 +307,11 @@ class KVPolicyRuntime:
             observed = self._request_views.get(request.request_id)
             if observed is None:
                 return (request.priority if priority else 0, 1, 0, math.inf)
-            expired = observed.waiting_seconds >= self.settings.max_policy_wait_seconds
-            score = self._guidance.get(
-                request.request_id, RequestGuidance(request.request_id)
-            ).score
+            expired = (
+                self._waiting_seconds(observed) >= self.settings.max_policy_wait_seconds
+            )
+            guidance = self._guidance.get(request.request_id)
+            score = guidance.score if guidance is not None else 0.0
             return (
                 request.priority if priority else 0,
                 0 if expired else 1,
@@ -315,18 +324,23 @@ class KVPolicyRuntime:
     def allows_request(self, request: Request) -> bool:
         observed = self._request_views.get(request.request_id)
         if (
-            observed is None
-            or observed.waiting_seconds >= self.settings.max_policy_wait_seconds
+            self._view is None
+            or observed is None
+            or self._waiting_seconds(observed) >= self.settings.max_policy_wait_seconds
         ):
             return True
-        return self._guidance.get(
-            request.request_id, RequestGuidance(request.request_id)
-        ).admit
+        guidance = self._guidance.get(request.request_id)
+        return guidance.admit if guidance is not None else True
+
+    def _waiting_seconds(self, request: RequestDemand) -> float:
+        assert self._view is not None
+        return request.waiting_seconds + max(0.0, self.clock() - self._view.now)
 
     def on_signal(
         self, operation: OperationResult, payload: SignalPayload, request_id: str | None
     ) -> None:
         self._reap()
+        self._view = None
         view = self.observation()
         binding = (
             request_id
@@ -406,6 +420,7 @@ class KVPolicyRuntime:
         ):
             raise ControlError("capacity", "Policy proposal capacity exhausted")
         prepared: list[_Work] = []
+        prepared_entries = 0
         try:
             for name, owner, proposal in proposed:
                 action = proposal.action
@@ -448,18 +463,23 @@ class KVPolicyRuntime:
                         action = msgspec.structs.replace(action, target=target)
                     entries = (
                         sum(
-                            len(p.blocks)
-                            + len(p.partial_blocks)
-                            + len(p.missing_ranges)
+                            max(
+                                1,
+                                len(p.blocks)
+                                + len(p.partial_blocks)
+                                + len(p.missing_ranges),
+                            )
                             for p in scope.prefixes
                         )
                         if scope is not None
                         else 0
                     )
+                    if not isinstance(action, ReleasePayload) and isinstance(
+                        action.target, HashTarget
+                    ):
+                        entries += len(action.target.blocks)
                     if (
-                        self._target_entries
-                        + sum(w.entries for w in prepared)
-                        + entries
+                        self._target_entries + prepared_entries + entries
                         > self.settings.max_policy_target_entries
                     ):
                         raise ControlError(
@@ -473,6 +493,7 @@ class KVPolicyRuntime:
                         child, OperationStatus.FAILED, type(error).__name__
                     )
                     scope, entries = None, 0
+                prepared_entries += entries
                 prepared.append(
                     _Work(
                         child,
@@ -508,6 +529,12 @@ class KVPolicyRuntime:
                 eligible.append(work)
         try:
             choices = self.composer.compose(tuple(w.proposal for w in eligible), view)
+            if (
+                not isinstance(choices, tuple)
+                or len(choices) != len(eligible)
+                or any(type(choice) is not bool for choice in choices)
+            ):
+                raise ControlError("invalid_payload", "Invalid composer decisions")
         except Exception:
             for work in eligible:
                 self.controller.registry.update(
@@ -516,16 +543,6 @@ class KVPolicyRuntime:
                     reason="Policy composition failed",
                 )
             raise
-        if len(choices) != len(eligible) or any(
-            type(choice) is not bool for choice in choices
-        ):
-            for work in eligible:
-                self.controller.registry.update(
-                    work.operation,
-                    OperationStatus.FAILED,
-                    reason="Composer returned invalid decisions",
-                )
-            raise ControlError("invalid_payload", "Invalid composer decisions")
         for work, accepted in zip(eligible, choices, strict=True):
             if accepted:
                 self._pending[work.operation.operation_id] = work
@@ -614,10 +631,10 @@ class KVPolicyRuntime:
 
     def tick(self, *, force: bool = False) -> None:
         now = self.clock()
-        self._reap()
         if not force and now - self._last_tick < self.settings.policy_interval_seconds:
             return
         self._last_tick = now
+        self._reap()
         registry = self.controller.registry
         for work in tuple(self._pending.values()):
             if work.generation != self._generation():
@@ -678,11 +695,12 @@ class KVPolicyRuntime:
             if current is None or current.status.terminal:
                 del self._running[identifier]
                 self._target_entries -= work.entries
-        active_owners = {
-            d.owner_id for d in self.controller.declarations.active_declarations()
-        }
-        self._declaration_owners = {
-            key: value
-            for key, value in self._declaration_owners.items()
-            if key in active_owners
-        }
+        if self._declaration_owners:
+            active_owners = {
+                d.owner_id for d in self.controller.declarations.active_declarations()
+            }
+            self._declaration_owners = {
+                key: value
+                for key, value in self._declaration_owners.items()
+                if key in active_owners
+            }

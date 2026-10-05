@@ -157,16 +157,21 @@ F8 不是当前“配置式插件”的隐含要求；首版更换插件需重�
 “Same typed envelope; different payload interpreters”图。该图中 shared dispatch
 和 future KVCR G1 hooks 是设计要求/未来方向，不能据图声称已合入。
 
-## 首版交付对账（2026-10-02）
+## 首版交付对账（2026-10-06 修正）
 
-已交付并有本地或真实链路证据的首版范围包括：统一 envelope/native 与
-KVCR opaque 分发、SessionPrefixIndex 与独立声明、engine-owned 预约/取消、
-CPU/Mooncake request-free movement、真实 Mooncake 跨 engine、Python/HTTP
-控制、策略/调度扩展、直接控制器、分支/range 工作流以及增量关联查询。
-对应实现任务和测试结果仍以 OpenSpec `tasks.md` 与 `validation.md` 为准。
+已实现的控制、逻辑索引、声明与 CPU/Mooncake 搬运有单元测试以及部分本地
+Qwen 真实链路证据。具体证据与限制见 OpenSpec `coverage.md` 和
+`validation.md`。策略/调度有针对性回归；其完整压力、收益和公平性矩阵未完成。
 
-以下首版验收仍保留在 OpenSpec 未完成任务中，不能在本清单中移到 F1–F8：
-verl/Agent Loop 的实际运行、策略压力/公平性对比、外部 GPT-OSS-120B 与
-DeepSeek-V4-Flash 评测、live weight-version 失效、真实 HTTP recovery
-演练，以及最终发布前 GitHub 查重（当前 CLI 未认证）。本文件的后续项仍只
-描述明确不属于首版的 Dynamo、混合 consumer、KVCR G1 和独立 KVCR 控制。
+10 月 2 日的完成度统计高估了交付范围：空目标 rollout、未对接真实格式的
+verl 脚本，以及仅检查文件存在的 coverage 脚本已移除。协议错误探针已补齐
+断言，但伪造过期 epoch 不等于实际重启恢复。以下仍是首版未完成项：
+
+- 物理 residency 查询/事件与完整闭环恢复；
+- 多轮共享前缀压力、完整 branch/range/task-tree 示例与应用 rollout 控制器；
+- verl Agent Loop 集成及 live weight-version 下旧 KV 的失效；
+- native policy 到真实 Mooncake 完成/复用的验收；
+- 策略对比、端到端开销、公平性及外部 GPT-OSS/DeepSeek 评测；
+- 成功的 GitHub 查重和满足完整证据要求的 PR 描述。
+
+这些内容保留在 OpenSpec 首版任务中。F1–F8 的后续边界不变。

@@ -115,3 +115,22 @@ the separate PD connector and existing Store unit suites mock the backend, so
 - GitHub CLI is unauthenticated. Public REST checks found request-free prefetch
   PR #58198 and retention PR #38514. Preserve their execution/reuse boundaries;
   repeat required authenticated CLI checks before PR publication. No PR created.
+
+## Quality review, 2026-10-06
+
+- OperationRegistry maps message/action IDs to retained results. Exercise terminal
+  expiry in completion order, empty messages, replay and active siblings through
+  submit/get/update with a fake clock. Optimize lookup without weakening the TTL.
+- Policy guidance maps an immutable observation to scheduler-owned admission and
+  ordering. Replace fake-policy wiring checks with the real quota policy and real
+  queues; check priority, bounded waiting, observation throttling and overflow.
+  Fake clocks make deadlines deterministic; CPU scheduler tests are sufficient.
+  Invalid composer output must terminate child records; snapshots must account
+  for original hash targets outside the resolved range. Extend the existing
+  movement fixture and verify reclamation/capacity through native submissions.
+- Association queries must provide a cursor from which a consumer can resume
+  replay. Force actual bounded-history loss through HTTP, reconstruct state, then
+  consume a subsequent delta; a forged future cursor alone is not gap recovery.
+- Example controllers must check correlated terminal outcomes on nonempty targets.
+  Exercise them against the model-free HTTP control fixture for failure/replay;
+  label this separately from live transfer and model reuse validation.

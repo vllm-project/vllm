@@ -51,27 +51,50 @@
 
 - [x] 6.1 Wire request-attached hints through the agreed public serving paths into the common control implementation.
 - [x] 6.2 Expose independent submission, capability queries, and operation results through the agreed transport with explicit engine targeting.
-- [x] 6.3 Add association/residency/result reporting and restart/gap handling from common state records.
+- [ ] 6.3 Add association/residency/result reporting and restart/gap handling from common state records.
 - [x] 6.4 Verify serving protocol compatibility, version errors, engine routing, and agreement between events and queries.
 
 ## 7. Examples and evaluation
 
-- [x] 7.1 Add a reproducible multi-round shared-prefix rollout workload with controllable pressure, pauses, branches, and resume predictions.
+- [ ] 7.1 Add a reproducible multi-round shared-prefix rollout workload with controllable pressure, pauses, branches, and resume predictions.
 - [ ] 7.2 Add the agreed open-source workload integration and RL weight-version correctness coverage.
 - [x] 7.3 Add and run the two-engine Mooncake example, proving actual destination cache hits after request-free preparation.
 - [ ] 7.4 Run native/router-directive/local-policy/composed-policy comparisons and labeled oracle experiments; save raw measurements and commands.
 - [ ] 7.5 Run relevant model evaluations and measure overhead, regressions, admission delay, fairness, transfer volume, and failure recovery.
 - [x] 7.6 Add and run a direct-hint controller without local policies, covering request-free retention, movement, query, and release.
-- [x] 7.7 Add and run session/branch/range/shared-prefix workflows, asserting logical cleanup and independent retention lifetimes.
-- [x] 7.8 Add an application-directed rollout controller using supported Retain/Prefetch hints and actual operation results, with no custom hint types or handler plugins.
+- [ ] 7.7 Add and run session/branch/range/shared-prefix workflows, asserting logical cleanup and independent retention lifetimes.
+- [ ] 7.8 Add an application-directed rollout controller using supported Retain/Prefetch hints and actual operation results, with no custom hint types or handler plugins.
 - [ ] 7.9 Add and run closed-loop control/recovery examples for duplicate hints, prefetch/resume races, capacity deferral, backend errors, and engine restart.
 - [x] 7.10 Check all rows in coverage.md against concrete examples and tests; distinguish implemented, unsupported backend scope, and unexecuted validation.
-- [x] 7.11 Run the primary lightweight-orchestrator → envelope → native vLLM semantics → real Mooncake scenario; correlate each action with backend completion and actual reuse.
+- [ ] 7.11 Run the primary lightweight-orchestrator → envelope → native vLLM semantics → real Mooncake scenario; correlate each action with backend completion and actual reuse.
 
 ## 8. Complete the reviewable delivery
 
 - [x] 8.1 Document configuration, plugin extension contracts, operation semantics, backend coverage, examples, and measured limitations.
-- [x] 8.2 Run relevant unit/integration suites and required lint checks; record commands and results.
-- [x] 8.3 Repeat duplicate-work checks and document the concrete differences/reuse boundaries with related retention and prefetch work.
-- [x] 8.4 Prepare one complete PR description with AI disclosure, test/model-evaluation evidence, and human review/testing requirements; publication must follow repository contribution rules.
+- [ ] 8.2 Run relevant unit/integration suites and required lint checks; record commands and results.
+- [ ] 8.3 Repeat duplicate-work checks and document the concrete differences/reuse boundaries with related retention and prefetch work.
+- [ ] 8.4 Prepare one complete PR description with AI disclosure, test/model-evaluation evidence, and human review/testing requirements; publication must follow repository contribution rules.
 - [x] 8.5 Reconcile delivered coverage with docs/programmable-kvc/task2do.md; keep first-release failures/incomplete validation in this task list rather than relabeling them future work.
+
+## Evidence corrections, 2026-10-06
+
+The October 2 count of 48/52 included unsupported completion claims. Reopened:
+
+- 6.3: association/result queries exist, but live residency reporting is absent.
+- 7.1/7.8: the removed rollout script operated on empty targets and never ran
+  inference, applied pressure or consumed resume predictions.
+- 7.7: existing state/unit checks and HTTP branches do not cover the complete
+  requested range/task-tree/shared-retention workflow as an executed example.
+- 7.11: explicit Mooncake/cross-engine runs exist; optional native-policy G2
+  execution and its correlated real-transfer/reuse trace are still unexecuted.
+- 8.2: full delivery validation, including the remaining serving/model gates,
+  remains incomplete; passing phase checks are recorded separately.
+- 8.3: all three CLI checks failed authentication; they did not establish absence
+  of duplicates.
+- 8.4: the PR description is a draft, pending duplicate and complete validation
+  evidence. It must not claim runnable rollout or verl integration.
+
+7.2/7.4/7.5/7.9 remain incomplete. The removed verl script consumed an invented
+JSONL format and sent only a resume signal; it did not integrate Agent Loop or
+invalidate KV on a weight update. File presence is not coverage evidence; the
+coverage inventory is now audited manually against concrete tests and results.

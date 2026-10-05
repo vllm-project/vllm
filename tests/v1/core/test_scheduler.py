@@ -19,6 +19,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.kv_control import KVControlConfig, KVPolicyConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
@@ -58,6 +59,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.kv_hints.control import ControlContext
+from vllm.v1.kv_hints.engine import create_control_service
+from vllm.v1.kv_hints.protocol import KvHintAction, KvHintsEnvelope
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -143,54 +147,134 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
-def test_optional_kv_policy_selects_without_mutating_scheduler_queues():
-    scheduler = create_scheduler(max_num_seqs=1, max_num_batched_tokens=16)
-    requests = create_requests(num_requests=2, num_tokens=4, req_ids=["a", "b"])
+def quota_scheduler(
+    *,
+    shares=None,
+    scheduling_policy="fcfs",
+    async_scheduling=False,
+    interval=10,
+    max_policy_requests=4096,
+):
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_num_batched_tokens=64,
+        num_blocks=9,
+        enable_prefix_caching=True,
+        scheduling_policy=scheduling_policy,
+        async_scheduling=async_scheduling,
+    )
+    scheduler.vllm_config.kv_control_config = KVControlConfig(
+        policies=[
+            KVPolicyConfig(
+                name="quota",
+                implementation="quota",
+                options={"shares": shares or {}, "max_wait_seconds": 10},
+            )
+        ],
+        policy_interval_seconds=interval,
+        max_policy_requests=max_policy_requests,
+        max_policy_wait_seconds=0.5,
+    )
+    service = create_control_service(
+        scheduler.vllm_config,
+        scheduler.kv_cache_manager,
+        "default",
+        requests=lambda: scheduler.requests.values(),
+    )
+    runtime = service.controller.policies
+    now = [0.0]
+    runtime.clock = lambda: now[0]
+    runtime.wall_clock = lambda: 1000.0
+    scheduler.kv_policy_runtime = runtime
+    requests = create_requests(num_requests=2, num_tokens=32, req_ids=["a", "b"])
     for request in requests:
+        request.arrival_time = 1000.0
+        request.session_id = request.request_id
         scheduler.add_request(request)
-
-    class Policy:
-        def __init__(self):
-            self.observed = 0
-
-        def observe_requests(self):
-            self.observed += 1
-
-        def select_request(self, queue, *, priority):
-            assert not priority
-            return list(queue)[-1]
-
-        def allows_request(self, request):
-            return request.request_id == "b"
-
-    policy = Policy()
-    scheduler.kv_policy_runtime = policy
-    scheduler.schedule()
-    assert policy.observed == 1
-    assert [request.request_id for request in scheduler.running] == ["b"]
-    assert [request.request_id for request in scheduler.waiting] == ["a"]
+    return scheduler, service.controller, now
 
 
-def test_optional_kv_policy_can_defer_admission_without_changing_preemption():
-    scheduler = create_scheduler(max_num_seqs=2, max_num_batched_tokens=16)
-    requests = create_requests(num_requests=2, num_tokens=4, req_ids=["a", "b"])
-    for request in requests:
-        scheduler.add_request(request)
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_quota_deferral_expires_even_before_the_next_policy_observation(
+    async_scheduling,
+    monkeypatch,
+):
+    scheduler, _, now = quota_scheduler(
+        shares={"a": 1, "b": 7}, async_scheduling=async_scheduling
+    )
+    runtime = scheduler.kv_policy_runtime
+    observe = Mock(wraps=runtime.observation)
+    monkeypatch.setattr(runtime, "observation", observe)
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["b"]
+    assert [r.request_id for r in scheduler.waiting] == ["a"]
+    scheduler.finish_requests("b", RequestStatus.FINISHED_ABORTED)
+    now[0] = 0.5
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["a"]
+    assert observe.call_count == 1
 
-    class Policy:
-        def observe_requests(self):
-            pass
 
-        def select_request(self, queue, *, priority):
-            return queue.peek_request()
+@pytest.mark.parametrize(
+    "scheduling_policy,priority,aged,expected",
+    [
+        ("fcfs", 0, False, "b"),
+        ("priority", -1, False, "a"),
+        ("priority", 0, False, "b"),
+        ("fcfs", 0, True, "a"),
+    ],
+)
+def test_quota_scores_respect_priority_and_bounded_waiting(
+    scheduling_policy,
+    priority,
+    aged,
+    expected,
+):
+    scheduler, controller, now = quota_scheduler(scheduling_policy=scheduling_policy)
+    scheduler.requests["a"].priority = priority
+    registry = controller.registry
+    result = controller.submit(
+        KvHintsEnvelope(
+            "0.1",
+            "importance",
+            [
+                KvHintAction(
+                    "a",
+                    "signal",
+                    "1",
+                    {
+                        "target": {"kind": "session", "session_id": "b"},
+                        "signal": "importance",
+                        "importance": 100,
+                    },
+                )
+            ],
+        ),
+        ControlContext(registry.engine_id, registry.engine_epoch, "native"),
+    ).results[0]
+    assert result.status == "completed"
+    scheduler.kv_policy_runtime.observe_requests()
+    if aged:
+        now[0] = 0.5
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == [expected]
+    assert all(r.num_preemptions == 0 for r in scheduler.requests.values())
 
-        def allows_request(self, request):
-            return request.request_id != "a"
 
-    scheduler.kv_policy_runtime = Policy()
-    scheduler.schedule()
-    assert [request.request_id for request in scheduler.running] == ["b"]
-    assert [request.request_id for request in scheduler.waiting] == ["a"]
+def test_quota_observation_overflow_falls_back_to_scheduler_order():
+    scheduler, _, now = quota_scheduler(
+        shares={"a": 1, "b": 7}, interval=0.05, max_policy_requests=2
+    )
+    runtime = scheduler.kv_policy_runtime
+    runtime.observe_requests()
+    assert not runtime.allows_request(scheduler.requests["a"])
+    (third,) = create_requests(num_requests=1, num_tokens=32, req_ids=["c"])
+    third.arrival_time = 1000.0
+    scheduler.add_request(third)
+    now[0] = runtime.settings.policy_interval_seconds
+    runtime.observe_requests()
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["a"]
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2])

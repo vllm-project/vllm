@@ -102,6 +102,17 @@ class BlockHashToBlockMap:
             return (blocks,)
         return tuple(blocks.values())
 
+    def get_cached_block_counts(self) -> tuple[int, int]:
+        """Count physical cached copies and unreferenced copies, excluding aliases."""
+        cached = reclaimable = 0
+        for key, copies in self._cache.items():
+            blocks = (copies,) if isinstance(copies, KVCacheBlock) else copies.values()
+            for block in blocks:
+                if block.block_hash == key:
+                    cached += 1
+                    reclaimable += block.ref_cnt == 0
+        return cached, reclaimable
+
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
         """Inserts the KVCacheBlock to the cache"""
         blocks = self._cache.get(key)
@@ -1001,6 +1012,17 @@ class BlockPool:
 
         """
         return self.free_block_queue.num_free_blocks
+
+    def get_cached_block_counts(self) -> tuple[int, int]:
+        """Count resident and reclaimable copies without double-counting aliases."""
+        # Sparse caches benefit from traversing only hash entries. At higher
+        # occupancy a pool scan avoids per-key dispatch and alias traversal.
+        if len(self.cached_block_hash_to_block) * 4 < self.num_gpu_blocks:
+            return self.cached_block_hash_to_block.get_cached_block_counts()
+        return (
+            sum(b.block_hash is not None for b in self.blocks),
+            sum(b.block_hash is not None and b.ref_cnt == 0 for b in self.blocks),
+        )
 
     def get_usage(self) -> float:
         """Get the KV cache usage.

@@ -27,28 +27,39 @@ Historical Pin mentions do not override the user's confirmed September 24
 semantics: no public Pin. Broad context-editing/attention changes are not implied
 by the notes' references to management edits.
 
-## Capability, code boundary, and demonstration
+## Audited coverage (2026-10-06)
 
-| Capability | Required implementation boundary | Runnable demonstration and assertion |
+Each row distinguishes implementation, executed evidence and remaining acceptance.
+A source file or mock is not evidence of real movement or serving performance.
+Historical Qwen/Store results below are the October 1 records in `validation.md`
+and compressed artifacts in `benchmarks/programmable_kv_cache/results/`.
+
+| Capability | Implementation and concrete evidence | Remaining acceptance |
 | --- | --- | --- |
-| Common hints | Existing envelope + action validation/dispatch | Submit the same supported hint through Python/HTTP and with/without inference; observe the same semantics |
-| Interpretation ownership | Whole-envelope native/backend dispatch | Native payload reaches vLLM semantics; a KVCR payload remains opaque to native parsing; no envelope is executed by both |
-| Application-directed behavior | Existing hint contract + common engine execution | Application chooses retention/movement targets and timing, submits hints, and reacts to actual results without a custom engine plugin |
-| Session/continuation state | Engine-local index + guarded state commands | Record a parent and two branches; resolve each explicit range and shared ancestor correctly |
-| Shared-content membership | Cache-hit/computation hooks + reverse association lookup | Session B hits A's prefix; both associations exist, physical capacity is counted once |
-| Request-free retention | Declaration records + eviction candidate selection | Apply/update/release independent range TTLs after inference ends; expiry changes priority without deleting B's declaration |
-| Explicit reclamation | KVCacheManager/BlockPool authority | Evict an inactive selected copy; referenced blocks are reported blocked/partial and remain usable |
-| Demotion lifecycle | Operation manager + CPU/Store adapter | Cold save succeeds, active refs delay source reclaim, and the result exposes both milestones |
-| Proactive preparation | Destination approval + request-free worker progress | Prefetch completes before resume; a racing resume shares the in-flight transfer |
-| Cross-engine reuse | Router-directed A/Store/B operations | A publishes compatible content, B prefetches, actual B GPU reuse is measured, A is not implicitly deleted |
-| Complete native G2 path | Lightweight orchestrator + ingress + native semantics + real Store calls | Correlate the original action with approval, Put/Get jobs, completion, and actual cache reuse |
-| Programmable local policy | PolicyView + proposal interface | The same tool-wait signal produces no action without a consumer, then a bounded plan with a configured policy |
-| Multi-policy composition | Replaceable composer + common resource account | Duplicate prefetch proposals share physical work; distinct targets compete for finite capacity |
-| Request/KV cooperation | Scheduler admission/score extension | Quota guidance and request growth compete with movement under one capacity account; existing preemption remains |
-| Logical lifecycle completion | Task-tree cleanup + declaration ownership | End one branch/task while an unrelated session retains the shared prefix |
-| Closed-loop control | Correlated results + capabilities + association/residency events | A router retries a deferred command using current observations and never equates receipt with readiness |
-| Recovery | Epochs/revisions + bounded replay/query + stale completion handling | Restart or event loss invalidates stale locations; unavailable KV falls back to normal recomputation |
-| Weight compatibility | Local/external version invalidation | Weight update prevents reuse/publication of obsolete KV even when bytes remain in the Store |
+| Common hints | `api.py`, `controller.py`; `test_kv_hint_control.py`, HTTP `test_api.py`, recorded `http-control.json.gz` | Full workload validation |
+| Interpretation ownership | `EngineCore.add_request`, `consume_attached`; engine `test_kv_control.py`, `test_kvcr_tier.py` opaque forwarding | KVCR independent control and G1 directives are unsupported |
+| Application-directed behavior | `http_control.py` executes explicit Retain/Release/Demote/Prefetch and polls outcomes; recorded CPU/Mooncake runs | Multi-round rollout controller (7.8) |
+| Session/continuation state | `state.py`, `request_observer.py`; state and engine control suites, recorded `request-associations.json.gz` | Complete branch/range workflow (7.7) |
+| Shared-content membership | `test_cache_hit_request_adds_logical_membership_without_allocating_another_copy`; state reverse-membership tests | Broader serving workload |
+| Request-free retention | `retention.py`, `KVRetentionPriority`; prefix-cache tests for independent expiry/eviction, direct HTTP run | Complete range and task-tree example (7.7) |
+| Explicit reclamation | `BlockPool.evict_unreferenced`; prefix-cache active-reference tests; recorded 4-copy HTTP eviction | Pressure comparisons |
+| Demotion lifecycle | `transfers.py` and CPU/Store adapters; queued source-reference tests; recorded real CPU/Store copies | Full failure workload |
+| Proactive preparation | Transfer leases, all-rank publication; Store/CPU scheduler and worker suites; recorded 784-token reuse | Executed closed-loop resume race (7.9) |
+| Cross-engine reuse | `http_control.py --destination-url`; recorded `mooncake-cross-engine.json.gz` | Other models/layouts |
+| Complete native G2 path | Explicit Demote/Prefetch path has real Store and Qwen evidence | Optional native-policy G2 trace and reuse (7.11) |
+| Programmable local policy | `policy.py`, `policy_runtime.py`; derived-operation and invalidation tests in `test_prefix_caching.py` | Real policy movement and performance |
+| Multi-policy composition | Composer and common transfer leases; tests for duplicate proposals, finite capacity and independent cancellation | Policy ablations and adverse workloads (7.4) |
+| Request/KV cooperation | Real quota/scheduler tests check priority and maximum waiting; the October 6 Qwen quota-enabled correctness run is recorded separately | Fairness, admission-delay and overhead matrix (7.5) |
+| Logical lifecycle completion | `finish_task` and independent declaration tests in state/control/cache suites | Full runnable workflow (7.7) |
+| Closed-loop control | Common operation results/events and association queries; direct transfer polling | Physical residency reporting (6.3) and full recovery loop (7.9) |
+| Recovery | Epoch checks, bounded replay, HTTP history-loss test; October 6 actual restart rejects the old epoch and drops local records | Full failure injection, prefetch/resume races and fallback loop (7.9) |
+| Weight compatibility | Startup namespace includes weight version; `test_engine_epochs_differ_but_compatible_dp_ranks_share_namespace` | Version changes are rejected while control is enabled; live local/external invalidation is not integrated (7.2) |
+
+Runtime restrictions: general CPU control requires one block per chunk; native
+CPU Share is unsupported. Mooncake supports full primary boundaries and PCP=DCP=1.
+Cold Retain/delete, SimpleCPU control, KVCR request-free actions and mixed-owner
+envelopes are unsupported. Local Qwen results do not validate GPT-OSS-120B or
+DeepSeek-V4-Flash. No verl Agent Loop integration or pressure workload is delivered.
 
 ## Engine responsibilities behind application control
 
@@ -105,9 +116,9 @@ implementing a separate protocol client. The demo IDs are not public action name
 - The first delivery includes a real Mooncake cross-engine run; scripts and mocks
   alone do not establish that result.
 
-## Pending interface decisions
+## Remaining delivery gaps
 
-- Concrete supported action payloads within the merged hint contract.
-- Association delta encoding and recovery/query contract.
-- Snapshot/follow-growth selection, ordering/retry semantics, plan partial
-  effects, and exact backend/group capability coverage.
+Payloads, whole-envelope routing, revisions and snapshot/follow-growth scope are
+specified in `implementation.md` and implemented in the native modules. The open
+items are the incomplete acceptance rows above and the task list, including
+residency reporting, real workload integration and live weight invalidation.

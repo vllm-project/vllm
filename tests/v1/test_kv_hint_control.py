@@ -212,6 +212,23 @@ def test_multi_action_message_expires_only_after_every_action_finishes(registry,
     assert registry.get("message", "b") is None
 
 
+def test_result_expiry_follows_completion_order_and_reused_ids(registry, now):
+    first = registry.submit(envelope("first"), CONTEXT).results[0]
+    second = registry.submit(envelope("second"), CONTEXT).results[0]
+    registry.update(second, OperationStatus.COMPLETED)
+    now[0] += 5
+    registry.update(first, OperationStatus.COMPLETED)
+    registry.submit(envelope("empty", action_ids=()), CONTEXT)
+    now[0] += 5
+    assert registry.get("second", "action") is None
+    replacement = registry.submit(envelope("second"), CONTEXT).results[0]
+    assert registry.get("first", "action") is not None
+    now[0] += 5
+    assert registry.get("first", "action") is None
+    assert not registry.submit(envelope("empty", action_ids=()), CONTEXT).replayed
+    assert registry.get("second", "action") == replacement
+
+
 def test_empty_envelopes_are_bounded_and_expire(now):
     registry = OperationRegistry(
         "engine-a",

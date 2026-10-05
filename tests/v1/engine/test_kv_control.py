@@ -69,6 +69,21 @@ def test_engine_epochs_differ_but_compatible_dp_ranks_share_namespace():
     )
 
 
+def test_live_weight_version_change_cannot_silently_preserve_control_namespace():
+    engine = object.__new__(EngineCore)
+    engine._weight_version = "default"
+    engine.kv_control_service = make_service()
+    before = engine.get_kv_control_capabilities()
+    engine.set_weight_version("default")
+    with pytest.raises(RuntimeError, match="restart the engine"):
+        engine.set_weight_version("updated")
+    assert engine.get_weight_version() == "default"
+    assert engine.get_kv_control_capabilities() == before
+    engine.kv_control_service = None
+    engine.set_weight_version("updated")
+    assert engine.get_weight_version() == "updated"
+
+
 @pytest.mark.parametrize(
     "settings",
     [

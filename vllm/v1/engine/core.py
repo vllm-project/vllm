@@ -1131,6 +1131,14 @@ class EngineCore:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
     def set_weight_version(self, weight_version: str) -> None:
+        if (
+            getattr(self, "kv_control_service", None) is not None
+            and weight_version != self._weight_version
+        ):
+            raise RuntimeError(
+                "Live weight-version changes with programmable KV control are "
+                "not supported; restart the engine to establish a new cache namespace"
+            )
         self._weight_version = weight_version
 
     def get_weight_version(self) -> str:

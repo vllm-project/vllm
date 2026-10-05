@@ -4,6 +4,7 @@
 
 from collections import OrderedDict, deque
 from dataclasses import dataclass
+from itertools import islice
 from typing import Literal, TypeAlias
 
 from vllm.v1.kv_hints.control import ControlError, _validate_id
@@ -56,6 +57,9 @@ class AssociationPage:
     revision: int
     items: tuple[ContinuationState, ...]
     next_after: ContinuationKey | None
+    engine_epoch: str
+    namespace: str
+    event_sequence: int
 
 
 @dataclass(frozen=True)
@@ -449,7 +453,12 @@ class SessionPrefixIndex:
         selected = keys[:limit]
         cursor = selected[-1] if len(keys) > limit else None
         return AssociationPage(
-            self.revision, tuple(self._continuations[k] for k in selected), cursor
+            self.revision,
+            tuple(self._continuations[k] for k in selected),
+            cursor,
+            self.engine_epoch,
+            self.namespace,
+            self._sequence,
         )
 
     def task_tree(self, session_id: str) -> tuple[str, ...]:
@@ -507,7 +516,7 @@ class SessionPrefixIndex:
             raise ControlError(
                 "event_gap", "Association history was pruned; query state"
             )
-        return tuple(e for e in self._events if e.sequence > after)[:limit]
+        return tuple(islice((e for e in self._events if e.sequence > after), limit))
 
     @staticmethod
     def _check_revision(expected: int, actual: int) -> None:
