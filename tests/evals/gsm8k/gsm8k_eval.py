@@ -134,9 +134,9 @@ async def call_vllm_chat_api(
 ) -> tuple[str, int]:
     """Call vLLM's OpenAI-compatible chat completions endpoint.
 
-    ``model``, ``temperature`` and the other optional fields are omitted from
-    the request when ``None``, so the server defaults apply (vLLM uses its
-    served model when ``model`` is omitted).
+    ``model``, ``temperature``, ``stop`` and the other optional fields are
+    omitted from the request when ``None``, so the server defaults apply (vLLM
+    uses its served model when ``model`` is omitted).
 
     Returns:
         Tuple of (final answer content, completion_tokens). Reasoning returned
@@ -146,10 +146,10 @@ async def call_vllm_chat_api(
     data = {
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "stop": stop,
     }
     data.update(
         _optional_params(
+            stop=stop,
             model=model,
             temperature=temperature,
             seed=seed,
@@ -257,7 +257,8 @@ def evaluate_gsm8k(
     otherwise the server default applies. ``model`` is used only in chat mode,
     where it may be ``None`` (the server uses its served model).
     ``reasoning_effort`` and ``chat_template_kwargs`` require
-    ``use_chat_completions=True``.
+    ``use_chat_completions=True``. Stop strings are sent only in completions
+    mode.
 
     Returns dict with accuracy, invalid_rate, latency, etc.
     """
@@ -277,15 +278,15 @@ def evaluate_gsm8k(
         output_tokens: list[int] = [0] * num_questions
 
         async def get_answer(session: aiohttp.ClientSession, i: int) -> tuple[str, int]:
-            stop = ["Question", "Assistant:", "<|separator|>"]
             if use_chat_completions:
+                # No stop strings: the chat template delimits the turn, and they
+                # would also cut off reasoning.
                 answer, tokens = await call_vllm_chat_api(
                     session=session,
                     model=model,
                     prompt=prompts[i],
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    stop=stop,
                     url=base_url,
                     seed=seed,
                     top_p=top_p,
@@ -299,7 +300,7 @@ def evaluate_gsm8k(
                     prompt=prompts[i],
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    stop=stop,
+                    stop=["Question", "Assistant:", "<|separator|>"],
                     url=base_url,
                     seed=seed,
                     top_p=top_p,
@@ -491,6 +492,9 @@ def main() -> None:
             "top_p": args.top_p,
             "top_k": args.top_k,
             "seed": args.seed,
+            "stop": None
+            if args.use_chat_completions
+            else ["Question", "Assistant:", "<|separator|>"],
             "reasoning_effort": args.reasoning_effort,
             "chat_template_kwargs": args.chat_template_kwargs,
         }
