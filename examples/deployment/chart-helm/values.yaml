@@ -19,6 +19,24 @@ servicePort: 80
 # -- Additional ports configuration
 extraPorts: []
 
+# -- Optional Prometheus Operator ServiceMonitor (requires its CRD)
+serviceMonitor:
+  # -- Enable metrics collection through a ServiceMonitor
+  enabled: false
+  # -- Labels used by the Prometheus serviceMonitorSelector
+  additionalLabels: {}
+  # -- Name of the Service port to scrape
+  port: service-port
+  # -- Metrics endpoint path
+  path: /metrics
+  # -- Scrape interval
+  interval: 30s
+  metricFilter:
+    # -- keep for an allowlist, drop for a denylist
+    action: keep
+    # -- RE2 expression matching metric names; empty disables filtering
+    regex: ""
+
 # -- Number of replicas
 replicaCount: 1
 

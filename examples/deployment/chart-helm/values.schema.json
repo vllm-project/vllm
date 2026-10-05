@@ -39,6 +39,44 @@
         "extraPorts": {
             "type": "array"
         },
+        "serviceMonitor": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "additionalLabels": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "port": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "path": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "interval": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "metricFilter": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["keep", "drop"]
+                        },
+                        "regex": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "replicaCount": {
             "type": "integer"
         },
