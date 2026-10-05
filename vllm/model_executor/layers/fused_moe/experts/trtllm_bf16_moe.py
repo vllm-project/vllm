@@ -254,6 +254,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.SigmoidRenorm,
+            RoutingMethodType.MiniMax2,
             RoutingMethodType.Sigmoid,
         ]
 
