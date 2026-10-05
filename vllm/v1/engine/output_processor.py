@@ -16,6 +16,7 @@ from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
     PoolingRequestOutput,
+    RequestError,
     RequestOutput,
     SamplingMask,
 )
@@ -328,6 +329,7 @@ class RequestState:
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        error: RequestError | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -366,6 +368,7 @@ class RequestState:
                 external_req_id,
                 [self._new_pooling_output(pooling_output)],
                 finished,
+                error=error,
             )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
@@ -393,6 +396,7 @@ class RequestState:
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        error: RequestError | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
@@ -409,6 +413,7 @@ class RequestState:
                 num_cached_tokens=self.num_cached_tokens,
                 prompt_token_ids=prompt_token_ids,
                 finished=finished,
+                error=error,
             )
         assert self.logprobs_processor is not None
         if self.output_kind == RequestOutputKind.DELTA:
@@ -463,10 +468,16 @@ class RequestState:
             logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
 
         sampling_mask = None
-        if finished and self.sampling_mask_chunks:
+        if (delta or finished) and self.sampling_mask_chunks:
             sampling_mask = SamplingMask(
-                [chunk.token_ids.tolist() for chunk in self.sampling_mask_chunks]
+                [
+                    position
+                    for chunk in self.sampling_mask_chunks
+                    for position in chunk.to_nested_list()
+                ]
             )
+            if delta:
+                self.sampling_mask_chunks.clear()
 
         # Concatenate routed experts on finish
         routed_experts = None
@@ -733,6 +744,19 @@ class OutputProcessor:
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
 
+            request_error = None
+            if (
+                req_state.detokenizer is None
+                and engine_core_output.mm_cache_miss_hashes
+                and finish_reason == FinishReason.ERROR
+            ):
+                request_error = RequestError(
+                    code="multimodal_cache_miss",
+                    message="Multi-modal processor cache miss.",
+                    retryable=True,
+                )
+                pooling_output = EMPTY_CPU_TENSOR
+
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
@@ -760,6 +784,7 @@ class OutputProcessor:
                 stop_reason,
                 kv_transfer_params,
                 ec_transfer_params,
+                error=request_error,
             ):
                 if req_state.streaming_input:
                     request_output.finished = False
