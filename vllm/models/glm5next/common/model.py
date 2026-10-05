@@ -70,6 +70,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -1107,6 +1108,12 @@ class Glm5NextForConditionalGeneration(
     # matching the GLM-OCR / GLM-4V serialization convention. If the real
     # checkpoint's safetensors keys differ (e.g. ``language_model.model.`` with
     # no outer ``model.``), override ``hf_to_vllm_mapper`` accordingly.
+
+    # transformers nests f_a_proj/f_b_proj under ``forget_gate``; the checkpoint
+    # and this model keep them flat, so LoRA adapters trained there need this.
+    hf_to_vllm_mapper = Glm4vForConditionalGeneration.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_substr={".forget_gate.": "."}
+    )
 
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
