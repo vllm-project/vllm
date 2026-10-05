@@ -85,7 +85,7 @@ def test_allocation_after_driver_error():
     native.my_malloc.argtypes = [ctypes.c_ssize_t, ctypes.c_int, ctypes.c_void_p]
     native.my_malloc.restype = ctypes.c_void_p
     # A zero-sized VA reservation fails before allocating physical memory.
-    assert native.my_malloc(0, torch.cuda.current_device(), None) is None
+    assert native.my_malloc(0, torch.accelerator.current_device_index(), None) is None
 
     with allocator.use_memory_pool():
         tensor = torch.ones(1024, dtype=torch.uint8, device=DEVICE_TYPE)
