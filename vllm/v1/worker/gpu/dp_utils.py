@@ -39,6 +39,9 @@ class DPSyncState:
     # Agreed upper bound on any rank's request count. Holds the padded count when
     # a FULL descriptor imposed one, else the most any rank scheduled.
     num_reqs: int
+    # Whether every rank has armed synchronized profiler stepping. None when
+    # synchronized profiler stepping was not requested.
+    profiler_ready: bool | None = None
 
 
 def sync_cudagraph_and_dp_padding(
@@ -54,23 +57,29 @@ def sync_cudagraph_and_dp_padding(
     parallel_config: ParallelConfig | None = None,
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
+    profiler_ready: bool | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Coordinates the batch descriptor and DP padding across all ranks.
 
     `parallel_config` is only needed to decide whether to microbatch, so callers
     that never do (`allow_ubatching=False`) can leave it out.
+    When `profiler_ready` is set, its readiness bit is carried by the same
+    all-reduce and returned in `DPSyncState`.
 
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(6, dp_size, dtype=torch.int32, device="cpu")
+    # Keep the collective shape independent of local profiler configuration.
+    tensor = torch.zeros(7, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     tensor[4][dp_rank] = int(allow_ubatching)
     tensor[5][dp_rank] = num_reqs
+    if profiler_ready is not None:
+        tensor[6][dp_rank] = int(profiler_ready)
     if should_skip_dp_coordination():
         tensor[:] = tensor[:, dp_rank, None].clone()
     else:
@@ -82,6 +91,11 @@ def sync_cudagraph_and_dp_padding(
     max_query_lens_across_dp = tensor[3]
     allow_ubatching_across_dp = tensor[4]
     num_reqs_across_dp = tensor[5]
+    synced_profiler_ready = (
+        bool(torch.all(tensor[6] == 1).item())
+        if profiler_ready is not None and not should_skip_dp_coordination()
+        else None
+    )
 
     # If ranks disagree on the uniform token count, or its 0 (means None) set to None
     synced_uniform_token_count: int | None = int(uniform_token_counts_across_dp[0])
@@ -150,6 +164,7 @@ def sync_cudagraph_and_dp_padding(
                 uniform_token_count=synced_uniform_token_count,
                 eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
                 num_reqs=num_reqs,
+                profiler_ready=synced_profiler_ready,
             )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))
@@ -168,6 +183,7 @@ def sync_cudagraph_and_dp_padding(
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
                 num_reqs=int(num_reqs_across_dp.max()),
+                profiler_ready=synced_profiler_ready,
             ),
         )
 
@@ -207,6 +223,7 @@ def sync_cudagraph_and_dp_padding(
             and synced_desc.num_reqs is not None
             else int(num_reqs_across_dp.max())
         ),
+        profiler_ready=synced_profiler_ready,
     )
 
 
@@ -224,6 +241,7 @@ def dispatch_cg_and_sync_dp(
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
     dp_sync: DPSyncState | None = None,
+    profiler_ready: bool | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
 
@@ -259,6 +277,9 @@ def dispatch_cg_and_sync_dp(
             same `uniform_token_count`; `num_reqs` may differ, as neither
             depends on it. Passing a sync from a different batch is a caller
             error and trips an assert.
+        profiler_ready: Whether this rank has armed synchronized profiler
+            stepping. When set, the existing DP agreement also reports whether
+            every rank is ready.
 
     Returns:
         (batch_desc, sync), where `sync` is this batch's agreement for a later
@@ -322,4 +343,5 @@ def dispatch_cg_and_sync_dp(
         parallel_config=parallel_config,
         allow_ubatching=allow_ubatching,
         uniform_decode=uniform_decode,
+        profiler_ready=profiler_ready,
     )
