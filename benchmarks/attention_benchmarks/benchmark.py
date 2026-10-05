@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Universal vLLM Attention Benchmark
+"""Universal vLLM Attention Benchmark.
 
 Benchmark any attention backend with the extended grammar.
 Supports standard attention (Flash/Triton/FlashInfer) and MLA backends.
@@ -23,6 +22,7 @@ Examples:
 
     # Parameter sweep (YAML config - recommended)
     python benchmark.py --config configs/cutlass_numsplits.yaml
+
 """
 
 import argparse
@@ -86,8 +86,7 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
 
 
 def run_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
-    """
-    Run a single benchmark with proper backend selection.
+    """Run a single benchmark with proper backend selection.
 
     Args:
         config: BenchmarkConfig with backend, batch_spec, and model params
@@ -95,6 +94,7 @@ def run_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
 
     Returns:
         BenchmarkResult (may have error field set on failure)
+
     """
     try:
         if is_mla_backend(config.backend):
@@ -121,8 +121,7 @@ def run_model_parameter_sweep(
     sweep: ModelParameterSweep,
     console: Console,
 ) -> list[BenchmarkResult]:
-    """
-    Run model parameter sweep for given backends and batch specs.
+    """Run model parameter sweep for given backends and batch specs.
 
     Args:
         backends: List of backend names
@@ -133,6 +132,7 @@ def run_model_parameter_sweep(
 
     Returns:
         List of BenchmarkResult objects
+
     """
     all_results = []
 
@@ -306,8 +306,7 @@ def run_parameter_sweep(
     sweep: ParameterSweep,
     console: Console,
 ) -> list[BenchmarkResult]:
-    """
-    Run parameter sweep for given backends and batch specs.
+    """Run parameter sweep for given backends and batch specs.
 
     Args:
         backends: List of backend names
@@ -318,6 +317,7 @@ def run_parameter_sweep(
 
     Returns:
         List of BenchmarkResult objects
+
     """
     all_results = []
 
@@ -397,8 +397,7 @@ def load_config_from_yaml(config_path: str) -> dict:
 
 
 def generate_batch_specs_from_ranges(ranges: list[dict]) -> list[str]:
-    """
-    Generate batch specs from range specifications.
+    """Generate batch specs from range specifications.
 
     Args:
         ranges: List of range specifications, each containing:
@@ -422,6 +421,7 @@ def generate_batch_specs_from_ranges(ranges: list[dict]) -> list[str]:
             }
         ]
         Returns: ["q1kv1k", "q2kv1k", ..., "q16kv1k"]
+
     """
     all_specs = []
 

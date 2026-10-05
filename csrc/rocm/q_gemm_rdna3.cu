@@ -1277,6 +1277,10 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
 
   TORCH_CHECK(b_q_weight.size(0) * 8 == size_k,
               "b_q_weight first dim must be K/8");
+  TORCH_CHECK(size_k % (groups * 32) == 0,
+              "group size (K/groups = ", size_k / groups,
+              ") must be a multiple of 32: the kernel checks group "
+              "transitions at 32-K granularity");
   TORCH_CHECK(b_scales.size(0) == groups,
               "b_scales must have same group count as qzeros");
   TORCH_CHECK(b_scales.size(1) == size_n, "b_scales last dim must be N");

@@ -74,11 +74,19 @@ class ParserEngineConfig:
 
     initial_state: ParserState = ParserState.CONTENT
 
+    wait_for_reasoning: bool | None = None
+
     arg_converter: Callable[[str, bool], str] | None = None
 
     stream_arg_deltas: bool = True
 
     tool_args_json: bool = True
+
+    # The tool region body is a single JSON array of ``{"name", "arguments"}``
+    # objects (one marker → N calls, no closing terminal). The engine splits
+    # the array into one tool call per element; the array's ``]`` ends the
+    # region and any trailing text becomes content. Used by Granite.
+    tool_call_body_array: bool = False
 
     arg_structural_chars: frozenset[str] | None = None
 

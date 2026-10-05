@@ -16,6 +16,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
     FullAttentionManager,
+    KpoolTailManager,
     MambaManager,
     RSWAManager,
     SlidingWindowManager,
@@ -24,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
+    KpoolTailSpec,
     MambaSpec,
     RSWASpec,
     SlidingWindowSpec,
@@ -281,6 +283,63 @@ def test_mamba_retirement_bounds_prefill_states(block_size, in_flight_chunks):
     assert pool.get_num_free_blocks() == initial_free
 
 
+@pytest.mark.parametrize("block_size", [896, 1536])
+@pytest.mark.parametrize("num_speculative_blocks", [0, 1, 4])
+@pytest.mark.parametrize("prompt_tokens", [25121, 704547])
+def test_mamba_checkpoint_admission_matches_allocation(
+    block_size, num_speculative_blocks, prompt_tokens
+):
+    """Checkpoint admission must match the subsequent physical allocation."""
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_speculative_blocks,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=64,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=2048,
+        enable_caching=True,
+        hash_block_size=128,
+    )
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    request_id = "prefill"
+    computed_tokens = 23040
+
+    def estimate(num_tokens, total_computed_tokens, apply_admission_cap):
+        return manager.get_num_blocks_to_allocate(
+            request_id=request_id,
+            num_tokens=num_tokens,
+            new_computed_blocks=[],
+            total_computed_tokens=total_computed_tokens,
+            num_local_computed_tokens=total_computed_tokens,
+            num_tokens_main_model=num_tokens,
+            apply_admission_cap=apply_admission_cap,
+        )
+
+    estimate(computed_tokens, 0, False)
+    manager.allocate_new_blocks(request_id, computed_tokens, computed_tokens)
+    assert request_id in manager._allocated_block_reqs
+
+    admission_estimate = estimate(prompt_tokens, computed_tokens, True)
+    allocation_estimate = estimate(prompt_tokens, computed_tokens, False)
+    assert request_id in manager._checkpoints
+
+    free_before = pool.get_num_free_blocks()
+    manager.allocate_new_blocks(request_id, prompt_tokens, prompt_tokens)
+    allocated = free_before - pool.get_num_free_blocks()
+
+    assert admission_estimate == allocation_estimate == allocated
+
+
 def get_sliding_window_manager(
     sliding_window_spec,
     block_pool,
@@ -375,6 +434,37 @@ def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
     assert manager.get_num_common_prefix_blocks(request_id) == 0
     assert manager.get_num_skipped_tokens(1024) == 0
     assert manager.req_to_blocks[request_id] == blocks
+
+
+@pytest.mark.parametrize("record_for_zeroing", [True, False])
+def test_external_kpool_tail_zeroing(record_for_zeroing):
+    """A transferred ring at index zero skips zeroing even with a local hit."""
+    spec = KpoolTailSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=4,
+    )
+    manager = KpoolTailManager(
+        spec,
+        block_pool=BlockPool(10, enable_caching=True, hash_block_size=4),
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+        needs_kv_cache_zeroing=True,
+        max_admission_blocks_per_request=1,
+    )
+    manager.allocate_external_computed_blocks(
+        "request", 16, 4, record_for_zeroing=record_for_zeroing
+    )
+    blocks = manager.req_to_blocks["request"]
+    assert len(blocks) == 1
+    assert manager.take_new_block_ids() == (
+        [blocks[0].block_id] if record_for_zeroing else []
+    )
+    assert manager.allocate_new_blocks("request", 20, 20) == []
+    assert manager.take_new_block_ids() == []
 
 
 def test_sliding_window_records_new_blocks_for_zeroing():

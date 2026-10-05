@@ -47,12 +47,6 @@ if not (
         allow_module_level=True,
     )
 
-from vllm.model_executor.layers.fla.ops.index import (  # noqa: E402
-    prepare_chunk_indices,
-    prepare_chunk_offsets,
-)
-from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE  # noqa: E402
-
 from tests.v1.attention.utils import (  # noqa: E402
     BatchSpec,
     create_common_attn_metadata,
@@ -66,6 +60,13 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa:
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
     MambaStateShapeCalculator,
+)
+from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
+    prepare_chunk_indices,
+    prepare_chunk_offsets,
+)
+from vllm.third_party.flash_linear_attention.ops.utils import (
+    FLA_CHUNK_SIZE,  # noqa: E402
 )
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadataBuilder,
@@ -175,7 +176,7 @@ def test_forward_core_split_matches_unified(
     builder = GDNAttentionMetadataBuilder(
         # GDNAttentionMetadataBuilder declares kv_cache_spec as AttentionSpec but
         # asserts isinstance(kv_cache_spec, MambaSpec). MambaSpec is correct here.
-        kv_cache_spec=MambaSpec(  # type: ignore[arg-type]
+        kv_cache_spec=MambaSpec(
             block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)
         ),
         layer_names=[PREFIX],
