@@ -3,12 +3,16 @@
 """Attention layer with AiterFlashAttention."""
 
 from dataclasses import dataclass, field, replace
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -334,6 +338,8 @@ class AiterFlashAttentionDecodeMetadata:
     swa_block_table: torch.Tensor | None = None
     swa_seq_lens: torch.Tensor | None = None
     swa_max_seq_len: int = 0
+    # GPU work plan for the FlyDSL paged-attention decode, if enabled.
+    flydsl_plan: Any | None = None
 
 
 @dataclass
@@ -485,6 +491,11 @@ class AiterFlashAttentionMetadataBuilder(
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
         kv_sharing_shape = None
+        # FlyDSL decode work plans, one per decode batch size. A captured CUDA
+        # graph keeps reading the buffers of the plan of its batch size, which
+        # build() refreshes in place every step.
+        self.use_flydsl_pa_decode = False
+        self._flydsl_plans: dict[int, Any] = {}
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for name, layer in layers.items():
             if name not in layer_names:
@@ -494,6 +505,7 @@ class AiterFlashAttentionMetadataBuilder(
                 "with Aiter Flash Attention Impl."
             )
             sliding_window_configs.add(layer.impl.sliding_window)
+            self.use_flydsl_pa_decode |= layer.impl.use_flydsl_pa_decode
             if (
                 layer.kv_sharing_target_layer_name is not None
                 or layer.kv_cache_update_bypass
@@ -683,11 +695,21 @@ class AiterFlashAttentionMetadataBuilder(
                         common_attn_metadata.max_seq_len,
                     )
                 )
+            flydsl_plan = None
+            if self.use_flydsl_pa_decode and decode_max_query_len == 1:
+                flydsl_plan = rocm_aiter_ops.flydsl_pa_decode_plan(
+                    common_attn_metadata.seq_lens[:num_decodes],
+                    # Must match the KV cache the kernel reads, not the model config.
+                    self.kv_cache_spec.num_kv_heads,
+                    plan=self._flydsl_plans.get(num_decodes),
+                )
+                self._flydsl_plans[num_decodes] = flydsl_plan
             decode_metadata = AiterFlashAttentionDecodeMetadata(
                 max_query_len=decode_max_query_len,
                 swa_block_table=swa_block_table,
                 swa_seq_lens=swa_seq_lens,
                 swa_max_seq_len=swa_max_seq_len,
+                flydsl_plan=flydsl_plan,
             )
 
         prefill_metadata = None
@@ -910,7 +932,16 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        if rocm_aiter_ops.is_flydsl_pa_decode_enabled():
+            # FlyDSL decode only takes 64-token pages.
+            return [16, 32, 64]
         return [16, 32]
+
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        if rocm_aiter_ops.is_flydsl_pa_decode_enabled():
+            return max(default_block_size, 64)
+        return super().get_preferred_block_size(default_block_size)
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -1033,6 +1064,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.use_flydsl_pa_decode = self._supports_flydsl_pa_decode()
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -1042,6 +1074,32 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 "query_start_loc with causal=True, which is incorrect for "
                 "cross-attention."
             )
+
+    def _supports_flydsl_pa_decode(self) -> bool:
+        if not rocm_aiter_ops.is_flydsl_pa_decode_enabled():
+            return False
+        # Single-token decode only; sliding window, sinks and multi-token
+        # decode already take the unified_attention path.
+        vllm_config = get_current_vllm_config_or_none()
+        block_size = vllm_config.cache_config.block_size if vllm_config else 64
+        requirements = {
+            "a KV cache block size that is a multiple of 64": block_size % 64 == 0,
+            "an FP8 (e4m3) KV cache": self.kv_cache_dtype in ("fp8", "fp8_e4m3"),
+            "head size 256": self.head_size == 256,
+            "at most 16 query heads per KV head": self.num_queries_per_kv <= 16,
+            "no ALiBi": self.alibi_slopes is None,
+            "no logits soft cap": self.logits_soft_cap == 0,
+        }
+        missing = [req for req, ok in requirements.items() if not ok]
+        if missing:
+            logger.warning_once(
+                "FlyDSL paged-attention decode requires %s; using the default "
+                "decode path for this layer.",
+                ", ".join(missing),
+            )
+            return False
+        logger.info_once("Using FlyDSL paged-attention decode for ROCM_AITER_FA.")
+        return True
 
     def _get_kv_cache_descales(
         self,
@@ -1597,6 +1655,23 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     V_QScale_asm=v_qscale_asm,
                     out_=output[:num_decode_tokens],
                     kv_cache_dtype=self.kv_cache_dtype,
+                )
+            elif (
+                self.use_flydsl_pa_decode
+                and attn_metadata.decode_metadata.flydsl_plan is not None
+                and key_cache.shape[1] == 64
+            ):
+                rocm_aiter_ops.flydsl_pa_decode(
+                    output=output[:num_decode_tokens],
+                    query=query[:num_decode_tokens],
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    seq_lens=attn_metadata.seq_lens[:num_decodes],
+                    block_table=attn_metadata.block_table[:num_decodes],
+                    scale=self.scale,
+                    k_scale=layer._k_scale,
+                    v_scale=layer._v_scale,
+                    work_plan=attn_metadata.decode_metadata.flydsl_plan,
                 )
             else:
                 _, num_heads, head_size = query.shape
