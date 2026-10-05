@@ -11,6 +11,7 @@ from tqdm import tqdm
 from vllm import RequestOutput, TextPrompt, TokensPrompt
 from vllm.entrypoints.beam_search_utils import (
     BeamSearchSOState,
+    bitmask_to_token_ids,
     get_trie_allowed_token_ids,
     validate_and_resolve_beam_search_so,
 )
@@ -43,23 +44,6 @@ logger = init_logger(__name__)
 # Engine-side cap on `SamplingParams.allowed_token_ids`; keep in sync with
 # MAX_NUM_ALLOWED_TOKEN_IDS in vllm/v1/worker/gpu/sample/logit_bias.py.
 _MAX_NUM_ALLOWED_TOKEN_IDS = 1024
-
-
-_bitmask_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-
-
-def _bitmask_to_token_ids(bitmask_row: torch.Tensor, vocab_size: int) -> list[int]:
-    """Convert a packed int32 bitmask row to a list of allowed token IDs."""
-    if vocab_size not in _bitmask_cache:
-        indices = torch.arange(vocab_size)
-        _bitmask_cache[vocab_size] = (
-            indices,
-            indices >> 5,  # i // 32
-            indices & 31,  # i % 32
-        )
-    indices, word_indices, bit_indices = _bitmask_cache[vocab_size]
-    mask = ((bitmask_row[word_indices] >> bit_indices) & 1).bool()
-    return indices[mask].tolist()
 
 
 class BeamSearchOfflineMixin(OfflineInferenceMixin):
@@ -488,7 +472,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 continue
 
             grammar.fill_bitmask(bitmask, 0)
-            allowed_ids = _bitmask_to_token_ids(bitmask[0], vocab_size)
+            allowed_ids = bitmask_to_token_ids(bitmask[0], vocab_size)
 
             if not allowed_ids:
                 result.append(None)

@@ -3,7 +3,7 @@
 """Unit tests for ChoiceTrie.
 
 Run without GPU:
-    python -m pytest tests/entrypoints/unit_tests/test_choice_trie.py -v
+    python -m pytest tests/entrypoints/generate/beam_search/test_choice_trie.py -v
 """
 
 from __future__ import annotations

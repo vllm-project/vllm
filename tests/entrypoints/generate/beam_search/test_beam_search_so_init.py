@@ -4,7 +4,7 @@
 
 Run without GPU:
     python -m pytest \
-        tests/entrypoints/unit_tests/test_beam_search_so_init.py -v
+        tests/entrypoints/generate/beam_search/test_beam_search_so_init.py -v
 """
 
 from __future__ import annotations
