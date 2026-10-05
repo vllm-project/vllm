@@ -173,6 +173,8 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
             head_size=self.head_dim,
             head_size_v=0,
             dtype=torch.bfloat16,
+            # Tiny per-request ring; every DCP rank keeps the full tail so the
+            # rank owning a pool can compress it.
             dcp_sharded=False,
         )
 
