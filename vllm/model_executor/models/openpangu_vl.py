@@ -761,15 +761,10 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_cls
-
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
-
-        model_cls = get_model_cls(self.info.ctx.model_config)
 
         image_token = hf_processor.image_token
         video_token = hf_processor.video_token
@@ -784,7 +779,9 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
         # [unused18][unused19][unused20] for images,
         # [unused18][unused32][unused20] for videos).
         targets = {
-            modality: get_wrapper_token_ids(model_cls, tokenizer, modality, pad_id)
+            modality: get_wrapper_token_ids(
+                OpenPanguVLForConditionalGeneration, tokenizer, modality, pad_id
+            )
             for modality, pad_id in placeholder.items()
         }
 
