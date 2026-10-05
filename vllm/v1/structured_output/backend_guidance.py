@@ -34,17 +34,58 @@ else:
 logger = init_logger(__name__)
 
 
+_SCHEMA_MAP_KEYWORDS = (
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+    "dependencies",
+)
+
+_SUBSCHEMA_KEYWORDS = (
+    "additionalProperties",
+    "unevaluatedProperties",
+    "propertyNames",
+    "contains",
+    "additionalItems",
+    "unevaluatedItems",
+    "not",
+    "if",
+    "then",
+    "else",
+    "contentSchema",
+    "items",
+    "prefixItems",
+    "allOf",
+    "anyOf",
+    "oneOf",
+)
+
+
 def _walk_json_for_additional_properties(data: object):
     if isinstance(data, dict):
-        for value in data.values():
-            _walk_json_for_additional_properties(value)
+        for key in _SCHEMA_MAP_KEYWORDS:
+            value = data.get(key)
+            if isinstance(value, dict):
+                for subschema in value.values():
+                    if isinstance(subschema, dict):
+                        _walk_json_for_additional_properties(subschema)
+
+        for key in _SUBSCHEMA_KEYWORDS:
+            value = data.get(key)
+            if isinstance(value, (dict, list)):
+                _walk_json_for_additional_properties(value)
+
         if "additionalProperties" not in data and (
-            "properties" in data or "patternProperties" in data
+            isinstance(data.get("properties"), dict)
+            or isinstance(data.get("patternProperties"), dict)
         ):
             data["additionalProperties"] = False
     elif isinstance(data, list):
         for item in data:
-            _walk_json_for_additional_properties(item)
+            if isinstance(item, dict):
+                _walk_json_for_additional_properties(item)
 
 
 def has_guidance_unsupported_json_features(schema: dict[str, Any]) -> bool:
