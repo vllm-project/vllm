@@ -140,6 +140,177 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     assert meta.num_prefill_tokens == k + 1
 
 
+def _mamba_hybrid_state(num_speculative_tokens: int) -> MambaHybridModelState:
+    state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
+    state.model_config = SimpleNamespace(max_model_len=8192)
+    state._align_mode = False
+    state.recoverssm = None
+    # A request that accepted 3 drafts (plus the bonus token) on the previous
+    # step; the others have never had a draft accepted.
+    state.num_accepted_tokens_gpu = torch.tensor([4, 1, 1], dtype=torch.int32)
+    return state
+
+
+def _input_batch(
+    num_scheduled_tokens: list[int],
+    num_draft_tokens_per_req: list[int] | None,
+    is_prefilling: list[bool],
+    num_reqs_after_padding: int | None = None,
+) -> SimpleNamespace:
+    """`num_draft_tokens_per_req=None` is a batch where nobody proposed a
+    draft this step, e.g. because ngram found no match for anyone."""
+    num_reqs = len(num_scheduled_tokens)
+    query_start_loc = np.zeros(num_reqs + 1, dtype=np.int32)
+    query_start_loc[1:] = np.cumsum(num_scheduled_tokens)
+    num_tokens = int(query_start_loc[-1])
+    seq_lens = torch.full((num_reqs,), 10, dtype=torch.int32)
+    return SimpleNamespace(
+        num_reqs=num_reqs,
+        num_reqs_after_padding=num_reqs_after_padding or num_reqs,
+        num_tokens=num_tokens,
+        num_tokens_after_padding=num_tokens,
+        query_start_loc_np=query_start_loc,
+        num_scheduled_tokens=np.array(num_scheduled_tokens, dtype=np.int32),
+        max_query_len=None,
+        seq_lens_cpu_upper_bound=seq_lens,
+        is_prefilling_np=np.array(is_prefilling),
+        prefill_runs_as_decode_np=None,
+        num_draft_tokens_per_req=None
+        if num_draft_tokens_per_req is None
+        else np.array(num_draft_tokens_per_req, dtype=np.int32),
+        idx_mapping=torch.arange(num_reqs),
+        query_start_loc=torch.from_numpy(query_start_loc),
+        seq_lens=seq_lens,
+        dcp_local_seq_lens=None,
+        positions=torch.zeros(num_tokens, dtype=torch.int64),
+        prompt_lens=None,
+    )
+
+
+def _prepare_attn_metadata(
+    state: MambaHybridModelState,
+    monkeypatch,
+    input_batch: SimpleNamespace | None = None,
+    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+) -> SimpleNamespace:
+    captured = {}
+
+    def fake_build_attn_metadata(**kwargs):
+        captured.update(kwargs)
+        return Mock()
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.model_states.mamba_hybrid.build_attn_metadata",
+        fake_build_attn_metadata,
+    )
+
+    if input_batch is None:
+        input_batch = _input_batch([1, 1], None, [False, False])
+    state.prepare_attn(
+        input_batch=input_batch,
+        cudagraph_mode=cudagraph_mode,
+        block_tables=(),
+        slot_mappings={},
+        attn_groups=[],
+        kv_cache_config=Mock(),
+    )
+    return captured["model_specific_attn_metadata"]
+
+
+def test_prepare_attn_keeps_the_accepted_offset_when_the_batch_drafted_nothing(
+    monkeypatch,
+):
+    """`num_accepted_tokens` must reach the attention builders whenever the
+    speculative config is on, even when *this* batch scheduled no draft
+    tokens at all. Before the fix, `use_spec_decode` was gated on this step's
+    scheduled drafts (`len(scheduled_spec_decode_tokens) > 0` in the V1
+    runner) rather than on the speculative config, so a request that accepted
+    drafts on a previous step would silently lose that offset the moment
+    ngram found no match for anyone in the batch.
+    """
+    state = _mamba_hybrid_state(num_speculative_tokens=3)
+
+    metadata = _prepare_attn_metadata(state, monkeypatch)
+
+    assert metadata.num_accepted_tokens is not None
+    assert metadata.num_accepted_tokens.tolist() == [4, 1]
+    assert metadata.num_decode_draft_tokens_cpu is not None
+
+
+def test_prepare_attn_omits_the_offset_without_a_speculative_config(monkeypatch):
+    """Mirrors the check above: with speculative decoding off entirely, there
+    is no accepted-token offset to carry, and the metadata must say so
+    explicitly (`None`) rather than a stale or default value."""
+    state = _mamba_hybrid_state(num_speculative_tokens=0)
+
+    metadata = _prepare_attn_metadata(state, monkeypatch)
+
+    assert metadata.num_accepted_tokens is None
+    assert metadata.num_decode_draft_tokens_cpu is None
+
+
+def test_zero_draft_decode_row_is_marked_as_a_speculative_row(monkeypatch):
+    """A decode row that got no drafts still has to reach the speculative path.
+
+    The recurrent backends only apply a row's accepted-token offset on that
+    path, and a row that accepted drafts on the previous step keeps that offset
+    even when the current step proposes nothing (the scheduler drops drafts
+    whenever the token budget truncates the step). Marking such a row with the
+    -1 sentinel sends it to the plain decode path, which reads the state at
+    column 0 and ignores the offset.
+    """
+    state = _mamba_hybrid_state(num_speculative_tokens=3)
+    input_batch = _input_batch([3, 1, 1], [2, 0, 0], [False, False, True])
+
+    metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [
+        2,  # decode row with drafts
+        0,  # decode row with no drafts: speculative path, offset applied
+        -1,  # one-token prefill tail: no offset to apply, stays a plain row
+    ]
+
+
+def test_batch_without_any_drafts_still_marks_its_decode_rows(monkeypatch):
+    """`num_draft_tokens_per_req` is None whenever no row in the batch drafted
+    anything. Those rows are ordinary decode rows carrying an offset from the
+    previous step, so the absence of drafts in this step must not be read as
+    speculative decoding being off."""
+    state = _mamba_hybrid_state(num_speculative_tokens=3)
+    input_batch = _input_batch([1, 1], None, [False, True])
+
+    metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [0, -1]
+
+
+def test_padded_rows_keep_the_sentinel(monkeypatch):
+    """Full CUDA-graph capture pads the batch; padded rows describe no request
+    and must not be picked up as speculative rows."""
+    state = _mamba_hybrid_state(num_speculative_tokens=3)
+    input_batch = _input_batch([1, 1], [0, 0], [False, False], num_reqs_after_padding=4)
+
+    metadata = _prepare_attn_metadata(
+        state, monkeypatch, input_batch, cudagraph_mode=CUDAGraphMode.FULL
+    )
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [0, 0, -1, -1]
+
+
+def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel(
+    monkeypatch,
+):
+    """A prefill continuation is excluded by `is_prefilling`, not by its token
+    count, so tails wider than one token are covered by the same rule."""
+    state = _mamba_hybrid_state(num_speculative_tokens=3)
+    input_batch = _input_batch([2, 3], [0, 0], [True, True])
+
+    metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [-1, -1]
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize(("num_sampled", "expected_value"), [(0, 1), (3, 3)])
 def test_postprocess_state_scalar_with_int32_mapping(
