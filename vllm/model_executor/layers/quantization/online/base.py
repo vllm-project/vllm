@@ -65,6 +65,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kInt8StaticChannelSym,
     kMxfp4Static,
     kMxfp8Dynamic,
@@ -227,8 +228,12 @@ class OnlineQuantizationConfig(QuantizationConfig):
         Returns:
             The matching method class, or None when ``spec`` has no weight
             quantization.
+
         """
         if spec is None or spec.weight is None:
+            return None
+        # Load-time gfx942 requant, not online conversion. Mxfp4MoEMethod owns it.
+        if spec.weight == kInt4Static32:
             return None
         cls = table.get(spec.weight)
         if cls is None:
@@ -260,6 +265,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             A tuple of source, quantization key string, target pattern, spec,
             and method class. Returns None when online quantization does not
             apply to the layer.
+
         """
         quant_spec: QuantSpec | None
         if self.args.targets is not None:
@@ -313,6 +319,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             A tuple of source, quantization key string, target pattern, spec,
             and dispatch table. Returns None when no pattern applies or the
             layer is ignored.
+
         """
         assert self.args.targets is not None
         ignored = should_ignore_layer(

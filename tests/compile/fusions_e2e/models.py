@@ -44,6 +44,15 @@ ROCM_AITER_UNIFIED_ATTN = pytest.param(
     ),
 )
 
+ROCM_AITER_MLA_ATTN = pytest.param(
+    AttentionBackendCase(backend=AttentionBackendEnum.ROCM_AITER_MLA),
+    id="ROCM_AITER_MLA",
+    marks=pytest.mark.skipif(
+        not is_aiter_found_and_supported(),
+        reason="ROCM_AITER_MLA only for AMD when AITER is installed",
+    ),
+)
+
 FLASHINFER_MLA_ATTN = pytest.param(
     AttentionBackendCase(backend=AttentionBackendEnum.FLASHINFER_MLA),
     id="FLASHINFER_MLA",
@@ -90,6 +99,20 @@ llama3_8b_fp4 = ModelFusionInfo(
         sequence_parallel=n_layers * 2 + 1,
         async_tp=n_layers * 4,
     ),
+)
+
+# ModelOpt MIXED_PRECISION: FP8 attention projections, NVFP4 MLPs. It resolves to
+# modelopt_mixed, not modelopt_fp4, and its MLP has no manual act+quant fusion, so
+# every MLP boundary is left to ActivationQuantFusionPass.
+qwen3_8_27b_mixed_fp4 = ModelFusionInfo(
+    model_name="nvidia/Qwen3.8-27B-NVFP4",
+    hf_overrides=lambda n_layers: {
+        "text_config": {
+            "num_hidden_layers": n_layers,
+            "layer_types": ["linear_attention"] * (n_layers - 1) + ["full_attention"],
+        }
+    },
+    matches=lambda n_layers: Matches(act_quant_fusion=n_layers),
 )
 
 # MoEs cannot do act+quant fusion because those ops are hidden from torch.compile.
