@@ -240,26 +240,36 @@ def _segmented_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> 
     Configuration only -- whether a given batch takes the route additionally
     depends on its query length. Round-robin interleaving other than 1 is
     excluded because the per-row causal window has not been validated there.
-    gfx942 uses generic split-KV Triton instead: AITER segmented MLA is
-    LDS-unsafe at TILE-128 on that arch.
     """
-    from vllm.platforms.rocm import on_gfx942
-
     return (
-        dcp_world_size > 1
-        and cp_interleave == 1
-        and not on_gfx942()
-        and _segmented_mla_decode_supported()
+        dcp_world_size > 1 and cp_interleave == 1 and _segmented_mla_decode_supported()
     )
 
 
+def _segmented_mla_fits_lds(num_heads: int, block_size: int, fp8_kv: bool) -> bool:
+    """Whether AITER segmented MLA compiles for this DCP verify shape.
+
+    On gfx942 it needs 128 KiB of LDS, over the 64 KiB available, for bf16 KV
+    at TILE-128 and for fp8 KV past 64 heads, where its query block widens to
+    128 heads. ``num_heads`` is the DCP-gathered count.
+    """
+    from vllm.platforms.rocm import on_gfx942
+
+    if not on_gfx942():
+        return True
+    if fp8_kv:
+        return num_heads <= 64
+    return _segmented_mla_page_size(block_size) < 128
+
+
 def _triton_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> bool:
-    """Whether gfx942 should use generic split-KV causal target verify.
+    """Whether gfx942 can fall back to generic split-KV causal target verify.
 
     The batch shape is causal qlen>1 over a DCP shard. Eagle MTP and DSpark
     target verify are that same shape, so this is not limited to one
-    speculative method: gfx942 has no cprr kernel and segmented TILE-128 is
-    LDS-unsafe. qlen==1 and non-causal stay on the plain ASM decode.
+    speculative method. gfx942 has no cprr kernel, so this serves the shapes
+    segmented MLA cannot (see _segmented_mla_fits_lds). qlen==1 and non-causal
+    stay on the plain ASM decode.
     """
     from vllm.platforms.rocm import on_gfx942
 
@@ -278,11 +288,11 @@ def _triton_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> boo
 #   round-robin ASM decode rebuilds global positions from g_kv_indptr, cp_rank
 #   and cp_world_size and applies the causal window in-kernel. Kernels exist only
 #   at _NATIVE_CPRR_HEADS; other gathered head counts are padded up.
-# * triton: causal qlen > 1 on gfx942. Generic split-KV decode over the same
-#   per-row local window segmented uses. Checked before segmented so gfx942
-#   never launches the LDS-unsafe TILE kernel.
-# * segmented: causal qlen > 1 on gfx950+ when cprr is not selected or qlen is
-#   below _MIN_CPRR_QLEN. Each verify token becomes a single-query row whose KV
+# * triton: causal qlen > 1 on gfx942 for shapes segmented MLA cannot fit in
+#   LDS (_segmented_mla_fits_lds). Generic split-KV decode over the same
+#   per-row local window segmented uses.
+# * segmented: causal qlen > 1 when cprr is not selected or qlen is below
+#   _MIN_CPRR_QLEN. Each verify token becomes a single-query row whose KV
 #   length encodes its causal window.
 #
 # The plain kernel must never serve a causal qlen > 1 block: it applies
@@ -686,8 +696,17 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                         else "This AITER build also lacks segmented MLA decode."
                     )
                 )
-        self._supports_segmented_dcp_verify = supports_segmented_dcp_verify
-        self._supports_triton_dcp_verify = supports_triton_dcp_verify
+        self._supports_segmented_dcp_verify = (
+            supports_segmented_dcp_verify
+            and _segmented_mla_fits_lds(
+                self.num_heads * self.dcp_world_size,
+                kv_cache_spec.block_size,
+                is_quantized_kv_cache(vllm_config.cache_config.cache_dtype),
+            )
+        )
+        self._supports_triton_dcp_verify = (
+            supports_triton_dcp_verify and not self._supports_segmented_dcp_verify
+        )
         self._mla_max_split_per_batch = 0
         if self._asm_dcp_verify:
             # Cap on KV splits per batch; at low batch the KV axis is the only
