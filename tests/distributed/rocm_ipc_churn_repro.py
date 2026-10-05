@@ -6,6 +6,7 @@ Phases (each in fresh processes):
   A: create/all_reduce/destroy RCCL groups of 4 and 2 ranks
   B: same, with most of the free GPU memory allocated
   C: same as B, with that memory registered with NIXL (UCX backend)
+  D: same as C, plus NIXL READs from every peer's registered memory each round
 """
 
 import argparse
@@ -17,6 +18,7 @@ import time
 import traceback
 from datetime import timedelta
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -45,6 +47,55 @@ def _log(phase, rank, msg):
     print(f"[REPRO] phase={phase} rank={rank} {msg}", flush=True)
 
 
+READ_BYTES = 8 << 20
+
+
+def _nixl_connect(agent, rank, hold, cpu_group):
+    src = hold[READ_BYTES : 2 * READ_BYTES]
+    src.fill_(rank + 1)
+    torch.accelerator.synchronize()
+    info = (agent.get_agent_metadata(), src.data_ptr())
+    gathered: list = [None] * WORLD
+    dist.all_gather_object(gathered, info, group=cpu_group)
+    peers = {}
+    for peer in range(WORLD):
+        if peer != rank:
+            name = agent.add_remote_agent(gathered[peer][0])
+            peers[peer] = (name, gathered[peer][1])
+    return peers
+
+
+def _nixl_read_all(agent, rank, hold, peers):
+    dst = hold[:READ_BYTES]
+    for peer, (name, remote_ptr) in peers.items():
+        dst.zero_()
+        torch.accelerator.synchronize()
+        local = agent.prep_xfer_dlist(
+            "NIXL_INIT_AGENT",
+            agent.get_xfer_descs([(dst.data_ptr(), READ_BYTES, rank)], "VRAM"),
+        )
+        remote = agent.prep_xfer_dlist(
+            name, agent.get_xfer_descs([(remote_ptr, READ_BYTES, peer)], "VRAM")
+        )
+        idx = np.arange(1, dtype=np.int32)
+        xfer = agent.make_prepped_xfer("READ", local, idx, remote, idx)
+        agent.transfer(xfer)
+        deadline = time.time() + 60
+        while True:
+            state = agent.check_xfer_state(xfer)
+            if state == "DONE":
+                break
+            if state != "PROC" or time.time() > deadline:
+                raise RuntimeError(f"NIXL READ from rank {peer} state={state}")
+            time.sleep(0.001)
+        agent.release_xfer_handle(xfer)
+        agent.release_dlist_handle(local)
+        agent.release_dlist_handle(remote)
+        got = int(dst[0].item()), int(dst[-1].item())
+        if got != (peer + 1, peer + 1):
+            raise RuntimeError(f"NIXL READ from rank {peer} returned {got}")
+
+
 def _worker(rank, port, phase, rounds, mem_frac, results):
     device = torch.device("cuda", rank)
     torch.accelerator.set_device_index(rank)
@@ -66,7 +117,8 @@ def _worker(rank, port, phase, rounds, mem_frac, results):
 
         hold = None
         agent = None
-        if phase in ("B", "C"):
+        peers = None
+        if phase in ("B", "C", "D"):
             stage = "alloc"
             free, total = torch.accelerator.get_memory_info(device)
             hold = torch.empty(int(free * mem_frac), dtype=torch.uint8, device=device)
@@ -75,7 +127,7 @@ def _worker(rank, port, phase, rounds, mem_frac, results):
                 rank,
                 f"holding {hold.numel() / 2**30:.1f} GiB of {total / 2**30:.1f} GiB",
             )
-        if phase == "C" and hold is not None:
+        if phase in ("C", "D") and hold is not None:
             stage = "nixl"
             from nixl_rocm._api import nixl_agent, nixl_agent_config
 
@@ -87,6 +139,13 @@ def _worker(rank, port, phase, rounds, mem_frac, results):
             )
             agent.register_memory(descs)
             _log(phase, rank, "registered held memory with NIXL")
+        if phase == "D" and agent is not None:
+            stage = "nixl_connect"
+            cpu_group = dist.new_group(backend="gloo")
+            peers = _nixl_connect(agent, rank, hold, cpu_group)
+            stage = "nixl_read"
+            _nixl_read_all(agent, rank, hold, peers)
+            _log(phase, rank, "NIXL READ from all peers ok")
 
         rc = _ipc_probe(hip)
         _log(phase, rank, f"ipc probe before churn rc={rc}")
@@ -107,6 +166,9 @@ def _worker(rank, port, phase, rounds, mem_frac, results):
             rc = _ipc_probe(hip)
             if rc != 0:
                 raise RuntimeError(f"hipIpcGetMemHandle failed rc={rc} after group")
+            if peers is not None:
+                stage = "nixl_read"
+                _nixl_read_all(agent, rank, hold, peers)
             stage = "barrier"
             dist.barrier(device_ids=[rank])
             if r % 10 == 9:
@@ -170,7 +232,7 @@ def run_phase(phase, rounds, mem_frac, timeout_s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--phases", default="A,B,C")
+    parser.add_argument("--phases", default="A,B,C,D")
     parser.add_argument("--rounds", type=int, default=40)
     parser.add_argument("--mem-frac", type=float, default=0.8)
     parser.add_argument("--timeout", type=int, default=600)
