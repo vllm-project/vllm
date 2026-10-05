@@ -152,6 +152,11 @@ impl EngineCoreRequest {
                 feature.extract_aux_frames(&mut aux_frames, threshold);
             }
         }
+        if let Some(params) = &mut self.sampling_params
+            && let Some(ids) = &mut params.prompt_logprob_token_ids
+        {
+            ids.extract_aux_frame(&mut aux_frames, threshold);
+        }
         aux_frames
     }
 }
@@ -168,7 +173,7 @@ mod tests {
         PlaceholderRange,
     };
     use crate::protocol::sampling::EngineCoreSamplingParams;
-    use crate::protocol::tensor::{WireArrayData, WireTensor};
+    use crate::protocol::tensor::{WireArrayData, WireNdArray, WireTensor};
     use crate::protocol::{decode_value, encode_msgpack};
 
     const AUX_FRAME_THRESHOLD: usize = 256;
@@ -293,5 +298,28 @@ mod tests {
             WireArrayData::AuxIndex(2)
         );
         assert!(request.extract_aux_frames(AUX_FRAME_THRESHOLD).is_empty());
+    }
+
+    #[test]
+    fn engine_core_request_extracts_large_prompt_logprob_token_ids() {
+        let ids = WireNdArray::from_i32(vec![AUX_FRAME_THRESHOLD, 1], vec![5; AUX_FRAME_THRESHOLD])
+            .unwrap();
+        let mut request = EngineCoreRequest {
+            sampling_params: Some(EngineCoreSamplingParams {
+                prompt_logprob_token_ids: Some(ids),
+                ..EngineCoreSamplingParams::for_test()
+            }),
+            ..EngineCoreRequest::default()
+        };
+
+        let aux_frames = request.extract_aux_frames(AUX_FRAME_THRESHOLD);
+
+        assert_eq!(aux_frames.len(), 1);
+        assert_eq!(aux_frames[0].len(), AUX_FRAME_THRESHOLD * 4);
+        let params = request.sampling_params.unwrap();
+        assert_eq!(
+            params.prompt_logprob_token_ids.unwrap().data,
+            WireArrayData::AuxIndex(1)
+        );
     }
 }

@@ -1069,6 +1069,12 @@ class FusedMoEParallelConfig:
         )
 
     @property
+    def use_passthrough_all2all(self):
+        # Not gated on use_all2all_kernels: the experts dispatch and combine
+        # internally in every EP topology, including TP-only.
+        return self.all2all_backend == "passthrough"
+
+    @property
     def use_mori_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend in (
             "mori_high_throughput",
@@ -1529,6 +1535,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_passthrough_all2all(self):
+        return self.moe_parallel_config.use_passthrough_all2all
 
     @property
     def use_mori_kernels(self):
