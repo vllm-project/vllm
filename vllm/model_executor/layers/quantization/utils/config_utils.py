@@ -151,18 +151,16 @@ def is_shared_expert_quant_fse_compatible(
                     f"{shared_expert_prefix}",
                 )
             assert issubclass(shared_method_cls, OnlineLinearBase)
-            shared_weight_key = shared_quant_spec.weight
 
             # NOTE: We can not rely on shared_quant_spec.activation_quant_key
             # as _ONLINE_SHORTHANDS: dict[str, QuantSpec] in quantization.py
             # does not define the default activation quant key.
             # `online_quant_config.resolve_quant_method_cls` should return the
-            # activation quant key as well.
-            shared_activation_key = shared_method_cls.activation_quant_key
-
+            # activation quant key as well. Only some online methods define it
+            # on the class, so compare the weight key first.
             if (
-                shared_weight_key != routed_weight_key
-                or shared_activation_key != routed_activation_key
+                shared_quant_spec.weight != routed_weight_key
+                or shared_method_cls.activation_quant_key != routed_activation_key
             ):
                 return (
                     False,
