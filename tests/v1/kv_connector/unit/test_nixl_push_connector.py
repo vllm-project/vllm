@@ -339,6 +339,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
     @classmethod
     def fresh(cls) -> _StubWriterWorker:
         w = object.__new__(cls)
+        w._region_aliases = {}
 
         # Push-specific state managed by NixlPushConnectorWorker.
         from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
