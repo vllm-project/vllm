@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     QUANTIZED_DS_MLA_CACHE_FORMATS,
@@ -168,6 +169,7 @@ def test_sm100_576_priority_unchanged():
     assert order[0] == "FLASHMLA_SPARSE", order
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA backends")
 def test_sm90_nope_fp8_ds_mla_resolves_to_flashmla():
     """The sparse backends ranked ahead of FLASHMLA_SPARSE for SM90 NoPE-512
     reject fp8_ds_mla, so the auto-selector lands on FlashMLA."""
