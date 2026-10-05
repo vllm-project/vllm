@@ -19,6 +19,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
 )
 from vllm.v1.hisparse.types import (
+    ACTIVE_TAIL_PAGES,
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
     SparseKVRowMirror,
@@ -31,10 +32,6 @@ from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
-
-# Sealed pages this many positions behind the block-table tail stay pinned so
-# a page written by an in-flight step is never handed out under it.
-_ACTIVE_TAIL_PAGES = 2
 
 
 @dataclass
@@ -241,12 +238,11 @@ class HiSparseCoordinator:
         return manager.block_pool if manager is not None else None
 
     def host_usage(self) -> tuple[int, int] | None:
-        """Host blocks backing live or cached prefixes, and pool capacity.
+        """Host blocks held by running requests or in-flight transfers, and
+        pool capacity.
 
-        A used block either backs an allocated page (in-flight spill
-        destination, imported prefix, or running request) or holds a
-        published, evictable cached prefix. Eviction reclaims cached blocks
-        on demand, so high usage alone does not block admissions.
+        Cached blocks no request references are free to evict, so the pool
+        counts them as free and they are not included.
         """
         pool = self.get_host_block_pool()
         if pool is None:
@@ -254,7 +250,7 @@ class HiSparseCoordinator:
         total = pool.num_gpu_blocks - 1  # Exclude the null block.
         return pool.num_gpu_blocks - pool.get_num_free_blocks() - 1, total
 
-    def num_pending_spills(self) -> int:
+    def num_pending_page_transfers(self) -> int:
         return len(self.pending_spills)
 
     # ------------------------------------------------------------------
@@ -360,7 +356,7 @@ class HiSparseCoordinator:
             req_blocks = manager.req_to_blocks.get(request_id)
             if (
                 req_blocks is None
-                or page_idx >= len(req_blocks) - _ACTIVE_TAIL_PAGES
+                or page_idx >= len(req_blocks) - ACTIVE_TAIL_PAGES
                 or req_blocks[page_idx].is_null
             ):
                 return None

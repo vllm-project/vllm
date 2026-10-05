@@ -30,10 +30,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
+from vllm.v1.hisparse.layout import get_hisparse_steady_state_concurrency
 from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVRowMirror
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -43,6 +45,8 @@ if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -109,7 +113,7 @@ class HiSparseConnectorScheduler:
             if usage is not None:
                 used, total = usage
                 self.stats.record_host_usage(
-                    used, total, self.coordinator.num_pending_spills()
+                    used, total, self.coordinator.num_pending_page_transfers()
                 )
         stats = self.stats
         self.stats = HiSparseKVConnectorStats()
@@ -238,6 +242,16 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                     and speculative_config is not None
                 ),
                 draft_kv_lookahead=vllm_config.num_lookahead_tokens,
+            )
+            max_model_len = vllm_config.model_config.max_model_len
+            steady_concurrency = get_hisparse_steady_state_concurrency(
+                vllm_config, kv_cache_config
+            )
+            logger.info_once(
+                "HiSparse steady-state maximum concurrency for %s tokens per "
+                "request: %.2fx (running requests reading from host).",
+                f"{max_model_len:,}",
+                steady_concurrency,
             )
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = HiSparseConnectorWorker(

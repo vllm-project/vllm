@@ -200,11 +200,13 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
 
 
 def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
-    """Resident pages spill to host, so only their active tail pins GPU blocks."""
+    """Running requests pin only their resident tail; the newest still needs its
+    full in-flight window to be admitted."""
     block_size = 16
     config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=10 * block_size),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        max_in_flight_tokens=10 * block_size,
     )
     attn_spec = FullAttentionSpec(
         block_size=block_size, num_kv_heads=1, head_size=64, dtype=torch.float16
@@ -230,8 +232,9 @@ def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
         hisparse_host_num_blocks=100,
     )
 
-    # GPU per request: indexer 10 + resident tail 2 + hot 4; host allows 10x.
-    assert get_hisparse_steady_state_concurrency(config, kv_cache_config) == 4.0
+    # Admission takes indexer 10 + resident 10 + hot 4 = 24 blocks and steady
+    # state 16, so 3 fit (2 x 16 + 24 <= 64) but not 4 (3 x 16 + 24 > 64).
+    assert get_hisparse_steady_state_concurrency(config, kv_cache_config) == 3.5
     # The worst-case bound charges all 10 resident pages.
     assert get_max_concurrency_for_kv_cache_config(
         config, kv_cache_config

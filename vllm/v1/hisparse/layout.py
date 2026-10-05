@@ -14,6 +14,7 @@ from vllm.v1.hisparse.runtime import (
     get_hisparse_host_block_stride,
     use_shared_hisparse_host_pool,
 )
+from vllm.v1.hisparse.types import ACTIVE_TAIL_PAGES
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
@@ -373,45 +374,35 @@ def get_hisparse_kv_cache_config(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
     )
-    max_model_len = vllm_config.model_config.max_model_len
-    steady_concurrency = get_hisparse_steady_state_concurrency(
-        vllm_config, kv_cache_config
-    )
-    logger.info_once(
-        "HiSparse steady-state KV cache size: %s tokens, maximum concurrency "
-        "for %s tokens per request: %.2fx (resident pages spilled to host).",
-        f"{int(steady_concurrency * max_model_len):,}",
-        f"{max_model_len:,}",
-        steady_concurrency,
-    )
     return kv_cache_config
 
 
 def get_hisparse_steady_state_concurrency(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> float:
-    """Max concurrency at max_model_len once resident pages spill to host.
+    """Max concurrency at max_model_len once running requests read from host.
 
-    Unlike get_max_concurrency_for_kv_cache_config, which charges every
-    resident page to the GPU pool, a decoding request that reads from host
-    only pins its active tail pages; the indexer, hot and regular groups and
-    the host source are still charged in full.
+    A request reading from host pins only its active tail of each resident
+    group, but admitting one still takes its full in-flight window, so the
+    bound is all-but-one requests at steady state plus one being admitted.
     """
-    from vllm.v1.hisparse.coordinator import _ACTIVE_TAIL_PAGES
-
-    gpu_blocks_per_request = 0
-    host_blocks_per_request = 0
+    admission_blocks = 0
+    steady_blocks = 0
+    host_blocks = 0
     for group in kv_cache_config.kv_cache_groups:
         spec = group.kv_cache_spec
         required = cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
-        if isinstance(spec, HiSparseResidentSpec):
-            required = min(required, _ACTIVE_TAIL_PAGES)
         if group.host_resident:
-            host_blocks_per_request += required
-        else:
-            gpu_blocks_per_request += required
+            host_blocks += required
+            continue
+        admission_blocks += required
+        if isinstance(spec, HiSparseResidentSpec):
+            required = min(required, ACTIVE_TAIL_PAGES)
+        steady_blocks += required
     assert kv_cache_config.hisparse_host_num_blocks is not None
-    return min(
-        kv_cache_config.num_blocks / gpu_blocks_per_request,
-        kv_cache_config.hisparse_host_num_blocks / host_blocks_per_request,
-    )
+    num_blocks = kv_cache_config.num_blocks
+    if num_blocks < admission_blocks:
+        gpu_concurrency = num_blocks / admission_blocks
+    else:
+        gpu_concurrency = 1 + (num_blocks - admission_blocks) / steady_blocks
+    return min(gpu_concurrency, kv_cache_config.hisparse_host_num_blocks / host_blocks)
