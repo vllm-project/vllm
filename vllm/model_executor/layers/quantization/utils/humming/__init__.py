@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.humming.moe import (
     select_humming_moe_experts,
 )
 from vllm.model_executor.layers.quantization.utils.humming.priority import (
+    prefers_humming,
     prioritize_humming,
 )
 from vllm.model_executor.layers.quantization.utils.humming.schema import (
@@ -44,6 +45,7 @@ __all__ = [
     "convert_linear_layer_to_humming_standard",
     "get_humming_linear_compute_config",
     "prepare_humming_linear_layer_config",
+    "prefers_humming",
     "prioritize_humming",
     "make_humming_moe_kernel",
     "select_humming_moe_experts",

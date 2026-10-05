@@ -231,7 +231,10 @@ from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
 from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
     ZentorchInt8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
+from vllm.model_executor.layers.quantization.utils.humming import (
+    prefers_humming,
+    prioritize_humming,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
@@ -1125,13 +1128,13 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None
         # Weight-only: prefer FlashInfer CuTe-DSL W4A16 on SM100/103,
-        # Humming then Marlin on SM90, and Marlin elsewhere.
+        # Humming then Marlin where Humming is preferred, and Marlin elsewhere.
         cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
             compute_capability
         )
         if compute_capability in (100, 103) and cutedsl_ok:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
-        elif compute_capability != 90:
+        elif not prefers_humming(compute_capability):
             force_kernel = MarlinNvFp4LinearKernel
 
     if force_kernel is not None:

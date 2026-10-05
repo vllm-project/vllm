@@ -7,23 +7,32 @@ from typing import TypeVar
 
 _KernelT = TypeVar("_KernelT", bound=type | Enum)
 
+# Compute capabilities where Humming outranks Marlin.
+_HUMMING_PREFERRED_CAPABILITIES = frozenset({90})
 
-def prioritize_humming(
-    kernels: list[_KernelT],
-    compute_capability: int | None = None,
-) -> list[_KernelT]:
-    """Swap Humming ahead of Marlin on SM90 without modifying the input list.
 
-    Match kernel class names or MoE backend enum names. A missing compute
-    capability uses the current device.
-    """
+def prefers_humming(compute_capability: int | None = None) -> bool:
+    """Whether Humming outranks Marlin. A missing compute capability uses the
+    current device."""
     if compute_capability is None:
         from vllm.platforms import current_platform
 
         if current_platform.is_cuda():
             cc = current_platform.get_device_capability()
             compute_capability = cc.to_int() if cc is not None else None
-    if compute_capability != 90:
+    return compute_capability in _HUMMING_PREFERRED_CAPABILITIES
+
+
+def prioritize_humming(
+    kernels: list[_KernelT],
+    compute_capability: int | None = None,
+) -> list[_KernelT]:
+    """Move Humming directly ahead of Marlin where Humming is preferred.
+
+    Every other entry keeps its relative order and the input list is not
+    modified. Match kernel class names or MoE backend enum names.
+    """
+    if not prefers_humming(compute_capability):
         return kernels
 
     names = [
@@ -32,7 +41,8 @@ def prioritize_humming(
     ]
     humming = next((i for i, name in enumerate(names) if "humming" in name), None)
     marlin = next((i for i, name in enumerate(names) if "marlin" in name), None)
-    if humming is not None and marlin is not None and humming > marlin:
-        kernels = kernels.copy()
-        kernels[humming], kernels[marlin] = kernels[marlin], kernels[humming]
+    if humming is None or marlin is None or humming < marlin:
+        return kernels
+    kernels = kernels.copy()
+    kernels.insert(marlin, kernels.pop(humming))
     return kernels

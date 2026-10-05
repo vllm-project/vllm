@@ -357,8 +357,8 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
         Mxfp4MoeBackend.MARLIN,
-        Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.BATCHED_MARLIN,
+        Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.CPU,
         Mxfp4MoeBackend.EMULATION,
@@ -387,8 +387,8 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
         Mxfp4MoeBackend.MARLIN,
-        Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.BATCHED_MARLIN,
+        Mxfp4MoeBackend.HUMMING,
     ]
     return prioritize_humming(_AVAILABLE_BACKENDS)
 
