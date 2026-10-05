@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import safetensors
@@ -20,6 +21,11 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
+
+LoRAAdapterConverter = Callable[
+    [dict[str, torch.Tensor], PEFTHelper],
+    tuple[dict[str, torch.Tensor], PEFTHelper],
+]
 
 
 @dataclass(frozen=True)
@@ -128,8 +134,16 @@ class LoRAModel:
         model_vocab_size: int | None = None,
         weights_mapper: WeightsMapper | None = None,
         skip_prefixes: list[str] | None = None,
+        adapter_converter: LoRAAdapterConverter | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
+        if adapter_converter is not None:
+            original_tensors = tensors
+            tensors, peft_helper = adapter_converter(tensors, peft_helper)
+            converted = tensors is not original_tensors
+            del original_tensors
+            if converted:
+                weights_mapper = None
         pin_memory = str(device) == "cpu" and PIN_MEMORY
 
         modules_to_save_names = peft_helper.modules_to_save or []
@@ -207,6 +221,7 @@ class LoRAModel:
         tensorizer_config_dict: dict | None = None,
         skip_prefixes: list[str] | None = None,
         moe_ep_spec: MoEEPLoadSpec | None = None,
+        adapter_converter: LoRAAdapterConverter | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
 
@@ -233,6 +248,7 @@ class LoRAModel:
                 slicing metadata shared across all MoE layers. Non-local
                 expert weights are skipped at read time instead of being
                 loaded and discarded later.
+            adapter_converter: Optional model-specific PEFT tensor converter.
 
         Returns:
             Loaded LoRA Model.
@@ -295,7 +311,8 @@ class LoRAModel:
                 device=device,
                 **tensorizer_args.deserialization_kwargs,
             )
-            check_unexpected_modules(tensors)
+            if adapter_converter is None:
+                check_unexpected_modules(tensors)
 
         elif os.path.isfile(lora_tensor_path):
             # Find unexpected modules.
@@ -307,7 +324,8 @@ class LoRAModel:
             unexpected_modules = []
             with safetensors.safe_open(lora_tensor_path, framework="pt") as f:  # type: ignore
                 # Load tensors if there are only expected modules.
-                check_unexpected_modules(f)
+                if adapter_converter is None:
+                    check_unexpected_modules(f)
                 for module in f.keys():  # noqa
                     if moe_ep_spec is not None and _is_remote_expert_key(
                         module, moe_ep_spec
@@ -321,7 +339,8 @@ class LoRAModel:
                 else lora_pt_file_path
             )
             tensors = torch.load(lora_file_path, map_location=device, weights_only=True)
-            check_unexpected_modules(tensors)
+            if adapter_converter is None:
+                check_unexpected_modules(tensors)
             if moe_ep_spec is not None:
                 # `.bin`/`.pt` adapters can't be lazy-loaded, but pruning
                 # the dict here still frees the non-local expert tensors
@@ -333,6 +352,21 @@ class LoRAModel:
                 }
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
+
+        if adapter_converter is not None:
+            original_tensors = tensors
+            tensors, peft_helper = adapter_converter(tensors, peft_helper)
+            converted = tensors is not original_tensors
+            del original_tensors
+            if converted:
+                weights_mapper = None
+                if moe_ep_spec is not None:
+                    tensors = {
+                        k: v
+                        for k, v in tensors.items()
+                        if not _is_remote_expert_key(k, moe_ep_spec)
+                    }
+            check_unexpected_modules(tensors)
 
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id() if lora_model_id is None else lora_model_id,
