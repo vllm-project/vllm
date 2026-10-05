@@ -167,6 +167,16 @@ mkdocs.yaml @hmellor
 /vllm/models/deepseek_v4 @zyongye
 /vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
 
+# HiSparse
+/csrc/libtorch_stable/hisparse_kernels.cu @MatthewBonanni
+/docs/design/hisparse.md @MatthewBonanni
+/tests/evals/gsm8k/configs/*HiSparse* @MatthewBonanni
+/tests/evals/gsm8k/configs/models-hisparse.txt @MatthewBonanni
+/tests/v1/e2e/general/test_hisparse.py @MatthewBonanni
+/tests/v1/kv_connector/unit/test_hisparse_*.py @MatthewBonanni
+/vllm/distributed/kv_transfer/kv_connector/v1/hisparse @MatthewBonanni
+/vllm/v1/hisparse @MatthewBonanni
+
 # Kimi-K3-specific files
 /vllm/models/kimi_k3/nvidia/kda.py @gau-nernst
 
