@@ -368,6 +368,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._recving_transfers = defaultdict(list)
         w._is_hma_required = False
         w.xfer_stats = NixlKVConnectorStats()
+        w._has_packed_cache = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
@@ -395,6 +396,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._group_spec_types = (FullAttentionSpec,)
         w._engine_ttl = 0.0
         w._engine_last_active = {}
+        w._engine_by_address = {}
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
@@ -856,6 +858,61 @@ def test_cleanup_remote_engine_pops_under_handshake_lock():
     w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
 
 
+def _recv_metadata(remote_engine_id: str, req_id: str = "req") -> NixlConnectorMetadata:
+    """Build metadata with a single ``reqs_to_recv`` entry pointing at
+    ``remote_engine_id`` (the prefill remote D receives a push from)."""
+    params = {
+        "remote_block_ids": ([0],),
+        "remote_engine_id": remote_engine_id,
+        "remote_request_id": "p-req",
+        "remote_host": "localhost",
+        "remote_port": 1234,
+        "tp_size": 1,
+    }
+    meta = NixlConnectorMetadata()
+    meta.add_new_req_to_recv(req_id, ([0],), params)
+    return meta
+
+
+def test_start_load_kv_refreshes_engine_last_active_on_d_side():
+    """D receiving a push refreshes ``_engine_last_active`` for the prefill
+    remote, but only once that engine is connected (handshaked into
+    ``_remote_agents`` via heartbeats), mirroring the P-side refresh which runs
+    after ``_ensure_handshake``. Without it the prefill engine is reaped
+    mid-stream once it passes its TTL."""
+    w = _StubWriterWorker.fresh()
+    w._send_heartbeats = lambda metadata: None
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    # Connected prefill engine (already handshaked in).
+    w._remote_agents["prefill-engine"] = {(0, 0): "agent-p"}
+
+    stale = time.perf_counter() - 5.0
+    w._engine_last_active["prefill-engine"] = stale
+
+    w.start_load_kv(_recv_metadata("prefill-engine"))
+
+    assert w._engine_last_active["prefill-engine"] > stale
+    assert "req" in w._recving_metadata
+
+
+def test_start_load_kv_skips_liveness_for_unconnected_engine():
+    """If the prefill engine was never handshaked into ``_remote_agents`` (e.g.
+    its heartbeat handshake never succeeded), the D-side refresh must NOT record
+    an ``_engine_last_active`` entry -- otherwise a later eviction pass hits the
+    ``_remote_agents`` invariant in ``_cleanup_remote_engine`` and crashes on
+    the D node."""
+    w = _eviction_worker(engine_ttl=30.0)
+    w._send_heartbeats = lambda metadata: None
+
+    w.start_load_kv(_recv_metadata("prefill-engine"))
+
+    # Unconnected -> no orphaned liveness entry, so eviction has nothing to trip on.
+    assert "prefill-engine" not in w._engine_last_active
+    assert "prefill-engine" not in w._remote_agents
+
+    w._evict_stale_engines()  # nothing to reap, must not raise
+
+
 class TestPushWriterNotifs:
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
@@ -1199,7 +1256,7 @@ class TestPushWriterNegative:
         w = _StubWriterWorker.fresh()
         for bogus_rid in (123, None, 4.5, b"bytes-not-str"):
             payload = _registration_data("placeholder")
-            payload["request_id"] = bogus_rid  # type: ignore[assignment]
+            payload["request_id"] = bogus_rid
             notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(payload)
             w._handle_push_reg_notif(notif)
         assert w._pending_d_registrations == {}
@@ -1300,6 +1357,7 @@ class TestPushWriterNegative:
         assert notified == set()
         # Did not register anywhere.
         assert "never-heard-of-you" not in w._recving_transfers
+        assert w.xfer_stats.data["num_notifications_after_expiry"] == [1]
 
     def test_start_load_kv_with_empty_metadata_is_noop(self):
         """Empty metadata must not wake the writer or enqueue anything."""
@@ -1787,6 +1845,40 @@ def test_layer_metadata_round_trip():
     assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
 
 
+@pytest.mark.parametrize(
+    "layouts, error",
+    [
+        ({"L0": (-1, 64)}, "escapes its block"),
+        ({"L0": (0, 0)}, "escapes its block"),
+        ({"L0": (200, 64)}, "escapes its block"),
+        ({"L1": (0, 64)}, "has no layout"),
+        ({"L0": (0, 32)}, "page sizes must match"),
+    ],
+)
+def test_packed_layer_alignment_rejects_invalid_page_layout(layouts, error):
+    worker = _layer_routing_worker([["L0"]], {"L0": 0})
+    worker.block_len_per_layer = [64]
+    metadata = _agent_metadata([["L0", "L1"]], [0x10000], [256])
+    metadata.packed_member_layouts = layouts
+    with pytest.raises(AssertionError, match=error):
+        worker._align_remote_regions_by_layer(metadata)
+
+
+def test_layer_alignment_preserves_nonpacked_regions_alongside_packed_layers():
+    worker = _layer_routing_worker([["a"], ["b"]], {"a": 0, "b": 1})
+    worker.block_len_per_layer = [64, 128]
+    metadata = _agent_metadata(
+        [["a", "other"], ["b"]], [0x1000, 0x2000], [192, 128], [256, 128]
+    )
+    metadata.packed_member_layouts = {"a": (64, 64), "other": (128, 64)}
+
+    worker._align_remote_regions_by_layer(metadata)
+
+    assert metadata.kv_caches_base_addr == [0x1040, 0x2000]
+    assert metadata.block_lens == [64, 128]
+    assert metadata.block_strides == [256, 128]
+
+
 def test_layer_identity_gate_preserves_the_non_hma_path():
     assert _layer_routing_worker([["a"]], {"a": 0})._transfer_layer_region_indices == (
         0,
@@ -1794,6 +1886,7 @@ def test_layer_identity_gate_preserves_the_non_hma_path():
 
     # A base worker (pull) never routes by layer name.
     pull = object.__new__(NixlBaseConnectorWorker)
+    pull.pp_size = 2
     pull._transfer_layer_names = ()
     pull._transfer_layer_region_indices = ()
     pull._transfer_layer_group_ids = ()
