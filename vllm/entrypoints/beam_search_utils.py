@@ -31,6 +31,38 @@ from vllm.v1.structured_output.request import get_structured_output_key
 
 _bitmask_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
+# stop_reason set on a beam that is retained as a length-truncated output
+# because the structured-output grammar still allowed tokens but none of the
+# engine's sampled logprobs were valid (the over-cap regime; see
+# resolve_over_cap_logprobs). Lets API callers distinguish this from an
+# ordinary length truncation.
+OVER_CAP_STOP_REASON = "structured_output_constraint_unsatisfiable"
+
+
+def resolve_over_cap_logprobs(
+    max_logprobs: int, vocab_size: int, base_logprobs: int
+) -> int:
+    """Number of logprobs to request for an over-cap beam step.
+
+    In the over-cap regime the engine samples unconstrained and the grammar is
+    enforced only by filtering the returned logprobs against the allowed set.
+    Requesting more logprobs widens that filter: with ``max_logprobs == -1``
+    the full vocabulary is returned, so every allowed token is visible and no
+    valid beam can be dropped. Otherwise the request is bounded by the engine's
+    ``max_logprobs`` ceiling (never below ``base_logprobs``).
+
+    Args:
+        max_logprobs: Engine ``max_logprobs`` config; ``-1`` means vocab-size.
+        vocab_size: Model vocabulary size.
+        base_logprobs: Logprobs requested on the common (<= cap) path.
+
+    Returns:
+        The number of logprobs to request for an over-cap beam step.
+
+    """
+    cap = vocab_size if max_logprobs < 0 else min(max_logprobs, vocab_size)
+    return max(base_logprobs, cap)
+
 
 def bitmask_to_token_ids(bitmask_row: torch.Tensor, vocab_size: int) -> list[int]:
     """Convert a packed int32 bitmask row to a list of allowed token IDs.

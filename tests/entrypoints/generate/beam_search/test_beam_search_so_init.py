@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from vllm.entrypoints.beam_search_utils import init_beam_search_so_backend
+from vllm.entrypoints.beam_search_utils import (
+    init_beam_search_so_backend,
+    resolve_over_cap_logprobs,
+)
 from vllm.sampling_params import StructuredOutputsParams
 
 
@@ -51,3 +54,30 @@ def test_choice_uses_trie_with_auto_backend():
     assert state.backend is None
     assert state.key is None
     assert state.bitmask is None
+
+
+def test_resolve_over_cap_logprobs_unlimited_returns_vocab_size():
+    """``max_logprobs == -1`` must request the full vocabulary.
+
+    Only seeing every token's logprob guarantees that an allowed token is
+    never missed, which is what makes over-cap beam drops impossible under
+    ``--max-logprobs -1``. The top-``len(allowed)`` logprobs by probability
+    can be disjoint from the allowed set, so a smaller request cannot give
+    that guarantee.
+    """
+    assert resolve_over_cap_logprobs(-1, 32000, 8) == 32000
+
+
+def test_resolve_over_cap_logprobs_bounded_by_max_logprobs():
+    """A finite ceiling bounds the request above the base."""
+    assert resolve_over_cap_logprobs(100, 32000, 8) == 100
+
+
+def test_resolve_over_cap_logprobs_bounded_by_vocab_size():
+    """The ceiling never exceeds the vocabulary size."""
+    assert resolve_over_cap_logprobs(100, 10, 8) == 10
+
+
+def test_resolve_over_cap_logprobs_never_below_base():
+    """The base request is a floor even when the ceiling is smaller."""
+    assert resolve_over_cap_logprobs(4, 32000, 8) == 8

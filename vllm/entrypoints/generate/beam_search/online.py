@@ -11,9 +11,11 @@ import numpy as np
 from vllm import CompletionOutput, RequestOutput
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.beam_search_utils import (
+    OVER_CAP_STOP_REASON,
     get_beam_allowed_token_ids,
     get_trie_allowed_token_ids,
     init_beam_search_so_backend,
+    resolve_over_cap_logprobs,
 )
 from vllm.inputs import (
     EncoderDecoderInput,
@@ -92,9 +94,13 @@ class BeamSearchOnlineMixin(ABC):
         so_bitmask = None
         so_trie: ChoiceTrie | None = None
         vocab_size = 0
+        over_cap_logprobs = logprobs_num
         if params.structured_outputs is not None:
             vllm_config = self.engine_client.vllm_config
             vocab_size = vllm_config.model_config.get_vocab_size()
+            over_cap_logprobs = resolve_over_cap_logprobs(
+                vllm_config.model_config.max_logprobs, vocab_size, logprobs_num
+            )
             so_backend, so_key, so_bitmask, so_trie = init_beam_search_so_backend(
                 vllm_config=vllm_config,
                 tokenizer=tokenizer,
@@ -124,6 +130,7 @@ class BeamSearchOnlineMixin(ABC):
                     request_id=request_id,
                     sampling_params=sampling_params,
                     logprobs_num=logprobs_num,
+                    over_cap_logprobs=over_cap_logprobs,
                     beam_width=beam_width,
                     temperature=temperature,
                     eos_token_id=eos_token_id,
@@ -193,6 +200,7 @@ class BeamSearchOnlineMixin(ABC):
         request_id: str,
         sampling_params: SamplingParams,
         logprobs_num: int,
+        over_cap_logprobs: int,
         beam_width: int,
         temperature: float,
         eos_token_id: int | None,
@@ -231,6 +239,7 @@ class BeamSearchOnlineMixin(ABC):
                     self._build_online_so_params,
                     all_beams,
                     logprobs_num,
+                    over_cap_logprobs,
                     temperature,
                     so_backend,
                     so_key,
@@ -353,19 +362,27 @@ class BeamSearchOnlineMixin(ABC):
                 ):
                     # Over-cap regime (see _build_online_so_params): the engine
                     # sampled unconstrained and none of its top logprobs fell
-                    # in the allowed set, so the grammar was not enforced for
-                    # this beam and the beam is silently dropped. Surface it.
+                    # in the allowed set, so the grammar could not be extended
+                    # for this beam. Rather than silently dropping it, retain
+                    # the grammar-valid prefix as a length-truncated output
+                    # tagged with a distinctive stop_reason so callers can
+                    # detect that the structured-output constraint could not be
+                    # satisfied here.
                     logger.warning(
                         "Beam search (request %s): structured-output allowed "
                         "set has %d tokens (> cap %d), so engine-side "
-                        "constraint was disabled and none of the sampled "
-                        "top-%d tokens were valid. Dropping this beam; the "
-                        "request may finish with fewer outputs.",
+                        "constraint was disabled and none of the %d sampled "
+                        "logprobs were valid. Returning this beam as a "
+                        "length-truncated output (stop_reason=%r).",
                         request_id,
                         len(allowed),
                         _MAX_NUM_ALLOWED_TOKEN_IDS,
-                        logprobs_num,
+                        over_cap_logprobs,
+                        OVER_CAP_STOP_REASON,
                     )
+                    current_beam.finish_reason = "length"
+                    current_beam.stop_reason = OVER_CAP_STOP_REASON
+                    completed.append(current_beam)
 
         # Processing non-EOS tokens
         candidate_logprobs = np.fromiter(
@@ -401,6 +418,7 @@ class BeamSearchOnlineMixin(ABC):
         self,
         beams: list[BeamSearchSequence],
         logprobs_num: int,
+        over_cap_logprobs: int,
         temperature: float,
         so_backend: StructuredOutputBackend | None,
         so_key: tuple | None,
@@ -446,26 +464,21 @@ class BeamSearchOnlineMixin(ABC):
             # skip the engine-side constraint and rely on the logprobs
             # filtering via allowed_sets instead.
             #
-            # Limitation: in this over-cap regime the engine samples
-            # unconstrained and returns only 2*beam_width logprobs, which are
-            # then filtered against allowed_sets. If none of those top tokens
-            # are in the allowed set, the beam yields no candidates and is
-            # dropped, so a request can finish early with fewer (possibly zero)
-            # outputs and finish_reason="length" rather than an error. The
-            # allowed set is near-full in this regime, so the model's natural
-            # top tokens almost always fall inside it; engine-side masking for
-            # arbitrary-size allowed sets is left as a follow-up. This mirrors
-            # the pre-existing offline limitation.
+            # In this over-cap regime the engine samples unconstrained and
+            # returns `over_cap_logprobs` logprobs, which are filtered against
+            # allowed_sets. Requesting more logprobs widens that filter: with
+            # max_logprobs == -1 the full vocabulary is returned and no valid
+            # beam can be dropped; otherwise, if none of the returned logprobs
+            # are valid, the beam is retained as a length-truncated output (see
+            # _beam_search_step) rather than silently dropped. This mirrors the
+            # offline path.
+            over_cap = len(allowed_ids) > _MAX_NUM_ALLOWED_TOKEN_IDS
             beam_params = SamplingParams(
-                logprobs=logprobs_num,
+                logprobs=over_cap_logprobs if over_cap else logprobs_num,
                 max_tokens=1,
                 temperature=temperature,
                 detokenize=False,
-                allowed_token_ids=(
-                    allowed_ids
-                    if len(allowed_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS
-                    else None
-                ),
+                allowed_token_ids=None if over_cap else allowed_ids,
             )
             active_beams.append(beam)
             params.append(beam_params)
