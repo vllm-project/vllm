@@ -101,3 +101,51 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
             getattr(executor, method)()
     else:
         assert getattr(executor, method)() is result
+
+
+@pytest.mark.parametrize(
+    "inherited_fds, local_world_size, is_cpu, numa_bind, expected",
+    [
+        (None, 8, False, False, True),  # spawn, GPU: start concurrently
+        ([], 8, False, False, False),  # fork carries fds between workers
+        (None, 1, False, False, False),  # nothing to overlap
+        (None, 8, True, False, False),  # CPU backend sets OpenMP envs per worker
+        (None, 8, False, True, False),  # NUMA wrapper patches the executable
+    ],
+)
+def test_can_start_workers_concurrently(
+    monkeypatch, inherited_fds, local_world_size, is_cpu, numa_bind, expected
+):
+    import vllm.v1.executor.multiproc_executor as mp_executor
+
+    monkeypatch.setattr(
+        mp_executor, "current_platform", SimpleNamespace(is_cpu=lambda: is_cpu)
+    )
+    executor: Any = SimpleNamespace(
+        local_world_size=local_world_size,
+        parallel_config=SimpleNamespace(numa_bind=numa_bind),
+    )
+
+    assert (
+        MultiprocExecutor._can_start_workers_concurrently(executor, inherited_fds)
+        is expected
+    )
+
+
+def test_start_workers_concurrently_keeps_started_workers_on_failure():
+    """Workers that started must reach cleanup, in rank order, if one fails."""
+    executor: Any = SimpleNamespace(local_world_size=4)
+    handles = {rank: object() for rank in (0, 1, 3)}
+
+    def start_worker(local_rank):
+        if local_rank == 2:
+            raise RuntimeError("boom")
+        return handles[local_rank]
+
+    unready_workers: list[Any] = []
+    with pytest.raises(RuntimeError, match="boom"):
+        MultiprocExecutor._start_workers_concurrently(
+            executor, start_worker, unready_workers
+        )
+
+    assert unready_workers == [handles[0], handles[1], handles[3]]
