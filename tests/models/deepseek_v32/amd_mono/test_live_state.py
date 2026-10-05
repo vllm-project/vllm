@@ -11,7 +11,6 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 
-from vllm.models.deepseek_v32.amd.mono import common as C
 from vllm.models.deepseek_v32.amd.mono import dispatch as D
 from vllm.models.deepseek_v32.amd.mono import guards as G
 from vllm.models.deepseek_v32.amd.mono import live as LV
@@ -54,15 +53,13 @@ class ScratchOp:
         return expired
 
 
-def bare_live(full_graphs=False, step_sync=True, check_every=1):
+def bare_live(step_sync=True, check_every=1):
     lv = LV.MonoLive.__new__(LV.MonoLive)
     lv.cfg = LV.LiveConfig(ckpt="x", step_sync=step_sync, check_every=check_every)
-    lv.full_graphs, lv.rank = full_graphs, 0
-    lv.enabled, lv.disabled_reason = True, ""
+    lv.rank, lv.enabled = 0, True
     lv.dev_nonfinite = None
     lv.sizes = (1,)
     lv.ops = {(3, 1): ScratchOp()}
-    lv.stats = dict(expired=[], nonfinite_steps=0)
     lv._st = dict(T=1, S=1, md=None)
     lv._n_mono, lv._voted = 1, None
     lv.votes = []
@@ -71,24 +68,19 @@ def bare_live(full_graphs=False, step_sync=True, check_every=1):
 
 
 @pytest.mark.usefixtures("no_device_sync")
-@pytest.mark.parametrize("full", [False, True])
 @pytest.mark.parametrize("bad", ["expired", "nonfinite"])
-def test_health_check_disables_or_failstops(monkeypatch, full, bad):
-    """MONO_LIVE_FAILSTOP=warn: an expired poll or non-finite output disables mono
-    eagerly; under FULL graphs it fail-stops."""
+def test_health_check_disables(monkeypatch, bad):
+    """MONO_LIVE_FAILSTOP=warn: an expired poll or non-finite output disables mono from
+    the next step, through the vote."""
     monkeypatch.setenv("MONO_LIVE_FAILSTOP", "warn")
-    lv = bare_live(full_graphs=full)
+    lv = bare_live()
     out = torch.zeros(1, 4)
     if bad == "expired":
         lv.ops[(3, 1)].words()[0] = 1
     else:
         out[0, 0] = float("nan")
-    if full:
-        with pytest.raises(RuntimeError, match="fail-stop"):
-            lv._end_step(out)
-    else:
-        lv._end_step(out)
-        assert lv.enabled is False and "finite" in lv.disabled_reason
+    lv._end_step(out)
+    assert lv.enabled is False and lv.votes == [False]
 
 
 @pytest.mark.usefixtures("no_device_sync")
@@ -107,21 +99,23 @@ def test_eager_expiry_reaches_poll_watch(monkeypatch):
         monkeypatch.setenv("MONO_LIVE_FAILSTOP", mode)
         lv = bare_live()
         op = lv.ops[(3, 1)]
-        watch = G.PollErrorWatch(lv) if mode == "warn" else None
+        watch = G.PollErrorWatch(lv) if mode != "0" else None
         if watch:
             watch.after_step()  # clean snapshot of step N-1
         op.words()[0] = 1  # step N: a wait expires
         if mode == "1":  # raise (default): the eager check fail-stops, words stay set
             with pytest.raises(RuntimeError, match="fail-stop"):
                 lv._end_step(out)
-            assert op.words()[0] == 1
+            watch.after_step()  # compute_logits of step N: snapshot
+            with pytest.raises(RuntimeError, match="expired kernel polls"):
+                watch.after_step()  # step N+1: the watch fail-stops too
             continue
         lv._end_step(out)
         assert lv.enabled is False
         if watch:  # warn: the watch still reports the incident, then clears
             assert op.words()[0] == 1
-            watch.after_step()  # compute_logits of step N: snapshot
-            watch.after_step()  # step N+1: check
+            watch.after_step()
+            watch.after_step()
             assert watch.n_incidents == 1
         assert op.words()[0] == 0  # off (no watch): the check clears the words itself
 
@@ -139,14 +133,14 @@ def test_step_sync_votes():
         assert lv._state_reason() == ""  # rides on the end-of-step vote
     assert lv.votes == [True] * 4, lv.votes
     # a local disable applies through the next vote, on every rank at the same step
-    lv.set_enabled(False)
+    lv.enabled = False
     assert lv._state_reason() == ""
     lv._n_mono += 1
     lv._end_step(out)
     assert lv.votes[-1] is False and lv._state_reason() == "disabled"
     nv = len(lv.votes)
     assert lv._state_reason() == "disabled" and len(lv.votes) == nv + 1  # off: vote
-    lv.set_enabled(True)
+    lv.enabled = True
     assert lv._state_reason() == "" and lv.votes[-1] is True
     lv._go = lambda ok: False  # a peer is disabled
     lv._voted = None
@@ -167,15 +161,6 @@ def test_step_sync_votes():
     assert lv._state_reason() == ""
     lv.enabled = False
     assert lv._state_reason() == "disabled" and lv.votes == []
-
-
-def test_enable_under_full_graphs():
-    """FULL graphs: changing the state is refused (captured graphs keep their decision;
-    an RPC raise would kill the engine)."""
-    lv = bare_live(full_graphs=True, step_sync=False)
-    assert (
-        lv.set_enabled(True) is True and lv.set_enabled(False) is False and lv.enabled
-    )
 
 
 class FakeDecode:
@@ -404,17 +389,17 @@ def test_caches_rebound_after_profiling():
     assert lv._index_tables_set and all(lv._flat[L] is flat[L] for L in (3, 4))
 
 
-def test_rope_tables_and_layer_metadata():
+def test_rope_tables_and_layer_metadata(monkeypatch):
     name = "model.layers.3.self_attn.attn"
     c = torch.randn(100, 64)
     lay = NS(self_attn=NS(rotary_emb=NS(cos_sin_cache=c), layer_name=name))
-    cos, sin, src = C.rope_tables(lay, 40)
-    assert cos.shape == sin.shape == (40, 32) and src == "torch.float32"
+    cos, sin = LV.rope_tables(lay, 40)
+    assert cos.shape == sin.shape == (40, 32)
     assert cos.dtype is torch.bfloat16 and cos.is_contiguous() and sin.is_contiguous()
     assert torch.equal(cos, c[:40, :32].bfloat16()) and torch.equal(
         sin, c[:40, 32:].bfloat16()
     )
-    assert C.rope_tables(lay)[0].shape == (100, 32)
+    assert LV.rope_tables(lay)[0].shape == (100, 32)
     md, sm = NS(x=1), torch.arange(4)
     for attn_md, slots, want in (
         ({name: md}, {name: sm}, (md, sm)),
@@ -423,7 +408,10 @@ def test_rope_tables_and_layer_metadata():
         (None, sm, (None, None)),
     ):
         fc = NS(attn_metadata=attn_md, slot_mapping=slots)
-        assert C.layer_metadata(lay, fc=fc) == want
+        monkeypatch.setattr(
+            "vllm.forward_context.get_forward_context", lambda fc=fc: fc
+        )
+        assert LV.layer_metadata(name) == want
 
 
 def test_op_launch_caching(monkeypatch):

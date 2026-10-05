@@ -68,15 +68,10 @@ def test_env_off_and_on(make_vc, monkeypatch):
     [("1", True), ("true", True), ("TRUE", True), ("0", False), ("yes", False)],
 )
 def test_env_parsing(monkeypatch, val, want):
-    """Unregistered in vllm.envs: os.environ is parsed the vLLM ROCm way; registered:
-    vllm.envs wins."""
     from vllm import envs
 
-    monkeypatch.delitem(envs.environment_variables, E.ENABLE, raising=False)
     monkeypatch.setenv(E.ENABLE, val)
-    assert E.enabled() is want
-    monkeypatch.setitem(envs.environment_variables, E.ENABLE, lambda: not want)
-    assert E.enabled() is (not want)
+    assert envs.VLLM_ROCM_USE_GLM5_MONOKERNEL is want
 
 
 def test_config_from_env(make_vc, ckpt, monkeypatch):
@@ -193,7 +188,7 @@ def test_check_before_install(make_vc, model_kw, vc_kw, ok):
 def test_cache_contract():
     cfg = NS(layers=[3, 4, 5])
     good = {L: torch.zeros(4, 16, 576, dtype=torch.bfloat16) for L in cfg.layers}
-    assert G.check_cache_contract(fake_model(good), cfg).startswith("ok")
+    G.check_cache_contract(fake_model(good), cfg)
     for frag, kv in {
         "dtype": torch.zeros(4, 16, 576, dtype=torch.float16),
         "not contiguous": torch.zeros(4, 576, 16, dtype=torch.bfloat16).transpose(1, 2),
@@ -202,8 +197,7 @@ def test_cache_contract():
     }.items():
         with pytest.raises(RuntimeError, match=frag):
             G.check_cache_contract(fake_model({**good, 5: kv}), cfg)
-    # size-only stand-ins are skipped
-    assert G.check_cache_contract(fake_model(), cfg).startswith("skipped")
+    G.check_cache_contract(fake_model(), cfg)  # size-only stand-ins are skipped
 
 
 def test_live_config_defaults():
@@ -287,8 +281,8 @@ def test_poll_watch(monkeypatch):
     for mode in ("1", "0"):
         monkeypatch.setenv(E.FAILSTOP, mode)
         obj = D.Glm5MonoDecode.__new__(D.Glm5MonoDecode)
-        obj.lv, obj.watch = object(), None
-        obj._install_poll_watch()
+        obj.lv = object()
+        obj.watch = obj._poll_watch()
         obj.after_step()
         if mode == "0":
             assert obj.watch is None

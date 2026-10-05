@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Load one GLM-5.2 MoE decoder layer's TP-rank shard for the MonoKernel, straight
-from the checkpoint safetensors (independent of vLLM's loaded, requantized and
-preshuffled parameters).
+"""One GLM-5.2 MoE decoder layer's TP-rank shard for the MonoKernel, read straight from
+the checkpoint safetensors (independent of vLLM's requantized, preshuffled parameters).
 
 Kernel contract (``kernel.weights.LayerWeights.t``, TP8, 8 local heads, inter 256):
 
@@ -21,6 +20,14 @@ Kernel contract (``kernel.weights.LayerWeights.t``, TP8, 8 local heads, inter 25
 
 Expert 256 is the shared expert; MXFP4 is e2m1 low-nibble-first with an E8M0 scale per
 32 along K.
+
+Fused-indexer layers (``Glm5MonoKernel(with_indexer=True)``) add, replicated on every
+rank like vLLM's indexer, FP8 with the attention weights' block-128 recipe:
+
+  w_index_k  FP8 E4M3 [128, 6144]  + s_index_k FP32 [1, 48]    indexer.wk
+  w_index_q  FP8 E4M3 [4096, 2048] + s_index_q FP32 [32, 16]   indexer.wq_b (head-major)
+  w_index_w  BF16 [32, 6144]        indexer.weights_proj
+  g_index_k, b_index_k FP32 [128]   indexer.k_norm LayerNorm weight / bias
 """
 
 from __future__ import annotations
@@ -32,10 +39,13 @@ from concurrent.futures import ThreadPoolExecutor
 import torch
 from safetensors import safe_open
 
+from vllm.models.deepseek_v32.amd.mono.fp8_attention import quant_fp8_block
+
 N_ROUTED = 256
 HEADS_TOTAL = 64
 NOPE, ROPE, VDIM, KV_LORA = 192, 64, 256, 512
 INTER_TOTAL = 2048
+INDEX_DIM, INDEX_HEADS, HIDDEN, Q_LORA = 128, 32, 6144, 2048
 
 
 class _Ckpt:
@@ -86,10 +96,7 @@ def load_glm5_layer(
     t["g_kv"] = dev(ck.get(p + "self_attn.kv_a_layernorm.weight"), bf)
     q_a = ck.get(p + "self_attn.q_a_proj.weight")
     kv_a = ck.get(p + "self_attn.kv_a_proj_with_mqa.weight")
-    assert q_a.shape == (2048, 6144) and kv_a.shape == (576, 6144), (
-        q_a.shape,
-        kv_a.shape,
-    )
+    assert q_a.shape == (2048, 6144) and kv_a.shape == (576, 6144), (q_a, kv_a)
     t["w_qkv_a"] = dev(torch.cat([q_a, kv_a], 0), bf)
     qb_rows = heads * (NOPE + ROPE)
     t["w_q_b"] = dev(
@@ -115,8 +122,7 @@ def load_glm5_layer(
     t["w_r"] = dev(ck.get(p + "mlp.gate.weight"), bf)
     t["bias"] = dev(ck.get(p + "mlp.gate.e_score_correction_bias"), torch.float32)
 
-    # Experts: native MXFP4, gate rows then up rows of this rank; shared expert = index
-    # 256.
+    # experts: native MXFP4, gate rows then up rows of this rank; shared expert = 256
     E = N_ROUTED + 1
     w_ug = torch.empty(E, 2 * inter, 6144 // 2, dtype=torch.uint8)
     s_ug = torch.empty(E, 2 * inter, 6144 // 32, dtype=torch.uint8)
@@ -124,8 +130,11 @@ def load_glm5_layer(
     s_dn = torch.empty(E, 6144, inter // 32, dtype=torch.uint8)
     r0, r1 = rank * inter, (rank + 1) * inter
 
+    def prefix(e):
+        return p + (f"mlp.experts.{e}." if e < N_ROUTED else "mlp.shared_experts.")
+
     def one(e):
-        q = p + (f"mlp.experts.{e}." if e < N_ROUTED else "mlp.shared_experts.")
+        q = prefix(e)
         for j, proj in enumerate(("gate_proj", "up_proj")):
             w = ck.slice(q + proj + ".weight")
             s = ck.slice(q + proj + ".weight_scale")
@@ -138,16 +147,41 @@ def load_glm5_layer(
             :, rank * inter // 32 : (rank + 1) * inter // 32
         ]
 
-    # Open every shard file once on this thread (safe_open handles are then read-only).
+    # open every shard file once on this thread (safe_open handles are then read-only)
     for e in range(E):
-        q = p + (f"mlp.experts.{e}." if e < N_ROUTED else "mlp.shared_experts.")
         for n in ("gate_proj", "up_proj", "down_proj"):
-            ck._f(q + n + ".weight")
-            ck._f(q + n + ".weight_scale")
+            ck._f(prefix(e) + n + ".weight")
+            ck._f(prefix(e) + n + ".weight_scale")
     with ThreadPoolExecutor(threads) as ex:
         list(ex.map(one, range(E)))
     for name, x in (("w_ug", w_ug), ("s_ug", s_ug), ("w_dn", w_dn), ("s_dn", s_dn)):
         t[name] = x.to(device)
-    for name in ("w_ug", "s_ug", "w_dn", "s_dn"):
-        assert t[name].dtype == torch.uint8
     return t
+
+
+def pack_index_weights(
+    wk: torch.Tensor,
+    wq_b: torch.Tensor,
+    weights_proj: torch.Tensor,
+    k_norm_w: torch.Tensor,
+    k_norm_b: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    assert tuple(wk.shape) == (INDEX_DIM, HIDDEN), wk.shape
+    assert tuple(wq_b.shape) == (INDEX_HEADS * INDEX_DIM, Q_LORA), wq_b.shape
+    assert tuple(weights_proj.shape) == (INDEX_HEADS, HIDDEN), weights_proj.shape
+    t = {}
+    t["w_index_k"], t["s_index_k"] = quant_fp8_block(wk)
+    t["w_index_q"], t["s_index_q"] = quant_fp8_block(wq_b)
+    t["w_index_w"] = weights_proj.to(torch.bfloat16).contiguous()
+    t["g_index_k"] = k_norm_w.float().contiguous()
+    t["b_index_k"] = k_norm_b.float().contiguous()
+    return t
+
+
+def index_weights_from_ckpt(
+    ckpt_dir: str, layer: int, device
+) -> dict[str, torch.Tensor]:
+    ck = _Ckpt(ckpt_dir)
+    p = f"model.layers.{layer}.self_attn.indexer."
+    names = "wk.weight wq_b.weight weights_proj.weight k_norm.weight k_norm.bias"
+    return pack_index_weights(*(ck.get(p + n).to(device) for n in names.split()))

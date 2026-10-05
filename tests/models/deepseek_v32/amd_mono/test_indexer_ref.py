@@ -176,7 +176,7 @@ def test_decode_step_glm_shapes():
 def test_pack_index_weights():
     """Fused-indexer weights: FP8 block-128 index projections (rounding only) + the
     BF16 weights_proj."""
-    from vllm.models.deepseek_v32.amd.mono import index_weights as IW
+    from vllm.models.deepseek_v32.amd.mono.ckpt_weights import pack_index_weights
     from vllm.models.deepseek_v32.amd.mono.fp8_attention import dequant_fp8_block
 
     bf = torch.bfloat16
@@ -185,7 +185,7 @@ def test_pack_index_weights():
         torch.randn(4096, 2048, generator=g).to(bf),
     )
     wp = torch.randn(32, 6144, generator=g).to(bf)
-    t = IW.pack_index_weights(wk, wq, wp, torch.ones(128), torch.zeros(128))
+    t = pack_index_weights(wk, wq, wp, torch.ones(128), torch.zeros(128))
     assert t["s_index_k"].shape == (1, 48) and t["s_index_q"].shape == (32, 16)
     assert t["w_index_w"].dtype == bf and t["g_index_k"].dtype == torch.float32
     for (w, s), ref in (

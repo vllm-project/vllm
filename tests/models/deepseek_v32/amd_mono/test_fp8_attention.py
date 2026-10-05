@@ -49,7 +49,7 @@ def _kernel_dequant(q, s, bk, scale_rows):
 def test_shapes_error_and_kernel_addressing(name):
     (rows, k), bk = SHAPES[name], BK[name]
     w = _rand(rows, k, 100 + list(SHAPES).index(name))
-    q, s = F.quant_fp8_block(w, 128, bk)
+    q, s = F.quant_fp8_block(w, bk)
     assert q.dtype is torch.float8_e4m3fn and q.shape == (rows, k) and q.is_contiguous()
     assert s.dtype is torch.float32 and s.shape == (-(-rows // 128), k // bk)
     assert torch.isfinite(s).all() and (s > 0).all()
@@ -70,7 +70,7 @@ def test_shapes_error_and_kernel_addressing(name):
 def test_zero_block_and_dict_api():
     w = _rand(256, 256, 3)
     w[:128, :128] = 0
-    q, s = F.quant_fp8_block(w, 128, 128)
+    q, s = F.quant_fp8_block(w)
     assert s[0, 0] == 1.0 and (q[:128, :128].float() == 0).all()
     t = {f"w_{n}": _rand(r, k, 11 + j) for j, (n, (r, k)) in enumerate(SHAPES.items())}
     errs = F.quantize_attention_fp8(t)

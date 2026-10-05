@@ -1,18 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Model-private custom op for the GLM-5.2 decode MonoKernel layer. The FlyDSL op
-objects are not tensors, so the op looks the active ``mono.dispatch.Glm5MonoDecode`` up
-by registry.
-
-Contract:
-  * the op is only the mono path of one layer (``MonoLive.mono_forward``); the per-step
-    go / no-go decision and the fallback to vLLM's layer happen outside it, in
-    ``Glm5MonoDecode.forward_layer``;
-  * ``mutates_args=["hidden_states", "residual"]``: on the first mono layer
-    ``fused_allreduce_rms_norm`` may write either in place; later layers only read;
-  * both outputs are fresh (never an alias of an input): ``x_out`` is allocated per
-    launch and the zeros output is the layer's own persistent zero buffer.
-The fake implementation returns fresh tensors of the same shapes / dtypes."""
+"""Model-private custom op: the mono path of one GLM-5.2 decoder layer
+(``MonoLive.mono_forward`` of the active ``mono.dispatch.Glm5MonoDecode``; the FlyDSL
+ops are not tensors). The step decision and vLLM's fallback layer stay outside the op.
+The first mono layer's ``fused_allreduce_rms_norm`` may write hidden_states / residual
+in place; both outputs are fresh (never an alias of an input)."""
 
 import torch
 

@@ -47,11 +47,8 @@ def _fake_kernels(monkeypatch):
 
     monkeypatch.setattr(IO, "fused_norm_rope", fused_norm_rope)
     monkeypatch.setattr(IO, "fused_q", fused_q)
-    monkeypatch.setattr(
-        IO,
-        "get_forward_context",
-        lambda: NS(attn_metadata={"L": object()}, slot_mapping={"L": torch.arange(4)}),
-    )
+    fc = NS(attn_metadata={"L": object()}, slot_mapping={"L": torch.arange(4)})
+    monkeypatch.setattr("vllm.forward_context.get_forward_context", lambda: fc)
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     monkeypatch.setattr(torch.accelerator, "synchronize", lambda *a, **k: None)
 
