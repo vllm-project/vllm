@@ -21,6 +21,7 @@ from vllm.entrypoints.pooling.typing import (
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import tokens_input
 from vllm.renderers import TokenizeParams
+from vllm.renderers.inputs.preprocess import extract_prompt_components
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -195,4 +196,7 @@ def test_render_rejects_truncation_only_when_ranking_markers_are_lost(
         expected = token_ids
         if truncate_prompt_tokens is not None:
             expected = token_ids[-6:] if truncation_side == "left" else token_ids[:6]
-        assert result["prompts"]["prompt_token_ids"] == expected
+        prompt_token_ids = extract_prompt_components(
+            proc.model_config, result["prompts"]
+        ).token_ids
+        assert prompt_token_ids == expected
