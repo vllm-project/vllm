@@ -468,6 +468,42 @@ def test_artifact_store_evicts_oldest_past_its_cap():
     assert store.get(keys[2]) == b"2"
 
 
+def test_seed_skips_a_peer_artifact_it_cannot_key():
+    """Artifacts from a seed peer are untrusted caches: one whose key would be
+    unhashable is skipped instead of failing the whole seed."""
+    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+        ArtifactStore,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
+
+    key = ArtifactCacheKey(kind="flashinfer_autotune", content_hash="abc")
+    peer = ArtifactStore()
+    peer.put(key, b"tuned")
+    payload = peer.to_json()
+    unhashable = {"key": {"kind": ["k"], "content_hash": "abc"}, "data": "eA=="}
+
+    store = ArtifactStore()
+    assert store.merge_json([unhashable, *payload]) == 1
+    assert store.get(key) == b"tuned"
+
+
+def test_seed_response_keeps_artifacts_within_budget():
+    """A seed response must fit the JSON plane's message cap, so artifacts
+    past the budget are left out rather than failing the seed."""
+    from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
+        ArtifactStore,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import ArtifactCacheKey
+
+    store = ArtifactStore()
+    for content_hash in "ab":
+        store.put(ArtifactCacheKey(kind="k", content_hash=content_hash), b"x" * 30)
+
+    # 30 bytes encode to 40 base64 characters, so only the first fits.
+    rendered = store.to_json(max_bytes=60)
+    assert [item["key"]["content_hash"] for item in rendered] == ["a"]
+
+
 def _boot_warmup_engine(monkeypatch, **preload_engine_args):
     """Run the --preload-autotune engine entrypoint without booting an engine.
 
@@ -518,64 +554,166 @@ def test_preload_warmup_engine_drops_the_daemon_loader_config(monkeypatch):
     }
 
 
-def test_seed_manifest_describes_every_exported_tensor():
-    """A mirror allocates from the manifest alone, so it must carry the shape
-    and dtype of every entry and reject a dtype it cannot size."""
+def _mla_like_tensors():
+    """kv_b_proj plus the transposed W_UV / permuted W_UK_T views that MLA's
+    post-processing leaves on the same storage."""
     import torch
 
-    from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
+    rank, heads, nope, v = 16, 2, 4, 4
+    kv_b = (
+        torch.arange(heads * (nope + v) * rank, dtype=torch.float32)
+        .to(torch.bfloat16)
+        .view(heads * (nope + v), rank)
+    )
+    w_uk, w_uv = kv_b.T.view(rank, heads, nope + v).split([nope, v], dim=-1)
+    tensors = {
+        "kv_b_proj.weight": kv_b,
+        "W_UV": w_uv.transpose(0, 1),
+        "W_UK_T": w_uk.permute(1, 2, 0),
+        "scale": torch.ones(3, dtype=torch.float32),
+    }
+    kinds = {name: "param" for name in tensors} | {"scale": "buffer"}
+    return tensors, kinds
+
+
+class _FakeMooncake:
+    """TransferEngine stand-in that "reads" host memory with memmove."""
+
+    def __init__(self):
+        self.registered: list[int] = []
+        self.unregistered: list[int] = []
+
+    def batch_register_memory(self, pointers, lengths):
+        if set(pointers) & set(self.registered):
+            return -1  # Mooncake refuses to register memory twice
+        self.registered += pointers
+        return 0
+
+    def batch_unregister_memory(self, pointers):
+        self.unregistered += pointers
+        self.registered = [p for p in self.registered if p not in pointers]
+        return 0
+
+    def batch_transfer_sync_read(self, session, local, remote, lengths):
+        import ctypes
+
+        for dst, src, nbytes in zip(local, remote, lengths):
+            ctypes.memmove(dst, src, nbytes)
+        return 0
+
+
+def _fake_rdma_source(engine):
+    from vllm.model_executor.model_loader.weight_cache.seed import RdmaSeedSource
+
+    source = RdmaSeedSource()
+    source._initialize_engine = lambda: (engine, "127.0.0.1:1")
+    return source
+
+
+def test_seed_manifest_describes_tensors_as_views_over_storages():
+    """Views that share an allocation must collapse onto one storage entry
+    with their own offset and strides, or the mirror could neither size its
+    buffers nor rebuild the layout."""
+    import torch
+
     from vllm.model_executor.model_loader.weight_cache.seed import (
         build_manifest,
         manifest_dtype,
         manifest_nbytes,
     )
 
-    manifest = build_manifest(
-        {
-            "weight": TensorEntry.from_tensor(
-                torch.zeros(2, 3, dtype=torch.float16), "param"
-            ),
-            "scale": TensorEntry.from_tensor(
-                torch.ones(4, dtype=torch.float32), "buffer"
-            ),
-        }
-    )
-    assert manifest == {
-        "weight": {"shape": [2, 3], "dtype": "float16", "is_param": True},
-        "scale": {"shape": [4], "dtype": "float32", "is_param": False},
+    tensors, kinds = _mla_like_tensors()
+    manifest, storages = build_manifest(tensors, kinds)
+    assert len(storages) == len(manifest["storages"]) == 2
+    views = manifest["tensors"]
+    assert {views[n]["storage"] for n in ("kv_b_proj.weight", "W_UV", "W_UK_T")} == {0}
+    assert views["W_UV"]["offset"] == tensors["W_UV"].storage_offset()
+    assert views["W_UV"]["stride"] == list(tensors["W_UV"].stride())
+    assert views["scale"] == {
+        "storage": 1,
+        "offset": 0,
+        "shape": [3],
+        "stride": [1],
+        "dtype": "float32",
+        "is_param": False,
     }
-    assert manifest_nbytes(manifest) == 2 * 3 * 2 + 4 * 4
+    assert manifest_nbytes(manifest) == tensors["kv_b_proj.weight"].nbytes + 3 * 4
     assert manifest_dtype("bfloat16") is torch.bfloat16
     with pytest.raises(RuntimeError, match="unsupported dtype"):
         manifest_dtype("not_a_torch_dtype")
 
 
-def test_peer_seed_copy_owns_its_tensors():
-    """The mirror must end up with its own memory: aliasing the source would
-    tie its lifetime to the replica it was seeded from."""
+@pytest.mark.parametrize("backend", ["peer_ipc", "rdma"])
+def test_seed_rebuilds_strided_views_with_their_aliasing(backend):
+    """MLA's W_UV/W_UK_T are non-contiguous views of kv_b_proj. A mirror must
+    rebuild them with the source's values, strides and shared storage; the
+    rdma plane carries the manifest and seed as JSON."""
+    import json
     from unittest.mock import patch
 
     import torch
 
-    from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
     from vllm.model_executor.model_loader.weight_cache.seed import (
         PeerIpcSeedSource,
         build_manifest,
     )
 
-    entries = {
-        "weight": TensorEntry.from_tensor(
-            torch.zeros(2, 3, dtype=torch.float16), "param"
-        )
-    }
+    tensors, kinds = _mla_like_tensors()
+    manifest, storages = build_manifest(tensors, kinds)
+    if backend == "rdma":
+        source = mirror = _fake_rdma_source(_FakeMooncake())
+        seed = source.prepare_seed(storages, None)
+        manifest, seed = json.loads(json.dumps([manifest, seed]))
+    else:
+        source = mirror = PeerIpcSeedSource()
+        with patch.object(torch.accelerator, "current_device_index", return_value=0):
+            seed = source.prepare_seed(storages, None)
     with patch.object(torch.accelerator, "synchronize"):
-        result = PeerIpcSeedSource().fill(
-            build_manifest(entries),
-            {"source_device_index": 0, "entries": entries},
-            torch.device("cpu"),
-        )
-    assert torch.equal(result["weight"], torch.zeros(2, 3, dtype=torch.float16))
-    assert result["weight"].data_ptr() != entries["weight"].cpu_tensor.data_ptr()
+        result = mirror.fill(manifest, seed, torch.device("cpu"))
+
+    for name, tensor in tensors.items():
+        assert torch.equal(result[name], tensor), name
+        assert result[name].stride() == tensor.stride(), name
+        assert result[name].data_ptr() != tensor.data_ptr(), name
+    kv_b_storage = result["kv_b_proj.weight"].untyped_storage().data_ptr()
+    assert result["W_UV"].untyped_storage().data_ptr() == kv_b_storage
+    assert result["W_UK_T"].untyped_storage().data_ptr() == kv_b_storage
+
+
+def test_seed_rejects_a_view_that_overruns_its_storage():
+    """``set_`` would silently grow a too-small buffer, detaching it from the
+    other views on that storage, so a peer's manifest is bounds-checked."""
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache.seed import (
+        build_manifest,
+        rebuild_tensors,
+    )
+
+    manifest, _ = build_manifest(
+        {"weight": torch.zeros(4, dtype=torch.float32)}, {"weight": "param"}
+    )
+    manifest["tensors"]["weight"]["shape"] = [8]
+    with pytest.raises(RuntimeError, match="overruns its storage"):
+        rebuild_tensors(manifest, [torch.empty(16, dtype=torch.uint8)])
+
+
+def test_rdma_seed_registers_each_storage_once():
+    """Mooncake refuses to register memory twice, so a source that registered
+    per request could seed only one mirror; releasing the weights must hand
+    the memory back to the NIC."""
+    from vllm.model_executor.model_loader.weight_cache.seed import build_manifest
+
+    tensors, kinds = _mla_like_tensors()
+    _, storages = build_manifest(tensors, kinds)
+    engine = _FakeMooncake()
+    source = _fake_rdma_source(engine)
+    first = source.prepare_seed(storages, None)
+    second = source.prepare_seed(storages, None)
+    assert first["regions"] == second["regions"]
+    assert sorted(engine.registered) == sorted(s.data_ptr() for s in storages)
+    source.release()
+    assert engine.registered == []
 
 
 def test_peer_seed_rejects_a_remapped_source_device():
@@ -592,27 +730,33 @@ def test_peer_seed_rejects_a_remapped_source_device():
         build_manifest,
     )
 
-    entries = {"weight": TensorEntry.from_tensor(torch.zeros(2), "param")}
+    manifest, storages = build_manifest({"weight": torch.zeros(2)}, {"weight": "param"})
     seed = {
         "source_device_index": 0,
         "source_gpu_uuid": "GPU-source",
-        "entries": entries,
+        "storages": [
+            TensorEntry.from_tensor(torch.zeros(8, dtype=torch.uint8), "buffer")
+        ],
     }
     with patch(
         "vllm.model_executor.model_loader.weight_cache.seed.current_platform"
     ) as platform:
         platform.get_device_uuid.return_value = "GPU-somewhere-else"
         with pytest.raises(RuntimeError, match="different physical GPU"):
-            PeerIpcSeedSource().fill(build_manifest(entries), seed, torch.device("cpu"))
+            PeerIpcSeedSource().fill(manifest, seed, torch.device("cpu"))
 
 
 @contextlib.contextmanager
 def _remote_seed_daemon(token):
     """Serve the daemon's remote seed plane on a loopback port.
 
-    Only that handler is exercised, so __init__ (which loads a model onto a
+    Only that thread is exercised, so __init__ (which loads a model onto a
     GPU) is skipped and just the state it touches is provided.
     """
+    from unittest.mock import patch
+
+    import torch
+
     from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
         ArtifactStore,
     )
@@ -626,29 +770,25 @@ def _remote_seed_daemon(token):
     daemon.mirror = None
     daemon.role = "target"
     daemon.global_rank = 0
+    daemon.device_index = 0
+    daemon._state_lock = threading.Lock()
     key = ArtifactCacheKey(kind="flashinfer_autotune", content_hash="abc")
     daemon.artifacts.put(key, b"tuned")
 
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(("127.0.0.1", 0))
-    server.listen()
-
-    def _serve():
-        while True:
-            try:
-                conn, _ = server.accept()
-            except OSError:
-                return
-            with conn, contextlib.suppress(Exception):
-                daemon._handle_remote_connection(conn)
-
-    thread = threading.Thread(target=_serve, daemon=True)
-    thread.start()
-    try:
-        yield server.getsockname()[1]
-    finally:
-        server.close()
-        thread.join(timeout=5)
+    server = socket.create_server(("127.0.0.1", 0))
+    with patch.object(torch.accelerator, "set_device_index"):
+        thread = threading.Thread(
+            target=daemon._serve_remote, args=(server,), daemon=True
+        )
+        thread.start()
+        try:
+            yield server.getsockname()[1]
+        finally:
+            # close() alone does not wake an accept() blocked on another thread.
+            with contextlib.suppress(OSError):
+                server.shutdown(socket.SHUT_RDWR)
+            server.close()
+            thread.join(timeout=5)
 
 
 def _ask_remote(port, message):
@@ -685,3 +825,74 @@ def test_remote_seed_plane_refuses_local_only_commands():
             response = _ask_remote(port, {"cmd": cmd, "token": "s3cret"})
             assert response["status"] == "error"
             assert "served locally" in response["message"]
+
+
+def test_remote_seed_plane_drops_a_stalled_peer(monkeypatch):
+    """A peer that connects and never sends its request must not hold the
+    listener: it gets a deadline, and the next peer is still served."""
+    from vllm.model_executor.model_loader.weight_cache import daemon
+
+    monkeypatch.setattr(daemon, "_REMOTE_REQUEST_TIMEOUT_S", 0.5)
+    with (
+        _remote_seed_daemon("s3cret") as port,
+        socket.create_connection(("127.0.0.1", port)),
+    ):
+        served = _ask_remote(port, {"cmd": "fetch_artifacts", "token": "s3cret"})
+    assert served["status"] == "ok"
+
+
+def test_draft_seed_dials_the_draft_listeners():
+    """One host:base_port serves both daemon groups, so a draft mirror rank
+    must dial the source's draft listener, past the target group's block,
+    rather than the target daemon of the same rank."""
+    from vllm.entrypoints.cli.preload import _listen_address, _seed_address
+
+    world_size, rank = 2, 1
+    _, draft_port = _listen_address("0.0.0.0:29700", rank, port_offset=world_size)
+    dialed = _seed_address("10.0.0.1:29700", rank, rank, port_offset=world_size)
+    assert dialed == f"10.0.0.1:{draft_port}"
+    assert _seed_address("10.0.0.1:29700", rank, rank) == "10.0.0.1:29701"
+
+
+def test_seed_addresses_tell_socket_paths_from_host_ports():
+    """A relative socket path must stay local, and only a real host:port is
+    dialed over the network."""
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        parse_seed_address,
+    )
+
+    for path in ("run/sock0", "../sock0", "sock0"):
+        assert parse_seed_address(path) == path
+    assert parse_seed_address("10.0.0.1:29700") == ("10.0.0.1", 29700)
+    assert parse_seed_address("[fe80::1]:29700") == ("fe80::1", 29700)
+    with pytest.raises(ValueError, match="host:port"):
+        parse_seed_address("host:29x00")
+
+
+def test_seed_matches_an_unhashed_mirror_by_model_path():
+    """A mirror without the safetensors fingerprints its checkpoint by model
+    path; it must accept a source serving that same --model and still refuse
+    one serving another."""
+    from dataclasses import replace
+
+    from vllm.model_executor.model_loader.weight_cache.daemon import seed_mismatches
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+
+    source = WeightCacheKey(
+        checkpoint="3f2a9c",
+        model_arch="KimiK3ForConditionalGeneration",
+        tp_size=1,
+        tp_rank=0,
+        dtype="torch.bfloat16",
+        quantization=None,
+        quant_config_hash="",
+        revision=None,
+        vllm_version="0",
+    )
+    mirror = replace(source, checkpoint="/models/k3")
+    assert seed_mismatches(mirror, source, "/models/k3", "/models/k3") == []
+    assert seed_mismatches(mirror, source, "/models/k3", "/models/x") == ["checkpoint"]
+    hashed_elsewhere = replace(source, checkpoint="77b1e0")
+    assert seed_mismatches(hashed_elsewhere, source, "/models/k3", "/models/k3") == [
+        "checkpoint"
+    ]
