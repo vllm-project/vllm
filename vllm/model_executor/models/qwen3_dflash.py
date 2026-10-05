@@ -105,6 +105,13 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     )
 
 
+def _reads_raw_weights(projs: list[nn.Module]) -> bool:
+    """Whether post-load `.weight` is plain (not quantized, not CPU-repacked)."""
+    return not current_platform.is_cpu() and all(
+        isinstance(p.quant_method, UnquantizedLinearMethod) for p in projs
+    )
+
+
 def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
     assert spec_config is not None
@@ -527,10 +534,7 @@ class DFlashQwen3Model(nn.Module):
         self._context_qkv_projs = [a.qkv_proj for a in layers_attn]
         self._context_q_sizes = [a.q_size for a in layers_attn]
 
-        if all(
-            isinstance(proj.quant_method, UnquantizedLinearMethod)
-            for proj in self._context_qkv_projs
-        ):
+        if _reads_raw_weights(self._context_qkv_projs):
             # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
             kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
             self._fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
@@ -905,6 +909,8 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
+
+    def process_weights_after_loading(self) -> None:
         self.model._build_fused_kv_buffers()
 
     def _read_mask_embedding(self) -> torch.Tensor | None:

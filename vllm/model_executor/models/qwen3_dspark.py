@@ -32,6 +32,9 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.platforms import current_platform
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
@@ -340,17 +343,18 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # the target by load_dspark_model, so skip the unloaded params here.
         uses_expanded_input_vocab = self.config.vocab_size > self.target_vocab_size
         uses_reduced_vocab = self.config.draft_vocab_size < self.target_vocab_size
-        if uses_expanded_input_vocab and not includes_embed_tokens:
+        complete = is_mtp_completeness_check_enabled()
+        if complete and uses_expanded_input_vocab and not includes_embed_tokens:
             raise ValueError(
                 "Qwen3 DSpark checkpoints whose input vocab_size is larger than "
                 "the target vocabulary must include embed_tokens weights."
             )
-        if uses_reduced_vocab and not includes_lm_head:
+        if complete and uses_reduced_vocab and not includes_lm_head:
             raise ValueError(
                 "Reduced-vocabulary Qwen3 DSpark checkpoints must include "
                 "lm_head weights; the full target lm_head cannot be shared."
             )
-        if uses_reduced_vocab and not includes_draft_id_mapping:
+        if complete and uses_reduced_vocab and not includes_draft_id_mapping:
             raise ValueError(
                 "Reduced-vocabulary Qwen3 DSpark checkpoints must include a "
                 "d2t mapping so sampled draft ids can be converted to target ids."
@@ -363,10 +367,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             orig_to_new_substr["lm_head"] = None
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
-        if self.model.confidence_head is None or not includes_confidence_head:
+        if complete and not includes_confidence_head:
             self.model.confidence_head = None
+        if self.model.confidence_head is None:
             orig_to_new_substr["confidence_head"] = None
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
-        self.model._build_fused_kv_buffers()

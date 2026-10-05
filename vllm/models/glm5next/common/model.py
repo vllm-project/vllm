@@ -59,6 +59,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    stash_weight_part,
 )
 from vllm.model_executor.models.deepseek_v2 import _get_moe_router_dtype
 from vllm.model_executor.models.glm4_1v import (
@@ -911,8 +912,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         if self.config.mla_use_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
 
-        _pending_wk_fp8: dict = {}
-
         for args in weights:
             name, loaded_weight = args[:2]
             kwargs: dict = args[2] if len(args) > 2 else {}
@@ -934,7 +933,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             if _try_load_fp8_indexer_wk(
                 name,
                 loaded_weight,
-                _pending_wk_fp8,
+                self,
                 params_dict,
                 loaded_params,
             ):
@@ -945,7 +944,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             if _try_load_fp8_attn_proj(
                 name,
                 loaded_weight,
-                _pending_wk_fp8,
+                self,
                 params_dict,
                 loaded_params,
                 kv_a_pad_size,
@@ -1353,7 +1352,7 @@ def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
     return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
 
 
-def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
+def _try_load_fp8_indexer_wk(name, tensor, module, params_dict, loaded_params):
     if "indexer.wk." not in name or "wk_weights" in name:
         return False
     is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
@@ -1361,13 +1360,13 @@ def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
     if not is_weight and not is_scale:
         return False
     layer_prefix = name.rsplit(".wk.", 1)[0]
-    entry = buf.setdefault(layer_prefix, {})
-    entry["weight" if is_weight else "scale"] = tensor
-    if "weight" not in entry or "scale" not in entry:
+    entry = stash_weight_part(
+        module, layer_prefix, "weight" if is_weight else "scale", tensor
+    )
+    if entry is None:
         return True
 
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
-    del buf[layer_prefix]
     block_size = weight_fp8.shape[1] // scale_inv.shape[1]
     weight_bf16 = scaled_dequantize(
         weight_fp8,
@@ -1423,7 +1422,7 @@ _FP8_ATTN_PROJS = {
 def _try_load_fp8_attn_proj(
     name,
     tensor,
-    buf,
+    module,
     params_dict,
     loaded_params,
     kv_a_pad_size: int,
@@ -1460,13 +1459,13 @@ def _try_load_fp8_attn_proj(
     if target_s in params_dict:
         return False
 
-    entry = buf.setdefault(layer_prefix, {}).setdefault(key, {})
-    entry["weight" if is_weight else "scale"] = tensor
-    if "weight" not in entry or "scale" not in entry:
+    entry = stash_weight_part(
+        module, f"{layer_prefix}{suffix}", "weight" if is_weight else "scale", tensor
+    )
+    if entry is None:
         return True
 
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
-    buf[layer_prefix].pop(key, None)
     block_size = weight_fp8.shape[1] // scale_inv.shape[1]
     weight_bf16 = _dequant_fp8_block(weight_fp8, scale_inv, block_size)
     # NoPE: pad kv_a rope portion (kv_lora_rank -> kv_lora_rank + qk_rope_head_dim).
