@@ -1532,7 +1532,7 @@ def _aiter_qk_rmsnorm(
     q_epsilon: float,
     k_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """aiter dual RMSNorm; allocates only where an out buffer is None."""
+    """AITER dual RMSNorm; allocates only where an out buffer is None."""
     from aiter.ops.fused_qk_norm_rope_cache_quant import _fused_qk_rmsnorm
 
     return _fused_qk_rmsnorm(
@@ -2295,7 +2295,9 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_mla_qk_norm_rope_enabled(cls) -> bool:
         return cls.is_mla_enabled() and cls._MLA_QK_NORM_ROPE
-      
+
+    @classmethod
+    @if_aiter_supported
     def mla_decode_supports_non_causal(cls) -> bool:
         """Whether installed aiter.mla.mla_decode_fwd accepts `causal`.
 
