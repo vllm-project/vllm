@@ -2702,17 +2702,18 @@ class NixlBaseConnectorWorker:
         assert self.copy_blocks is not None
 
         local_block_ids = meta.local_physical_block_ids
-        # TODO (NickLucche) D2H<>H2D ops could benefit from coalescing io across groups
-        # The h2d block copies below are intentionally synchronous.
+        # Every KV cache group allocates from the same BlockPool, so block ids
+        # are unique across groups and the per-group copies can be issued as one.
+        block_ids = [block_id for group in local_block_ids for block_id in group]
+        # The h2d block copy below is intentionally synchronous.
         with gpu_sync_allowed():
-            for group_block_ids in local_block_ids:
-                self.copy_blocks(
-                    self.host_xfer_buffers,
-                    self.device_kv_caches,
-                    group_block_ids,
-                    group_block_ids,
-                    "h2d",
-                )
+            self.copy_blocks(
+                self.host_xfer_buffers,
+                self.device_kv_caches,
+                block_ids,
+                block_ids,
+                "h2d",
+            )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "synced recved kv of request[%s] to device kv buffer,"
@@ -2740,14 +2741,18 @@ class NixlBaseConnectorWorker:
                         ",".join(map(str, meta.local_physical_block_ids)),
                     )
                 # blocking
-                for group_block_ids in meta.local_physical_block_ids:
-                    self.copy_blocks(
-                        self.device_kv_caches,
-                        self.host_xfer_buffers,
-                        group_block_ids,
-                        group_block_ids,
-                        "d2h",
-                    )
+                block_ids = [
+                    block_id
+                    for group in meta.local_physical_block_ids
+                    for block_id in group
+                ]
+                self.copy_blocks(
+                    self.device_kv_caches,
+                    self.host_xfer_buffers,
+                    block_ids,
+                    block_ids,
+                    "d2h",
+                )
 
     @cached_property
     def _attention_kv_caches(self) -> list[torch.Tensor]:
@@ -3231,6 +3236,9 @@ class NixlBaseConnectorWorker:
             ):
                 continue  # handshake is still pending
 
+            # Refresh the TTL: a heartbeat means the router still paired this P-D,
+            # so requests are still waiting on this engine
+            self._engine_last_active[engine_id] = time.perf_counter()
             # Build the heartbeat message: "HB:req1,req2,..."
             hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
             for agent_name in self._remote_agents[engine_id].values():
@@ -3581,10 +3589,13 @@ class NixlBaseConnectorWorker:
         prevents us from using background threads, though memory usage is not guaranteed
         to be "optimal" until a new handshake is performed.
 
-        Engines with active transfers or pending handshakes cannot be stale:
+        Engines with active transfers, heartbeats or pending handshakes cannot
+        be stale:
         - Reads stamp _engine_last_active when they are issued, and engines a
           transfer is still reading from are held back explicitly, since the
           stamp is not refreshed while the read runs.
+        - Heartbeats stamp it too, so an engine stays registered while this
+          instance holds requests waiting on it.
         - Pending handshakes don't have an _engine_last_active entry yet
         """
         # NOTE (NickLucche): This does NOT currently prevent OOMing if a huge number
