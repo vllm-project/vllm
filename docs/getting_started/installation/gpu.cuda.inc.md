@@ -43,7 +43,7 @@ As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch releas
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
 export CUDA_VERSION=130 # or other
 export CPU_ARCH=$(uname -m) # x86_64 or aarch64
-uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
+uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl" --extra-index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION}"
 ```
 
 #### Install the latest code
@@ -111,8 +111,8 @@ This command will do the following:
 If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and install it without re-running the full pip install:
 
     ```bash
-    ./build_rust.sh          # release build
-    ./build_rust.sh --debug  # faster build for development
+    ./tools/build_rust.sh          # release build
+    ./tools/build_rust.sh --debug  # faster build for development
     ```
 
     This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
@@ -183,7 +183,7 @@ To build vLLM using an existing PyTorch installation:
 # install PyTorch first, either from PyPI or from source
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-python use_existing_torch.py
+python tools/use_existing_torch.py
 uv pip install -r requirements/build/cuda.txt
 uv pip install --no-build-isolation -e .
 ```
@@ -440,7 +440,8 @@ ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.
 
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
-`nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04` image.
+`nvidia/cuda:13.4.1-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or
+newer, the first NCCL release with Rubin (SM107) support.
 For `BUILD_BASE_IMAGE`, use:
 
 - `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
@@ -462,7 +463,8 @@ For `BUILD_BASE_IMAGE`, use:
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.4 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
-      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.4.1-base-ubuntu24.04" \
+      --build-arg NCCL_VERSION=2.32.3 \
       .
     ```
 
@@ -482,7 +484,8 @@ For `BUILD_BASE_IMAGE`, use:
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.4 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.4" \
-      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.4.1-base-ubuntu24.04" \
+      --build-arg NCCL_VERSION=2.32.3 \
       .
     ```
 
@@ -490,9 +493,6 @@ For `BUILD_BASE_IMAGE`, use:
     Keep the default explicit `torch_cuda_arch_list`. GPU-less BuildKit builds
     cannot inspect the host GPU. R100 and VR200 report compute capability 10.7,
     for which the generic `10.0` target provides family-compatible kernels.
-    The Ubuntu `devel` final image is also required: the corresponding `base`
-    image lacks the CUDA runtime/JIT package closure used by vLLM and the
-    prerelease PyTorch wheel.
 
     `RUN_WHEEL_CHECK=false` disables only the PyPI publication-size guard for
     this private staging image.
