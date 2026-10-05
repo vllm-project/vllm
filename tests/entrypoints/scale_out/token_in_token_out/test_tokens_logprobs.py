@@ -151,3 +151,16 @@ def test_logprob_is_required_on_the_wire():
     """A payload missing logprob is rejected rather than read as -9999."""
     with pytest.raises(ValidationError):
         GenerateLogProb.model_validate({"token_id": 1})
+
+
+def test_rank_zero_from_a_nan_logprob_is_none():
+    """The engine reports rank 0 for a sampled token whose logprob is NaN."""
+    result = ServingTokens._create_tokens_logprobs(
+        None,
+        token_ids=[7],
+        top_logprobs=[{7: Logprob(float("nan"), rank=0), 8: Logprob(-0.2, rank=1)}],
+        num_output_top_logprobs=1,
+    )
+    entry = result.content[0]
+    assert entry.rank is None
+    assert entry.top_logprobs[0].rank is None

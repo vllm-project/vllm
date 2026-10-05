@@ -757,7 +757,11 @@ class ServingTokens(GenerateBaseServing):
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int | None = None,
     ) -> GenerateLogProbs:
-        """Create generate-shaped logprobs (integer token ids, no tokenizer)."""
+        """Create generate-shaped logprobs (integer token ids, no tokenizer).
+
+        The engine reports rank 0 for a sampled token whose logprob is NaN; that
+        is not a rank, so it is sent as ``None`` (the logprob is clamped).
+        """
         logprobs_content: list[GenerateLogProbsContent] = []
 
         for i, token_id in enumerate(token_ids):
@@ -775,12 +779,12 @@ class ServingTokens(GenerateBaseServing):
                     GenerateLogProbsContent(
                         token_id=token_id,
                         logprob=max(step_token.logprob, -9999.0),
-                        rank=step_token.rank,
+                        rank=step_token.rank or None,
                         top_logprobs=[
                             GenerateLogProb(
                                 token_id=top_token_id,
                                 logprob=max(top_logprob.logprob, -9999.0),
-                                rank=top_logprob.rank,
+                                rank=top_logprob.rank or None,
                             )
                             for rank_index, (top_token_id, top_logprob) in enumerate(
                                 step_top_logprobs.items()

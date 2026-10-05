@@ -115,7 +115,8 @@ choice carries a `GenerateLogProbs`; `output_mode: "text"` returns decoded
 - `rank` is the token's rank in the vocabulary distribution (1 = most likely)
   on every entry, the sampled one included; a top-k candidate's rank is its
   top-k position. The list is not sorted by it, so sort by `rank` if you need
-  rank order.
+  rank order. It is `null` when the engine could not rank the token (a NaN
+  logprob, which is sent as `-9999.0`).
 - There is no `token` or `bytes` field. The generate server has no tokenizer;
   [derender](derenderer.md) fills those in when it converts the response to the
   OpenAI shapes.

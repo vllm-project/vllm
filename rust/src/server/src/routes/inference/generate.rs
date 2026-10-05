@@ -5,7 +5,7 @@ mod convert;
 mod types;
 mod validate;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
@@ -415,26 +415,32 @@ fn position_to_generate_logprobs_content(
         )
     })?;
 
+    // One pass: the first entry of each token id wins, as in Python's dict. The
+    // sampled token is the only one the engine can list twice.
+    let mut seen = HashSet::with_capacity(position.entries.len());
     Ok(GenerateLogProbsContent {
         token_id: chosen.token_id,
         logprob: clamp_logprob(chosen.logprob),
-        rank: Some(chosen.rank),
+        rank: wire_rank(chosen.rank),
         top_logprobs: position
             .entries
             .iter()
-            .enumerate()
-            .filter(|(i, entry)| {
-                !position.entries[..*i].iter().any(|earlier| earlier.token_id == entry.token_id)
-            })
-            .map(|(_, entry)| entry)
+            .filter(|entry| seen.insert(entry.token_id))
             .take(usize::try_from(requested).map_or(usize::MAX, |n| n.max(1)))
             .map(|entry| GenerateLogProb {
                 token_id: entry.token_id,
                 logprob: clamp_logprob(entry.logprob),
-                rank: Some(entry.rank),
+                rank: wire_rank(entry.rank),
             })
             .collect(),
     })
+}
+
+/// The engine reports rank 0 for a sampled token whose logprob is NaN (no value
+/// compares >= NaN). That is not a rank, so it goes on the wire as `None`, the
+/// way `clamp_logprob` handles the logprob itself.
+fn wire_rank(rank: u32) -> Option<u32> {
+    (rank > 0).then_some(rank)
 }
 
 fn position_to_logprob_map(position: &PositionLogprobs) -> HashMap<u32, GenerateLogprob> {
@@ -582,6 +588,31 @@ mod tests {
             top(&pos, -1),
             vec![(7, Some(1)), (8, Some(2)), (9, Some(3))]
         );
+    }
+
+    #[test]
+    fn generate_top_logprobs_full_vocab_is_linear() {
+        // logprobs = -1 returns the whole vocabulary; deduping it must not be
+        // quadratic in the number of entries.
+        const VOCAB: u32 = 200_000;
+        let mut entries = vec![(5, -0.5, 1)];
+        entries.extend((0..VOCAB).map(|t| (t, -1.0 - t as f32, t + 1)));
+        let pos = position(&entries);
+        let start = std::time::Instant::now();
+        let got = top(&pos, -1);
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(got.len(), VOCAB as usize);
+        assert_eq!(got[0], (5, Some(1)));
+    }
+
+    #[test]
+    fn generate_rank_zero_from_a_nan_logprob_is_none() {
+        // The engine reports rank 0 for a sampled token whose logprob is NaN.
+        let pos = position(&[(7, f32::NAN, 0), (8, -0.2, 1)]);
+        let content = position_to_generate_logprobs_content(&pos, 1).unwrap();
+        assert_eq!(content.rank, None);
+        assert_eq!(content.logprob, -9999.0);
+        assert_eq!(top(&pos, 1), vec![(7, None)]);
     }
 
     #[tokio::test]
