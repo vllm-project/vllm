@@ -128,8 +128,8 @@ def _install_counter_mocks(monkeypatch, fake_kernel, api_available=True):
     if "flashinfer" not in sys.modules:
         fake_fi = ModuleType("flashinfer")
         fake_decode = ModuleType("flashinfer.decode")
-        fake_decode.trtllm_batch_decode_with_kv_cache_mla = fake_kernel
-        fake_fi.decode = fake_decode
+        fake_decode.trtllm_batch_decode_with_kv_cache_mla = fake_kernel  # type: ignore[attr-defined]
+        fake_fi.decode = fake_decode  # type: ignore[attr-defined]
         sys.modules["flashinfer"] = fake_fi
         sys.modules["flashinfer.decode"] = fake_decode
         monkeypatch.setattr(sys, "modules", sys.modules)
@@ -140,30 +140,36 @@ def _install_counter_mocks(monkeypatch, fake_kernel, api_available=True):
     monkeypatch.setattr(
         fi_sparse,
         "triton_convert_req_index_to_global_index",
-        lambda *a, **k: (torch.zeros(4, 8, dtype=torch.int32),
-                          torch.ones(4, dtype=torch.int32)),
+        lambda *a, **k: (
+            torch.zeros(4, 8, dtype=torch.int32),
+            torch.ones(4, dtype=torch.int32),
+        ),
     )
-    monkeypatch.setattr(fi_sparse, "_get_workspace_buffer",
-                      lambda device: torch.zeros(1024, dtype=torch.int8))
-    monkeypatch.setattr(fi_sparse, "_FI_HAS_MULTI_CTAS_COUNTER_API",
-                      api_available)
+    monkeypatch.setattr(
+        fi_sparse,
+        "_get_workspace_buffer",
+        lambda device: torch.zeros(1024, dtype=torch.int8),
+    )
+    monkeypatch.setattr(fi_sparse, "_FI_HAS_MULTI_CTAS_COUNTER_API", api_available)
     # The real names are only bound when the guarded import succeeds (FlashInfer
     # installed). Inject them with raising=False so forward_mqa resolves them
     # regardless of the installed FlashInfer version, and monkeypatch restores the
     # module afterwards (plain setattr would mutate the module permanently).
-    monkeypatch.setattr(fi_sparse, "get_trtllm_gen_multi_ctas_kv_counter_bytes",
-                        _fi_counter_bytes_stub, raising=False)
-    monkeypatch.setattr(fi_sparse, "get_device_sm_count", lambda device: 148,
-                      raising=False)
+    monkeypatch.setattr(
+        fi_sparse,
+        "get_trtllm_gen_multi_ctas_kv_counter_bytes",
+        _fi_counter_bytes_stub,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        fi_sparse, "get_device_sm_count", lambda device: 148, raising=False
+    )
     return fi_sparse
 
 
-def _run_counter_forward(monkeypatch,
-                       impl,
-                       metadata,
-                       q_heads=16,
-                       page_size=64,
-                       api_available=True):
+def _run_counter_forward(
+    monkeypatch, impl, metadata, q_heads=16, page_size=64, api_available=True
+):
     """Drive FlashInferMLASparseImpl.forward_mqa with a mocked kernel.
 
     Returns (kernel_kwargs, output, lse). The kernel is mocked to return a
@@ -211,9 +217,36 @@ def test_trtllm_gen_mla_decode_supports_num_heads():
     for heads in (128, 192, 320):
         assert _trtllm_gen_mla_decode_supports_num_heads(heads), heads
     # Untileable: 17..31, or > 64 and not a multiple of 64.
-    for heads in (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
-                 29, 30, 31, 65, 67, 69, 70, 71, 76, 89, 94, 103,
-                 115, 127, 175, 253):
+    for heads in (
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        65,
+        67,
+        69,
+        70,
+        71,
+        76,
+        89,
+        94,
+        103,
+        115,
+        127,
+        175,
+        253,
+    ):
         assert not _trtllm_gen_mla_decode_supports_num_heads(heads), heads
 
 
@@ -225,10 +258,15 @@ def test_counter_bytes_formula_matches_flashinfer():
         )
     except ImportError:
         pytest.skip("FlashInfer not installed; stub formula is used elsewhere")
-    for batch, heads, sm in ((1, 16, 148), (2048, 16, 148), (1, 64, 148),
-                           (8192, 128, 148)):
+    for batch, heads, sm in (
+        (1, 16, 148),
+        (2048, 16, 148),
+        (1, 64, 148),
+        (8192, 128, 148),
+    ):
         assert get_trtllm_gen_multi_ctas_kv_counter_bytes(
-            batch, heads, sm) == _fi_counter_bytes_stub(batch, heads, sm)
+            batch, heads, sm
+        ) == _fi_counter_bytes_stub(batch, heads, sm)
 
 
 def test_get_multi_ctas_kv_counter_buffer_allocates_zeroed_uint8():
@@ -262,8 +300,9 @@ def test_get_multi_ctas_kv_counter_buffer_grows_when_undersized():
     assert (b2 == 0).all()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(),
-                   reason="CUDA required for device-change realloc")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA required for device-change realloc"
+)
 def test_get_multi_ctas_kv_counter_buffer_device_change_realloc():
     import vllm.v1.attention.backends.mla.flashinfer_mla_sparse as fi_sparse
 
@@ -294,7 +333,6 @@ def test_counter_nope_mla_lens_coexists_with_buffer(monkeypatch):
     _install_counter_mocks(monkeypatch, fake_kernel)
 
     impl = _make_counter_impl(is_nope_mla=True)
-    metadata = _make_counter_metadata()
     bound = MethodType(fi_sparse.FlashInferMLASparseImpl._run_mqa_kernel, impl)
     q = torch.zeros(4, 960, 930, dtype=torch.float16)
     kv_cache = torch.zeros(4, 64, 938, dtype=torch.float16)
@@ -327,12 +365,15 @@ def test_counter_persists_across_calls(monkeypatch):
     _install_counter_mocks(monkeypatch, fake_kernel)
 
     impl = _make_counter_impl()
-    metadata = _make_counter_metadata()
     bound = MethodType(fi_sparse.FlashInferMLASparseImpl._run_mqa_kernel, impl)
     q = torch.zeros(4, 16, 140, dtype=torch.float16)
     kv_cache = torch.zeros(4, 64, 132, dtype=torch.float16)
-    bound(q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32))
-    bound(q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32))
+    bound(
+        q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32)
+    )
+    bound(
+        q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32)
+    )
     assert len(calls) == 2
     assert calls[0].data_ptr() == calls[1].data_ptr()
 
@@ -351,11 +392,12 @@ def test_counter_grows_on_larger_batch(monkeypatch):
     # Start with a small worst-case batch so the first call computes a small
     # counter-buffer size (608 bytes for batch=1, heads=16, sm=148).
     impl = _make_counter_impl(_mla_counter_max_batch=1)
-    metadata = _make_counter_metadata()
     bound = MethodType(fi_sparse.FlashInferMLASparseImpl._run_mqa_kernel, impl)
     q = torch.zeros(4, 16, 136, dtype=torch.float16)
     kv_cache = torch.zeros(4, 64, 130, dtype=torch.float16)
-    bound(q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32))
+    bound(
+        q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32)
+    )
     small_expected = _fi_counter_bytes_stub(1, 16, 148)
     assert calls[0].numel() == small_expected
 
@@ -363,7 +405,9 @@ def test_counter_grows_on_larger_batch(monkeypatch):
     # recomputes a larger buffer (Rev B: exact equality, not just "bigger").
     impl._mla_counter_max_batch = 2048
     impl._mla_counter_bytes = None
-    bound(q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32))
+    bound(
+        q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32)
+    )
     assert len(calls) == 2
     assert calls[0].data_ptr() != calls[1].data_ptr()
     expected = _fi_counter_bytes_stub(2048, 16, 148)
@@ -383,15 +427,15 @@ def test_counter_ineligible_page_size_no_buffer(monkeypatch):
 
 
 def test_counter_api_unavailable_fallback(monkeypatch):
-    captured, _, _ = _run_counter_forward(monkeypatch, {}, {},
-                                        api_available=False)
+    captured, _, _ = _run_counter_forward(monkeypatch, {}, {}, api_available=False)
     assert "multi_ctas_kv_counter_buffer" not in captured
     assert "backend" not in captured
 
 
 def test_counter_disabled_env_var_fallback(monkeypatch):
     captured, _, _ = _run_counter_forward(
-        monkeypatch, {"_persistent_mla_counter_enabled": False}, {})
+        monkeypatch, {"_persistent_mla_counter_enabled": False}, {}
+    )
     assert "multi_ctas_kv_counter_buffer" not in captured
     assert "backend" not in captured
 
@@ -417,8 +461,10 @@ def test_counter_dcp_sizing_and_branch(monkeypatch):
     monkeypatch.setattr(
         fi_sparse,
         "triton_filter_and_convert_dcp_index",
-        lambda *a, **k: (torch.zeros(4, 8, dtype=torch.int32),
-                          torch.ones(4, dtype=torch.int32)),
+        lambda *a, **k: (
+            torch.zeros(4, 8, dtype=torch.int32),
+            torch.ones(4, dtype=torch.int32),
+        ),
     )
 
     impl = _make_counter_impl(
@@ -427,23 +473,21 @@ def test_counter_dcp_sizing_and_branch(monkeypatch):
         _mla_counter_max_heads=32,
         need_to_return_lse_for_decode=True,
     )
-    metadata = _make_counter_metadata(
-        req_id_per_token=torch.zeros(4, dtype=torch.int32),
-        block_table=torch.zeros(4, 1, dtype=torch.int32),
-    )
     bound = MethodType(fi_sparse.FlashInferMLASparseImpl._run_mqa_kernel, impl)
     q = torch.zeros(4, 32, 280, dtype=torch.float16)
     kv_cache = torch.zeros(4, 64, 272, dtype=torch.float16)
-    out, lse = bound(q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32))
+    out, lse = bound(
+        q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32)
+    )
     assert "multi_ctas_kv_counter_buffer" in captured
     assert captured["return_lse"] is True
     assert lse is not None
+
 
 def test_counter_one_time_logs(monkeypatch, caplog_vllm):
     import logging
 
     import vllm.logger as vllm_logger
-    import vllm.v1.attention.backends.mla.flashinfer_mla_sparse as fi_sparse
 
     # info_once is lru_cache'd process-wide; clear it so this test observes the
     # one-time log deterministically regardless of prior tests.
@@ -468,14 +512,19 @@ def test_counter_tuple_q_input(monkeypatch):
     _install_counter_mocks(monkeypatch, fake_kernel)
 
     impl = _make_counter_impl()
-    metadata = _make_counter_metadata()
     bound = MethodType(fi_sparse.FlashInferMLASparseImpl._run_mqa_kernel, impl)
-    q = (torch.zeros(4, 16, 92, dtype=torch.float16),
-         torch.zeros(4, 16, 44, dtype=torch.float16))
+    q = (
+        torch.zeros(4, 16, 92, dtype=torch.float16),
+        torch.zeros(4, 16, 44, dtype=torch.float16),
+    )
     kv_cache = torch.zeros(4, 64, 168, dtype=torch.float16)
     q_cat = torch.cat(q, dim=-1)
-    bound(q_cat, kv_cache, impl.topk_indices_buffer,
-          torch.ones(q_cat.shape[0], dtype=torch.int32))
+    bound(
+        q_cat,
+        kv_cache,
+        impl.topk_indices_buffer,
+        torch.ones(q_cat.shape[0], dtype=torch.int32),
+    )
     assert "multi_ctas_kv_counter_buffer" in captured
 
 
@@ -489,27 +538,28 @@ def test_counter_empty_rows_lse_masking_unchanged(monkeypatch):
         o = torch.zeros(4, 1, 16, 106, dtype=torch.float16)
         return o, torch.zeros(4, 16, dtype=torch.float16)
 
-    import vllm.v1.attention.backends.mla.flashinfer_mla_sparse as fi_sparse
-
     _install_counter_mocks(monkeypatch, fake_kernel)
     # All top-k index rows are invalid (-1) -> every row is an "empty row" whose
     # LSE must be masked to -inf and output zeroed.
     monkeypatch.setattr(
         fi_sparse,
         "triton_convert_req_index_to_global_index",
-        lambda *a, **k: (torch.full((4, 8), -1, dtype=torch.int32),
-                          torch.ones(4, dtype=torch.int32)),
+        lambda *a, **k: (
+            torch.full((4, 8), -1, dtype=torch.int32),
+            torch.ones(4, dtype=torch.int32),
+        ),
     )
 
     impl = _make_counter_impl(
         need_to_return_lse_for_decode=True,
         topk_indices_buffer=torch.full((4, 8), -1, dtype=torch.int32),
     )
-    metadata = _make_counter_metadata()
     bound = MethodType(fi_sparse.FlashInferMLASparseImpl._run_mqa_kernel, impl)
     q = torch.zeros(4, 16, 186, dtype=torch.float16)
     kv_cache = torch.zeros(4, 64, 218, dtype=torch.float16)
-    out, lse = bound(q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32))
+    out, lse = bound(
+        q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32)
+    )
     assert (out == 0).all()
     assert (lse == float("-inf")).all()
     assert "multi_ctas_kv_counter_buffer" in captured
@@ -534,13 +584,22 @@ def test_counter_module_global_shared_across_instances(monkeypatch):
 
     impl1 = _make_counter_impl()
     impl2 = _make_counter_impl()
-    metadata = _make_counter_metadata()
     bound1 = MethodType(fi_sparse.FlashInferMLASparseImpl._run_mqa_kernel, impl1)
     bound2 = MethodType(fi_sparse.FlashInferMLASparseImpl._run_mqa_kernel, impl2)
     q = torch.zeros(4, 16, 133, dtype=torch.float16)
     kv_cache = torch.zeros(4, 64, 153, dtype=torch.float16)
-    bound1(q, kv_cache, impl1.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32))
-    bound2(q, kv_cache, impl2.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32))
+    bound1(
+        q,
+        kv_cache,
+        impl1.topk_indices_buffer,
+        torch.ones(q.shape[0], dtype=torch.int32),
+    )
+    bound2(
+        q,
+        kv_cache,
+        impl2.topk_indices_buffer,
+        torch.ones(q.shape[0], dtype=torch.int32),
+    )
     assert len(calls) == 2
     assert calls[0].data_ptr() == calls[1].data_ptr()
 
@@ -558,11 +617,12 @@ def test_counter_max_batch_fallback(monkeypatch):
     _install_counter_mocks(monkeypatch, fake_kernel)
 
     impl = _make_counter_impl(_mla_counter_max_batch=0)
-    metadata = _make_counter_metadata()
     bound = MethodType(fi_sparse.FlashInferMLASparseImpl._run_mqa_kernel, impl)
     q = torch.zeros(4, 16, 137, dtype=torch.float16)
     kv_cache = torch.zeros(4, 64, 149, dtype=torch.float16)
-    out, lse = bound(q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32))
+    out, lse = bound(
+        q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32)
+    )
     buf = captured["multi_ctas_kv_counter_buffer"]
     assert buf.numel() >= _fi_counter_bytes_stub(0, 16, 148)
 
@@ -579,19 +639,20 @@ def test_counter_fp8_quantized_path(monkeypatch):
 
     _install_counter_mocks(monkeypatch, fake_kernel)
 
-    impl = _make_counter_impl(kv_cache_dtype="fp8", bmm1_scale=None,
-                             bmm2_scale=None)
+    impl = _make_counter_impl(kv_cache_dtype="fp8", bmm1_scale=None, bmm2_scale=None)
     layer = SimpleNamespace(_q_scale_float=2.0, _k_scale_float=3.0)
-    metadata = _make_counter_metadata()
     # The upstream base moved per-layer scale preparation into
     # _prepare_mqa_kernel; run the real one so the fp8 scaling assertions
     # still exercise the production code path.
     MethodType(fi_sparse.FlashInferMLASparseImpl._prepare_mqa_kernel, impl)(
-        layer, q_dev := torch.device("cpu"))
+        layer, torch.device("cpu")
+    )
     bound = MethodType(fi_sparse.FlashInferMLASparseImpl._run_mqa_kernel, impl)
     q = torch.zeros(4, 16, 141, dtype=torch.float16)
     kv_cache = torch.zeros(4, 64, 147, dtype=torch.float16)
-    out, lse = bound(q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32))
+    out, lse = bound(
+        q, kv_cache, impl.topk_indices_buffer, torch.ones(q.shape[0], dtype=torch.int32)
+    )
     assert "multi_ctas_kv_counter_buffer" in captured
     assert impl.bmm1_scale == 0.08838834764831845 * 2.0 * 3.0
     assert impl.bmm2_scale == 1.0 * 3.0
@@ -616,8 +677,9 @@ def _construct_real_impl(monkeypatch, num_heads=16):
     # DeviceConfig(device="cpu") bypasses the platform-probing __post_init__.
     monkeypatch.setattr(sma, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(sma, "get_flash_attn_version", lambda **kw: None)
-    monkeypatch.setattr(sma.current_platform, "is_device_capability_family",
-                      lambda *a: False)
+    monkeypatch.setattr(
+        sma.current_platform, "is_device_capability_family", lambda *a: False
+    )
 
     class _DummyKVProj:
         weight = torch.zeros(1, 1)
