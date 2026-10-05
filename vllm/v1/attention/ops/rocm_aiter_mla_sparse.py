@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import importlib
+import inspect
 import math
 from collections.abc import Callable
 from importlib.util import find_spec
@@ -44,6 +45,31 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
         return None
     logger.info_once("Using AITER OPUS for large sparse MLA prefill on gfx950")
     return pa_sparse_prefill_opus
+
+
+@functools.cache
+def _get_aiter_pa_prefill_sparse() -> Callable[..., torch.Tensor] | None:
+    """gfx942 prefill kernel from aiter#6002. Missing that launch keeps the in-tree kernel."""
+    if not _ON_GFX942:
+        return None
+    try:
+        from aiter.ops.triton.attention import pa_prefill_sparse as pa_mod
+    except ImportError:
+        return None
+    try:
+        source = inspect.getsource(pa_mod)
+    except OSError:
+        return None
+    # aiter#6002 is the gfx942 launch. An older pa_prefill_sparse still imports
+    # and would run a different kernel, so stay on the in-tree path.
+    if 'DEVICE_ARCH == "gfx942"' not in source:
+        logger.info_once(
+            "AITER pa_prefill_sparse has no gfx942 kernel; "
+            "using the in-tree sparse prefill kernel"
+        )
+        return None
+    logger.info_once("Using AITER pa_prefill_sparse for sparse MLA prefill on gfx942")
+    return pa_mod.pa_prefill_sparse
 
 
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
@@ -3526,6 +3552,38 @@ def _rocm_sparse_attn_prefill_ragged_aiter_opus(
     return True
 
 
+def _rocm_sparse_attn_prefill_aiter(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    indptr: torch.Tensor,
+    scale: float,
+    attn_sink: torch.Tensor | None,
+    output: torch.Tensor,
+) -> bool:
+    """gfx942 path for aiter#6002. One KV pool; the extend sources stay unset."""
+    pa_prefill_sparse = _get_aiter_pa_prefill_sparse()
+    if pa_prefill_sparse is None:
+        return False
+    indices = _as_int32_contiguous_1d(indices)
+    indptr = _as_int32_contiguous_1d(indptr)
+    written = pa_prefill_sparse(
+        q,
+        kv,
+        indices,
+        indptr,
+        None,
+        None,
+        None,
+        attn_sink,
+        float(scale),
+        out=output if output.shape == q.shape and output.dtype == q.dtype else None,
+    )
+    if written.data_ptr() != output.data_ptr():
+        output.copy_(written[..., : output.shape[-1]].to(output.dtype))
+    return True
+
+
 @functools.lru_cache
 def _decode_cu_count() -> int:
     try:
@@ -4105,6 +4163,28 @@ def rocm_sparse_attn_prefill(
             )
         assert opus_attn_sink is not None
         if _rocm_sparse_attn_prefill_ragged_aiter_opus(
+            q=q,
+            kv=kv.squeeze(1),
+            indices=ragged_indices,
+            indptr=ragged_indptr,
+            scale=scale,
+            attn_sink=opus_attn_sink,
+            output=output,
+        ):
+            return
+
+    if _get_aiter_pa_prefill_sparse() is not None:
+        if ragged_indices is None or ragged_indptr is None:
+            assert indices is not None
+            indices_2d = indices.reshape(indices.shape[0], -1)
+            ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
+                indices_2d,
+                topk_length
+                if topk_length is not None
+                else (indices_2d >= 0).sum(dim=-1, dtype=torch.int32),
+                num_rows=kv.shape[0],
+            )
+        if _rocm_sparse_attn_prefill_aiter(
             q=q,
             kv=kv.squeeze(1),
             indices=ragged_indices,
