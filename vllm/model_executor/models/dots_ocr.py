@@ -96,9 +96,9 @@ DotsOCRImageInputs: TypeAlias = DotsOCRImagePixelInputs | DotsOCRImageEmbeddingI
 
 
 class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_images = mm_counts.get("image", 0)
-        return IMAGE_TOKEN * num_images
+    # get_dummy_text is inherited: it emits the complete wrapper derived
+    # from get_placeholder_str ("<|img|><|imgpad|><|endofimg|>"), which
+    # matches the replacement targets in _get_prompt_updates.
 
     def get_dummy_mm_data(
         self,

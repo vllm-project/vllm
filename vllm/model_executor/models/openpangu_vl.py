@@ -60,6 +60,7 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLMultiModalProcessor,
     Qwen2_5_VLProcessingInfo,
 )
+from vllm.model_executor.models.qwen2_vl import get_wrapper_token_ids
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -758,24 +759,31 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        # Avoid circular import
+        from vllm.model_executor.model_loader import get_model_cls
+
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
+
+        model_cls = get_model_cls(self.info.ctx.model_config)
+
         image_token = hf_processor.image_token
         video_token = hf_processor.video_token
-        # The official chat template wraps placeholders as
-        # [unused18][unused19][unused20] (image) and
-        # [unused18][unused32][unused20] (video).
-        vision_start_token = hf_processor.vision_start_token
-        vision_end_token = hf_processor.vision_end_token
         image_token_id = vocab[image_token]
         video_token_id = vocab[video_token]
-        vision_start_token_id = vocab[vision_start_token]
-        vision_end_token_id = vocab[vision_end_token]
         placeholder = {
             "image": image_token_id,
             "video": video_token_id,
+        }
+        # Match the complete wrapper emitted by the chat template (derived
+        # from the model's own placeholder string:
+        # [unused18][unused19][unused20] for images,
+        # [unused18][unused32][unused20] for videos).
+        targets = {
+            modality: get_wrapper_token_ids(model_cls, tokenizer, modality, pad_id)
+            for modality, pad_id in placeholder.items()
         }
 
         merge_length = image_processor.merge_size**2
@@ -785,38 +793,26 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
             grid_thw = out_item[f"{modality}_grid_thw"].data
             if not isinstance(grid_thw, torch.Tensor):
                 raise TypeError("Expected 'grid_thw' to be a Tensor")
+
+            pad_id = placeholder[modality]
+            wrapper_ids = targets[modality]
+            # get_wrapper_token_ids guarantees the pad token occurs exactly
+            # once in a derived wrapper, or the target is the bare pad token.
+            pad_idx = wrapper_ids.index(pad_id)
+            prefix = wrapper_ids[:pad_idx]
+            suffix = wrapper_ids[pad_idx + 1 :]
+
             if modality == "image":
                 num_tokens = int(grid_thw.prod()) // merge_length
-                replacement = (
-                    [vision_start_token_id]
-                    + [image_token_id] * num_tokens
-                    + [vision_end_token_id]
+                replacement = prefix + [pad_id] * num_tokens + suffix
+            else:
+                # Video placeholders are expanded per frame.
+                grid_t, grid_h, grid_w = grid_thw
+                tokens_per_frame = (grid_h * grid_w).item() // merge_length
+                replacement = (prefix + [pad_id] * tokens_per_frame + suffix) * (
+                    grid_t.item()
                 )
-                return PromptUpdateDetails.select_token_id(
-                    replacement, image_token_id
-                )
-            # When modality is video
-            grid_t, grid_h, grid_w = grid_thw
-            video_seq_length_per_time = (grid_h * grid_w).item() // merge_length
-            video_token_id_per_time = (
-                [vision_start_token_id]
-                + [video_token_id] * video_seq_length_per_time
-                + [vision_end_token_id]
-            )
-            replacement = video_token_id_per_time * grid_t.item()
-            return PromptUpdateDetails.select_token_id(
-                replacement,
-                embed_token_id=video_token_id,
-            )
-
-        targets = {
-            modality: [
-                vision_start_token_id,
-                placeholder[modality],
-                vision_end_token_id,
-            ]
-            for modality in ("image", "video")
-        }
+            return PromptUpdateDetails.select_token_id(replacement, pad_id)
 
         return [
             PromptReplacement(

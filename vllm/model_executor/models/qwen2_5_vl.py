@@ -77,11 +77,6 @@ from vllm.multimodal.inputs import (
     VideoItem,
 )
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import (
-    PromptReplacement,
-    PromptUpdate,
-    PromptUpdateDetails,
-)
 from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.multimodal.video_prune.evs import (
     compute_mrope_for_media,
@@ -112,6 +107,7 @@ from .interfaces import (
 )
 from .qwen2_vl import (
     Qwen2VLDummyInputsBuilder,
+    Qwen2VLImageProcessor,
     Qwen2VLMultiModalDataParser,
     Qwen2VLMultiModalProcessor,
     Qwen2VLProcessingInfo,
@@ -1230,71 +1226,39 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             ]
         return hf_inputs
 
-    def _get_prompt_updates(
+    def _get_num_pad_tokens(
         self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, Any],
+        item_idx: int,
+        modality: str,
         out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
+        image_processor: Qwen2VLImageProcessor,
+        merge_length: int,
+    ) -> int:
+        out_item = out_mm_kwargs[modality][item_idx]
+        grid_thw = out_item[f"{modality}_grid_thw"].data
+        assert isinstance(grid_thw, torch.Tensor)
 
-        placeholder = {
-            "image": vocab[hf_processor.image_token],
-            "video": vocab[hf_processor.video_token],
-        }
-        vision_start = vocab["<|vision_start|>"]
-        vision_end = vocab["<|vision_end|>"]
+        num_tokens = int(grid_thw.prod()) // merge_length
 
-        merge_length = image_processor.merge_size**2
-
-        def get_replacement_qwen2vl(item_idx: int, modality: str):
-            out_item = out_mm_kwargs[modality][item_idx]
-            grid_thw = out_item[f"{modality}_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
-
-            num_tokens = int(grid_thw.prod()) // merge_length
-
-            # EVS-specific code
-            video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
-            if (
-                modality == "video"
-                and video_pruning_rate is not None
-                and video_pruning_rate > 0.0
-            ):
-                T, H, W = map(int, grid_thw)
-                tokens_per_frame = (H // image_processor.merge_size) * (
-                    W // image_processor.merge_size
-                )
-                num_tokens = compute_retained_tokens_count(
-                    tokens_per_frame,
-                    T,
-                    video_pruning_rate,
-                )
-            # End of EVS-specific code
-
-            replacement = (
-                [vision_start] + [placeholder[modality]] * num_tokens + [vision_end]
+        # EVS: Explored Visual-token Selection.
+        # Prune redundant video tokens to reduce prefill cost.
+        video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
+        if (
+            modality == "video"
+            and video_pruning_rate is not None
+            and video_pruning_rate > 0.0
+        ):
+            T, H, W = map(int, grid_thw)
+            tokens_per_frame = (H // image_processor.merge_size) * (
+                W // image_processor.merge_size
             )
-            return PromptUpdateDetails.select_token_id(
-                replacement, placeholder[modality]
+            num_tokens = compute_retained_tokens_count(
+                tokens_per_frame,
+                T,
+                video_pruning_rate,
             )
 
-        targets = {
-            modality: [vision_start, placeholder[modality], vision_end]
-            for modality in ("image", "video")
-        }
-
-        return [
-            PromptReplacement(
-                modality=modality,
-                target=targets[modality],
-                replacement=partial(get_replacement_qwen2vl, modality=modality),
-            )
-            for modality in ("image", "video")
-        ]
+        return num_tokens
 
 
 @MULTIMODAL_REGISTRY.register_processor(

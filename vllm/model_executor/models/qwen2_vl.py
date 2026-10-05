@@ -86,6 +86,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers.protocol import TokenizerLike
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -1082,16 +1083,60 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         )
 
 
+def safe_placeholder_str(
+    model_cls: type[nn.Module],
+    modality: str,
+) -> str | None:
+    """Return ``model_cls.get_placeholder_str(modality, 1)``, or None if the
+    model does not support the modality (returns None or raises)."""
+    try:
+        return model_cls.get_placeholder_str(modality, 1)
+    except Exception:
+        return None
+
+
+def get_wrapper_token_ids(
+    model_cls: type[nn.Module],
+    tokenizer: TokenizerLike,
+    modality: str,
+    pad_id: int,
+) -> list[int]:
+    """Derive the prompt-replacement target for `modality` from the model
+    class's own placeholder string.
+
+    The target is the complete wrapper emitted by the chat template
+    (e.g. ``<|vision_start|><|image_pad|><|vision_end|>`` for Qwen2-VL,
+    ``<vision><|image_pad|></vision>`` for EXAONE 4.5, or
+    ``<|img|><|imgpad|><|endofimg|>`` for dots.ocr), so that a bare pad
+    token typed by the user in text is not mistaken for a placeholder.
+
+    Falls back to the bare pad token if the wrapper cannot be determined.
+    """
+    placeholder_str = safe_placeholder_str(model_cls, modality)
+    if placeholder_str:
+        wrapper_ids = tokenizer.encode(placeholder_str, add_special_tokens=False)
+        if wrapper_ids.count(pad_id) == 1:
+            return wrapper_ids
+
+    return [pad_id]
+
+
 class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        # Avoid circular import
+        from vllm.model_executor.model_loader import get_model_cls
+
+        model_cls = get_model_cls(self.info.ctx.model_config)
+
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        hf_processor = self.info.get_hf_processor()
-        image_token: str = hf_processor.image_token
-        video_token: str = hf_processor.video_token
+        # Emit the complete wrapper (not the bare pad token) so that the
+        # dummy prompt matches the replacement targets in _get_prompt_updates.
+        image_placeholder = safe_placeholder_str(model_cls, "image") or ""
+        video_placeholder = safe_placeholder_str(model_cls, "video") or ""
 
-        return image_token * num_images + video_token * num_videos
+        return image_placeholder * num_images + video_placeholder * num_videos
 
     def get_dummy_mm_data(
         self,
@@ -1128,39 +1173,46 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        # Avoid circular import
+        from vllm.model_executor.model_loader import get_model_cls
+
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
+        model_cls = get_model_cls(self.info.ctx.model_config)
+
         placeholder = {
             "image": vocab[hf_processor.image_token],
             "video": vocab[hf_processor.video_token],
         }
-        # The official chat template renders placeholders with the vision
-        # wrapper, e.g. <|vision_start|><|image_pad|><|vision_end|>.
-        vision_start = vocab["<|vision_start|>"]
-        vision_end = vocab["<|vision_end|>"]
+        # Match the complete wrapper emitted by the chat template (derived
+        # from each model's own placeholder string) instead of the bare pad
+        # token, so that a pad token typed by the user is left untouched.
+        targets = {
+            modality: get_wrapper_token_ids(model_cls, tokenizer, modality, pad_id)
+            for modality, pad_id in placeholder.items()
+        }
 
         merge_length = image_processor.merge_size**2
 
         def get_replacement_qwen2vl(item_idx: int, modality: str):
-            out_item = out_mm_kwargs[modality][item_idx]
-            grid_thw = out_item[f"{modality}_grid_thw"].data
-            assert isinstance(grid_thw, torch.Tensor)
+            num_tokens = self._get_num_pad_tokens(
+                item_idx, modality, out_mm_kwargs, image_processor, merge_length
+            )
 
-            num_tokens = int(grid_thw.prod()) // merge_length
+            pad_id = placeholder[modality]
+            wrapper_ids = targets[modality]
+            # get_wrapper_token_ids guarantees the pad token occurs exactly
+            # once in a derived wrapper, or the target is the bare pad token.
+            pad_idx = wrapper_ids.index(pad_id)
             replacement = (
-                [vision_start] + [placeholder[modality]] * num_tokens + [vision_end]
+                wrapper_ids[:pad_idx]
+                + [pad_id] * num_tokens
+                + wrapper_ids[pad_idx + 1 :]
             )
-            return PromptUpdateDetails.select_token_id(
-                replacement, placeholder[modality]
-            )
-
-        targets = {
-            modality: [vision_start, placeholder[modality], vision_end]
-            for modality in ("image", "video")
-        }
+            return PromptUpdateDetails.select_token_id(replacement, pad_id)
 
         return [
             PromptReplacement(
@@ -1170,6 +1222,20 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo])
             )
             for modality in ("image", "video")
         ]
+
+    def _get_num_pad_tokens(
+        self,
+        item_idx: int,
+        modality: str,
+        out_mm_kwargs: MultiModalKwargsItems,
+        image_processor: Qwen2VLImageProcessor,
+        merge_length: int,
+    ) -> int:
+        out_item = out_mm_kwargs[modality][item_idx]
+        grid_thw = out_item[f"{modality}_grid_thw"].data
+        assert isinstance(grid_thw, torch.Tensor)
+
+        return int(grid_thw.prod()) // merge_length
 
     def _get_mm_fields_config(
         self,
