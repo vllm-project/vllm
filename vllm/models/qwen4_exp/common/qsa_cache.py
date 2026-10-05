@@ -838,6 +838,15 @@ def qsa_ring_capacity(
     capacity = minimal
     while capacity <= limit:
         if block_size % capacity == 0:
+            if capacity != minimal:
+                logger.info_once(
+                    "QSA ring widened from %d to %d rows so that it divides the "
+                    "attention block size %d (num_speculative_tokens=%d).",
+                    minimal,
+                    capacity,
+                    block_size,
+                    num_speculative_tokens,
+                )
             return capacity
         capacity += compress_ratio
     raise ValueError(
@@ -882,20 +891,11 @@ class QSAKeyStateCache(_QSAStateCache):
         return self.kv_cache[..., self.rope_position_offset :].view(torch.int64)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        num_spec = vllm_config.num_speculative_tokens
-        block_size = self.cache_config.block_size
-        span = self.compress_ratio + num_spec
-        minimal = self.compress_ratio * cdiv(span, self.compress_ratio)
-        capacity = qsa_ring_capacity(self.compress_ratio, num_spec, block_size)
-        if capacity != minimal:
-            logger.info_once(
-                "QSA ring widened from %d to %d rows so that it divides the "
-                "attention block size %d (num_speculative_tokens=%d).",
-                minimal,
-                capacity,
-                block_size,
-                num_spec,
-            )
+        capacity = qsa_ring_capacity(
+            self.compress_ratio,
+            vllm_config.num_speculative_tokens,
+            self.cache_config.block_size,
+        )
         return CircularBufferSpec(
             block_size=capacity,
             num_kv_heads=1,
