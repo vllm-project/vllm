@@ -9,6 +9,10 @@ service Control {
   rpc GetServerInfo (GetServerInfoRequest) returns (ServerInfo) {}
   rpc GetModelInfo (GetModelInfoRequest) returns (ModelInfo) {}
 
+  // Request managed-engine shutdown using the configured shutdown timeout.
+  // Returns FAILED_PRECONDITION when this server does not manage the engine process.
+  rpc Shutdown (ShutdownRequest) returns (ShutdownResponse) {}
+
   // Request lifecycle.
   rpc Abort (AbortRequest) returns (AbortResponse) {}
 
@@ -85,6 +89,10 @@ message ModelInfo {
   string reasoning_parser = 24;
   string tool_call_parser = 25;
 }
+
+message ShutdownRequest {}
+// Acknowledges acceptance, not completion; shutdown may close the connection first.
+message ShutdownResponse {}
 
 message AbortRequest {
   repeated string request_ids = 1;

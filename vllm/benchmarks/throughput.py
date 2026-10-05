@@ -178,6 +178,7 @@ def _run_vllm_requests(
                 beam_width=n,
                 max_tokens=output_len,
                 ignore_eos=True,
+                watermarking=False,
             ),
         )
         if do_profile:
@@ -1141,6 +1142,7 @@ def main(args: argparse.Namespace):
     # Output JSON results if specified
     if args.output_json:
         results = {
+            "model_id": args.model,
             "elapsed_time": elapsed_time,
             "num_requests": len(requests),
             "total_num_tokens": total_num_tokens,

@@ -19,6 +19,30 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/mooncake_integration/config_sweep_accuracy_test.sh
+  mirror:
+    amd:
+      label: ":amd: (MI355) Distributed MooncakeConnector HIP PD accuracy"
+      dind: false
+      device: mi355_4
+      num_devices: 4
+      timeout_in_minutes: 30
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+        - tests/v1/kv_connector/mooncake_integration/
+        - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
+        - tests/utils.py
+        - examples/disaggregated/mooncake_connector/
+        - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+        - vllm/platforms/rocm.py
+        - requirements/common.txt
+        - requirements/kv_connectors_rocm.txt
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        # Same full accuracy/TP sweep, using same-host HIP GPU transport.
+        - pytest -v -s v1/kv_connector/mooncake_integration/test_accuracy_rocm.py
 
 - label: ":nvidia: (L4) Mooncake EC TCP E2E"
   key: mooncake-ec-tcp-e2e-2-gpus

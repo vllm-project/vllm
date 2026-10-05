@@ -22,7 +22,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -62,7 +62,7 @@ class MiMoV2MTPLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -147,7 +147,7 @@ class _MiMoV2MTPLayers(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         num_mtp_layers: int,
         cache_config: CacheConfig | None,
         quant_config: QuantizationConfig | None,
@@ -271,7 +271,12 @@ class MiMoV2MTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        pending_qkv_proj: dict[str, dict[str, torch.Tensor]] = {}
+        # The pairing state must outlive this call: AutoWeightsLoader delegates
+        # per contiguous group of names, so a pair can straddle two calls and
+        # would otherwise be dropped silently.
+        pending_qkv_proj = getattr(self, "_pending_qkv_proj", None)
+        if pending_qkv_proj is None:
+            self._pending_qkv_proj = pending_qkv_proj = {}
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
