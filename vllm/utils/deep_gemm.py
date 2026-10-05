@@ -32,7 +32,7 @@ _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
 
 def get_paged_mqa_page_sizes() -> tuple[int, ...]:
     """KV page sizes (in cache entries) the paged-MQA logits kernels take (only
-    64 for fp8 on SM120); larger storage blocks are split into one of these."""
+    64 on SM120); larger storage blocks are split into one of these."""
     return (64,) if current_platform.is_device_capability_family(120) else (32, 64)
 
 

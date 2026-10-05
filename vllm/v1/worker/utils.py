@@ -273,8 +273,8 @@ class AttentionGroup:
     # Set when the backend needs blocks smaller than the KV cache manager's: its
     # block tables and KV cache views then address kernel blocks, kernel block j
     # of block b being b * kernel_block_stride + j. The stride is set when a
-    # packed KV cache is bound (other layers' pages sit between its blocks), and
-    # is the kernel blocks per block otherwise.
+    # packed KV cache is bound (other layers' pages sit between its blocks);
+    # otherwise it stays 0 and the kernel blocks per block are used.
     kernel_block_size: int | None = None
     kernel_block_stride: int = 0
     # Persistent per ubatch: CUDA graphs capture the mapped block table.
