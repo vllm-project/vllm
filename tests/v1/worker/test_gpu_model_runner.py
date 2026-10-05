@@ -512,6 +512,30 @@ def test_alignment_rejected_by_a_sibling_backend_raises(monkeypatch, cpu):
         platform.update_block_size_for_backend(vllm_config)
 
 
+@pytest.mark.parametrize("mamba_cache_mode", ["align", "none"])
+def test_align_mode_blocks_land_on_the_mamba_checkpoint_grid(
+    monkeypatch, mamba_cache_mode
+):
+    """A backend that checkpoints every 64 tokens needs 64-aligned blocks.
+
+    Unaligned, Qwen3.5-0.8B's block (544) puts every other checkpoint off the
+    grid. Outside align mode there are no checkpoints, so nothing changes.
+    """
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm.model_executor.models import qwen3_5
+
+    monkeypatch.setattr(
+        qwen3_5, "qwen_gdn_prefill_checkpoint_alignment", lambda vllm_config: 64
+    )
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+
+    Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
+
+    expected = 576 if mamba_cache_mode == "align" else 544
+    assert vllm_config.cache_config.block_size == expected
+
+
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
     # XPU's GDN rounding runs after super()'s check, so it must check again.
     try:

@@ -158,6 +158,17 @@ def _resolve_gdn_prefill_backend(
     return backend, "triton"
 
 
+def qwen_gdn_prefill_checkpoint_alignment(vllm_config: VllmConfig) -> int | None:
+    """Token alignment of internal prefill checkpoints, if the backend has them.
+
+    Only FlashInfer's GDN prefill emits mid-prefill states.
+    """
+    _, active_backend = _resolve_gdn_prefill_backend(vllm_config)
+    if active_backend != "flashinfer":
+        return None
+    return FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+
+
 def _log_gdn_backend_decision(
     vllm_config: VllmConfig,
     requested_backend: str,

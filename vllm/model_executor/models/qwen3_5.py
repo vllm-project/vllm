@@ -44,6 +44,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
+    qwen_gdn_prefill_checkpoint_alignment,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
@@ -393,6 +394,10 @@ class Qwen3_5ForCausalLMBase(
         )
 
     @classmethod
+    def get_mamba_block_alignment(cls, vllm_config: "VllmConfig") -> int | None:
+        return qwen_gdn_prefill_checkpoint_alignment(vllm_config)
+
+    @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
     ) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -612,6 +617,10 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
+
+    @classmethod
+    def get_mamba_block_alignment(cls, vllm_config: "VllmConfig") -> int | None:
+        return qwen_gdn_prefill_checkpoint_alignment(vllm_config)
 
     @classmethod
     def get_mamba_state_shape_from_config(

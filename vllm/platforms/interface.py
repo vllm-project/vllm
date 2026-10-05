@@ -985,6 +985,16 @@ class Platform:
                 # For hybrid MLA/Mamba models, make the manager block size a
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
+        # Some Mamba backends can only checkpoint state at multiples of a
+        # token stride, so align-mode blocks must land on that grid.
+        if cache_config.mamba_cache_mode == "align" and hasattr(
+            model_cls, "get_mamba_block_alignment"
+        ):
+            mamba_block_alignment = model_cls.get_mamba_block_alignment(vllm_config)
+            if mamba_block_alignment:
+                kernel_block_alignment_size = lcm(
+                    kernel_block_alignment_size, mamba_block_alignment
+                )
 
         # Use minimum block size that satisfies both backend alignment and
         # mamba page size compatibility
