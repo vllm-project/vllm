@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
@@ -35,7 +35,62 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig
     from vllm.entrypoints.mcp.tool_server import ToolServer
+    from vllm.parser.abstract_parser import Parser
+
+
+def resolve_generate_reasoning_fields(
+    request: ChatCompletionRequest,
+    prompt_token_ids: list[int],
+    *,
+    online_renderer: OnlineRenderer,
+    model_config: "ModelConfig",
+) -> tuple[bool | None, dict[str, Any] | None]:
+    """Match OpenAIServingChat's reasoning_ended / reasoning_parser_kwargs.
+
+    ``adjust_request`` (inside ``OnlineRenderer.render_chat``) may set
+    ``request._grammar_from_parser``; that private flag is not serializable, so
+    /render must resolve it into ``reasoning_ended`` before returning a
+    ``GenerateRequest``.
+    """
+    chat_template_kwargs = (
+        request.build_chat_params(
+            online_renderer.chat_template,
+            online_renderer.chat_template_content_format,
+        )
+        .with_defaults(online_renderer.default_chat_template_kwargs)
+        .chat_template_kwargs
+    )
+
+    parser: Parser | None = None
+    if online_renderer.parser is not None:
+        tokenizer = online_renderer.renderer.tokenizer
+        if tokenizer is not None:
+            parser = online_renderer.parser(
+                tokenizer,
+                request.tools,
+                chat_template_kwargs=chat_template_kwargs,
+                model_config=model_config,
+            )
+
+    if not request.include_reasoning:
+        reasoning_ended: bool | None = True
+    elif request._grammar_from_parser:
+        # Mistral grammar already includes an optional think? rule.
+        reasoning_ended = True
+    elif parser is not None and parser.reasoning_parser is not None:
+        reasoning_ended = parser.is_reasoning_end(prompt_token_ids)
+    else:
+        reasoning_ended = None
+
+    reasoning_parser_kwargs: dict[str, Any] | None = None
+    if parser is not None and parser.reasoning_parser is not None:
+        reasoning_parser_kwargs = {
+            "chat_template_kwargs": chat_template_kwargs,
+        }
+
+    return reasoning_ended, reasoning_parser_kwargs
 
 
 class ServingRender(BaseServing):
@@ -126,12 +181,21 @@ class ServingRender(BaseServing):
 
         request_id = f"chatcmpl-{random_uuid()}"
 
+        reasoning_ended, reasoning_parser_kwargs = resolve_generate_reasoning_fields(
+            request,
+            token_ids,
+            online_renderer=self.online_renderer,
+            model_config=self.model_config,
+        )
+
         return GenerateRequest(
             request_id=request_id,
             token_ids=token_ids,
             features=self._extract_mm_features(engine_input),
             sampling_params=params,
             model=request.model,
+            reasoning_ended=reasoning_ended,
+            reasoning_parser_kwargs=reasoning_parser_kwargs,
             stream=bool(request.stream),
             stream_options=(request.stream_options if request.stream else None),
             cache_salt=request.cache_salt,

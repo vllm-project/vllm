@@ -212,6 +212,28 @@ class GenerateRequest(BaseModel):
 
     model: str | None = None
 
+    reasoning_ended: bool | None = Field(
+        default=None,
+        description=(
+            "Whether reasoning has already ended for this prompt, matching "
+            "OpenAIServingChat's engine_client.generate(reasoning_ended=...). "
+            "Set by /render so /inference/v1/generate can start structured "
+            "outputs at the same token as /v1/chat/completions. True means "
+            "constrain from the first generated token; None lets the engine "
+            "decide from the prompt and --reasoning-parser."
+        ),
+    )
+
+    reasoning_parser_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Kwargs for the engine-side reasoner, matching "
+            "OpenAIServingChat's reasoning_parser_kwargs. Typically "
+            '{"chat_template_kwargs": {...}} so enable_thinking and similar '
+            "flags agree between the frontend and the engine."
+        ),
+    )
+
     return_token_ids: bool | None = Field(
         default=None,
         description=(

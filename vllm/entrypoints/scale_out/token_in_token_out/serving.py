@@ -349,6 +349,8 @@ class ServingTokens(GenerateBaseServing):
             priority=request.priority,
             data_parallel_rank=data_parallel_rank,
             session_id=session_id,
+            reasoning_ended=request.reasoning_ended,
+            reasoning_parser_kwargs=request.reasoning_parser_kwargs,
         )
 
         assert result_generator is not None
