@@ -11,6 +11,7 @@ These tests cover:
   F) Indexer fused two-stage Triton kernel: head=512 cr>=128 (no-overlap)
 """
 
+import importlib
 import math
 from types import SimpleNamespace
 
@@ -41,7 +42,23 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize(
+    "platform",
+    [
+        pytest.param(
+            "nvidia",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="CUDA only"
+            ),
+        ),
+        pytest.param(
+            "amd",
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="ROCm only"
+            ),
+        ),
+    ],
+)
 @pytest.mark.parametrize(
     "cache_dtype,kv_mxfp8",
     [
@@ -54,10 +71,12 @@ from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 @pytest.mark.parametrize("num_tokens", [1, 17, 1023, 1024])
 @pytest.mark.parametrize("use_graph", [False, True])
 def test_dspark_context_kv_matches_query_insert(
-    cache_dtype, kv_mxfp8, num_tokens, use_graph
+    platform, cache_dtype, kv_mxfp8, num_tokens, use_graph
 ):
     """KV-only insertion must preserve every cache byte, including graph replay."""
-    from vllm.models.deepseek_v41.nvidia.dspark import _insert_context_kv
+    _insert_context_kv = importlib.import_module(
+        f"vllm.models.deepseek_v41.{platform}.dspark"
+    )._insert_context_kv
 
     torch.manual_seed(42)
     block_size = 256
