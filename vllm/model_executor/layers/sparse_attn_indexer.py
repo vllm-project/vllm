@@ -519,6 +519,12 @@ def sparse_attn_indexer(
         )
         # Score one contiguous row window per rank; metadata is replicated.
         shard_sizes = prefill_metadata.row_shard_sizes
+        if candidate_blocks is not None:
+            # DSV4.1 candidate sources must publish every row on every TP rank;
+            # the row-shard exchange only gathers token top-k, not candidates.
+            # Masked consumers also require candidates aligned to their rows.
+            # Keep both replicated without mutating shared prefill metadata.
+            shard_sizes = None
         shard_start = shard_stop = 0
         if shard_sizes is not None:
             assert dcp_world_size == 1 and not use_pcp
