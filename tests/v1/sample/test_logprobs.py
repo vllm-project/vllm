@@ -1407,6 +1407,10 @@ def test_prompt_logprobs_with_chunking_and_preemption():
 def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
     """Per-row scores stay row-aligned across chunked prefill and preemption."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # The ragged check below compares a second generate call against the first
+    # one. Default kernel selection varies between processes, which moves bf16
+    # logprob tails by up to 0.2; under this the two runs are bit-identical.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
     prompts = [
         "The following numbers of the sequence "
