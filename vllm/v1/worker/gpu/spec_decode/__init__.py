@@ -3,6 +3,7 @@
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.speculative import XPRESS_ARCHITECTURES
 
 
 def init_speculator(vllm_config: VllmConfig, device: torch.device):
@@ -16,10 +17,7 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
         return ExtractHiddenStatesSpeculator(vllm_config, device)
     elif speculative_config.method == "dflash":
         architectures = speculative_config.draft_model_config.architectures
-        if any(
-            arch in ("Qwen3XPressModel", "DFlashQwen3XPressModel")
-            for arch in architectures
-        ):
+        if any(arch in XPRESS_ARCHITECTURES for arch in architectures):
             from vllm.v1.worker.gpu.spec_decode.xpress.speculator import (
                 XPressSpeculator,
             )

@@ -93,6 +93,11 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
 )
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 
+# Draft architectures that carry an XPress refiner. EAGLEConfig rewrites a dflash
+# draft's architecture to DFlash{arch}, so a checkpoint is seen under either name;
+# the dispatch in v1/worker/gpu/spec_decode reads this same set.
+XPRESS_ARCHITECTURES = frozenset({"Qwen3XPressModel", "DFlashQwen3XPressModel"})
+
 
 def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
     hf_config = model_config.hf_config
@@ -1983,7 +1988,7 @@ class SpeculativeConfig:
             self.method == "dflash"
             and self.draft_model_config is not None
             and any(
-                arch in ("Qwen3XPressModel", "DFlashQwen3XPressModel")
+                arch in XPRESS_ARCHITECTURES
                 for arch in self.draft_model_config.architectures
             )
         )
