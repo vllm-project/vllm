@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     FP4_MARLIN_SUPPORTED_GROUP_SIZES,
-    rand_marlin_weight_fp4_like,
+    rand_marlin_weight_nvfp4_like,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     marlin_quant_fp8_torch,
@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    SUPPORTED_GPTQ_QUANT_TYPES,
     gptq_pack,
     gptq_quantize_weights,
 )
@@ -83,7 +84,13 @@ def bench_run(
     if size_k % group_size != 0:
         return
 
-    repack_supported = group_size in MARLIN_SUPPORTED_GROUP_SIZES
+    # The repack benchmark goes through gptq_quantize_weights, which only
+    # accepts GPTQ quant types, so the type has to be checked too and not
+    # just the group size.
+    repack_supported = (
+        group_size in MARLIN_SUPPORTED_GROUP_SIZES
+        and quant_type in SUPPORTED_GPTQ_QUANT_TYPES
+    )
 
     def gen_marlin_params():
         # Marlin quant
@@ -91,8 +98,8 @@ def bench_run(
         if quant_type == scalar_types.float4_e2m1f:
             if group_size != 16:
                 return
-            marlin_w_ref, marlin_q_w, marlin_s, marlin_s2 = rand_marlin_weight_fp4_like(
-                b.T, group_size
+            marlin_w_ref, marlin_q_w, marlin_s, marlin_s2 = (
+                rand_marlin_weight_nvfp4_like(b.T, group_size)
             )
         elif quant_type == scalar_types.float8_e4m3fn:
             if group_size not in [-1, 128]:
@@ -123,13 +130,19 @@ def bench_run(
             q_w_gptq = gptq_pack(q_w, quant_type.size_bits, size_k, size_n)
         return q_w_gptq
 
+    marlin_params = gen_marlin_params()
+    if marlin_params is None:
+        # gen_marlin_params bails on quant type and group size combinations
+        # Marlin does not support, e.g. float4_e2m1f at any group size other
+        # than 16. Skip the shape rather than unpacking None.
+        return
     (
         marlin_w_ref,
         marlin_q_w,
         marlin_s,
         marlin_s2,
         marlin_zp,
-    ) = gen_marlin_params()
+    ) = marlin_params
     q_w_gptq = gen_repack_params()
 
     # Prepare
