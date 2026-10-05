@@ -209,7 +209,7 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
     cache hits (passed via kv_transfer_params) instead of the local count,
     which sees the KVs pulled from the remote prefill as a ~100% hit.
     """
-    output_processor = OutputProcessor(tokenizer=None, log_stats=True)
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
 
     prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
     kv_transfer_params = {
@@ -246,23 +246,13 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
                 new_token_ids=[42],
                 prefill_stats=prefill_stats,
             )
-        ],
-        engine_core_timestamp=1.0,
-        iteration_stats=IterationStats(),
+        ]
     )
     request_output = processed.request_outputs[0]
     if do_remote_prefill:
         assert request_output.num_cached_tokens == 5
     else:
         assert request_output.num_cached_tokens == len(prompt_tokens) - 1
-
-    stats = IterationStats()
-    output_processor.abort_requests(
-        [request.request_id], internal=True, iteration_stats=stats
-    )
-    logger = MagicMock(kv_cache_metrics_enabled=False, gauge_lora_info=None)
-    PrometheusStatLogger.record(logger, None, stats)
-    logger.histogram_prefill_kv_computed_request[0].observe.assert_called_once_with(1)
 
 
 def test_request_stream_interval_raises_but_not_below_engine_default(

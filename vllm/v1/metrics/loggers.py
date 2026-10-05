@@ -1175,22 +1175,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_e2e_time_request[engine_idx].observe(
                 finished_request.e2e_latency
             )
-            if finished_request.queued_time is not None:
-                self.histogram_queue_time_request[engine_idx].observe(
-                    finished_request.queued_time
-                )
-            if finished_request.prefill_time is not None:
-                self.histogram_prefill_time_request[engine_idx].observe(
-                    finished_request.prefill_time
-                )
-            if finished_request.inference_time is not None:
-                self.histogram_inference_time_request[engine_idx].observe(
-                    finished_request.inference_time
-                )
-            if finished_request.decode_time is not None:
-                self.histogram_decode_time_request[engine_idx].observe(
-                    finished_request.decode_time
-                )
+            if (value := finished_request.queued_time) is not None:
+                self.histogram_queue_time_request[engine_idx].observe(value)
+            if (value := finished_request.prefill_time) is not None:
+                self.histogram_prefill_time_request[engine_idx].observe(value)
+            if (value := finished_request.inference_time) is not None:
+                self.histogram_inference_time_request[engine_idx].observe(value)
+            if (value := finished_request.decode_time) is not None:
+                self.histogram_decode_time_request[engine_idx].observe(value)
             self.histogram_request_num_preemptions[engine_idx].observe(
                 finished_request.num_preemptions
             )
@@ -1210,10 +1202,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_num_generation_tokens_request[engine_idx].observe(
                 finished_request.num_generation_tokens
             )
-            if finished_request.mean_time_per_output_token is not None:
-                self.histogram_request_time_per_output_token[engine_idx].observe(
-                    finished_request.mean_time_per_output_token
-                )
+            if (value := finished_request.mean_time_per_output_token) is not None:
+                self.histogram_request_time_per_output_token[engine_idx].observe(value)
             if finished_request.max_tokens_param:
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param

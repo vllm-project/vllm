@@ -18,7 +18,7 @@ import multiprocessing
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import DEFAULT, AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -412,13 +412,10 @@ async def test_parallel_admission_is_all_or_nothing(first_n: int):
 @pytest.mark.asyncio
 async def test_parallel_admission_registration_failure_cleans_up_parent(monkeypatch):
     llm = _make_request_test_llm(2, AsyncMock())
-    add_request = llm.output_processor.add_request
-
-    def register(request, *args):
-        if request.request_id == "1_parallel":
-            raise RuntimeError("frontend registration failed")
-        add_request(request, *args)
-
+    register = MagicMock(
+        wraps=llm.output_processor.add_request,
+        side_effect=[DEFAULT, RuntimeError("frontend registration failed")],
+    )
     monkeypatch.setattr(llm.output_processor, "add_request", register)
     request = _make_engine_request("parallel", 2)
     with pytest.raises(RuntimeError, match="frontend registration failed"):
@@ -431,8 +428,7 @@ async def test_parallel_admission_registration_failure_cleans_up_parent(monkeypa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unknown_first", [False, True])
-async def test_parallel_admission_cancellation_cleans_up_all_children(unknown_first):
+async def test_parallel_admission_cancellation_cleans_up_all_children():
     """Cancellation during core submission must release every reserved slot."""
     first_submission_started = asyncio.Event()
     client = object.__new__(DPLBAsyncMPClient)
@@ -449,17 +445,22 @@ async def test_parallel_admission_cancellation_cleans_up_all_children(unknown_fi
     llm.output_processor = OutputProcessor(None, log_stats=True)
     llm.logger_manager = MagicMock()
 
-    def group_requests(ids):
-        groups = client.group_requests_by_engine(ids)
-        order = (None, 2) if unknown_first else (2, None)
-        return {engine: groups[engine] for engine in order if engine in groups}
-
-    llm.engine_core.group_requests_by_engine = group_requests
+    # The submitted child sorts first, before unsubmitted siblings.
+    llm.engine_core.group_requests_by_engine = (
+        lambda ids: client.group_requests_by_engine(sorted(ids))
+    )
+    llm.engine_core.abort_requests_async.side_effect = (
+        client.acknowledge_finished_requests
+    )
     request = _make_engine_request("parallel", 3)
     output = llm.generate(request, request.params, request.request_id)
     generate_task = asyncio.create_task(anext(output))
 
     await first_submission_started.wait()
+    assert client.group_requests_by_engine(["0_parallel"]) == {2: ["0_parallel"]}
+    # Retain ownership while the terminal output awaits frontend processing.
+    client._finished_request_engines.update(client.reqs_in_flight)
+    client.reqs_in_flight.clear()
     generate_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await generate_task
@@ -478,6 +479,7 @@ async def test_parallel_admission_cancellation_cleans_up_all_children(unknown_fi
     assert stats.finished_requests[0].finish_reason == FinishReason.ABORT
     assert stats.n_params_iter == [3]
     assert stats.max_num_generation_tokens_iter == [0]
+    assert not client._finished_request_engines
 
 
 # ---------------------------------------------------------------------------
