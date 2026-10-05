@@ -294,6 +294,25 @@ from an older engine). Temporary, never-cached allocations can therefore be
 excluded from prefix-cache retention queries. CPU-offload residency is not
 included.
 
+**Label cardinality:** with `G` configured KV cache groups, this label has at
+most `G + 1` values per existing `(model_name, engine)` label set: the group
+IDs and `-1`. Groups are fixed by the resolved model/cache layout; their IDs
+do not grow with requests, allocations, or DCP ranks. Other layouts can have
+more groups, so check the resolved `kv_cache_config.kv_cache_groups` rather
+than assuming a universal count or target/draft ordering.
+
+For example, a layout with one target group and one uniform sliding-window
+draft group has `G = 2`. If the target is group `0` and the draft is group `1`,
+the possible label values are `0`, `1`, and `-1`. With unchanged buckets, this
+means up to three times the series for these three histograms. Other metric
+families are unaffected by this label.
+
+Bucket count adds a separate cost: with `B` finite buckets, each histogram
+uses `B + 3` series per label set (`B` finite buckets, `+Inf`, `_sum`, and
+`_count`), plus `_created` if the exporter emits it. The current defaults have
+26 finite buckets, so all three histograms together use up to 261 series per
+engine for `G = 2`, or 270 with `_created`.
+
 For example, plot median idle time separately for each cached group, scoped to
 one model/deployment:
 
