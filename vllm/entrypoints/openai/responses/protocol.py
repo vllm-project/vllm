@@ -61,6 +61,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     StopParam,
+    TopLogprobsParam,
     validate_cache_salt,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
@@ -210,7 +211,7 @@ class ResponsesRequest(OpenAIBaseModel):
     text: ResponseTextConfig | None = None
     tool_choice: ToolChoice = "auto"
     tools: list[Tool] = Field(default_factory=list)
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     top_p: float | None = None
     top_k: int | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
