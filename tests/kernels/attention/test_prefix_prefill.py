@@ -354,6 +354,7 @@ def test_rocm_backend_sliding_window_includes_boundary_token(
         max_seq_len=seq_len,
         block_table=torch.zeros(1, 1, dtype=torch.int32, device=device),
         causal=True,
+        mm_prefix_range_tensor=None,
     )
     impl = RocmAttentionImpl(
         num_heads=num_heads,
@@ -545,18 +546,12 @@ def test_contexted_kv_attention_cached_kv(
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("use_mm_prefix", [False, True])
 @torch.inference_mode()
-def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> None:
-    # Boundary guard for the KV_FROM_CACHE block-table load. With an
-    # exact-sized block table (row length == number of blocks for the
-    # sequence) and a query that ends the sequence, the last K/V tile has
-    # padded lanes whose absolute positions step past the sequence end. Those
-    # lanes must not read a block-table entry past this batch's row.
-    #
-    # seq_len is a whole number of blocks, so bn_logical for a padded lane
-    # lands exactly on num_blocks (one past the last valid row entry), and
-    # query_len is not tile-aligned so the overshoot is actually exercised.
-    # The result must still match a dense causal SDPA reference.
+def test_contexted_kv_attention_cached_kv_block_table_boundary(
+    device: str, use_mm_prefix: bool
+) -> None:
+    """Partial context and query tiles must not read past an exact block table."""
     set_random_seed(0)
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
@@ -567,10 +562,10 @@ def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> N
     num_queries_per_kv = 1
     num_kv_heads = num_heads // num_queries_per_kv
     head_size = 32
-    block_size = 32
-    num_blocks = 4
-    seq_len = num_blocks * block_size  # 128 == exact multiple of block_size
-    query_len = 99  # < seq_len and not a multiple of the kernel tile
+    block_size = 16 if use_mm_prefix else 32
+    num_blocks = 1 if use_mm_prefix else 4
+    seq_len = num_blocks * block_size
+    query_len = 3 if use_mm_prefix else 99
 
     query = torch.empty(query_len, num_heads, head_size, dtype=dtype)
     query.uniform_(-1e-3, 1e-3)
@@ -629,6 +624,11 @@ def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> N
         k_scale,
         v_scale,
         sliding_window=0,
+        mm_prefix_range=(
+            torch.tensor([[[0, seq_len - 1]]], dtype=torch.int32, device=device)
+            if use_mm_prefix
+            else None
+        ),
     )
     torch.accelerator.synchronize()
 
@@ -651,6 +651,8 @@ def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> N
     attn_mask = create_causal_attention_mask_for_sdpa(
         [query_len], [seq_len], 0, device=device, dtype=dtype
     )
+    if use_mm_prefix:
+        attn_mask.zero_()
     output_ref = F.scaled_dot_product_attention(
         query_sdpa,
         key_sdpa,
@@ -1078,3 +1080,368 @@ def test_qwen3_nonstandard_block_size(
         device=device,
         op=op,
     )
+
+
+@pytest.mark.parametrize(
+    "dtype,sliding_window,clamp,cached_kv,block_size,head_size,kv_cache_dtype",
+    [
+        pytest.param(torch.float16, None, False, False, 16, 128, "auto", id="dense"),
+        pytest.param(torch.bfloat16, None, False, True, 16, 256, "auto", id="cached"),
+        pytest.param(
+            torch.bfloat16, 16, False, False, 544, 256, "auto", id="window-dense"
+        ),
+        pytest.param(
+            torch.float16, 16, False, True, 544, 128, "auto", id="window-cached"
+        ),
+        pytest.param(
+            torch.bfloat16, 16, True, False, 16, 256, "fp8", id="clamped-fp8-dense"
+        ),
+        pytest.param(
+            torch.bfloat16, 16, True, True, 544, 256, "fp8", id="clamped-fp8-cached"
+        ),
+    ],
+)
+@torch.inference_mode()
+def test_prefix_lm_matches_dense_reference(
+    dtype: torch.dtype,
+    sliding_window: int | None,
+    clamp: bool,
+    cached_kv: bool,
+    block_size: int,
+    head_size: int,
+    kv_cache_dtype: str,
+) -> None:
+    """Image spans cross query tiles and cached context without changing text masks."""
+    from vllm.v1.attention.backends.utils import compute_mm_prefix_range_tensor
+    from vllm.v1.attention.ops.paged_attn import PagedAttention
+
+    if (
+        kv_cache_dtype == "fp8"
+        and not current_platform.is_rocm()
+        and not current_platform.has_device_capability(89)
+    ):
+        pytest.skip("FP8 requires CUDA compute capability >= 8.9")
+
+    device = "cuda:0"
+    set_random_seed(0)
+    query_lens, context_lens = [193, 37, 1], [0, 89, 80]
+    seq_lens = [q + c for q, c in zip(query_lens, context_lens)]
+    num_heads, num_kv_heads = 4, 2
+    ranges = {0: [(5, 170), (180, 189)], 1: [(70, 110)]}
+    blocks_per_req = math.ceil(max(seq_lens) / block_size)
+    block_table = (
+        torch.randperm(3 * blocks_per_req, device=device).reshape(3, -1).to(torch.int32)
+    )
+    cache_dtype = current_platform.fp8_dtype() if kv_cache_dtype == "fp8" else dtype
+    k_scale, v_scale = 0.5, 1.75
+    cache = torch.empty(
+        2,
+        3 * blocks_per_req,
+        block_size,
+        num_kv_heads * head_size,
+        device=device,
+        dtype=cache_dtype,
+    )
+    k_cache, v_cache = PagedAttention.split_kv_cache(cache, num_kv_heads, head_size)
+    # Unwritten page tails must never contribute to attention.
+    k_cache.fill_(float("nan"))
+    v_cache.fill_(float("nan"))
+    query = torch.randn(
+        sum(query_lens), num_heads, head_size, device=device, dtype=dtype
+    )
+    dense_keys, dense_values, references = [], [], []
+    offset = 0
+    for req_idx, (q_len, ctx_len, seq_len) in enumerate(
+        zip(query_lens, context_lens, seq_lens)
+    ):
+        key = torch.randn(seq_len, num_kv_heads, head_size, device=device, dtype=dtype)
+        value = torch.randn_like(key)
+        if kv_cache_dtype == "fp8":
+            cached_key = (key / k_scale).to(cache_dtype)
+            cached_value = (value / v_scale).to(cache_dtype)
+        else:
+            cached_key, cached_value = key, value
+        positions = torch.arange(seq_len, device=device)
+        pages = block_table[req_idx, positions // block_size]
+        key_storage = cached_key.reshape(
+            seq_len, num_kv_heads, head_size // k_cache.shape[-1], k_cache.shape[-1]
+        )
+        # Indexed writes to FP8 storage need byte views on ROCm.
+        if kv_cache_dtype == "fp8":
+            k_cache.view(torch.uint8)[pages, :, :, positions % block_size, :] = (
+                key_storage.view(torch.uint8)
+            )
+            v_cache.view(torch.uint8)[pages, :, :, positions % block_size] = (
+                cached_value.view(torch.uint8)
+            )
+        else:
+            k_cache[pages, :, :, positions % block_size, :] = key_storage
+            v_cache[pages, :, :, positions % block_size] = cached_value
+        dense_keys.append(key[ctx_len:])
+        dense_values.append(value[ctx_len:])
+        key, value = key.clone(), value.clone()
+        cache_end = seq_len if cached_kv else ctx_len
+        if kv_cache_dtype == "fp8":
+            key[:cache_end] = (cached_key[:cache_end].float() * k_scale).to(dtype)
+            value[:cache_end] = (cached_value[:cache_end].float() * v_scale).to(dtype)
+        q_pos = torch.arange(ctx_len, seq_len, device=device)
+        k_pos = torch.arange(seq_len, device=device)
+        keep = k_pos[None, :] <= q_pos[:, None]
+        window = q_pos[:, None] - k_pos[None, :] < (sliding_window or seq_len + 1)
+        keep &= window
+        for start, end in ranges.get(req_idx, []):
+            image = (
+                (q_pos[:, None] >= start)
+                & (q_pos[:, None] <= end)
+                & (k_pos[None, :] >= start)
+                & (k_pos[None, :] <= end)
+            )
+            keep |= (image & window) if clamp else image
+        repeated_key = key.repeat_interleave(num_heads // num_kv_heads, dim=1)
+        repeated_value = value.repeat_interleave(num_heads // num_kv_heads, dim=1)
+        scores = (
+            torch.einsum(
+                "qhd,khd->hqk",
+                query[offset : offset + q_len].float(),
+                repeated_key.float(),
+            )
+            * head_size**-0.5
+        )
+        references.append(
+            torch.einsum(
+                "hqk,khd->qhd",
+                scores.masked_fill(~keep, -torch.inf).softmax(-1),
+                repeated_value.float(),
+            )
+        )
+        offset += q_len
+    k_scale_tensor = torch.tensor(k_scale, device=device)
+    v_scale_tensor = torch.tensor(v_scale, device=device)
+    output = torch.empty_like(query)
+    query_start = torch.tensor([0, 193, 230, 231], device=device, dtype=torch.int32)
+    seq_lens_tensor = torch.tensor(seq_lens, device=device, dtype=torch.int32)
+    mm_ranges = compute_mm_prefix_range_tensor(ranges, 3, torch.device(device))
+    key = None if cached_kv else torch.cat(dense_keys)
+    value = None if cached_kv else torch.cat(dense_values)
+
+    chunked_prefill_paged_decode(
+        query,
+        key,
+        value,
+        output,
+        kv_cache_dtype,
+        k_cache,
+        v_cache,
+        block_table,
+        query_start,
+        seq_lens_tensor,
+        max(seq_lens),
+        max(query_lens),
+        k_scale_tensor,
+        v_scale_tensor,
+        sliding_window=sliding_window,
+        mm_prefix_range=mm_ranges,
+        mm_prefix_clamp_sliding_window=clamp,
+    )
+    torch.testing.assert_close(
+        output.float(), torch.cat(references), atol=2e-2, rtol=2e-2
+    )
+
+
+@pytest.mark.parametrize("clamp", [False, True])
+@torch.inference_mode()
+def test_prefix_lm_ignores_evicted_window_pages(clamp: bool) -> None:
+    """Zero-probability keys in released pages must not poison the output."""
+    from vllm.v1.attention.ops.paged_attn import PagedAttention
+
+    device, dtype = "cuda:0", torch.bfloat16
+    seq_len, query_len, head_size, block_size = 129, 33, 128, 16
+    cache = torch.zeros(2, 10, block_size, head_size, device=device, dtype=dtype)
+    k_cache, v_cache = PagedAttention.split_kv_cache(cache, 1, head_size)
+    k_cache[0].fill_(float("nan"))
+    v_cache.fill_(1)
+    v_cache[0].fill_(float("nan"))
+    table = torch.arange(1, 10, dtype=torch.int32, device=device)[None, :]
+    table[:, :4] = 0
+    query = torch.zeros(query_len, 1, head_size, device=device, dtype=dtype)
+    key = torch.zeros_like(query)
+    value = torch.ones_like(query)
+    output = torch.empty_like(query)
+    scale = torch.tensor(1.0, device=device)
+    context_attention_fwd(
+        query,
+        key,
+        value,
+        output,
+        "auto",
+        k_cache,
+        v_cache,
+        table,
+        torch.tensor([0, query_len], dtype=torch.int32, device=device),
+        torch.tensor([seq_len], dtype=torch.int32, device=device),
+        seq_len,
+        query_len,
+        scale,
+        scale,
+        sliding_window=32,
+        mm_prefix_range=torch.tensor([[[88, 110]]], dtype=torch.int32, device=device),
+        mm_prefix_clamp_sliding_window=clamp,
+    )
+    torch.testing.assert_close(output, value)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend")
+@pytest.mark.parametrize(
+    "sliding_window,clamp,query_len,num_heads",
+    [
+        pytest.param(None, False, 1, 4, id="single-token-hip"),
+        pytest.param(32, False, 1, 1, id="single-token-triton"),
+        pytest.param(None, False, 4, 1, id="multi-token-global"),
+        pytest.param(32, False, 4, 1, id="multi-token-window"),
+        pytest.param(32, True, 4, 1, id="multi-token-clamped"),
+    ],
+)
+@torch.inference_mode()
+def test_rocm_prefix_prompt_extension_replays_decode_graph(
+    sliding_window: int | None,
+    clamp: bool,
+    query_len: int,
+    num_heads: int,
+) -> None:
+    """Image prompt extensions must replay the causal graph with updated inputs."""
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.attention.backends.rocm_attn import (
+        RocmAttentionImpl,
+        RocmAttentionMetadataBuilder,
+    )
+    from vllm.v1.attention.ops.paged_attn import PagedAttention
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    device, dtype = "cuda:0", torch.bfloat16
+    head_size, block_size = 128, 16
+    torch.accelerator.set_device_index(device)
+    layer = SimpleNamespace(
+        sliding_window=sliding_window,
+        use_mm_prefix=True,
+        mm_prefix_clamp_sliding_window=clamp,
+        _k_scale=torch.tensor(1.0, device=device),
+        _v_scale=torch.tensor(1.0, device=device),
+    )
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_config=SimpleNamespace(
+            is_mm_prefix_lm=True,
+            get_sliding_window=lambda: sliding_window,
+            get_num_attention_heads=lambda _: num_heads,
+            get_num_kv_heads=lambda _: 1,
+            get_head_size=lambda: head_size,
+        ),
+        parallel_config=None,
+        compilation_config=SimpleNamespace(static_forward_context={"attn": layer}),
+    )
+    spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=head_size, dtype=dtype
+    )
+    builder = RocmAttentionMetadataBuilder(spec, ["attn"], config, device)
+    cache = torch.zeros(2, 5, block_size, head_size, device=device, dtype=dtype)
+    _, v_cache = PagedAttention.split_kv_cache(cache, 1, head_size)
+    values = torch.arange(80, device=device, dtype=dtype)
+    v_cache.copy_(values.reshape(5, 1, 1, block_size).expand_as(v_cache))
+    query = torch.zeros(query_len, num_heads, head_size, device=device, dtype=dtype)
+    output = torch.empty_like(query)
+    common = CommonAttentionMetadata(
+        num_actual_tokens=query_len,
+        max_query_len=query_len,
+        max_seq_len=80,
+        query_start_loc=torch.tensor(
+            [0, query_len, query_len], dtype=torch.int32, device=device
+        ),
+        query_start_loc_cpu=torch.tensor(
+            [0, query_len, query_len], dtype=torch.int32, device="cpu"
+        ),
+        seq_lens_cpu_upper_bound=torch.tensor([1, 0], dtype=torch.int32, device="cpu"),
+        seq_lens=torch.tensor([1, 0], dtype=torch.int32, device=device),
+        block_table_tensor=torch.arange(5, dtype=torch.int32, device=device).repeat(
+            2, 1
+        ),
+        slot_mapping=torch.zeros(query_len, dtype=torch.int64, device=device),
+        causal=True,
+        num_reqs=2,
+        is_prefilling=torch.tensor([False, False], device="cpu"),
+        mm_req_doc_ranges=None,
+    )
+    metadata = builder.build_for_cudagraph_capture(common)
+    impl = RocmAttentionImpl(
+        num_heads=num_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=sliding_window,
+        kv_cache_dtype="auto",
+    )
+
+    def run() -> None:
+        impl.forward(layer, query, None, None, cache.transpose(0, 1), metadata, output)
+
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    assert common.seq_lens_cpu_upper_bound is not None
+    assert common.is_prefilling is not None
+    for seq_len, active_query_len in ((65, query_len), (73, 1)):
+        starts = torch.tensor(
+            [0, active_query_len, active_query_len], dtype=torch.int32, device="cpu"
+        )
+        common.query_start_loc.copy_(starts)
+        common.query_start_loc_cpu.copy_(starts)
+        common.seq_lens[0] = seq_len
+        common.seq_lens_cpu_upper_bound[0] = seq_len
+        common.is_prefilling[0] = True
+        first_query = seq_len - active_query_len
+        # The real prompt token is the image's last token; later queries are drafts.
+        start = (
+            first_query - sliding_window + 1
+            if sliding_window is not None and not clamp
+            else 0
+        )
+        common.mm_req_doc_ranges = {0: [(start, first_query)]}
+        assert builder.build(0, common).mm_prefix_range_tensor is None
+        output.fill_(float("nan"))
+        graph.replay()
+        expected = (
+            torch.stack(
+                [
+                    values[max(0, pos + 1 - (sliding_window or seq_len)) : pos + 1]
+                    .float()
+                    .mean()
+                    for pos in range(first_query, seq_len)
+                ]
+            )
+            .to(dtype)[:, None, None]
+            .expand(active_query_len, num_heads, head_size)
+        )
+        torch.testing.assert_close(output[:active_query_len], expected)
+        torch.testing.assert_close(common.query_start_loc.cpu(), starts)
+        assert common.seq_lens[0].item() == seq_len
+
+    if query_len > 1:
+        # Rejection may leave different device query lengths within one graph.
+        common.query_start_loc.copy_(torch.tensor([0, 1, query_len], device=device))
+        common.seq_lens.copy_(torch.tensor([73, 61], device=device))
+        output.fill_(float("nan"))
+        graph.replay()
+        expected = (
+            torch.stack(
+                [
+                    values[max(0, pos + 1 - (sliding_window or 80)) : pos + 1]
+                    .float()
+                    .mean()
+                    for pos in [72, *range(61 - (query_len - 1), 61)]
+                ]
+            )
+            .to(dtype)[:, None, None]
+            .expand_as(output)
+        )
+        torch.testing.assert_close(output, expected)
