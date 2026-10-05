@@ -32,6 +32,34 @@ NUM_BLOCKS = 8
 NUM_SPECULATIVE_TOKENS = 3
 
 
+def test_dspark_lookahead_covers_query_window():
+    """The fill-in bonus query must not address an unallocated KV block."""
+    for sample_from_anchor in (False, True, None):
+        hf_config = SimpleNamespace()
+        if sample_from_anchor is not None:
+            hf_config.sample_from_anchor = sample_from_anchor
+        speculative_config = SimpleNamespace(
+            use_dflash=lambda: False,
+            use_dspark=lambda: True,
+            use_eagle=lambda: True,
+            draft_model_config=SimpleNamespace(hf_config=hf_config),
+        )
+        for num_speculative_tokens in (1, 7):
+            config = SimpleNamespace(
+                speculative_config=speculative_config,
+                num_speculative_tokens=num_speculative_tokens,
+            )
+            lookahead = VllmConfig.num_lookahead_tokens.fget(config)
+            # Match DSparkSpeculator's default and its two query layouts.
+            query_width = num_speculative_tokens + int(sample_from_anchor is False)
+            assert lookahead == query_width
+            for block_size in (16, 32):
+                for prompt_len in range(1, 2 * block_size + 1):
+                    num_blocks = (prompt_len + lookahead + block_size - 1) // block_size
+                    last_query_pos = prompt_len + query_width - 1
+                    assert last_query_pos // block_size < num_blocks
+
+
 def _dflash_speculative_config(num_speculative_tokens: int) -> SpeculativeConfig:
     model_config = ModelConfig(
         model=DFLASH_TARGET_DIR,
