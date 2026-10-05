@@ -104,6 +104,7 @@ class EngineCoreReadyResponse:
     supports_draft_weight_updates: bool = False
     # Full-attention block size in tokens after initialization, or unavailable.
     effective_attention_block_size: int | None = None
+    supports_inline_hidden_states: bool = False
 
 
 class EngineCoreRequest(
