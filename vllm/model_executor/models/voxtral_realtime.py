@@ -125,15 +125,19 @@ class VoxtralRealtimeProcessingInfo(VoxtralProcessingInfo):
         # Each streaming update carries a single audio frame.
         return {"audio": 1}
 
-    def get_max_audio_tokens(self) -> int:
-        # The largest streaming chunk is the first one, which covers the
-        # prompt prefix (BOS + left padding + delay). Later chunks are ~1 token.
+    def get_max_audio_array_len(self) -> int:
+        # Profile with the largest streaming chunk, the first one: it covers
+        # the prompt prefix (BOS + left padding + delay), later chunks are
+        # ~1 token. get_max_audio_tokens keeps max_model_len so the encoder
+        # cache stays as large as before: each paused session keeps its last
+        # chunk cached until it resumes, and a cache sized to one chunk
+        # deadlocks a few concurrent sessions.
         tokenizer = self.get_tokenizer()
         audio_encoder = tokenizer.instruct.audio_encoder
         prompt_tokens = (
             tokenizer.instruct.start() + audio_encoder.encode_streaming_tokens()
         )
-        return len(prompt_tokens)
+        return len(prompt_tokens) * audio_encoder.audio_config.raw_audio_length_per_tok
 
 
 class VoxtralRealtimeBuffer:
