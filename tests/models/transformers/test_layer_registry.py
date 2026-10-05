@@ -9,11 +9,15 @@ is set and the symbol exists, and otherwise falls back to
 logging that reports which source was used.
 """
 
+import ast
 import importlib
 import inspect
 import logging
+import pkgutil
 import sys
 import types
+from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -22,6 +26,8 @@ import torch
 from vllm.model_executor.models.transformers import layers
 
 HW_MODULE = "vllm.model_executor.hw_agnostic.layers.layernorm"
+_HW_PKG = "vllm.model_executor.hw_agnostic.layers"
+_VLLM_PKG = "vllm.model_executor.layers"
 
 
 @pytest.fixture
@@ -180,11 +186,6 @@ def test_hw_agnostic_matches_vllm_end_to_end(monkeypatch, vllm_runner, tiny_llam
     )
 
 
-# --------------------------------------------------------------------------
-# Out-of-tree override reachability.
-#
-# --------------------------------------------------------------------------
-
 _HW_AGNOSTIC_LAYERS = (
     ("layernorm", "RMSNorm"),
     ("activation", "SiluAndMul"),
@@ -207,7 +208,7 @@ def _vllm_layer(module: str, name: str) -> Any:
 
 
 def _mirrored(module: str) -> dict[str, str]:
-    """`_MIRRORED_MODULES` narrowed to one module, for validating in isolation."""
+    """`_mirrored_modules()` narrowed to one module, for validating in isolation."""
     return {
         f"vllm.model_executor.layers.{module}": (
             f"vllm.model_executor.hw_agnostic.layers.{module}"
@@ -217,16 +218,16 @@ def _mirrored(module: str) -> dict[str, str]:
 
 @pytest.fixture
 def oot_registries():
-    """Both `op_registry_oot`s, restored afterwards so a test may register.
+    """The in-tree and hw-agnostic `op_registry_oot`s, restored afterwards.
 
-    A test that registers has to go through `register_oot` rather than write the
-    dict, because *which* dict the write lands in is the thing under test.
+    Tests register through `register_oot` rather than writing a dict, because
+    which dict the write lands in is under test.
     """
-    from vllm.model_executor.custom_op import op_registry_oot as hw_specific
+    from vllm.model_executor.custom_op import op_registry_oot as in_tree
     from vllm.model_executor.hw_agnostic.custom_op import op_registry_oot as hw_agnostic
 
-    saved = [(reg, dict(reg)) for reg in (hw_specific, hw_agnostic)]
-    yield hw_specific, hw_agnostic
+    saved = [(reg, dict(reg)) for reg in (in_tree, hw_agnostic)]
+    yield in_tree, hw_agnostic
     for registry, before in saved:
         registry.clear()
         registry.update(before)
@@ -236,10 +237,8 @@ def oot_registries():
 def test_hw_agnostic_layer_is_standalone(module, name):
     """Each hw-agnostic layer is an independent implementation, not a subclass.
 
-    The isolation is deliberate: the hw-agnostic path can be reshaped without
-    touching the in-tree layers. What it costs is that the two classes are
-    interchangeable only by name, which is what the rest of these tests are
-    about.
+    So the two classes are interchangeable only by name, which is what the rest
+    of these tests are about.
     """
     hw_cls = _hw_layer(module, name)
     vllm_cls = _vllm_layer(module, name)
@@ -255,15 +254,13 @@ def test_hw_agnostic_layer_is_standalone(module, name):
 
 @pytest.mark.parametrize("module,name", _HW_AGNOSTIC_LAYERS)
 def test_hw_agnostic_layer_keeps_the_registered_names(module, name):
-    """`__name__` and `name` match the in-tree layer, in each path's own registry.
+    """`__name__` and `name` match the in-tree layer, each in its own registry.
 
-    `__name__` is what `__new__` keys the out-of-tree swap on, so drift there
-    unregisters every override of the layer. `name` is what identifies the op to
-    `CompilationConfig.custom_ops`. Both classes can claim the same registered
-    name only because the registries are separate -- one entry each, so neither
-    `register` trips the other's duplicate-name assert.
+    `__name__` keys the out-of-tree swap in `__new__`; `name` identifies the op
+    to `CompilationConfig.custom_ops`. The registries are separate, so both
+    classes can register the same name.
     """
-    from vllm.model_executor.custom_op import op_registry as hw_specific_registry
+    from vllm.model_executor.custom_op import op_registry as in_tree_registry
     from vllm.model_executor.hw_agnostic.custom_op import (
         op_registry as hw_agnostic_registry,
     )
@@ -277,20 +274,14 @@ def test_hw_agnostic_layer_keeps_the_registered_names(module, name):
     # because the swap keys on `__name__`.
     assert hw_cls.name == vllm_cls.name
     assert issubclass(hw_cls, hw_agnostic_registry[hw_cls.name])
-    assert issubclass(vllm_cls, hw_specific_registry[vllm_cls.name])
+    assert issubclass(vllm_cls, in_tree_registry[vllm_cls.name])
     # Same name, two owners, because they are two registries.
-    assert hw_agnostic_registry[hw_cls.name] is not hw_specific_registry[vllm_cls.name]
-    assert hw_agnostic_registry is not hw_specific_registry
-
-
-# --------------------------------------------------------------------------
-# Resolving the in-tree layer names to the hw-agnostic classes.
-#
-# --------------------------------------------------------------------------
+    assert hw_agnostic_registry[hw_cls.name] is not in_tree_registry[vllm_cls.name]
+    assert hw_agnostic_registry is not in_tree_registry
 
 
 def test_layer_names_scope_is_a_noop_when_disabled(monkeypatch):
-    """Disabled: the in-tree names are untouched, so a plugin overrides vLLM."""
+    """Disabled: the in-tree names are untouched, so a plugin overrides in-tree."""
     from vllm.model_executor.hw_agnostic.layers._layer_names import (
         hw_agnostic_layer_names,
     )
@@ -303,12 +294,11 @@ def test_layer_names_scope_is_a_noop_when_disabled(monkeypatch):
 
 
 def test_layer_names_scope_rebinds_and_restores(monkeypatch):
-    """Enabled: every mirrored name resolves to the hw-agnostic class inside the
-    block, and to the in-tree class again outside it.
+    """Enabled: mirrored names resolve to the hw-agnostic class inside the block,
+    and to the in-tree class again outside it.
 
-    Restoring matters as much as rebinding: ~200 in-tree modules import from
-    these, and a permanent swap would leave `isinstance(x, LinearBase)` answering
-    differently depending on import order.
+    Restoring matters: in-tree modules import these names, and a permanent swap
+    would make `isinstance` checks depend on import order.
     """
     from vllm.model_executor.hw_agnostic.layers._layer_names import (
         hw_agnostic_layer_names,
@@ -346,8 +336,8 @@ def test_layer_names_scope_restores_on_exception(monkeypatch):
 def test_layer_names_scope_leaves_unported_layers_alone(monkeypatch):
     """Names with no hw-agnostic implementation keep their in-tree class.
 
-    The same fallback the modeling side takes in `_resolve`, so a plugin's
-    `GeluAndMul` override still lands on the class that gets built.
+    The same fallback `_resolve` takes, so a plugin's `GeluAndMul` override
+    lands on the class that gets built.
     """
     from vllm.model_executor.hw_agnostic.layers._layer_names import (
         hw_agnostic_layer_names,
@@ -365,13 +355,9 @@ def test_layer_names_scope_leaves_unported_layers_alone(monkeypatch):
 def test_layer_names_scope_rebinds_classes_only(monkeypatch):
     """A mirrored *function* name keeps its in-tree implementation.
 
-    Both `activation` modules define `get_act_and_mul_fn`, but they are not
-    interchangeable: the in-tree one takes a `compile_native` keyword and raises
-    `ValueError` for an unsupported activation, the hw-agnostic one takes neither
-    and raises `KeyError`. Nothing subclasses a function and `register_oot` cannot
-    key on one, so rebinding it buys nothing and only breaks callers that run while
-    plugins load -- and `validate_registered_overrides` inspects classes, so it
-    would not catch the swap either.
+    The two `get_act_and_mul_fn`s are not interchangeable: the in-tree one takes
+    `compile_native` and raises `ValueError` for an unsupported activation, the
+    hw-agnostic one takes neither and raises `KeyError`.
     """
     from vllm.model_executor.hw_agnostic.layers._layer_names import (
         hw_agnostic_layer_names,
@@ -392,12 +378,249 @@ def test_layer_names_scope_rebinds_classes_only(monkeypatch):
         inspect.signature(vllm_fn).bind("silu", compile_native=False)
 
 
+@pytest.mark.parametrize("case", ["function", "op_name"])
+def test_layer_names_scope_skips_non_counterparts(monkeypatch, case):
+    """An in-tree name that is not the ported class keeps its object.
+
+    Covers an in-tree function (`layernorm.poly_norm`) and a mismatched op name.
+    Skipping is per name and only warns; `test_mirrored_names_are_counterparts`
+    fails on it.
+    """
+    from vllm.model_executor.hw_agnostic.layers import _layer_names
+    from vllm.model_executor.hw_agnostic.layers._layer_names import (
+        hw_agnostic_layer_names,
+    )
+
+    hw_module = importlib.import_module(f"{_HW_PKG}.layernorm")
+    if case == "function":
+        name = "poly_norm"
+        fake = type(name, (), {"__module__": hw_module.__name__})
+        monkeypatch.setattr(hw_module, name, fake, raising=False)
+    else:
+        name = "RMSNorm"
+        monkeypatch.setattr(_hw_layer("layernorm", name), "name", "not_rms_norm")
+    warned: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        _layer_names.logger, "warning_once", lambda *args, **_: warned.append(args)
+    )
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+    original = _vllm_layer("layernorm", name)
+
+    with hw_agnostic_layer_names():
+        assert _vllm_layer("layernorm", name) is original
+        assert _vllm_layer("activation", "SiluAndMul") is _hw_layer(
+            "activation", "SiluAndMul"
+        )
+
+    assert [args[2] for args in warned] == [name]
+
+
+@pytest.fixture
+def extra_hw_layers(tmp_path, monkeypatch):
+    """Extend the hw-agnostic package with files written under `tmp_path`.
+
+    Yields a writer `(relpath, source, in_tree=False)`; `in_tree=True` extends
+    the in-tree package instead. The new modules are dropped from `sys.modules`
+    afterwards, so nothing leaks into later tests.
+    """
+    roots = {}
+    for in_tree, pkg_name in ((False, _HW_PKG), (True, _VLLM_PKG)):
+        pkg = importlib.import_module(pkg_name)
+        roots[in_tree] = tmp_path / ("vllm" if in_tree else "hw_agnostic")
+        monkeypatch.setattr(pkg, "__path__", [*pkg.__path__, str(roots[in_tree])])
+
+    def write(relpath: str, source: str, in_tree: bool = False) -> None:
+        path = roots[in_tree] / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+        importlib.invalidate_caches()
+
+    yield write
+    for name, module in list(sys.modules.items()):
+        if str(getattr(module, "__file__", None) or "").startswith(str(tmp_path)):
+            del sys.modules[name]
+
+
+def _hw_module_names() -> list[str]:
+    """Every public hw-agnostic layer module, mirrored or not."""
+    hw_pkg = importlib.import_module(_HW_PKG)
+    return [
+        info.name
+        for info in pkgutil.walk_packages(hw_pkg.__path__, prefix=f"{_HW_PKG}.")
+        if not any(p.startswith("_") for p in info.name.split("."))
+    ]
+
+
+def test_discovery_finds_the_ported_modules():
+    """The pairs follow the package layout, the convention `_resolve` uses."""
+    from vllm.model_executor.hw_agnostic.layers._layer_names import (
+        _mirrored_modules,
+    )
+
+    mirrored = _mirrored_modules()
+    for module, _ in _HW_AGNOSTIC_LAYERS:
+        assert mirrored[f"{_VLLM_PKG}.{module}"] == f"{_HW_PKG}.{module}"
+    for vllm_name, hw_name in mirrored.items():
+        assert vllm_name.removeprefix(_VLLM_PKG) == hw_name.removeprefix(_HW_PKG)
+        assert "._" not in hw_name  # `_layer_names` itself is private
+
+
+def test_new_hw_agnostic_module_reaches_plugins(
+    monkeypatch, extra_hw_layers, oot_registries
+):
+    """A new hw-agnostic module is discovered and reached by a plugin's override."""
+    from vllm.model_executor.hw_agnostic.layers._layer_names import (
+        _mirrored_modules,
+        hw_agnostic_layer_names,
+    )
+
+    extra_hw_layers(
+        "vocab_parallel_embedding.py",
+        "from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer\n"
+        "\n\n"
+        "class VocabParallelEmbedding(PluggableLayer):\n"
+        '    name = "vocab_parallel_embedding"\n',
+    )
+    extra_hw_layers("hw_only_helpers.py", "class Helper:\n    pass\n")
+
+    mirrored = _mirrored_modules()
+    assert (
+        mirrored[f"{_VLLM_PKG}.vocab_parallel_embedding"]
+        == f"{_HW_PKG}.vocab_parallel_embedding"
+    )
+    assert f"{_HW_PKG}.hw_only_helpers" not in mirrored.values()
+
+    in_tree_registry, hw_agnostic_registry = oot_registries
+    in_tree_registry.pop("VocabParallelEmbedding", None)
+    hw_agnostic_registry.pop("VocabParallelEmbedding", None)
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+
+    with hw_agnostic_layer_names():
+        imported = _vllm_layer("vocab_parallel_embedding", "VocabParallelEmbedding")
+        override = imported.register_oot(name="VocabParallelEmbedding")(
+            type("PluginVocabParallelEmbedding", (imported,), {})
+        )
+
+    hw_cls = _hw_layer("vocab_parallel_embedding", "VocabParallelEmbedding")
+    assert imported is hw_cls
+    assert hw_agnostic_registry["VocabParallelEmbedding"] is override
+    assert "VocabParallelEmbedding" not in in_tree_registry
+    assert type(hw_cls.__new__(hw_cls)) is override
+
+
+def test_subpackage_without_init_is_invisible(extra_hw_layers):
+    """A directory without an `__init__.py` is invisible to discovery."""
+    from vllm.model_executor.hw_agnostic.layers._layer_names import (
+        _mirrored_modules,
+    )
+
+    extra_hw_layers("quantization/fp8.py", "")
+    assert f"{_HW_PKG}.quantization.fp8" not in _mirrored_modules().values()
+
+    extra_hw_layers("quantization/__init__.py", "")
+    assert f"{_HW_PKG}.quantization.fp8" in _mirrored_modules().values()
+
+
+def test_private_modules_are_never_mirrored(extra_hw_layers):
+    """A `_`-prefixed hw-agnostic module stays private even with an in-tree twin."""
+    from vllm.model_executor.hw_agnostic.layers._layer_names import (
+        _mirrored_modules,
+    )
+
+    extra_hw_layers("_helpers.py", "class Helper:\n    pass\n")
+    extra_hw_layers("_helpers.py", "class Helper:\n    pass\n", in_tree=True)
+    assert f"{_HW_PKG}._helpers" not in _mirrored_modules().values()
+
+
+def test_broken_subpackage_fails_discovery(extra_hw_layers):
+    """A subpackage that fails to import raises instead of vanishing.
+
+    `walk_packages` would otherwise swallow the `ImportError` and skip every
+    module under it.
+    """
+    from vllm.model_executor.hw_agnostic.layers._layer_names import (
+        _mirrored_modules,
+    )
+
+    extra_hw_layers("quantization/__init__.py", "raise ImportError('broken port')")
+    extra_hw_layers("quantization/fp8.py", "")
+    with pytest.raises(ImportError, match="broken port"):
+        _mirrored_modules()
+
+
+def test_every_hw_agnostic_directory_is_a_package():
+    """Each directory holding a hw-agnostic module has an `__init__.py`."""
+    root = Path(importlib.import_module(_HW_PKG).__file__).parent
+    dirs = {
+        d
+        for py in root.rglob("*.py")
+        for d in (py.parent, *py.parent.parents)
+        if d.is_relative_to(root)
+    }
+    missing = sorted(
+        str(d.relative_to(root)) for d in dirs if not (d / "__init__.py").is_file()
+    )
+    assert not missing
+
+
+def test_mirrored_names_are_counterparts():
+    """Every hw-agnostic class whose name exists in-tree is that class's port.
+
+    At runtime a mismatch only warns
+    (`test_layer_names_scope_skips_non_counterparts`); here it fails.
+    """
+    from vllm.model_executor.hw_agnostic.layers._layer_names import (
+        _hw_agnostic_classes,
+        _is_counterpart,
+        _mirrored_modules,
+    )
+
+    mismatched = []
+    for vllm_name, hw_name in _mirrored_modules().items():
+        vllm_module = importlib.import_module(vllm_name)
+        hw_module = importlib.import_module(hw_name)
+        for name, hw_cls in _hw_agnostic_classes(hw_module).items():
+            if hasattr(vllm_module, name) and not _is_counterpart(
+                getattr(vllm_module, name), hw_cls, name
+            ):
+                mismatched.append(f"{hw_name}.{name}")
+    assert not mismatched
+
+
+def test_hw_agnostic_classes_reuse_in_tree_names_only_at_the_mirrored_path():
+    """A hw-agnostic class named like an in-tree class lives at its mirrored path.
+
+    Registries key on the bare name, so e.g. a `RotaryEmbedding` in hw-agnostic
+    `layernorm` could not be told apart from the in-tree one in
+    `rotary_embedding`. Reads the in-tree source to avoid importing it all.
+    """
+    from vllm.model_executor.hw_agnostic.layers._layer_names import _hw_agnostic_classes
+
+    vllm_root = Path(importlib.import_module(_VLLM_PKG).__file__).parent
+    defined_in: dict[str, set[str]] = defaultdict(set)
+    for py in vllm_root.rglob("*.py"):
+        rel = py.relative_to(vllm_root).with_suffix("")
+        parts = rel.parts[:-1] if rel.name == "__init__" else rel.parts
+        tree = ast.parse(py.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                defined_in[node.name].add(".".join((_VLLM_PKG, *parts)))
+
+    misplaced = []
+    for hw_name in _hw_module_names():
+        mirror = _VLLM_PKG + hw_name.removeprefix(_HW_PKG)
+        for name in _hw_agnostic_classes(importlib.import_module(hw_name)):
+            homes = defined_in.get(name)
+            if homes and mirror not in homes:
+                misplaced.append(f"{hw_name}.{name} (in-tree: {sorted(homes)})")
+    assert not misplaced
+
+
 @pytest.mark.parametrize("hw_agnostic", ["0", "1"])
 def test_general_plugins_open_the_scope_only_when_enabled(monkeypatch, hw_agnostic):
-    """`load_general_plugins` guards the scope on `VLLM_USE_HW_AGNOSTIC`.
+    """`load_general_plugins` opens the scope only with `VLLM_USE_HW_AGNOSTIC`.
 
-    With it off, the loading path must be what it is upstream: no scope opened,
-    and no hw-agnostic module imported at all.
+    With it off, plugins see the in-tree classes.
     """
     import vllm.plugins as plugins
 
@@ -429,21 +652,19 @@ def test_registration_follows_the_imported_class(
 ):
     """The class a plugin imports decides which registry its override lands in.
 
-    `register_oot` resolves `op_registry_oot` from the globals of the module that
-    *defines* it, so the imported class settles the base class and the
-    destination registry in the same step -- they cannot come apart. That is why
-    rebinding the name is the whole fix rather than half of one: the plugin's
-    unchanged `from vllm.model_executor.layers.<mod> import X` writes into
-    whichever registry the path it is running on reads.
+    `register_oot` writes to the `op_registry_oot` of the module defining the
+    class, so base class and registry always match. Rebinding the name is
+    therefore enough: an unchanged `from vllm.model_executor.layers.<mod> import
+    X` registers where the active path reads.
     """
     from vllm.model_executor.hw_agnostic.layers._layer_names import (
         hw_agnostic_layer_names,
     )
 
-    hw_specific_registry, hw_agnostic_registry = oot_registries
+    in_tree_registry, hw_agnostic_registry = oot_registries
     # A plugin may already own this name in this process (on Spyre, "RMSNorm"
     # resolves to `SpyreRMSNorm`); `register_oot` asserts on a duplicate.
-    hw_specific_registry.pop(name, None)
+    in_tree_registry.pop(name, None)
     hw_agnostic_registry.pop(name, None)
 
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", hw_agnostic)
@@ -457,9 +678,9 @@ def test_registration_follows_the_imported_class(
 
     if hw_agnostic == "1":
         assert hw_agnostic_registry[name] is override
-        assert name not in hw_specific_registry
+        assert name not in in_tree_registry
     else:
-        assert hw_specific_registry[name] is override
+        assert in_tree_registry[name] is override
         assert name not in hw_agnostic_registry
 
 
@@ -470,14 +691,13 @@ def test_plugin_import_pattern_reaches_the_entry_point(
 ):
     """The end-to-end contract, both ways round.
 
-    A plugin does exactly one thing: subclass the name it imported from
-    `vllm.model_executor.layers.<mod>` while `hw_agnostic_layer_names()` is
-    active. This asserts the result is swapped in for the class the modeling code
-    on that path instantiates, with `__init__` reachable -- which is the whole
-    reason the plugin needs no `VLLM_USE_HW_AGNOSTIC`-dependent imports of its
-    own.
+    A plugin subclasses the name it imported from
+    `vllm.model_executor.layers.<mod>` under `hw_agnostic_layer_names()`; the
+    result replaces the class the modeling code instantiates on that path, with
+    `__init__` reachable. So a plugin needs no `VLLM_USE_HW_AGNOSTIC`-dependent
+    imports.
     """
-    from vllm.model_executor.custom_op import op_registry_oot as hw_specific_registry
+    from vllm.model_executor.custom_op import op_registry_oot as in_tree_registry
     from vllm.model_executor.hw_agnostic.custom_op import (
         op_registry_oot as hw_agnostic_registry,
     )
@@ -493,7 +713,7 @@ def test_plugin_import_pattern_reaches_the_entry_point(
 
     # Where `register_oot` on `imported` would have put it; see
     # `test_registration_follows_the_imported_class`.
-    registry = hw_agnostic_registry if hw_agnostic == "1" else hw_specific_registry
+    registry = hw_agnostic_registry if hw_agnostic == "1" else in_tree_registry
     monkeypatch.setitem(registry, name, plugin_cls)
 
     # What the modeling code instantiates on this path.
@@ -508,14 +728,12 @@ def test_plugin_import_pattern_reaches_the_entry_point(
 
 @pytest.mark.parametrize("module,name", _HW_AGNOSTIC_LAYERS)
 def test_override_registered_against_wrong_base_raises(monkeypatch, module, name):
-    """Registered here but derived from the other path's class: `__init__` skipped.
+    """In the hw-agnostic registry but derived from the in-tree class.
 
-    `__new__` matches on the bare name, so it hands the override back regardless
-    of ancestry; `super().__new__` then returns an object that is not an instance
-    of the class that was called, and `type.__call__` quietly skips `__init__`.
-    The first symptom is an unrelated `AttributeError` on `_backward_hooks`, far
-    from the registration that caused it. `__new__` cannot see the mismatch
-    without a check of its own, so the sweep names both classes instead.
+    `__new__` matches on the bare name and returns the override, which is not an
+    instance of the called class, so `type.__call__` skips `__init__`. The first
+    symptom would be an unrelated `AttributeError` on `_backward_hooks`; the
+    validator names both classes instead.
     """
     from vllm.model_executor.hw_agnostic.custom_op import (
         op_registry_oot as hw_agnostic_registry,
@@ -540,18 +758,14 @@ def test_override_registered_against_wrong_base_raises(monkeypatch, module, name
 
 
 @pytest.mark.parametrize("module,name", _HW_AGNOSTIC_LAYERS)
-def test_override_stranded_in_the_hw_specific_registry_raises(
-    monkeypatch, module, name
-):
-    """Registered against the hw-specific class: dropped rather than skipped.
+def test_override_stranded_in_the_in_tree_registry_raises(monkeypatch, module, name):
+    """Registered against the in-tree class: dropped from the hw-agnostic path.
 
-    The quietest of the failures the separate registries allow, and the reason
-    the sweep has to look in both of them. The hw-agnostic `__new__` reads only
-    its own registry, so an override sitting in the other one is never consulted:
-    no mismatch to detect, no `__init__` to skip, just the in-tree layer running
-    as if no plugin had been loaded.
+    The hw-agnostic `__new__` reads only its own registry, so the plain
+    hw-agnostic layer runs as if no plugin were loaded. This is why the
+    validator checks both registries.
     """
-    from vllm.model_executor.custom_op import op_registry_oot as hw_specific_registry
+    from vllm.model_executor.custom_op import op_registry_oot as in_tree_registry
     from vllm.model_executor.hw_agnostic.custom_op import (
         op_registry_oot as hw_agnostic_registry,
     )
@@ -562,10 +776,10 @@ def test_override_stranded_in_the_hw_specific_registry_raises(
     hw_cls = _hw_layer(module, name)
     vllm_cls = _vllm_layer(module, name)
     plugin_cls = type(f"Plugin{name}", (vllm_cls,), {})
-    monkeypatch.setitem(hw_specific_registry, name, plugin_cls)
+    monkeypatch.setitem(in_tree_registry, name, plugin_cls)
     monkeypatch.delitem(hw_agnostic_registry, name, raising=False)
 
-    # Nothing whatsoever happens on the hw-agnostic path.
+    # The hw-agnostic path never sees the override.
     assert type(hw_cls.__new__(hw_cls)) is hw_cls
 
     with pytest.raises(TypeError, match=f"Plugin{name}.*invisible to the hw-agnostic"):
@@ -573,20 +787,18 @@ def test_override_stranded_in_the_hw_specific_registry_raises(
 
 
 def test_correctly_based_override_passes_validation(monkeypatch):
-    """The sweep only rejects the two mismatches, and only for mirrored layers.
+    """The validator rejects only the two mismatches, and only for ported layers.
 
     A layer with no hw-agnostic implementation is instantiated from its in-tree
-    class on both paths, so an override based on that class is right and lives in
-    the hw-specific registry legitimately. It is not a published hw-agnostic
-    name, so the sweep never looks at it -- otherwise the guard would reject the
-    very fallback it exists to allow.
+    class on both paths, so its override legitimately lives in the in-tree
+    registry.
     """
-    from vllm.model_executor.custom_op import op_registry_oot as hw_specific_registry
+    from vllm.model_executor.custom_op import op_registry_oot as in_tree_registry
     from vllm.model_executor.hw_agnostic.custom_op import (
         op_registry_oot as hw_agnostic_registry,
     )
     from vllm.model_executor.hw_agnostic.layers._layer_names import (
-        _MIRRORED_MODULES,
+        _mirrored_modules,
         validate_registered_overrides,
     )
 
@@ -598,22 +810,19 @@ def test_correctly_based_override_passes_validation(monkeypatch):
     )
     # An unported layer, registered against the class both paths instantiate.
     monkeypatch.setitem(
-        hw_specific_registry,
+        in_tree_registry,
         "GeluAndMul",
         type("PluginGeluAndMul", (_vllm_layer("activation", "GeluAndMul"),), {}),
     )
 
-    validate_registered_overrides(_MIRRORED_MODULES)
+    validate_registered_overrides(_mirrored_modules())
 
 
 def test_hw_agnostic_ops_skip_vendor_forwards(monkeypatch):
     """Hw-agnostic dispatch has two branches: portable, or out-of-tree.
 
-    The in-tree `CustomOp` grows a `forward_<vendor>` per platform and picks
-    between them in `dispatch_forward`. The hw-agnostic one defines none, so a
-    hw-agnostic layer cannot inherit a vendor kernel and there is nothing to keep
-    in step as platforms are added -- the property that makes these layers worth
-    having, expressed where a test can hold it.
+    The in-tree `CustomOp` has a `forward_<vendor>` per platform; the hw-agnostic
+    one has none, so a hw-agnostic layer cannot inherit a vendor kernel.
     """
     from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
     from vllm.model_executor.custom_op import CustomOp as VllmCustomOp
@@ -642,8 +851,8 @@ def test_hw_agnostic_ops_skip_vendor_forwards(monkeypatch):
     monkeypatch.setitem(hw_agnostic_registry, "RMSNorm", HwRMSNorm)
     config = VllmConfig(compilation_config=CompilationConfig(custom_ops=["all"]))
     with set_current_vllm_config(config):
-        # `dispatch_forward` consults exactly one predicate, so pinning it pins
-        # the whole choice -- on the host as much as on an out-of-tree platform.
+        # `dispatch_forward` consults only `is_out_of_tree`, so pinning it pins
+        # the choice on any host.
         monkeypatch.setattr(current_platform, "is_out_of_tree", lambda: False)
         assert HwRMSNorm(8)._forward_method.__name__ == "forward_native"
         monkeypatch.setattr(current_platform, "is_out_of_tree", lambda: True)
