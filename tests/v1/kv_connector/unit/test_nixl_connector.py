@@ -3047,6 +3047,32 @@ class TestPeerReplacement:
             call.release_dlist_handle(old_handle)
         )
 
+    def test_repeated_invalidation_backs_off_before_rehandshake(self):
+        # A peer that is invalidated again soon after recovery (eg a persistent
+        # RDMA fault) must not re-handshake on every request.
+        self._fail_old_peer()
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+        self._connect("old")
+        self._fail_old_peer()
+        assert self.worker.get_transfer_results().failed_recving == {"old-req"}
+        assert "old" in self.worker._remote_agents
+
+        self.transport.make_prepped_xfer.reset_mock()
+        self.worker.start_load_kv(self._request("old", req_id="next"))
+        assert self.worker.get_transfer_results().failed_recving == {"next"}
+        self.transport.make_prepped_xfer.assert_not_called()
+        assert "old" not in self.worker._handshake_futures
+        self.transport.remove_remote_agent.assert_called_once()
+
+        backoff, release_at = self.worker._invalid_engine_backoff["old"]
+        assert backoff == 1.0
+        self.worker._invalid_engine_backoff["old"] = (backoff, release_at - backoff)
+        self.worker.get_transfer_results()
+        assert self.transport.remove_remote_agent.call_count == 2
+        assert "old" not in self.worker._remote_agents
+
     def test_recovery_waits_until_failed_handle_can_be_released(self):
         self._fail_old_peer()
         with patch.object(
