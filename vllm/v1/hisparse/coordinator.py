@@ -175,15 +175,11 @@ class HiSparseCoordinator:
         self.pending_spills: dict[int, _PendingSpill] = {}
         self.request_states: dict[str, _HiSparseRequestState] = {}
         self.next_spill_id = 0
-        # Workers write a step's draft rows and page spills at the next step's
-        # start, after the scheduler may already have freed the destination
-        # host blocks. Freed host blocks wait for the latest scheduled step's
-        # deferred writes before returning to the pool, so no other writer
-        # (e.g. a P/D import) can receive them first.
+        # Freed host blocks wait for the step's deferred host writes to land.
         self._latest_step_id: int | None = None
         # Step id -> [expected, completed] worker reports.
         self._pending_step_writes: dict[int, list[int]] = {}
-        self._held_host_blocks: list[tuple[int, list[KVCacheBlock]]] = []
+        self._held_host_blocks: dict[int, list[list[KVCacheBlock]]] = {}
         # Published host block hash -> GPU copies of that page, readable until
         # the pool reuses them. Lets a host prefix hit come back GPU-resident.
         self.copies: dict[BlockHashWithGroupId, tuple[KVCacheBlock, ...]] = {}
@@ -254,14 +250,12 @@ class HiSparseCoordinator:
         return step_id
 
     def _hold_host_blocks(self, request_id: str) -> None:
-        """Keep a freed request's host blocks until the latest step's deferred
-        writes land; the host manager then has none left to free."""
         if self._latest_step_id is None:
             return
         assert self.host_manager is not None
         blocks = self.host_manager.req_to_blocks.pop(request_id, None)
         if blocks:
-            self._held_host_blocks.append((self._latest_step_id, blocks))
+            self._held_host_blocks.setdefault(self._latest_step_id, []).append(blocks)
 
     def _update_step_writes(
         self,
@@ -274,29 +268,16 @@ class HiSparseCoordinator:
                 counts[0] = enqueued_counts.get(step_id, 0)
             counts[1] += completed_counts.get(step_id, 0)
             if counts[0] and counts[1] >= counts[0]:
-                done_step_id = (
-                    step_id if done_step_id is None else max(done_step_id, step_id)
-                )
+                done_step_id = step_id
         if done_step_id is None:
             return
-        # Each worker writes steps in order on one stream, so a finished step
-        # implies every earlier one has landed too.
-        self._pending_step_writes = {
-            step_id: counts
-            for step_id, counts in self._pending_step_writes.items()
-            if step_id > done_step_id
-        }
-        released = [
-            blocks
-            for step_id, blocks in self._held_host_blocks
-            if step_id <= done_step_id
-        ]
-        self._held_host_blocks = [
-            entry for entry in self._held_host_blocks if entry[0] > done_step_id
-        ]
+        # Workers write steps in order on one stream, so earlier steps landed too.
+        for step_id in [s for s in self._pending_step_writes if s <= done_step_id]:
+            del self._pending_step_writes[step_id]
         assert self.host_manager is not None
-        for blocks in released:
-            self.host_manager.block_pool.free_blocks(reversed(blocks))
+        for step_id in [s for s in self._held_host_blocks if s <= done_step_id]:
+            for blocks in self._held_host_blocks.pop(step_id):
+                self.host_manager.block_pool.free_blocks(reversed(blocks))
 
     def get_host_block_pool(self) -> BlockPool | None:
         manager = self.host_manager
