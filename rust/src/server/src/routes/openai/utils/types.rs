@@ -7,7 +7,7 @@ use std::slice;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use vllm_llm::TokenUsage;
+use vllm_chat::ChatTokenUsage;
 
 // ============================================================================
 // Constants
@@ -36,6 +36,36 @@ where
         Some(value) => vllm_text::normalize_top_k(value)
             .map(|value| Some(value.unwrap_or(0)))
             .map_err(serde::de::Error::custom),
+    }
+}
+
+/// Effort level for reasoning models.
+///
+/// Fixed OpenAI HTTP request grades. Request conversion maps these names to
+/// the model-independent `vllm_chat::EffortValue` before renderer validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
     }
 }
 
@@ -201,6 +231,29 @@ pub struct InputAudio {
 // Streaming
 // ============================================================================
 
+#[derive(Debug, Serialize)]
+pub(crate) struct StreamResponseEnvelope {
+    id: String,
+    object: &'static str,
+    created: u64,
+    model: String,
+}
+
+impl StreamResponseEnvelope {
+    pub(crate) fn new(id: String, object: &'static str, created: u64, model: String) -> Self {
+        Self {
+            id,
+            object,
+            created,
+            model,
+        }
+    }
+
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+}
+
 /// Mirrors the Python vLLM `StreamOptions` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StreamOptions {
@@ -357,9 +410,17 @@ impl ToolReference {
 // Chat Messages
 // ============================================================================
 
+/// One chat message, tagged by `role`.
+///
+/// The derived serde impls use `remote = "Self"` and cover only the standard
+/// roles; the trait impls below dispatch on the role tag and handle
+/// [`ChatMessage::Custom`] separately. A `#[serde(untagged)]` fallback variant
+/// would also accept malformed standard messages, such as a `tool` message
+/// without `tool_call_id`, and replace their field errors with serde's generic
+/// untagged-enum error.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "role")]
+#[serde(tag = "role", remote = "Self")]
 pub enum ChatMessage {
     #[serde(rename = "system")]
     System {
@@ -394,6 +455,67 @@ pub enum ChatMessage {
         tools: Option<Vec<Tool>>,
         name: Option<String>,
     },
+    /// Message with a role outside the OpenAI set, such as `root`. Chat
+    /// templates receive the role string unchanged.
+    #[serde(skip)]
+    Custom {
+        role: String,
+        content: MessageContent,
+    },
+}
+
+/// Role tags of the standard [`ChatMessage`] variants.
+const STANDARD_CHAT_ROLES: &[&str] = &[
+    "system",
+    "user",
+    "assistant",
+    "tool",
+    "function",
+    "developer",
+];
+
+/// Wire shape of [`ChatMessage::Custom`].
+#[derive(Deserialize, Serialize)]
+struct CustomChatMessage<R, C> {
+    role: R,
+    content: C,
+}
+
+impl Serialize for ChatMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Custom { role, content } => {
+                CustomChatMessage { role, content }.serialize(serializer)
+            }
+            _ => Self::serialize(self, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatMessage {
+    /// Dispatch on the role tag: standard roles keep their derived errors,
+    /// and any other string role becomes [`ChatMessage::Custom`].
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let is_custom = value
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| !STANDARD_CHAT_ROLES.contains(&role));
+
+        if is_custom {
+            let CustomChatMessage { role, content } =
+                CustomChatMessage::deserialize(value).map_err(serde::de::Error::custom)?;
+            Ok(Self::Custom { role, content })
+        } else {
+            Self::deserialize(value).map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -417,14 +539,18 @@ pub struct Usage {
     pub total_tokens: usize,
     pub completion_tokens: Option<usize>,
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
+    /// Reasoning-token breakdown.
+    /// Always present, 0 when the configured parser has no reasoning channel.
+    pub completion_tokens_details: CompletionTokenUsageInfo,
 }
 
 impl Usage {
-    /// Create a Usage with prompt-token cache details.
+    /// Create a Usage with prompt-token cache and reasoning-token details.
     pub fn from_counts(
         prompt_tokens: usize,
         completion_tokens: usize,
         cached_tokens: Option<usize>,
+        reasoning_tokens: usize,
     ) -> Self {
         Self {
             prompt_tokens,
@@ -433,14 +559,20 @@ impl Usage {
             prompt_tokens_details: cached_tokens
                 .filter(|&c| c > 0)
                 .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
+            completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
         }
     }
 
-    pub fn from_token_usage(usage: TokenUsage, enable_prompt_tokens_details: bool) -> Self {
+    pub fn from_token_usage(
+        usage: impl Into<ChatTokenUsage>,
+        enable_prompt_tokens_details: bool,
+    ) -> Self {
+        let usage = usage.into();
         Self::from_counts(
             usage.prompt_token_count,
             usage.output_token_count,
             enable_prompt_tokens_details.then_some(usage.cached_token_count),
+            usage.reasoning_tokens,
         )
     }
 }
@@ -451,8 +583,15 @@ pub struct PromptTokenUsageInfo {
     pub cached_tokens: usize,
 }
 
+/// Mirrors the Python vLLM `CompletionTokenUsageInfo` class.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CompletionTokenUsageInfo {
+    pub reasoning_tokens: usize,
+}
+
 #[cfg(test)]
 mod usage_tests {
+    use vllm_chat::ChatTokenUsage;
     use vllm_llm::TokenUsage;
 
     use super::Usage;
@@ -488,6 +627,59 @@ mod usage_tests {
             usage.prompt_tokens_details.as_ref().map(|details| details.cached_tokens),
             Some(3)
         );
+    }
+
+    #[test]
+    fn token_usage_includes_reasoning_token_details() {
+        let usage = Usage::from_token_usage(
+            ChatTokenUsage {
+                engine: TokenUsage {
+                    prompt_token_count: 5,
+                    output_token_count: 4,
+                    cached_token_count: 0,
+                },
+                reasoning_tokens: 3,
+            },
+            false,
+        );
+
+        assert_eq!(usage.completion_tokens_details.reasoning_tokens, 3);
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 3);
+    }
+
+    #[test]
+    fn token_usage_serializes_zero_reasoning_tokens() {
+        let usage = Usage::from_token_usage(
+            ChatTokenUsage {
+                engine: TokenUsage {
+                    prompt_token_count: 5,
+                    output_token_count: 0,
+                    cached_token_count: 0,
+                },
+                reasoning_tokens: 0,
+            },
+            false,
+        );
+
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
+    }
+
+    #[test]
+    fn token_usage_reports_zero_reasoning_tokens_without_reasoning_parser() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 5,
+                output_token_count: 2,
+                cached_token_count: 0,
+            },
+            false,
+        );
+
+        assert_eq!(usage.completion_tokens_details.reasoning_tokens, 0);
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
     }
 }
 

@@ -3,6 +3,7 @@
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -58,7 +59,7 @@ def moe_fused_mul_sum_kernel(
             weights += (tl.load(w_row + n).to(tl.float32),)  # type: ignore[assignment]
 
     n_tiles: tl.constexpr = (hidden_size + BLOCK_K - 1) // BLOCK_K
-    a_row = inputs_ptr + pid_m * stride_m
+    a_row = inputs_ptr + pid_m.to(tl.int64) * stride_m
     out_row = outputs_ptr + pid_m * hidden_size
 
     for t in tl.range(0, n_tiles):
@@ -75,11 +76,18 @@ def moe_fused_mul_sum_kernel(
 def _heuristic_config(
     hidden_size: int,
     element_size: int,
+    device_index: int = 0,
 ):
     is_fp32 = element_size > 2
     max_block_k = 256 if is_fp32 else 512
-    BLOCK_K = max(128, min(triton.next_power_of_2(hidden_size), max_block_k))
     num_warps = 4 if is_fp32 else 2
+    if not is_fp32 and hidden_size >= 1024 and current_platform.is_cuda():
+        capability = current_platform.get_device_capability(device_index)
+        if capability is not None and capability >= (7, 5):
+            # Larger tiles reduce the serial hidden-dimension loop.
+            max_block_k = 4096
+            num_warps = 8 if capability == (7, 5) else 16
+    BLOCK_K = max(128, min(triton.next_power_of_2(hidden_size), max_block_k))
     num_stages = 3
     return BLOCK_K, num_warps, num_stages
 
@@ -92,8 +100,7 @@ def moe_fused_mul_sum(
     expert_map: torch.Tensor | None = None,
     num_valid_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """
-    Fused kernel for MoE (Mixture of Experts) to perform weighted summation
+    """Fused kernel for MoE (Mixture of Experts) to perform weighted summation
     of expert outputs.
 
     Args:
@@ -122,6 +129,7 @@ def moe_fused_mul_sum(
     Returns:
         The fused weighted sum of expert outputs.
         Shape: (num_tokens, hidden_size).
+
     """
     assert inputs.ndim == 3
     assert topk_weights.ndim == 2
@@ -149,6 +157,7 @@ def moe_fused_mul_sum(
         BLOCK_K, num_warps, num_stages = _heuristic_config(
             hidden_size,
             inputs.element_size(),
+            inputs.device.index or 0,
         )
         grid = (num_tokens,)
         moe_fused_mul_sum_kernel[grid](

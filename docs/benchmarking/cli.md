@@ -147,7 +147,7 @@ With standard decoding, each streamed output usually contains one token, so ITL
 and TPOT are typically similar.
 
 With speculative decoding, one streamed output can contain multiple tokens,
-such as several accepted draft tokens within a single engine tstep. ITL records
+such as several accepted draft tokens within a single engine step. ITL records
 only the gaps between streamed outputs; it does not add zero-duration gaps for
 tokens in the same output. TPOT instead amortizes the request's decoding time
 over every output token.
@@ -451,7 +451,7 @@ vllm bench serve \
     --num-prompts -1
 ```
 
-Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructued data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
+Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructured data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
 
 #### BFCL (Tool-Calling) Benchmark
 
@@ -596,6 +596,46 @@ vllm bench serve \
     --max-concurrency 512
 ```
 
+#### Responses API Benchmark
+
+The `openai-responses` backend benchmarks vLLM's
+[Responses API](../serving/online_serving/openai_compatible_server.md#responses-api)
+directly, instead of routing the same workload through `/v1/chat/completions`.
+
+```bash
+# Server
+vllm serve openai/gpt-oss-20b
+
+# Client
+vllm bench serve \
+    --backend openai-responses \
+    --endpoint /v1/responses \
+    --model openai/gpt-oss-20b \
+    --dataset-name random \
+    --random-input-len 1024 \
+    --random-output-len 1024 \
+    --num-prompts 200
+```
+
+Reasoning deltas (`response.reasoning_text.delta`) count towards TTFT and ITL,
+because the server is already decoding tokens when it emits them. Only output
+text (`response.output_text.delta`) is collected as the generated text, which
+matches how the `openai-chat` backend treats `DeltaMessage.reasoning`. End-to-end
+latency stops at the last token event, so `latency - ttft` equals `sum(itl)` and
+TPOT is comparable with the other endpoints. The input and output token counts
+come from the usage block on `response.completed`, which is still required: a
+stream that ends without a terminal event is reported as a failed request.
+
+The backend measures one streamed text-generation request per prompt. Built-in
+tools, MCP, and multi-turn state via `previous_response_id` are out of scope.
+All sampling parameter flags are supported except `--min-p`, which the
+Responses API does not accept.
+
+!!! warning
+    Do not pass `--extra-body '{"include_reasoning": false}'` when benchmarking
+    a reasoning model. The server still generates reasoning tokens but emits no
+    events for them, so the whole reasoning phase is absorbed into TTFT.
+
 #### Running With Sampling Parameters
 
 When using OpenAI-compatible backends such as `vllm`, optional sampling
@@ -664,7 +704,7 @@ vLLM's benchmark serving script provides sophisticated load pattern simulation c
 
 - `--request-rate`: Controls the target request generation rate (requests per second). Set to `inf` for maximum throughput testing or finite values for controlled load simulation.
 - `--burstiness`: Controls traffic variability using a Gamma distribution (range: > 0). Lower values create bursty traffic, higher values create uniform traffic.
-- `--max-concurrency`: Limits concurrent outstanding requests. If this argument is not provided, concurrency is unlimited. Set a value to simulate backpressure.
+- `--max-concurrency`: Limits concurrent outstanding requests. If this argument is not provided, concurrency is unlimited. Set a value to simulate backpressure. When set, include `client_queue_time` in `--percentile-metrics` to report time spent waiting for the benchmark client's concurrency limit. With a finite `--request-rate`, `e2el_including_client_queue` reports schedule-relative end-to-end latency; it is omitted for `--request-rate=inf`, where all requests arrive at benchmark start.
 
 These parameters work together to create realistic load patterns with carefully chosen defaults. The `--request-rate` parameter defaults to `inf` (infinite), which sends all requests immediately for maximum throughput testing. When set to finite values, it uses either a Poisson process (default `--burstiness=1.0`) or Gamma distribution for realistic request timing. The `--burstiness` parameter only takes effect when `--request-rate` is not infinite - a value of 1.0 creates natural Poisson traffic, while lower values (0.1-0.5) create bursty patterns and higher values (2.0-5.0) create uniform spacing. The `--max-concurrency` parameter defaults to `None` (unlimited) but can be set to simulate real-world constraints where a load balancer or API gateway limits concurrent connections. When combined, these parameters allow you to simulate everything from unrestricted stress testing (`--request-rate=inf`) to production-like scenarios with realistic arrival patterns and resource constraints.
 
