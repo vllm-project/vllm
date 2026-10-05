@@ -585,11 +585,18 @@ class ServerRole:
         round supply via ``add_stored_blocks``.
 
         Caller has already confirmed every key is HIT (single-threaded
-        scheduler ⇒ no eviction race), so the JobMetadata returned by
-        ``parent.create_store_job`` carries parallel ``keys``/``block_ids``
-        of length ``len(keys)``.
+        scheduler ⇒ no eviction race), so a non-None ``TransferJob``
+        returned by ``parent.create_store_job`` carries parallel
+        ``keys``/``block_ids`` of length ``len(keys)``. If the admission
+        policy rejected the pin (None), the keys are reported back as
+        MISS so the requester falls back to recomputation instead of
+        waiting on blocks that will never arrive.
         """
         meta = parent.create_store_job(keys, lookup.ctx)
+        if meta is None:
+            for h in keys:
+                lookup.resolved[h] = False
+            return
         self.add_stored_blocks(
             lookup.kv_request_id,
             list(meta.keys),
