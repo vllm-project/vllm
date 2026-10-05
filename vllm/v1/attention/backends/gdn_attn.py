@@ -458,6 +458,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_query_start_loc_cpu,
                 query_start_loc.device,
             )
+            if self.gdn_prefill_backend == "flashinfer":
+                # Reuse FlashInfer's int64 lengths across all layers in this batch.
+                assert prefill_query_start_loc is not None
+                prefill_query_start_loc = prefill_query_start_loc.to(torch.int64)
 
         if num_prefills > 0:
             context_lens_tensor = m.compute_num_computed_tokens()

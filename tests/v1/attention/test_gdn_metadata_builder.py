@@ -200,9 +200,11 @@ def _build(
 @pytest.mark.parametrize(
     "test_case", GDN_BUILD_TEST_CASES.values(), ids=GDN_BUILD_TEST_CASES.keys()
 )
-def test_gdn_build_classification(test_case: GDNBuildTestCase):
+@pytest.mark.parametrize("prefill_backend", ["triton", "flashinfer"])
+def test_gdn_build_classification(test_case: GDNBuildTestCase, prefill_backend: str):
     """Test that GDN metadata builder classifies requests correctly."""
     builder = _create_gdn_builder(test_case.num_speculative_tokens)
+    builder.gdn_prefill_backend = prefill_backend
     batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
     meta = _build(builder, batch, test_case.num_decode_draft_tokens)
 
@@ -212,6 +214,16 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
     assert meta.num_spec_decodes == test_case.expected_num_spec_decodes
     if meta.spec_state_indices_tensor is not None:
         assert len(meta.spec_state_indices_tensor) == meta.num_spec_decodes
+    if meta.num_prefills == 0:
+        assert meta.prefill_query_start_loc is None
+    else:
+        assert meta.non_spec_query_start_loc is not None
+        assert meta.non_spec_query_start_loc.dtype == torch.int32
+        expected = meta.non_spec_query_start_loc
+        if meta.spec_sequence_masks is None and meta.num_decodes > 0:
+            expected = expected[meta.num_decodes :] - meta.num_decode_tokens
+        dtype = torch.int64 if prefill_backend == "flashinfer" else torch.int32
+        torch.testing.assert_close(meta.prefill_query_start_loc, expected.to(dtype))
 
 
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
