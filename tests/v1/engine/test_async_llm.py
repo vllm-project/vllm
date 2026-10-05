@@ -33,6 +33,7 @@ from vllm.v1.metrics.loggers import (
     PerEngineStatLoggerAdapter,
     PrometheusStatLogger,
 )
+from vllm.v1.metrics.reader import get_metrics_snapshot
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
@@ -402,6 +403,15 @@ async def test_finished_flag(
         assert outputs[-1].finished
 
 
+def _num_finished_requests(finished_reason: str) -> int:
+    return sum(
+        metric.value
+        for metric in get_metrics_snapshot()
+        if metric.name == "vllm:request_success"
+        and metric.labels["finished_reason"] == finished_reason
+    )
+
+
 @pytest.mark.parametrize(
     "engine_args,prompt",
     [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
@@ -419,6 +429,7 @@ async def test_mid_stream_cancellation(
         NUM_REQUESTS = 100
         NUM_TOKENS = 1000
         NUM_EXPECTED_TOKENS = 20
+        num_aborted_before = _num_finished_requests("abort")
 
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
 
@@ -451,6 +462,10 @@ async def test_mid_stream_cancellation(
 
         # Make sure no requests are left hanging
         assert not engine.output_processor.has_unfinished_requests()
+
+        # EngineCore sends no output for client aborts, so they must be
+        # recorded by the abort itself to show up in the metrics.
+        assert _num_finished_requests("abort") - num_aborted_before == NUM_REQUESTS
 
         # Confirm we can reuse the request id after the cancellations.
         request_id = request_ids[0]

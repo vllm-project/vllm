@@ -57,7 +57,7 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 - `vllm:kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
 - `vllm:request_prompt_tokens` - Request prompt length.
 - `vllm:request_generation_tokens` - Request generation length.
-- `vllm:request_success` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached.
+- `vllm:request_success` - Number of finished requests by their finish reason: `stop`, `length`, `repetition`, `abort` (client disconnects and server-side aborts) or `error`.
 - `vllm:request_queue_time_seconds` - Queue time.
 - `vllm:request_prefill_time_seconds` - Requests prefill time.
 - `vllm:request_decode_time_seconds` - Requests decode time.
@@ -343,7 +343,7 @@ vllm:num_requests_running{model_name="meta-llama/Llama-3.1-8B-Instruct"} 8.0
 # TYPE vllm:generation_tokens_total counter
 vllm:generation_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct"} 27453.0
 ...
-# HELP vllm:request_success_total Count of successfully processed requests.
+# HELP vllm:request_success_total Count of finished requests, by finish reason.
 # TYPE vllm:request_success_total counter
 vllm:request_success_total{finished_reason="stop",model_name="meta-llama/Llama-3.1-8B-Instruct"} 1.0
 vllm:request_success_total{finished_reason="length",model_name="meta-llama/Llama-3.1-8B-Instruct"} 131.0

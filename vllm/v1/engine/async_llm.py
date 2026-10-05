@@ -894,7 +894,27 @@ class AsyncLLM(EngineClient):
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
+        logger_manager = self.logger_manager
+        aborted_stats: dict[int, IterationStats] = {}
+
+        def get_iteration_stats(internal_request_id: str) -> IterationStats:
+            engine_idx = self.engine_core.get_engine_index(internal_request_id)
+            if engine_idx not in aborted_stats:
+                aborted_stats[engine_idx] = IterationStats()
+            return aborted_stats[engine_idx]
+
+        all_request_ids = self.output_processor.abort_requests(
+            request_ids,
+            internal,
+            get_iteration_stats if logger_manager is not None else None,
+        )
+        if logger_manager is not None:
+            for engine_idx, iteration_stats in aborted_stats.items():
+                logger_manager.record(
+                    scheduler_stats=None,
+                    iteration_stats=iteration_stats,
+                    engine_idx=engine_idx,
+                )
         await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:

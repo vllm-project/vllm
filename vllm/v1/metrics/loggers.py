@@ -764,7 +764,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_request_success: dict[FinishReason, dict[int, Counter]] = {}
         counter_request_success_base = self._counter_cls(
             name="vllm:request_success",
-            documentation="Count of successfully processed requests.",
+            documentation="Count of finished requests, by finish reason.",
             labelnames=labelnames + ["finished_reason"],
         )
         for reason in FinishReason:
@@ -1189,10 +1189,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens
         )
-        self.histogram_iteration_tokens[engine_idx].observe(
-            iteration_stats.prompt_token_stats.computed
-            + iteration_stats.num_generation_tokens
-        )
+        # Stats recorded without scheduler stats (e.g. frontend aborts) are
+        # not an engine iteration.
+        if scheduler_stats is not None:
+            self.histogram_iteration_tokens[engine_idx].observe(
+                iteration_stats.prompt_token_stats.computed
+                + iteration_stats.num_generation_tokens
+            )
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:
             self.histogram_max_num_generation_tokens_request[engine_idx].observe(
