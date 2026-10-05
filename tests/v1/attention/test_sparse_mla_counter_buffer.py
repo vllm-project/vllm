@@ -274,6 +274,38 @@ def test_get_multi_ctas_kv_counter_buffer_device_change_realloc():
     assert b2.device.type == "cuda"
 
 
+def test_counter_nope_mla_lens_coexists_with_buffer(monkeypatch):
+    """nope-MLA (qk_rope_head_dim=0) must forward sparse_mla_top_k_lens AND
+    the persistent multi-CTA-KV counter buffer in the SAME kernel call.
+
+    Regression guard: the counter wiring originally re-initialised ``extra_kwargs``
+    after the nope-MLA lens was staged, silently dropping
+    ``sparse_mla_top_k_lens`` from the kernel invocation. Both kwargs must reach
+    the kernel together.
+    """
+    import vllm.v1.attention.backends.mla.flashinfer_mla_sparse as fi_sparse
+
+    captured = {}
+
+    def fake_kernel(**kwargs):
+        captured.update(kwargs)
+        return torch.zeros(4, 1296, 914, dtype=torch.float16)
+
+    _install_counter_mocks(monkeypatch, fake_kernel)
+
+    impl = _make_counter_impl(is_nope_mla=True)
+    metadata = _make_counter_metadata()
+    bound = MethodType(fi_sparse.FlashInferMLASparseImpl._run_mqa_kernel, impl)
+    q = torch.zeros(4, 960, 930, dtype=torch.float16)
+    kv_cache = torch.zeros(4, 64, 938, dtype=torch.float16)
+    seq_lens = torch.ones(q.shape[0], dtype=torch.int32)
+    out, lse = bound(q, kv_cache, impl.topk_indices_buffer, seq_lens)
+    assert "multi_ctas_kv_counter_buffer" in captured
+    assert "sparse_mla_top_k_lens" in captured
+    assert captured["sparse_mla_top_k_lens"].shape == (4,)
+    assert captured["sparse_mla_top_k_lens"].equal(seq_lens)
+
+
 def test_counter_eligible_path_passes_buffer(monkeypatch):
     captured, _, _ = _run_counter_forward(monkeypatch, {}, {})
     buf = captured["multi_ctas_kv_counter_buffer"]

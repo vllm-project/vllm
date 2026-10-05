@@ -826,7 +826,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         heads_tileable = _trtllm_gen_mla_decode_supports_num_heads(
             runtime_num_heads
         )
-        extra_kwargs = {}
         if (
             self._persistent_mla_counter_enabled
             and _FI_HAS_MULTI_CTAS_COUNTER_API
