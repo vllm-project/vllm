@@ -21,6 +21,20 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct --port 8000
 python tests/evals/gsm8k/gsm8k_eval.py --port 8000
 ```
 
+For chat-only models, send the prompts through `/v1/chat/completions`.
+`--model` must match the served model name:
+
+```bash
+python tests/evals/gsm8k/gsm8k_eval.py --port 8000 \
+    --use-chat-completions --model Qwen/Qwen2.5-1.5B-Instruct --max-tokens 1024 \
+    --chat-template-kwargs '{"enable_thinking": false}'
+```
+
+`--reasoning-effort`, `--temperature`, `--top-p`, and `--top-k` set the
+matching request fields. With a reasoning parser, only the final answer
+`content` is scored. Stop strings also apply to reasoning text, so pass `--stop`
+with no values to disable them when thinking is on.
+
 ## Configuration Format
 
 Model configs in `configs/` directory use this YAML format:
