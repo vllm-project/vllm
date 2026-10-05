@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from math import gcd
 
 import nixl_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -19,6 +21,11 @@ from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
     dbo_maybe_run_recv_hook,
+    dbo_num_ubatches,
+    dbo_switch_to_comm,
+    dbo_switch_to_compute,
+    dbo_yield_and_switch_from_comm_to_compute,
+    dbo_yield_and_switch_from_compute_to_comm,
 )
 
 logger = init_logger(__name__)
@@ -78,6 +85,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         global_to_physical: torch.Tensor | None = None,
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
+        num_ubatches: int = 1,
     ):
         super().__init__()
 
@@ -87,7 +95,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
-        self.handles: list[tuple | None] = [None, None]
+        self.handles: list[tuple | None] = [None] * num_ubatches
         self.num_dispatchers_ = num_dispatchers
         self.expert_capacity = expert_capacity
 
@@ -136,6 +144,28 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def max_num_tokens_per_rank(self) -> int | None:
         return self.max_tokens_per_rank
+
+    def _get_runtime_dispatch_capacity(self) -> int:
+        """Use the synchronized execution slice, retaining the reservation limit."""
+        if not is_forward_context_available():
+            return self.max_tokens_per_rank
+        dp_metadata = get_forward_context().dp_metadata
+        if dp_metadata is None:
+            return self.max_tokens_per_rank
+        # The MoE runner supplies EP-local sizes when sequence parallelism is
+        # active. Both sources are CPU metadata, including during graph capture.
+        if dp_metadata.local_sizes is not None:
+            capacity = max(dp_metadata.local_sizes)
+        else:
+            capacity = int(dp_metadata.num_tokens_across_dp_cpu.max())
+        capacity = max(1, capacity)
+        # The NIXL TMA receive extent is capacity * num_dispatchers and must
+        # be divisible by four. This only changes undersized warmup shapes;
+        # normal aligned execution buckets (for example 64/128) are unchanged.
+        alignment = 4 // gcd(self.num_dispatchers_, 4)
+        capacity = (capacity + alignment - 1) // alignment * alignment
+        assert capacity <= self.max_tokens_per_rank
+        return capacity
 
     def topk_indices_dtype(self) -> torch.dtype | None:
         return NIXL_EP_TOPK_INDICES_DTYPE
@@ -205,7 +235,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
-    ) -> tuple[Callable, mk.ReceiverType]:
+    ) -> tuple[Callable, mk.ReceiverType] | mk.ReceiverType:
         if defer_input_quant:
             raise NotImplementedError(
                 f"{self.__class__.__name__} does not support defer_input_quant=True. "
@@ -247,31 +277,77 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
+        runtime_dispatch_capacity = self._get_runtime_dispatch_capacity()
+        assert a1.size(0) <= runtime_dispatch_capacity
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
+        dbo_yield_and_switch_from_compute_to_comm()
         expert_x, expert_num_tokens, handle, _, hook = self.buffer.dispatch(
             a1,
             dispatch_topk_ids,
-            self.max_tokens_per_rank,
+            runtime_dispatch_capacity,
             self.expert_capacity,
             use_fp8=self.use_fp8_dispatch,
             # round_scale needs to be set to dispatch in ue8m0
             round_scale=self.use_ue8m0_dispatch,
             use_ue8m0=self.use_ue8m0_dispatch,
             async_finish=False,
-            return_recv_hook=True,
+            # DBO already provides a separate stream for the full send/recv.
+            return_recv_hook=not dbo_enabled(),
         )
+        if dbo_num_ubatches() > 2:
+            # NIXL reuses two receive buffers. Save their contents in the recv
+            # hook, before the next microbatch dispatch can overwrite them.
+            copies: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+            def snapshot(src: torch.Tensor) -> torch.Tensor:
+                dst = torch.empty_like(src)
+                copies.append((dst, src))
+                return dst
+
+            expert_x = (
+                tuple(snapshot(x) for x in expert_x)
+                if isinstance(expert_x, tuple)
+                else snapshot(expert_x)
+            )
+            expert_num_tokens = snapshot(expert_num_tokens)
+            handle = tuple(
+                snapshot(value) if isinstance(value, torch.Tensor) else value
+                for value in handle
+            )
+            recv_hook = hook
+
+            def snapshot_recv_hook():
+                if recv_hook is not None:
+                    recv_hook()
+                for dst, src in copies:
+                    dst.copy_(src)
+
+            hook = snapshot_recv_hook
         self.handles[a2a_idx] = handle
 
-        return (
-            hook,
-            lambda: self._receiver(
+        def receiver():
+            return self._receiver(
                 expert_x,
                 expert_num_tokens,
                 quant_config.a1_scale,
                 a1.dtype,
                 quant_config,
-            ),
-        )
+            )
+
+        if dbo_enabled():
+            dbo_switch_to_compute()
+
+            def receive_on_comm():
+                dbo_switch_to_comm()
+                if hook is not None:
+                    hook()
+                dbo_yield_and_switch_from_comm_to_compute()
+                return receiver()
+
+            # Snapshot copies precede the comm-done event. Keep the generic
+            # MoE handoff from adding a second receive on the compute stream.
+            return receive_on_comm
+        return hook, receiver
 
     def _receiver(
         self,
@@ -305,7 +381,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"{self.__class__.__name__} does not support defer_input_quant=True. "
                 "Please select an MoE kernel that accepts quantized inputs."
             )
-        hook, receiver = self.prepare_async(
+        result = self.prepare_async(
             a1,
             topk_weights,
             topk_ids,
@@ -314,8 +390,11 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             apply_router_weight_on_input,
             quant_config,
         )
-        hook()
-        return receiver()
+        if isinstance(result, tuple):
+            hook, receiver = result
+            hook()
+            return receiver()
+        return result()
 
     def _finalize(
         self,
@@ -326,13 +405,13 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
         do_async: bool,
-    ) -> tuple[Callable, Callable]:
+    ) -> tuple[Callable, Callable] | Callable:
         assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate), (
             "Weight application and reduction happens in the combine kernel."
         )
 
         a2a_idx = dbo_current_ubatch_id()
-        do_recv_hook = dbo_enabled() or do_async
+        do_recv_hook = do_async and not dbo_enabled()
         handle = self.handles[a2a_idx]
         assert handle is not None
 
@@ -344,6 +423,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
+        dbo_yield_and_switch_from_compute_to_comm()
         _, _, recv_hook = self.buffer.combine(
             fused_expert_output,
             combine_topk_ids,
@@ -355,6 +435,14 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             out=output,
         )
 
+        if dbo_enabled():
+            dbo_switch_to_compute()
+
+            def receive_on_comm():
+                dbo_switch_to_comm()
+                dbo_yield_and_switch_from_comm_to_compute()
+
+            return receive_on_comm
         return recv_hook, lambda: None
 
     def finalize_async(
@@ -365,7 +453,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> tuple[Callable, Callable]:
+    ) -> tuple[Callable, Callable] | Callable:
         return self._finalize(
             output,
             fused_expert_output,
