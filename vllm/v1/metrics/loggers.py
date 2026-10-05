@@ -619,6 +619,25 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
+        # The scheduler-state gauges above use multiprocess_mode="mostrecent".
+        # In multiprocess deployments, a child process that never sets a
+        # "mostrecent" gauge exports a sample with timestamp 0, which the
+        # collector drops, so an idle multi-API-server deployment would report
+        # no series at all for these gauges until the first scheduler stats
+        # arrive (#59988). Seed them with 0 now, like record_sleep_state()
+        # does for the engine sleep state.
+        for idx in engine_indexes:
+            self.gauge_scheduler_running[idx].set(0)
+            self.gauge_scheduler_waiting[idx].set(0)
+            self.gauge_kv_cache_usage[idx].set(0)
+        for waiting_reason in [WAITING_REASON_CAPACITY, WAITING_REASON_DEFERRED]:
+            for idx in engine_indexes:
+                self.gauge_waiting_by_reason[waiting_reason][idx].set(0)
+        if self.gauge_kv_fetch_by_stage:
+            for stage in KV_FETCH_STAGES:
+                for idx in engine_indexes:
+                    self.gauge_kv_fetch_by_stage[stage][idx].set(0)
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
