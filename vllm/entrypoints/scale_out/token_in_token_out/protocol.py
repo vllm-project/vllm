@@ -4,6 +4,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Discriminator,
     Field,
     NonNegativeInt,
@@ -147,6 +148,16 @@ class MultiModalFeatures(BaseModel):
         return self
 
 
+class ReasoningParserKwargs(BaseModel):
+    """Kwargs for the engine-side reasoning parser that gates structured
+    outputs. Typed so clients cannot pass arbitrary constructor kwargs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
+    """The effective chat template kwargs the prompt was rendered with."""
+
+
 class GenerateRequest(BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
@@ -211,6 +222,15 @@ class GenerateRequest(BaseModel):
     """The sampling parameters for the model."""
 
     model: str | None = None
+
+    reasoning_ended: bool | None = None
+    """Whether reasoning has ended before the first generated token, as
+    resolved by /render. `True` applies structured outputs from the first
+    token; `None` lets the engine check the prompt with its reasoning parser."""
+
+    reasoning_parser_kwargs: ReasoningParserKwargs | None = None
+    """Set by /render when it has a reasoning parser, so the engine-side
+    parser agrees with the frontend on flags such as `enable_thinking`."""
 
     return_token_ids: bool | None = Field(
         default=None,

@@ -124,6 +124,14 @@ def test_generate_request_rejects_placeholder_outside_prompt():
         )
 
 
+def test_reasoning_parser_kwargs_rejects_unknown_keys():
+    """The engine splats these into its reasoning parser's constructor, so a
+    client must not be able to pass arbitrary keyword arguments."""
+    payload = {**_base_payload(), "reasoning_parser_kwargs": {"tokenizer": None}}
+    with pytest.raises(ValidationError, match="tokenizer"):
+        GenerateRequest.model_validate(payload)
+
+
 def test_output_mode_defaults_to_tokens():
     assert GenerateRequest.model_validate(_base_payload()).output_mode == "tokens"
 
