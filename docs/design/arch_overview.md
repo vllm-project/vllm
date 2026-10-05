@@ -139,7 +139,7 @@ deciding which requests execute each step. Its source is in
 
 The V1 scheduler is **token-budget-based**: at each step it holds a fixed
 `max_num_scheduled_tokens` budget and fills it greedily across both running and
-waiting requests. There is no separate "prefill phase" or "decode phase" —
+waiting requests. There is no separate "prefill phase" or "decode phase":
 each request has a `num_computed_tokens` counter that advances toward
 `num_tokens_with_spec`. This unified view handles chunked prefills, prefix
 caching, and speculative decoding within a single scheduling loop.
@@ -185,7 +185,7 @@ execution: while the GPU executes step *N*, the CPU speculatively schedules
 step *N+1*.
 
 Each scheduled decode step adds one or more **output placeholders**
-(`num_output_placeholders`) to the request — one for the main token plus any
+(`num_output_placeholders`) to the request, one for the main token plus any
 speculative (draft/spec) tokens the GPU is producing but has not yet
 returned.
 
@@ -193,8 +193,8 @@ Every preemption (`_preempt_request`), not only a forced prefix-cache reset,
 resets `num_output_placeholders` to `0` and marks any in-flight output as
 **stale** by setting `num_stale_output_tokens` to the request's
 `num_in_flight_tokens`. By default these stale tokens are still delivered
-once the GPU returns them — dropping them would perturb spec-decode
-acceptance — they just no longer advance the reset counters;
+once the GPU returns them (dropping them would perturb spec-decode
+acceptance), they just no longer advance the reset counters;
 `update_from_output` drains the stale share step by step as it arrives.
 
 A caller can instead request that stale output be dropped by passing
