@@ -119,9 +119,7 @@ class WorkerLoRAManager:
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             peft_helper = PEFTHelper.from_local_dir(
-                lora_path,
-                self.max_position_embeddings,
-                lora_request.tensorizer_config_dict,
+                lora_path, self.max_position_embeddings
             )
 
             # Validates the LoRA configuration against requirements before
@@ -147,7 +145,6 @@ class WorkerLoRAManager:
                 device="cpu",
                 dtype=self.lora_config.lora_dtype,
                 model_vocab_size=self.vocab_size,
-                tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
                 skip_prefixes=lora_skip_prefixes,
                 moe_ep_spec=self._adapter_manager.moe_ep_load_spec,

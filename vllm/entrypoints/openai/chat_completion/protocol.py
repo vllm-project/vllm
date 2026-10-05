@@ -22,6 +22,7 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    has_non_text_content,
 )
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
@@ -267,7 +268,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
-    watermarking: bool = True
+    watermarking: bool | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
     include_stop_str_in_output: bool = False
@@ -646,6 +647,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
+            watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
             skip_special_tokens=self.skip_special_tokens,
@@ -978,6 +980,26 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def drop_prompt_token_ids_with_media(cls, data):
+        # The forwarded ids would drop media in ``messages``, so ignore them. Runs
+        # before validation, which can turn content into a one-shot iterator.
+        if not isinstance(data, dict):
+            return data
+        kv_transfer_params = data.get("kv_transfer_params")
+        if (
+            isinstance(kv_transfer_params, dict)
+            and kv_transfer_params.get("prompt_token_ids") is not None
+            and has_non_text_content(data.get("messages"))
+        ):
+            logger.debug(
+                "Ignoring kv_transfer_params['prompt_token_ids']: "
+                "messages have non-text content and are rendered instead."
+            )
+            kv_transfer_params.pop("prompt_token_ids")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_system_message_content_type(cls, data):
         """Warn if system messages contain non-text content.
 
@@ -1079,6 +1101,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    watermarking: bool | None = None
     length_penalty: float | None = 1.0
     early_stopping: bool = False
     structured_outputs: StructuredOutputsParams | None = None
@@ -1116,6 +1139,17 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "when using `logprob_token_ids`, `logprobs` must be set to true.",
                 parameter="logprob_token_ids",
+            )
+        kv_transfer_params = data.get("kv_transfer_params")
+        if (
+            isinstance(kv_transfer_params, dict)
+            and kv_transfer_params.get("prompt_token_ids") is not None
+        ):
+            raise VLLMValidationError(
+                "Batch chat completions do not support "
+                "`kv_transfer_params['prompt_token_ids']`: one pre-tokenized "
+                "prompt cannot serve several conversations.",
+                parameter="kv_transfer_params.prompt_token_ids",
             )
         response_format = data.get("response_format")
         if response_format is not None:
