@@ -200,3 +200,33 @@ def test_pad_unpad_round_trip_preserves_head_order(num_heads):
 def test_a_non_causal_block_never_routes_to_gluon(gluon_available):
     """A small-head block that normally uses Gluon must use ASM when non-causal."""
     assert not AiterMLAHelper.use_gluon_verify(12, 8, "auto", causal=False)
+
+
+def test_divisor_heads_skip_gluon_when_triton_cannot_compile_it(monkeypatch):
+    """Head counts that divide 16 still take Gluon on gfx950, unless Triton cannot compile it.
+
+    AITER's kernel passes ``cga_layout`` to ``PaddedSharedLayout``. Triton 3.6
+    rejects that keyword, and the ROCm vLLM image ships Triton 3.6 on MI355
+    (gfx950). Divisors of 16 are the counts ``use_gluon_decode`` still selects
+    once the arch gate passes; non-divisors already take the padded asm decode.
+    """
+    monkeypatch.setattr(rocm_aiter_mla, "_triton_compiles_aiter_gluon_mla", lambda: False)
+    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: True)
+    supported = rocm_aiter_mla._gluon_mla_decode_supported
+    if hasattr(supported, "cache_clear"):
+        supported.cache_clear()
+
+    assert not supported()
+    assert not AiterMLAHelper.use_gluon_decode(8, 1, "bfloat16")
+    assert not AiterMLAHelper.use_gluon_verify(8, 4, "bfloat16")
+
+
+def test_triton_gluon_mla_probe_matches_padded_shared_layout():
+    """The probe reports exactly whether this Triton accepts ``cga_layout``."""
+    from triton.experimental.gluon import language as gl
+
+    fields = getattr(gl.PaddedSharedLayout, "__dataclass_fields__", {})
+    assert rocm_aiter_mla._triton_compiles_aiter_gluon_mla() == ("cga_layout" in fields)
