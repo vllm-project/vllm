@@ -264,6 +264,7 @@ def test_qsa_side_metadata_marks_cudagraph_padding_inert() -> None:
     token_to_req = torch.tensor([0] * 4 + [1] * 4 + [2] * 4 + [0] * 4, device=device)
     common = SimpleNamespace(
         num_actual_tokens=16,
+        is_dummy_batch=False,
         num_reqs=4,
         max_query_len=4,
         max_seq_len=68,
@@ -318,6 +319,7 @@ def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
     block_table = torch.tensor([[1], [0], [2]], dtype=torch.int32, device=device)
     common = SimpleNamespace(
         num_actual_tokens=16,
+        is_dummy_batch=False,
         num_reqs=3,
         max_query_len=7,
         max_seq_len=11,
@@ -483,6 +485,7 @@ def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
     )
     common = SimpleNamespace(
         num_actual_tokens=8,
+        is_dummy_batch=True,
         num_reqs=3,
         max_query_len=5,
         max_seq_len=12,
@@ -600,6 +603,7 @@ def test_qsa_triton_metadata_matches_pytorch(
     seq_lens[-1] = 20
     common = SimpleNamespace(
         num_actual_tokens=num_tokens,
+        is_dummy_batch=False,
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=seq_lens,
@@ -667,6 +671,7 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
     )
     common = SimpleNamespace(
         num_actual_tokens=num_tokens,
+        is_dummy_batch=False,
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=torch.tensor(

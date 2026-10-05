@@ -141,6 +141,10 @@ class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._init_reorder_batch_threshold(None, supports_dcp_with_varlen=True)
+
 
 class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner."""
@@ -208,7 +212,9 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
     """Run paged sparse GQA with the QSA Triton kernel."""
 
-    supports_dcp: bool = False
+    can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
+    lse_base_on_e: bool = False
     supports_pcp: bool = False
 
     def __init__(
@@ -250,10 +256,21 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         self.kv_cache_dtype = real_kv_cache_dtype
         if not is_flash_attn_varlen_func_available():
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
-        if self.dcp_world_size != 1:
-            raise NotImplementedError(
-                "Qwen4Exp QSA does not support decode context parallelism"
+        self.cp_kv_cache_interleave_size = 1
+        self._dcp_local_indices: torch.Tensor | None = None
+        if self.dcp_world_size > 1:
+            from vllm.config import get_current_vllm_config
+
+            config = get_current_vllm_config()
+            self.cp_kv_cache_interleave_size = (
+                config.parallel_config.cp_kv_cache_interleave_size
             )
+            block_size = config.cache_config.block_size
+            if block_size % self.cp_kv_cache_interleave_size:
+                raise NotImplementedError(
+                    "Qwen4Exp QSA DCP requires block_size divisible by "
+                    "cp_kv_cache_interleave_size"
+                )
         if self.kv_cache_dtype not in ("auto", "bfloat16", "fp8", "fp8_e4m3"):
             raise NotImplementedError(
                 "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache"
@@ -314,6 +331,23 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
 
         from .ops.qsa import qsa_sparse_paged_attention
 
+        if self.dcp_world_size > 1:
+            self._forward_qsa_dcp(
+                query[:num_tokens],
+                key_cache,
+                value_cache,
+                topk_buffer,
+                num_tokens,
+                attn_metadata.block_table,
+                token_to_req,
+                use_prefill_config,
+                output[:num_tokens],
+                output_gate[:num_tokens],
+                k_scale,
+                v_scale,
+            )
+            return output
+
         qsa_sparse_paged_attention(
             query[:num_tokens],
             key_cache,
@@ -329,11 +363,78 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         )
         return output
 
+    def _forward_qsa_dcp(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        topk_buffer: torch.Tensor,
+        num_tokens: int,
+        block_table: torch.Tensor,
+        token_to_req: torch.Tensor,
+        use_prefill_config: bool,
+        output: torch.Tensor,
+        output_gate: torch.Tensor,
+        k_scale: float | None,
+        v_scale: float | None,
+    ) -> None:
+        """Attend over local selections and merge rank results."""
+        from vllm.distributed.parallel_state import get_dcp_group
+
+        from .ops.qsa import qsa_sparse_paged_attention
+        from .ops.qsa_dcp import (
+            qsa_dcp_empty_owner_rows,
+            qsa_localize_dcp_indices,
+            qsa_neutralize_empty_owner_lse_,
+        )
+
+        group = get_dcp_group()
+
+        if self._dcp_local_indices is None:
+            self._dcp_local_indices = torch.empty_like(topk_buffer)
+        local_indices = qsa_localize_dcp_indices(
+            topk_buffer[:num_tokens],
+            self._dcp_local_indices[:num_tokens],
+            self.dcp_world_size,
+            self.dcp_rank,
+            self.cp_kv_cache_interleave_size,
+        )
+        empty_rows = qsa_dcp_empty_owner_rows(local_indices)
+
+        query_all_heads = group.all_gather(query.contiguous(), dim=1)
+        partial_out, partial_lse = qsa_sparse_paged_attention(
+            query_all_heads,
+            key_cache,
+            value_cache,
+            local_indices,
+            block_table,
+            token_to_req,
+            use_prefill_config,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            return_lse=True,
+        )
+
+        qsa_neutralize_empty_owner_lse_(partial_lse, empty_rows)
+
+        merged = cast(
+            torch.Tensor,
+            self.dcp_combine(
+                partial_out.float(),
+                partial_lse.float(),
+                group,
+                is_lse_base_on_e=self.lse_base_on_e,
+            ),
+        )
+
+        gated = merged.to(output.dtype).float() * torch.sigmoid(
+            output_gate.view_as(merged).float()
+        )
+        output.copy_(gated)
+
 
 class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
     """Merged Qwen full-attention owner with a QSA index side branch."""
-
-    supports_dcp = False
 
     def __init__(
         self,
@@ -364,12 +465,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if getattr(quant_config, "kv_cache_scheme", None) is not None:
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
         parallel_config = vllm_config.parallel_config
-        if (
-            parallel_config.prefill_context_parallel_size > 1
-            or parallel_config.decode_context_parallel_size > 1
-        ):
+        if parallel_config.prefill_context_parallel_size > 1:
             raise NotImplementedError(
-                "Qwen4Exp QSA does not support context parallelism"
+                "Qwen4Exp QSA does not support prefill context parallelism"
             )
         if not getattr(config, "is_causal", True):
             raise NotImplementedError("Qwen4Exp QSA requires causal decoder attention")

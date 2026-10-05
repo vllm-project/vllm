@@ -65,6 +65,7 @@ def _prepare_dflash_inputs_to_capture(
             block_tables=input_block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
+            is_dummy_batch=input_batch.is_dummy,
             for_cudagraph_capture=True,
             causal=causal,
         )
