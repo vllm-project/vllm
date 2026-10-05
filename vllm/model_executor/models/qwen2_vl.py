@@ -83,6 +83,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -1136,6 +1137,10 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo])
             "image": vocab[hf_processor.image_token],
             "video": vocab[hf_processor.video_token],
         }
+        # The official chat template renders placeholders with the vision
+        # wrapper, e.g. <|vision_start|><|image_pad|><|vision_end|>.
+        vision_start = vocab["<|vision_start|>"]
+        vision_end = vocab["<|vision_end|>"]
 
         merge_length = image_processor.merge_size**2
 
@@ -1145,12 +1150,22 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo])
             assert isinstance(grid_thw, torch.Tensor)
 
             num_tokens = int(grid_thw.prod()) // merge_length
-            return [placeholder[modality]] * num_tokens
+            replacement = (
+                [vision_start] + [placeholder[modality]] * num_tokens + [vision_end]
+            )
+            return PromptUpdateDetails.select_token_id(
+                replacement, placeholder[modality]
+            )
+
+        targets = {
+            modality: [vision_start, placeholder[modality], vision_end]
+            for modality in ("image", "video")
+        }
 
         return [
             PromptReplacement(
                 modality=modality,
-                target=[placeholder[modality]],
+                target=targets[modality],
                 replacement=partial(get_replacement_qwen2vl, modality=modality),
             )
             for modality in ("image", "video")

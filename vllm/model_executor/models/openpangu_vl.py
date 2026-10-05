@@ -764,6 +764,9 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
         vocab = tokenizer.get_vocab()
         image_token = hf_processor.image_token
         video_token = hf_processor.video_token
+        # The official chat template wraps placeholders as
+        # [unused18][unused19][unused20] (image) and
+        # [unused18][unused32][unused20] (video).
         vision_start_token = hf_processor.vision_start_token
         vision_end_token = hf_processor.vision_end_token
         image_token_id = vocab[image_token]
@@ -783,30 +786,42 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
             if not isinstance(grid_thw, torch.Tensor):
                 raise TypeError("Expected 'grid_thw' to be a Tensor")
             if modality == "image":
-                image_token_id_total = [image_token_id] * (
-                    int(grid_thw.prod()) // merge_length
-                )
-                return image_token_id_total
-            else:
-                # When modality is video
-                grid_t, grid_h, grid_w = grid_thw
-                video_seq_length_per_time = (grid_h * grid_w).item() // merge_length
-                video_token_id_per_time = (
+                num_tokens = int(grid_thw.prod()) // merge_length
+                replacement = (
                     [vision_start_token_id]
-                    + [video_token_id] * video_seq_length_per_time
+                    + [image_token_id] * num_tokens
                     + [vision_end_token_id]
                 )
-                video_token_id_total = video_token_id_per_time * grid_t.item()
-                video_token_id_middle = video_token_id_total[1:-1]
                 return PromptUpdateDetails.select_token_id(
-                    video_token_id_middle,
-                    embed_token_id=video_token_id,
+                    replacement, image_token_id
                 )
+            # When modality is video
+            grid_t, grid_h, grid_w = grid_thw
+            video_seq_length_per_time = (grid_h * grid_w).item() // merge_length
+            video_token_id_per_time = (
+                [vision_start_token_id]
+                + [video_token_id] * video_seq_length_per_time
+                + [vision_end_token_id]
+            )
+            replacement = video_token_id_per_time * grid_t.item()
+            return PromptUpdateDetails.select_token_id(
+                replacement,
+                embed_token_id=video_token_id,
+            )
+
+        targets = {
+            modality: [
+                vision_start_token_id,
+                placeholder[modality],
+                vision_end_token_id,
+            ]
+            for modality in ("image", "video")
+        }
 
         return [
             PromptReplacement(
                 modality=modality,
-                target=[placeholder[modality]],
+                target=targets[modality],
                 replacement=partial(
                     get_replacement_openpangu_vision, modality=modality
                 ),
