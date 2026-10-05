@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import ClassVar, cast
 
 import torch
@@ -22,8 +22,8 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
     QKVParallelLinear,
-    Qwen4ExpQSAQKVIndexerLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -57,6 +57,72 @@ from vllm.v1.kv_cache_interface import (
 from ..common.qsa_cache import QSAForwardMetadata
 from . import model
 from .indexer_qsa import QSAIndexer
+
+
+class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
+    """Pack sharded Q/gate, K, V and replicated indexer Q/K in one GEMM."""
+
+    def __init__(
+        self,
+        qkv_proj: QKVParallelLinear,
+        index_size: int,
+        quant_config: QuantizationConfig | None,
+    ) -> None:
+        self.num_kv_head_replicas = qkv_proj.num_kv_head_replicas
+        super().__init__(
+            input_size=qkv_proj.input_size,
+            output_sizes=[*qkv_proj.output_sizes, index_size * qkv_proj.tp_size],
+            bias=False,
+            params_dtype=qkv_proj.params_dtype,
+            quant_config=quant_config,
+            prefix=qkv_proj.prefix,
+        )
+
+    def _load_shard(
+        self,
+        loader: Callable[..., None],
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: int | tuple[int, ...] | None,
+    ) -> None:
+        tp_rank = self.tp_rank
+        param_tp_rank = getattr(param, "tp_rank", None)
+        if loaded_shard_id == 3:
+            shard_rank = 0
+        elif loaded_shard_id in (1, 2):
+            shard_rank = tp_rank // self.num_kv_head_replicas
+        else:
+            shard_rank = tp_rank
+        self.tp_rank = shard_rank
+        if param_tp_rank is not None:
+            param.tp_rank = shard_rank
+        try:
+            loader(param, loaded_weight, loaded_shard_id)
+        finally:
+            self.tp_rank = tp_rank
+            if param_tp_rank is not None:
+                param.tp_rank = param_tp_rank
+
+    def weight_loader(self, param, loaded_weight, loaded_shard_id=None) -> None:
+        self._load_shard(super().weight_loader, param, loaded_weight, loaded_shard_id)
+
+    def weight_loader_v2(self, param, loaded_weight, loaded_shard_id=None) -> None:
+        self._load_shard(
+            super().weight_loader_v2, param, loaded_weight, loaded_shard_id
+        )
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        def remap_shards():
+            for name, weight in weights:
+                shard_id = getattr(weight, "shard_id", None)
+                if isinstance(shard_id, str):
+                    weight = weight.detach()
+                    weight.shard_id = {"q": 0, "k": 1, "v": 2}[shard_id]
+                yield name, weight
+
+        return super().load_weights(remap_shards())
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):

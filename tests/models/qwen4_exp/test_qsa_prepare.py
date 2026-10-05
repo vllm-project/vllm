@@ -317,10 +317,12 @@ def test_qsa_fused_prepare_matches_unfused(
     )
     unfused_compressed = fused_compressed.clone()
 
-    # Read the indexer columns directly from the merged QKVG/indexer GEMM.
+    # TP=4 QKVG width makes the indexer slice row-strided, as in the merged
+    # projection. The exact width is unimportant; the larger stride is tested.
+    main_qkvg_width = 3584
     projected_qk = torch.randn(
-        num_tokens, 3584 + (HQ + 1) * D, dtype=torch.bfloat16, device=device
-    )[:, 3584:]
+        num_tokens, main_qkvg_width + (HQ + 1) * D, dtype=torch.bfloat16, device=device
+    )[:, main_qkvg_width:]
     q_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
     k_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
 
