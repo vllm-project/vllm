@@ -3,9 +3,12 @@
 
 """SynthID-Text watermark generation primitives."""
 
+import math
+
 import torch
 
 from vllm.config.watermarking import WatermarkPRFName
+from vllm.v1.watermarking.detector import WatermarkDetector
 from vllm.v1.watermarking.prfs import PhiloxPRF, create_prf
 from vllm.v1.watermarking.watermarker import (
     RandomSampler,
@@ -96,3 +99,68 @@ class SynthIDWatermarker(Watermarker):
         contexts: torch.Tensor,
     ) -> WatermarkSample:
         raise ValueError("SynthID requires a random sampler")
+
+
+def _binomial_survival(hits: int, trials: int) -> float:
+    """Return P[Binomial(trials, 0.5) >= hits]."""
+    if hits <= 0:
+        return 1.0
+    if hits > trials:
+        return 0.0
+    if hits <= trials // 2:
+        return 1.0 - _binomial_survival(trials - hits + 1, trials)
+
+    log_term = (
+        math.lgamma(trials + 1)
+        - math.lgamma(hits + 1)
+        - math.lgamma(trials - hits + 1)
+        - trials * math.log(2)
+    )
+    term = math.exp(log_term)
+    total = term
+    for count in range(hits, trials):
+        term *= (trials - count) / (count + 1)
+        total += term
+    return min(1.0, total)
+
+
+class SynthIDWatermarkDetector(WatermarkDetector):
+    """Detect a surplus of Philox-derived SynthID bits in generated tokens.
+
+    The score is the mean g value. The p-value uses an ideal-PRF
+    Binomial(num_scored_tokens * depth, 0.5) null distribution.
+    """
+
+    def __init__(
+        self,
+        key: int,
+        context_width: int = 4,
+        depth: int = 32,
+        p_value_threshold: float = 0.01,
+        prf: WatermarkPRFName = "philox",
+        deduplicate_contexts: bool = True,
+    ) -> None:
+        if not 1 <= depth <= 32:
+            raise ValueError("SynthID depth must be between 1 and 32")
+        selected_prf = create_prf(prf, key)
+        if not isinstance(selected_prf, PhiloxPRF):
+            raise ValueError("SynthID requires the Philox PRF")
+        super().__init__(context_width, p_value_threshold, deduplicate_contexts)
+        self.prf = selected_prf
+        self.depth = depth
+
+    def _score_tokens(
+        self, contexts: torch.Tensor, targets: torch.Tensor
+    ) -> torch.Tensor:
+        # [N, context_width] and [N, 1] produce one word per token: [N].
+        words = self.prf.uint32(contexts, targets.unsqueeze(-1)).squeeze(-1)
+        bit_positions = torch.arange(self.depth, device=words.device)
+        # [N, 1] and [depth] broadcast to binary g values shaped [N, depth].
+        return (words.unsqueeze(-1) >> bit_positions) & 1
+
+    def _aggregate_scores(self, token_scores: torch.Tensor) -> float:
+        return token_scores.to(torch.float64).mean().item()
+
+    def _get_p_value(self, score: float, num_scored_tokens: int) -> float:
+        trials = num_scored_tokens * self.depth
+        return _binomial_survival(round(score * trials), trials)

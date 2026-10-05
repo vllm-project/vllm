@@ -43,7 +43,7 @@ def test_goldens_cover_every_candidate(goldens: dict[str, dict]):
         (candidate.scheme, candidate.prf) for candidate in WATERMARKING_CANDIDATES
     }
     assert candidate_combinations == configured_algorithm_prf_combinations()
-    assert set(DETECTOR_FACTORIES) == configured_algorithms() - {"synthid"}
+    assert set(DETECTOR_FACTORIES) == configured_algorithms()
 
 
 def test_golden_fixture_guards(goldens: dict[str, dict]):
