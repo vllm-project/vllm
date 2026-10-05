@@ -29,4 +29,4 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/attention --ignore v1/attention/test_cuda_backend_probe_errors.py --ignore v1/attention/test_sparse_indexer_decode_seq_lens.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT || true'
+    pytest -v -s v1/attention --ignore v1/attention/test_cuda_backend_probe_errors.py --ignore v1/attention/test_sparse_indexer_decode_seq_lens.py --ignore v1/attention/test_kpool_tail_slot_mapping.py --ignore v1/attention/test_deepseek_v4_rocm_adaptive.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT || true'
