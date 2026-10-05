@@ -536,6 +536,7 @@ class EngineCoreReadyResponse:
     effective_attention_block_size: int | None = None
     vllm_config: dict | None = None
     prefix_hash_config: PrefixHashConfig | None = None
+    supports_inline_hidden_states: bool = False
 
 
 ready_response = EngineCoreReadyResponse(

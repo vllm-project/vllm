@@ -151,6 +151,7 @@ class EngineCoreReadyResponse:
     # Set when the engine hashes request blocks (prefix caching or a KV
     # connector), so that a frontend can send prompt block hashes.
     prefix_hash_config: PrefixHashConfig | None = None
+    supports_inline_hidden_states: bool = False
 
 
 class EngineCoreRequest(
