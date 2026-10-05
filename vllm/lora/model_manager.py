@@ -328,8 +328,8 @@ class LoRAModelManager:
                     self.punica_wrapper_mapping[prefix] = connector_punica_wrapper
             else:
                 logger.warning_once(
-                    "Connector LoRA support disabled: model does not implement "
-                    "get_num_mm_connector_tokens(). This method is required to "
+                    "Connector LoRA support disabled: get_mm_lora_token_counts() "
+                    "returned no connector token counts, which are required to "
                     "determine the connector's token budget for LoRA operations."
                 )
 

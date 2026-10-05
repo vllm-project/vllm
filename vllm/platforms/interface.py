@@ -1112,11 +1112,6 @@ class Platform:
         return True
 
     @classmethod
-    def get_lora_vocab_padding_size(cls) -> int:
-        """Returns how much padding the LoRA logits need for kernels."""
-        return 256
-
-    @classmethod
     def get_device_communicator_cls(cls) -> str:
         """Get device specific communicator class for distributed communication."""
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa

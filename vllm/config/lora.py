@@ -25,7 +25,6 @@ logger = init_logger(__name__)
 
 LoRADType = Literal["auto", "float16", "bfloat16"]
 MaxLoRARanks = Literal[1, 8, 16, 32, 64, 128, 256, 320, 512]
-LoRAExtraVocabSize = Literal[256, 512]
 
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
