@@ -14,6 +14,7 @@ from vllm.model_executor.models.config import (
     Qwen3_5ForConditionalGenerationConfig,
     Qwen4ExpForConditionalGenerationConfig,
 )
+from vllm.model_executor.models.utils import make_empty_intermediate_tensors_factory
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
@@ -162,6 +163,7 @@ def test_qwen4_exp_allows_pipeline_parallel_with_or_without_ple(
         Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("backend", ["amd", "nvidia"])
 def test_qwen4_exp_pp_intermediate_tensors_carry_input_ids(backend: str) -> None:
     """PLE token IDs are transported alongside hidden states across PP."""
@@ -169,6 +171,9 @@ def test_qwen4_exp_pp_intermediate_tensors_carry_input_ids(backend: str) -> None
     model = object.__new__(model_module.Qwen4ExpModel)
     torch.nn.Module.__init__(model)
     model.config = _text_config()
+    model._empty_hidden_states = make_empty_intermediate_tensors_factory(
+        ["hidden_states"], model.config.hidden_size * model.config.hc_count
+    )
 
     tensors = model.make_empty_intermediate_tensors(
         batch_size=8,
@@ -182,6 +187,7 @@ def test_qwen4_exp_pp_intermediate_tensors_carry_input_ids(backend: str) -> None
     assert tensors["input_ids"].dtype == torch.int32
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("backend", ["amd", "nvidia"])
 def test_qwen4_exp_pp_forward_preserves_input_ids(backend: str) -> None:
     """Non-first PP ranks pass transported token IDs to their decoder layers."""
@@ -223,6 +229,7 @@ def test_qwen4_exp_pp_forward_preserves_input_ids(backend: str) -> None:
     torch.testing.assert_close(output["input_ids"], input_ids)
 
 
+@spawn_new_process_for_each_test
 @pytest.mark.parametrize("backend", ["amd", "nvidia"])
 def test_qwen4_exp_pp_intermediate_tensors_omit_input_ids_without_ple(
     backend: str,
@@ -232,6 +239,9 @@ def test_qwen4_exp_pp_intermediate_tensors_omit_input_ids_without_ple(
     model = object.__new__(model_module.Qwen4ExpModel)
     torch.nn.Module.__init__(model)
     model.config = _text_config(ple_layer_ids=[])
+    model._empty_hidden_states = make_empty_intermediate_tensors_factory(
+        ["hidden_states"], model.config.hidden_size * model.config.hc_count
+    )
 
     tensors = model.make_empty_intermediate_tensors(
         batch_size=8,

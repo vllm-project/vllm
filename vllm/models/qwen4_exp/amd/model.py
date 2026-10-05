@@ -62,6 +62,7 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
+    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -404,6 +405,9 @@ class Qwen4ExpModel(nn.Module):
             Qwen4ExpSparseMoeBlock,
             "mlp",
         )
+        self._empty_hidden_states = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size * config.hc_count
+        )
         self.hyper_connection_mixer: GatedResidual | None
         if get_pp_group().is_last_rank:
             hc_config = HyperConnectionConfig(
@@ -451,23 +455,14 @@ class Qwen4ExpModel(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
     ) -> IntermediateTensors:
-        tensors = {
-            "hidden_states": torch.zeros(
-                (batch_size, self.config.hidden_size * self.config.hc_count),
-                dtype=dtype,
-                device=device,
-            )
-        }
+        tensors = self._empty_hidden_states(batch_size, dtype, device)
         if self.config.ple_layer_ids:
-            # PLE needs the raw token IDs on every pipeline stage. The model
-            # runner stores input IDs as int32, so preserve that compact dtype
-            # while transporting them through the PP intermediate tensors.
             tensors["input_ids"] = torch.zeros(
                 batch_size,
                 dtype=torch.int32,
                 device=device,
             )
-        return IntermediateTensors(tensors)
+        return tensors
 
     def forward(
         self,
