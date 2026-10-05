@@ -105,10 +105,7 @@ class Glm5MonoKernel:
         timeline=False,
         poll_limit: int | None = None,
         poll_early_out: bool = False,
-        index_paged: bool = False,
         index_q_fp8: bool = True,
-        index_cache_rowpar: bool = False,
-        index_score_batched: bool = False,
         cache_hoist: bool = False,
         split_keys64: bool = False,
         select_radix11: bool = False,
@@ -134,13 +131,9 @@ class Glm5MonoKernel:
         self.W, self.S, self.rank, self.npes, self.topk = W, samples, rank, npes, topk
         self.launches_per_step = launches_per_step
         self.with_indexer = with_indexer
-        # fused indexer on vLLM's paged FP8 index cache (see build_glm5_monokernel)
-        self.index_paged = bool(index_paged)
-        self._index_tables = None  # (index cache, block table) refs set by set_index_tables (paged)
+        self._index_tables = None  # (index cache, block table) refs set by set_index_tables
         self._validated_sig = None  # forward(): input signature of the last validated launch
         self._wptrs = None  # forward(): the fixed weight pointers (built on the first launch)
-        if self.index_paged and not with_indexer:
-            raise ValueError("index_paged requires with_indexer=True")
         self.index_max_seq = index_max_seq
         self.attention_weight = AttentionWeight(attention_weight)
         t = W.t
@@ -214,7 +207,7 @@ class Glm5MonoKernel:
                     )
                 ]
                 + [0 if self.timeline is None else self.timeline.data_ptr()]
-                # 8..11 (index_paged): index cache, decode block table, its row stride, cache block stride (bytes);
+                # 8..11: index cache, decode block table, its row stride, cache block stride (bytes);
                 # set by set_index_tables
                 + [0, 0, 0, 0],
                 dtype=torch.int64,
@@ -262,10 +255,7 @@ class Glm5MonoKernel:
             timeline=timeline,
             poll_limit=poll_limit,
             poll_early_out=poll_early_out,
-            index_paged=self.index_paged,
             index_q_fp8=index_q_fp8,
-            index_cache_rowpar=index_cache_rowpar,
-            index_score_batched=index_score_batched,
             cache_hoist=cache_hoist,
             split_keys64=split_keys64,
             select_radix11=select_radix11,
@@ -324,7 +314,6 @@ class Glm5MonoKernel:
         x_out=None,
         layer=0,
         advance=True,
-        index_cache=None,
         positions=None,
         slot_mapping=None,
         sparse_kv_indptr=None,
@@ -341,11 +330,9 @@ class Glm5MonoKernel:
         # Validate on the first launch and whenever an input's identity / layout changes; a steady
         # decode loop passes the same persistent buffers every step, so it pays only for this signature.
         sig = (total_samples, advance, self._index_tables is not None, indices.dtype, _tsig(kv_cache),
-               pe_cache.data_ptr(), _tsig(positions), _tsig(slot_mapping), _tsig(sparse_kv_indptr),
-               _tsig(index_cache) if (self.with_indexer and not self.index_paged) else None)
+               pe_cache.data_ptr(), _tsig(positions), _tsig(slot_mapping), _tsig(sparse_kv_indptr))
         if sig != self._validated_sig:
-            self._validate(h, kv_cache, pe_cache, indices, advance, index_cache, positions, slot_mapping,
-                           sparse_kv_indptr)
+            self._validate(h, kv_cache, pe_cache, indices, advance, positions, slot_mapping, sparse_kv_indptr)
             self._validated_sig = sig
         chunks = total_samples // self.S
         wp = self._wptrs
@@ -371,7 +358,7 @@ class Glm5MonoKernel:
                 p(sparse_kv_indptr) + row * 4,
                 p(kv_cache),
                 p(pe_cache),
-                p(index_cache) if (self.with_indexer and not self.index_paged) else p(indices),
+                p(indices),
                 p(cos),
                 p(sin),
                 *wp,
@@ -392,8 +379,7 @@ class Glm5MonoKernel:
                 self.advance_step()
         return x_out
 
-    def _validate(self, h, kv_cache, pe_cache, indices, advance, index_cache, positions, slot_mapping,
-                  sparse_kv_indptr):
+    def _validate(self, h, kv_cache, pe_cache, indices, advance, positions, slot_mapping, sparse_kv_indptr):
         """forward()'s argument checks (raise ValueError); run when forward's input signature changes."""
         total_samples = h.shape[0]
         if total_samples % self.S:
@@ -405,23 +391,12 @@ class Glm5MonoKernel:
             raise ValueError("fused indexer does not support chunked launches")
         if not advance and chunks != 1:
             raise ValueError("chunked launches must advance mailbox epochs")
-        if self.index_paged and self._index_tables is None:
-            raise ValueError("index_paged: call set_index_tables(index_cache, block_table) before forward")
-        if self.index_paged and indices.dtype is not torch.int32:
+        if self.with_indexer and self._index_tables is None:
+            raise ValueError("with_indexer: call set_index_tables(index_cache, block_table) before forward")
+        if self.with_indexer and indices.dtype is not torch.int32:
             # the CSR the select stage writes (min(ctx, topk) entries per row at sparse_kv_indptr offsets; the
             # caller sizes it -- warm-up launches with inactive rows pass a 1-element buffer)
-            raise ValueError("index_paged: indices must be the int32 CSR buffer")
-        if self.with_indexer and not self.index_paged:
-            if index_cache is None:
-                raise ValueError("index_cache is required when with_indexer=True")
-            if (
-                index_cache.shape != (self.index_max_seq, INDEX_DIM)
-                or index_cache.dtype is not torch.bfloat16
-            ):
-                raise ValueError(
-                    f"index_cache must be bf16 [{self.index_max_seq}, {INDEX_DIM}], got "
-                    f"{tuple(index_cache.shape)} {index_cache.dtype}"
-                )
+            raise ValueError("with_indexer: indices must be the int32 CSR buffer")
         cache_width = KV_LORA + PE_DIM
         if kv_cache.dtype is not torch.bfloat16 or not kv_cache.is_contiguous():
             raise ValueError("the MLA KV cache must be contiguous bf16")
@@ -479,10 +454,10 @@ class Glm5MonoKernel:
         self._wptrs = None
 
     def set_index_tables(self, index_cache: torch.Tensor, block_table: torch.Tensor) -> None:
-        """index_paged: point the indexer parameter table at vLLM's uint8 [blocks, 16, 132] index cache and a
+        """Point the indexer parameter table at vLLM's uint8 [blocks, 16, 132] index cache and a
         persistent int32 [rows, W] decode block table (stable addresses: call once, before any capture)."""
-        if not self.index_paged:
-            raise ValueError("set_index_tables needs index_paged=True")
+        if not self.with_indexer:
+            raise ValueError("set_index_tables needs with_indexer=True")
         if index_cache.dtype is not torch.uint8 or index_cache.dim() != 3 or tuple(index_cache.shape[1:]) != (16, INDEX_DIM + 4):
             raise ValueError(f"index cache must be uint8 [blocks, 16, {INDEX_DIM + 4}], got "
                              f"{tuple(index_cache.shape)} {index_cache.dtype}")
@@ -577,15 +552,6 @@ class Glm5MonoKernel:
             result["index_w"] = self.debug("index_w", (S, 32))
             result["index_k"] = self.debug("index_k", (S, INDEX_DIM))  # pre-LayerNorm projection (fp32)
             result["index_scores"] = self.debug("index_scores", (S, self.index_max_seq))
-        if self.with_indexer and self.index_paged:
             result["index_k_new"] = self.debug("index_k_new", (S, INDEX_DIM), bf2=True)  # unscaled FP8 values
             result["index_k_scale"] = self.debug("index_k_scale", (S,))
-            return result  # paged: the CSR is in the caller's indices buffer, not in scratch
-        if self.with_indexer:
-            off = self.scr_layout["indices"]
-            result["indices"] = (
-                self.scratch[off : off + S * self.topk * 4]
-                .view(torch.int32)
-                .view(S, self.topk)
-            )
-        return result
+        return result  # the CSR is in the caller's indices buffer

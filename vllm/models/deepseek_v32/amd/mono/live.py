@@ -512,11 +512,8 @@ class MonoLive:
                 extra_kwargs_for=lambda L: (
                     dict(
                         with_indexer=True,
-                        index_paged=True,
                         index_max_seq=self.index_max_seq,
                         index_q_fp8=self.cfg.index_q_fp8,
-                        index_cache_rowpar=self.cfg.fused_index_rowpar_cache,
-                        index_score_batched=self.cfg.fused_index_batched_score,
                         select_radix11=self.cfg.fused_select_radix11,
                         # the idle-CTA projections fit widths <= 8 only (MTP k=1 builds
                         # S=10)
