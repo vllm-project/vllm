@@ -16,12 +16,17 @@ from functools import cache
 from typing import TYPE_CHECKING
 
 import torch
+from typing_extensions import override
 
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    CommonAttentionMetadata,
+    max_decode_query_len,
+)
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
@@ -36,7 +41,7 @@ from vllm.v1.attention.backends.utils import (
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
@@ -300,10 +305,9 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
 
 
 class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
-    # Overrides GDN's UNIFORM_BATCH: adaptive verification requires ALWAYS from every
-    # builder, and KDA reads per-request offsets off device within a fixed k+1 window,
-    # so one k+1 graph replays any 1..k+1 mix.
-    _cudagraph_support = AttentionCGSupport.ALWAYS
+    # Inherits GDN's decode-only level; ragged decode is declared by
+    # get_varlen_cudagraph_max_query_len below.
+    _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
     mamba_aligned_state_indices: torch.Tensor | None = None
 
     def __init__(
@@ -354,6 +358,20 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         self.recoverssm_context = context
         return context
+
+    @override  # type: ignore[misc]
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["KimiK3KDAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: "KVCacheSpec",
+    ) -> int | None:
+        if (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            != AttentionCGSupport.UNIFORM_BATCH
+        ):
+            return None
+        return max_decode_query_len(vllm_config)
 
     def build(  # type: ignore[override]
         self,
