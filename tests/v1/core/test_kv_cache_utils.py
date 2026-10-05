@@ -3555,7 +3555,7 @@ def _grouping_config():
         kv_transfer_config=None,
         speculative_config=None,
         cache_config=cache_config,
-        model_config=SimpleNamespace(max_model_len=32768),
+        model_config=SimpleNamespace(max_model_len=32768, use_mla=False),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         max_in_flight_tokens=256,
     )
@@ -3597,6 +3597,7 @@ def test_hybrid_group_size_selection(
     [
         (None, False),
         ("NixlPushConnector", True),
+        ("NixlConnector", False),
         ("OffloadingConnector", False),
         ("MultiConnector", False),
     ],

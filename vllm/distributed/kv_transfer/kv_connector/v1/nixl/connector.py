@@ -342,6 +342,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
 class NixlPullConnector(NixlBaseConnector):
     """Pull-based (READ) NIXL KV transfer connector."""
 
+    @classmethod
+    def requires_matching_kv_cache_groups(cls, vllm_config: VllmConfig) -> bool:
+        # Group pairs map different peer plans, except for MLA.
+        return vllm_config.model_config.use_mla
+
     def __init__(
         self,
         vllm_config: VllmConfig,
