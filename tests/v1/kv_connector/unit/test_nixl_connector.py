@@ -50,6 +50,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HeartbeatInfo,
     RemoteMeta,
     ReqMeta,
     compute_nixl_compatibility_hash,
@@ -114,7 +115,7 @@ def get_default_xfer_telemetry(
     class AttributeDict(dict):
         __slots__ = ()
         __getattr__ = dict.__getitem__
-        __setattr__ = dict.__setitem__  # type: ignore[assignment]
+        __setattr__ = dict.__setitem__
 
     # We can't instantiate nixlXferTelemetry because it's read only and
     # ray env does not have NIXL, so we must fake it
@@ -1698,6 +1699,7 @@ def test_kv_connector_stats_failure_grouping():
     stats.record_failed_handshake()
     stats.record_failed_notification()
     stats.record_kv_expired_req()
+    stats.record_notification_after_expiry()
     assert not stats.is_empty()
 
     # No successful transfers: latency stats are zero but the failure
@@ -1706,6 +1708,7 @@ def test_kv_connector_stats_failure_grouping():
     assert reduced["Num successful transfers"] == 0
     assert reduced["Num failed transfers"] == 3
     assert reduced["Num KV expired reqs"] == 1
+    assert reduced["Num notifs after expiry"] == 1
 
 
 def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
@@ -1750,6 +1753,7 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
     stats.record_failed_handshake()
     stats.record_failed_notification()
     stats.record_kv_expired_req()
+    stats.record_notification_after_expiry()
     prom.observe(stats.data, engine_idx=0)
 
     def counter_value(name: str) -> float:
@@ -1761,6 +1765,33 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
 
     assert counter_value("vllm:nixl_num_failed_transfers_total") == 3.0
     assert counter_value("vllm:nixl_num_kv_expired_reqs_total") == 1.0
+    assert counter_value("vllm:nixl_num_notifications_after_expiry_total") == 1.0
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_notification_after_expiry_is_counted(default_vllm_config, dist_init):
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+    worker._reqs_to_process.add("known")
+    worker._reqs_to_send["known"] = time.perf_counter() + 10
+    worker.nixl_wrapper.get_new_notifs = MagicMock(
+        return_value={"decode-agent": [b"known:1", b"unknown:1"]}
+    )
+
+    assert worker._get_new_notifs() == {"known"}
+
+    stats = connector.get_kv_connector_stats()
+    assert isinstance(stats, NixlKVConnectorStats)
+    assert stats.data["num_notifications_after_expiry"] == [1]
 
 
 def test_multi_kv_connector_stats_aggregation():
@@ -2668,6 +2699,51 @@ def test_engine_with_inflight_transfer_is_not_evicted(default_vllm_config, dist_
 
         assert engine_id not in worker._remote_agents
         assert mock_rem.call_count == 2
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_heartbeated_engine_is_not_evicted(default_vllm_config, dist_init, monkeypatch):
+    """Heartbeats keep a remote engine's NIXL state alive.
+
+    Requests waiting in the D scheduler issue no reads, but their engine is
+    heartbeated through its remote agents. If the TTL expires anyway, the
+    next heartbeat evicts the engine and starts a new handshake, which loads
+    every remote agent again.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=10.0)
+    nixl_wrapper = worker.nixl_wrapper
+
+    now = {"t": 1000.0}
+    monkeypatch.setattr(base_worker.time, "perf_counter", lambda: now["t"])
+    worker._engine_last_active[engine_id] = now["t"]
+
+    metadata = NixlConnectorMetadata()
+    metadata.heartbeat_by_engine = {
+        engine_id: HeartbeatInfo(
+            req_ids={"remote-req"}, host="localhost", port=1234, tp_size=2
+        )
+    }
+
+    with (
+        patch.object(nixl_wrapper, "send_notif") as mock_send,
+        patch.object(nixl_wrapper, "remove_remote_agent") as mock_rem,
+        patch.object(worker, "_handshake_initiation_executor") as mock_executor,
+    ):
+        # One heartbeat every 5 s for twice the TTL, and no reads.
+        for _ in range(4):
+            now["t"] += 5.0
+            worker._send_heartbeats(metadata)
+
+    assert engine_id in worker._remote_agents
+    mock_rem.assert_not_called()
+    mock_executor.submit.assert_not_called()
+    # Every heartbeat reached both remote agents.
+    assert mock_send.call_count == 8
 
 
 @patch(
