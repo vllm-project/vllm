@@ -16,6 +16,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
     FullAttentionManager,
+    KpoolTailManager,
     MambaManager,
     RSWAManager,
     SlidingWindowManager,
@@ -24,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
+    KpoolTailSpec,
     MambaSpec,
     RSWASpec,
     SlidingWindowSpec,
@@ -330,6 +332,37 @@ def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
     assert manager.get_num_common_prefix_blocks(request_id) == 0
     assert manager.get_num_skipped_tokens(1024) == 0
     assert manager.req_to_blocks[request_id] == blocks
+
+
+@pytest.mark.parametrize("record_for_zeroing", [True, False])
+def test_external_kpool_tail_zeroing(record_for_zeroing):
+    """A transferred ring at index zero skips zeroing even with a local hit."""
+    spec = KpoolTailSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=8,
+        dtype=torch.bfloat16,
+        sliding_window=4,
+    )
+    manager = KpoolTailManager(
+        spec,
+        block_pool=BlockPool(10, enable_caching=True, hash_block_size=4),
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+        needs_kv_cache_zeroing=True,
+        max_admission_blocks_per_request=1,
+    )
+    manager.allocate_external_computed_blocks(
+        "request", 16, 4, record_for_zeroing=record_for_zeroing
+    )
+    blocks = manager.req_to_blocks["request"]
+    assert len(blocks) == 1
+    assert manager.take_new_block_ids() == (
+        [blocks[0].block_id] if record_for_zeroing else []
+    )
+    assert manager.allocate_new_blocks("request", 20, 20) == []
+    assert manager.take_new_block_ids() == []
 
 
 def test_sliding_window_records_new_blocks_for_zeroing():
