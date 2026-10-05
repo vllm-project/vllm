@@ -35,6 +35,7 @@ from vllm.multimodal.cache import (
     MultiModalCacheMissError,
     engine_receiver_cache_from_config,
 )
+from vllm.sampling_params import supports_inline_hidden_states
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -506,8 +507,10 @@ class EngineCore:
                     f"Supported tasks: {supported_pooling_tasks}"
                 )
 
-        if request.kv_transfer_params is not None and (
-            not self.scheduler.get_kv_connector()
+        if (
+            request.kv_transfer_params is not None
+            and not request.kv_transfer_params.get("return_last_hidden_state", False)
+            and not self.scheduler.get_kv_connector()
         ):
             logger.warning(
                 "Got kv_transfer_params, but no KVConnector found. "
@@ -1058,6 +1061,18 @@ class EngineCore:
         if self.mm_receiver_cache is not None and request.mm_features:
             request.mm_features = self.mm_receiver_cache.get_and_update_features(
                 request.mm_features
+            )
+
+        if (
+            request.sampling_params is not None
+            and request.sampling_params.validate_inline_output()
+            and (
+                request.resumable or not supports_inline_hidden_states(self.vllm_config)
+            )
+        ):
+            raise ValueError(
+                "return_last_hidden_state is unsupported for this engine "
+                "or resumable input"
             )
 
         req = Request.from_engine_core_request(request, self.request_block_hasher)
@@ -1745,6 +1760,9 @@ class EngineCoreProc(EngineCore):
                 self.vllm_config.weight_transfer_config.backend
                 if self.vllm_config.weight_transfer_config is not None
                 else None
+            ),
+            supports_inline_hidden_states=supports_inline_hidden_states(
+                self.vllm_config
             ),
             enable_sleep_mode=self.vllm_config.model_config.enable_sleep_mode,
             supports_draft_weight_updates=(

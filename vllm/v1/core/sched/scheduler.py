@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import math
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -53,7 +54,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -2191,6 +2197,31 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params["remote_prefill_cached_tokens"] = (
                             prefill_stats.num_cached_tokens
                         )
+                    if (request.kv_transfer_params or {}).get(
+                        "return_last_hidden_state", False
+                    ) and finish_reason in (FinishReason.STOP, FinishReason.LENGTH):
+                        vector = (model_runner_output.hidden_states or {}).get(req_id)
+                        model_config = self.vllm_config.model_config
+                        if (
+                            vector is None
+                            or len(vector) != model_config.get_hidden_size()
+                            or not all(math.isfinite(x) for x in vector)
+                        ):
+                            logger.error(
+                                "Missing or nonfinite hidden state for %s", req_id
+                            )
+                            request.status = RequestStatus.FINISHED_ERROR
+                            finish_reason = FinishReason.ERROR
+                            new_token_ids = []
+                        else:
+                            kv_transfer_params = {
+                                "last_hidden_state": vector,
+                                "token_position": request.num_prompt_tokens - 1,
+                                "layer_id": (
+                                    model_config.hf_text_config.num_hidden_layers
+                                ),
+                                "representation": "post_final_norm",
+                            }
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
