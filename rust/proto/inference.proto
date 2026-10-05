@@ -105,7 +105,6 @@ message DecodingParameters {
 
   // Token sequences that must not be generated. Each sequence must be nonempty.
   repeated TokenIds bad_words_token_ids = 12;
-  optional string whitespace_pattern = 13;
 }
 
 message StoppingCriteria {
@@ -214,7 +213,6 @@ message FinishInfo {
   google.protobuf.Struct kv_transfer_params = 6;
   //uint64 seed = 7;
   google.protobuf.Struct ec_transfer_params = 8;
-  // Prompt tokens served from cache; absent on older servers.
   optional uint32 num_cached_tokens = 9;
 }
 

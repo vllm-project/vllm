@@ -277,22 +277,12 @@ fn candidate_logprob_spec(
 fn convert_structured_output(
     d: &pb::DecodingParameters,
 ) -> Result<Option<StructuredOutputsParams>, Status> {
-    use pb::decoding_parameters::StructuredOutput;
-    if d.whitespace_pattern.is_some()
-        && matches!(
-            d.structured_output.as_ref(),
-            None | Some(StructuredOutput::JsonObject(false))
-        )
-    {
-        return Err(Status::invalid_argument(
-            "whitespace_pattern requires a structured output constraint",
-        ));
-    }
     let so = match d.structured_output.as_ref() {
         None => return Ok(None),
         Some(so) => so,
     };
-    let mut params = match so {
+    use pb::decoding_parameters::StructuredOutput;
+    let params = match so {
         StructuredOutput::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
@@ -309,7 +299,6 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
-    params.options.whitespace_pattern.clone_from(&d.whitespace_pattern);
     params
         .validate()
         .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
@@ -597,17 +586,13 @@ mod tests {
     }
 
     #[test]
-    fn grpc_generation_constraints_survive_protobuf_conversion_and_lowering() {
+    fn grpc_bad_words_token_ids_survive_protobuf_conversion_and_lowering() {
         let request = pb::GenerateRequest {
             decoding: Some(pb::DecodingParameters {
                 bad_words_token_ids: vec![
                     pb::TokenIds { ids: vec![5] },
                     pb::TokenIds { ids: vec![7, 11] },
                 ],
-                structured_output: Some(pb::decoding_parameters::StructuredOutput::JsonObject(
-                    true,
-                )),
-                whitespace_pattern: Some("[ ]*".to_string()),
                 ..Default::default()
             }),
             ..base_request()
@@ -632,10 +617,6 @@ mod tests {
             .generate_request;
             let params = engine.sampling_params;
             assert_eq!(params.bad_words_token_ids, Some(vec![vec![5], vec![7, 11]]));
-            assert_eq!(
-                params.structured_outputs.unwrap().options.whitespace_pattern.as_deref(),
-                Some("[ ]*")
-            );
         }
     }
 
@@ -707,36 +688,17 @@ mod tests {
     }
 
     #[test]
-    fn grpc_rejects_invalid_structured_output_before_engine() {
+    fn grpc_rejects_empty_grammar_before_engine() {
         use super::pb::decoding_parameters::StructuredOutput;
-        for (structured_output, whitespace_pattern, message) in [
-            (
-                Some(StructuredOutput::Grammar("  ".to_string())),
-                None,
-                "grammar cannot be an empty string",
-            ),
-            (
-                None,
-                Some("[ ]*".to_string()),
-                "whitespace_pattern requires",
-            ),
-            (
-                Some(StructuredOutput::JsonObject(false)),
-                Some("[ ]*".to_string()),
-                "whitespace_pattern requires",
-            ),
-        ] {
-            let req = pb::GenerateRequest {
-                decoding: Some(pb::DecodingParameters {
-                    structured_output,
-                    whitespace_pattern,
-                    ..Default::default()
-                }),
-                ..base_request()
-            };
-            let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
-            assert!(err.message().contains(message));
-        }
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
+        assert!(err.message().contains("grammar cannot be an empty string"));
     }
 
     #[test]
