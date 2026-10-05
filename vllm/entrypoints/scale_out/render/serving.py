@@ -17,6 +17,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     MultiModalFeatures,
+    ParseContext,
     ReasoningParserKwargs,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
@@ -26,11 +27,15 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.multimodal.parse import MultiModalDataParser
+from vllm.parser.utils import count_history_tool_calls
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
 )
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.online_renderer import (
+    OnlineRenderer,
+    resolve_chat_template_kwargs,
+)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -154,6 +159,24 @@ class ServingRender(BaseServing):
             cache_salt=request.cache_salt,
             priority=request.priority,
             token_offsets=engine_input.get("prompt_token_offsets"),
+            parse_context=self._build_parse_context(request),
+        )
+
+    def _build_parse_context(self, request: ChatCompletionRequest) -> ParseContext:
+        renderer = self.online_renderer
+        return ParseContext(
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            parallel_tool_calls=request.parallel_tool_calls,
+            include_reasoning=request.include_reasoning,
+            chat_template_kwargs=resolve_chat_template_kwargs(
+                request,
+                renderer.chat_template,
+                renderer.chat_template_content_format,
+                renderer.default_chat_template_kwargs,
+                use_harmony=renderer.use_harmony,
+            ),
+            history_tool_call_cnt=count_history_tool_calls(request),
         )
 
     async def render_messages_request(

@@ -195,6 +195,12 @@ class Parser:
         state.history_tool_call_cnt = count_history_tool_calls(request)
         state.history_tool_call_cnt_initialized = True
 
+    def set_history_tool_call_count(self, count: int) -> None:
+        """Seed the history count when `request.messages` is not available."""
+        state = self._stream_state
+        state.history_tool_call_cnt = count
+        state.history_tool_call_cnt_initialized = True
+
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:

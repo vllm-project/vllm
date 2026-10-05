@@ -682,3 +682,135 @@ async def test_text_parity_stop_string(client, stream):
     if coupled["stop_reason"] != stop:
         pytest.skip("Model did not emit the stop string")
     assert derendered[len(inline_text) :].startswith(stop)
+
+
+# ---------------------------------------------------------------------------
+# Inline derender level: generate(output_mode="derender") == chat completions
+# ---------------------------------------------------------------------------
+
+
+async def _inline_derender(
+    client: httpx.AsyncClient, messages: list[dict], **extra
+) -> dict:
+    """Render a chat request, then generate it at the derender level with
+    the `parse_context` that `/render` returned."""
+    render = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL,
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": 128,
+            **extra,
+        },
+    )
+    assert render.status_code == 200, render.text
+    generate_request = render.json()
+    assert generate_request["parse_context"] is not None
+
+    resp = await client.post(
+        "/inference/v1/generate",
+        json={**generate_request, "output_mode": "derender"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["output_mode"] == "derender"
+    return data
+
+
+def _assert_inline_parity(coupled: dict, inline: dict) -> None:
+    assert len(inline["choices"]) == len(coupled["choices"])
+    for c, i in zip(coupled["choices"], inline["choices"]):
+        assert i["token_ids"] == c["token_ids"], (
+            "greedy (temperature=0) generation was expected to be deterministic "
+            "across the coupled and inline calls"
+        )
+        assert i["message"]["content"] == c["message"]["content"]
+        assert i["message"].get("reasoning") == c["message"].get("reasoning")
+        assert _tool_sig(i) == _tool_sig(c)
+        # TODO(#59324): compare tool call finish_reason once it is mapped.
+        if not _tool_sig(c):
+            assert i["finish_reason"] == c["finish_reason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "extra"),
+    [
+        pytest.param(TEXT_MESSAGES[0]["content"], {}, id="plain"),
+        pytest.param(
+            "What is 17 times 23? Think it through.",
+            {"include_reasoning": True, "max_tokens": 256},
+            id="reasoning",
+        ),
+        pytest.param(
+            "What is 17 times 23? Think it through.",
+            {"include_reasoning": False, "max_tokens": 256},
+            id="reasoning-hidden",
+        ),
+        pytest.param(
+            "What's the weather in Paris?",
+            {"tools": TOOLS, "tool_choice": "auto", "max_tokens": 1024},
+            id="tool-auto",
+        ),
+        pytest.param(
+            "What's the weather in Paris?",
+            {"tools": TOOLS, "tool_choice": "required", "max_tokens": 1024},
+            id="tool-required",
+        ),
+        pytest.param(
+            "What's the weather in Paris?",
+            {"tools": TOOLS, "tool_choice": FORCE_WEATHER_TOOL, "max_tokens": 1024},
+            id="tool-named",
+        ),
+        pytest.param(
+            "What's the weather in Paris and in Rome?",
+            {
+                "tools": TOOLS,
+                "tool_choice": "required",
+                "parallel_tool_calls": False,
+                "max_tokens": 1024,
+            },
+            id="tool-no-parallel",
+        ),
+        pytest.param(
+            "Write two short lines about the sea.", {"stop": ["\n"]}, id="stop"
+        ),
+        pytest.param(TEXT_MESSAGES[0]["content"], {"n": 2}, id="n2"),
+    ],
+)
+async def test_inline_derender_parity(client, content, extra):
+    """The derender level parses the engine's own text, so it matches coupled
+    chat, including for hermes with tools whose `adjust_request` changes the
+    decode flags."""
+    messages = [{"role": "user", "content": content}]
+    coupled = await _coupled(client, messages, **extra)
+    inline = await _inline_derender(client, messages, **extra)
+    _assert_inline_parity(coupled, inline)
+
+    if extra.get("parallel_tool_calls") is False:
+        assert len(_tool_sig(inline["choices"][0])) <= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_reasoning", [True, False])
+async def test_inline_derender_logprobs(client, include_reasoning):
+    """Logprobs match coupled chat and are dropped when reasoning is hidden."""
+    messages = [{"role": "user", "content": "What is 2+2?"}]
+    extra = {
+        "logprobs": True,
+        "top_logprobs": 3,
+        "include_reasoning": include_reasoning,
+    }
+    inline = (await _inline_derender(client, messages, **extra))["choices"][0]
+
+    if not include_reasoning:
+        assert inline["logprobs"] is None
+        return
+
+    coupled = (await _coupled(client, messages, **extra))["choices"][0]
+    i_content = inline["logprobs"]["content"]
+    c_content = coupled["logprobs"]["content"]
+    assert [(e["token"], e["bytes"]) for e in i_content] == [
+        (e["token"], e["bytes"]) for e in c_content
+    ]

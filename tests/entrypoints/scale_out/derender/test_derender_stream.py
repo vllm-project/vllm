@@ -35,6 +35,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    FunctionCall,
     PerRequestMetrics,
     SpeculativeDecodingMetrics,
 )
@@ -55,6 +56,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamChoice,
     GenerateTokensStreamResponse,
+    ParseContext,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.parser import Parser
@@ -348,6 +350,52 @@ def test_non_streaming_derender_initializes_parser_prefix(
     parser.set_prompt_token_ids.assert_called_once_with([11, 12])
     assert choices[0].message.tool_calls[0].function.name == "tool"
     assert choices[0].finish_reason == "length"
+
+
+_WEATHER_TOOLS = [
+    {
+        "type": "function",
+        "function": {"name": "get_weather", "parameters": {"type": "object"}},
+    }
+]
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["auto", "required", {"type": "function", "function": {"name": "get_weather"}}],
+)
+def test_derender_text_choices_builds_request_from_parse_context(
+    derenderer, monkeypatch, tool_choice
+):
+    """Every tool_choice survives the synthetic request validators, the
+    history count is seeded and parallel_tool_calls=false keeps one call."""
+    parser = MagicMock()
+    parser.parse.return_value = (
+        None,
+        None,
+        [
+            FunctionCall(name="get_weather", arguments="{}"),
+            FunctionCall(name="get_weather", arguments="{}"),
+        ],
+    )
+    monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    parse_context = ParseContext.model_validate(
+        {
+            "tools": _WEATHER_TOOLS,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": False,
+            "history_tool_call_cnt": 3,
+        }
+    )
+    output = MagicMock(text="raw", token_ids=[1, 2])
+
+    (message,) = derenderer._derender_text_choices([output], parse_context, [11])
+
+    chat_request = parser.parse.call_args.args[1]
+    assert chat_request.tool_choice == parse_context.tool_choice
+    parser.set_prompt_token_ids.assert_called_once_with([11])
+    parser.set_history_tool_call_count.assert_called_once_with(3)
+    assert len(message.tool_calls) == 1
 
 
 class TestDetokenizeDelta:

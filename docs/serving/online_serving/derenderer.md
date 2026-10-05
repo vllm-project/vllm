@@ -87,6 +87,8 @@ The derenderer builds its tool and reasoning parsers from its own server flags p
 - Start the render server with the same `--tool-call-parser`, `--reasoning-parser`, `--enable-auto-tool-choice`, `--chat-template` and `--default-chat-template-kwargs` you'd give `vllm serve` for this model. If `/render` and `/derender` run on different servers, give both the same values.
 - Send the full `chat_request` that went to `/render`, not just `messages` and `tools`. Fields like `chat_template_kwargs`, `reasoning_effort`, `tool_choice` and `include_reasoning` change how the output is parsed.
 
+`/derender` decodes with the flags in `chat_request` which can differ from what the engine ran with. For parsers whose `adjust_request` changes decoding, use [`output_mode: "derender"`](token_in_token_out.md#derender) on `/inference/v1/generate`. It parses the engine's own text and matches coupled chat.
+
 A mismatch doesn't fail. The parser just splits `reasoning`, `content` and `tool_calls` differently from what `vllm serve` would return.
 
 `/v1/completions/derender` only detokenizes. It never runs tool or reasoning parsers, the same as `/v1/completions` on `vllm serve`. It only reads `skip_special_tokens` from `completion_request`.

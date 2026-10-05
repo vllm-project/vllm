@@ -30,6 +30,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderStreamState,
     GenerateTokensResponse,
     GenerateTokensStreamResponse,
+    ParseContext,
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -37,8 +38,10 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
 from vllm.logger import init_logger
+from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
+from vllm.renderers.online_renderer import resolve_chat_template_kwargs
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
@@ -104,6 +107,9 @@ class OnlineDerenderer:
         # offload them in one hop to keep the event loop responsive.
         self._derender_chat_async = make_async(
             self._derender_chat, executor=renderer._executor
+        )
+        self._derender_text_choices_async = make_async(
+            self._derender_text_choices, executor=renderer._executor
         )
         self._derender_completion_async = make_async(
             self._derender_completion, executor=renderer._executor
@@ -203,18 +209,69 @@ class OnlineDerenderer:
 
         return choices
 
+    async def derender_text_choices(
+        self,
+        outputs: Sequence[CompletionOutput],
+        parse_context: ParseContext | None,
+        prompt_token_ids: list[int] | None,
+    ) -> list[ChatMessage]:
+        """Parse the engine's decoded output text into assistant messages.
+
+        Args:
+            outputs: Final engine outputs, already detokenized.
+            parse_context: Chat context from `/render`. None is only valid
+                on a server without a parser.
+            prompt_token_ids: Prompt token IDs, if known.
+
+        Returns:
+            One message per output, in order.
+
+        """
+        return await self._derender_text_choices_async(
+            outputs, parse_context, prompt_token_ids
+        )
+
+    def _derender_text_choices(
+        self,
+        outputs: Sequence[CompletionOutput],
+        parse_context: ParseContext | None,
+        prompt_token_ids: list[int] | None,
+    ) -> list[ChatMessage]:
+        if self.parser is None:
+            return [ChatMessage(role="assistant", content=o.text) for o in outputs]
+
+        assert parse_context is not None
+        tokenizer = self.renderer.get_tokenizer()
+        # Validate from plain data: the request validators only accept a
+        # named tool_choice as a dict.
+        chat_request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [],
+                **parse_context.model_dump(exclude={"history_tool_call_cnt"}),
+            }
+        )
+        return [
+            self._parse_and_assemble(
+                tokenizer,
+                output.text,
+                output.token_ids,
+                chat_request,
+                parse_context.chat_template_kwargs,
+                prompt_token_ids,
+                history_tool_call_count=parse_context.history_tool_call_cnt,
+            )
+            for output in outputs
+        ]
+
     def _resolve_chat_template_kwargs(
         self, chat_request: ChatCompletionRequest
     ) -> dict[str, Any]:
-        if self.use_harmony:
-            return {}
-        return (
-            chat_request.build_chat_params(
-                self.chat_template,
-                self.chat_template_content_format,
-            )
-            .with_defaults(self.default_chat_template_kwargs)
-            .chat_template_kwargs
+        return resolve_chat_template_kwargs(
+            chat_request,
+            self.chat_template,
+            self.chat_template_content_format,
+            self.default_chat_template_kwargs,
+            use_harmony=self.use_harmony,
         )
 
     def _parse_and_assemble(
@@ -225,6 +282,7 @@ class OnlineDerenderer:
         chat_request: ChatCompletionRequest,
         chat_template_kwargs: dict[str, Any],
         prompt_token_ids: list[int] | None,
+        history_tool_call_count: int | None = None,
     ) -> ChatMessage:
         """Parse decoded output text into an assistant `ChatMessage`.
 
@@ -236,6 +294,9 @@ class OnlineDerenderer:
                 `include_reasoning`.
             chat_template_kwargs: Already resolved template kwargs.
             prompt_token_ids: Prompt token IDs, if known.
+            history_tool_call_count: Tool calls in the conversation, for
+                requests that carry no messages. None derives it from
+                `chat_request`.
 
         Returns:
             The assembled assistant message.
@@ -250,6 +311,8 @@ class OnlineDerenderer:
         )
         if prompt_token_ids is not None:
             parser.set_prompt_token_ids(prompt_token_ids)
+        if history_tool_call_count is not None:
+            parser.set_history_tool_call_count(history_tool_call_count)
         reasoning, content, tool_calls = parser.parse(
             text,
             chat_request,
@@ -261,7 +324,10 @@ class OnlineDerenderer:
             reasoning = None
 
         tc_items = (
-            [ToolCall(id=random_uuid(), function=tc) for tc in tool_calls]
+            [
+                ToolCall(id=random_uuid(), function=tc)
+                for tc in maybe_filter_parallel_tool_calls(tool_calls, chat_request)
+            ]
             if tool_calls
             else []
         )
