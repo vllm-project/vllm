@@ -1,9 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
+
+import pytest
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine import (
+    EngineCoreEvent,
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
@@ -288,3 +299,75 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+@pytest.mark.parametrize("finish_reason", [FinishReason.ABORT, FinishReason.ERROR])
+def test_finished_before_scheduled_has_no_phase_latencies(finish_reason):
+    """A request that fails while waiting never reaches the scheduled or
+    first-token phases, so it must not report TTFT or per-phase intervals
+    (unset timestamps would otherwise yield huge or negative values)."""
+    req_stats = RequestStateStats(arrival_time=time.time())
+    iteration_stats = IterationStats()
+    output = EngineCoreOutput(
+        request_id="req",
+        new_token_ids=[],
+        finish_reason=finish_reason,
+        events=[EngineCoreEvent.new_event(EngineCoreEventType.QUEUED)],
+    )
+
+    iteration_stats.update_from_output(
+        output,
+        engine_core_timestamp=time.monotonic(),
+        is_prefilling=True,
+        req_stats=req_stats,
+        lora_states=LoRARequestStates(log_stats=True),
+        lora_name=None,
+    )
+    iteration_stats.update_from_finished_request(
+        finish_reason=finish_reason,
+        request_id="req",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+    )
+
+    assert iteration_stats.time_to_first_tokens_iter == []
+    finished = iteration_stats.finished_requests[0]
+    assert finished.finish_reason == finish_reason
+    assert finished.e2e_latency >= 0
+    assert finished.queued_time is None
+    assert finished.prefill_time is None
+    assert finished.inference_time is None
+    assert finished.decode_time is None
+
+
+def test_finished_after_first_token_keeps_reached_phase_latencies():
+    """A request that fails mid-decode still reports the phases it reached."""
+    req_stats = RequestStateStats(arrival_time=time.time())
+    lora_states = LoRARequestStates(log_stats=True)
+    iteration_stats = IterationStats()
+    events = [
+        EngineCoreEvent.new_event(EngineCoreEventType.QUEUED, 1.0),
+        EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED, 2.0),
+    ]
+    first = EngineCoreOutput(request_id="req", new_token_ids=[1], events=events)
+    last = EngineCoreOutput(
+        request_id="req", new_token_ids=[], finish_reason=FinishReason.ERROR
+    )
+
+    iteration_stats.update_from_output(first, 4.0, True, req_stats, lora_states, None)
+    iteration_stats.update_from_output(last, 7.0, False, req_stats, lora_states, None)
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.ERROR,
+        request_id="req",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+    )
+
+    assert len(iteration_stats.time_to_first_tokens_iter) == 1
+    finished = iteration_stats.finished_requests[0]
+    assert finished.queued_time == 1.0
+    assert finished.prefill_time == 2.0
+    assert finished.decode_time == 3.0
+    assert finished.inference_time == 5.0
