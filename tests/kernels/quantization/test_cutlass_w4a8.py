@@ -29,7 +29,8 @@ if not current_platform.is_cuda():
 #  `is_quant_method_supported` conflates kernels with quantization methods
 #  an assumption which is breaking down as quantizations methods can have
 #  have kernels and some kernels support multiple quantization methods.
-IS_SUPPORTED_BY_GPU = current_platform.get_device_capability()[0] >= 9
+capability = current_platform.get_device_capability()
+IS_SUPPORTED_BY_GPU = capability is not None and capability[0] >= 9
 
 MNK_SHAPES = [
     (1, 128, 128),

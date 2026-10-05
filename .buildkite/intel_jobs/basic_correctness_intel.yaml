@@ -18,11 +18,12 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/
-  - tests/basic_correctness/test_cumem.py
+  - tests/basic_correctness/memory/
+  - tests/basic_correctness/cpu_offload/
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-      pytest -v -s basic_correctness/test_cpu_offload.py &&
-      pytest -v -s basic_correctness/test_mem.py'
+      pytest -v -s basic_correctness/cpu_offload &&
+      pytest -v -s basic_correctness/memory'
