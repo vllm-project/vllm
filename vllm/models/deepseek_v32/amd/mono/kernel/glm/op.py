@@ -38,14 +38,15 @@ from vllm.models.deepseek_v32.amd.mono.kernel.glm.layout import (
     INDEX_DIM,
     POLL_STAGES,
     layout,
-    stage_tasks,
 )
-from vllm.models.deepseek_v32.amd.mono.kernel.layout import TL_COLS
 from vllm.models.deepseek_v32.amd.mono.kernel.packing import pack_bf16, pack_fp8, pack_mxfp4
 from vllm.models.deepseek_v32.amd.mono.kernel.runtime import SymmetricPeerBuffer
 from vllm.models.deepseek_v32.amd.mono.kernel.weights import LayerWeights
 
 __all__ = ["Glm5MonoKernel"]
+
+# fused-indexer weights, in index_params order (slots 0..6)
+_INDEX_WEIGHTS = ("w_index_k", "s_index_k", "w_index_w", "w_index_q", "s_index_q", "g_index_k", "b_index_k")
 
 
 def _tsig(t):
@@ -102,7 +103,6 @@ class Glm5MonoKernel:
         attention_weight: AttentionWeight | str = AttentionWeight.FP8_BLOCK128,
         prepared_weights: dict[str, torch.Tensor] | None = None,
         runtime: "Glm5MonoKernel | None" = None,
-        timeline=False,
         poll_limit: int | None = None,
         poll_early_out: bool = False,
         index_q_fp8: bool = True,
@@ -148,16 +148,7 @@ class Glm5MonoKernel:
             else prepared_weights
         )
         if with_indexer:
-            required = (
-                "w_index_k",
-                "s_index_k",
-                "w_index_w",
-                "w_index_q",
-                "s_index_q",
-                "g_index_k",
-                "b_index_k",
-            )
-            missing = [name for name in required if name not in t]
+            missing = [name for name in _INDEX_WEIGHTS if name not in t]
             if missing:
                 raise ValueError(
                     f"with_indexer=True requires weights: {', '.join(missing)}"
@@ -176,40 +167,11 @@ class Glm5MonoKernel:
             split_keys=64 if split_keys64 else None,
         )
         dev = torch.device("cuda", torch.accelerator.current_device_index())
-        self.stages = stage_tasks(
-            samples,
-            W.heads,
-            topk,
-            with_indexer,
-            index_max_seq,
-            inter=W.config.inter,
-            split_keys=64 if split_keys64 else None,
-        )
-        n_tasks = sum(n for _, n in self.stages)
-        self.timeline = (
-            torch.zeros(n_tasks, TL_COLS, dtype=torch.int64, device=dev)
-            if timeline
-            else None
-        )
         if with_indexer:
             index_tensors = dict(t, **self.packed)
             self.index_params = torch.tensor(
-                [
-                    index_tensors[name].data_ptr()
-                    for name in (
-                        "w_index_k",
-                        "s_index_k",
-                        "w_index_w",
-                        "w_index_q",
-                        "s_index_q",
-                        "g_index_k",
-                        "b_index_k",
-                    )
-                ]
-                + [0 if self.timeline is None else self.timeline.data_ptr()]
-                # 8..11: index cache, decode block table, its row stride, cache block stride (bytes);
-                # set by set_index_tables
-                + [0, 0, 0, 0],
+                # 7: unused; 8..11 (set_index_tables): index cache, block table, its row stride, cache block stride (B)
+                [index_tensors[name].data_ptr() for name in _INDEX_WEIGHTS] + [0] * 5,
                 dtype=torch.int64,
                 device=dev,
             )
@@ -252,7 +214,6 @@ class Glm5MonoKernel:
             index_max_seq=index_max_seq,
             attention_weight=self.attention_weight,
             inter=W.config.inter,
-            timeline=timeline,
             poll_limit=poll_limit,
             poll_early_out=poll_early_out,
             index_q_fp8=index_q_fp8,
@@ -365,11 +326,7 @@ class Glm5MonoKernel:
                 p(self.scratch),
                 self.sym,
                 p(self.peers),
-                (
-                    p(self.index_params)
-                    if self.with_indexer
-                    else (0 if self.timeline is None else p(self.timeline))
-                ),
+                p(self.index_params) if self.with_indexer else 0,
                 p(self.step),
                 self.rank,
                 layer,
@@ -490,46 +447,6 @@ class Glm5MonoKernel:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
-
-    def timeline_report(self) -> str:
-        """Per stage, in us from launch start: [first start, median hint seen, last end]
-        and median per-task phases (hint wait, payload staging, compute, epilogue)."""
-        # s_memrealtime ticks at 100 MHz
-        tl = (
-            self.timeline[:, :5].cpu().double() / 100.0
-        )
-        t0 = tl[:, 0].min()
-        rows, i = [], 0
-        for name, n in self.stages:
-            st = tl[i : i + n].clone()
-            i += n
-            for c in (1, 2, 3):  # missing marks inherit the previous one
-                st[:, c] = torch.where(st[:, c] > 0, st[:, c], st[:, c - 1])
-            d = (st[:, 1:] - st[:, :-1]).median(0).values
-            rows.append(
-                f"{name:7s} x{n:4d}  [{(st[:, 0].min() - t0):6.1f} | hint {(st[:, 1].median() - t0):6.1f} | "
-                f"end {(st[:, 4].max() - t0):6.1f}]  hint {d[0]:5.1f}  stage {d[1]:5.1f}  "
-                f"compute {d[2]:5.1f}  epi {d[3]:5.1f}"
-            )
-            if name == "index_score":
-                per_sample = n // self.S
-                ready = [
-                    (st[s * per_sample : (s + 1) * per_sample, 4].max() - t0).item()
-                    for s in range(self.S)
-                ]
-                rows.append(
-                    " " * 10
-                    + "score-ready/sample "
-                    + " ".join(f"{v:.1f}" for v in ready)
-                )
-            elif name == "index_select":
-                done = [(st[s, 4] - t0).item() for s in range(self.S)]
-                rows.append(
-                    " " * 10
-                    + "select-done/sample "
-                    + " ".join(f"{v:.1f}" for v in done)
-                )
-        return "\n".join(rows)
 
     def intermediates(self):
         S, H = self.S, self.W.heads
