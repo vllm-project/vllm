@@ -973,6 +973,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         #
         # KV Cache residency metrics
         #
+        self.kv_cache_histograms: tuple[Histogram, Histogram, Histogram] | None = None
         if self.kv_cache_metrics_enabled:
             kv_cache_residency_buckets = histogram_buckets(
                 "kv_cache_residency", overrides=custom_buckets
@@ -981,47 +982,45 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_kv_block_lifetime = self._histogram_cls(
                 name="vllm:kv_block_lifetime_seconds",
                 documentation=(
-                    "Histogram of KV cache block lifetime from allocation to eviction. "
+                    "Histogram of KV block lifetime from allocation to eviction "
+                    "or recycling. "
                     "Sampled metrics (controlled by --kv-cache-metrics-sample)."
                 ),
                 buckets=kv_cache_residency_buckets,
-                labelnames=labelnames,
-            )
-            self.histogram_kv_block_lifetime = create_metric_per_engine(
-                histogram_kv_block_lifetime, per_engine_labelvalues
+                labelnames=labelnames + ["kv_cache_group_id"],
             )
 
             histogram_kv_block_idle_before_evict = self._histogram_cls(
                 name="vllm:kv_block_idle_before_evict_seconds",
                 documentation=(
-                    "Histogram of idle time before KV cache block eviction. "
+                    "Histogram of time continuously unreferenced before KV block "
+                    "eviction (zero if still referenced). "
                     "Sampled metrics (controlled by --kv-cache-metrics-sample)."
                 ),
                 buckets=kv_cache_residency_buckets,
-                labelnames=labelnames,
-            )
-            self.histogram_kv_block_idle_before_evict = create_metric_per_engine(
-                histogram_kv_block_idle_before_evict, per_engine_labelvalues
+                labelnames=labelnames + ["kv_cache_group_id"],
             )
 
             histogram_kv_block_reuse_gap = self._histogram_cls(
                 name="vllm:kv_block_reuse_gap_seconds",
                 documentation=(
                     "Histogram of time gaps between consecutive KV cache block "
-                    "accesses. Only the most recent accesses are recorded "
+                    "prefix reuses, excluding transfer pins. Only the most recent "
+                    "reuses are recorded "
                     "(ring buffer). Sampled metrics (controlled by "
                     "--kv-cache-metrics-sample)."
                 ),
                 buckets=kv_cache_residency_buckets,
-                labelnames=labelnames,
+                labelnames=labelnames + ["kv_cache_group_id"],
             )
-            self.histogram_kv_block_reuse_gap = create_metric_per_engine(
-                histogram_kv_block_reuse_gap, per_engine_labelvalues
+            self.kv_cache_histograms = (
+                histogram_kv_block_lifetime,
+                histogram_kv_block_idle_before_evict,
+                histogram_kv_block_reuse_gap,
             )
-        else:
-            self.histogram_kv_block_lifetime = {}
-            self.histogram_kv_block_idle_before_evict = {}
-            self.histogram_kv_block_reuse_gap = {}
+            for histogram in self.kv_cache_histograms:
+                for labelvalues in per_engine_labelvalues.values():
+                    histogram.labels(*labelvalues, "-1")
 
         #
         # LoRA metrics
@@ -1141,11 +1140,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.kv_cache_metrics_enabled
                 and scheduler_stats.kv_cache_eviction_events
             ):
-                lifetime_hist = self.histogram_kv_block_lifetime[engine_idx]
-                idle_hist = self.histogram_kv_block_idle_before_evict[engine_idx]
-                reuse_hist = self.histogram_kv_block_reuse_gap[engine_idx]
-
+                assert self.kv_cache_histograms is not None
                 for event in scheduler_stats.kv_cache_eviction_events:
+                    group_id = (
+                        event.kv_cache_group_id
+                        if event.kv_cache_group_id is not None
+                        else -1
+                    )
+                    lifetime_hist, idle_hist, reuse_hist = (
+                        histogram.labels(
+                            *self.per_engine_labelvalues[engine_idx], str(group_id)
+                        )
+                        for histogram in self.kv_cache_histograms
+                    )
                     lifetime_hist.observe(event.lifetime_seconds)
                     idle_hist.observe(event.idle_seconds)
                     for gap in event.reuse_gaps_seconds:

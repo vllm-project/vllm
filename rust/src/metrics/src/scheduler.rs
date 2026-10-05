@@ -11,10 +11,19 @@ use prometheus_client::registry::Registry;
 
 use crate::{F64Gauge, Histogram, HistogramFamily, U64Counter, U64Gauge};
 
-const KV_CACHE_RESIDENCY_BUCKETS: [f64; 21] = [
+const KV_CACHE_RESIDENCY_BUCKETS: [f64; 26] = [
     0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0,
-    120.0, 300.0, 600.0, 1200.0, 1800.0,
+    120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0, 7200.0, 14400.0, 28800.0, 86400.0,
 ];
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct KvCacheLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub kv_cache_group_id: String,
+}
+
+pub type KvCacheHistogramFamily = Family<KvCacheLabels, Histogram, fn() -> Histogram>;
 
 fn kv_block_lifetime_histogram() -> Histogram {
     Histogram::new(KV_CACHE_RESIDENCY_BUCKETS.iter().copied())
@@ -249,9 +258,9 @@ pub struct SchedulerMetrics {
     pub estimated_write_bytes_per_gpu: Family<EngineLabels, U64Counter>,
 
     // Sampled KV-cache residency histograms.
-    pub kv_block_lifetime_seconds: HistogramFamily,
-    pub kv_block_idle_before_evict_seconds: HistogramFamily,
-    pub kv_block_reuse_gap_seconds: HistogramFamily,
+    pub kv_block_lifetime_seconds: KvCacheHistogramFamily,
+    pub kv_block_idle_before_evict_seconds: KvCacheHistogramFamily,
+    pub kv_block_reuse_gap_seconds: KvCacheHistogramFamily,
 
     // Mooncake store connector telemetry. Mirrors `MooncakeStorePromMetrics`.
     pub mooncake_operation_time_seconds: MooncakeOperationHistogramFamily,
@@ -401,7 +410,7 @@ impl SchedulerMetrics {
             Family::new_with_constructor(kv_block_lifetime_histogram as fn() -> Histogram);
         registry.register(
             "vllm:kv_block_lifetime_seconds",
-            "Histogram of KV cache block lifetime from allocation to eviction. Sampled metrics (controlled by --kv-cache-metrics-sample).",
+            "Histogram of KV block lifetime from allocation to eviction or recycling. Sampled metrics (controlled by --kv-cache-metrics-sample).",
             kv_block_lifetime_seconds.clone(),
         );
 
@@ -409,7 +418,7 @@ impl SchedulerMetrics {
             Family::new_with_constructor(kv_block_idle_before_evict_histogram as fn() -> Histogram);
         registry.register(
             "vllm:kv_block_idle_before_evict_seconds",
-            "Histogram of idle time before KV cache block eviction. Sampled metrics (controlled by --kv-cache-metrics-sample).",
+            "Histogram of time continuously unreferenced before KV block eviction (zero if still referenced). Sampled metrics (controlled by --kv-cache-metrics-sample).",
             kv_block_idle_before_evict_seconds.clone(),
         );
 
@@ -417,7 +426,7 @@ impl SchedulerMetrics {
             Family::new_with_constructor(kv_block_reuse_gap_histogram as fn() -> Histogram);
         registry.register(
             "vllm:kv_block_reuse_gap_seconds",
-            "Histogram of time gaps between consecutive KV cache block accesses. Only the most recent accesses are recorded (ring buffer). Sampled metrics (controlled by --kv-cache-metrics-sample).",
+            "Histogram of time gaps between consecutive KV cache block prefix reuses, excluding transfer pins. Only the most recent reuses are recorded (ring buffer). Sampled metrics (controlled by --kv-cache-metrics-sample).",
             kv_block_reuse_gap_seconds.clone(),
         );
 

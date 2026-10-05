@@ -726,6 +726,8 @@ class BlockPool:
             block.ref_cnt -= 1
             self._reuse_watchers[block.block_id] = on_reuse
             if block.ref_cnt == 0:
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_freed(block)
                 released.append(block)
         self.free_block_queue.append_n(released)
 
@@ -740,11 +742,13 @@ class BlockPool:
             True if the block is evicted, False otherwise.
 
         """
-        # Clean up metrics tracking first to prevent leaks
-        if self.metrics_collector:
-            self.metrics_collector.on_block_evicted(block)
-
         evicted_hashes = self._remove_cached_block_hashes(block)
+        # Drain every sampled lifetime, distinguishing uncached recycling.
+        if self.metrics_collector:
+            self.metrics_collector.on_block_evicted(
+                block, get_group_id(evicted_hashes[0]) if evicted_hashes else None
+            )
+
         if not evicted_hashes:
             # The block doesn't have hash, eviction is not needed
             return False
@@ -752,13 +756,16 @@ class BlockPool:
         self._emit_block_removed_events(evicted_hashes)
         return True
 
-    def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
+    def touch(
+        self, blocks: Sequence[KVCacheBlock], *, record_access: bool = True
+    ) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
 
         Args:
             blocks: A list of blocks to touch.
+            record_access: Record a prefix reuse. False for transfer-only pins.
 
         """
         for block in blocks:
@@ -768,7 +775,9 @@ class BlockPool:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
             if self.metrics_collector:
-                self.metrics_collector.on_block_accessed(block)
+                self.metrics_collector.on_block_accessed(
+                    block, record_access=record_access
+                )
 
     def is_block_writable(self, block: KVCacheBlock) -> bool:
         """Return whether a block can be mutated by its sole owner."""
@@ -793,6 +802,8 @@ class BlockPool:
                 continue
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_freed(block)
                 if block.block_hash is None or not self.enable_caching:
                     # LIFO reuse of non-cached blocks for better GPU locality.
                     blocks_to_evict_first.append(block)

@@ -271,26 +271,65 @@ record:
 
 ### KV Cache Residency Metrics
 
-We also emit a set of histograms that describe how long sampled KV cache
-blocks stay resident and how often they are reused. Sampling
-(`--kv-cache-metrics-sample`) keeps the overhead tiny; when a block is
-chosen we record:
+Enable `--kv-cache-metrics` to sample GPU block lifetimes. Sampling
+(`--kv-cache-metrics-sample`) is per allocation. Observations are emitted when
+blocks are evicted or recycled; still-resident blocks do not contribute yet.
+These histograms count block lifetimes, not requests, tokens, or bytes.
 
-- `lifetime` – allocation ⟶ eviction
-- `idle before eviction` – last touch ⟶ eviction
-- `reuse gaps` – the pauses between touches when the block gets reused
+- `vllm:kv_block_lifetime_seconds`: allocation to eviction/recycling, including
+  time held by requests or transfers.
+- `vllm:kv_block_idle_before_evict_seconds`: the final uninterrupted interval
+  with zero references, when the block was eligible for reuse. Any new request
+  reference or transfer pin ends that interval. Explicit invalidation of a
+  still-referenced block records zero idle time.
+- `vllm:kv_block_reuse_gap_seconds`: gaps between prefix reuses by requests,
+  excluding transfer-only pins. Only the last four reuses are retained, giving
+  at most three gaps per sampled lifetime.
 
-Those map directly to the Prometheus metrics:
+All three histograms carry a `kv_cache_group_id` label. Nonnegative values
+identify prefix-cache groups in the resolved KV cache configuration, allowing
+full-attention and sliding-window groups to be examined separately. `-1` means
+there was no cached hash at eviction/recycling (or group metadata was absent
+from an older engine). Temporary, never-cached allocations can therefore be
+excluded from prefix-cache retention queries. CPU-offload residency is not
+included.
 
-- `vllm:kv_block_lifetime_seconds` – how long each sampled block exists.
-- `vllm:kv_block_idle_before_evict_seconds` – idle tail after the final access.
-- `vllm:kv_block_reuse_gap_seconds` – time between consecutive touches.
+For example, plot median idle time separately for each cached group, scoped to
+one model/deployment:
 
-The engine core only ships raw eviction events via `SchedulerStats`; the
-frontend drains them, turns them into Prometheus observations, and also
-exposes the same data through `LLM.get_metrics()` when logging is on.
-Looking at lifetime and idle time on one chart makes it easy to spot
-stranded cache or workloads that pin prompts for a long decode.
+```promql
+histogram_quantile(0.5,
+  sum by (le, kv_cache_group_id) (
+    rate(vllm:kv_block_idle_before_evict_seconds_bucket{kv_cache_group_id!="-1"}[5m])
+  )
+)
+```
+
+The default finite buckets extend to 24 hours. Values above the final finite
+bucket still increment `+Inf`; `histogram_quantile` returns the last finite
+boundary when the requested quantile falls into that overflow bucket. Check the
+overflow fraction alongside tail quantiles:
+
+```promql
+1 -
+  sum by (kv_cache_group_id) (
+    rate(vllm:kv_block_lifetime_seconds_bucket{le="86400.0",kv_cache_group_id!="-1"}[5m])
+  )
+  /
+  sum by (kv_cache_group_id) (
+    rate(vllm:kv_block_lifetime_seconds_count{kv_cache_group_id!="-1"}[5m])
+  )
+```
+
+Use the final boundary actually exposed by the exporter when using custom
+buckets. Adding buckets or labels requires care during rolling upgrades: avoid
+combining instances with different histogram schemas when calculating quantiles.
+
+The engine core ships eviction samples via `SchedulerStats`. Both Python and
+Rust frontends publish these histograms; `LLM.get_metrics()` exposes them too.
+The idle metric previously measured time since allocation or the last `touch`,
+which included transfer pins and time actively held by a request. Its corrected
+meaning is time continuously eligible for eviction.
 
 ### Metrics Publishing - Logging
 
