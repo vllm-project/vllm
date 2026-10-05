@@ -791,6 +791,64 @@ async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
 
 
 @pytest.mark.asyncio
+async def test_chat_full_generator_gives_each_choice_parser_the_prompt():
+    prompts: list[list[int] | None] = []
+
+    class RecordingParser:
+        tool_parser_cls = None
+
+        def __init__(self, *args, **kwargs):
+            self.prompt_token_ids = None
+
+        def set_prompt_token_ids(self, prompt_token_ids):
+            self.prompt_token_ids = list(prompt_token_ids)
+
+        def parse(self, model_output, request, **kwargs):
+            prompts.append(self.prompt_token_ids)
+            return None, model_output, None
+
+        def count_reasoning_tokens(self, token_ids):
+            return 0
+
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.parser_cls = RecordingParser
+    serving.model_config = None
+    serving.chat_template = None
+    serving.chat_template_content_format = "auto"
+    serving.default_chat_template_kwargs = {}
+    request_output = _make_metrics_request_output()
+    request_output.prompt_token_ids = [7, 8]
+    request_output.outputs.append(
+        CompletionOutput(
+            index=1,
+            text="Hi",
+            token_ids=[102],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        )
+    )
+
+    await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            n=2,
+        ),
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        parser=RecordingParser(),
+    )
+
+    assert prompts == [[7, 8], [7, 8]]
+
+
+@pytest.mark.asyncio
 async def test_chat_streaming_metrics_ride_on_usage_chunk():
     serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
     chunks = await _collect_metrics_stream_chunks(
@@ -1606,6 +1664,21 @@ async def test_serving_chat_truncation_side_controls_prompt_truncation():
         truncation_side="left",
     )
     assert left_token_ids == full_token_ids[-4:]
+
+
+def test_serving_chat_starts_without_tokenizer():
+    """Regression test: building the serving objects must not require a
+    tokenizer, which is absent under `skip_tokenizer_init`."""
+    mock_engine = _build_mock_engine()
+    mock_engine.model_config = MockModelConfig(skip_tokenizer_init=True)
+    mock_engine.renderer = HfRenderer(
+        MockVllmConfig(mock_engine.model_config, parallel_config=MockParallelConfig()),
+        None,
+    )
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    assert serving_chat.parser_cls is None
 
 
 @pytest.mark.asyncio
