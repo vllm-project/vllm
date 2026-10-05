@@ -148,16 +148,19 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec
         )
-        self.plan_flashinfer_checkpoints = (
-            kv_cache_spec.prefill_checkpoint_alignment
-            == FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
-        )
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
             _resolve_gdn_prefill_backend,
         )
 
         self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+        # Only the Qwen GDN layer opts in on FlashInfer; KDA layers sharing this
+        # backend export checkpoints their own way.
+        self.plan_flashinfer_checkpoints = (
+            self.gdn_prefill_backend == "flashinfer"
+            and kv_cache_spec.prefill_checkpoint_alignment
+            == FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
+        )
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None

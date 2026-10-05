@@ -547,12 +547,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # FlashInfer's prefill emits mid-prefill states, so a block-boundary
         # checkpoint needs no split prefill. Worst case is a state every
         # alignment tokens across the whole batch.
+        self._checkpoint_alignment = qwen_gdn_prefill_checkpoint_alignment(vllm_config)
         self._checkpoint_buffer_spec: tuple[tuple[int, ...], torch.dtype] | None = None
-        if self.gdn_prefill_backend == "flashinfer":
+        if self._checkpoint_alignment is not None:
             self._checkpoint_buffer_spec = (
                 (
                     vllm_config.scheduler_config.max_num_batched_tokens
-                    // FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
+                    // self._checkpoint_alignment,
                     self.num_v_heads // self.tp_size,
                     self.head_v_dim,
                     self.head_k_dim,
@@ -595,12 +596,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         spec = super().get_kv_cache_spec(vllm_config)
-        if self._checkpoint_buffer_spec is None or not isinstance(spec, MambaSpec):
+        if self._checkpoint_alignment is None or not isinstance(spec, MambaSpec):
             return spec
         return replace(
             spec,
             num_prefill_checkpoint_blocks=1,
-            prefill_checkpoint_alignment=FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
+            prefill_checkpoint_alignment=self._checkpoint_alignment,
         )
 
     def _fused_gdn_decode_unsupported_reason(
