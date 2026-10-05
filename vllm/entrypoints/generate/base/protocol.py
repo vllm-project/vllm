@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     Field,
     model_serializer,
 )
@@ -25,6 +26,12 @@ logger = init_logger(__name__)
 StopParam: TypeAlias = (
     str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
 )
+
+# `top_logprobs` is nullable in the OpenAI spec; null means the same as omitted.
+TopLogprobsParam: TypeAlias = Annotated[
+    int,
+    BeforeValidator(lambda v: 0 if v is None else v, json_schema_input_type=int | None),
+]
 
 _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
