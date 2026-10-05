@@ -1266,16 +1266,12 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "resampler"),
             )
-            self._resampler_moved = False
 
         self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
 
-    def _ensure_resampler_device(self) -> None:
-        if self._resampler_moved:
-            return
+    def process_weights_after_loading(self) -> None:
         # Only move device, DO NOT touch dtype (fp8 quant needs its own dtype)
         self.resampler.to(current_platform.device_type)
-        self._resampler_moved = True
 
     def _parse_and_validate_vision_input(
         self,
@@ -1407,7 +1403,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights)
-        self._ensure_resampler_device()
         return loaded
 
     def get_mm_mapping(self) -> MultiModelKeys:
@@ -2224,7 +2219,6 @@ class MiniCPMV2_6(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self._ensure_resampler_device()
         return loaded
 
 
@@ -2323,7 +2317,6 @@ class MiniCPMV4_0(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self._ensure_resampler_device()
         return loaded
 
 
@@ -2427,7 +2420,6 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self._ensure_resampler_device()
         return loaded
 
 

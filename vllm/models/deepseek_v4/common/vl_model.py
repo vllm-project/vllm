@@ -180,7 +180,6 @@ class DeepseekV4ForConditionalGeneration(
         self.hf_to_vllm_mapper = _make_deepseek_v4_vl_weights_mapper(
             text_mapper, image_enabled
         )
-        self._weights_finalized = False
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
         patches = kwargs.pop("patches", None)
@@ -322,26 +321,11 @@ class DeepseekV4ForConditionalGeneration(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        child_finalizes = getattr(
-            self.language_model, "finalizes_weights_during_load", True
-        )
-        mapped = self.hf_to_vllm_mapper.apply(weights)
-        if child_finalizes:
-            # A child which finalizes inside load_weights must see all of its
-            # weights in one contiguous delegation from AutoWeightsLoader.
-            mapped = iter(sorted(mapped, key=lambda x: x[0]))
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(mapped)
-        self._weights_finalized = child_finalizes
-        return loaded_params
+        return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))
 
     def process_weights_after_loading(self) -> None:
-        # Backbones such as the ROCm implementation require this to run only
-        # after the loader's generic per-layer quantization finalization.
-        if getattr(self, "_weights_finalized", False):
-            return
         self.language_model.process_weights_after_loading()
-        self._weights_finalized = True
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefixes in the multimodal model."""

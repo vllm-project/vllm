@@ -421,12 +421,12 @@ class KimiK3MTP(nn.Module):
                     f"MTP layer weights, or disable speculative decoding."
                 )
 
-        if use_mega_moe:
-            for module in self.modules():
-                if isinstance(module, KimiMoE) and module.use_mega_moe:
-                    module.experts.finalize_weights()
-
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        for module in self.modules():
+            if isinstance(module, KimiMoE) and module.use_mega_moe:
+                module.experts.finalize_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite a checkpoint weight name to this module's parameter path.

@@ -283,8 +283,11 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     LOADING_LAYERS.clear()
 
 
-def finalize_layerwise_reload(*args, **kwargs):
-    finalize_layerwise_processing(*args, **kwargs)
+def finalize_layerwise_reload(
+    model: torch.nn.Module, model_config: ModelConfig
+) -> None:
+    """Finalize a reload without the model-level hook (cold-start only)."""
+    finalize_layerwise_processing(model, model_config)
 
 
 def _finalize_attention_layer(

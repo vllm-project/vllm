@@ -749,7 +749,6 @@ class MiniCPMOBaseModel(_MiniCPMOBaseModelBase):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self._ensure_resampler_device()
         return loaded
 
     def subsequent_chunk_mask(

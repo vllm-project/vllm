@@ -527,7 +527,6 @@ class DeepSeekV4MTP(nn.Module):
                     f"Use a checkpoint that includes MTP layer weights, "
                     f"or disable speculative decoding."
                 )
-        self.process_weights_after_loading()
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
