@@ -1,3 +1,0 @@
-Qwen3.5-4B-SplitQ-k3v4.yaml
-Qwen3.5-4B-SplitQ-k3v3.yaml
-Qwen3.5-4B-SplitQ-k3v3-compact.yaml

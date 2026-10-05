@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""SplitQ attention backend for AMD GPUs (native kernels: HIP or FlyDSL).
+"""Octave attention backend for AMD GPUs (native kernels: HIP or FlyDSL).
 
-KV cache format and reference: ``vllm/v1/attention/ops/rocm_splitq.py``.
-Kernels: ``csrc/attention/splitq_attn.cu`` (portable) and the per-architecture
-tiers in ``_ARCH_TIERS``; see ``docs/design/rocm_splitq.md``.
+KV cache format and reference: ``vllm/v1/attention/ops/rocm_octave.py``.
+Kernels: ``csrc/attention/octave_attn.cu`` (portable) and the per-architecture
+tiers in ``_ARCH_TIERS``; see ``docs/design/rocm_octave.md``.
 
 Decode, MTP verification and short continuation chunks (every request with
 at most ``_DECODE_MAX_QUERY_LEN`` query tokens) run the split-KV decode
@@ -33,7 +33,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.attention.ops import rocm_splitq as sq
+from vllm.v1.attention.ops import rocm_octave as sq
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.workspace import (
@@ -45,7 +45,9 @@ from vllm.v1.worker.workspace import (
 # Decode always has the portable dot4 kernel; prefill needs a native kernel
 # (HIP or FlyDSL) per architecture and there is no Triton fallback.
 _ARCH_TIERS: dict[str, tuple[str, str | None]] = {
-    "gfx11": ("wmma", "wmma"),
+    # Only the targets the WMMA kernels are compiled for; on others they are
+    # empty stubs.
+    "gfx110": ("wmma", "wmma"),
 }
 _PORTABLE_TIERS: tuple[str, str | None] = ("dot4", None)
 
@@ -78,28 +80,28 @@ def _max_capture_size(vllm_config: VllmConfig) -> int:
     return vllm_config.compilation_config.max_cudagraph_capture_size or 4
 
 
-class RocmSplitQAttentionBackend(AttentionBackend):
+class RocmOctaveAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     forward_includes_kv_cache_update: bool = False
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "splitq_k3v4",
-        "splitq_k3v3",
-        "splitq_k3v3_compact",
+        "octave_k3v4",
+        "octave_k3v3",
+        "octave_k3v3_compact",
     ]
 
     @staticmethod
     def get_name() -> str:
-        return "ROCM_SPLITQ"
+        return "ROCM_OCTAVE"
 
     @staticmethod
-    def get_impl_cls() -> type["RocmSplitQAttentionImpl"]:
-        return RocmSplitQAttentionImpl
+    def get_impl_cls() -> type["RocmOctaveAttentionImpl"]:
+        return RocmOctaveAttentionImpl
 
     @staticmethod
-    def get_builder_cls() -> type["RocmSplitQMetadataBuilder"]:
-        return RocmSplitQMetadataBuilder
+    def get_builder_cls() -> type["RocmOctaveMetadataBuilder"]:
+        return RocmOctaveMetadataBuilder
 
     @staticmethod
     def get_supported_kernel_block_sizes(
@@ -123,9 +125,9 @@ class RocmSplitQAttentionBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """One packed K+V slot per (token, KV head)."""
-        if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_splitq:
+        if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_octave:
             return spec
-        fmt = sq.SplitQFormat.from_cache_dtype(
+        fmt = sq.OctaveFormat.from_cache_dtype(
             spec.kv_quant_mode.name.lower(),
             spec.head_size,
             sq.registered_rope_dim(spec.head_size),
@@ -134,7 +136,7 @@ class RocmSplitQAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class RocmSplitQMetadata:
+class RocmOctaveMetadata:
     num_actual_tokens: int
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -149,7 +151,7 @@ class RocmSplitQMetadata:
     q_to_klen: torch.Tensor
 
 
-class RocmSplitQMetadataBuilder(AttentionMetadataBuilder[RocmSplitQMetadata]):
+class RocmOctaveMetadataBuilder(AttentionMetadataBuilder[RocmOctaveMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     supports_draft_decode_metadata_update = True
 
@@ -192,11 +194,11 @@ class RocmSplitQMetadataBuilder(AttentionMetadataBuilder[RocmSplitQMetadata]):
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> RocmSplitQMetadata:
+    ) -> RocmOctaveMetadata:
         cm = common_attn_metadata
         n = cm.num_actual_tokens
         num_decodes, _, num_decode_tokens, _ = split_decodes_and_prefills(cm)
-        md = RocmSplitQMetadata(
+        md = RocmOctaveMetadata(
             num_actual_tokens=n,
             max_query_len=cm.max_query_len,
             query_start_loc=cm.query_start_loc,
@@ -211,12 +213,12 @@ class RocmSplitQMetadataBuilder(AttentionMetadataBuilder[RocmSplitQMetadata]):
         self._fill_query_maps(md)
         return md
 
-    def update_draft_decode_metadata(self, metadata: RocmSplitQMetadata) -> None:
+    def update_draft_decode_metadata(self, metadata: RocmOctaveMetadata) -> None:
         # Draft steps advance seq_lens in place; the K lengths follow it.
         self._fill_query_maps(metadata)
 
     @staticmethod
-    def _fill_query_maps(md: RocmSplitQMetadata) -> None:
+    def _fill_query_maps(md: RocmOctaveMetadata) -> None:
         """On the device, without host syncs (also inside graph capture).
         Queries past the last request (cudagraph padding) get K length 0."""
         n = md.num_actual_tokens
@@ -233,7 +235,7 @@ class RocmSplitQMetadataBuilder(AttentionMetadataBuilder[RocmSplitQMetadata]):
         md.q_to_klen.copy_(torch.where(req < num_reqs, klen, 0))
 
 
-class RocmSplitQAttentionImpl(AttentionImpl):
+class RocmOctaveAttentionImpl(AttentionImpl):
     def __init__(
         self,
         num_heads: int,
@@ -250,13 +252,13 @@ class RocmSplitQAttentionImpl(AttentionImpl):
         **kwargs,
     ) -> None:
         if alibi_slopes is not None or sinks is not None:
-            raise NotImplementedError("ROCM_SPLITQ does not support ALiBi or sinks")
+            raise NotImplementedError("ROCM_OCTAVE does not support ALiBi or sinks")
         if sliding_window is not None or logits_soft_cap:
             raise NotImplementedError(
-                "ROCM_SPLITQ does not support sliding window or soft cap"
+                "ROCM_OCTAVE does not support sliding window or soft cap"
             )
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("ROCM_SPLITQ supports decoder attention only")
+            raise NotImplementedError("ROCM_OCTAVE supports decoder attention only")
 
         self.num_heads = num_heads
         self.head_size = head_size
@@ -270,22 +272,22 @@ class RocmSplitQAttentionImpl(AttentionImpl):
             vllm_config.model_config.hf_text_config, head_size
         )
         sq.register_rope_dim(head_size, rope_dim)
-        self.fmt = sq.SplitQFormat.from_cache_dtype(kv_cache_dtype, head_size, rope_dim)
+        self.fmt = sq.OctaveFormat.from_cache_dtype(kv_cache_dtype, head_size, rope_dim)
         if not (
             current_platform.is_rocm()
             and head_size == _KERNEL_HEAD_SIZE
             and rope_dim == _KERNEL_ROPE_DIM
-            and hasattr(torch.ops._C, "splitq_decode")
+            and hasattr(torch.ops._C, "octave_decode")
         ):
             raise NotImplementedError(
-                "ROCM_SPLITQ kernels need ROCm, head_size=256 and 64 rotary "
+                "ROCM_OCTAVE kernels need ROCm, head_size=256 and 64 rotary "
                 f"dims; got head_size={head_size}, rotary dims={rope_dim}"
             )
         arch, (decode_tier, prefill_tier) = _arch_tiers()
         if prefill_tier is None:
             raise NotImplementedError(
-                f"ROCM_SPLITQ has no native prefill kernel for {arch} yet; see the "
-                "architecture contract in docs/design/rocm_splitq.md"
+                f"ROCM_OCTAVE has no native prefill kernel for {arch} yet; see the "
+                "architecture contract in docs/design/rocm_octave.md"
             )
         self._use_wmma = decode_tier == "wmma"
 
@@ -342,7 +344,7 @@ class RocmSplitQAttentionImpl(AttentionImpl):
             return
         k_signs, v_signs = self._signs(key.device)
         n = slot_mapping.shape[0]
-        torch.ops._C.splitq_cache_store(
+        torch.ops._C.octave_cache_store(
             key[:n],
             value[:n],
             kv_cache,
@@ -359,14 +361,14 @@ class RocmSplitQAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: RocmSplitQMetadata,
+        attn_metadata: RocmOctaveMetadata,
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None
         if output_scale is not None or output_block_scale is not None:
-            raise NotImplementedError("ROCM_SPLITQ does not fuse output quant")
+            raise NotImplementedError("ROCM_OCTAVE does not fuse output quant")
         if attn_metadata is None:
             return output.fill_(0)
 
@@ -404,7 +406,7 @@ class RocmSplitQAttentionImpl(AttentionImpl):
         out: torch.Tensor,
         q: torch.Tensor,
         kv_cache: torch.Tensor,
-        md: RocmSplitQMetadata,
+        md: RocmOctaveMetadata,
         q_to_req: torch.Tensor,
         q_to_klen: torch.Tensor,
     ) -> None:
@@ -419,7 +421,7 @@ class RocmSplitQAttentionImpl(AttentionImpl):
         for t in (q, out, md.block_table, q_to_req, q_to_klen, mid_o):
             with contextlib.suppress(Exception):
                 t.record_stream(stream)
-        torch.ops._C.splitq_decode(
+        torch.ops._C.octave_decode(
             out,
             q,
             kv_cache,
@@ -443,7 +445,7 @@ class RocmSplitQAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        md: RocmSplitQMetadata,
+        md: RocmOctaveMetadata,
     ) -> None:
         """Requests after the decodes, in the rotated space, without host
         syncs: one call covers them all, reading the cached prefixes straight
@@ -458,11 +460,11 @@ class RocmSplitQAttentionImpl(AttentionImpl):
         k_rot = key[ndt:n].to(torch.float16, copy=True)
         v_rot = value[ndt:n].to(torch.float16, copy=True)
         k_blocks = not self.fmt.compact
-        torch.ops._C.splitq_rotate(q_rot, k_signs, k_blocks, False)
-        torch.ops._C.splitq_rotate(k_rot, k_signs, k_blocks, False)
-        torch.ops._C.splitq_rotate(v_rot, v_signs, False, False)
+        torch.ops._C.octave_rotate(q_rot, k_signs, k_blocks, False)
+        torch.ops._C.octave_rotate(k_rot, k_signs, k_blocks, False)
+        torch.ops._C.octave_rotate(v_rot, v_signs, False, False)
         o_rot = torch.empty_like(q_rot)
-        torch.ops._C.splitq_prefill(
+        torch.ops._C.octave_prefill(
             o_rot,
             q_rot,
             k_rot,
@@ -475,5 +477,5 @@ class RocmSplitQAttentionImpl(AttentionImpl):
             self.scale,
             self.fmt.kernel_code,
         )
-        torch.ops._C.splitq_rotate(o_rot, v_signs, False, True)
+        torch.ops._C.octave_rotate(o_rot, v_signs, False, True)
         out[ndt:n] = o_rot

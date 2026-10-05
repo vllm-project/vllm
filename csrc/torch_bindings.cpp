@@ -77,26 +77,26 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! mid_o_buf, float sm_scale, int num_kv_splits) -> ()");
   ops.impl("pth_decode_int8_rdna3", torch::kCUDA, &pth_decode_int8_rdna3);
 
-  // SplitQ KV cache (ROCm): store, split-KV decode, rotation, prefill.
+  // Octave KV cache (ROCm): store, split-KV decode, rotation, prefill.
   ops.def(
-      "splitq_cache_store(Tensor key, Tensor value, Tensor! cache, "
+      "octave_cache_store(Tensor key, Tensor value, Tensor! cache, "
       "Tensor slot_mapping, Tensor k_signs, Tensor v_signs, int fmt) -> ()");
-  ops.impl("splitq_cache_store", torch::kCUDA, &splitq_cache_store);
+  ops.impl("octave_cache_store", torch::kCUDA, &octave_cache_store);
   ops.def(
-      "splitq_decode(Tensor! out, Tensor query, Tensor cache, "
+      "octave_decode(Tensor! out, Tensor query, Tensor cache, "
       "Tensor block_table, Tensor q_to_req, Tensor q_to_klen, "
       "Tensor! mid_o, Tensor k_signs, Tensor v_signs, float sm_scale, "
       "int num_kv_splits, int fmt, int query_group, bool use_wmma) -> ()");
-  ops.impl("splitq_decode", torch::kCUDA, &splitq_decode);
+  ops.impl("octave_decode", torch::kCUDA, &octave_decode);
   ops.def(
-      "splitq_rotate(Tensor! x, Tensor signs, bool k_layout, bool inverse) "
+      "octave_rotate(Tensor! x, Tensor signs, bool k_layout, bool inverse) "
       "-> ()");
-  ops.impl("splitq_rotate", torch::kCUDA, &splitq_rotate);
+  ops.impl("octave_rotate", torch::kCUDA, &octave_rotate);
   ops.def(
-      "splitq_prefill(Tensor! out, Tensor q, Tensor k, Tensor v, Tensor cache, "
+      "octave_prefill(Tensor! out, Tensor q, Tensor k, Tensor v, Tensor cache, "
       "Tensor block_table, Tensor cu_seqlens_q, Tensor seq_lens, "
       "int max_query_len, float sm_scale, int fmt) -> ()");
-  ops.impl("splitq_prefill", torch::kCUDA, &splitq_prefill);
+  ops.impl("octave_prefill", torch::kCUDA, &octave_prefill);
 }
 
 #ifdef USE_ROCM

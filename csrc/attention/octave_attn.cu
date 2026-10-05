@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// SplitQ KV cache kernels, head_size 256 with 64 RoPE dims. Portable across
-// the AMD targets vLLM builds (splitq_arch.cuh); the WMMA decode tier for
-// gfx11 lives in splitq_decode_wmma_rdna3.cu.
-// Format: vllm/v1/attention/ops/rocm_splitq.py (the PyTorch reference there
+// Octave KV cache kernels, head_size 256 with 64 RoPE dims. Portable across
+// the AMD targets vLLM builds (octave_arch.cuh); the WMMA decode tier for
+// gfx11 lives in octave_decode_wmma_rdna3.cu.
+// Format: vllm/v1/attention/ops/rocm_octave.py (the PyTorch reference there
 // is the source of truth for the byte layout).
 //
-//   splitq_cache_store   quantize + pack K/V into slots (one wave per slot).
-//   splitq_decode        split-KV attention per query group; K dot products
+//   octave_cache_store   quantize + pack K/V into slots (one wave per slot).
+//   octave_decode        split-KV attention per query group; K dot products
 //                        with int8 dot4 on the codebook values of the packed
 //                        codes, the query quantized to int8 once per block.
 //                        Consecutive query tokens of one request (MTP verify)
 //                        share the KV read.
-//   splitq_rotate        the store-time rotations, for the prefill path.
+//   octave_rotate        the store-time rotations, for the prefill path.
 //
 // Everything is in the rotated space: K and V are sign-flipped and
 // Hadamard-rotated at store time; the query is rotated like K and the
@@ -29,10 +29,10 @@
   #include <hip/hip_bf16.h>
   #include <hip/hip_fp16.h>
 
-  #include "splitq_arch.cuh"
-  #include "splitq_format.cuh"
+  #include "octave_arch.cuh"
+  #include "octave_format.cuh"
 
-namespace splitq {
+namespace octave {
 
 constexpr int DPL = D / 32;  // dims per lane when a wave owns one slot
 
@@ -129,7 +129,7 @@ __device__ __forceinline__ void rotate_full(float (&x)[DPL], int lane,
   for (int i = 0; i < DPL; ++i) x[i] *= 0.0625f;
 }
 
-// Midpoints of the int8 codebooks (rocm_splitq.LUT), in codebook units.
+// Midpoints of the int8 codebooks (rocm_octave.LUT), in codebook units.
 __device__ constexpr float kThr3[7] = {-103.f, -62.f, -29.5f, 0.f,
                                        29.5f,  62.f,  103.f};
 __device__ constexpr float kThr4[15] = {-110.5f, -84.5f, -66.f, -50.5f, -36.5f,
@@ -683,15 +683,15 @@ __global__ void __launch_bounds__(32)
   }
 }
 
-}  // namespace splitq
+}  // namespace octave
 
 // ---------------------------------------------------------------------------
 // Host launchers
 // ---------------------------------------------------------------------------
-using namespace splitq;
+using namespace octave;
 
 // fmt: V fmt (3 or 4), plus kCompactFlag for compact K (3-bit V only).
-int splitq_slot_bytes(int64_t fmt) {
+int octave_slot_bytes(int64_t fmt) {
   switch (fmt) {
     case 3:
       return Format<3>::SLOT;
@@ -700,20 +700,20 @@ int splitq_slot_bytes(int64_t fmt) {
     case 3 + kCompactFlag:
       return Format<3, true>::SLOT;
   }
-  TORCH_CHECK(false, "splitq: unknown format id ", fmt);
+  TORCH_CHECK(false, "octave: unknown format id ", fmt);
   return 0;
 }
 
 static void check_cache(const torch::Tensor& cache, int64_t fmt) {
   TORCH_CHECK(cache.dtype() == at::kByte && cache.dim() == 4,
-              "splitq: cache must be uint8 [blocks, heads, block_size, slot]");
-  const int slot = splitq_slot_bytes(fmt);
+              "octave: cache must be uint8 [blocks, heads, block_size, slot]");
+  const int slot = octave_slot_bytes(fmt);
   TORCH_CHECK(cache.size(3) == slot && cache.stride(3) == 1,
-              "splitq: slot size mismatch, expected ", slot, " got ",
+              "octave: slot size mismatch, expected ", slot, " got ",
               cache.size(3));
 }
 
-void splitq_cache_store(torch::Tensor key, torch::Tensor value,
+void octave_cache_store(torch::Tensor key, torch::Tensor value,
                         torch::Tensor cache, torch::Tensor slot_mapping,
                         torch::Tensor k_signs, torch::Tensor v_signs,
                         int64_t fmt) {
@@ -721,7 +721,7 @@ void splitq_cache_store(torch::Tensor key, torch::Tensor value,
   if (n == 0) return;
   check_cache(cache, fmt);
   TORCH_CHECK(key.size(-1) == D && key.stride(-1) == 1 && value.stride(-1) == 1,
-              "splitq: head_size must be 256 with contiguous last dim");
+              "octave: head_size must be 256 with contiguous last dim");
   TORCH_CHECK(slot_mapping.dtype() == at::kLong);
   const int hkv = cache.size(1);
   const at::cuda::OptionalCUDAGuard guard(device_of(key));
@@ -796,16 +796,16 @@ static void dispatch_decode(int g, int qg, torch::Tensor& query,
   SQ_DEC(8, 1);
   SQ_DEC(8, 4);
   #undef SQ_DEC
-  TORCH_CHECK(false, "splitq_decode: unsupported GQA group ", g);
+  TORCH_CHECK(false, "octave_decode: unsupported GQA group ", g);
 }
 
-int splitq_decode_wmma(torch::Tensor query, torch::Tensor cache,
+int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        torch::Tensor block_table, torch::Tensor q_to_req,
                        torch::Tensor q_to_klen, torch::Tensor mid_o,
                        torch::Tensor k_signs, double sm_scale,
                        int64_t num_kv_splits, int64_t fmt);
 
-void splitq_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
+void octave_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
                    torch::Tensor block_table, torch::Tensor q_to_req,
                    torch::Tensor q_to_klen, torch::Tensor mid_o,
                    torch::Tensor k_signs, torch::Tensor v_signs,
@@ -830,7 +830,7 @@ void splitq_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
   // Fast tier when the device and shapes allow it, else the portable kernel.
   const int wmma_splits =
       use_wmma
-          ? splitq_decode_wmma(query, cache, block_table, q_to_req, q_to_klen,
+          ? octave_decode_wmma(query, cache, block_table, q_to_req, q_to_klen,
                                mid_o, k_signs, sm_scale, num_kv_splits, fmt)
           : 0;
   if (wmma_splits > 0) {
@@ -866,11 +866,11 @@ void splitq_decode(torch::Tensor out, torch::Tensor query, torch::Tensor cache,
         out.stride(1));
 }
 
-void splitq_rotate(torch::Tensor x, torch::Tensor signs, bool k_layout,
+void octave_rotate(torch::Tensor x, torch::Tensor signs, bool k_layout,
                    bool inverse) {
   if (x.numel() == 0) return;
   TORCH_CHECK(x.dim() == 3 && x.size(2) == D && x.stride(2) == 1,
-              "splitq_rotate: x must be [T, H, 256] with contiguous last dim");
+              "octave_rotate: x must be [T, H, 256] with contiguous last dim");
   const at::cuda::OptionalCUDAGuard guard(device_of(x));
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   dim3 grid(x.size(0), x.size(1));
@@ -885,16 +885,16 @@ void splitq_rotate(torch::Tensor x, torch::Tensor signs, bool k_layout,
 }
 
 #else
-void splitq_cache_store(torch::Tensor, torch::Tensor, torch::Tensor,
+void octave_cache_store(torch::Tensor, torch::Tensor, torch::Tensor,
                         torch::Tensor, torch::Tensor, torch::Tensor, int64_t) {
-  TORCH_CHECK(false, "splitq requires ROCm");
+  TORCH_CHECK(false, "octave requires ROCm");
 }
-void splitq_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+void octave_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                    torch::Tensor, double, int64_t, int64_t, int64_t, bool) {
-  TORCH_CHECK(false, "splitq requires ROCm");
+  TORCH_CHECK(false, "octave requires ROCm");
 }
-void splitq_rotate(torch::Tensor, torch::Tensor, bool, bool) {
-  TORCH_CHECK(false, "splitq requires ROCm");
+void octave_rotate(torch::Tensor, torch::Tensor, bool, bool) {
+  TORCH_CHECK(false, "octave requires ROCm");
 }
 #endif

@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// SplitQ decode on WMMA for RDNA3 (gfx11). Same structure as the int8
-// per-token-head kernel in pth_decode_int8_rdna3_wmma.cu (independent waves,
-// one (split, 16-query row tile) per wave, transposed orientation, lane pairs
-// sharing A fragments through a DPP swap); see the notes there. What changes is
-// the cache side:
+// Octave decode on WMMA for RDNA3 (gfx11). Independent waves, one (split,
+// 16-query row tile) per wave, transposed orientation, and lane pairs sharing
+// A fragments through a DPP swap. The products:
 //
 //   QK  S^T[token][q] = K x Q^T over 16 k-steps of 16 dims: steps 0-3 the
 //       RoPE block (4-bit codes), 4-15 the NoPE blocks (3-bit codes). Codes
@@ -17,7 +15,7 @@
 //       the per-token V scale is folded into P, the bias removed with sum(P).
 //
 // The query is rotated like K while it is staged into LDS; the output stays
-// rotated and splitq_reduce rotates it back.
+// rotated and octave_reduce rotates it back.
 
 #include <cstdint>
 #include <torch/all.h>
@@ -28,14 +26,14 @@
   #include <hip/hip_bf16.h>
   #include <hip/hip_fp16.h>
 
-  #include "splitq_format.cuh"
+  #include "octave_format.cuh"
 
   #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1100__) && \
       !defined(__gfx1101__) && !defined(__gfx1102__) && !defined(__gfx1103__)
-    #define SPLITQ_WMMA_STUB
+    #define OCTAVE_WMMA_STUB
   #endif
 
-namespace splitq_wmma {
+namespace octave_wmma {
 
 typedef _Float16 h16v __attribute__((ext_vector_type(16)));
 typedef _Float16 h8v __attribute__((ext_vector_type(8)));
@@ -44,10 +42,10 @@ typedef float f8v __attribute__((ext_vector_type(8)));
 typedef uint32_t u8v __attribute__((ext_vector_type(8)));
 typedef const int __attribute__((address_space(4))) cint;
 
-using splitq::D;
-using splitq::Format;
-using splitq::LUT_ONE;
-using splitq::R;
+using octave::D;
+using octave::Format;
+using octave::LUT_ONE;
+using octave::R;
 constexpr int QG = 4;        // query tokens per block
 constexpr int QROW = D + 8;  // padded LDS row (bank spread)
 constexpr float PSCALE = 256.0f;
@@ -122,7 +120,7 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     int num_phys_blocks, int num_splits, int min_tps, int num_row_tiles,
     int64_t sq0, int64_t sq1, int64_t scb, int64_t sch, int64_t sct,
     int64_t smo, int64_t smh, int64_t sms) {
-  #ifndef SPLITQ_WMMA_STUB
+  #ifndef OCTAVE_WMMA_STUB
   using F = Format<VB, KC>;
   constexpr int NG = KC ? 1 : 4;  // QK tiles (one per K scale)
   const int grp = blockIdx.x;
@@ -341,15 +339,15 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
       };
       // Biased codebook bytes (x + 128) of a 16-dim step from its raw words.
       auto rope_bytes = [&](uint2 raw, uint32_t o[4]) {
-        o[0] = splitq::lut4(raw.x & 0x0F0F0F0Fu) ^ X;
-        o[1] = splitq::lut4((raw.x >> 4) & 0x0F0F0F0Fu) ^ X;
-        o[2] = splitq::lut4(raw.y & 0x0F0F0F0Fu) ^ X;
-        o[3] = splitq::lut4((raw.y >> 4) & 0x0F0F0F0Fu) ^ X;
+        o[0] = octave::lut4(raw.x & 0x0F0F0F0Fu) ^ X;
+        o[1] = octave::lut4((raw.x >> 4) & 0x0F0F0F0Fu) ^ X;
+        o[2] = octave::lut4(raw.y & 0x0F0F0F0Fu) ^ X;
+        o[3] = octave::lut4((raw.y >> 4) & 0x0F0F0F0Fu) ^ X;
       };
       auto nope_bytes = [&](uint2 raw, uint32_t o[4]) {
     #pragma unroll
         for (int i = 0; i < 4; ++i)
-          o[i] = splitq::lut3(((raw.x >> (2 * i)) & 0x03030303u) |
+          o[i] = octave::lut3(((raw.x >> (2 * i)) & 0x03030303u) |
                               (((raw.y >> i) & 0x01010101u) << 2)) ^
                  X;
       };
@@ -472,10 +470,10 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
         auto vq = [&](int i, int q) -> uint32_t {
           if constexpr (VB == 4) {
             const uint32_t w = q < 2 ? vraw[i].x : vraw[i].y;
-            return splitq::lut4((w >> (4 * (q & 1))) & 0x0F0F0F0Fu) ^ X;
+            return octave::lut4((w >> (4 * (q & 1))) & 0x0F0F0F0Fu) ^ X;
           } else {
             const uint32_t hi = vraw[i].y >> (4 * (rr & 1));
-            return splitq::lut3(((vraw[i].x >> (2 * q)) & 0x03030303u) |
+            return octave::lut3(((vraw[i].x >> (2 * q)) & 0x03030303u) |
                                 (((hi >> q) & 0x01010101u) << 2)) ^
                    X;
           }
@@ -530,10 +528,10 @@ __global__ __launch_bounds__(64 * NSB) void decode_wmma(
     }
     seg0 = seg1;
   }
-  #endif  // SPLITQ_WMMA_STUB
+  #endif  // OCTAVE_WMMA_STUB
 }
 
-}  // namespace splitq_wmma
+}  // namespace octave_wmma
 
 // Splits per row group and minimum tokens per split, as in the int8 kernel.
 constexpr int kSqWmmaSplits = 192;
@@ -543,12 +541,12 @@ constexpr int kSqWmmaNsb = 2;
 // Launches the WMMA decode when the shape is covered; returns the number of
 // splits it wrote (for the reduce), or 0 when the caller must use its own
 // kernel.
-int splitq_decode_wmma(torch::Tensor query, torch::Tensor cache,
+int octave_decode_wmma(torch::Tensor query, torch::Tensor cache,
                        torch::Tensor block_table, torch::Tensor q_to_req,
                        torch::Tensor q_to_klen, torch::Tensor mid_o,
                        torch::Tensor k_signs, double sm_scale,
                        int64_t num_kv_splits, int64_t fmt) {
-  using namespace splitq_wmma;
+  using namespace octave_wmma;
   static const bool arch_ok = [] {
     const auto* prop = at::cuda::getCurrentDeviceProperties();
     return std::string(prop->gcnArchName).rfind("gfx11", 0) == 0;
@@ -560,7 +558,7 @@ int splitq_decode_wmma(torch::Tensor query, torch::Tensor cache,
   const bool eligible =
       arch_ok && query.size(2) == D && query.stride(2) == 1 && hpk * QG <= 32 &&
       cache.size(2) % 16 == 0 &&
-      cache.stride(2) % (fmt & splitq::kCompactFlag ? 4 : 8) == 0 &&
+      cache.stride(2) % (fmt & octave::kCompactFlag ? 4 : 8) == 0 &&
       num_kv_splits >= 1;
   if (!eligible) return 0;
   const int ns = std::min<int>(kSqWmmaSplits, (int)num_kv_splits);

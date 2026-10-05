@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Byte layout of one SplitQ slot (one token, one KV head). The PyTorch
-// reference in vllm/v1/attention/ops/rocm_splitq.py is the source of truth.
+// Byte layout of one Octave slot (one token, one KV head). The PyTorch
+// reference in vllm/v1/attention/ops/rocm_octave.py is the source of truth.
 //
 //   [0, OFF_KN)       K RoPE block (dims 0-63), rotated, 4-bit codes
 //   [OFF_KN, OFF_V)   K NoPE blocks (dims 64-255), rotated, 3-bit codes
@@ -23,7 +23,7 @@
 
 #include <cstdint>
 
-namespace splitq {
+namespace octave {
 
 constexpr int D = 256;       // head size
 constexpr int R = 64;        // RoPE dims (K block 0)
@@ -75,4 +75,4 @@ __device__ __forceinline__ uint32_t lut(uint32_t codes) {
     return lut3(codes);
 }
 
-}  // namespace splitq
+}  // namespace octave

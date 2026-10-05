@@ -946,7 +946,7 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            # customize_spec may read the model config (e.g. SplitQ's rotary dim).
+            # customize_spec may read the model config (e.g. Octave's rotary dim).
             with set_current_vllm_config(vllm_config):
                 attn_page_size_1_token = backend_cls.customize_spec(
                     attn_spec
@@ -1183,8 +1183,7 @@ class Platform:
 
     @classmethod
     def use_custom_allreduce_graph_registration(cls) -> bool:
-        """
-        Returns if the buffers a cuda graph captures can be IPC-registered, so
+        """Returns if the buffers a cuda graph captures can be IPC-registered, so
         that captured all reduces read the input tensor in place instead of
         copying it into the pre-registered buffer.
         """

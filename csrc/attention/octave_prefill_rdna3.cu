@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// SplitQ prefill for RDNA3 (gfx11), head size 256, fp16. Reads the packed
+// Octave prefill for RDNA3 (gfx11), head size 256, fp16. Reads the packed
 // cache directly; no intermediate buffers. Everything is in the rotated space
 // (the caller rotates Q/K/V of the chunk and rotates the output back).
 //
@@ -34,18 +34,18 @@
   #include <hip/hip_runtime.h>
   #include <hip/hip_fp16.h>
 
-  #include "splitq_format.cuh"
+  #include "octave_format.cuh"
 
   #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1100__) && \
       !defined(__gfx1101__) && !defined(__gfx1102__) && !defined(__gfx1103__)
-    #define SPLITQ_PREFILL_STUB
+    #define OCTAVE_PREFILL_STUB
   #endif
 
-namespace splitq_pf {
+namespace octave_pf {
 
-using splitq::D;
-using splitq::Format;
-using splitq::LUT_ONE;
+using octave::D;
+using octave::Format;
+using octave::LUT_ONE;
 
 typedef _Float16 h16v __attribute__((ext_vector_type(16)));
 typedef _Float16 h8v __attribute__((ext_vector_type(8)));
@@ -138,7 +138,7 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
     int num_q_heads, int num_kv_heads, int block_size, int max_blocks,
     int num_splits, int total_q_tokens, int64_t sq_tok, int64_t sq_head,
     int64_t scb, int64_t sch, int64_t sct) {
-  #ifndef SPLITQ_PREFILL_STUB
+  #ifndef OCTAVE_PREFILL_STUB
   using F = Format<VB, KC>;
   const int seq = blockIdx.x, kvh = blockIdx.y;
   const int rowtile = blockIdx.z / num_splits, split = blockIdx.z % num_splits;
@@ -260,8 +260,8 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
       u4v o;
     #pragma unroll
       for (int x = 0; x < 4; ++x)
-        o[x] = k3 ? splitq::lut3(block_codes<3>(r3, hi, hi, x))
-                  : splitq::lut4(block_codes<4>(r4, 0, 0, x));
+        o[x] = k3 ? octave::lut3(block_codes<3>(r3, hi, hi, x))
+                  : octave::lut4(block_codes<4>(r4, 0, 0, x));
       *(u4v*)&sK[bf][tk][64 * kq + 16 * kp] = o;
       if (lt < KT) {
         const h2v a = __builtin_bit_cast(h2v, S.s0);
@@ -288,7 +288,7 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
           c[i] = ((S.v[i][0] >> sl) & 0x03030303u) |
                  (((S.v[i][1] >> sh) & 0x01010101u) << 2);
         }
-        c[i] = splitq::lut<VB>(c[i]) ^ 0x80808080u;
+        c[i] = octave::lut<VB>(c[i]) ^ 0x80808080u;
       }
       uint32_t t[4];
       tr4(c[0], c[1], c[2], c[3], t);
@@ -519,7 +519,7 @@ __global__ __launch_bounds__(NTHREADS) void prefix_attn(
     wp[D] = m * 0.6931471805599453f;
     wp[D + 1] = l;
   }
-  #endif  // SPLITQ_PREFILL_STUB
+  #endif  // OCTAVE_PREFILL_STUB
 }
 
 // ===========================================================================
@@ -554,7 +554,7 @@ __global__ void __launch_bounds__(D)
                int total_q_tokens, int64_t sq_tok, int64_t sq_head,
                int64_t sk_tok, int64_t sk_head, int64_t sv_tok, int64_t sv_head,
                int64_t so_tok, int64_t so_head) {
-  #ifndef SPLITQ_PREFILL_STUB
+  #ifndef OCTAVE_PREFILL_STUB
   const int seq = blockIdx.x, head = blockIdx.y;
   const int tid = threadIdx.x, wave = tid >> 5, lane = tid & 31;
   const int lo = lane & 15, hi = lane >> 4;
@@ -694,7 +694,7 @@ __global__ void __launch_bounds__(D)
     for (int f = 0; f < FRAGS; ++f)
       orow[16 * f + lo] = __float2half(acc[f][i] * inv);
   }
-  #endif  // SPLITQ_PREFILL_STUB
+  #endif  // OCTAVE_PREFILL_STUB
 }
 
 // Partials of phase 1, kept alive for the process: a graph that captured a
@@ -712,34 +712,34 @@ float* workspace(int64_t need, const at::TensorOptions& opts) {
   return (float*)bufs.back().data_ptr();
 }
 
-}  // namespace splitq_pf
+}  // namespace octave_pf
 
-int splitq_slot_bytes(int64_t fmt);
+int octave_slot_bytes(int64_t fmt);
 
-void splitq_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
+void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
                     torch::Tensor v, torch::Tensor cache,
                     torch::Tensor block_table, torch::Tensor cu_seqlens_q,
                     torch::Tensor seq_lens, int64_t max_query_len,
                     double sm_scale, int64_t fmt) {
-  using namespace splitq_pf;
+  using namespace octave_pf;
   TORCH_CHECK(q.dtype() == at::kHalf && k.dtype() == at::kHalf &&
                   v.dtype() == at::kHalf && out.dtype() == at::kHalf,
-              "splitq_prefill: fp16 only");
+              "octave_prefill: fp16 only");
   TORCH_CHECK(q.size(2) == D && q.stride(2) == 1 && k.stride(2) == 1 &&
               v.stride(2) == 1 && out.stride(2) == 1);
   TORCH_CHECK(cache.dtype() == at::kByte && cache.dim() == 4 &&
               cache.stride(3) == 1);
-  TORCH_CHECK(cache.size(3) == splitq_slot_bytes(fmt),
-              "splitq_prefill: slot size mismatch");
-  const int align = fmt & splitq::kCompactFlag ? 4 : 8;
+  TORCH_CHECK(cache.size(3) == octave_slot_bytes(fmt),
+              "octave_prefill: slot size mismatch");
+  const int align = fmt & octave::kCompactFlag ? 4 : 8;
   TORCH_CHECK(cache.stride(2) % align == 0 && cache.stride(1) % align == 0 &&
                   cache.stride(0) % align == 0,
-              "splitq_prefill: misaligned slots");
+              "octave_prefill: misaligned slots");
   static const bool arch_ok = [] {
     const auto* prop = at::cuda::getCurrentDeviceProperties();
     return std::string(prop->gcnArchName).rfind("gfx11", 0) == 0;
   }();
-  TORCH_CHECK(arch_ok, "splitq_prefill: RDNA3 (gfx11) only");
+  TORCH_CHECK(arch_ok, "octave_prefill: RDNA3 (gfx11) only");
   const int num_seqs = seq_lens.size(0);
   if (num_seqs == 0 || q.size(0) == 0) return;
   const at::cuda::OptionalCUDAGuard guard(device_of(q));
@@ -750,7 +750,7 @@ void splitq_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
   const int block_size = cache.size(2);
   const int max_blocks = block_table.size(1);
   TORCH_CHECK(block_table.stride(1) == 1 && block_table.stride(0) == max_blocks,
-              "splitq_prefill: block_table rows must be contiguous");
+              "octave_prefill: block_table rows must be contiguous");
   const int total_q = q.size(0);
 
   const int rowtiles = (int)((max_query_len * hpk + 127) / 128);
@@ -787,9 +787,9 @@ void splitq_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
 }
 
 #else
-void splitq_prefill(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+void octave_prefill(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                     torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
                     int64_t, double, int64_t) {
-  TORCH_CHECK(false, "splitq requires ROCm");
+  TORCH_CHECK(false, "octave requires ROCm");
 }
 #endif

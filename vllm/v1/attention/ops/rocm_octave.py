@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""SplitQ KV-cache format: layout, rotations and a PyTorch reference.
+"""Octave KV-cache format: layout, rotations and a PyTorch reference.
 
 Each (token, KV head) is stored in one byte slot. V is always quantized
 whole; K has two layouts:
 
-* Block K (``splitq_k3v4``, ``splitq_k3v3``): random sign flips plus a
+* Block K (``octave_k3v4``, ``octave_k3v3``): random sign flips plus a
   Walsh-Hadamard transform over each 64-dim block. The RoPE blocks get 4-bit
   codes, the NoPE blocks 3-bit codes, and every block has its own scale.
-* Compact K (``splitq_k3v3_compact``): sign flips plus one Hadamard transform
+* Compact K (``octave_k3v3_compact``): sign flips plus one Hadamard transform
   over all dims, 3-bit codes, one scale. Spreading the RoPE dims over the
   whole head lets them share the 3-bit budget.
 * V: sign flips plus one Hadamard transform over all dims, ``v_bits`` codes.
@@ -68,7 +68,7 @@ def register_rope_dim(head_size: int, rope_dim: int) -> None:
     prev = _rope_dim_by_head_size.setdefault(head_size, rope_dim)
     if prev != rope_dim:
         raise ValueError(
-            f"SplitQ: conflicting rotary dims {prev} and {rope_dim} for "
+            f"Octave: conflicting rotary dims {prev} and {rope_dim} for "
             f"head_size={head_size}"
         )
 
@@ -88,7 +88,7 @@ def registered_rope_dim(head_size: int) -> int:
         vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None or vllm_config.model_config is None:
             raise RuntimeError(
-                "SplitQ needs the model's rotary dim before sizing the KV cache"
+                "Octave needs the model's rotary dim before sizing the KV cache"
             )
         register_rope_dim(
             head_size,
@@ -98,7 +98,7 @@ def registered_rope_dim(head_size: int) -> int:
 
 
 @dataclass(frozen=True)
-class SplitQFormat:
+class OctaveFormat:
     head_size: int
     rope_dim: int
     v_bits: int
@@ -107,23 +107,23 @@ class SplitQFormat:
     def __post_init__(self):
         d, r = self.head_size, self.rope_dim
         if self.v_bits not in (3, 4):
-            raise ValueError(f"SplitQ supports 3- or 4-bit V, got {self.v_bits}")
+            raise ValueError(f"Octave supports 3- or 4-bit V, got {self.v_bits}")
         if self.compact and d & (d - 1):
             raise ValueError(
-                f"Compact SplitQ K needs a power-of-two head_size, got {d}"
+                f"Compact Octave K needs a power-of-two head_size, got {d}"
             )
         if r % HADAMARD_BLOCK or d % HADAMARD_BLOCK:
             raise ValueError(
-                f"SplitQ needs head_size and rope_dim in multiples of "
+                f"Octave needs head_size and rope_dim in multiples of "
                 f"{HADAMARD_BLOCK}; got head_size={d}, rope_dim={r}"
             )
 
     @classmethod
     def from_cache_dtype(cls, cache_dtype: str, head_size: int, rope_dim: int):
         v_bits, compact = {
-            "splitq_k3v4": (4, False),
-            "splitq_k3v3": (3, False),
-            "splitq_k3v3_compact": (3, True),
+            "octave_k3v4": (4, False),
+            "octave_k3v3": (3, False),
+            "octave_k3v3_compact": (3, True),
         }[cache_dtype]
         return cls(head_size, rope_dim, v_bits, compact)
 
@@ -285,7 +285,7 @@ def _unpack(packed: torch.Tensor, n: int, bits: int) -> torch.Tensor:
 
 
 def reference_quantize(
-    key: torch.Tensor, value: torch.Tensor, fmt: SplitQFormat
+    key: torch.Tensor, value: torch.Tensor, fmt: OctaveFormat
 ) -> torch.Tensor:
     """(T, H, D) K and V -> (T, H, slot_bytes) uint8 slots."""
     t, h, d = key.shape
@@ -319,7 +319,7 @@ def reference_quantize(
 
 
 def reference_dequantize(
-    slots: torch.Tensor, fmt: SplitQFormat, rotated: bool = False
+    slots: torch.Tensor, fmt: OctaveFormat, rotated: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """(T, H, slot) slots -> fp32 K and V of shape (T, H, D).
 
@@ -360,10 +360,10 @@ def reference_attention(
     block_table: torch.Tensor,
     q_to_req: torch.Tensor,
     q_to_klen: torch.Tensor,
-    fmt: SplitQFormat,
+    fmt: OctaveFormat,
     scale: float,
 ) -> torch.Tensor:
-    """Per-query-token attention over a SplitQ paged cache.
+    """Per-query-token attention over a Octave paged cache.
 
     query: (Q, Hq, D). cache: (num_blocks, Hkv, block_size, slot) uint8.
     Query token i attends to the first ``q_to_klen[i]`` tokens of request

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""SplitQ HIP kernels against the PyTorch reference in
-vllm/v1/attention/ops/rocm_splitq.py."""
+"""Octave HIP kernels against the PyTorch reference in
+vllm/v1/attention/ops/rocm_octave.py."""
 
 import math
 
@@ -9,19 +9,19 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.attention.ops import rocm_splitq as sq
+from vllm.v1.attention.ops import rocm_octave as sq
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm() or not hasattr(torch.ops._C, "splitq_decode"),
-    reason="SplitQ kernels are ROCm-only",
+    not current_platform.is_rocm() or not hasattr(torch.ops._C, "octave_decode"),
+    reason="Octave kernels are ROCm-only",
 )
 
 HEAD, ROPE, BLOCK = 256, 64, 16
-CACHE_DTYPES = ["splitq_k3v4", "splitq_k3v3", "splitq_k3v3_compact"]
+CACHE_DTYPES = ["octave_k3v4", "octave_k3v3", "octave_k3v3_compact"]
 
 
-def _format(cache_dtype: str) -> sq.SplitQFormat:
-    return sq.SplitQFormat.from_cache_dtype(cache_dtype, HEAD, ROPE)
+def _format(cache_dtype: str) -> sq.OctaveFormat:
+    return sq.OctaveFormat.from_cache_dtype(cache_dtype, HEAD, ROPE)
 
 
 def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -40,7 +40,7 @@ def _fill(cache, block_ids, k, v, k_signs, v_signs, fmt):
         block_ids.long().repeat_interleave(BLOCK)[:n] * BLOCK
         + torch.arange(n, device=k.device) % BLOCK
     )
-    torch.ops._C.splitq_cache_store(
+    torch.ops._C.octave_cache_store(
         k, v, cache, slots, k_signs, v_signs, fmt.kernel_code
     )
     return slots
@@ -73,11 +73,11 @@ def test_store_matches_reference(cache_dtype):
 
 @pytest.mark.parametrize(
     "cache_dtype,slot_bytes",
-    [("splitq_k3v4", 248), ("splitq_k3v3", 216), ("splitq_k3v3_compact", 196)],
+    [("octave_k3v4", 248), ("octave_k3v3", 216), ("octave_k3v3_compact", 196)],
 )
 def test_slot_bytes_match_kernel_layout(cache_dtype, slot_bytes):
     """The cache is sized from the Python format; the kernels index it with
-    splitq::Format in csrc/attention/splitq_format.cuh."""
+    octave::Format in csrc/attention/octave_format.cuh."""
     assert _format(cache_dtype).slot_bytes == slot_bytes
 
 
@@ -96,7 +96,7 @@ def test_store_skips_padding_slots(cache_dtype):
     before = cache.clone()
     slots = torch.full((t,), -1, dtype=torch.long, device=dev)
     slots[3] = 21
-    torch.ops._C.splitq_cache_store(k, v, cache, slots, ksg, vsg, fmt.kernel_code)
+    torch.ops._C.octave_cache_store(k, v, cache, slots, ksg, vsg, fmt.kernel_code)
     written = torch.zeros_like(cache, dtype=torch.bool)
     written[1, :, 5] = True
     assert torch.equal(cache[~written], before[~written])
@@ -146,7 +146,7 @@ def test_decode_matches_reference(
     mid = torch.empty(
         num_q, hkv * group, num_splits, HEAD + 2, dtype=torch.float32, device=dev
     )
-    torch.ops._C.splitq_decode(
+    torch.ops._C.octave_decode(
         out,
         q,
         cache,
@@ -210,11 +210,11 @@ def test_prefill_matches_reference(cache_dtype, query_lens):
     k_new = torch.cat([k[c:] for k, c in zip(ks, ctx_lens)])
     v_new = torch.cat([v[c:] for v, c in zip(vs, ctx_lens)])
     q_rot, k_rot, v_rot = q.clone(), k_new.clone(), v_new.clone()
-    torch.ops._C.splitq_rotate(q_rot, ksg, not fmt.compact, False)
-    torch.ops._C.splitq_rotate(k_rot, ksg, not fmt.compact, False)
-    torch.ops._C.splitq_rotate(v_rot, vsg, False, False)
+    torch.ops._C.octave_rotate(q_rot, ksg, not fmt.compact, False)
+    torch.ops._C.octave_rotate(k_rot, ksg, not fmt.compact, False)
+    torch.ops._C.octave_rotate(v_rot, vsg, False, False)
     out = torch.empty_like(q_rot)
-    torch.ops._C.splitq_prefill(
+    torch.ops._C.octave_prefill(
         out,
         q_rot,
         k_rot,
@@ -227,7 +227,7 @@ def test_prefill_matches_reference(cache_dtype, query_lens):
         1 / 16,
         fmt.kernel_code,
     )
-    torch.ops._C.splitq_rotate(out, vsg, False, True)
+    torch.ops._C.octave_rotate(out, vsg, False, True)
 
     ref = torch.empty(total, hkv * group, HEAD, device=dev)
     for i, (c, n) in enumerate(zip(ctx_lens, query_lens)):
