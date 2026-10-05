@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.tasks import SupportedTask
 
 from .log_response import log_response
+from .request_failures import RequestFailureMetricsMiddleware
 
 logger = init_logger(__name__)
 
@@ -21,6 +22,9 @@ def init_entrypoints_middleware(
     app: FastAPI,
     supported_tasks: tuple["SupportedTask", ...],
 ):
+    # Added first so that it only sees requests that reach the API routes.
+    app.add_middleware(RequestFailureMetricsMiddleware)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=args.allowed_origins,

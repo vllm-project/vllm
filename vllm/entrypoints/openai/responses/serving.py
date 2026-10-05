@@ -72,6 +72,7 @@ from vllm.entrypoints.openai.responses.utils import (
     reuse_streamed_item_ids,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.middleware.request_failures import mark_generation_started
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
@@ -600,6 +601,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 request_metadata,
             )
 
+        mark_generation_started(raw_request)
         return await self.responses_full_generator(
             request,
             sampling_params,

@@ -94,6 +94,10 @@ http_request_duration_highr_seconds_count 201.0
 http_request_duration_seconds_count{handler="/v1/completions",method="POST"} 201.0
 ```
 
+Requests that fail in the API server never reach the engine, so they are not counted by `vllm:request_success`. They are counted by `vllm:request_failure_total`, labelled with the `stage` the failure surfaced in and the HTTP status `code` of the error:
+
+- `input_processing` - the request failed before generation started, e.g. validation, chat template rendering or admission control.
+
 ### Multi-process Mode
 
 Historically, metrics were collected in the engine core process and multiprocess mode was used to make them available in the API server process. See <https://github.com/vllm-project/vllm/pull/7279>.
