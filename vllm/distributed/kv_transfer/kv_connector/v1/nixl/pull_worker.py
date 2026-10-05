@@ -185,7 +185,34 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
-        if not local_block_ids:
+        if (pairs := plan.group_pairs) is not None:
+            # One block list per group pair, taken from its group on each side.
+            # A full local prefix hit has none and only notifies.
+            local_ids = local_block_ids and [
+                local_block_ids[g] for g in pairs.local_groups
+            ]
+            remote_ids = self._logical_to_kernel_block_ids(
+                [meta.remote.block_ids[g] for g in pairs.remote_groups],
+                remote_info.remote_physical_blocks_per_logical,
+                pairs.spec_types,
+            )
+
+            def group_pair_ids(block_ids: BlockIds, rank: int) -> BlockIds:
+                return [
+                    list(ids) if rank in ranks else []
+                    for ids, ranks in zip(block_ids, pairs.source_ranks)
+                ]
+
+            read_specs = [
+                ReadSpec(
+                    rank,
+                    group_pair_ids(local_ids, rank),
+                    group_pair_ids(remote_ids, rank),
+                    group_pairs=pairs,
+                )
+                for rank in sorted(self.dst_xfer_side_handles[engine_id])
+            ]
+        elif not local_block_ids:
             # Region expansion cannot index empty groups. Pass empty specs to
             # _read_blocks so its existing cache-hit notification path runs.
             read_specs = [
@@ -329,7 +356,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id,
             )
             # Get side handles.
-            if tp_ratio < 0 and (not self.use_mla or len(read_specs) > 1):
+            if pairs is not None:
+                local_xfer_side_handle = self._group_pair_src_handle(
+                    pairs, remote_info.remote_tp_size, spec.remote_rank
+                )
+                local_dram_handle = None
+            elif tp_ratio < 0 and (not self.use_mla or len(read_specs) > 1):
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
                 split_key = (tp_ratio, remote_block_size)
@@ -374,15 +406,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             ):
                 return
 
-        if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
+        if pairs or (self.use_mla and tp_ratio < 0 and len(read_specs) == 1):
             # ..but we still need to notify the other remote ranks that we
             # have the blocks we need so they can update the request state.
             # Same thing for DCP (tp_size == dcp_size), so the raw tp_ratio already
-            # reflects whether any remote replica is left unchosen.
+            # reflects whether any remote replica is left unchosen. Group pairs
+            # read from no remote rank owning only heads another one supplies.
             notif_id = f"{meta.remote.request_id}:{plan.local_consumers}".encode()
+            read_ranks = {(0, spec.remote_rank) for spec in read_specs}
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify != (0, read_specs[0].remote_rank):
+                if rank_to_notify not in read_ranks:
                     try:
                         self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
                     except Exception as e:
@@ -424,16 +458,24 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids = read_spec.remote_block_ids
 
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
-        block_size_ratio = self.transfer_topo.block_size_ratio(
-            remote_info.remote_block_size
+        pairs = read_spec.group_pairs
+        spec_types = pairs.spec_types if pairs else None
+        block_size_ratio = (
+            1
+            if pairs
+            else self.transfer_topo.block_size_ratio(remote_info.remote_block_size)
         )
         # Equal kernel blocks under different logical block sizes leave
         # different padding at the end of each list: pair them the same way.
-        if block_size_ratio > 1 or (
-            num_tokens is not None
-            and not read_spec.block_ids_by_region
-            and remote_info.remote_physical_blocks_per_logical
-            != self._physical_blocks_per_logical_kv_block
+        if (
+            pairs
+            or block_size_ratio > 1
+            or (
+                num_tokens is not None
+                and not read_spec.block_ids_by_region
+                and remote_info.remote_physical_blocks_per_logical
+                != self._physical_blocks_per_logical_kv_block
+            )
         ):
             if read_spec.block_ids_by_region:
                 raise NotImplementedError(
@@ -446,6 +488,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     block_size_ratio,
                     num_tokens,
                     remote_info.remote_physical_blocks_per_logical,
+                    pairs,
                 )
             )
         # NOTE(rob): having the staging blocks be on the READER side is
@@ -491,7 +534,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             assert (
                 len(remote_block_ids)
                 == len(local_block_ids)
-                == len(self.kv_cache_config.transfer_groups)
+                == len(spec_types or self.kv_cache_config.transfer_groups)
             )
             if not (self.dcp_size > 1 or remote_info.remote_dcp_size > 1):
                 local_block_ids, remote_block_ids = self._apply_prefix_caching(
@@ -503,6 +546,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     prefill_physical_per_logical=(
                         remote_info.remote_physical_blocks_per_logical
                     ),
+                    group_spec_types=spec_types,
                 )
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
@@ -526,6 +570,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 if read_spec.block_ids_by_region
                 else self.dst_uses_region_group_mapping[dst_engine_id]
             ),
+            group_region_ids=pairs.remote_regions if pairs else None,
+            group_units=pairs.units if pairs else None,
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
@@ -543,6 +589,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 if read_spec.block_ids_by_region
                 else self._uses_region_group_mapping
             ),
+            group_region_ids=pairs.local_regions if pairs else None,
+            group_units=pairs.units if pairs else None,
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)

@@ -722,6 +722,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     mock_plan = MagicMock(spec=TPMapping)
     mock_plan.all_source_ranks = ()
     mock_plan.source_ranks_per_group = ()
+    mock_plan.group_pairs = None
     worker.tp_mappings = {remote_engine_id: mock_plan}
 
     metadata = NixlConnectorMetadata()

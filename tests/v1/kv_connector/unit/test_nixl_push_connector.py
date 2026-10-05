@@ -84,6 +84,7 @@ def _make_request(
     req = MagicMock()
     req.request_id = request_id
     req.num_computed_tokens = 64
+    req.num_prompt_tokens = 65
 
     if is_d_side:
         # D-side request: do_remote_prefill=True -> prefill on a remote P.
@@ -433,6 +434,7 @@ def _registration_data(
         "decode_port": decode_port,
         "decode_tp_size": decode_tp_size,
         "local_block_ids": local_block_ids,
+        "num_tokens": 48,
         "remote_engine_id": remote_engine_id,
         "remote_host": remote_host,
         "remote_port": remote_port,
@@ -2123,12 +2125,20 @@ def test_set_region_layers_rejects_layer_outside_any_kv_group():
 
 
 @pytest.mark.parametrize(
-    ("local_block_size", "remote_block_size", "remote_ppl", "remote_tp_size", "error"),
+    (
+        "local_block_size",
+        "remote_block_size",
+        "remote_ppl",
+        "remote_tp_size",
+        "remote_group",
+        "error",
+    ),
     [
-        (32, 16, 1, 1, "identical P/D block sizes"),
-        (16, 32, 1, 1, "identical P/D block sizes"),
-        (16, 16, 1, 2, "decode TP greater"),
-        (16, 16, 2, 1, "identical P/D block sizes"),
+        (32, 16, 1, 1, 0, "identical P/D block sizes"),
+        (16, 32, 1, 1, 0, "identical P/D block sizes"),
+        (16, 16, 1, 2, 0, "decode TP greater"),
+        (16, 16, 2, 1, 0, "identical P/D block sizes"),
+        (16, 16, 1, 1, 1, "different KV cache group plans"),
     ],
 )
 def test_layer_handshake_rejects_unsupported_geometry(
@@ -2136,12 +2146,14 @@ def test_layer_handshake_rejects_unsupported_geometry(
     remote_block_size: int,
     remote_ppl: int,
     remote_tp_size: int,
+    remote_group: int,
     error: str,
 ):
     """Reject unsupported peers without registering agents or transfer state."""
     metadata = _agent_metadata([["a"]], [0xA000], [128])
     metadata.block_size = remote_block_size
     metadata.physical_blocks_per_logical_kv_block = remote_ppl
+    metadata.region_member_pages = [[(remote_group, 8, 16)]]
     worker = _layer_routing_worker([["a"]], {"a": 0})
     worker.block_size = local_block_size
     worker.block_len_per_layer = [128]

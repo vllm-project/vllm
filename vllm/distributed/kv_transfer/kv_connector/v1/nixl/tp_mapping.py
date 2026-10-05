@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
 
@@ -19,6 +20,46 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 # ======================================================================
 
 
+class PageView(NamedTuple):
+    """``heads`` KV heads from ``first`` of every page of a region holding
+    ``tokens`` tokens per head, in ``units`` equal token intervals, each one
+    descriptor or, with ``runs`` == ``heads``, one per head."""
+
+    region: int
+    first: int
+    heads: int
+    tokens: int
+    units: int
+    runs: int
+    token_bytes: int
+
+
+class GroupPairs(NamedTuple):
+    """Layers split by their (local, remote) KV cache group and transfer
+    geometry, for peers whose layers the model-wide mapping cannot pair:
+    different groups, page shapes or KV head ownership. Each pair runs with its
+    groups' block ids on each side, from its own remote ranks.
+    """
+
+    # Indices into each side's KV cache transfer groups.
+    local_groups: list[int]
+    remote_groups: list[int]
+    spec_types: list[type[KVCacheSpec]]
+    # Remote ranks each pair transfers with.
+    source_ranks: list[tuple[int, ...]]
+    # Local and remote transfer units per page, and descriptors per unit.
+    units: list[tuple[int, int, int]]
+    # Attention: each layer's first descriptor in its remote rank's lists.
+    # SSM: state sub-regions. Aligned by layer.
+    local_regions: list[np.ndarray]
+    remote_regions: list[np.ndarray]
+    # Per remote rank: attention descriptor views of the local and remote list.
+    local_views: dict[int, tuple[PageView, ...]]
+    remote_views: dict[int, tuple[PageView, ...]]
+    # Remote regions holding SSM state, in remote descriptor order.
+    remote_ssm_regions: list[int]
+
+
 @dataclass(frozen=True)
 class ReadSpec:
     """Specification for a single remote block read operation."""
@@ -27,6 +68,52 @@ class ReadSpec:
     local_block_ids: BlockIds
     remote_block_ids: BlockIds
     block_ids_by_region: bool = False
+    # Set when the block ids are per group pair.
+    group_pairs: GroupPairs | None = None
+
+
+def kv_head_slices(
+    heads: int,
+    tp: int,
+    rank: int,
+    remote_heads: int,
+    remote_tp: int,
+    remote_ranks: list[int],
+    read: bool,
+) -> dict[int, tuple[int, int, int]]:
+    """(first local head, first remote head, count) each remote rank shares
+    with this rank, from both sides' per-rank KV heads.
+
+    A rank owns a contiguous range of global KV heads; with more ranks than
+    heads, QKVParallelLinear replicates each head on consecutive ranks. A read
+    takes each local head from the first remote rank owning it; a write sends
+    every local head a remote rank owns.
+    """
+    # Total KV heads; if both sides hold one head, any total maps alike.
+    total = next(
+        (h * t for h, t in ((heads, tp), (remote_heads, remote_tp)) if h > 1),
+        min(tp, remote_tp),
+    )
+
+    def owned(n: int, t: int, r: int) -> range:
+        first = r * n if n > 1 else r * total // t
+        return range(first, first + n)
+
+    local = owned(heads, tp, rank)
+    start = local.start
+    slices = {}
+    for remote_rank in remote_ranks:
+        remote = owned(remote_heads, remote_tp, remote_rank)
+        first, last = max(start, remote.start), min(local.stop, remote.stop)
+        if first < last:
+            slices[remote_rank] = (
+                first - local.start,
+                first - remote.start,
+                last - first,
+            )
+            if read:
+                start = last
+    return slices
 
 
 def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
@@ -61,6 +148,8 @@ class TPMapping:
     # a request's blocks only once that many notifications have come in.
     local_consumers: int = 1
 
+    group_pairs: GroupPairs | None = None
+
 
 # ======================================================================
 # TP mapping computation
@@ -72,6 +161,7 @@ def compute_tp_mapping(
     remote_tp_size: int,
     group_spec_types: tuple[type[KVCacheSpec], ...],
     remote_dcp_size: int = 1,
+    group_pairs: GroupPairs | None = None,
 ) -> TPMapping:
     """Build the complete local-to-remote TP mapping.
 
@@ -158,4 +248,5 @@ def compute_tp_mapping(
         rank_to_attention_slot=rank_to_attention_slot,
         rank_offset_factor=rank_offset_factor,
         local_consumers=local_consumers,
+        group_pairs=group_pairs,
     )

@@ -173,6 +173,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         )
         local_block_ids: BlockIds = blocks.get_unhashed_block_ids_all_groups()
         local_block_ids = self.get_exchange_clipped_blocks(local_block_ids)
+        # Both sides pair blocks from the last token P pushes.
+        params["remote_num_tokens"] = self._get_remote_prefill_token_count(request)
 
         # ``remote_*`` fields are P's coordinates (from D's perspective).
         # ``decode_*`` fields are D's own info that P needs for the
@@ -184,6 +186,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             "decode_port": self.side_channel_port,
             "decode_tp_size": (self.vllm_config.parallel_config.tensor_parallel_size),
             "local_block_ids": local_block_ids,
+            "num_tokens": params["remote_num_tokens"],
             "remote_engine_id": params["remote_engine_id"],
             "remote_host": params["remote_host"],
             "remote_port": params["remote_port"],

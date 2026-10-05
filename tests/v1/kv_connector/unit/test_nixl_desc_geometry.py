@@ -1699,3 +1699,232 @@ def test_ring_scratch_without_mamba_registers_and_addresses_its_own_regions():
     )
     # Paged block 1 in both regions; ring block 0 only in its scratch region.
     assert sorted(desc_ids.tolist()) == sorted([0 * 2 + 1, 1 * 2 + 1, 1 * 2 + 0])
+
+
+def _make_grouped_worker(engine_id, specs, group_size, tp_rank=0, tp_size=1):
+    """Pull worker whose KV cache groups hold up to ``group_size`` layers of
+    one spec, assigned as by the uniform-page-size planner."""
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    layers_by_spec = defaultdict(list)
+    for name, spec in specs.items():
+        layers_by_spec[spec].append(name)
+    groups = []
+    for spec, names in layers_by_spec.items():
+        num_groups = -(-len(names) // group_size)
+        groups += [
+            KVCacheGroupSpec(names[i::num_groups], spec) for i in range(num_groups)
+        ]
+    vllm_config = create_vllm_config(block_size=16)
+    vllm_config.cache_config.kv_cache_layout = "LBHNC"
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    page_size = next(iter(specs.values())).page_size_bytes
+    num_regions = max(len(group.layer_names) for group in groups)
+    kv_cache_config = get_kv_cache_config_from_groups(
+        vllm_config, groups, 32 * num_regions * page_size
+    )
+    caches = allocate_kv_cache(
+        kv_cache_config, torch.device("cpu"), KVCacheLayout.LBHNC
+    )
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [
+        max(spec.block_size for spec in specs.values())
+    ]
+    fake_backend.get_name.return_value = "FLASH_ATTN"
+    fake_platform = MagicMock(device_type="cuda")
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=tp_rank),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=tp_size),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(bw, "current_platform", fake_platform),
+        # The full attention layers' single KV head.
+        patch.object(
+            type(vllm_config.model_config), "get_total_num_kv_heads", lambda _: 1
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlConnectorWorker(vllm_config, engine_id, kv_cache_config)
+        worker.register_kv_caches(caches)
+    return worker, caches
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("hybrid", "prefill_tp", "prefill_group_size", "decode_group_size"),
+    [
+        ("sliding_window", 1, 2, 4),
+        ("gdn", 1, 2, 4),
+        ("sliding_window", 2, 2, 4),
+        ("replicated", 2, 4, 4),
+    ],
+)
+def test_pull_between_different_group_plans(
+    monkeypatch, hybrid, prefill_tp, prefill_group_size, decode_group_size
+):
+    """P and D group the same layers differently, or prefill TP2 replicates
+    every KV head: each decode KV head and token receives the prefill KV of
+    the same layer, head and token, and nothing else in the decode KV cache
+    is written. At prefill TP2 the full attention head is replicated and the
+    sliding-window heads are sharded, which changes their pages by different
+    factors, or replicated."""
+    import ctypes
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        MambaSpec,
+        SlidingWindowSpec,
+    )
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+
+    def make_specs(tp):
+        # Equal 1 KiB pages: a replicated 1 x 16 full attention head, and
+        # sliding-window heads of 2 x 8 sharded across TP or 1 x 16 replicated.
+        full = FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16
+        )
+        block, heads, size = (
+            (16, 1, 16) if hybrid == "replicated" else (16 * tp, 2 // tp, 8)
+        )
+        other = (
+            SlidingWindowSpec(
+                block_size=block,
+                num_kv_heads=heads,
+                head_size=size,
+                dtype=torch.float16,
+                sliding_window=64,
+            )
+            if hybrid != "gdn"
+            else MambaSpec(
+                block_size=16,
+                shapes=((24, 3), (2, 4, 4)),
+                dtypes=(torch.float16, torch.float16),
+                page_size_padded=full.page_size_bytes,
+                mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+            )
+        )
+        return {
+            f"model.layers.{i}.attn": full if i % 4 == 3 else other for i in range(8)
+        }
+
+    prefill = [
+        _make_grouped_worker(
+            "P", make_specs(prefill_tp), prefill_group_size, rank, prefill_tp
+        )
+        for rank in range(prefill_tp)
+    ]
+    decode, decode_caches = _make_grouped_worker("D", make_specs(1), decode_group_size)
+    decode._remote_agents["P"] = {
+        (0, rank): decode.add_remote_agent(
+            msgspec.msgpack.decode(
+                worker.xfer_handshake_metadata.agent_metadata_bytes,
+                type=NixlAgentMetadata,
+            ),
+            rank,
+            prefill_tp,
+        )
+        for rank, (worker, _) in enumerate(prefill)
+    }
+    assert decode.tp_mappings["P"].group_pairs is not None
+
+    page_size = 1024
+    num_tokens = 48
+
+    def raw(cache):
+        storage = cache.untyped_storage()
+        return torch.empty(0, dtype=torch.uint8).set_(storage, 0, (storage.nbytes(),))
+
+    def page(caches, name, block):
+        start = caches[name].data_ptr() - raw(caches[name]).data_ptr()
+        start += block * page_size
+        return raw(caches[name])[start : start + page_size]
+
+    def block_ids(worker, ids):
+        # Pages of the request's tokens per attention group, one SSM state slot.
+        return [
+            [
+                next(ids)
+                for _ in range(
+                    1
+                    if isinstance(group.kv_cache_spec, MambaSpec)
+                    else -(-num_tokens // group.kv_cache_spec.block_size)
+                )
+            ]
+            for group in worker.kv_cache_config.transfer_groups
+        ]
+
+    prefill_ids = block_ids(prefill[0][0], iter(range(1, 32)))
+    decode_ids = block_ids(decode, iter(range(31, 0, -1)))
+    for worker, caches in prefill:
+        for ids, group in zip(prefill_ids, worker.kv_cache_config.transfer_groups):
+            for name in group.layer_names:
+                for block in ids:
+                    page(caches, name, block).random_(0, 256)
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req",
+        local_block_ids=decode_ids,
+        kv_transfer_params={
+            "remote_block_ids": prefill_ids,
+            "remote_engine_id": "P",
+            "remote_request_id": "req-P",
+            "remote_host": "localhost",
+            "remote_port": 1,
+            "tp_size": prefill_tp,
+            "remote_num_tokens": num_tokens,
+        },
+    )
+    decode._read_blocks_for_req("req", metadata.reqs_to_recv["req"])
+    nixl = decode.nixl_wrapper
+    for _, local, local_ids, remote, remote_ids in nixl.xfers:
+        for (dst, length, _), (src, src_length, _) in zip(
+            nixl.dlists[local][local_ids], nixl.dlists[remote][remote_ids], strict=True
+        ):
+            assert length == src_length
+            ctypes.memmove(int(dst), int(src), int(length))
+
+    prefill_group = prefill[0][0].kv_cache_config.transfer_group_index_by_layer
+    for ids, group in zip(decode_ids, decode.kv_cache_config.transfer_groups):
+        for name in group.layer_names:
+            prefill_ids_of_layer = prefill_ids[prefill_group[name]]
+            for pos, block in enumerate(ids):
+                received = page(decode_caches, name, block)
+                if isinstance(group.kv_cache_spec, MambaSpec):
+                    sent = page(prefill[0][1], name, prefill_ids_of_layer[pos])
+                    size = group.kv_cache_spec.state_content_size_bytes
+                    assert torch.equal(received[:size], sent[:size]), (name, block)
+                else:
+                    # [heads, tokens, K|V] views of both pages.
+                    heads = decode_caches[name][block].view(torch.int16)
+                    for head in range(heads.shape[0]):
+                        rank = head * prefill_tp // max(heads.shape[0], prefill_tp)
+                        prefill_cache = prefill[rank][1][name].view(torch.int16)
+                        start = pos * heads.shape[1]
+                        sent = prefill_cache[
+                            prefill_ids_of_layer[start // prefill_cache.shape[2]]
+                        ][head % prefill_cache.shape[1]]
+                        offset = start % prefill_cache.shape[2]
+                        assert torch.equal(
+                            heads[head], sent[offset : offset + heads.shape[1]]
+                        ), (name, block, head)
+                received.zero_()
+    assert not raw(next(iter(decode_caches.values()))).any()
+
+    # A full local prefix hit only notifies each prefill rank, once.
+    notified = []
+    nixl.send_notif = lambda agent, notif_msg: notified.append(agent)
+    metadata.reqs_to_recv["req"].local_physical_block_ids = []
+    decode._read_blocks_for_req("req", metadata.reqs_to_recv["req"])
+    assert len(notified) == prefill_tp

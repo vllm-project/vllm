@@ -499,6 +499,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 port=0,
                 engine_id=decode_engine_id,
                 request_id=decode_request_id,
+                num_tokens=registration_data["num_tokens"],
             ),
         )
 
@@ -535,16 +536,29 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # Expand D's logical IDs using the ratio learned during the
         # NIXL handshake. ``meta`` is freshly built by
         # ``_do_start_push_kv`` so mutating it here is safe.
-        meta.remote.block_ids = self._logical_to_kernel_block_ids(
-            meta.remote.block_ids,
-            remote_info.remote_physical_blocks_per_logical,
-        )
+        source_ranks = plan.source_ranks_per_group
+        if (pairs := plan.group_pairs) is not None:
+            # One block list per group pair, taken from its group on each side.
+            meta.local_physical_block_ids = [
+                meta.local_physical_block_ids[g] for g in pairs.local_groups
+            ]
+            meta.remote.block_ids = self._logical_to_kernel_block_ids(
+                [meta.remote.block_ids[g] for g in pairs.remote_groups],
+                remote_info.remote_physical_blocks_per_logical,
+                pairs.spec_types,
+            )
+            source_ranks = tuple(pairs.source_ranks)
+        else:
+            meta.remote.block_ids = self._logical_to_kernel_block_ids(
+                meta.remote.block_ids,
+                remote_info.remote_physical_blocks_per_logical,
+            )
         remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
         local_region_groups = self.region_group_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         groups_differ = local_region_groups != remote_region_groups
-        if groups_differ and not self._transfer_layer_group_ids:
+        if groups_differ and not self._transfer_layer_group_ids and not pairs:
             raise NotImplementedError(
                 "NixlPushConnector does not support different producer and "
                 "consumer cache-group layouts"
@@ -557,7 +571,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # attention groups need widening; pure MLA writes to all handshaked
         # ranks (only the dst differs per rank).
         replicate_attn = self.use_mla and tp_ratio < 0
-        if replicate_attn and not self._has_mamba:
+        if pairs is not None:
+            write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
+        elif replicate_attn and not self._has_mamba:
             assert len(plan.all_source_ranks) == 1
             write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
         else:
@@ -570,7 +586,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 list(block_ids[g])
                 if (self._is_csa_linear and tp_ratio < 0)
                 or (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
-                or rank in plan.source_ranks_per_group[g]
+                or rank in source_ranks[g]
                 else []
                 for g in range(num_groups)
             ]
@@ -580,6 +596,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_rank=rank,
                 local_block_ids=group_ids(local_block_ids, rank),
                 remote_block_ids=group_ids(remote_block_ids, rank),
+                group_pairs=pairs,
             )
             for rank in write_ranks
         ]
@@ -595,7 +612,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_block_size,
                 req_id,
             )
-            if tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1):
+            if pairs is not None:
+                local_xfer_side_handle = self._group_pair_src_handle(
+                    pairs, remote_info.remote_tp_size, spec.remote_rank
+                )
+            elif tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1):
                 # Multiple targets: write each rank its chunk of local memory.
                 # Hybrid MLA+SSM also lands here: its split handles replicate
                 # the attention descriptors and chunk only the SSM state.
@@ -617,6 +638,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
+                num_tokens=meta.remote.num_tokens,
             )
             if handle is not None:
                 handles.append(handle)
@@ -636,6 +658,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
+        num_tokens: int | None = None,
     ) -> int | None:
         """Post a WRITE point-to-point xfer request.
 
@@ -648,6 +671,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids = read_spec.remote_block_ids
 
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
+        pairs = read_spec.group_pairs
+        spec_types = pairs.spec_types if pairs else None
 
         notif_id = f"{remote_request_id}:{self.world_size}".encode()
 
@@ -655,6 +680,17 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             logger.warning("No blocks to push for request %s", request_id)
             return None
 
+        if pairs is not None:
+            local_block_ids, remote_block_ids = (
+                self._map_block_ids_for_block_size_ratio(
+                    local_block_ids,
+                    remote_block_ids,
+                    1,
+                    num_tokens,
+                    remote_info.remote_physical_blocks_per_logical,
+                    pairs,
+                )
+            )
         # Prefix caching: D allocated only uncached blocks, so on a partial hit it
         # sends fewer than P's. End-trim P's blocks to that same suffix so we WRITE only
         # the uncomputed tail into D's slots. Runs on kernel ids, post-expansion.
@@ -663,6 +699,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             prefill_block_ids=local_block_ids,
             decode_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
             prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
+            group_spec_types=spec_types,
         )
 
         local_block_ids = list(local_block_ids)
@@ -687,6 +724,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             region_num_blocks=self.dst_region_num_blocks[dst_engine_id],
             region_group_ids=self.dst_region_group_ids[dst_engine_id],
             uses_region_group_mapping=self.dst_uses_region_group_mapping[dst_engine_id],
+            group_region_ids=pairs.remote_regions if pairs else None,
+            group_units=pairs.units if pairs else None,
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
@@ -696,6 +735,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             region_num_blocks=self.dst_region_num_blocks[self.engine_id],
             region_group_ids=self.region_group_ids,
             uses_region_group_mapping=self._uses_region_group_mapping,
+            group_region_ids=pairs.local_regions if pairs else None,
+            group_units=pairs.units if pairs else None,
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
