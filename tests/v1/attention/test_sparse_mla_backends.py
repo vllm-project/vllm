@@ -65,6 +65,9 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import current_stream
+from vllm.v1.attention.backends.mla import (
+    flashattn_mla_sparse as flashattn_sparse_module,
+)
 from vllm.v1.attention.backends.mla import index_group as index_group_module
 from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
     FlashAttnMLASparseImpl,
@@ -3403,6 +3406,129 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     assert kernel_shapes == [q.shape]
     assert output.shape == (num_tokens, 2, 1)
     assert lse is None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(90),
+    reason="FlashAttention MLA requires Hopper",
+)
+@pytest.mark.parametrize("use_cuda_graph", [False, True])
+@pytest.mark.parametrize("block_stride_rows", [64, 128])
+@pytest.mark.parametrize(
+    "query_len,num_decode_tokens,max_decode_rows,num_layers",
+    [
+        pytest.param(1, 2, 2, 4, id="decode"),
+        pytest.param(4, 8, 8, 4, id="mtp4"),
+        pytest.param(6, 12, 12, 4, id="mtp6"),
+        pytest.param(4, 8, 2, 4, id="scratch_overflow"),
+        pytest.param(4, 4, 8, 4, id="mixed"),
+        pytest.param(4, 0, 8, 4, id="prefill"),
+        pytest.param(4, 8, 8, 1, id="single_layer"),
+    ],
+)
+def test_flashattn_shared_indices_match_independent_conversion(
+    monkeypatch,
+    query_len,
+    num_decode_tokens,
+    max_decode_rows,
+    num_layers,
+    block_stride_rows,
+    use_cuda_graph,
+):
+    """Reuse must preserve attention outputs as requests and pages change."""
+    device = torch.device(DEVICE_TYPE)
+    num_tokens, block_size, topk, seq_len = 2 * query_len, 64, 2048, 8192
+    blocks_per_req = seq_len // block_size
+    logical = torch.arange(
+        0, seq_len, seq_len // topk, dtype=torch.int32, device=device
+    ).repeat(num_tokens, 1)
+    logical[:, ::7] = -1
+    builder = SparseMLAIndexGroupBuilder(logical, max_decode_rows=max_decode_rows)
+    metadata = SimpleNamespace(
+        block_table=torch.randperm(
+            2 * blocks_per_req, dtype=torch.int32, device=device
+        ).view(2, blocks_per_req),
+        block_size=block_size,
+        req_id_per_token=torch.arange(
+            2, dtype=torch.int32, device=device
+        ).repeat_interleave(query_len),
+        num_decode_tokens=num_decode_tokens,
+    )
+    q_nope = torch.randn(num_tokens, 8, 512, dtype=torch.bfloat16, device=device)
+    q_rope = torch.randn(num_tokens, 8, 64, dtype=torch.bfloat16, device=device)
+    caches = torch.randn(
+        num_layers,
+        2 * blocks_per_req,
+        block_stride_rows,
+        576,
+        dtype=torch.bfloat16,
+        device=device,
+    )[:, :, :block_size]
+    impls = []
+    for i in range(num_layers):
+        impl = object.__new__(FlashAttnMLASparseImpl)
+        impl.topk_indices_buffer = logical
+        impl.index_group, impl.index_group_index = builder.register_layer(i == 0)
+        impl.dcp_world_size = 1
+        impl.kv_lora_rank, impl.qk_rope_head_dim = 512, 64
+        impl.scale = 256**-0.5
+        impl.cu_seqlens_q_buffer = torch.arange(
+            num_tokens + 1, dtype=torch.int32, device=device
+        )
+        impls.append(impl)
+
+    convert = triton_convert_req_index_to_global_index
+    convert_spy = MagicMock(wraps=convert)
+    for module in (index_group_module, flashattn_sparse_module):
+        monkeypatch.setattr(
+            module, "triton_convert_req_index_to_global_index", convert_spy
+        )
+
+    def run():
+        impls[0].record_logical_topk_ready()
+        return [
+            impl.forward_mqa((q_nope, q_rope), cache, metadata, None)[0]
+            for impl, cache in zip(impls, caches)
+        ]
+
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(current_stream())
+    with torch.cuda.stream(stream):
+        run()  # Warm up the conversion and FA3 kernels before capture.
+        stream.synchronize()
+        convert_spy.reset_mock()
+        if use_cuda_graph:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                outputs = run()
+        else:
+            outputs = run()
+        reuse = num_decode_tokens == num_tokens and num_tokens <= max_decode_rows + 1
+        assert convert_spy.call_count == (1 if reuse else num_layers)
+
+        for _ in range(2):
+            metadata.req_id_per_token.copy_(metadata.req_id_per_token.flip(0))
+            metadata.block_table.copy_(metadata.block_table.roll(1, dims=1))
+            logical.copy_(torch.where(logical >= 0, (logical + 1) % seq_len, logical))
+            if use_cuda_graph:
+                graph.replay()
+            else:
+                outputs = run()
+            physical, counts = convert(
+                metadata.req_id_per_token,
+                metadata.block_table,
+                logical,
+                BLOCK_SIZE=block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=topk,
+                return_valid_counts=True,
+            )
+            for impl, cache, actual in zip(impls, caches, outputs):
+                expected = impl._run_mqa_kernel(
+                    q_nope, q_rope, cache, physical, counts, block_size
+                )
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    stream.synchronize()
 
 
 def test_flashattn_hisparse_decode_uses_index_group():
