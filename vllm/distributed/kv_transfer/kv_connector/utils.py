@@ -91,11 +91,14 @@ def get_prefill_stop(request: "Request", backoff: int) -> int:
     """The prompt tokens a P/D prefiller computes and its decoder loads.
 
     Both sides derive it from the same prompt. It leaves the trailing
-    ``backoff`` tokens to the decoder, and moves back to the start of a
+    `backoff` tokens to the decoder, and moves back to the start of a
     multimodal item that cut would split: models parse an item from its
     whole placeholder. 0 means no prefix can be transferred, and the decoder
-    computes the whole prompt.
+    computes the whole prompt: also the case for a request that skips reading
+    external KV (prompt logprobs), which the decoder never loads.
     """
+    if request.skip_reading_external_kv:
+        return 0
     stop = request.num_prompt_tokens - backoff
     for feature in request.mm_features:
         position = feature.mm_position
@@ -105,15 +108,16 @@ def get_prefill_stop(request: "Request", backoff: int) -> int:
 
 
 def truncate_prompt_for_prefill(request: "Request", stop: int) -> None:
-    """P-side: drop the prompt from ``stop`` on, with the multimodal items
-    there, before the request is scheduled."""
+    """P-side: drop the prompt from `stop` on, with the multimodal items
+    there, before the request is scheduled. The prompt is rebound rather than
+    edited in place, since parallel samples can share it in-process."""
     # A mixed-mode prompt carries token ids, embeddings and a mask.
     if request.prompt_token_ids is not None:
-        del request.prompt_token_ids[stop:]
+        request.prompt_token_ids = request.prompt_token_ids[:stop]
     if request.prompt_embeds is not None:
         request.prompt_embeds = request.prompt_embeds[:stop]
     if request.prompt_is_token_ids is not None:
-        del request.prompt_is_token_ids[stop:]
+        request.prompt_is_token_ids = request.prompt_is_token_ids[:stop]
     del request._all_token_ids[stop:]
     request.num_prompt_tokens = stop
     request.mm_features = [

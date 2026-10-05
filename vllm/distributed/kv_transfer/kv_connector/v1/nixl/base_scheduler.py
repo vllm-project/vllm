@@ -435,7 +435,8 @@ class NixlBaseConnectorScheduler:
             request.truncate_block_hashes(
                 hash_block_size, self.vllm_config.num_hash_lookahead_tokens
             )
-            params["_p_side_truncated"] = True
+            # Parallel samples can share kv_transfer_params in-process.
+            request.kv_transfer_params = {**params, "_p_side_truncated": True}
 
     def _build_save_meta(
         self,
