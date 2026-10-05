@@ -165,17 +165,26 @@ def _run_warmup_engine(args: argparse.Namespace, socket_dir: str | None) -> None
     distributed state dies with it.
     """
     from vllm.engine.arg_utils import EngineArgs
+    from vllm.usage.usage_lib import UsageContext
     from vllm.v1.engine.llm_engine import LLMEngine
 
     engine_args = EngineArgs.from_cli_args(args)
     engine_args.load_format = "ipc_cache"
-    extra_config = dict(engine_args.model_loader_extra_config or {})
-    # "copy" would tell the daemons to release the weights this engine only
-    # borrows; fallback=False turns a daemon that cannot serve them into an
-    # error rather than a silent disk load that doubles the GPU footprint.
-    extra_config.update(socket_dir=socket_dir, mode="zero_copy", fallback=False)
-    engine_args.model_loader_extra_config = extra_config
-    LLMEngine.from_engine_args(engine_args)
+    # Any preload --model-loader-extra-config is for the daemons' disk loader,
+    # whose keys IpcModelLoader rejects. "copy" would tell the daemons to
+    # release the weights this engine only borrows; fallback=False turns a
+    # daemon that cannot serve them into an error rather than a silent disk
+    # load that doubles the GPU footprint.
+    engine_args.model_loader_extra_config = {
+        "socket_dir": socket_dir,
+        "mode": "zero_copy",
+        "fallback": False,
+    }
+    # Resolve batch defaults as `vllm serve` does: they feed the config hash
+    # the tuned table is keyed by.
+    LLMEngine.from_engine_args(
+        engine_args, usage_context=UsageContext.OPENAI_API_SERVER
+    )
 
 
 class PreloadSubcommand(CLISubcommand):
@@ -315,6 +324,12 @@ class PreloadSubcommand(CLISubcommand):
             raise ValueError(
                 "--preload-autotune runs one local engine, so it supports "
                 "neither --nnodes > 1 nor --data-parallel-size > 1"
+            )
+        if args.preload_autotune and args.weight_cache_device_offset:
+            raise ValueError(
+                "--preload-autotune runs its engine on the first local GPUs, "
+                "not past --weight-cache-device-offset; a seeded mirror "
+                "already adopts the source's autotune table"
             )
         if args.weight_cache_listen and not args.weight_cache_seed_token:
             raise ValueError(
@@ -541,8 +556,8 @@ def _warm_up_kernels(
     keep serving the weights they already hold.
     """
     logger.info_once(
-        "===== Weight cache daemon warming up kernels: running one engine "
-        "to autotune and JIT-compile once ====="
+        "===== Daemons ready; booting one warmup engine against them to "
+        "autotune and JIT-compile once ====="
     )
     proc = ctx.Process(
         target=_run_warmup_engine,

@@ -7,6 +7,7 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import argparse
 import contextlib
 import shutil
 import socket
@@ -465,6 +466,56 @@ def test_artifact_store_evicts_oldest_past_its_cap():
     assert store.get(keys[0]) is None
     assert store.get(keys[1]) == b"1"
     assert store.get(keys[2]) == b"2"
+
+
+def _boot_warmup_engine(monkeypatch, **preload_engine_args):
+    """Run the --preload-autotune engine entrypoint without booting an engine.
+
+    Returns:
+        The EngineArgs it would boot with and the from_engine_args kwargs.
+
+    """
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.entrypoints.cli.preload import _run_warmup_engine
+    from vllm.v1.engine.llm_engine import LLMEngine
+
+    booted: dict[str, Any] = {}
+
+    def from_engine_args(cls, engine_args, **kwargs):
+        booted.update(engine_args=engine_args, **kwargs)
+
+    monkeypatch.setattr(
+        EngineArgs,
+        "from_cli_args",
+        classmethod(lambda cls, args: EngineArgs(model="m", **preload_engine_args)),
+    )
+    monkeypatch.setattr(LLMEngine, "from_engine_args", classmethod(from_engine_args))
+    _run_warmup_engine(argparse.Namespace(), socket_dir="/run/vllm")
+    return booted.pop("engine_args"), booted
+
+
+def test_preload_warmup_engine_resolves_defaults_like_vllm_serve(monkeypatch):
+    """The warmup engine's table is keyed by the config hash, which covers the
+    batch defaults that depend on the usage context; booted under a different
+    context than `vllm serve`, its table would never be hit."""
+    from vllm.usage.usage_lib import UsageContext
+
+    _, kwargs = _boot_warmup_engine(monkeypatch)
+    assert kwargs["usage_context"] == UsageContext.OPENAI_API_SERVER
+
+
+def test_preload_warmup_engine_drops_the_daemon_loader_config(monkeypatch):
+    """Preload's loader config is for the daemons' disk loader; handed to the
+    warmup engine's IPC loader, its unknown keys would fail the warmup."""
+    engine_args, _ = _boot_warmup_engine(
+        monkeypatch, model_loader_extra_config={"enable_multithread_load": True}
+    )
+    assert engine_args.load_format == "ipc_cache"
+    assert engine_args.model_loader_extra_config == {
+        "socket_dir": "/run/vllm",
+        "mode": "zero_copy",
+        "fallback": False,
+    }
 
 
 def test_seed_manifest_describes_every_exported_tensor():
