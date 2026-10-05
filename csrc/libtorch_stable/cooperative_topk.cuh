@@ -14,6 +14,7 @@
 #include <cstdint>
 
 #include "topk_histogram_4096.cuh"
+#include "topk_histogram_4096_overflow.cuh"
 
 namespace vllm {
 namespace cooperative {
@@ -531,7 +532,7 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
       extern __shared__ __align__(128) uint8_t sr[];
       hist4096::histogram_4096_topk<
           TopK, 12, hist4096::kHist4096VecsPerThread, false,
-          hist4096::OverflowRecovery::kRescan>(
+          hist4096::OverflowRecovery::kFp32Rescan>(
           in, out, sl, sr);  // 4096-bin (12-bit) histogram
     }
     return;
