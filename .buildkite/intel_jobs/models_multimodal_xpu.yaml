@@ -283,9 +283,10 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/multimodal/generation/test_common.py -m split(group=1) and not core_model --deselect="models/multimodal/generation/test_common.py::test_custom_inputs_models[llava_onevision-test_case4]" || true'
-- label: ':nvidia: (H200 MIG 18GB) Multimodal Models (Extended Pooling)'
+- label: ':nvidia: (H200 MIG 18GB) Multimodal Models (Extended Pooling) Shard %N'
   key: multi-modal-models-extended-pooling
   device: intel_gpu
+  parallelism: 3
   optional: true
   working_dir: .
   no_plugin: true
@@ -308,4 +309,4 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pip install av matplotlib ftfy &&
     cd tests &&
-    pytest -v -s models/multimodal/pooling -m not core_model || true'
+    pytest -v -s models/multimodal/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'

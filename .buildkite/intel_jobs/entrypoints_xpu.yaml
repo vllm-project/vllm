@@ -30,7 +30,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'bash .buildkite/scripts/initialized-snapshot-e2e.sh "$IMAGE_TAG" "$BUILDKITE_COMMIT" || true'
+    'bash .buildkite/scripts/initialized-snapshot-e2e.sh "$IMAGE_TAG_XPU" "$BUILDKITE_COMMIT" || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Unit'
   key: entrypoints-unit-tests
   device: intel_gpu
