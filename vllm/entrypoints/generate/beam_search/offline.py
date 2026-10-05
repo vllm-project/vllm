@@ -381,11 +381,14 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         faster for large choice sets. Returns a :class:`BeamSearchSOState`
         where exactly one of ``backend`` or ``trie`` is set.
         """
-        # CHOICE fast path: build a prefix trie and skip the grammar backend.
+        # Capture the request type BEFORE validation: the shared validator
+        # rewrites a CHOICE request to an equivalent grammar in place, which
+        # would otherwise hide the CHOICE type and make this fast path
+        # unreachable for the default "auto"/"xgrammar" backend.
         vllm_config = self.llm_engine.vllm_config
+        key = get_structured_output_key(structured_outputs)
         validate_and_resolve_beam_search_so(structured_outputs, vllm_config, tokenizer)
 
-        key = get_structured_output_key(structured_outputs)
         if key[0] == StructuredOutputOptions.CHOICE:
             choices = json.loads(key[1])
             trie = ChoiceTrie.build(

@@ -116,10 +116,15 @@ def init_beam_search_so_backend(
         ValueError: If the requested backend is not supported.
 
     """
-    validate_and_resolve_beam_search_so(structured_outputs, vllm_config, tokenizer)
-
+    # Capture the request type BEFORE validation. The shared validator runs
+    # the xgrammar validator, which rewrites a CHOICE request to an equivalent
+    # grammar in place (``choice`` -> ``None``, ``grammar`` -> EBNF). Reading
+    # the key afterwards would report GRAMMAR and make the trie fast path
+    # unreachable for the default "auto"/"xgrammar" backend.
     key = get_structured_output_key(structured_outputs)
     request_type, grammar_spec = key
+
+    validate_and_resolve_beam_search_so(structured_outputs, vllm_config, tokenizer)
 
     # Fast path: build a prefix trie for CHOICE requests and skip xgrammar.
     if request_type == StructuredOutputOptions.CHOICE:
