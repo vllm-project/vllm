@@ -206,7 +206,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
-- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`)
+- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`. Use the authenticated `/inference/v1/abort_requests` otherwise)
 
 **Utility endpoints:**
 
@@ -375,7 +375,7 @@ An attacker who can reach the gRPC port can:
 1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
 2. **Mutate engine state** by pausing generation, sleeping the engine, or initiating configured RL weight updates through the `Control` service
 3. **Consume GPU and compute resources** by submitting unbounded generation requests
-4. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
+4. **Stop a managed engine** through `Control.Shutdown`, or cause denial of service by exploiting bugs in the gRPC interface.
 
 ### Recommendations
 

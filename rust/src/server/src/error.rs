@@ -194,6 +194,27 @@ mod tests {
     }
 
     #[test]
+    fn chat_template_throw_maps_to_invalid_request() {
+        let error = vllm_chat::Error::ChatTemplateThrown {
+            message: "Unexpected reasoning effort high.".to_string(),
+        };
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert_eq!(response.error.message, "Unexpected reasoning effort high.");
+    }
+
+    #[test]
+    fn chat_template_render_failure_stays_internal() {
+        let error = vllm_chat::Error::ChatTemplate(
+            "failed to render jinja template: unknown function".to_string(),
+        );
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
     fn llm_wrapped_empty_prompt_maps_to_invalid_request() {
         let error = vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds {
             request_id: "req-1".to_string(),

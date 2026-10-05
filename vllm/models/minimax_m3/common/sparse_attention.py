@@ -56,6 +56,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
+    get_kv_quant_mode,
     is_quantized_kv_cache,
 )
 
@@ -531,10 +532,10 @@ def select_main_backend_and_impl_cls(
     """Pick the main attention backend and implementation.
 
     Blackwell (SM100) uses the MSA attend for supported top-k block counts
-    when the KV cache is BF16 or FP8 E4M3; MI355 uses AITER sparse PA
+    when the KV cache is BF16, FP8 E4M3 or NVFP4; MI355 uses AITER sparse PA
     with shuffle KV cache layout; Other platforms and FP8 E5M2 fall
-    back to Triton. The MSA modules are imported lazily to avoid import errors
-    on unsupported platforms.
+    back to Triton. NVFP4 is MSA-only. The MSA modules are imported lazily to
+    avoid import errors on unsupported platforms.
     """
     use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
         num_kv_heads, emits_sparse_block_table=emits_sparse_block_table
@@ -545,6 +546,18 @@ def select_main_backend_and_impl_cls(
         and topk_blocks in (4, 8, 16, 32)
         and kv_cache_dtype != "fp8_e5m2"
     )
+    use_nvfp4 = get_kv_quant_mode(kv_cache_dtype).is_nvfp4
+    if use_nvfp4 and kv_cache_dtype != "nvfp4":
+        raise ValueError(
+            "MiniMax M3 sparse attention supports only the 'nvfp4' NVFP4 KV "
+            f"cache dtype, got {kv_cache_dtype}"
+        )
+    if use_nvfp4 and (use_aiter_sparse_pa or not use_msa):
+        raise ValueError(
+            "MiniMax M3 sparse attention supports an NVFP4 KV cache only with "
+            f"the SM100 MSA backend (kv_cache_dtype={kv_cache_dtype}, "
+            f"topk_blocks={topk_blocks})"
+        )
     selected = (
         "AITER_SPARSE_PA" if use_aiter_sparse_pa else ("MSA" if use_msa else "Triton")
     )
@@ -565,8 +578,11 @@ def select_main_backend_and_impl_cls(
         from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
             MiniMaxM3SparseMSABackend,
             MiniMaxM3SparseMSAImpl,
+            MiniMaxM3SparseMSANvfp4Backend,
         )
 
+        if use_nvfp4:
+            return MiniMaxM3SparseMSANvfp4Backend, MiniMaxM3SparseMSAImpl
         return MiniMaxM3SparseMSABackend, MiniMaxM3SparseMSAImpl
     return MiniMaxM3SparseBackend, MiniMaxM3SparseTritonImpl
 
