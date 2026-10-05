@@ -109,6 +109,9 @@ class NixlBaseConnectorScheduler:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # Encoded payloads the listener serves; updated in place by a republish.
+        self._handshake_data: dict[tuple[int, int], bytes] = {}
+        self._registration_epoch = 0
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -295,20 +298,23 @@ class NixlBaseConnectorScheduler:
             metadata (dict): the handshake metadata to set.
 
         """
-        encoded_data: dict[tuple[int, int], bytes] = {}
         encoder = msgspec.msgpack.Encoder()
+        if self._handshake_data:
+            # A republish after a wake-up: every rank's payload gets the new epoch.
+            self._registration_epoch += 1
         for (pp_rank, tp_rank), rank_metadata in metadata.items():
             if not isinstance(rank_metadata, NixlHandshakePayload):
                 raise ValueError(
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
-            encoded_data[(pp_rank, tp_rank)] = encoder.encode(rank_metadata)
+            rank_metadata.registration_epoch = self._registration_epoch
+            self._handshake_data[(pp_rank, tp_rank)] = encoder.encode(rank_metadata)
             logger.debug(
                 "PP rank %d, TP rank %d: encoded NixlHandshakePayload size: %s bytes",
                 pp_rank,
                 tp_rank,
-                str(len(encoded_data[(pp_rank, tp_rank)])),
+                str(len(self._handshake_data[(pp_rank, tp_rank)])),
             )
 
         # Only start the listener when we have metadata to serve.
@@ -317,7 +323,7 @@ class NixlBaseConnectorScheduler:
             self._nixl_handshake_listener_t = threading.Thread(
                 target=self._nixl_handshake_listener,
                 args=(
-                    encoded_data,
+                    self._handshake_data,
                     ready_event,
                     self._stop_event,
                     self.side_channel_host,

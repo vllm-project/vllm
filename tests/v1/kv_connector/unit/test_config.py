@@ -172,7 +172,9 @@ _NIXL = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
 @pytest.mark.parametrize(
     ("kv_connector", "kv_connector_extra_config", "supported"),
     [
-        ("NixlConnector", {}, False),
+        ("NixlConnector", {}, True),
+        ("NixlConnector", {"backends": ["LIBFABRIC"]}, False),
+        ("NixlPushConnector", {}, False),
         ("MooncakeConnector", {"mooncake_protocol": "tcp"}, False),
         ("MooncakeConnector", {"mooncake_protocol": "rdma"}, True),
         ("MooncakeConnector", {}, True),
@@ -181,11 +183,13 @@ _NIXL = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
         ("OffloadingConnector", {}, True),
         ("ExampleConnector", {}, True),
         ("MultiConnector", {"connectors": [_MOONCAKE, _OFFLOADING]}, True),
-        ("MultiConnector", {"connectors": [_MOONCAKE, _NIXL]}, False),
+        ("MultiConnector", {"connectors": [_MOONCAKE, _NIXL]}, True),
         ("MultiConnector", {"connectors": [_OFFLOADING, _MOONCAKE_TCP]}, False),
     ],
     ids=[
         "nixl",
+        "nixl-libfabric",
+        "nixl-push",
         "mooncake-tcp",
         "mooncake-rdma",
         "mooncake-default",
