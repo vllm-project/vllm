@@ -123,6 +123,11 @@ class NixlBaseConnectorScheduler:
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
+        # D side: requests parked in WAITING_FOR_REMOTE_KVS until every worker
+        # reports them in finished_recving.
+        self._reqs_awaiting_recv: set[ReqId] = set()
+        # D side: awaited requests that finished before that report.
+        self._reqs_to_abort: set[ReqId] = set()
 
         # Heartbeat tracking: requests needing periodic lease-renewal heartbeats to
         # remote P-side, stored as ready-to-send HeartbeatInfo grouped by remote engine
@@ -494,6 +499,7 @@ class NixlBaseConnectorScheduler:
         meta.scheduler_clock = time.perf_counter()
         meta.reqs_in_batch = self._reqs_in_batch
         meta.reqs_not_processed = self._reqs_not_processed
+        meta.reqs_to_abort = self._reqs_to_abort
 
         # Package heartbeats, throttled by heartbeat_interval.
         if self._heartbeat_by_engine:
@@ -506,6 +512,7 @@ class NixlBaseConnectorScheduler:
         self._reqs_need_recv.clear()
         self._reqs_in_batch = set()
         self._reqs_not_processed = set()
+        self._reqs_to_abort = set()
         self._reqs_need_send = {}
 
         return meta
@@ -514,6 +521,7 @@ class NixlBaseConnectorScheduler:
         """Stop heartbeating for requests whose KV transfer completed."""
         for req_id in connector_output.finished_recving or ():
             self._stop_heartbeat(req_id)
+            self._reqs_awaiting_recv.discard(req_id)
 
     def has_pending_push_work(self) -> bool:
         return False

@@ -273,6 +273,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.scheduler_clock: float = 0.0
         self.reqs_in_batch: set[ReqId] = set()
         self.reqs_not_processed: set[ReqId] = set()
+        # D side: requests finished while waiting for their KV to arrive.
+        self.reqs_to_abort: set[ReqId] = set()
         # Heartbeat data grouped by remote engine, sent by D worker to P.
         self.heartbeat_by_engine: dict[EngineId, HeartbeatInfo] = {}
         # Push mode (D side): registration data the D worker should send to

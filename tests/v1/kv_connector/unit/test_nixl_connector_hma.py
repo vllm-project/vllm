@@ -60,6 +60,9 @@ def region_pull_worker():
     worker._transfer_layer_group_ids = ()
     worker._bidirectional_kv_xfer_enabled = False
     worker._recving_transfers = {}
+    worker._kv_load_timeout = 0.0
+    worker._recv_deadlines = {}
+    worker._aborted_recvs = set()
     worker.use_mla, worker._has_mamba = True, False
     worker.dcp_size = 1
     worker.dcp_rank = 0
@@ -375,6 +378,7 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     scheduler._reqs_in_batch = set()
     scheduler._reqs_need_save = {}
     scheduler._reqs_need_recv = {}
+    scheduler._reqs_awaiting_recv = set()
     scheduler.use_host_buffer = False
     scheduler.is_bidirectional_kv_xfer_enabled = False
     scheduler._is_hma_required = False
@@ -692,6 +696,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._engine_last_active = {}
     worker._recving_transfers = {}
+    worker._kv_load_timeout = 0.0
     worker._bidirectional_kv_xfer_enabled = False
     worker.dcp_size = 1
     worker.dcp_rank = 0

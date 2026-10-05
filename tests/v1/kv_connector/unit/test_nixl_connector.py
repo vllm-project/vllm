@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import copy
 import inspect
 import os
 import queue
@@ -2119,6 +2120,8 @@ def recv_worker():
     worker._physical_blocks_per_logical_kv_block = 1
     worker._recving_metadata = {"request": MagicMock(local_block_ids=([1, 2, 3],))}
     worker._recving_transfers = defaultdict(list)
+    worker._recv_deadlines = {}
+    worker._aborted_recvs = set()
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
     worker._handshake_lock = threading.RLock()
@@ -2930,6 +2933,251 @@ class TestPeerReplacement:
         self.worker.start_load_kv(NixlConnectorMetadata())
         assert "old" in self.worker._handshake_futures
         self.transport.send_notif.assert_not_called()
+
+
+class _StallingNixlWrapper(FakeNixlWrapper):
+    """READs stay in flight until ``resolve()``."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.posted: list[int] = []
+        self.notified: list[bytes] = []
+        self._stalled: set[int] = set()
+
+    def make_prepped_xfer(
+        self,
+        xfer_type: str,
+        local_xfer_side_handle: int,
+        local_block_descs_ids: list[int],
+        remote_xfer_side_handle: int,
+        remote_block_descs_ids: list[int],
+        notif_msg: bytes | None = None,
+    ) -> int:
+        handle = super().make_prepped_xfer(
+            xfer_type,
+            local_xfer_side_handle,
+            local_block_descs_ids,
+            remote_xfer_side_handle,
+            remote_block_descs_ids,
+            notif_msg,
+        )
+        self._stalled.add(handle)
+        self.posted.append(handle)
+        return handle
+
+    def send_notif(self, agent_name: str, notif_msg: bytes) -> None:
+        self.notified.append(notif_msg)
+
+    def resolve(self) -> None:
+        self._stalled.clear()
+
+    def check_xfer_state(self, handle: int) -> str:
+        return "PROC" if handle in self._stalled else "DONE"
+
+
+@pytest.fixture
+def make_pull_worker(monkeypatch):
+    """CPU pull workers on _StallingNixlWrapper; the test completes handshakes."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    platform = SimpleNamespace(
+        device_type="cpu",
+        discover_numa_topology=lambda: [],
+        get_nixl_memory_type=lambda: "DRAM",
+        is_rocm=lambda: False,
+    )
+    workers: list[FakeNixlConnectorWorker] = []
+
+    def make(vllm_config) -> FakeNixlConnectorWorker:
+        worker = FakeNixlConnectorWorker(vllm_config, "local", hand_shake_latency=0)
+        worker.REMOTE_ENGINE_ID = "my-engine-id"
+        monkeypatch.setattr(
+            worker._handshake_initiation_executor, "submit", lambda *args: Future()
+        )
+        workers.append(worker)
+        return worker
+
+    with (
+        patch.object(bw, "NixlWrapper", _StallingNixlWrapper),
+        patch.object(bw, "current_platform", platform),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(
+            bw, "get_current_attn_backends", return_value=[FlashAttentionBackend]
+        ),
+    ):
+        yield make
+        for worker in workers:
+            worker.shutdown()
+
+
+def _advance_worker_clock(seconds: float):
+    """Run the pull worker ``seconds`` in the future."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import pull_worker
+
+    return patch.object(
+        pull_worker,
+        "time",
+        SimpleNamespace(perf_counter=lambda: time.perf_counter() + seconds),
+    )
+
+
+class _DecodeHarness:
+    """A decode scheduler and its TP workers, stepped like the engine core."""
+
+    ENGINE_ID = "my-engine-id"
+
+    def __init__(self, make_pull_worker, num_workers: int = 1, **extra_config):
+        vllm_config = create_vllm_config(
+            kv_connector_extra_config={"engine_ttl": 0, **extra_config}
+        )
+        vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
+        self.scheduler = create_scheduler(vllm_config, num_blocks=100)
+        self.workers = [make_pull_worker(vllm_config) for _ in range(num_workers)]
+        self.aggregator = KVOutputAggregator(expected_finished_count=num_workers)
+        self.block_pool = self.scheduler.kv_cache_manager.block_pool
+        self.num_free_blocks = self.block_pool.get_num_free_blocks()
+
+    def add_request(self, request_id: int) -> str:
+        request = create_request(
+            request_id=request_id, num_tokens=40, do_remote_prefill=True
+        )
+        assert request.kv_transfer_params is not None
+        request.kv_transfer_params["remote_block_ids"] = ([0, 1, 2],)
+        self.scheduler.add_request(request)
+        return request.request_id
+
+    def connect(self) -> None:
+        """Complete each worker's pending handshake with the remote engine."""
+        for worker in self.workers:
+            worker._handshake_futures[self.ENGINE_ID].set_result(
+                worker._nixl_handshake("my-host", 1234, 1, self.ENGINE_ID)
+            )
+
+    def step(self) -> None:
+        scheduler_output = self.scheduler.schedule()
+        outputs: list[ModelRunnerOutput | None] = []
+        for worker in self.workers:
+            worker.start_load_kv(copy.deepcopy(scheduler_output.kv_connector_metadata))
+            results = worker.get_transfer_results()
+            outputs.append(
+                ModelRunnerOutput(
+                    req_ids=[],
+                    req_id_to_index={},
+                    kv_connector_output=KVConnectorOutput(
+                        finished_recving=results.finished_recving,
+                        failed_recving=results.failed_recving,
+                        invalid_block_ids=worker.get_block_ids_with_load_errors(),
+                    ),
+                )
+            )
+        output = self.aggregator.aggregate(outputs)
+        assert output is not None
+        self.scheduler.update_from_output(scheduler_output, output)
+
+    def status(self, req_id: str) -> RequestStatus | None:
+        """The request's status while the scheduler holds its blocks."""
+        request = self.scheduler.requests.get(req_id)
+        return request.status if request is not None else None
+
+    def all_blocks_free(self) -> bool:
+        return self.block_pool.get_num_free_blocks() == self.num_free_blocks
+
+
+@pytest.mark.cpu_test
+def test_abort_before_read_releases_blocks(make_pull_worker):
+    """An aborted request with no READ posted frees its blocks.
+
+    The scheduler holds the blocks until every worker reports the request in
+    finished_recving, and a worker still waiting on its handshake has nothing
+    else to report it with. A handshake that completes after the abort must
+    not READ into the freed blocks; it only notifies the producer.
+    """
+    harness = _DecodeHarness(make_pull_worker, num_workers=2)
+    req_id = harness.add_request(1)
+    harness.step()
+    assert harness.status(req_id) == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    harness.scheduler.finish_requests(req_id, RequestStatus.FINISHED_ABORTED)
+    assert harness.status(req_id) == RequestStatus.FINISHED_ABORTED
+    harness.step()
+    assert harness.status(req_id) is None
+    assert harness.all_blocks_free()
+
+    harness.connect()
+    harness.step()
+    assert not any(worker.nixl_wrapper.posted for worker in harness.workers)
+    for worker in harness.workers:
+        assert worker.nixl_wrapper.notified == [b"prefill-1:1"]
+
+
+@pytest.mark.cpu_test
+def test_stalled_read_fails_request_at_kv_load_timeout(make_pull_worker):
+    """A READ outstanding past kv_load_timeout fails its request at once and
+    counts as a failed transfer. The remote engine stays connected."""
+    harness = _DecodeHarness(make_pull_worker)
+    worker = harness.workers[0]
+    req_id = harness.add_request(1)
+    harness.step()
+    harness.connect()
+    harness.step()
+    assert worker.nixl_wrapper.posted
+
+    # kv_load_timeout defaults to decoder_kv_blocks_ttl (480 s).
+    with _advance_worker_clock(481):
+        harness.step()
+    assert harness.status(req_id) == RequestStatus.FINISHED_ERROR
+    assert worker.xfer_stats.data["num_failed_transfers"] == [1]
+    assert _DecodeHarness.ENGINE_ID in worker._remote_agents
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("finish", ["abort", "timeout"])
+def test_stalled_read_keeps_blocks_until_it_resolves(make_pull_worker, finish):
+    """Blocks a READ may still write to are freed only once it resolves,
+    whether the request was aborted or timed out."""
+    harness = _DecodeHarness(make_pull_worker)
+    wrapper = harness.workers[0].nixl_wrapper
+    req_id = harness.add_request(1)
+    harness.step()
+    harness.connect()
+    harness.step()
+
+    if finish == "abort":
+        harness.scheduler.finish_requests(req_id, RequestStatus.FINISHED_ABORTED)
+        harness.step()
+    else:
+        with _advance_worker_clock(481):
+            harness.step()
+    for _ in range(3):
+        harness.step()
+        assert harness.status(req_id) in (
+            RequestStatus.FINISHED_ABORTED,
+            RequestStatus.FINISHED_ERROR,
+        )
+
+    wrapper.resolve()
+    harness.step()
+    assert harness.status(req_id) is None
+    assert harness.all_blocks_free()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("kv_load_timeout", [0, -1])
+def test_kv_load_timeout_disabled(make_pull_worker, kv_load_timeout):
+    """kv_load_timeout <= 0 never fails an outstanding READ."""
+    harness = _DecodeHarness(make_pull_worker, kv_load_timeout=kv_load_timeout)
+    worker = harness.workers[0]
+    req_id = harness.add_request(1)
+    harness.step()
+    harness.connect()
+    harness.step()
+
+    with _advance_worker_clock(10**6):
+        harness.step()
+    assert harness.status(req_id) == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert worker.xfer_stats.data["num_failed_transfers"] == []
 
 
 def test_transfer_topology_unregister():

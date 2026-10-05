@@ -132,6 +132,10 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
 
+- `kv_load_timeout` (via `kv_connector_extra_config`): Time (in seconds) the decoder waits for the KV reads of one request. (Optional)
+    - Default: the value of `decoder_kv_blocks_ttl` (480)
+    - A request whose reads are still in flight after this time is failed under `kv_load_failure_policy` and counted in `vllm:nixl_num_failed_transfers`. Its KV blocks stay allocated until the reads complete or fail, since an in-flight read can still write to them. Set to 0 or less to disable.
+
 ## Bidirectional KV Transfer (Multi-turn)
 
 In standard disaggregated prefilling, KV cache flows in one direction: Prefill (P) computes the KV cache and Decode (D) reads from P. For multi-turn conversations this is wasteful — D already holds the KV cache corresponding to the generated tokens from prior turns, yet P must recompute it from scratch on every new turn. Bidirectional KV transfer lets P **pull** existing KV blocks from D via RDMA before computing only the new tokens, significantly reducing Time-To-First-Token (TTFT) for long-prefill such as **multi-turn heavy scenarios**.

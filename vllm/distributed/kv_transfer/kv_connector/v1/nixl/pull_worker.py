@@ -3,16 +3,21 @@
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
+    ReqId,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -43,6 +48,20 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Seconds the READs of a request may stay outstanding before the
+        # request is failed; <= 0 disables the deadline.
+        self._kv_load_timeout = float(
+            self.kv_transfer_config.get_from_extra_config(
+                "kv_load_timeout",
+                self.kv_transfer_config.get_from_extra_config(
+                    "decoder_kv_blocks_ttl", 480
+                ),
+            )
+        )
+        # Deadlines of requests with READs posted, by request.
+        self._recv_deadlines: dict[ReqId, float] = {}
+        # Aborted requests dropped before any READ was posted.
+        self._aborted_recvs: set[ReqId] = set()
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
@@ -82,9 +101,22 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Handshake already completed, start async read xfer.
             self._read_blocks_for_req(req_id, meta)
 
+        self._drop_aborted_recvs(metadata.reqs_to_abort)
+
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
             req_id, meta = self._ready_requests.get_nowait()
+            if req_id not in self._recving_metadata and (
+                meta.awaiting_kvs or any(meta.local_block_ids)
+            ):
+                # Aborted while its handshake was pending: the scheduler may
+                # already have reused its blocks, so only notify the producer.
+                meta = replace(
+                    meta,
+                    local_block_ids=[],
+                    local_physical_block_ids=[],
+                    awaiting_kvs=False,
+                )
             assert meta.remote is not None
             if meta.remote.engine_id not in self._remote_agents:
                 # The engine was released after its handshake completed, so
@@ -176,6 +208,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # then takes the notify-only path without registering a transfer.
             # Seed the entry so this rank still reports completion.
             self._recving_transfers.setdefault(req_id, [])
+            if self._kv_load_timeout > 0:
+                self._recv_deadlines[req_id] = (
+                    time.perf_counter() + self._kv_load_timeout
+                )
 
         plan = self.tp_mappings[engine_id]
         remote_info = self.transfer_topo.get_engine_info(engine_id)
@@ -635,6 +671,65 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         self._recving_transfers[request_id].append(unstarted)
                 raise
             self._recving_transfers[request_id].append(handle)
+
+    def _drop_aborted_recvs(self, req_ids: set[ReqId]) -> None:
+        """Report aborted requests with no READ posted as done receiving.
+
+        Nothing writes to their blocks, so the scheduler can free them. An
+        aborted request with READs posted is reported once they complete,
+        fail or time out.
+        """
+        for req_id in req_ids:
+            if (
+                req_id in self._recving_transfers
+                or req_id in self._recv_failures
+                or self._recving_metadata.pop(req_id, None) is None
+            ):
+                continue
+            self._aborted_recvs.add(req_id)
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        results = super().get_transfer_results()
+        for req_id in results.finished_recving:
+            self._recv_deadlines.pop(req_id, None)
+        self._fail_timed_out_recvs()
+        results.finished_recving |= self._aborted_recvs
+        self._aborted_recvs.clear()
+        return results
+
+    def _fail_timed_out_recvs(self) -> None:
+        """Fail requests whose READs are outstanding past ``kv_load_timeout``.
+
+        Releasing an outstanding handle does not stop its DMA, so the handles
+        stay tracked. The request's blocks are reported invalid now, which
+        fails the request under ``kv_load_failure_policy``, and the scheduler
+        frees them once every handle has completed or failed. With HMA the
+        request fails only then.
+        """
+        if not self._recv_deadlines:
+            return
+        now = time.perf_counter()
+        timed_out = [
+            req_id
+            for req_id, deadline in self._recv_deadlines.items()
+            if now >= deadline and req_id in self._recving_transfers
+        ]
+        for req_id in timed_out:
+            del self._recv_deadlines[req_id]
+            meta = self._recving_metadata[req_id]
+            assert meta.remote is not None
+            self._log_failure(
+                failure_type="transfer_timeout",
+                req_id=req_id,
+                msg="Keeping its blocks until the transfers complete or fail",
+                meta=meta,
+                num_outstanding_xfers=len(self._recving_transfers[req_id]),
+                kv_load_timeout=self._kv_load_timeout,
+            )
+            self.xfer_stats.record_failed_transfer()
+            self._recv_failures.add(req_id)
+            if not self._is_hma_required:
+                self._invalid_block_ids.put(set(meta.local_block_ids[0]))
 
     def _get_new_notifs(self) -> set[str]:
         """Get req_ids which got a remote xfer message. When multiple consumers
