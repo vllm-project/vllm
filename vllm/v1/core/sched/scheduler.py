@@ -3240,6 +3240,12 @@ class Scheduler(SchedulerInterface):
             req_num_computed_tokens = (
                 request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
             )
+            # Frontier without the as-yet unvalidated output placeholders;
+            # captured before any truncation below mutates num_computed_tokens.
+            materialized_frontier = (
+                request.num_computed_tokens - request.num_output_placeholders
+            )
+            assert materialized_frontier >= 0
 
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
@@ -3294,6 +3300,17 @@ class Scheduler(SchedulerInterface):
                 # in-flight output was sampled from the invalid KV: drain and
                 # drop it as it returns, and restart with no placeholders or
                 # drafts carried over (same idiom as _handle_stopped_request).
+                # That idiom also rewinds the frontier below the placeholder
+                # span before zeroing it; the truncation above can land inside
+                # that span (e.g. the shared-block restore for a decoding
+                # request whose in-flight placeholders outnumber this step's
+                # scheduled tokens), and keeping those positions marked as
+                # computed would drop their output without ever re-sampling.
+                if request.num_computed_tokens > materialized_frontier:
+                    total_affected_tokens += (
+                        request.num_computed_tokens - materialized_frontier
+                    )
+                    request.num_computed_tokens = materialized_frontier
                 request.drop_stale_output = True
                 request.num_stale_output_tokens = request.num_in_flight_tokens
                 request.num_output_placeholders = 0
