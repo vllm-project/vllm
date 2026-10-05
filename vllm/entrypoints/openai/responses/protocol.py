@@ -62,6 +62,7 @@ from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     StopParam,
     validate_cache_salt,
+    validate_inline_kv_request,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
@@ -499,6 +500,12 @@ class ResponsesRequest(OpenAIBaseModel):
             isinstance(self.include, list)
             and "message.output_text.logprobs" in self.include
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_inline_output(cls, data):
+        validate_inline_kv_request(data, supported=False)
+        return data
 
     @model_validator(mode="before")
     @classmethod
