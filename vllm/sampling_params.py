@@ -1366,6 +1366,31 @@ class SamplingParams(
         # roundtrip serialization/deserialization won't fail.
         self.structured_outputs.__post_init__()
 
+        # disable_any_whitespace/disable_additional_properties are only
+        # honored by specific backends (StructuredOutputsConfig lets
+        # backend="auto" through unchecked, since the concrete backend isn't
+        # known until it's resolved above), so enforce that here now that
+        # self.structured_outputs._backend is the final, concrete choice.
+        resolved_backend = self.structured_outputs._backend
+        if self.structured_outputs.disable_any_whitespace and resolved_backend not in (
+            "xgrammar",
+            "guidance",
+        ):
+            raise VLLMValidationError(
+                "structured_outputs.disable_any_whitespace is only supported "
+                "for the xgrammar and guidance backends, but this request "
+                f"resolved to '{resolved_backend}'."
+            )
+        if (
+            self.structured_outputs.disable_additional_properties
+            and resolved_backend != "guidance"
+        ):
+            raise VLLMValidationError(
+                "structured_outputs.disable_additional_properties is only "
+                "supported for the guidance backend, but this request "
+                f"resolved to '{resolved_backend}'."
+            )
+
     def __repr__(self) -> str:
         return (
             f"SamplingParams(n={self.n}, "

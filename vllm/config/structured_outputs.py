@@ -60,12 +60,25 @@ class StructuredOutputsConfig:
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:
-        if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
+        # With backend="auto" the concrete backend isn't known until a
+        # request resolves it (it may land on xgrammar/guidance, which
+        # support these options), so that case is deferred to per-request
+        # validation in SamplingParams._validate_structured_outputs instead
+        # of being rejected here before any backend has been chosen.
+        if (
+            self.disable_any_whitespace
+            and self.backend != "auto"
+            and self.backend not in ("xgrammar", "guidance")
+        ):
             raise ValueError(
                 "disable_any_whitespace is only supported for "
                 "xgrammar and guidance backends."
             )
-        if self.disable_additional_properties and self.backend != "guidance":
+        if (
+            self.disable_additional_properties
+            and self.backend != "auto"
+            and self.backend != "guidance"
+        ):
             raise ValueError(
                 "disable_additional_properties is only supported "
                 "for the guidance backend."

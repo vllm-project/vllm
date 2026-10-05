@@ -186,3 +186,84 @@ def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend)
     )
     assert params.structured_outputs is not None
     assert params.structured_outputs._backend == expected_backend
+
+
+def test_disable_any_whitespace_construction_allows_auto_backend():
+    """backend='auto' may resolve to xgrammar or guidance, both of which
+    support disable_any_whitespace, so the engine config must not reject
+    this combination before a backend has even been chosen (#42110)."""
+    StructuredOutputsConfig(backend="auto", disable_any_whitespace=True)
+
+
+def test_disable_additional_properties_construction_allows_auto_backend():
+    """Same as above for disable_additional_properties, which guidance
+    supports."""
+    StructuredOutputsConfig(backend="auto", disable_additional_properties=True)
+
+
+@pytest.mark.parametrize("backend", ["outlines", "lm-format-enforcer"])
+def test_disable_any_whitespace_construction_still_rejects_explicit_incompatible_backend(  # noqa: E501
+    backend,
+):
+    """An explicitly pinned incompatible backend is unambiguous, so it must
+    still fail fast at construction time, unlike 'auto'."""
+    with pytest.raises(ValueError, match="disable_any_whitespace"):
+        StructuredOutputsConfig(backend=backend, disable_any_whitespace=True)
+
+
+def test_disable_any_whitespace_with_auto_resolving_to_xgrammar_succeeds():
+    """The common case: auto resolves to xgrammar, which supports the flag."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            json=JSON_SCHEMA, disable_any_whitespace=True
+        )
+    )
+    params._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        StructuredOutputsConfig(backend="auto", disable_any_whitespace=True),
+        tokenizer=object(),
+    )
+    assert params.structured_outputs is not None
+    assert params.structured_outputs._backend == "xgrammar"
+
+
+def test_disable_any_whitespace_with_auto_resolving_to_outlines_rejected():
+    """Auto can still fall back to outlines for an unsupported schema, which
+    does not support disable_any_whitespace; that must be caught once the
+    backend is actually known, instead of silently ignored (#42110)."""
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "patternProperties": {"^a$": {"type": "string"}},
+    }
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            json=schema, disable_any_whitespace=True
+        )
+    )
+    with pytest.raises(VLLMValidationError, match="disable_any_whitespace"):
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(backend="auto", disable_any_whitespace=True),
+            tokenizer=object(),
+        )
+
+
+def test_disable_additional_properties_with_auto_resolving_to_outlines_rejected():
+    """Same as above for disable_additional_properties."""
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "patternProperties": {"^a$": {"type": "string"}},
+    }
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            json=schema, disable_additional_properties=True
+        )
+    )
+    with pytest.raises(VLLMValidationError, match="disable_additional_properties"):
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(backend="auto"),
+            tokenizer=object(),
+        )
