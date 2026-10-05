@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
@@ -29,6 +30,39 @@ def test_mixed_warmup_skipped_for_single_seq(max_num_reqs):
         )
         is False
     )
+
+
+def test_mixed_warmup_disables_watermarking():
+    outputs: list[SchedulerOutput] = []
+    runner = SimpleNamespace(
+        is_pooling_model=False,
+        max_num_reqs=2,
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))
+            ],
+            num_blocks=128,
+        ),
+        vllm_config=SimpleNamespace(num_lookahead_tokens=0),
+        max_model_len=128,
+        model_state=SimpleNamespace(max_encoder_len=0),
+        kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
+    )
+
+    assert run_mixed_prefill_decode_warmup(
+        runner,
+        worker_execute_model=outputs.append,
+        worker_sample_tokens=lambda grammar_output: None,
+        num_tokens=32,
+    )
+
+    sampling_params = [
+        request.sampling_params
+        for output in outputs
+        for request in output.scheduled_new_reqs
+    ]
+    assert len(sampling_params) == 2
+    assert all(params.watermarking is False for params in sampling_params)
 
 
 @pytest.mark.parametrize("fail_warmup", [False, True])

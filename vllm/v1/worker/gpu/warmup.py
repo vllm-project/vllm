@@ -139,7 +139,11 @@ def run_mixed_prefill_decode_warmup(
         next_block_id += num_blocks
         return block_ids
 
-    sampling_params = SamplingParams(max_tokens=2, temperature=0.0)
+    sampling_params = SamplingParams(
+        max_tokens=2,
+        temperature=0.0,
+        watermarking=False,
+    )
 
     decode_prefill_output = SchedulerOutput.make_empty()
     decode_prefill_output.scheduled_new_reqs = [

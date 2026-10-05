@@ -12,6 +12,7 @@ Tests cover:
 
 import math
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -302,8 +303,10 @@ class TestGeneration:
 
         mock_logprobs = {1234: -0.5, 5678: -2.0, 100: -3.0}
         mock_output = _create_mock_request_output(mock_logprobs)
+        state = SimpleNamespace(sampling_params=None)
 
         async def mock_generate(*args, **kwargs):
+            state.sampling_params = args[1]
             yield mock_output
 
         mock_engine.generate = mock_generate
@@ -317,6 +320,8 @@ class TestGeneration:
         result = await serving.create_generative_scoring(request, None)
 
         assert isinstance(result, GenerativeScoringResponse)
+        assert state.sampling_params is not None
+        assert state.sampling_params.watermarking is False
         assert len(result.data) == 2
         for item_result in result.data:
             assert 0.0 <= item_result.score <= 1.0
