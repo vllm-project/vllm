@@ -135,16 +135,14 @@ class DeepseekV4AiterMegaMoEExperts(nn.Module):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor:
-        assert self._runtime is not None
-        return self._runtime.forward(
-            hidden_states.contiguous(),
-            topk_weights,
-            topk_ids,
-            w1=self.w13_weight,
-            w1_scale=self.w13_weight_scale,
-            w2=self.w2_weight,
-            w2_scale=self.w2_weight_scale,
-        )
+        runtime = self._runtime
+        assert runtime is not None
+        # MegaMoEV2 reads these per launch; rebind to this layer's experts.
+        runtime._s1_w1 = self.w13_weight
+        runtime._s1_w1_scale = self.w13_weight_scale
+        runtime.w2 = self.w2_weight
+        runtime.w2_scale = self.w2_weight_scale
+        return runtime.forward(hidden_states.contiguous(), topk_weights, topk_ids)
 
 
 DeepseekV4AiterMegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
