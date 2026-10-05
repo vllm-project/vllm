@@ -322,23 +322,19 @@ def _is_sm100() -> bool:
 # RTX 5090 / RTX PRO 6000 Blackwell (sm_120) plans, TP=1 and TP=2, measured with
 # benchmarks/kernels/qwen38fn_skinny_gemm/. LM head only: in an in-server profile
 # on one RTX PRO 6000 it is the one shape that beats cuBLAS (-4.9% per call),
-# while the smaller shapes the sweep liked regress. Other shapes and token counts
-# keep the standard implementation.
+# while the smaller shapes the sweep liked regress. Only M=1 and M=4 are kept:
+# those are the counts the profile exercised, the drafter and the k=3
+# verification. Everything else keeps the standard implementation.
 QWEN4_EXP_SM120_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
     # LM head, TP=1.
     (248320, 2560): {
         1: SkinnyGemmConfig(1, 32, 1, k_unroll=2, vector_width=2, static_k=2560),
-        2: SkinnyGemmConfig(2, 32, 1, k_unroll=6, vector_width=2, static_k=2560),
         4: SkinnyGemmConfig(4, 32, 1, vector_width=2, static_k=2560),
-        8: SkinnyGemmConfig(8, 32, 8, k_unroll=5, vector_width=2, static_k=2560),
     },
     # LM head, TP=2.
     (124160, 2560): {
         1: SkinnyGemmConfig(1, 32, 1, k_unroll=6, vector_width=4, static_k=2560),
-        2: SkinnyGemmConfig(2, 32, 1, k_unroll=4, vector_width=4, static_k=2560),
         4: SkinnyGemmConfig(4, 64, 1, k_unroll=5, vector_width=2, static_k=2560),
-        8: SkinnyGemmConfig(8, 32, 4, k_unroll=5, vector_width=4, static_k=2560),
-        16: SkinnyGemmConfig(16, 32, 2, k_unroll=4, vector_width=4, static_k=2560),
     },
 }
 
