@@ -325,6 +325,12 @@ class PreloadSubcommand(CLISubcommand):
                 "--preload-autotune runs one local engine, so it supports "
                 "neither --nnodes > 1 nor --data-parallel-size > 1"
             )
+        if args.preload_autotune and args.weight_cache_device_offset:
+            raise ValueError(
+                "--preload-autotune runs its engine on the first local GPUs, "
+                "not past --weight-cache-device-offset; a seeded mirror "
+                "already adopts the source's autotune table"
+            )
         if args.weight_cache_listen and not args.weight_cache_seed_token:
             raise ValueError(
                 "--weight-cache-listen requires --weight-cache-seed-token so a "

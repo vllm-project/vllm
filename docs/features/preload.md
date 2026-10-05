@@ -284,7 +284,9 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   launching the daemon with pipeline parallelism is rejected.
 - **Autotune preloading**: `--preload-autotune` runs one local engine, so it
   supports neither `--nnodes > 1` nor `--data-parallel-size > 1`; those
-  deployments let their first engine tune and publish instead. The table lives
+  deployments let their first engine tune and publish instead. It cannot be
+  combined with `--weight-cache-device-offset` either, but a seeded mirror
+  already adopts its source's table. The table lives
   only in the daemons' memory, so restarting them drops it — the engine's own
   on-disk autotune cache still saves the profiling work in that case.
 - **Seeding**: `peer_ipc` cannot cross hosts, because a CUDA IPC handle is
