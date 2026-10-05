@@ -11,10 +11,12 @@ import numpy as np
 import torch
 
 from vllm.distributed.device_communicators.shm_broadcast import (
+    SHM_PATH,
     check_shm_free_space,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -68,6 +70,21 @@ def _get_populate_write_fn(
     return _madvise_populate_write
 
 
+def map_shared_file(fd: int, size: int, is_hugetlb: bool) -> mmap.mmap:
+    try:
+        return mmap.mmap(
+            fd, size, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE
+        )
+    except OSError as e:
+        if is_hugetlb and e.errno == errno.ENOMEM:
+            raise RuntimeError(
+                f"Not enough free huge pages to map {size / 2**30:.1f} GiB; "
+                "reserve more (vm.nr_hugepages or the pod's hugepages-<size> "
+                "request) or lower the pool size."
+            ) from e
+        raise
+
+
 class SharedOffloadRegion:
     """Single mmap-backed memory region shared across all workers for a
     vLLM instance.  Workers coordinate via the filesystem: the first worker
@@ -75,13 +92,16 @@ class SharedOffloadRegion:
     the rest open the existing file and wait until it reaches the expected
     size.  Each worker then mmap()s the full file.
 
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
+    File path: {shm_dir}/vllm_offload_{engine_id}.mmap.  When a barrier is
     given, the path is unlinked once every worker has mapped the file, so
     the kernel reclaims the memory when the last worker exits, no matter
     how it exits; mappings taken before the unlink stay valid.
 
     Creator-only population pre-faults the entire region before the barrier
     and requires that barrier to keep joiners from using unpopulated pages.
+
+    ``shm_dir`` may be a hugetlbfs mount: the file is then rounded up to the
+    huge page size, and the kernel reserves every huge page at mmap time.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -97,17 +117,21 @@ class SharedOffloadRegion:
         *,
         creator_memory_check: Callable[[int], None] | None = None,
         populate_only_on_creator: bool = False,
+        shm_dir: str = SHM_PATH,
     ) -> None:
         if populate_only_on_creator and barrier is None:
             raise ValueError("Creator-only population requires a barrier.")
-        self.page_size = mmap.PAGESIZE
-        assert kv_bytes_per_chunk % self.page_size == 0
+        assert kv_bytes_per_chunk % mmap.PAGESIZE == 0
+        # f_bsize is the huge page size on hugetlbfs and PAGESIZE on tmpfs.
+        self.page_size = max(os.statvfs(shm_dir).f_bsize, mmap.PAGESIZE)
+        self.is_hugetlb = self.page_size > mmap.PAGESIZE
 
         self.num_chunks = num_chunks
         self._row_stride = kv_bytes_per_chunk
         self.total_size_bytes = self.num_chunks * self._row_stride
+        self.mapped_size_bytes = round_up(self.total_size_bytes, self.page_size)
 
-        self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+        self.mmap_path = os.path.join(shm_dir, f"vllm_offload_{engine_id}.mmap")
         self._creator = False  # set True only if this worker creates the file
         self.rank = rank
         if rank is not None:
@@ -124,7 +148,7 @@ class SharedOffloadRegion:
                 # Joiner path — another worker won O_EXCL. Reopen and wait
                 # for the file to reach expected size.
                 self.fd = os.open(self.mmap_path, os.O_RDWR)
-                _wait_for_file_size(self.fd, self.total_size_bytes)
+                _wait_for_file_size(self.fd, self.mapped_size_bytes)
                 logger.info("Opened existing mmap file %s", self.mmap_path)
             else:
                 # Creator path. We won O_EXCL, so we own the file: any
@@ -134,27 +158,29 @@ class SharedOffloadRegion:
                 self._creator = True
                 if creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
-                check_shm_free_space(
-                    self.total_size_bytes,
-                    allocation_name="CPU KV offload shared region in /dev/shm",
-                )
-                os.ftruncate(self.fd, self.total_size_bytes)
+                # hugetlbfs statfs reports no free space without a size=
+                # limit; mmap below fails with ENOMEM on a short pool instead.
+                if not self.is_hugetlb:
+                    check_shm_free_space(
+                        self.total_size_bytes,
+                        shm_path=shm_dir,
+                        allocation_name=f"CPU KV offload shared region in {shm_dir}",
+                    )
+                os.ftruncate(self.fd, self.mapped_size_bytes)
                 logger.info(
-                    "Created mmap file %s (%.2f GB)",
+                    "Created mmap file %s (%.2f GB, %d KiB pages)",
                     self.mmap_path,
-                    self.total_size_bytes / 1e9,
+                    self.mapped_size_bytes / 1e9,
+                    self.page_size // 1024,
                 )
 
-            self.mmap_obj: mmap.mmap | None = mmap.mmap(
-                self.fd,
-                self.total_size_bytes,
-                flags=mmap.MAP_SHARED,
-                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+            self.mmap_obj: mmap.mmap | None = map_shared_file(
+                self.fd, self.mapped_size_bytes, self.is_hugetlb
             )
 
             if populate_only_on_creator and self._creator:
                 populate_write_fn = _get_populate_write_fn(self.mmap_obj)
-                populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
+                populate_write_fn(self.mmap_obj, 0, self.mapped_size_bytes)
         except Exception:
             if self._creator:
                 with contextlib.suppress(FileNotFoundError):
@@ -201,7 +227,9 @@ class SharedOffloadRegion:
                 self._creator = False
                 logger.info("Unlinked mmap file %s", self.mmap_path)
 
-        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
+        self._base = torch.frombuffer(
+            memoryview(self.mmap_obj), dtype=torch.int8, count=self.total_size_bytes
+        )
         self._views: list[torch.Tensor] = []
         self._canonical_offset = 0
         self.is_pinned: bool = False
@@ -231,7 +259,7 @@ class SharedOffloadRegion:
         else:
             # No rank — populate the entire shared region in one call.
             _t0 = time.perf_counter()
-            populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
+            populate_write_fn(self.mmap_obj, 0, self.mapped_size_bytes)
             logger.debug(
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )
