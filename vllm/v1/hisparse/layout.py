@@ -363,7 +363,7 @@ def get_hisparse_kv_cache_config(
         size / 2**30,
         num_blocks,
     )
-    kv_cache_config = KVCacheConfig(
+    return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=[*host_groups, *device_groups],
@@ -374,7 +374,6 @@ def get_hisparse_kv_cache_config(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
     )
-    return kv_cache_config
 
 
 def get_hisparse_steady_state_concurrency(
