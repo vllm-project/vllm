@@ -19,6 +19,8 @@
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+import torch
+
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -30,8 +32,6 @@ from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 from .base import Base
 
 if TYPE_CHECKING:
-    import torch
-
     from vllm.config import VllmConfig
 
 
@@ -68,11 +68,15 @@ class CausalMixin(VllmModelForTextGeneration, Base):
     def load_weights(self, weights: Iterable[tuple[str, "torch.Tensor"]]) -> set[str]:
         """A thin wrapper around `Base.load_weights` to handle the lm_head bias."""
         lm_head_bias = set()
+        load_device = self.vllm_config.load_config.device or self.device_config.device
 
         def auto_load_lm_head_bias(weights):
             for name, weight in weights:
                 if name.endswith("lm_head.bias") and self.pp_group.is_last_rank:
-                    self.lm_head._register_bias()
+                    # load_weights is called outside vLLM's device context,
+                    # so we must enter it again when registering the bias.
+                    with torch.device(load_device):
+                        self.lm_head._register_bias()
                     self.lm_head.bias.weight_loader(self.lm_head.bias, weight)
                     lm_head_bias.add(name)
                 else:

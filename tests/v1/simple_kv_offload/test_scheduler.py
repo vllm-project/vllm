@@ -19,6 +19,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.config.cache import MambaCacheMode
 from vllm.config.kv_events import KVEventsConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
@@ -1243,7 +1244,7 @@ def test_preemption_no_cpu_block_leak() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-    assert hit_tokens > 0
+    assert hit_tokens is not None and hit_tokens > 0
 
     gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
@@ -1338,7 +1339,7 @@ def test_inflight_finish_deferred_cleanup() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, _ = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-    assert hit_tokens > 0
+    assert hit_tokens is not None and hit_tokens > 0
 
     gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
@@ -1549,6 +1550,53 @@ def test_chunked_prefill_reads_live_block_ids() -> None:
     assert meta2.store_event >= 0
     # Only the 2 NEW blocks should be stored (first 2 already done)
     assert len(meta2.store_gpu_blocks) == 2
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+@pytest.mark.parametrize("same_output", [False, True])
+def test_eager_store_resets_block_cursor_after_preemption(
+    use_v2_model_runner: bool,
+    same_output: bool,
+) -> None:
+    """A resumed request stores its confirmed tail after preemption."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=8, lazy=False)
+    sched = fix.scheduler
+    req = make_request(num_blocks=3)
+
+    initial_blocks = _alloc_and_register(fix, req, num_blocks=2)
+    sched.update_state_after_alloc(req, initial_blocks, num_external_tokens=0)
+    initial_output = make_scheduler_output(
+        {req.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req.request_id: initial_blocks.get_block_ids()},
+    )
+    initial_meta = sched.build_connector_meta(initial_output)
+    assert len(initial_meta.store_gpu_blocks) == 2
+    simulate_store_completion(sched, initial_meta.store_event)
+
+    if not same_output:
+        preemption_output = make_scheduler_output({})
+        preemption_output.preempted_req_ids = {req.request_id}
+        sched.build_connector_meta(preemption_output)
+    fix.gpu_block_pool.free_blocks(initial_blocks.blocks[0])
+
+    resumed_blocks = _alloc_and_register(fix, req, num_blocks=3)
+    sched.update_state_after_alloc(req, resumed_blocks, num_external_tokens=0)
+    if use_v2_model_runner:
+        resumed_output = make_scheduler_output(
+            {req.request_id: 3 * BLOCK_SIZE},
+            new_reqs={req.request_id: resumed_blocks.get_block_ids()},
+        )
+    else:
+        resumed_output = make_scheduler_output(
+            {req.request_id: 3 * BLOCK_SIZE},
+            cached_req_new_blocks={req.request_id: resumed_blocks.get_block_ids()},
+        )
+        resumed_output.scheduled_cached_reqs.resumed_req_ids.add(req.request_id)
+    if same_output:
+        resumed_output.preempted_req_ids = {req.request_id}
+
+    resumed_meta = sched.build_connector_meta(resumed_output)
+    assert resumed_meta.store_gpu_blocks == [resumed_blocks.blocks[0][2].block_id]
 
 
 # ---------------------------------------------------------------------------
@@ -1863,6 +1911,31 @@ def test_reset_pending_lazy_stores() -> None:
     assert hit_tokens == 0, "CPU cache should be empty after reset"
 
 
+@pytest.mark.parametrize("num_groups", [1, 2])
+@pytest.mark.parametrize("lazy", [False, True])
+def test_reset_releases_pending_cpu_hits(num_groups: int, lazy: bool) -> None:
+    """A lookup awaiting GPU allocation must not prevent a cache reset."""
+    fix = make_scheduler(num_groups=num_groups, lazy=lazy)
+    sched = fix.scheduler
+    req = make_request(num_blocks=2)
+    cpu_blocks = []
+    for group_id in range(num_groups):
+        cpu_blocks.extend(
+            _allocate_gpu_blocks(sched.cpu_block_pool, req, 2, group_id=group_id)
+        )
+    sched.cpu_block_pool.free_blocks(cpu_blocks)
+
+    assert sched.get_num_new_matched_tokens(req, 0) == (2 * BLOCK_SIZE, True)
+    assert all(block.ref_cnt == 1 for block in cpu_blocks)
+    assert not sched._reqs_to_load
+
+    assert sched.reset()
+    assert all(block.ref_cnt == 0 for block in cpu_blocks)
+    assert not sched._pending_cpu_hits
+    assert sched.get_num_new_matched_tokens(req, 0) == (0, False)
+    assert sched.reset()
+
+
 # ---------------------------------------------------------------------------
 # Test 14: Reset with pending loads waits for completion
 # ---------------------------------------------------------------------------
@@ -1896,7 +1969,7 @@ def test_reset_pending_loads() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-    assert hit_tokens > 0
+    assert hit_tokens is not None and hit_tokens > 0
 
     gpu_blocks2 = gpu_pool.get_new_blocks(num_blocks)
     kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
@@ -2246,7 +2319,7 @@ def _make_hybrid_attention_mamba_scheduler(
     hash_block_size: int | None = None,
     dcp_world_size: int = 4,
     lazy: bool = False,
-    mamba_cache_mode: str = "align",
+    mamba_cache_mode: MambaCacheMode = "align",
     enable_kv_cache_events: bool = False,
 ) -> SchedulerFixture:
     """Build a scheduler for one attention group plus one Mamba group."""
@@ -2316,8 +2389,8 @@ def _make_hybrid_attention_mamba_scheduler(
 def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
     """Replicated groups must not be scaled by the DCP world size.
 
-    ``dcp_world_size_for_kv_cache_spec`` gives full attention the process DCP
-    size and every other spec 1. Reconstructing a group's geometry as
+    The spec's ``dcp_sharded`` flag controls its effective block size.
+    Reconstructing a group's geometry as
     ``spec.block_size * cp_world_size`` over-scales the replicated groups, so
     the eager store scan believes far fewer of their blocks are ready and
     silently offloads only a fraction of them.
@@ -2334,7 +2407,7 @@ def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
         # of the hash block, so it cannot exceed the smallest of them.
         hash_block_size=BLOCK_SIZE,
         dcp_world_size=dcp_world_size,
-        mamba_cache_mode="all",
+        mamba_cache_mode="none",
     )
     sched = fix.scheduler
     gpu_pool = fix.gpu_block_pool
@@ -2744,55 +2817,6 @@ def test_eager_store_does_not_scan_mamba_blocks_positionally() -> None:
     assert meta3.store_event == -1
     assert meta3.store_gpu_blocks == []
     assert sched._reqs_to_store[req.request_id].num_stored_blocks == [2, 0]
-
-
-def test_eager_store_scans_mamba_all_blocks_positionally() -> None:
-    """Mamba all-mode retains positional identity and needs no handoff."""
-    block_size = 4 * BLOCK_SIZE
-    fix = _make_hybrid_attention_mamba_scheduler(
-        num_cpu_blocks=16,
-        num_gpu_blocks=24,
-        block_size=block_size,
-        mamba_cache_mode="all",
-    )
-    sched = fix.scheduler
-    gpu_pool = fix.gpu_block_pool
-    attention_manager, mamba_manager = sched.cpu_coordinator.single_type_managers
-    assert attention_manager.has_positionally_stable_blocks
-    assert mamba_manager.has_positionally_stable_blocks
-
-    req = _make_cp_request(num_blocks=2, virtual_block_size=block_size)
-    attention_blocks = _allocate_cp_gpu_blocks(
-        gpu_pool, req, 2, virtual_block_size=block_size, group_id=0
-    )
-    mamba_blocks = _allocate_cp_gpu_blocks(
-        gpu_pool, req, 2, virtual_block_size=block_size, group_id=1
-    )
-    kv_blocks = KVCacheBlocks(blocks=(attention_blocks, mamba_blocks))
-    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
-
-    # build_connector_meta runs before the scheduler commits this step's
-    # tokens, so the positional scan picks the blocks up on the next step.
-    first = sched.build_connector_meta(
-        make_scheduler_output(
-            {req.request_id: 2 * block_size},
-            new_reqs={req.request_id: kv_blocks.get_block_ids()},
-        )
-    )
-    assert first.store_gpu_blocks == []
-    req.num_computed_tokens = 2 * block_size
-    meta = sched.build_connector_meta(
-        make_scheduler_output(
-            {req.request_id: 1},
-            cached_req_new_blocks={req.request_id: None},
-        )
-    )
-
-    assert set(meta.store_gpu_blocks) == {
-        *(block.block_id for block in attention_blocks),
-        *(block.block_id for block in mamba_blocks),
-    }
-    assert sched._reqs_to_store[req.request_id].num_stored_blocks == [2, 2]
 
 
 @pytest.mark.parametrize("gone_via", ["preempted", "finished", "unregistered"])
