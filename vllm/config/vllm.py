@@ -698,6 +698,21 @@ class VllmConfig:
         return 1 + self.num_speculative_tokens
 
     @property
+    def use_cumem_cudagraph_pool(self) -> bool:
+        """Whether CUDA graphs go to the cuMem pool that sleep offloads."""
+        from vllm.platforms import current_platform
+
+        model_config = self.model_config
+        return (
+            model_config is not None
+            and model_config.sleep_mode_offload_cudagraph
+            and model_config.enable_sleep_mode
+            and model_config.sleep_mode_backend == "cumem"
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and current_platform.is_cuda()
+        )
+
+    @property
     def use_v2_model_runner(self) -> bool:
         if self.attention_config.hisparse_config is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
@@ -1265,9 +1280,15 @@ class VllmConfig:
             return
         if not self.use_v2_model_runner:
             raise ValueError("sampling distribution replay requires Model Runner V2")
-        if self.speculative_config is not None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.enable_adaptive_verification
+        ):
             raise ValueError(
-                "sampling distribution replay does not support speculative decoding"
+                "sampling distribution replay with speculative decoding "
+                "requires fixed verification boundaries; disable adaptive "
+                "verification"
             )
         if model_config.is_diffusion:
             raise ValueError(
@@ -2315,6 +2336,14 @@ class VllmConfig:
                 custom_ops.append("+quant_fp8")
 
         self._verify_kv_transfer_compat()
+        if self.use_cumem_cudagraph_pool:
+            # NCCL graph registration pins the offloaded pool; workers inherit this.
+            value = os.environ.setdefault("NCCL_GRAPH_REGISTER", "0")
+            if value != "0":
+                logger.warning(
+                    "NCCL_GRAPH_REGISTER=%s pins the CUDA graph pool during sleep.",
+                    value,
+                )
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
 
@@ -3085,9 +3114,6 @@ class VllmConfig:
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
 
-        if self.cache_config.mamba_cache_mode == "all":
-            unsupported.append("mamba cache mode 'all'")
-
         return unsupported
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
@@ -3493,10 +3519,6 @@ class VllmConfig:
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
                 )
-            if self.cache_config.mamba_cache_mode not in ("none", "align"):
-                raise ValueError(
-                    "RecoverSSM supports only none and align Mamba cache modes"
-                )
             if (
                 self.cache_config.mamba_cache_mode == "align"
                 and not self.use_v2_model_runner
@@ -3529,11 +3551,6 @@ class VllmConfig:
                     "Mamba2 ReplaySSM speculative decoding requires "
                     "--mamba-backend flashinfer"
                 )
-        elif self.cache_config.mamba_cache_mode == "all":
-            raise ValueError(
-                "--use-replayssm supports prefix caching only in align mode; "
-                "pass --mamba-cache-mode align"
-            )
         elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
             if self.cache_config.mamba_cache_mode == "align":
                 raise ValueError(

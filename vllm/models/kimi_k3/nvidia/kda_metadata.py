@@ -104,7 +104,7 @@ def _mamba_get_block_table_tensor(
     kv_cache_spec: MambaSpec,
     mamba_cache_mode: str,
 ) -> torch.Tensor:
-    if mamba_cache_mode in ("all", "none"):
+    if mamba_cache_mode == "none":
         return block_table
 
     assert block_table.is_cuda and seq_lens.is_cuda
