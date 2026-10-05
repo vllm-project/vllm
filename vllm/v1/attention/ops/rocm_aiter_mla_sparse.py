@@ -49,7 +49,10 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
 
 @functools.cache
 def _get_aiter_pa_prefill_sparse() -> Callable[..., torch.Tensor] | None:
-    """gfx942 prefill kernel from aiter#6002. Missing that launch keeps the in-tree kernel."""
+    """gfx942 prefill kernel from aiter#6002.
+
+    Missing that launch keeps the in-tree kernel.
+    """
     if not _ON_GFX942:
         return None
     try:
