@@ -403,6 +403,17 @@ class BeamSearchOnlineMixin(ABC):
             # set exceeds the cap (e.g. a trie root over thousands of choices),
             # skip the engine-side constraint and rely on the logprobs
             # filtering via allowed_sets instead.
+            #
+            # Limitation: in this over-cap regime the engine samples
+            # unconstrained and returns only 2*beam_width logprobs, which are
+            # then filtered against allowed_sets. If none of those top tokens
+            # are in the allowed set, the beam yields no candidates and is
+            # dropped, so a request can finish early with fewer (possibly zero)
+            # outputs and finish_reason="length" rather than an error. The
+            # allowed set is near-full in this regime, so the model's natural
+            # top tokens almost always fall inside it; engine-side masking for
+            # arbitrary-size allowed sets is left as a follow-up. This mirrors
+            # the pre-existing offline limitation.
             beam_params = SamplingParams(
                 logprobs=logprobs_num,
                 max_tokens=1,
