@@ -2055,6 +2055,7 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
         finished_req_ids=set(),
         ec_connector_output=None,
         cudagraph_stats=None,
+        num_spec_tokens_to_schedule=2,
         skip_speculator_proposal=False,
         zero_next_draft_req_ids=frozenset(),
     )
@@ -2122,7 +2123,11 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
 
     def propose(*args, **kwargs):
         assert args[3] is target_hidden
-        assert kwargs == {"dp_sync": None, "mm_inputs": None}
+        assert kwargs == {
+            "num_speculative_tokens": 2,
+            "dp_sync": None,
+            "mm_inputs": None,
+        }
         events.append(f"propose-step-{proposer._step}")
         proposer._step += 1
         return torch.tensor([[8, 9]], dtype=torch.int64).repeat(num_reqs, 1)

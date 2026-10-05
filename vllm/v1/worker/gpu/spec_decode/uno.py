@@ -881,7 +881,10 @@ class UnoSpeculator(DraftModelSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
+        # Uno drafts all K rows in one launch and requires a fixed K; the
+        # runner blanks any rows beyond num_speculative_tokens.
         n = input_batch.num_reqs
         if n == 0:
             return self.draft_tokens[:0]
