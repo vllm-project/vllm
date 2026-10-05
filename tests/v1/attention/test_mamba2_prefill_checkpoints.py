@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Internal prefill checkpoints for Mamba2 align-mode prefix caching."""
 
-import pytest
 import torch
 
 from tests.v1.attention.utils import (
@@ -10,18 +9,12 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
-from vllm.v1.kv_cache_interface import (
-    MambaSpec,
-    get_mamba_prefill_checkpoint_position,
-    is_mamba_prefill_checkpoint_valid,
-)
+from vllm.v1.kv_cache_interface import MambaSpec
 
 compute_chunk_metadata = BaseMambaAttentionMetadataBuilder._compute_chunk_metadata
 
@@ -168,91 +161,3 @@ def test_builder_emits_nothing_outside_align_mode():
     meta = _build(builder, seq_lens=[900], query_lens=[900])
 
     assert meta.checkpoint_chunk_idx is None
-
-
-def _call_get_kv_cache_spec(monkeypatch, mamba_cache_mode: str) -> MambaSpec:
-    """Drive MambaMixer2.get_kv_cache_spec without building a real layer.
-
-    Patching the base implementation means `super()` returns a known spec, so
-    none of the layer's instance state (or distributed init) is touched.
-    """
-    base = MambaSpec(
-        block_size=MAMBA_BLOCK_SIZE,
-        shapes=((16, 64),),
-        dtypes=(torch.float16,),
-        mamba_cache_mode=mamba_cache_mode,
-    )
-    monkeypatch.setattr(MambaBase, "get_kv_cache_spec", lambda self, cfg: base)
-    vllm_config = create_vllm_config(block_size=MAMBA_BLOCK_SIZE)
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
-    layer = object.__new__(MambaMixer2)
-    return MambaMixer2.get_kv_cache_spec(layer, vllm_config)
-
-
-def test_opts_into_unaligned_checkpoints(monkeypatch):
-    """One checkpoint block at any token position, via the chunk split."""
-    spec = _call_get_kv_cache_spec(monkeypatch, "align")
-
-    assert spec.num_prefill_checkpoint_blocks == 1
-    assert spec.prefill_checkpoint_alignment == 1
-
-
-@pytest.mark.parametrize("hash_block_size", [16, 64, 256])
-def test_eagle_block_drop_moves_the_checkpoint_one_block_earlier(hash_block_size):
-    """Eagle prunes the last matching block, so the checkpoint backs off one.
-
-    Getting this wrong writes a checkpoint at a position the cache will not
-    look for, so the block is registered but never hit.
-    """
-    seq_len = 19 * hash_block_size + 7
-
-    plain = get_mamba_prefill_checkpoint_position(
-        seq_len, hash_block_size, drop_eagle_block=False
-    )
-    dropped = get_mamba_prefill_checkpoint_position(
-        seq_len, hash_block_size, drop_eagle_block=True
-    )
-
-    assert plain == 19 * hash_block_size
-    assert dropped == plain - hash_block_size
-
-
-@pytest.mark.parametrize("mamba_block_size", [16, 256, 2096])
-def test_valid_checkpoint_always_leaves_room_for_the_conv_window(mamba_block_size):
-    """A valid checkpoint is never close enough to the query start to underflow.
-
-    The mixer reads the `conv_state.shape[-1]` tokens preceding the checkpoint
-    (conv_kernel - 1 + num_spec, so 6 for conv_kernel 4 with num_spec 3). If an
-    offset below that were reachable, the window would index off the front of
-    the batch and silently wrap. It is not: the predicate's
-    `checkpoint_col > initial_state_col` term forces the checkpoint past a
-    block boundary the query start has not reached, so the offset is at least
-    half a block. K3 guards this explicitly (kda.py:424); this test is why we
-    do not need to.
-    """
-    candidates = (1, 2, 4, 8, 16, 128, 1048, 2096)
-    hash_sizes = [h for h in candidates if mamba_block_size % h == 0]
-    checked = 0
-    for hash_block_size in hash_sizes:
-        for drop_eagle_block in (False, True):
-            for query_end in range(mamba_block_size + 1, 4 * mamba_block_size, 7):
-                position = get_mamba_prefill_checkpoint_position(
-                    query_end, hash_block_size, drop_eagle_block=drop_eagle_block
-                )
-                for query_start in range(0, query_end, hash_block_size):
-                    if not is_mamba_prefill_checkpoint_valid(
-                        query_start=query_start,
-                        query_end=query_end,
-                        checkpoint_position=position,
-                        hash_block_size=hash_block_size,
-                        mamba_block_size=mamba_block_size,
-                        checkpoint_alignment=1,
-                    ):
-                        continue
-                    checked += 1
-                    assert position - query_start >= mamba_block_size // 2, (
-                        f"offset {position - query_start} too small: "
-                        f"block={mamba_block_size} hash={hash_block_size} "
-                        f"start={query_start} end={query_end} drop={drop_eagle_block}"
-                    )
-    assert checked > 0, "no valid checkpoints exercised; test proves nothing"

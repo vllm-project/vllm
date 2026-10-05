@@ -183,8 +183,7 @@ class Mamba2AttentionMetadataBuilder(
                 list(range(first, common.num_reqs)),
             )
             if checkpoint is not None:
-                # The host offsets place the chunk boundary below; the
-                # tensors are handed to the exporter untouched.
+                # The host offsets place a chunk boundary on the checkpoint.
                 checkpoint_offsets_p = checkpoint.offsets
                 checkpoint_meta = checkpoint
 
