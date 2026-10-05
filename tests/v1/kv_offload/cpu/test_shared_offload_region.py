@@ -174,8 +174,8 @@ def _mp_race_construct_and_write(
     cleanup_queue,
 ) -> None:
     """Race to construct a SharedOffloadRegion, write fill_value, then wait
-    for the parent's cleanup signal before tearing down.  The wait gives the
-    parent a window to read the raw mmap before the creator removes the file."""
+    for the parent's cleanup signal before tearing down. The wait gives the
+    parent a window to read the raw mmap before the unlink owner removes it."""
     try:
         region = SharedOffloadRegion(
             engine_id=engine_id,
@@ -226,7 +226,7 @@ def _mp_barrier_construct_and_hold(
             populate_only_on_creator=replicated,
             unlink_owner=rank == 0,
         )
-        # The constructor's barrier precedes the creator's unlink.
+        # The constructor's barrier precedes the unlink owner's unlink.
         barrier.wait(30)
         t = region.create_next_worker_view(PAGE_SIZE)
         if not replicated or rank == 0:
@@ -398,7 +398,7 @@ def test_create_next_worker_view_multiprocess_slots(iid):
     done_queue = ctx.Queue()
     cleanup_queue = ctx.Queue()
 
-    # Parent is rank 0 (creator); child is rank 1 (joiner).
+    # Parent is rank 0; child is rank 1.
     region = SharedOffloadRegion(
         engine_id=iid,
         num_chunks=num_chunks,
@@ -470,28 +470,6 @@ def test_create_next_worker_view_worker_isolation(iid):
 # ---------------------------------------------------------------------------
 # Constructor — initialization and joiner semantics
 # ---------------------------------------------------------------------------
-
-
-def test_creator_flag_set_on_first_open(iid):
-    """The first worker to open the file must have _creator == True."""
-    with _region(iid) as r:
-        assert r._creator is True
-
-
-def test_joiner_flag_not_set(iid):
-    """A second worker opening the same file must have _creator == False.
-
-    A joiner (the scheduler-side mapping) may still drop the pathname once
-    every worker has mapped it; the mappings stay valid afterwards.
-    """
-    with _multi_region(iid, num_workers=2) as (r0, r1):
-        assert r0._creator is True
-        assert r1._creator is False
-        # The last opener owns successful-path unlinking, so construction has
-        # already removed the name while both mappings remain usable.
-        assert not os.path.exists(r0.mmap_path)
-        r0.mmap_obj[0:1] = b"\xab"
-        assert memoryview(r1.mmap_obj)[0:1] == b"\xab"
 
 
 def test_file_exists_after_construction(iid):
@@ -752,7 +730,7 @@ def test_cleanup_non_owner_leaves_file(iid):
         r1.cleanup()
 
         assert mmap_obj1.closed, "mmap should be closed after cleanup"
-        assert os.path.exists(path), "non-creator must not remove the file"
+        assert os.path.exists(path), "non-owner must not remove the file"
         with pytest.raises(OSError):
             os.fstat(fd1)  # fd should be closed
     finally:
@@ -762,15 +740,15 @@ def test_cleanup_non_owner_leaves_file(iid):
 
 def test_joiner_owner_unlinks_without_barrier(iid):
     """An owner without a barrier unlinks after mapping the shared file."""
-    creator = _make_region(iid, unlink_owner=False)
+    initializer = _make_region(iid, unlink_owner=False)
     owner = _make_region(iid, unlink_owner=True)
-    path = creator.mmap_path
+    path = initializer.mmap_path
     try:
-        creator.cleanup()
+        initializer.cleanup()
         assert not os.path.exists(path)
         owner.cleanup()
     finally:
-        creator.cleanup()
+        initializer.cleanup()
         owner.cleanup()
         _cleanup_file(path)
 

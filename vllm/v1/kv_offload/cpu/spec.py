@@ -24,11 +24,8 @@ from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 
-def _all_workers_barrier() -> None:
-    """Block until every worker rank has reached this point (gloo cpu group).
-
-    A superset of the node-local mmap openers suffices: once the barrier
-    releases, every worker sharing the region file has mapped it."""
+def _shared_region_barrier() -> None:
+    """Synchronize all ranks that may open the shared mmap region."""
     from vllm.distributed.parallel_state import (
         get_inner_dp_world_group,
         get_world_group,
@@ -183,7 +180,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 rank=rank,
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
-                barrier=_all_workers_barrier,
+                barrier=_shared_region_barrier,
                 unlink_owner=worker_rank == 0,
             )
         try:

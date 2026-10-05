@@ -113,7 +113,6 @@ class SharedOffloadRegion:
         self.total_size_bytes = self.num_chunks * self._row_stride
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
-        self._creator = False  # set True only if this worker creates the file
         self._mmap_identity: tuple[int, int] | None = None
         self.rank = rank
         self.fd: int | None = None
@@ -146,7 +145,6 @@ class SharedOffloadRegion:
                 # failure here must clean up so concurrent joiners don't
                 # land on a 0-byte stub and spin in _wait_for_file_size.
                 created_path = True
-                self._creator = True
                 # Record identity before the checks below, which can raise: the
                 # failure path unlinks, and unlink() needs the identity to know
                 # the pathname is still ours. The joiner path has nothing to

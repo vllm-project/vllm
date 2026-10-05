@@ -218,8 +218,6 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     assert isinstance(spec, TieringOffloadingSpec)
 
     region = MagicMock()
-    # The scheduler joins a region the workers created; get_manager asserts it.
-    region._creator = False
     region_calls: list[dict[str, Any]] = []
     worker_calls: list[dict[str, Any]] = []
 
@@ -399,8 +397,6 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
     assert isinstance(spec, CPUOffloadingSpec)
 
     region = MagicMock()
-    # The scheduler joins a region the workers created; get_manager asserts it.
-    region._creator = False
     region_calls: list[dict[str, Any]] = []
     worker_calls: list[dict[str, Any]] = []
 

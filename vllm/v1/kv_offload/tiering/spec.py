@@ -69,7 +69,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec, _all_workers_barrier
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec, _shared_region_barrier
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
@@ -362,22 +362,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     unlink_owner=False,
                 )
                 self._scheduler_mmap = scheduler_mmap
-                # EngineCore constructs this scheduler-side mapping only after
-                # synchronous worker initialize_from_config RPCs complete, so
-                # every TP worker has already mapped this generation.
-                # Except under torchrun, where each rank runs its own engine
-                # and there are no such RPCs to order us behind the other ranks'
-                # workers: a rank that has not opened the path yet would win
-                # O_EXCL and map a second, disjoint region.
+                # In the normal executor there is one scheduler, and its
+                # synchronous worker initialization has already mapped the
+                # region. With torchrun, every rank also has its own scheduler;
+                # wait until all of those scheduler mappings exist before any
+                # rank removes the pathname.
                 if self.config.parallel.per_rank_engine:
-                    _all_workers_barrier()
-                # Unlinking is only safe because we joined a region the workers
-                # already created. Had we won O_EXCL we would be dropping the
-                # name of a region nobody else has mapped, and every worker
-                # opening afterwards would get its own private file.
-                assert not scheduler_mmap._creator, (
-                    "scheduler created the offload region instead of joining it"
-                )
+                    _shared_region_barrier()
                 scheduler_mmap.unlink()
 
                 # Create primary tier (CPU-based)
@@ -473,9 +464,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 # All workers must have mapped the file before a failed worker
-                # aborts startup and removes its name.  On success the
-                # scheduler remains the final opener and unlink owner.
-                barrier=_all_workers_barrier,
+                # aborts startup and removes its name. On success the
+                # scheduler mapping phase performs the final unlink.
+                barrier=_shared_region_barrier,
                 unlink_owner=False,
             )
             if self.config.canonical_layout:
