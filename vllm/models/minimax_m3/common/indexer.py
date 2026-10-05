@@ -547,17 +547,32 @@ def select_indexer_impl_cls(
         and get_tensor_model_parallel_world_size() > 1
         and envs.VLLM_ROCM_MINIMAX_INDEXER_CP
     ):
-        from vllm.models.minimax_m3.amd.indexer_context_parallel import (
-            MiniMaxM3IndexerTritonCPImpl,
-        )
+        attention_config = get_current_vllm_config().attention_config
+        if indexer_kv_dtype != "bf16":
+            # The CP score kernel reads the index cache with no scale; the
+            # fp8 indexer has its own CP path (#57909).
+            logger.warning_once(
+                "VLLM_ROCM_MINIMAX_INDEXER_CP ignored: needs indexer_kv_dtype="
+                "'bf16', got %r",
+                indexer_kv_dtype,
+            )
+        elif getattr(attention_config, "minimax_m3_fused_decode", False):
+            logger.warning_once(
+                "VLLM_ROCM_MINIMAX_INDEXER_CP ignored: the fused decode path "
+                "computes indexer top-k inside its kernel"
+            )
+        else:
+            from vllm.models.minimax_m3.amd.indexer_context_parallel import (
+                MiniMaxM3IndexerTritonCPImpl,
+            )
 
-        logger.info_once(
-            "MiniMax M3 indexer: selected Triton CP (context-parallel, ROCm) "
-            "[topk_blocks=%d, tp=%d]",
-            topk_blocks,
-            get_tensor_model_parallel_world_size(),
-        )
-        return MiniMaxM3IndexerTritonCPImpl
+            logger.info_once(
+                "MiniMax M3 indexer: selected Triton CP (context-parallel, ROCm) "
+                "[topk_blocks=%d, tp=%d]",
+                topk_blocks,
+                get_tensor_model_parallel_world_size(),
+            )
+            return MiniMaxM3IndexerTritonCPImpl
     logger.info_once(
         "MiniMax M3 indexer: selected Triton (no fmha_sm100) "
         "[topk_blocks=%d, indexer_kv_dtype=%s, sm100=%s]",

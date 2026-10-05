@@ -1263,8 +1263,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         in ("true", "1")
     ),
     # Enable per-rank context-parallel scoring for MiniMax-M3 sparse
-    # indexer on ROCm (TP>1 only).  Each rank scores 1/world_size of the
-    # global blocks, then an all-gather of packed top-k keys merges them.
+    # indexer on ROCm (TP>1, bf16 index cache only; default off). Index
+    # queries are all-gathered, each rank scores every index head on
+    # 1/world_size of the blocks, and per-head top-k candidates are merged.
     "VLLM_ROCM_MINIMAX_INDEXER_CP": lambda: (
         os.getenv("VLLM_ROCM_MINIMAX_INDEXER_CP", "False").lower() in ("true", "1")
     ),
