@@ -443,6 +443,13 @@ class AsyncLLM(EngineClient):
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
+            request_params = request.params
+            if isinstance(request_params, SamplingParams):
+                # This request object is owned by the engine from here on.
+                self.input_processor.apply_watermarking(
+                    request_params,
+                    self.input_processor.resolve_watermarking(request_params),
+                )
         else:
             if isinstance(prompt, dict) and "type" in prompt:
                 # Rendered EngineInput; no blocking preprocessing needed.
@@ -599,6 +606,8 @@ class AsyncLLM(EngineClient):
 
         async def handle_inputs():
             cancelled = False
+            errored = False
+            any_added = False
             try:
                 async for input_chunk in input_stream:
                     sp = input_chunk.sampling_params
@@ -623,18 +632,23 @@ class AsyncLLM(EngineClient):
                         self.model_config, input_chunk.prompt
                     )
                     await self._add_request(req, prompt_text, None, 0, queue)
+                    any_added = True
             except (asyncio.CancelledError, GeneratorExit):
                 cancelled = True
             except Exception as error:
                 # Wrap in InputStreamError so generate() can propagate it
                 # without wrapping in EngineGenerateError.
                 queue.put(InputStreamError(error))
+                errored = True
             finally:
                 queue._input_stream_task = None
                 if not cancelled:
-                    # Send empty final request to indicate that inputs have
-                    # finished. Don't send if cancelled (session was aborted).
-                    await self._add_request(final_req, None, None, 0, queue)
+                    if any_added:
+                        # Send empty final request to indicate that inputs have
+                        # finished. Don't send if cancelled (session was aborted).
+                        await self._add_request(final_req, None, None, 0, queue)
+                    elif not errored:
+                        queue.put(STREAM_FINISHED)
 
         # Ensure output handler is running.
         self._run_output_handler()
@@ -903,6 +917,7 @@ class AsyncLLM(EngineClient):
             sampling_params=SamplingParams(
                 max_tokens=1,
                 extra_args={"kv_transfer_params": dict(kv_transfer_params)},
+                watermarking=False,
             ),
             pooling_params=None,
             arrival_time=time.time(),
