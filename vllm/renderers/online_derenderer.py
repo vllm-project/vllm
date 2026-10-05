@@ -1034,8 +1034,8 @@ def _resolve_prompt_logprobs(
     resolved: PromptLogprobs = []
     context_token_ids: list[int] = []
     for entry in prompt_logprobs:
-        if entry is None:
-            resolved.append(None)
+        if not entry:
+            resolved.append(entry)
             continue
         new_entry: dict[int, Logprob] = {}
         for tid, lp in entry.items():

@@ -712,7 +712,7 @@ async def test_derender_completion_prompt_logprobs_passthrough(client):
 
 @pytest.mark.asyncio
 async def test_derender_chat_prompt_logprobs_decoded_token(client):
-    """Null decoded_token in chat prompt_logprobs is filled; given ones are kept."""
+    """Null decoded_token is filled; given ones and empty entries are kept."""
     gen_req = await _render_chat(client)
     ids = gen_req["token_ids"][:3]
     tok = get_tokenizer(MODEL_NAME)
@@ -720,6 +720,7 @@ async def test_derender_chat_prompt_logprobs_decoded_token(client):
         None,
         {str(ids[0]): {"logprob": -0.5, "rank": 1}},
         {str(ids[1]): {"logprob": -0.1, "rank": 1, "decoded_token": "kept"}},
+        {},
     ]
     response = await client.post(
         "/v1/chat/completions/derender",
@@ -735,6 +736,7 @@ async def test_derender_chat_prompt_logprobs_decoded_token(client):
         == (convert_ids_list_to_tokens(tok, [ids[0]])[0])
     )
     assert out[2][str(ids[1])]["decoded_token"] == "kept"
+    assert out[3] == {}
 
 
 @pytest.mark.asyncio
