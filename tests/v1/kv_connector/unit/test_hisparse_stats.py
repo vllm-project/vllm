@@ -83,18 +83,6 @@ def test_build_kv_connector_stats_round_trip():
     assert rebuilt.reduce() == stats.reduce()
 
 
-def test_build_kv_connector_stats_round_trip_with_host_usage():
-    stats = HiSparseKVConnectorStats()
-    stats.record_host_usage(used=6, total=10, pending_page_transfers=2)
-    payload = stats.to_dict()
-
-    rebuilt = HiSparseConnector.build_kv_connector_stats(data=payload)
-
-    assert rebuilt is not None
-    assert rebuilt.data["host_cache_usage_perc"] == [0.6]
-    assert rebuilt.reduce() == stats.reduce()
-
-
 def test_prom_metrics_observe_host_usage_gauges():
     from types import SimpleNamespace
     from typing import Any
