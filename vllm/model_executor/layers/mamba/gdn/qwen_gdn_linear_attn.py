@@ -31,10 +31,10 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
-from vllm.model_executor.layers.mamba.kda_checkpoint import (
-    FlashKDAPrefillCheckpointExporter,
+from vllm.model_executor.layers.mamba.checkpoint import (
+    ConvRecurrentCheckpointExporter,
 )
+from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
@@ -157,10 +157,6 @@ def _resolve_gdn_prefill_backend(
     if backend == "cutedsl" and supports_cutedsl:
         return backend, "cutedsl"
     return backend, "triton"
-
-
-class FlashInferGDNPrefillCheckpointExporter(FlashKDAPrefillCheckpointExporter):
-    """Store FlashInfer GDN prefill checkpoints, laid out like FlashKDA's."""
 
 
 def qwen_gdn_prefill_checkpoint_alignment(vllm_config: VllmConfig) -> int | None:
@@ -563,7 +559,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ),
                 torch.float32,
             )
-            self._checkpoint_exporter = FlashInferGDNPrefillCheckpointExporter()
+            self._checkpoint_exporter = ConvRecurrentCheckpointExporter()
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
