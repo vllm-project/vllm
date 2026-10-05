@@ -130,6 +130,10 @@ class FlashAttnMLASparseMetadataBuilder(
         )
         threshold = {16: 128, 32: 128, 64: 256, 128: 256}.get(num_q_heads, 256)
         self._init_reorder_batch_threshold(threshold, supports_spec_as_decode=True)
+        self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
+
+    def update_draft_decode_metadata(self, _metadata: SparseMLACommonMetadata) -> None:
+        pass
 
 
 class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
