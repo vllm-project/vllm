@@ -101,6 +101,41 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
         ),
     },
     "hopper": {
+        (17408, 5120): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (16, _MatmulMConfig(16, 256, 4, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (5120, 8704): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (16, _MatmulMConfig(16, 64, 4, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (8192, 5120): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (16, _MatmulMConfig(16, 64, 4, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (5120, 3072): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (16, _MatmulMConfig(16, 64, 4, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
+        (124160, 5120): _MatmulShapeConfig(
+            block_k=64,
+            m_buckets=(
+                (16, _MatmulMConfig(16, 256, 4, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
+            ),
+        ),
         (12288, 2048): _MatmulShapeConfig(
             block_k=128,
             m_buckets=(
