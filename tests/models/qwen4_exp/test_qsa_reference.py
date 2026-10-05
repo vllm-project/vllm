@@ -15,6 +15,7 @@ from vllm.models.qwen4_exp.nvidia import (
 )
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
+from vllm.models.qwen4_exp.nvidia.qsa import qsa_kv_cache_dtype
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.utils import clear_layer_kv_caches
@@ -446,6 +447,19 @@ def test_qsa_ring_capacity_covers_one_speculative_step(
         block_size=48, compress_ratio=compress_ratio
     ).get_kv_cache_spec(SimpleNamespace(num_speculative_tokens=num_spec))
     assert spec.block_size == expected
+
+
+def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
+    """``--kv-cache-dtype-skip-layers`` keeps the listed QSA layers unquantized.
+
+    The MTP layer's own attention is the one that matters on Flash-Next: FP8
+    there cuts draft acceptance at depth while the target layers stay FP8.
+    """
+    cache_config = SimpleNamespace(cache_dtype="fp8", kv_cache_dtype_skip_layers=["48"])
+    assert qsa_kv_cache_dtype(cache_config, "mtp.layers.48.self_attn") == "auto"
+    assert qsa_kv_cache_dtype(cache_config, "model.layers.47.self_attn") == "fp8"
+    cache_config.kv_cache_dtype_skip_layers = []
+    assert qsa_kv_cache_dtype(cache_config, "mtp.layers.48.self_attn") == "fp8"
 
 
 @requires_qsa_kernels
