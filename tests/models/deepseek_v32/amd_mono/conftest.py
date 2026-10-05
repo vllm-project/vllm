@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared fixtures of the GLM-5.2 MonoKernel (ROCm, mono/) tests.
-
-The CPU tests build MonoLive / Glm5MonoDecode objects bare (``__new__``) around fake
-kernel ops, so they need neither a GPU nor FlyDSL; the GPU test is skip-marked (8x
-gfx950).
-"""
+"""Shared fixtures of the GLM-5.2 MonoKernel (ROCm, mono/) CPU tests: MonoLive /
+Glm5MonoDecode are built bare (``__new__``) around fake kernel ops (no GPU, no FlyDSL)."""
 
 import pytest
 import torch
