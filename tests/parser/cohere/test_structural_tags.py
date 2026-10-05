@@ -340,6 +340,14 @@ class TestAdjustRequestFoldFromStructuredOutputs:
                 _make_chat_request(structured_outputs={"json": json_value}),
             )
 
+    def test_deeply_nested_json_string_rejected(self, parser) -> None:
+        """json.loads raises RecursionError on a string nested this deeply."""
+        schema = '{"type": "array", "items": ' * 20_000 + "{}" + "}" * 20_000
+        with pytest.raises(VLLMValidationError, match="nested too deeply"):
+            parser.adjust_request(
+                _make_chat_request(structured_outputs={"json": schema}),
+            )
+
     @pytest.mark.parametrize(
         "construct",
         [

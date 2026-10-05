@@ -405,6 +405,7 @@ def _schema_dict_from_structured_outputs(
     if isinstance(raw, str):
         if not raw.strip():
             raise ValueError("structured_outputs.json cannot be empty.")
+        check_json_nesting(raw)
         try:
             raw = json.loads(raw)
         except json.JSONDecodeError as e:
