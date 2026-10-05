@@ -29,10 +29,11 @@ The design is extensible to other artifacts; today it caches **model weights**.
   the same image tag.
 - **Supported quantization**. The daemon serves weights that already went
   through quantization post-processing, so every quantization method in the
-  model must support loading pre-processed weights. Unquantized models and
-  checkpoints quantized with `fp8`, ModelOpt NVFP4 or MXFP4 (except GPT-OSS)
-  are supported. Other methods, such as compressed-tensors, GPTQ and AWQ,
-  raise `UnsupportedQuantForIPCError`, even when fallback is enabled.
+  model must support loading pre-processed weights. Unquantized models
+  (except MoE models with `--all2all-backend moonep`) and checkpoints
+  quantized with `fp8`, ModelOpt NVFP4 or MXFP4 (except GPT-OSS) are
+  supported. Other methods, such as compressed-tensors, GPTQ and AWQ, raise
+  `UnsupportedQuantForIPCError`, even when fallback is enabled.
 - **No [sleep mode](sleep_mode.md)** in zero-copy mode: the weights live in
   the daemon's allocations, so the engine cannot offload them.
 
@@ -149,7 +150,8 @@ Select the mode with `--model-loader-extra-config '{"mode": "..."}'`:
 - `copy`: the engine clones every tensor into its own GPU memory and then asks
   the daemon to release its cache. This is a one-shot handoff: while the copy
   runs the GPU holds two copies of the weights, and after the release the
-  daemon has nothing left to serve, so the next engine restart loads from disk.
+  daemon has nothing left to serve: the next engine restart falls back to
+  disk, or fails once `state_timeout_s` elapses if `fallback` is disabled.
   Use it to pre-stage weights for a single engine start and stop the daemon
   afterwards.
 
@@ -309,14 +311,27 @@ Use `docker compose restart vllm` to restart only the engine.
 ### Scoping the shared namespaces
 
 If sharing the host's IPC and PID namespaces is not acceptable, the engine
-container can join the daemon container's namespaces instead:
+container can join the daemon container's namespaces instead. A container
+can only be joined if its IPC namespace is shareable, so start the daemon
+with `--ipc=shareable` (Docker's default is private) instead of `--ipc=host`,
+drop `--pid=host` from both, and point the engine at the daemon container:
 
 ```bash
-docker run ... --ipc=container:vllm-weight-cache --pid=container:vllm-weight-cache ...
+# daemon
+docker run -d --name vllm-weight-cache \
+    --gpus all --ipc=shareable --shm-size 16g \
+    ... \
+    --entrypoint vllm vllm/vllm-openai:latest preload ...
+
+# engine
+docker run -d --name vllm \
+    --gpus all --ipc=container:vllm-weight-cache --pid=container:vllm-weight-cache \
+    ... \
+    vllm/vllm-openai:latest ...
 ```
 
-The daemon container then needs a `--shm-size` large enough for the engine's
-own shared memory use, since the engine inherits the daemon's `/dev/shm`.
+The engine inherits the daemon's `/dev/shm`, so size the daemon's
+`--shm-size` for the engine's own shared memory use.
 
 ## Kubernetes
 
@@ -401,7 +416,7 @@ The `ipc_cache` loader accepts extra keys via `--model-loader-extra-config`:
 ```bash
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --load-format ipc_cache \
-    --model-loader-extra-config '{"mode": "copy", "fallback": false}'
+    --model-loader-extra-config '{"fallback": false, "state_timeout_s": 900}'
 ```
 
 | Key | Default | Description |
