@@ -27,18 +27,6 @@ from vllm.multimodal.inputs import PlaceholderRange
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
-@pytest.fixture(autouse=True)
-def mock_get_model_cls(monkeypatch):
-    """Route get_model_cls to the mock model class carried by model_config."""
-    import vllm.model_executor.model_loader as loader
-
-    monkeypatch.setattr(
-        loader,
-        "get_model_cls",
-        lambda model_config: model_config._mock_model_cls,
-    )
-
-
 def _make_processor(processor_cls, special_tokens, hf_processor, placeholder_strs):
     vocab = {"[UNK]": 0, "before": 1, "after": 2}
     backend = Tokenizer(models.WordLevel(vocab=vocab, unk_token="[UNK]"))
@@ -57,16 +45,26 @@ def _make_processor(processor_cls, special_tokens, hf_processor, placeholder_str
     model_cls = SimpleNamespace(get_placeholder_str=_placeholder_fn)
 
     processor = object.__new__(processor_cls)
+    # Processors expose the model class via _get_model_cls() (no
+    # model_loader indirection); point it at the mock.
+    processor._get_model_cls = lambda: model_cls
     processor.info = SimpleNamespace(
         get_hf_processor=lambda **kwargs: hf_processor,
         get_image_processor=lambda **kwargs: SimpleNamespace(merge_size=2),
         get_tokenizer=lambda: tokenizer,
         ctx=SimpleNamespace(
-            model_config=SimpleNamespace(_mock_model_cls=model_cls),
+            model_config=SimpleNamespace(),
             get_mm_config=lambda: SimpleNamespace(video_pruning_rate=None),
         ),
     )
     return processor
+
+
+def _make_dummy_builder(processor):
+    """Create a dummy builder sharing the processor's mock model class."""
+    builder = Qwen2VLDummyInputsBuilder(processor.info)
+    builder._get_model_cls = processor._get_model_cls
+    return builder
 
 
 @pytest.fixture
@@ -389,7 +387,7 @@ def test_openpangu_vl_does_not_match_bare_image_pad_in_user_text(
 def test_dummy_text_emits_full_wrapper(qwen2_vl_processor):
     # The dummy prompt must contain the complete wrapper so that it matches
     # the replacement targets (used for profiling).
-    builder = Qwen2VLDummyInputsBuilder(qwen2_vl_processor.info)
+    builder = _make_dummy_builder(qwen2_vl_processor)
 
     assert builder.get_dummy_text({"image": 1}) == (
         "<|vision_start|><|image_pad|><|vision_end|>"
@@ -401,7 +399,7 @@ def test_dummy_text_emits_full_wrapper(qwen2_vl_processor):
 
 
 def test_dummy_text_emits_full_wrapper_dots_ocr(dots_ocr_style_processor):
-    builder = Qwen2VLDummyInputsBuilder(dots_ocr_style_processor.info)
+    builder = _make_dummy_builder(dots_ocr_style_processor)
 
     assert builder.get_dummy_text({"image": 2}) == (
         "<|img|><|imgpad|><|endofimg|><|img|><|imgpad|><|endofimg|>"
@@ -414,7 +412,7 @@ def test_dummy_text_falls_back_to_bare_pad_for_jina_video(
     # Jina-VL defines no video placeholder string; the dummy must fall back
     # to the bare pad token, consistent with get_wrapper_token_ids, so that
     # profiling with video still matches the video replacement target.
-    builder = Qwen2VLDummyInputsBuilder(jina_style_processor.info)
+    builder = _make_dummy_builder(jina_style_processor)
 
     assert builder.get_dummy_text({"image": 1, "video": 1}) == (
         "<|vision_start|><|image_pad|><|vision_end|><|video_pad|>"

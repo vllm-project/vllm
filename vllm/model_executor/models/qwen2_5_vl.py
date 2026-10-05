@@ -1149,6 +1149,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
 
 class Qwen2_5_VLDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+    def _get_model_cls(self) -> type[nn.Module]:
+        return Qwen2_5_VLForConditionalGeneration
+
     def _get_dummy_videos(
         self,
         *,
@@ -1202,6 +1205,9 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
 
 
 class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
+    def _get_model_cls(self) -> type[nn.Module]:
+        return Qwen2_5_VLForConditionalGeneration
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

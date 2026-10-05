@@ -59,6 +59,9 @@ class JinaVLScorer(nn.Module):
 
 
 class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
+    def _get_model_cls(self) -> type[nn.Module]:
+        return JinaVLForSequenceClassification
+
     def _cached_apply_hf_processor(
         self,
         inputs: ProcessorInputs,
@@ -96,10 +99,15 @@ class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         )
 
 
+class JinaVLDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+    def _get_model_cls(self) -> type[nn.Module]:
+        return JinaVLForSequenceClassification
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     JinaVLMultiModalProcessor,
     info=Qwen2VLProcessingInfo,
-    dummy_inputs=Qwen2VLDummyInputsBuilder,
+    dummy_inputs=JinaVLDummyInputsBuilder,
 )
 class JinaVLForSequenceClassification(
     Qwen2VLForConditionalGeneration,

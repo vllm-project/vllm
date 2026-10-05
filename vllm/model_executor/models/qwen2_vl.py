@@ -1253,11 +1253,11 @@ def _get_vision_token_offset(mm_position: PlaceholderRange) -> int:
 
 
 class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_cls
+    def _get_model_cls(self) -> type[nn.Module]:
+        return Qwen2VLForConditionalGeneration
 
-        model_cls = get_model_cls(self.info.ctx.model_config)
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        model_cls = self._get_model_cls()
 
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1306,21 +1306,21 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
 
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]):
+    def _get_model_cls(self) -> type[nn.Module]:
+        return Qwen2VLForConditionalGeneration
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_cls
-
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
-        model_cls = get_model_cls(self.info.ctx.model_config)
+        model_cls = self._get_model_cls()
 
         placeholder = {
             "image": vocab[hf_processor.image_token],

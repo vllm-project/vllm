@@ -96,6 +96,9 @@ DotsOCRImageInputs: TypeAlias = DotsOCRImagePixelInputs | DotsOCRImageEmbeddingI
 
 
 class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+    def _get_model_cls(self) -> type[nn.Module]:
+        return DotsOCRForCausalLM
+
     # get_dummy_text is inherited: it emits the complete wrapper derived
     # from get_placeholder_str ("<|img|><|imgpad|><|endofimg|>"), which
     # matches the replacement targets in _get_prompt_updates.
@@ -578,8 +581,13 @@ class DotsVisionTransformer(nn.Module):
         return hidden_states
 
 
+class DotsOCRMultiModalProcessor(Qwen2VLMultiModalProcessor):
+    def _get_model_cls(self) -> type[nn.Module]:
+        return DotsOCRForCausalLM
+
+
 @MULTIMODAL_REGISTRY.register_processor(
-    Qwen2VLMultiModalProcessor,
+    DotsOCRMultiModalProcessor,
     info=DotsOCRProcessingInfo,
     dummy_inputs=DotsOCRDummyInputsBuilder,
 )

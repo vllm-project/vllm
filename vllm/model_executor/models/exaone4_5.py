@@ -50,8 +50,7 @@ from vllm.model_executor.models.qwen2_5_vl import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from .qwen2_vl import Qwen2VLDummyInputsBuilder as Exaone4_5_DummyInputsBuilder
-from .qwen2_vl import Qwen2VLMultiModalProcessor as Exaone4_5_MultiModalProcessor
+from .qwen2_vl import Qwen2VLDummyInputsBuilder, Qwen2VLMultiModalProcessor
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -313,6 +312,16 @@ class Exaone4_5_ProcessingInfo(Qwen2VLProcessingInfo):
             Exaone4_5_Processor,
             **kwargs,
         )
+
+
+class Exaone4_5_MultiModalProcessor(Qwen2VLMultiModalProcessor):
+    def _get_model_cls(self) -> type[nn.Module]:
+        return Exaone4_5_ForConditionalGeneration
+
+
+class Exaone4_5_DummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+    def _get_model_cls(self) -> type[nn.Module]:
+        return Exaone4_5_ForConditionalGeneration
 
 
 @MULTIMODAL_REGISTRY.register_processor(
