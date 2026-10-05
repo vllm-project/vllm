@@ -15,7 +15,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.v1.metrics.utils import create_metric_per_engine
 
 _HISPARSE_LEVEL_KEYS = frozenset(
-    {"host_blocks_used", "host_blocks_total", "host_blocks_usage", "pending_spills"}
+    {
+        "host_blocks_used",
+        "host_blocks_total",
+        "host_blocks_usage",
+        "pending_page_transfers",
+    }
 )
 
 
@@ -43,7 +48,7 @@ class HiSparseKVConnectorStats(KVConnectorStats):
             "host_blocks_used": [],
             "host_blocks_total": [],
             "host_blocks_usage": [],
-            "pending_spills": [],
+            "pending_page_transfers": [],
         }
 
     def record_snapshot(self, hits: int, misses: int, host_to_device_bytes: int):
@@ -51,12 +56,14 @@ class HiSparseKVConnectorStats(KVConnectorStats):
         self.data["cache_misses"].append(misses)
         self.data["host_to_device_bytes"].append(host_to_device_bytes)
 
-    def record_host_usage(self, used: int, total: int, pending_spills: int):
+    def record_host_usage(
+        self, used: int, total: int, pending_page_transfers: int
+    ) -> None:
         """Record scheduler-side host-tier level values."""
         self.data["host_blocks_used"].append(used)
         self.data["host_blocks_total"].append(total)
         self.data["host_blocks_usage"].append(used / total if total else 0.0)
-        self.data["pending_spills"].append(pending_spills)
+        self.data["pending_page_transfers"].append(pending_page_transfers)
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
@@ -132,7 +139,10 @@ class HiSparsePromMetrics(KVConnectorPromMetrics):
 
         gauge_host_blocks_used = self._gauge_cls(
             name="vllm:hisparse_host_blocks_used",
-            documentation="HiSparse host KV blocks backing live or cached prefixes.",
+            documentation=(
+                "HiSparse host KV blocks held by running requests or in-flight "
+                "transfers. Evictable cached blocks are not counted."
+            ),
             multiprocess_mode="mostrecent",
             labelnames=labelnames,
         )
@@ -148,10 +158,10 @@ class HiSparsePromMetrics(KVConnectorPromMetrics):
             multiprocess_mode="mostrecent",
             labelnames=labelnames,
         )
-        gauge_pending_spills = self._gauge_cls(
-            name="vllm:hisparse_pending_spills",
+        gauge_pending_page_transfers = self._gauge_cls(
+            name="vllm:hisparse_pending_page_transfers",
             documentation=(
-                "HiSparse page transfers enqueued but not yet completed on host."
+                "HiSparse page transfers (write-backs and restores) not yet completed."
             ),
             multiprocess_mode="mostrecent",
             labelnames=labelnames,
@@ -166,8 +176,8 @@ class HiSparsePromMetrics(KVConnectorPromMetrics):
             "host_blocks_usage": create_metric_per_engine(
                 gauge_host_blocks_usage, self.per_engine_labelvalues
             ),
-            "pending_spills": create_metric_per_engine(
-                gauge_pending_spills, self.per_engine_labelvalues
+            "pending_page_transfers": create_metric_per_engine(
+                gauge_pending_page_transfers, self.per_engine_labelvalues
             ),
         }
 

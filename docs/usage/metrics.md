@@ -52,9 +52,9 @@ configured (with a `--attention-hisparse-config` sparse-MLA model, e.g.
 DeepSeek V3.2). The host-tier gauges are reported by the scheduler process
 once per engine step and reflect the logical host KV pool shared by all
 tensor-parallel ranks; the hot-buffer counters are sampled from the device
-every 2000 worker steps. Note that `vllm:hisparse_host_blocks_used` counts
-blocks backing live or cached prefixes — evictable cached blocks are
-included, since eviction reclaims them on demand.
+every 2000 worker steps. `vllm:hisparse_host_blocks_used` counts blocks held
+by running requests or in-flight transfers; evictable cached blocks are not
+counted.
 
 --8<-- "gen:metrics-hisparse"
 

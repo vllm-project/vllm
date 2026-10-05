@@ -87,7 +87,7 @@ def test_scheduler_stats_report_host_pool_usage():
     assert stats.data["host_blocks_used"] == [0]
     assert stats.data["host_blocks_total"] == [7]
     assert stats.data["host_blocks_usage"] == [0.0]
-    assert stats.data["pending_spills"] == [0]
+    assert stats.data["pending_page_transfers"] == [0]
 
     # Allocating host pages for a request raises the used count.
     request = make_request(

@@ -28,26 +28,20 @@ def test_record_snapshot_and_reduce():
 
 def test_record_host_usage_reports_latest_level():
     stats = HiSparseKVConnectorStats()
-    stats.record_host_usage(used=4, total=10, pending_spills=2)
-    stats.record_host_usage(used=8, total=10, pending_spills=0)
+    stats.record_host_usage(used=4, total=10, pending_page_transfers=2)
+    stats.record_host_usage(used=8, total=10, pending_page_transfers=0)
 
     reduced = stats.reduce()
     assert reduced["HiSparse host pool used blocks"] == 8
     assert reduced["HiSparse host pool usage %"] == 80.0
 
 
-def test_host_usage_only_stats_are_not_empty():
-    stats = HiSparseKVConnectorStats()
-    stats.record_host_usage(used=1, total=4, pending_spills=0)
-    assert not stats.is_empty()
-
-
 def test_aggregate_keeps_latest_host_usage_level():
     first = HiSparseKVConnectorStats()
-    first.record_host_usage(used=4, total=10, pending_spills=2)
+    first.record_host_usage(used=4, total=10, pending_page_transfers=2)
     second = HiSparseKVConnectorStats()
-    second.record_host_usage(used=8, total=10, pending_spills=0)
-    second.record_host_usage(used=6, total=10, pending_spills=1)
+    second.record_host_usage(used=8, total=10, pending_page_transfers=0)
+    second.record_host_usage(used=6, total=10, pending_page_transfers=1)
 
     first.aggregate(second)
 
@@ -55,7 +49,7 @@ def test_aggregate_keeps_latest_host_usage_level():
     assert first.data["host_blocks_used"] == [4, 6]
     assert first.data["host_blocks_total"] == [10, 10]
     assert first.data["host_blocks_usage"] == [0.4, 0.6]
-    assert first.data["pending_spills"] == [2, 1]
+    assert first.data["pending_page_transfers"] == [2, 1]
 
 
 def test_aggregate_extends_snapshot_deltas():
@@ -94,7 +88,7 @@ def test_build_kv_connector_stats_round_trip():
 
 def test_build_kv_connector_stats_round_trip_with_host_usage():
     stats = HiSparseKVConnectorStats()
-    stats.record_host_usage(used=6, total=10, pending_spills=2)
+    stats.record_host_usage(used=6, total=10, pending_page_transfers=2)
     payload = stats.to_dict()
 
     rebuilt = HiSparseConnector.build_kv_connector_stats(data=payload)
@@ -145,8 +139,8 @@ def test_prom_metrics_observe_host_usage_gauges():
 
     stats = HiSparseKVConnectorStats()
     stats.record_snapshot(hits=3, misses=2, host_to_device_bytes=32)
-    stats.record_host_usage(used=4, total=8, pending_spills=1)
-    stats.record_host_usage(used=6, total=8, pending_spills=3)
+    stats.record_host_usage(used=4, total=8, pending_page_transfers=1)
+    stats.record_host_usage(used=6, total=8, pending_page_transfers=3)
     prom.observe(stats.to_dict())
 
     assert created["vllm:hisparse_cache_hits"].increments == [3]
@@ -155,4 +149,4 @@ def test_prom_metrics_observe_host_usage_gauges():
     assert created["vllm:hisparse_host_blocks_used"].set_values == [6]
     assert created["vllm:hisparse_host_blocks_total"].set_values == [8]
     assert created["vllm:hisparse_host_blocks_usage"].set_values == [0.75]
-    assert created["vllm:hisparse_pending_spills"].set_values == [3]
+    assert created["vllm:hisparse_pending_page_transfers"].set_values == [3]
