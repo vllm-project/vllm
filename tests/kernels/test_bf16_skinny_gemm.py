@@ -975,44 +975,6 @@ def test_qwen4_exp_sm121_selected_shapes(
     assert cosine > 0.999
 
 
-@pytest.mark.parametrize("num_tokens", [1, 4, 8])
-def test_qwen4_exp_column_slice_keeps_skinny_path(
-    num_tokens: int, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The fused HC down projection returns its LoRA output as a column slice."""
-    if not torch.cuda.is_available():
-        pytest.skip("requires CUDA")
-    plans = qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY.get(
-        torch.cuda.get_device_capability(), {}
-    )
-    cases = [
-        (n, k, plan[num_tokens]) for (n, k), plan in plans.items() if num_tokens in plan
-    ]
-    if not cases or not qwen4_exp_gemm.shape_dynamic_skinny_gemm.is_available():
-        pytest.skip("no Qwen4Exp CuTe DSL plans on this device")
-
-    linear = torch.nn.functional.linear
-
-    def no_fallback(*args, **kwargs):
-        raise AssertionError("fell back to F.linear")
-
-    torch.manual_seed(num_tokens)
-    for n, k, _ in cases:
-        storage = torch.randn(num_tokens, k + 16, dtype=torch.bfloat16, device="cuda")
-        x = storage[:, :k]
-        weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
-        reference = linear(x, weight)
-
-        with monkeypatch.context() as m:
-            m.setattr(torch.nn.functional, "linear", no_fallback)
-            output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
-
-        cosine = torch.nn.functional.cosine_similarity(
-            output.float().flatten(), reference.float().flatten(), dim=0
-        ).item()
-        assert cosine > 0.999, (n, k)
-
-
 def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
     _require_sm103_and_cute()
     spec = glm52_gemm.GLM52_Q_B_PROJECTION

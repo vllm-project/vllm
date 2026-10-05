@@ -223,8 +223,8 @@ class ShapeDynamicSkinnyGemm:
             raise ValueError("a and b must have the same BF16 or FP16 dtype")
         if not a.is_cuda or not b.is_cuda or a.device != b.device:
             raise ValueError("a and b must be CUDA tensors on the same device")
-        if a.stride(1) != 1 or not b.is_contiguous():
-            raise ValueError("a must be row-major and b must be contiguous")
+        if not b.is_contiguous():
+            raise ValueError("b must be contiguous")
         if a.shape[1] != b.shape[1]:
             raise ValueError("a and b must have matching K dimensions")
         if not 1 <= a.shape[0] <= 16:
@@ -251,7 +251,7 @@ class ShapeDynamicSkinnyGemm:
         if config.static_k is not None and a.shape[1] != config.static_k:
             raise ValueError("input K must match config static_k")
         if not row_stride_ok(a, config):
-            raise ValueError("a rows must be aligned to vector_width elements")
+            raise ValueError("a must be row-major with vector_width-aligned rows")
         has_residual = residual is not None
         cache_key = (a.dtype, config, has_residual)
         if cache_key not in self._compiled:
