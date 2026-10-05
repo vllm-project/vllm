@@ -1,5 +1,4 @@
 # Should be mirrored in pyproject.toml
---extra-index-url https://download.pytorch.org/whl/cu130
 cmake>=3.26.1
 ninja
 packaging>=24.2
