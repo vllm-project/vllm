@@ -10,9 +10,10 @@ import stat
 import sys
 import tempfile
 from argparse import Namespace
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from http import HTTPStatus
-from io import BytesIO
+from io import BytesIO, StringIO
+from pathlib import Path
 from typing import IO, Any, NoReturn, TypeAlias, TypedDict
 from urllib.parse import urlparse
 
@@ -252,15 +253,13 @@ class BatchFrontendArgs(BaseFrontendArgs):
     local file paths, or web (http or https) urls. If a URL is specified,
     the file should be available via HTTP PUT."""
     output_tmp_dir: str | None = None
-    """The directory used to stage files that cannot be streamed in place: the
-    output file before it is uploaded to an output URL, and an input that has
-    to be copied before it can be read twice (a URL or a pipe). Defaults to the
-    system temporary directory, which may be small on containers."""
-    max_inflight: int = 1024
-    """Maximum number of requests submitted to the engine at once. Bounds
-    frontend memory, which would otherwise grow with the size of the input
-    file. The engine schedules its own batches, so this only caps how many
-    requests are queued ahead of it."""
+    """Directory for staging a URL input, a piped input, or the output before
+    it is uploaded to a URL. When unset, piped input and output are held in
+    memory and URL input is downloaded to the system temporary directory."""
+    max_inflight: int | None = None
+    """Maximum number of requests queued at the engine at once, which bounds
+    frontend memory. Defaults to twice the scheduler's max_num_seqs, at least
+    1024."""
     enable_metrics: bool = False
     """Enable Prometheus metrics"""
     host: str | None = None
@@ -348,87 +347,66 @@ class BatchProgressTracker:
         return self._pbar
 
 
-def is_descriptor_alias(path: str) -> bool:
-    """Whether a path names an open descriptor rather than a file of its own.
+def is_url(path_or_url: str) -> bool:
+    return path_or_url.startswith(("http://", "https://"))
 
-    Reopening one of these shares the descriptor's offset on some platforms, so
-    a second pass over it would start at EOF even though it stats as a regular
-    file. Ordinary files under /dev, a batch on tmpfs for instance, are not
-    affected.
-    """
-    if path in ("/dev/stdin", "/dev/stdout", "/dev/stderr"):
-        return True
-    directory, _, number = path.rpartition("/")
-    if not number.isdigit():
-        return False
-    return directory == "/dev/fd" or (
-        directory.startswith("/proc/") and directory.endswith("/fd")
+
+def staging_file(tmp_dir: str | None, prefix: str) -> IO[str]:
+    """In-memory buffer, or a temporary file when a directory is given."""
+    if tmp_dir is None:
+        return StringIO()
+    return tempfile.NamedTemporaryFile(
+        mode="w+", encoding="utf-8", dir=tmp_dir, prefix=prefix, suffix=".jsonl"
     )
 
 
-def needs_staging(path_or_url: str) -> bool:
-    """Whether the input has to be copied before it can be read twice."""
-    if path_or_url.startswith(("http://", "https://")):
-        return True
-    if is_descriptor_alias(path_or_url):
-        return True
-    return not stat.S_ISREG(os.stat(path_or_url).st_mode)
-
-
 @contextlib.asynccontextmanager
-async def local_input_path(path_or_url: str, tmp_dir: str | None):
-    """Yield a local path that can be read twice.
+async def open_batch_input(
+    path_or_url: str, tmp_dir: str | None
+) -> AsyncIterator[IO[str]]:
+    """Yield the batch as a seekable text file, so it can be read twice.
 
-    The batch is read once to validate it and once to run it. Anything that
-    cannot be re-read, a URL body or a stream such as a pipe or process
-    substitution, is staged to a temporary file first.
+    A non-seekable source is staged via `staging_file`. A URL is downloaded to
+    a file, since the in-memory fetch is capped at the media download limit.
     """
-    if not needs_staging(path_or_url):
-        yield path_or_url
-        return
+    with contextlib.ExitStack() as stack:
+        if is_url(path_or_url):
+            download_dir = stack.enter_context(
+                tempfile.TemporaryDirectory(dir=tmp_dir, prefix="tmp_batch_input_")
+            )
+            download_path = Path(download_dir, "input.jsonl")
+            logger.info("Downloading %s to %s", path_or_url, download_path)
+            await global_http_connection.async_download_file(
+                path_or_url, download_path, chunk_size=_STAGING_CHUNK_SIZE
+            )
+            yield stack.enter_context(download_path.open(encoding="utf-8"))
+            return
 
-    is_url = path_or_url.startswith(("http://", "https://"))
+        source = stack.enter_context(open(path_or_url, encoding="utf-8"))
+        if source.seekable():
+            yield source
+            return
 
-    with tempfile.NamedTemporaryFile(
-        mode="wb",
-        dir=tmp_dir,
-        prefix="tmp_batch_input_",
-        suffix=".jsonl",
-    ) as f:
-        logger.info("Staging %s to %s", path_or_url, f.name)
-        if is_url:
-            async with (
-                aiohttp.ClientSession() as session,
-                session.get(path_or_url) as resp,
-            ):
-                resp.raise_for_status()
-                async for chunk in resp.content.iter_chunked(_STAGING_CHUNK_SIZE):
-                    f.write(chunk)
-        else:
-            with open(path_or_url, "rb") as source:
-                shutil.copyfileobj(source, f, _STAGING_CHUNK_SIZE)
-        f.flush()
-        yield f.name
+        logger.info("Staging %s so it can be read twice", path_or_url)
+        staged = stack.enter_context(staging_file(tmp_dir, "tmp_batch_input_"))
+        shutil.copyfileobj(source, staged, _STAGING_CHUNK_SIZE)
+        staged.seek(0)
+        yield staged
 
 
-def validate_batch(input_path: str) -> int:
-    """Parse every request and return how many there are.
-
-    Parsing up front keeps a malformed batch from producing partial output and
-    gives the progress bar a total. The parsed requests are deliberately
-    discarded rather than kept, so peak memory does not grow with the batch;
-    the cost is that each request is parsed again when it runs.
-    """
+def validate_batch(input_file: IO[str]) -> int:
+    """Parse every request and return the count; requests are re-parsed when run."""
     num_requests = 0
-    with open(input_path, encoding="utf-8") as f:
-        for request_json in f:
-            if request_json.strip():
-                BatchRequestInput.model_validate_json(request_json)
-                num_requests += 1
+    for request_json in input_file:
+        if request_json.strip():
+            BatchRequestInput.model_validate_json(request_json)
+            num_requests += 1
     return num_requests
 
 
-async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> None:
+async def upload_data(
+    output_url: str, data_or_file: str | bytes, from_file: bool
+) -> None:
     """Upload a local file to a URL.
     output_url: The URL to upload the file to.
     data_or_file: Either the data to upload or the path to the file to upload.
@@ -484,33 +462,29 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
 
 
 @contextlib.asynccontextmanager
-async def batch_output_writer(path_or_url: str, output_tmp_dir: str | None):
+async def batch_output_writer(
+    path_or_url: str, output_tmp_dir: str | None
+) -> AsyncIterator[IO[str]]:
     """Yield a file that receives responses as they complete.
 
-    Responses are appended and flushed while the batch runs, so an interrupted
-    run leaves the work finished so far in a local output file. A URL
-    destination is staged locally and uploaded only once the batch completes,
-    so it does not carry that guarantee: a run that fails partway uploads
-    nothing.
+    A local file holds whatever finished if the run fails. A URL destination is
+    staged and uploaded only once the batch completes.
     """
-    if not path_or_url.startswith(("http://", "https://")):
+    if not is_url(path_or_url):
         logger.info("Writing outputs to local file %s", path_or_url)
         with open(path_or_url, "w", encoding="utf-8") as f:
             yield f
         return
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=output_tmp_dir,
-        prefix="tmp_batch_output_",
-        suffix=".jsonl",
-    ) as f:
-        logger.info("Writing outputs to temporary local file %s", f.name)
+    with staging_file(output_tmp_dir, "tmp_batch_output_") as f:
         yield f
         f.flush()
         logger.info("Uploading outputs to %s", path_or_url)
-        await upload_data(path_or_url, f.name, from_file=True)
+        if isinstance(f, StringIO):
+            data = f.getvalue().strip().encode("utf-8")
+            await upload_data(path_or_url, data, from_file=False)
+        else:
+            await upload_data(path_or_url, f.name, from_file=True)
 
 
 async def download_bytes_from_url(
@@ -661,16 +635,10 @@ class EndpointConfig(TypedDict):
 
 
 def url_matches(endpoint_url: str, url: str) -> bool:
-    """Whether a request URL is served by an endpoint.
-
-    An endpoint that carries no version of its own, /score and /rerank, is also
-    served under one, /v1/score. The rest already name the version they serve.
-    """
-    if url == endpoint_url:
-        return True
+    """Unversioned endpoints (/score, /rerank) match by suffix; others exactly."""
     if re.match(r"/v\d+/", endpoint_url):
-        return False
-    return bool(re.fullmatch(rf"/v\d+{re.escape(endpoint_url)}", url))
+        return url == endpoint_url
+    return url.endswith(endpoint_url)
 
 
 def handle_endpoint_request(
@@ -873,18 +841,21 @@ async def build_endpoint_registry(
 
 
 def is_same_local_file(input_file: str, output_file: str) -> bool:
-    """Whether both paths name the same file, through symlinks or aliases."""
-    if input_file.startswith(("http://", "https://")) or output_file.startswith(
-        ("http://", "https://")
-    ):
+    """Whether both paths name the same regular file; only those can be truncated."""
+    if is_url(input_file) or is_url(output_file):
         return False
-    if not (os.path.exists(input_file) and os.path.exists(output_file)):
+    try:
+        input_stat = os.stat(input_file)
+        output_stat = os.stat(output_file)
+    except OSError:
         return False
-    return os.path.samefile(input_file, output_file)
+    if not (stat.S_ISREG(input_stat.st_mode) and stat.S_ISREG(output_stat.st_mode)):
+        return False
+    return os.path.samestat(input_stat, output_stat)
 
 
 def validate_run_batch_args(args):
-    if args.max_inflight < 1:
+    if args.max_inflight is not None and args.max_inflight < 1:
         raise ValueError(f"--max-inflight must be at least 1, got {args.max_inflight}.")
 
     if is_same_local_file(args.input_file, args.output_file):
@@ -931,100 +902,89 @@ async def run_one_request(
     return await result
 
 
-def write_finished(
-    finished: Iterable[asyncio.Task[BatchRequestOutput]],
-    output_file: IO[str],
-    tracker: BatchProgressTracker,
-) -> BaseException | None:
-    """Write each response that completed, returning the first failure if any.
-
-    Requests finish in groups, so a failure must not discard the responses that
-    succeeded alongside it.
-    """
-    failure: BaseException | None = None
-    for task in finished:
-        error = task.exception()
-        if error is not None:
-            failure = failure or error
-            continue
-        print(task.result().model_dump_json(), file=output_file)
-        tracker.completed()
-    output_file.flush()
-    return failure
-
-
 async def dispatch_batch(
-    input_path: str,
+    input_file: IO[str],
     output_file: IO[str],
     endpoint_registry: dict[str, EndpointConfig],
     tracker: BatchProgressTracker,
     max_inflight: int,
 ) -> None:
-    """Run every request in the batch, writing responses as they finish.
+    """Run every request with at most `max_inflight` alive at once.
 
-    At most ``max_inflight`` requests are alive at once, so neither the parsed
-    requests nor their responses accumulate for the whole batch.
+    Each request writes its own response. The first request to raise, rather
+    than return an error response, cancels the rest.
     """
-    pending: set[asyncio.Task[BatchRequestOutput]] = set()
+    slots = asyncio.Semaphore(max_inflight)
+    inflight: set[asyncio.Task[None]] = set()
+    failure: BaseException | None = None
+
+    async def run_and_write(request_json: str) -> None:
+        nonlocal failure
+        try:
+            response = await run_one_request(request_json, endpoint_registry)
+            print(response.model_dump_json(), file=output_file)
+            output_file.flush()
+            tracker.completed()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+        finally:
+            slots.release()
 
     try:
-        with open(input_path, encoding="utf-8") as f:
-            requests = (line for line in f if line.strip())
-            while True:
-                # Top up; the generator resumes where the previous round left off.
-                for request_json in requests:
-                    pending.add(
-                        asyncio.create_task(
-                            run_one_request(request_json, endpoint_registry)
-                        )
-                    )
-                    if len(pending) >= max_inflight:
-                        break
-
-                if not pending:
+        for request_json in input_file:
+            if not request_json.strip():
+                continue
+            await slots.acquire()
+            if failure is not None:
+                break
+            task = asyncio.create_task(run_and_write(request_json))
+            inflight.add(task)
+            task.add_done_callback(inflight.discard)
+        else:
+            # Reacquiring every slot waits for the last request to finish.
+            for _ in range(max_inflight):
+                await slots.acquire()
+                if failure is not None:
                     break
 
-                finished, pending = await asyncio.wait(
-                    pending, return_when=asyncio.FIRST_COMPLETED
-                )
-                failure = write_finished(finished, output_file, tracker)
-                if failure is not None:
-                    raise failure
+        if isinstance(failure, asyncio.CancelledError):
+            raise RuntimeError(
+                "A batch request was cancelled before it completed"
+            ) from failure
+        if failure is not None:
+            raise failure
     finally:
-        # An error leaves the rest of the batch in flight. Drop it, and wait for
-        # the cancellations so the requests do not outlive the run.
-        for task in pending:
+        for task in inflight:
             task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        if inflight:
+            await asyncio.gather(*inflight, return_exceptions=True)
 
 
 async def run_batch(
     engine_client: EngineClient,
     args: Namespace,
+    input_file: IO[str],
+    num_requests: int,
 ) -> None:
     endpoint_registry = await build_endpoint_registry(
         engine_client=engine_client,
         args=args,
     )
-
+    max_inflight = args.max_inflight or max(
+        1024, 2 * engine_client.vllm_config.scheduler_config.max_num_seqs
+    )
     tracker = BatchProgressTracker()
-    logger.info("Reading batch from %s...", args.input_file)
 
-    async with local_input_path(args.input_file, args.output_tmp_dir) as input_path:
-        num_requests = validate_batch(input_path)
-
-        async with batch_output_writer(
-            args.output_file, args.output_tmp_dir
-        ) as output_file:
-            with tracker.pbar(total=num_requests):
-                await dispatch_batch(
-                    input_path,
-                    output_file,
-                    endpoint_registry,
-                    tracker,
-                    args.max_inflight,
-                )
+    async with batch_output_writer(
+        args.output_file, args.output_tmp_dir
+    ) as output_file:
+        with tracker.pbar(total=num_requests):
+            await dispatch_batch(
+                input_file, output_file, endpoint_registry, tracker, max_inflight
+            )
 
 
 async def main(args: Namespace):
@@ -1033,11 +993,17 @@ async def main(args: Namespace):
 
     validate_run_batch_args(args)
 
-    async with build_async_engine_client(
-        args,
-        usage_context=UsageContext.OPENAI_BATCH_RUNNER,
-    ) as engine_client:
-        await run_batch(engine_client, args)
+    # Validate the batch before loading the model, so bad input fails fast.
+    logger.info("Reading batch from %s...", args.input_file)
+    async with open_batch_input(args.input_file, args.output_tmp_dir) as input_file:
+        num_requests = validate_batch(input_file)
+        input_file.seek(0)
+
+        async with build_async_engine_client(
+            args,
+            usage_context=UsageContext.OPENAI_BATCH_RUNNER,
+        ) as engine_client:
+            await run_batch(engine_client, args, input_file, num_requests)
 
 
 if __name__ == "__main__":

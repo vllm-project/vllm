@@ -15,7 +15,7 @@ Each line represents a separate request. See the [OpenAI package reference](http
 ```{note}
 We currently support `/v1/chat/completions`, `/v1/embeddings`, `/score`, `/rerank`,
 `/v1/audio/transcriptions`, and `/v1/audio/translations` endpoints (`/v1/completions`
-coming soon). Score and rerank are also served under a version prefix, such as
+coming soon). Score and rerank match any URL ending in `/score` or `/rerank`, such as
 `/v1/score`.
 ```
 
@@ -72,7 +72,9 @@ You should now have your results at `results.jsonl`. You can check your results 
 
 Responses are written as each request finishes, so their order does not follow
 the input file. Match a response to its request with `custom_id` rather than by
-line number.
+line number. The output file is truncated when the run starts; if the run fails
+partway, it holds the responses that finished, so check the exit code before
+treating it as complete. An output URL is uploaded only when the run succeeds.
 
 ```bash
 cat results.jsonl

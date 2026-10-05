@@ -26,16 +26,13 @@ from vllm.entrypoints.launchers.run_batch import (
     batch_output_writer,
     dispatch_batch,
     download_bytes_from_url,
-    is_descriptor_alias,
     is_same_local_file,
-    local_input_path,
     make_transcription_wrapper,
-    needs_staging,
+    open_batch_input,
     upload_data,
     url_matches,
     validate_batch,
     validate_run_batch_args,
-    write_finished,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
@@ -1128,49 +1125,54 @@ async def test_upload_data_error_includes_awaited_response_body():
 # ---------------------------------------------------------------------------
 
 
+def _write_batch(tmp_path, lines: list[str]):
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("\n".join(lines) + "\n")
+    return input_path
+
+
+def _read_twice(f) -> tuple[str, str]:
+    """Read a batch handle the way the two passes do, seeking back in between."""
+    first = f.read()
+    f.seek(0)
+    return first, f.read()
+
+
 def test_validate_batch_counts_requests(tmp_path):
     """Blank lines are skipped and do not count towards the request total."""
-    input_path = tmp_path / "input.jsonl"
-    input_path.write_text(INPUT_BATCH + "\n\n")
+    input_path = _write_batch(tmp_path, [INPUT_BATCH, ""])
 
-    assert validate_batch(str(input_path)) == len(INPUT_BATCH.strip().split("\n"))
+    with open(input_path, encoding="utf-8") as f:
+        assert validate_batch(f) == len(INPUT_BATCH.strip().split("\n"))
 
 
 def test_validate_batch_rejects_malformed_request(tmp_path):
-    """A malformed request is rejected before any of the batch is run.
+    """A malformed request is rejected before any of the batch is run."""
+    input_path = _write_batch(tmp_path, [INPUT_BATCH, INVALID_INPUT_BATCH])
 
-    Requests are parsed up front so that an invalid line fails the whole batch
-    without leaving partial output behind.
-    """
-    input_path = tmp_path / "input.jsonl"
-    input_path.write_text(INPUT_BATCH + "\n" + INVALID_INPUT_BATCH + "\n")
-
-    with pytest.raises(pydantic.ValidationError):
-        validate_batch(str(input_path))
+    with (
+        open(input_path, encoding="utf-8") as f,
+        pytest.raises(pydantic.ValidationError),
+    ):
+        validate_batch(f)
 
 
 @pytest.mark.asyncio
 async def test_dispatch_batch_writes_a_response_per_request(tmp_path):
-    """Every request must produce exactly one response line.
-
-    Responses finish out of order and are written in groups as they complete,
-    so a missed drain would silently truncate the output.
-    """
-    input_path = tmp_path / "input.jsonl"
-    input_path.write_text(INPUT_BATCH + "\n")
+    """Every request must produce exactly one response line."""
+    input_path = _write_batch(tmp_path, [INPUT_BATCH])
     output_path = tmp_path / "output.jsonl"
 
     requests = [json.loads(line) for line in INPUT_BATCH.strip().split("\n")]
 
-    with open(output_path, "w", encoding="utf-8") as output_file:
+    with (
+        open(input_path, encoding="utf-8") as input_file,
+        open(output_path, "w", encoding="utf-8") as output_file,
+    ):
         # An empty registry routes every request to an error response, which
         # exercises the dispatch loop without starting an engine.
         await dispatch_batch(
-            str(input_path),
-            output_file,
-            {},
-            BatchProgressTracker(),
-            max_inflight=2,
+            input_file, output_file, {}, BatchProgressTracker(), max_inflight=2
         )
 
     lines = output_path.read_text().strip().split("\n")
@@ -1182,10 +1184,7 @@ async def test_dispatch_batch_writes_a_response_per_request(tmp_path):
 
 @pytest.mark.asyncio
 async def test_batch_output_writer_persists_before_completion(tmp_path):
-    """Responses reach disk while the batch is still running.
-
-    This is what makes an interrupted run recoverable rather than a total loss.
-    """
+    """Responses reach disk while the batch is still running."""
     output_path = tmp_path / "output.jsonl"
 
     async with batch_output_writer(str(output_path), None) as output_file:
@@ -1198,17 +1197,15 @@ async def test_batch_output_writer_persists_before_completion(tmp_path):
 
 
 def test_is_same_local_file_detects_aliases(tmp_path):
-    """Aliases of one file must be recognised.
-
-    Responses are written while the batch runs, so an output path that aliases
-    the input would truncate it before it has been read.
-    """
+    """Aliases of one regular file must be recognised, and only those."""
     target = tmp_path / "batch.jsonl"
     target.write_text("{}\n")
     link = tmp_path / "link.jsonl"
     link.symlink_to(target)
     other = tmp_path / "other.jsonl"
     other.write_text("{}\n")
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
 
     assert is_same_local_file(str(target), str(target))
     assert is_same_local_file(str(target), str(link))
@@ -1216,47 +1213,94 @@ def test_is_same_local_file_detects_aliases(tmp_path):
 
     assert not is_same_local_file(str(target), str(other))
     assert not is_same_local_file(str(target), "https://example.com/output.jsonl")
+    assert not is_same_local_file(str(target), str(tmp_path / "missing.jsonl"))
+    assert not is_same_local_file(str(fifo), str(fifo))
 
 
 @pytest.mark.asyncio
 async def test_dispatch_batch_counts_error_responses_as_completed(tmp_path):
-    """Synthesized error responses advance progress like any other response.
-
-    They never reach run_request, so counting only dispatched requests leaves
-    the bar short of the batch size for inputs containing an unsupported URL.
-    """
-    input_path = tmp_path / "input.jsonl"
-    input_path.write_text(INPUT_BATCH + "\n")
+    """Synthesized error responses advance progress like any other response."""
+    input_path = _write_batch(tmp_path, [INPUT_BATCH])
     output_path = tmp_path / "output.jsonl"
     num_requests = len(INPUT_BATCH.strip().split("\n"))
 
     tracker = BatchProgressTracker()
-    with open(output_path, "w", encoding="utf-8") as output_file:
-        with tracker.pbar(total=num_requests) as pbar:
-            # An empty registry makes every response a synthesized error.
-            await dispatch_batch(
-                str(input_path), output_file, {}, tracker, max_inflight=2
-            )
-        assert pbar.n == num_requests
+    with (
+        open(input_path, encoding="utf-8") as input_file,
+        open(output_path, "w", encoding="utf-8") as output_file,
+        tracker.pbar(total=num_requests) as pbar,
+    ):
+        # An empty registry makes every response a synthesized error.
+        await dispatch_batch(input_file, output_file, {}, tracker, max_inflight=2)
+    assert pbar.n == num_requests
 
 
 @pytest.mark.asyncio
-async def test_local_input_path_stages_a_stream(tmp_path):
-    """A non-seekable input must be staged so the batch can be read twice.
+async def test_open_batch_input_reads_a_regular_file_in_place(tmp_path):
+    """An ordinary file is not copied; it is seekable, so both passes reread it."""
+    input_path = _write_batch(tmp_path, [INPUT_BATCH])
 
-    The batch is validated in one pass and run in another; a pipe would be
-    drained by the first, leaving the second with nothing.
-    """
+    async with open_batch_input(str(input_path), None) as f:
+        assert f.name == str(input_path)
+        assert _read_twice(f) == (INPUT_BATCH + "\n", INPUT_BATCH + "\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_tmp_dir", [False, True])
+async def test_open_batch_input_stages_a_stream(tmp_path, use_tmp_dir):
+    """A non-seekable input must be staged so the batch can be read twice."""
     payload = '{"custom_id": "request-1"}\n'
     read_fd, write_fd = os.pipe()
     os.write(write_fd, payload.encode())
     os.close(write_fd)
 
-    async with local_input_path(f"/dev/fd/{read_fd}", str(tmp_path)) as path:
-        with open(path, encoding="utf-8") as f:
-            assert f.read() == payload
-        with open(path, encoding="utf-8") as f:
-            assert f.read() == payload
+    tmp_dir = str(tmp_path) if use_tmp_dir else None
+    async with open_batch_input(f"/dev/fd/{read_fd}", tmp_dir) as f:
+        assert _read_twice(f) == (payload, payload)
+        staged_files = list(tmp_path.iterdir())
+        assert bool(staged_files) == use_tmp_dir
+    assert not list(tmp_path.iterdir()), "staged copy must be removed"
+
+
+@pytest.mark.asyncio
+async def test_open_batch_input_rereads_a_descriptor_alias(tmp_path):
+    """Both passes see the whole batch through a descriptor alias."""
+    source = _write_batch(tmp_path, [INPUT_BATCH])
+    expected = len(INPUT_BATCH.strip().split("\n"))
+
+    with open(source, encoding="utf-8") as handle:
+        async with open_batch_input(f"/dev/fd/{handle.fileno()}", None) as f:
+            assert validate_batch(f) == expected
+            f.seek(0)
+            assert validate_batch(f) == expected
+
+
+@pytest.mark.asyncio
+async def test_open_batch_input_downloads_a_url(tmp_path, monkeypatch):
+    """A URL body is downloaded through the shared HTTP client to a file."""
+    payload = "\n".join(INPUT_BATCH.strip().split("\n")[:2]) + "\n"
+    downloads = []
+
+    async def fake_download_file(url, save_path, *, chunk_size):
+        downloads.append((url, save_path))
+        save_path.write_text(payload)
+        return save_path
+
+    monkeypatch.setattr(
+        run_batch_module.global_http_connection,
+        "async_download_file",
+        fake_download_file,
+    )
+
+    async with open_batch_input("https://example.com/batch.jsonl", str(tmp_path)) as f:
+        assert validate_batch(f) == 2
+        f.seek(0)
+        assert validate_batch(f) == 2
+
+    ((url, save_path),) = downloads
+    assert url == "https://example.com/batch.jsonl"
+    assert save_path.is_relative_to(tmp_path)
+    assert not save_path.exists(), "downloaded copy must be removed"
 
 
 def test_max_inflight_must_be_positive():
@@ -1265,19 +1309,27 @@ def test_max_inflight_must_be_positive():
         validate_run_batch_args(SimpleNamespace(max_inflight=0))
 
 
+def _chat_requests(n: int) -> list[dict]:
+    return [
+        {"custom_id": f"request-{i}", "method": "POST", "url": "/v1/chat/completions"}
+        for i in range(n)
+    ]
+
+
+def _response(request_json: str) -> BatchRequestOutput:
+    return BatchRequestOutput(
+        id="vllm-test",
+        custom_id=json.loads(request_json)["custom_id"],
+        response=None,
+        error=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_dispatch_batch_respects_max_inflight(tmp_path, monkeypatch):
-    """No more than max_inflight requests may be alive at once.
-
-    This bound is what keeps frontend memory flat; without it the whole input
-    file is submitted at once and memory grows with the batch.
-    """
-    requests = [
-        {"custom_id": f"request-{i}", "method": "POST", "url": "/v1/chat/completions"}
-        for i in range(50)
-    ]
-    input_path = tmp_path / "input.jsonl"
-    input_path.write_text("\n".join(json.dumps(r) for r in requests) + "\n")
+    """No more than max_inflight requests may be alive at once."""
+    requests = _chat_requests(50)
+    input_path = _write_batch(tmp_path, [json.dumps(r) for r in requests])
     output_path = tmp_path / "output.jsonl"
 
     live = 0
@@ -1289,104 +1341,65 @@ async def test_dispatch_batch_respects_max_inflight(tmp_path, monkeypatch):
         peak = max(peak, live)
         await asyncio.sleep(0)
         live -= 1
-        return BatchRequestOutput(
-            id="vllm-test",
-            custom_id=json.loads(request_json)["custom_id"],
-            response=None,
-            error=None,
-        )
+        return _response(request_json)
 
     monkeypatch.setattr(run_batch_module, "run_one_request", fake_run_one_request)
 
     max_inflight = 8
-    with open(output_path, "w", encoding="utf-8") as output_file:
+    with (
+        open(input_path, encoding="utf-8") as input_file,
+        open(output_path, "w", encoding="utf-8") as output_file,
+    ):
         await dispatch_batch(
-            str(input_path),
-            output_file,
-            {},
-            BatchProgressTracker(),
-            max_inflight,
+            input_file, output_file, {}, BatchProgressTracker(), max_inflight
         )
 
     assert peak <= max_inflight
     assert len(output_path.read_text().strip().split("\n")) == len(requests)
 
 
-def _make_streaming_aiohttp_mocks(body: bytes, chunk_size: int = 8):
-    """Mock a ClientSession whose GET body is read with content.iter_chunked."""
-
-    async def iter_chunked(_size):
-        for start in range(0, len(body), chunk_size):
-            yield body[start : start + chunk_size]
-
-    mock_resp = MagicMock()
-    mock_resp.raise_for_status = MagicMock()
-    mock_resp.content.iter_chunked = iter_chunked
-    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-    mock_resp.__aexit__ = AsyncMock(return_value=False)
-
-    mock_session = MagicMock()
-    mock_session.get = MagicMock(return_value=mock_resp)
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=False)
-    return mock_session
-
-
 @pytest.mark.asyncio
-async def test_local_input_path_downloads_a_url(tmp_path):
-    """A URL body is staged to a local file, not held in memory."""
-    payload = ("\n".join(INPUT_BATCH.strip().split("\n")[:2]) + "\n").encode()
-    session = _make_streaming_aiohttp_mocks(payload)
-
-    with patch(
-        "vllm.entrypoints.launchers.run_batch.aiohttp.ClientSession",
-        return_value=session,
-    ):
-        async with local_input_path(
-            "https://example.com/batch.jsonl", str(tmp_path)
-        ) as path:
-            assert path != "https://example.com/batch.jsonl"
-            with open(path, "rb") as f:
-                assert f.read() == payload
-            assert validate_batch(path) == 2
-
-
-@pytest.mark.asyncio
-async def test_batch_output_writer_uploads_url_output_once(tmp_path, monkeypatch):
-    """A URL destination is staged locally and uploaded after the batch."""
+@pytest.mark.parametrize("use_tmp_dir", [False, True])
+async def test_batch_output_writer_uploads_url_output_once(
+    tmp_path, monkeypatch, use_tmp_dir
+):
+    """A URL destination is staged and uploaded after the batch."""
     uploaded = {}
 
     async def fake_upload_data(output_url, data_or_file, from_file):
         uploaded["url"] = output_url
         uploaded["from_file"] = from_file
-        with open(data_or_file, encoding="utf-8") as f:
-            uploaded["content"] = f.read()
+        if from_file:
+            with open(data_or_file, encoding="utf-8") as f:
+                uploaded["content"] = f.read()
+        else:
+            uploaded["content"] = data_or_file
 
     monkeypatch.setattr(run_batch_module, "upload_data", fake_upload_data)
 
+    tmp_dir = str(tmp_path) if use_tmp_dir else None
     async with batch_output_writer(
-        "https://example.com/output.jsonl", str(tmp_path)
+        "https://example.com/output.jsonl", tmp_dir
     ) as output_file:
         print("first", file=output_file)
         print("second", file=output_file)
         assert not uploaded, "upload must wait until the batch finishes"
+        assert bool(list(tmp_path.iterdir())) == use_tmp_dir
 
+    # The in-memory path uploads stripped bytes, as it always has.
     assert uploaded == {
         "url": "https://example.com/output.jsonl",
-        "from_file": True,
-        "content": "first\nsecond\n",
+        "from_file": use_tmp_dir,
+        "content": "first\nsecond\n" if use_tmp_dir else b"first\nsecond",
     }
+    assert not list(tmp_path.iterdir()), "staged copy must be removed"
 
 
 @pytest.mark.asyncio
 async def test_batch_output_writer_url_output_uploads_nothing_on_failure(
     tmp_path, monkeypatch
 ):
-    """A failed batch uploads nothing, so a URL output is all or nothing.
-
-    Incremental writes only make a local output recoverable; this pins the
-    documented limitation so it cannot change silently.
-    """
+    """A failed batch uploads nothing, so a URL output is all or nothing."""
     upload = AsyncMock()
     monkeypatch.setattr(run_batch_module, "upload_data", upload)
 
@@ -1403,12 +1416,7 @@ async def test_batch_output_writer_url_output_uploads_nothing_on_failure(
 @pytest.mark.asyncio
 async def test_dispatch_batch_cancels_inflight_on_failure(tmp_path, monkeypatch):
     """An aborted batch must not leave requests running behind it."""
-    requests = [
-        {"custom_id": f"request-{i}", "method": "POST", "url": "/v1/chat/completions"}
-        for i in range(8)
-    ]
-    input_path = tmp_path / "input.jsonl"
-    input_path.write_text("\n".join(json.dumps(r) for r in requests) + "\n")
+    input_path = _write_batch(tmp_path, [json.dumps(r) for r in _chat_requests(8)])
 
     started: list[asyncio.Task | None] = []
 
@@ -1421,15 +1429,12 @@ async def test_dispatch_batch_cancels_inflight_on_failure(tmp_path, monkeypatch)
     monkeypatch.setattr(run_batch_module, "run_one_request", fake_run_one_request)
 
     with (
+        open(input_path, encoding="utf-8") as input_file,
         open(tmp_path / "output.jsonl", "w", encoding="utf-8") as output_file,
         pytest.raises(RuntimeError, match="request blew up"),
     ):
         await dispatch_batch(
-            str(input_path),
-            output_file,
-            {},
-            BatchProgressTracker(),
-            max_inflight=4,
+            input_file, output_file, {}, BatchProgressTracker(), max_inflight=4
         )
 
     await asyncio.sleep(0)
@@ -1439,31 +1444,59 @@ async def test_dispatch_batch_cancels_inflight_on_failure(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_local_input_path_stages_a_descriptor_alias(tmp_path):
-    """A descriptor alias is staged even though it stats as a regular file.
+async def test_dispatch_batch_keeps_responses_written_before_a_failure(
+    tmp_path, monkeypatch
+):
+    """A failure must not discard responses that had already finished."""
+    input_path = _write_batch(tmp_path, [json.dumps(r) for r in _chat_requests(3)])
+    output_path = tmp_path / "output.jsonl"
 
-    Reopening /dev/fd/N shares the descriptor's offset on some platforms, so
-    the second pass would start at EOF and the batch would run nothing.
-    """
-    source = tmp_path / "batch.jsonl"
-    source.write_text(INPUT_BATCH + "\n")
-    expected = len(INPUT_BATCH.strip().split("\n"))
+    async def fake_run_one_request(request_json, endpoint_registry):
+        if json.loads(request_json)["custom_id"] == "request-1":
+            raise RuntimeError("request blew up")
+        return _response(request_json)
 
-    with open(source, encoding="utf-8") as handle:
-        alias = f"/dev/fd/{handle.fileno()}"
-        async with local_input_path(alias, str(tmp_path)) as path:
-            assert path != alias
-            # Readable twice, which is what the two passes need.
-            assert validate_batch(path) == expected
-            assert validate_batch(path) == expected
+    monkeypatch.setattr(run_batch_module, "run_one_request", fake_run_one_request)
+
+    with (
+        open(input_path, encoding="utf-8") as input_file,
+        open(output_path, "w", encoding="utf-8") as output_file,
+        pytest.raises(RuntimeError, match="request blew up"),
+    ):
+        await dispatch_batch(
+            input_file, output_file, {}, BatchProgressTracker(), max_inflight=1
+        )
+
+    written = [
+        BatchRequestOutput.model_validate_json(line).custom_id
+        for line in output_path.read_text().strip().split("\n")
+    ]
+    assert written == ["request-0"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_batch_reports_a_cancelled_request(tmp_path, monkeypatch):
+    """A request cancelled from inside the engine fails the batch with an error."""
+    input_path = _write_batch(tmp_path, [json.dumps(r) for r in _chat_requests(2)])
+
+    async def fake_run_one_request(request_json, endpoint_registry):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(run_batch_module, "run_one_request", fake_run_one_request)
+
+    with (
+        open(input_path, encoding="utf-8") as input_file,
+        open(tmp_path / "output.jsonl", "w", encoding="utf-8") as output_file,
+        pytest.raises(RuntimeError, match="cancelled"),
+    ):
+        await dispatch_batch(
+            input_file, output_file, {}, BatchProgressTracker(), max_inflight=4
+        )
 
 
 @pytest.mark.asyncio
 async def test_unsupported_url_error_lists_registry_endpoints(tmp_path):
-    """The error names the endpoints the registry actually serves.
-
-    Built from the registry rather than a literal, so the two cannot drift.
-    """
+    """The error names the endpoints the registry actually serves."""
     registry = {
         "widgets": {
             "url": "/v1/widgets",
@@ -1473,13 +1506,15 @@ async def test_unsupported_url_error_lists_registry_endpoints(tmp_path):
     }
     request = json.loads(INPUT_BATCH.strip().split("\n")[0])
     request["url"] = "/v1/unsupported"
-    input_path = tmp_path / "input.jsonl"
-    input_path.write_text(json.dumps(request) + "\n")
+    input_path = _write_batch(tmp_path, [json.dumps(request)])
     output_path = tmp_path / "output.jsonl"
 
-    with open(output_path, "w", encoding="utf-8") as output_file:
+    with (
+        open(input_path, encoding="utf-8") as input_file,
+        open(output_path, "w", encoding="utf-8") as output_file,
+    ):
         await dispatch_batch(
-            str(input_path), output_file, registry, BatchProgressTracker(), 4
+            input_file, output_file, registry, BatchProgressTracker(), 4
         )
 
     error = BatchRequestOutput.model_validate_json(
@@ -1489,72 +1524,14 @@ async def test_unsupported_url_error_lists_registry_endpoints(tmp_path):
     assert "/v1/widgets" in error
 
 
-def test_only_descriptor_aliases_need_staging(tmp_path):
-    """An ordinary file is read in place; only descriptor aliases are copied.
-
-    Staging every path under /dev would copy a batch held on tmpfs, which is
-    re-readable and may be large.
-    """
-    ordinary = tmp_path / "batch.jsonl"
-    ordinary.write_text("{}\n")
-
-    assert not needs_staging(str(ordinary))
-    assert not is_descriptor_alias("/dev/shm/batch.jsonl")
-    assert not is_descriptor_alias("/dev/null")
-
-    assert is_descriptor_alias("/dev/stdin")
-    assert is_descriptor_alias("/dev/fd/3")
-    assert is_descriptor_alias("/proc/self/fd/12")
-    assert is_descriptor_alias("/proc/451/fd/7")
-
-
-@pytest.mark.asyncio
-async def test_write_finished_keeps_responses_that_completed_with_a_failure(tmp_path):
-    """A failure must not discard responses that finished alongside it.
-
-    Requests complete in groups, so raising on the first failure would throw
-    away work that had already succeeded.
-    """
-
-    async def succeed(custom_id):
-        return BatchRequestOutput(
-            id="vllm-test", custom_id=custom_id, response=None, error=None
-        )
-
-    async def fail():
-        raise RuntimeError("request blew up")
-
-    # The failure is first, so an implementation that raises immediately would
-    # write nothing.
-    tasks = [asyncio.create_task(fail())] + [
-        asyncio.create_task(succeed(f"request-{i}")) for i in range(3)
-    ]
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-    output_path = tmp_path / "output.jsonl"
-    with open(output_path, "w", encoding="utf-8") as output_file:
-        failure = write_finished(tasks, output_file, BatchProgressTracker())
-
-    assert isinstance(failure, RuntimeError)
-    written = [
-        BatchRequestOutput.model_validate_json(line).custom_id
-        for line in output_path.read_text().strip().split("\n")
-    ]
-    assert written == ["request-0", "request-1", "request-2"]
-
-
-def test_url_matches_accepts_versioned_endpoints():
-    """An endpoint with no version of its own is also served under one.
-
-    Score and rerank are reachable as /score and /v1/score. The previous suffix
-    match also accepted unrelated paths ending in the same segment.
-    """
-    for url in ("/score", "/v1/score", "/v2/score", "/v10/score"):
+def test_url_matches_accepts_any_prefix_for_unversioned_endpoints():
+    """An endpoint with no version of its own is served under any prefix."""
+    for url in ("/score", "/v1/score", "/api/v1/score", "/foo/score"):
         assert url_matches("/score", url), url
-    for url in ("/foo/score", "/a/b/score", "/scorecard", "/vX/score"):
+    for url in ("/scorecard", "/score/", "/v1/scores"):
         assert not url_matches("/score", url), url
 
     # An endpoint that already names its version matches only that version.
     assert url_matches("/v1/embeddings", "/v1/embeddings")
-    for url in ("/v2/embeddings", "/v1/v1/embeddings"):
+    for url in ("/v2/embeddings", "/api/v1/embeddings"):
         assert not url_matches("/v1/embeddings", url), url
