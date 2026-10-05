@@ -40,6 +40,7 @@ class BeamSearchOnlineMixin(ABC):
         temperature = params.temperature
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
+        self.engine_client.input_processor.resolve_watermarking(params)
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
@@ -62,6 +63,7 @@ class BeamSearchOnlineMixin(ABC):
             logprobs=logprobs_num,
             max_tokens=1,
             temperature=temperature,
+            watermarking=False,
             detokenize=False,
         )
         all_beams = [
