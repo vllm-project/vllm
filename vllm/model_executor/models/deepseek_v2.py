@@ -665,11 +665,6 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         )  # Only has one vector instead of K + V
 
     def forward(self): ...
-      
-    @property
-    def uses_shuffled_layout(self) -> bool:
-        """Whether this cache's reader expects the shuffled value layout."""
-        return False
 
     @property
     def uses_shuffled_layout(self) -> bool:

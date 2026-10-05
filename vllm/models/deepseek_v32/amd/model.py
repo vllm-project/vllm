@@ -191,14 +191,14 @@ class DeepseekV32Model(torch.nn.Module):
                 max_tokens,
                 num_local_heads,
                 config.kv_lora_rank + config.qk_rope_head_dim,
-                dtype=torch.float8_e4m3fn,
+                dtype=current_platform.fp8_dtype(),
                 device=self.device,
             )
             q_index_buffer = torch.empty(
                 max_tokens,
                 config.index_n_heads,
                 config.index_head_dim,
-                dtype=torch.float8_e4m3fn,
+                dtype=current_platform.fp8_dtype(),
                 device=self.device,
             )
             index_weights_buffer = torch.empty(
@@ -266,7 +266,7 @@ class DeepseekV32Model(torch.nn.Module):
                 index_cos, index_sin = cos.contiguous(), sin.contiguous()
             for layer in self.layers[self.start_layer : self.end_layer]:
                 layer.self_attn.set_aiter_rope(rope_cos, rope_sin, index_cos, index_sin)
-        
+
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             DeepseekV2MoE,

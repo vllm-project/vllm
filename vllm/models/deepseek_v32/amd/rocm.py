@@ -22,10 +22,12 @@ class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
     """Indexer K cache that reports aiter's shuffled layout above block size 1."""
 
     def get_attn_backend(self):
+        """Indexer backend for this cache."""
         return DeepseekV32IndexerBackend
 
     @property
     def uses_shuffled_layout(self) -> bool:
+        """Whether the indexer K cache uses aiter's shuffled layout."""
         # aiter's gather/insert pair shuffles the cache above block size 1:
         # [n_blocks, blk/16, head_dim/16, 16, 16] instead of [n_blocks, blk, head_dim].
         return self.kv_cache.ndim == 3 and self.kv_cache.shape[1] != 1
@@ -432,7 +434,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
                 kv_c,
                 k_pe,
                 # aiter rejects the raw uint8 cache; the enable gate guarantees fp8.
-                self.kv_cache.view(torch.float8_e4m3fn),
+                self.kv_cache.view(current_platform.fp8_dtype()),
                 mqa_q,
                 mla_slot,
                 self._k_scale,

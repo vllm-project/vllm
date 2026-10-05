@@ -77,14 +77,14 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
                 max_tokens,
                 num_local_heads,
                 config.kv_lora_rank + config.qk_rope_head_dim,
-                dtype=torch.float8_e4m3fn,
+                dtype=current_platform.fp8_dtype(),
                 device=current_platform.device_type,
             )
             q_index_buffer = torch.empty(
                 max_tokens,
                 config.index_n_heads,
                 config.index_head_dim,
-                dtype=torch.float8_e4m3fn,
+                dtype=current_platform.fp8_dtype(),
                 device=current_platform.device_type,
             )
             index_weights_buffer = torch.empty(
