@@ -413,7 +413,8 @@ class NixlBaseConnectorScheduler:
         ):
             truncate_prompt_for_prefill(request, stop)
             request.max_tokens = 1
-            params["_p_side_truncated"] = True
+            # Parallel samples can share kv_transfer_params in-process.
+            request.kv_transfer_params = {**params, "_p_side_truncated": True}
 
     def _build_save_meta(
         self,

@@ -1674,6 +1674,25 @@ def test_mamba_n1_p_side_truncation():
     d_req.mm_features = [whole]
     assert fa_sched.get_num_new_matched_tokens(d_req, 0) == (0, False)
 
+    # A request that skips reading the prefix cache (prompt logprobs) is not
+    # cut: the decoder loads nothing and recomputes its whole prompt.
+    logprobs_req = create_request(num_tokens=10, do_remote_decode=True)
+    logprobs_req.sampling_params.skip_reading_prefix_cache = True
+    fa_sched.on_new_request(logprobs_req)
+    assert logprobs_req.num_prompt_tokens == len(logprobs_req.prompt_token_ids) == 10
+
+    # In-process parallel samples share the prompt and kv_transfer_params;
+    # each sample is cut on its own without touching the other's.
+    first = create_request(num_tokens=10, do_remote_decode=True)
+    second = create_request(num_tokens=10, do_remote_decode=True)
+    second.prompt_token_ids = first.prompt_token_ids
+    second.kv_transfer_params = first.kv_transfer_params
+    fa_sched.on_new_request(first)
+    fa_sched.on_new_request(second)
+    for sample in (first, second):
+        assert sample.num_prompt_tokens == len(sample.prompt_token_ids) == 9
+        assert sample.max_tokens == 1
+
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
