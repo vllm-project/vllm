@@ -306,8 +306,9 @@ class SamplingParams(
     """Controls the randomness of the sampling. Lower values make the model
     more deterministic, while higher values make the model more random. Zero
     means greedy sampling."""
-    watermarking: bool = True
-    """Whether to apply the engine's configured watermark to this request."""
+    watermarking: bool | None = None
+    """Whether to apply the engine's configured watermark to this request.
+    ``None`` defaults to enabled."""
     top_p: float = 1.0
     """Controls the cumulative probability of the top tokens to consider. Must
     be in (0, 1]. Set to 1 to consider all tokens."""
@@ -397,6 +398,7 @@ class SamplingParams(
     output_text_buffer_length: int = 0
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
+    _watermarking_skipped: bool = False
 
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None
@@ -450,7 +452,7 @@ class SamplingParams(
         frequency_penalty: float | None = 0.0,
         repetition_penalty: float | None = 1.0,
         temperature: float | None = 1.0,
-        watermarking: bool = True,
+        watermarking: bool | None = None,
         top_p: float | None = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
@@ -1469,6 +1471,7 @@ class SamplingParams(
             _bad_words_token_ids=[[0], [1, 2]],
             logprobs=5,
             prompt_logprobs=1,
+            watermarking=True,
         )
 
 
@@ -1488,6 +1491,7 @@ class BeamSearchParams(
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
     skip_special_tokens: bool = True
+    watermarking: bool | None = None
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
