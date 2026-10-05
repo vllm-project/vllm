@@ -1965,10 +1965,6 @@ def selective_scan_fwd(
     has_initial_state: torch.Tensor | None,
     ssm_states: torch.Tensor,
     null_block_id: int,
-    block_size: int = 1024,
-    block_idx_first_scheduled_token: torch.Tensor | None = None,
-    block_idx_last_scheduled_token: torch.Tensor | None = None,
-    initial_state_idx: torch.Tensor | None = None,
     cu_chunk_seqlen: torch.Tensor | None = None,
     last_chunk_indices: torch.Tensor | None = None,
 ):
@@ -1987,10 +1983,6 @@ def selective_scan_fwd(
         has_initial_state,
         ssm_states,
         null_block_id,
-        block_size,
-        block_idx_first_scheduled_token,
-        block_idx_last_scheduled_token,
-        initial_state_idx,
         cu_chunk_seqlen,
         last_chunk_indices,
     )

@@ -109,15 +109,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
 
     const int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
-    int cache_index;
-    if (cache_indices == nullptr) {
-        cache_index = batch_id;
-    } else if (params.cache_enabled) {
-        const int* initial_state_idx = reinterpret_cast<const int*>(params.initial_state_idx_ptr);
-        cache_index = cache_indices[batch_id * params.cache_indices_stride + initial_state_idx[batch_id]];
-    } else {
-        cache_index = cache_indices[batch_id];
-    }
+    const int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
     // Skip batch entries whose cache index maps to the null block (padding).
     if (cache_indices != nullptr && cache_index == params.null_block_id){
         return;
@@ -132,18 +124,11 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + sequence_start_index * params.C_batch_stride + group_id * params.C_group_stride;
 
-    typename Ktraits::state_t *ssm_states;
-    if (params.cache_enabled) {
-        // APC mode: ssm_states points to the base, we'll use absolute cache slots later
-        ssm_states = reinterpret_cast<typename Ktraits::state_t *>(params.ssm_states_ptr) +
-            dim_id * kNRows * params.ssm_states_dim_stride;
-    } else {
-        // Non-APC mode: offset by cache_index as before
-        ssm_states = reinterpret_cast<typename Ktraits::state_t *>(params.ssm_states_ptr) +
-            cache_index * params.ssm_states_batch_stride +
-            dim_id * kNRows * params.ssm_states_dim_stride;
-    }
-    
+    typename Ktraits::state_t *ssm_states =
+        reinterpret_cast<typename Ktraits::state_t *>(params.ssm_states_ptr) +
+        cache_index * params.ssm_states_batch_stride +
+        dim_id * kNRows * params.ssm_states_dim_stride;
+
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
         #pragma unroll
@@ -159,46 +144,24 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         }
     }
 
-    // Use block_size for chunking when APC is enabled, otherwise use 2048 for backwards compatibility
-    const int block_size = params.cache_enabled ? params.block_size : 2048;
+    const int chunk_size = 2048;
 
-    const int* batch_cache_indices = cache_indices != nullptr ?
-                                     cache_indices + batch_id * params.cache_indices_stride : nullptr;
-    const int* block_idx_first_scheduled = params.block_idx_first_scheduled_token_ptr != nullptr ?
-                                           reinterpret_cast<const int*>(params.block_idx_first_scheduled_token_ptr) : nullptr;
-    const int* block_idx_last_scheduled = params.block_idx_last_scheduled_token_ptr != nullptr ?
-                                          reinterpret_cast<const int*>(params.block_idx_last_scheduled_token_ptr) : nullptr;
-    const int* initial_state_idx = params.initial_state_idx_ptr != nullptr ?
-                                   reinterpret_cast<const int*>(params.initial_state_idx_ptr) : nullptr;
     const int* cu_chunk_seqlen = params.cu_chunk_seqlen_ptr != nullptr ?
                                  reinterpret_cast<const int*>(params.cu_chunk_seqlen_ptr) : nullptr;
     const int* last_chunk_indices = params.last_chunk_indices_ptr != nullptr ?
                                     reinterpret_cast<const int*>(params.last_chunk_indices_ptr) : nullptr;
 
-    const size_t load_cache_slot = params.cache_enabled && batch_cache_indices != nullptr ? batch_cache_indices[initial_state_idx[batch_id]] : cache_index;
-
-    const int block_idx_first = (params.cache_enabled && block_idx_first_scheduled != nullptr) ?
-                                 block_idx_first_scheduled[batch_id] : 0;
-
-    // Determine chunk boundaries from pre-computed metadata (APC mode)
-    // or fall back to simple block_size chunking.
+    // Determine chunk boundaries from pre-computed metadata, or fall back to
+    // fixed-size chunking.
     int first_chunk_idx, n_chunks;
-    int current_position;
 
     if (cu_chunk_seqlen != nullptr && last_chunk_indices != nullptr) {
         const int last_chunk_idx = last_chunk_indices[batch_id];
         first_chunk_idx = (batch_id == 0) ? 0 : last_chunk_indices[batch_id - 1] + 1;
         n_chunks = last_chunk_idx - first_chunk_idx + 1;
-        // Derive current_position: if the first chunk is partial (fills remainder
-        // of a started block), offset into the block accordingly.
-        const int first_chunk_tokens = cu_chunk_seqlen[first_chunk_idx + 1] - cu_chunk_seqlen[first_chunk_idx];
-        const int chunk_start_offset = (n_chunks > 1 && first_chunk_tokens < block_size)
-                                        ? (block_size - first_chunk_tokens) : 0;
-        current_position = block_idx_first * block_size + chunk_start_offset;
     } else {
         first_chunk_idx = 0;
-        n_chunks = (seqlen + block_size - 1) / block_size;
-        current_position = 0;
+        n_chunks = (seqlen + chunk_size - 1) / chunk_size;
     }
 
     int tokens_processed = 0;
@@ -206,7 +169,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
         const int chunk_tokens = (cu_chunk_seqlen != nullptr)
             ? cu_chunk_seqlen[first_chunk_idx + chunk + 1] - cu_chunk_seqlen[first_chunk_idx + chunk]
-            : min(block_size, seqlen - tokens_processed);
+            : min(chunk_size, seqlen - tokens_processed);
         if (chunk_tokens <= 0) break;
         input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
 
@@ -298,14 +261,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 if (chunk > 0) {
                     running_prefix = smem_running_prefix[state_idx + r * MAX_DSTATE];
                 } else {
-                    // Load initial state
-                    if (params.cache_enabled && has_initial_state && batch_cache_indices != nullptr) {
-                        size_t state_offset = load_cache_slot * params.ssm_states_batch_stride +
-                                             r * params.ssm_states_dim_stride +
-                                             state_idx * params.ssm_states_dstate_stride;
-                        running_prefix = make_float2(1.0, float(ssm_states[state_offset]));
-                    } else if (has_initial_state) {
-                        // Non-APC mode: load from current batch position
+                    if (has_initial_state) {
                         running_prefix = make_float2(1.0, float(ssm_states[state_idx * params.ssm_states_dstate_stride]));
                     } else {
                         // No initial state
@@ -322,23 +278,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 if (threadIdx.x == 0) {
                     smem_running_prefix[state_idx + r * MAX_DSTATE] = prefix_op.running_prefix;
 
-                    // Store state at the end of each aligned chunk when cache is enabled
-                    if (params.cache_enabled && batch_cache_indices != nullptr) {
-                        size_t cache_slot;
-                        if (chunk == n_chunks - 1) {
-                            cache_slot = batch_cache_indices[block_idx_last_scheduled[batch_id]];
-                        } else {
-                            const int block_idx_completed = (current_position + chunk_tokens - 1) / block_size;
-                            cache_slot = batch_cache_indices[block_idx_completed];
-                        }
-
-                        size_t state_offset = cache_slot * params.ssm_states_batch_stride +
-                                             r * params.ssm_states_dim_stride +
-                                             state_idx * params.ssm_states_dstate_stride;
-
-                        ssm_states[state_offset] = typename Ktraits::state_t(prefix_op.running_prefix.y);
-                    } else if (!params.cache_enabled && chunk == n_chunks - 1) {
-                        // Non-APC mode: store only final state at current batch position
+                    if (chunk == n_chunks - 1) {
                         ssm_states[state_idx * params.ssm_states_dstate_stride] = typename Ktraits::state_t(prefix_op.running_prefix.y);
                     }
                 }
@@ -386,7 +326,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         Cvar += chunk_tokens;
 
         tokens_processed += chunk_tokens;
-        current_position += chunk_tokens;
     }
 }
 
@@ -425,9 +364,7 @@ template<typename input_t, typename weight_t, typename state_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
 
     #ifndef USE_ROCM
-        if (params.cache_enabled && params.block_size == 1024) {
-            selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream);
-        } else if (params.seqlen <= 128) {
+        if (params.seqlen <= 128) {
             selective_scan_fwd_launch<32, 4, input_t, weight_t, state_t>(params, stream);
         } else if (params.seqlen <= 256) {
             selective_scan_fwd_launch<32, 8, input_t, weight_t, state_t>(params, stream);
@@ -439,9 +376,7 @@ void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
             selective_scan_fwd_launch<128, 16, input_t, weight_t, state_t>(params, stream);
         }
     #else
-        if (params.cache_enabled && params.block_size == 1024) {
-            selective_scan_fwd_launch<64, 16, input_t, weight_t, state_t>(params, stream);
-        } else if (params.seqlen <= 256) {
+        if (params.seqlen <= 256) {
             selective_scan_fwd_launch<64, 4, input_t, weight_t, state_t>(params, stream);
         } else if (params.seqlen <= 512) {
             selective_scan_fwd_launch<64, 8, input_t, weight_t, state_t>(params, stream);
@@ -527,10 +462,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         const std::optional<torch::stable::Tensor>& has_initial_state,
                         bool varlen,
                         int64_t null_block_id,
-                        int64_t block_size,
-                        const std::optional<torch::stable::Tensor> &block_idx_first_scheduled_token,
-                        const std::optional<torch::stable::Tensor> &block_idx_last_scheduled_token,
-                        const std::optional<torch::stable::Tensor> &initial_state_idx,
                         const std::optional<torch::stable::Tensor> &cu_chunk_seqlen,
                         const std::optional<torch::stable::Tensor> &last_chunk_indices) {
 
@@ -566,14 +497,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.cache_indices_ptr = cache_indices.has_value() ? cache_indices.value().data_ptr() : nullptr;
     params.has_initial_state_ptr = has_initial_state.has_value() ? has_initial_state.value().data_ptr() : nullptr;
 
-    // Set cache parameters - cache is enabled if we have direct cache writing params
-    params.cache_enabled = block_idx_first_scheduled_token.has_value();
-    params.block_size = static_cast<int>(block_size);
-
-    // Set direct cache writing pointers
-    params.block_idx_first_scheduled_token_ptr = block_idx_first_scheduled_token.has_value() ? block_idx_first_scheduled_token.value().data_ptr() : nullptr;
-    params.block_idx_last_scheduled_token_ptr = block_idx_last_scheduled_token.has_value() ? block_idx_last_scheduled_token.value().data_ptr() : nullptr;
-    params.initial_state_idx_ptr = initial_state_idx.has_value() ? initial_state_idx.value().data_ptr() : nullptr;
     params.cu_chunk_seqlen_ptr = cu_chunk_seqlen.has_value() ? cu_chunk_seqlen.value().data_ptr() : nullptr;
     params.last_chunk_indices_ptr = last_chunk_indices.has_value() ? last_chunk_indices.value().data_ptr() : nullptr;
 
@@ -606,7 +529,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
         params.ssm_states_dim_stride = ssm_states.stride(1);
         params.ssm_states_dstate_stride = ssm_states.stride(2);
 
-        params.cache_indices_stride = cache_indices.has_value() ? cache_indices.value().stride(0) : 0;
 
     }
     else{
@@ -641,7 +563,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
         params.ssm_states_dim_stride = ssm_states.stride(1);
         params.ssm_states_dstate_stride = ssm_states.stride(2);
 
-        params.cache_indices_stride = cache_indices.has_value() ? cache_indices.value().stride(0) : 0;
     }
 }
 
@@ -658,10 +579,6 @@ void selective_scan_fwd(const torch::stable::Tensor &u, const torch::stable::Ten
                   // used to identify padding entries if cache_indices provided
                   // in case of padding, the kernel will return early
                   int64_t null_block_id,
-                  int64_t block_size,
-                  const std::optional<torch::stable::Tensor> &block_idx_first_scheduled_token,
-                  const std::optional<torch::stable::Tensor> &block_idx_last_scheduled_token,
-                  const std::optional<torch::stable::Tensor> &initial_state_idx,
                   const std::optional<torch::stable::Tensor> &cu_chunk_seqlen,
                   const std::optional<torch::stable::Tensor> &last_chunk_indices) {
     auto input_type = u.scalar_type();
@@ -755,16 +672,7 @@ void selective_scan_fwd(const torch::stable::Tensor &u, const torch::stable::Ten
         auto cache_indices_ = cache_indices.value();
         STD_TORCH_CHECK(cache_indices_.scalar_type() == torch::headeronly::ScalarType::Int);
         STD_TORCH_CHECK(cache_indices_.is_cuda());
-
-        // cache_indices can be either 1D (batch_size,) for non-APC mode
-        // or 2D (batch_size, max_positions) for APC mode
-        const bool is_apc_mode = block_idx_first_scheduled_token.has_value();
-        if (is_apc_mode) {
-            STD_TORCH_CHECK(cache_indices_.dim() == 2, "cache_indices must be 2D for APC mode");
-            STD_TORCH_CHECK(cache_indices_.size(0) == batch_size, "cache_indices first dimension must match batch_size");
-        } else {
-            CHECK_SHAPE(cache_indices_, batch_size);
-        }
+        CHECK_SHAPE(cache_indices_, batch_size);
     }
 
 
@@ -805,10 +713,6 @@ void selective_scan_fwd(const torch::stable::Tensor &u, const torch::stable::Ten
                        has_initial_state,
                        varlen,
                        null_block_id,
-                       block_size,
-                       block_idx_first_scheduled_token,
-                       block_idx_last_scheduled_token,
-                       initial_state_idx,
                        cu_chunk_seqlen,
                        last_chunk_indices
                        );

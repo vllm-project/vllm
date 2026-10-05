@@ -501,10 +501,6 @@ void selective_scan_fwd(
     const std::optional<torch::stable::Tensor>& cache_indices,
     const std::optional<torch::stable::Tensor>& has_initial_state,
     const torch::stable::Tensor& ssm_states, int64_t null_block_id,
-    int64_t block_size,
-    const std::optional<torch::stable::Tensor>& block_idx_first_scheduled_token,
-    const std::optional<torch::stable::Tensor>& block_idx_last_scheduled_token,
-    const std::optional<torch::stable::Tensor>& initial_state_idx,
     const std::optional<torch::stable::Tensor>& cu_chunk_seqlen,
     const std::optional<torch::stable::Tensor>& last_chunk_indices);
 

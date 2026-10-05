@@ -714,10 +714,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? has_initial_state,"
       "Tensor! ssm_states,"
       "int null_block_id,"
-      "int block_size,"
-      "Tensor? block_idx_first_scheduled_token,"
-      "Tensor? block_idx_last_scheduled_token,"
-      "Tensor? initial_state_idx,"
       "Tensor? cu_chunk_seqlen,"
       "Tensor? last_chunk_indices) -> ()");
 
