@@ -73,6 +73,8 @@ class NixlAgentMetadata:
     region_mem_types: list[str] | None = None
     dcp_size: int = 1
     pcp_size: int = 1
+    # Page length of the PLE short-conv state (None when the model has none).
+    ple_block_len: int | None = None
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
     # Packed member -> (byte offset in its region's block, bytes per page).
