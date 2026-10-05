@@ -26,7 +26,11 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
-from vllm.v1.hisparse.runtime import HiSparseCacheHandle, release_pinned_state
+from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
+    HiSparseSlotInvalidator,
+    release_pinned_state,
+)
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
@@ -333,6 +337,9 @@ class HiSparseConnectorWorker:
             raise RuntimeError(
                 "HiSparse request-state mapping does not match max_num_seqs."
             )
+        self._invalidate_written_slots = HiSparseSlotInvalidator(
+            self.request_state_indices
+        )
         self.hot_backing = hot_backing
         self._pending_invalid_block_ids: list[int] = []
         # Destination block ids of host copies this worker has run.
@@ -875,12 +882,11 @@ class HiSparseConnectorWorker:
                 self._enqueue_row_dma(pending_layers, ready_event=ready_event)
                 self._submitted_mirror_layers.update(pending_layers)
         assert cache.req_id_per_token is not None
-        for _, handle in active:
-            if handle.runtime.is_group_leader:
-                handle.runtime.invalidate_written_slots(
-                    dst_slots[:num_rows],
-                    cache.req_id_per_token[:num_rows],
-                )
+        self._invalidate_written_slots(
+            [handle.runtime for _, handle in active if handle.runtime.is_group_leader],
+            dst_slots[:num_rows],
+            cache.req_id_per_token[:num_rows],
+        )
 
     def _finish_mirror_phase(self, ready_event: torch.Event | None = None) -> None:
         state = self._slot_mapping_staging

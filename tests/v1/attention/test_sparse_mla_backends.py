@@ -104,6 +104,7 @@ from vllm.v1.hisparse import runtime as hisparse_runtime
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseRuntime,
+    HiSparseSlotInvalidator,
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
     build_hisparse_prefill_staging_plan,
@@ -2875,8 +2876,10 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     stale_row = flat_hot[stale_hot_slot].clone()
 
     flat_pool[8] += 1000
-    cache_handle.runtime.invalidate_written_slots(
-        torch.tensor([8], dtype=torch.int64, device=device), req_ids
+    HiSparseSlotInvalidator(request_state_indices)(
+        [cache_handle.runtime],
+        torch.tensor([8], dtype=torch.int64, device=device),
+        req_ids,
     )
     cache_handle.runtime.begin_forward()
     hot_indices = cache_handle.swap_in(
@@ -2890,6 +2893,37 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     idx = hot_indices.cpu().tolist()[0][0]
     assert not torch.equal(flat_hot[idx], stale_row)
     torch.testing.assert_close(flat_hot[idx].cpu(), flat_pool[8])
+
+
+@requires_hisparse_ops
+def test_hisparse_invalidation_covers_every_index_group():
+    """One launch drops a rewritten slot from each listed group's request row."""
+    device = torch.device(DEVICE_TYPE)
+    tables = [
+        torch.tensor(
+            [[5, 7, 9, 7, 1, 2, 3, 4], [7, 1, 2, 3, 7, 7, 7, 7]],
+            dtype=torch.int32,
+            device=device,
+        )
+        + offset
+        for offset in (0, 0, 100)
+    ]
+    expected = [table.clone() for table in tables]
+    leaders = [
+        SimpleNamespace(index_group=SimpleNamespace(device_global_indices=table))
+        for table in tables[:2]
+    ]
+    for table in expected[:2]:
+        table[1][table[1] == 7] = -1
+
+    HiSparseSlotInvalidator(torch.tensor([1, 0], dtype=torch.int32, device=device))(
+        leaders,
+        torch.tensor([7, 7], dtype=torch.int64, device=device),
+        torch.tensor([0, -1], dtype=torch.int32, device=device),
+    )
+
+    for table, want in zip(tables, expected):
+        torch.testing.assert_close(table, want)
 
 
 @requires_hisparse_ops

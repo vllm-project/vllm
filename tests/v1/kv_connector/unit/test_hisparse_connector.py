@@ -85,7 +85,6 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
         is_group_leader=True,
         eager_host_mirror=True,
         begin_forward=MagicMock(),
-        invalidate_written_slots=MagicMock(),
     )
     handle = HiSparseCacheHandle(runtime)
     handle.mirror_slot_mapping = torch.tensor([4, 5])
@@ -98,6 +97,7 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
     worker._draft_layers = ()
     worker.is_host_writer = True
     worker._enqueue_row_dma = MagicMock()
+    worker._invalidate_written_slots = MagicMock()
     worker.start_step = MagicMock(
         side_effect=lambda *_args, **_kwargs: worker._clear_forward_mirror_state()
     )
@@ -126,7 +126,8 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
     worker._enqueue_host_mirror()
 
     worker._enqueue_row_dma.assert_called_once_with((0,), ready_event=None)
-    runtime.invalidate_written_slots.assert_called_once()
+    worker._invalidate_written_slots.assert_called_once()
+    assert worker._invalidate_written_slots.call_args.args[0] == [runtime]
 
 
 class _FakeEvent:
@@ -187,7 +188,6 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
             host_cache=torch.zeros(4 * block_size, width),
             request_state_indices=request_state_indices,
             begin_forward=MagicMock(),
-            invalidate_written_slots=MagicMock(),
         )
         handle = HiSparseCacheHandle(runtime)
         handle.view = SimpleNamespace(
@@ -217,6 +217,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         device=torch.device("cpu"),
         pinned_host_pools=[],
     )
+    worker._invalidate_written_slots = MagicMock()
     connector = object.__new__(HiSparseConnector)
     connector.connector_worker = worker
     connector._get_connector_metadata = MagicMock(

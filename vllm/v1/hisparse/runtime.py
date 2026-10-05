@@ -662,10 +662,6 @@ class HiSparseIndexGroup:
         self.lru_init = torch.arange(region_stride, dtype=torch.int16, device=device)
         self.lru_slots = self.lru_init.repeat(max_num_reqs, 1).contiguous()
         self.shared_topk = _create_shared_topk_state(device, max_swap_rows, top_k)
-        # Request ids the resolver reads, built on the copy stream: a
-        # compute-stream write would race with its logical_topk_ready wait.
-        self.row_indices = torch.arange(max_swap_rows, dtype=torch.int32, device=device)
-        self.request_ids = torch.empty_like(self.row_indices)
         self.copy_stream = (
             copy_stream if copy_stream is not None else _create_copy_stream(device)
         )
@@ -875,22 +871,6 @@ class HiSparseRuntime:
         )
         device_global_indices.index_copy_(0, state_indices, active_indices)
 
-    def invalidate_written_slots(
-        self,
-        written_slots: torch.Tensor,
-        req_id_per_token: torch.Tensor,
-    ) -> None:
-        num_tokens = min(written_slots.numel(), req_id_per_token.numel())
-        if num_tokens == 0:
-            return
-        assert self.request_state_indices is not None
-        torch.ops._C_cache_ops.hisparse_invalidate_written_slots(
-            self.index_group.device_global_indices,
-            self.request_state_indices,
-            req_id_per_token[:num_tokens],
-            written_slots[:num_tokens],
-        )
-
     def begin_forward(self) -> None:
         self._swap_step = 0
 
@@ -911,6 +891,7 @@ class HiSparseRuntime:
         *,
         resident: HiSparseCacheHandle | None = None,
         req_id_per_token: torch.Tensor,
+        num_valid_rows: torch.Tensor,
         block_table: torch.Tensor,
         topk_indices: torch.Tensor,
         block_size: int,
@@ -946,8 +927,8 @@ class HiSparseRuntime:
         swap_device_physical_rows = shared.swap_device_physical_rows[shared_rows]
         swap_counts = shared.swap_counts[shared_rows]
 
-        # Padded rows are skipped by the kernel (request_state_indices) and must
-        # come out as -1 so the attention kernel masks them.
+        # Rows past num_valid_rows and rows without request state come out as
+        # -1 so the attention kernel masks them.
         torch.ops._C_cache_ops.hisparse_resolve_residency(
             host_cache,
             hot.cache,
@@ -976,6 +957,7 @@ class HiSparseRuntime:
             if resident is not None and resident.view is not None
             else 0,
             0,
+            num_valid_rows,
         )
 
     def _swap_rows(self, shared_rows: slice) -> None:
@@ -1010,17 +992,10 @@ class HiSparseRuntime:
         else:
             group.copy_stream.wait_stream(compute_stream)
         with group.copy_stream:
-            # CUDA-graph padding rows past the batch's tokens map to request 0;
-            # mark them -1 so residency resolution skips them.
-            num_tokens = logical_topk_indices.shape[0]
-            request_ids = group.request_ids[:num_tokens]
-            request_ids.copy_(req_id_per_token)
-            request_ids.masked_fill_(
-                group.row_indices[:num_tokens] >= num_valid_rows, -1
-            )
             self._resolve_residency(
                 resident=resident,
-                req_id_per_token=request_ids,
+                req_id_per_token=req_id_per_token,
+                num_valid_rows=num_valid_rows,
                 block_table=block_table,
                 topk_indices=logical_topk_indices,
                 block_size=block_size,
@@ -1102,6 +1077,43 @@ class HiSparseRuntime:
                 group.shared_topk.valid_topk_counts[shared_rows],
             )
         return physical_topk_indices
+
+
+class HiSparseSlotInvalidator:
+    """Drop hot copies of rewritten host slots for many index groups at once."""
+
+    def __init__(self, request_state_indices: torch.Tensor) -> None:
+        self.request_state_indices = request_state_indices
+        self._group_tables: dict[tuple[int, ...], torch.Tensor] = {}
+
+    def __call__(
+        self,
+        leaders: list[HiSparseRuntime],
+        written_slots: torch.Tensor,
+        req_id_per_token: torch.Tensor,
+    ) -> None:
+        num_tokens = min(written_slots.numel(), req_id_per_token.numel())
+        if num_tokens == 0 or not leaders:
+            return
+        tables = [leader.index_group.device_global_indices for leader in leaders]
+        key = tuple(table.data_ptr() for table in tables)
+        group_table = self._group_tables.get(key)
+        if group_table is None:
+            if any(table.shape != tables[0].shape for table in tables):
+                raise ValueError("HiSparse index groups must share one hot layout.")
+            group_table = torch.tensor(
+                key, dtype=torch.int64, device=self.request_state_indices.device
+            )
+            self._group_tables[key] = group_table
+        num_state_rows, region_stride = tables[0].shape
+        torch.ops._C_cache_ops.hisparse_invalidate_written_slots(
+            group_table,
+            self.request_state_indices,
+            req_id_per_token[:num_tokens],
+            written_slots[:num_tokens],
+            num_state_rows,
+            region_stride,
+        )
 
 
 class HiSparseCacheHandle:
