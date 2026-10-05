@@ -319,7 +319,11 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
 
 
 def test_scheduled_prefix_hit_publishes_adopted_copies():
-    """Copies adopted after scheduling must reach the worker's block table."""
+    """Copies adopted after scheduling must reach the worker's block table.
+
+    A new request carries them in its own row: a separate table update for the
+    same row is staged as a second, unordered write in the same step.
+    """
     from tests.v1.core.test_prefix_caching import (
         HISPARSE_BLOCK_SIZE,
         _allocate_scheduled,
@@ -367,5 +371,6 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
 
     scheduler.build_connector_meta(scheduler_output)
 
-    resident_ids = scheduler_output.block_table_updates[resumed.request_id][2]
+    assert scheduler_output.block_table_updates is None
+    resident_ids = scheduler_output.scheduled_new_reqs[0].block_ids[2]
     assert resident_ids[:3] == copy_ids[:3]

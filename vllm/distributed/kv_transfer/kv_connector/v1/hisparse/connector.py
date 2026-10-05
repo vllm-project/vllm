@@ -134,9 +134,14 @@ class HiSparseConnectorScheduler:
             )
             for request_id, start, count in scheduled_requests
         )
-        scheduler_output.block_table_updates = (
-            self.coordinator.take_block_table_updates() or None
-        )
+        block_table_updates = self.coordinator.take_block_table_updates()
+        # The worker stages a new request's row and its table update as two
+        # unordered writes, so a new request carries its updated row instead.
+        for request in scheduler_output.scheduled_new_reqs:
+            block_ids = block_table_updates.pop(request.req_id, None)
+            if block_ids is not None:
+                request.block_ids = block_ids
+        scheduler_output.block_table_updates = block_table_updates or None
         command = self.coordinator.build_offload_command()
         host_block_copies = self.coordinator.take_host_block_copies()
         source_group_id = self.coordinator.host_group_id
