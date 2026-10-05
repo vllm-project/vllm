@@ -262,7 +262,14 @@ class QuickAllReduce:
         # its own HIP IPC buffers, so initialize it instead of the HIP
         # communicator. Keep a 2 MiB floor: the FlyDSL kernel's fixed launch
         # cost regresses decode-sized collectives below this.
-        if self.qr_quant_level == QuickReduceRegime.INT4:
+        use_flydsl = envs.VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL
+        if use_flydsl and self.qr_quant_level != QuickReduceRegime.INT4:
+            logger.warning(
+                "VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL only supports INT4 "
+                "QuickReduce; using the HIP QuickReduce kernels for %s.",
+                self.qr_quant_level.name,
+            )
+        if use_flydsl and self.qr_quant_level == QuickReduceRegime.INT4:
             from aiter.ops.flydsl import QuickAllReduceInt4
 
             self._flydsl_int4 = QuickAllReduceInt4(
