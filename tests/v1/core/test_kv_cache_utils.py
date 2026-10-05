@@ -1873,6 +1873,27 @@ def test_dcp_target_allocates_replicated_draft_independently(
     assert [len(group) for group in cached_blocks.blocks] == [1, 4]
 
 
+def test_dcp_replicated_kpool_tail_keeps_block_interior_layout(monkeypatch):
+    """A replicated kpool tail ring is per-request state, not a draft group."""
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.parallel_config.decode_context_parallel_size = 4
+    config.cache_config.kv_cache_layout = None
+    tail = KpoolTailSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        sliding_window=4,
+        dcp_sharded=False,
+    )
+    layout = resolve_kv_cache_layout(config, [["LBHNC"]], [new_mla_spec(), tail])
+    assert layout == KVCacheLayout.LBHNC
+
+
 @pytest.mark.parametrize("use_mla", [False, True])
 def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
     config = VllmConfig(model_config=ModelConfig(max_model_len=1024))

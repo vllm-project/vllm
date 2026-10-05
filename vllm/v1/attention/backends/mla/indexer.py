@@ -554,7 +554,15 @@ class BuildPrefillChunkMetadataKernel(
             # Cover Triton's divisible, exact-one, and generic i32 classes.
             query_slice_start=(0, 1, 2),
             query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
-            DCP_INTERLEAVE=dcp_interleave,
+            # Compressed indexers localize in units of compressed states.
+            DCP_INTERLEAVE=list(
+                dict.fromkeys(
+                    dcp_interleave // ratio
+                    for ratio in compress_ratios
+                    if dcp_interleave % ratio == 0
+                )
+            )
+            or [dcp_interleave],
             BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=list(compress_ratios),
             # PCP's global cumulative lengths are the second row of one packed
@@ -1010,11 +1018,31 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
 
-        if self.dcp_world_size > 1 and self.compress_ratio > 1:
-            raise NotImplementedError(
-                "DCP is not supported with sparse indexer KV compression "
-                f"(compress_ratio={self.compress_ratio})."
+        # Each compressed state must live on a single rank, so the DCP
+        # interleave has to cover whole states.
+        if (
+            self.dcp_world_size > 1
+            and self.compress_ratio > 1
+            and (
+                (
+                    isinstance(self.kv_cache_spec, MLAAttentionSpec)
+                    and self.kv_cache_spec.model_version == "deepseek_v4"
+                )
+                or self.cp_kv_cache_interleave_size % self.compress_ratio != 0
             )
+        ):
+            raise NotImplementedError(
+                "DCP with sparse indexer KV compression "
+                f"(compress_ratio={self.compress_ratio}) requires "
+                "--cp-kv-cache-interleave-size to be a multiple of it; "
+                "DeepSeek-V4 is not supported."
+            )
+        # DCP interleave in units of compressed states.
+        self.compressed_cp_interleave_size = (
+            self.cp_kv_cache_interleave_size // self.compress_ratio
+            if self.dcp_world_size > 1 and self.compress_ratio > 1
+            else self.cp_kv_cache_interleave_size
+        )
 
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:
@@ -1348,6 +1376,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.kv_cache_spec.num_states,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
+                dcp_world_size=self.dcp_world_size,
+                cp_interleave=self.cp_kv_cache_interleave_size,
             )
             if self.pcp_world_size > 1:
                 compressed_slot_mapping = get_pcp_group().all_gather(
@@ -1467,7 +1497,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     skip_kv_gather=query_slice.start > 0,
                     dcp_rank=self.dcp_rank,
                     dcp_world_size=self.dcp_world_size,
-                    cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+                    cp_kv_cache_interleave_size=self.compressed_cp_interleave_size,
                     pcp_plan=pcp_plan,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
