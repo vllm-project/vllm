@@ -86,3 +86,65 @@ steps:
           limit: 1
         - exit_status: -10  # Agent was lost
           limit: 1
+
+  # Zen CPU image. Independent of the ROCm image chain above.
+  # Label must not start with ":docker:" so the generator honors device and
+  # schedules this on the amd-cpu queue. Key must not start with "image-build"
+  # or source_file_dependencies are ignored and the step always runs.
+  - label: "AMD: Build Zen CPU image"
+    key: zen-cpu-image
+    # Reuse the shared `<repo>:<commit>-cpu` image that image-build-cpu publishes
+    # to public ECR, so Dockerfile.zen just layers on top instead of recompiling
+    # vLLM from source. The AMD agent env provides INTERNAL_REGISTRY rather than
+    # the x86 REGISTRY/REPO, so pass the public-ECR coordinates explicitly (same
+    # values ci_config.yaml feeds image-build-cpu). If the pull fails, the build
+    # script still falls back to building the CPU base from source.
+    depends_on:
+      - image-build-cpu
+    device: amd_cpu
+    no_plugin: true
+    source_file_dependencies:
+      - .buildkite/hardware_tests/amd.yaml
+      - .buildkite/image_build/image_build_zen_cpu.sh
+      - docker/Dockerfile.zen
+      - docker/Dockerfile.cpu
+      - requirements/cpu.txt
+      - requirements/build/cpu.txt
+      - requirements/build/rust.txt
+      - requirements/test/cpu.txt
+      - cmake/cpu_extension.cmake
+      - vllm/model_executor/layers/utils.py
+      - vllm/model_executor/kernels/linear/zentorch_utils.py
+      - vllm/model_executor/kernels/linear/scaled_mm/zentorch.py
+      - vllm/model_executor/kernels/linear/mixed_precision/zentorch.py
+      - vllm/platforms/cpu.py
+      - vllm/platforms/zen_cpu.py
+      - vllm/platforms/__init__.py
+      - tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
+      - tests/test_zen_cpu_platform_detection.py
+      - tests/kernels/moe/test_zen_cpu_fused_moe.py
+      - tests/kernels/moe/test_zen_cpu_int8_moe.py
+    commands:
+      - |
+        REGISTRY="public.ecr.aws/q9t5s3a7"
+        if [[ "$$BUILDKITE_BRANCH" == "main" ]]; then
+          REPO="vllm-ci-postmerge-repo"
+        else
+          REPO="vllm-ci-test-repo"
+        fi
+        .buildkite/image_build/image_build_zen_cpu.sh "$$REGISTRY" "$$REPO" "$$BUILDKITE_COMMIT"
+    env:
+      DOCKER_BUILDKIT: "1"
+      # Install zentorch directly (if-branch in Dockerfile.zen) instead of
+      # `uv pip install "vllm[zen]"`, which forces uv to re-resolve vLLM's full
+      # dependency closure and chokes on its transitive triton-cpu URL dependency.
+      # Keep this pin in sync with the `zen` extra in setup.py.
+      ZENTORCH_VERSION: "2.13.0.1"
+    retry:
+      automatic:
+        - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
