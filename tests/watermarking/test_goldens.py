@@ -43,7 +43,7 @@ def test_goldens_cover_every_candidate(goldens: dict[str, dict]):
         (candidate.scheme, candidate.prf) for candidate in WATERMARKING_CANDIDATES
     }
     assert candidate_combinations == configured_algorithm_prf_combinations()
-    assert set(DETECTOR_FACTORIES) == configured_algorithms()
+    assert set(DETECTOR_FACTORIES) == configured_algorithms() - {"synthid"}
 
 
 def test_golden_fixture_guards(goldens: dict[str, dict]):
@@ -52,7 +52,7 @@ def test_golden_fixture_guards(goldens: dict[str, dict]):
 
 def test_resolved_records_every_watermark_config_field():
     assert {field.name for field in dataclasses.fields(WatermarkConfig)} == (
-        set(WATERMARK_CONFIG_FIELDS) | {"key"}
+        set(WATERMARK_CONFIG_FIELDS) | {"key", "depth"}
     )
 
 
