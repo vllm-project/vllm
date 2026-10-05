@@ -5,8 +5,10 @@ import unittest
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 import torch
 
+from tests.v1.core.utils import create_scheduler as create_spec_scheduler
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -21,7 +23,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -627,3 +629,41 @@ class TestStreamingScheduler(unittest.TestCase):
             cached_state_cycle1["prompt_token_ids"]
             is not cached_state_cycle3["prompt_token_ids"]
         ), "Cached states from different cycles should be independent objects."
+
+
+def _model_output(request_id: str, token_ids: list[int]) -> ModelRunnerOutput:
+    return ModelRunnerOutput(
+        req_ids=[request_id],
+        req_id_to_index={request_id: 0},
+        sampled_token_ids=[token_ids],
+        logprobs=None,
+        prompt_logprobs_dict={request_id: None},
+        pooler_output=[],
+    )
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_next_chunk_fully_computed_after_stop_on_accepted_draft(async_scheduling):
+    """A stop on an accepted draft trims the step's later tokens. The next
+    chunk must still be computed in full rather than landing on positions
+    whose KV belongs to the trimmed drafts."""
+    scheduler = create_spec_scheduler(
+        num_speculative_tokens=2,
+        async_scheduling=async_scheduling,
+        speculative_method="ngram_gpu" if async_scheduling else None,
+    )
+    session = DummyRequest("session", prompt_token_ids=[1, 2, 3], max_tokens=2)
+    scheduler.add_request(session)
+    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [10]))
+    scheduler.update_draft_token_ids(DraftTokenIds(["session"], [[11, 12]]))
+    # Both drafts are accepted, but max_tokens stops at 11.
+    scheduler.update_from_output(
+        scheduler.schedule(), _model_output("session", [11, 12, 13])
+    )
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[7, 8]))
+    output = scheduler.schedule()
+
+    assert list(session.prompt_token_ids) == [1, 2, 3, 10, 7, 8]
+    assert output.num_scheduled_tokens["session"] == 2
