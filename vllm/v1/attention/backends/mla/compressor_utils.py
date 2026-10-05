@@ -79,12 +79,24 @@ class CompressedSlotMappingKernel(
             mask = offset < query_len
 
             pos = start_pos + i + tl.arange(0, TRITON_BLOCK_SIZE)
-            # A replayed token has a PAD slot (SWA bounded replay: its KV is
-            # cached already); its compressed KV is cached too, so PAD here.
-            slot = tl.load(
-                slot_mapping_ptr + query_start + offset, mask=mask, other=PAD_ID
-            )
-            is_valid = ((pos + 1) % COMPRESS_RATIO == 0) & (slot != PAD_ID)
+            if DCP_WORLD_SIZE == 1:
+                # A replayed token has a PAD slot (SWA bounded replay: its KV
+                # is cached already); its compressed KV is cached too, so PAD
+                # here.
+                slot = tl.load(
+                    slot_mapping_ptr + query_start + offset, mask=mask, other=PAD_ID
+                )
+                is_valid = ((pos + 1) % COMPRESS_RATIO == 0) & (slot != PAD_ID)
+            else:
+                # Under DCP the raw slot mapping is owner-masked by RAW token
+                # position, while a state's closing token can belong to any
+                # rank (ratio even => closers all sit on odd positions), so
+                # PAD there cannot distinguish "replayed" from "another
+                # rank's token". Bounded replay never happens on models that
+                # reach this branch (V4.1-only feature, gated off with DCP —
+                # see the SWA builder's assert), so the closing test alone
+                # decides validity.
+                is_valid = (pos + 1) % COMPRESS_RATIO == 0
             pos_after_compress = pos // COMPRESS_RATIO
 
             block_ids, local_block_offsets, is_local = cp_global_to_local_block(

@@ -215,6 +215,12 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 int(self.kv_cache_spec.num_states),
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
+                # Sharded compressed cache: owner-masked local-slot writes so
+                # the read-side cp_global_to_local_block math finds each state
+                # where this rank's shard actually holds it.
+                dcp_world_size=self.dcp_world_size,
+                dcp_rank=self.dcp_rank,
+                cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             )
 
         c128a_fields: dict[str, torch.Tensor | None] = {}

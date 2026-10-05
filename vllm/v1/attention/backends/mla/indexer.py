@@ -1337,6 +1337,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.kv_cache_spec.num_states,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
+                # Sharded indexer K cache: owner-masked local-slot writes to
+                # match the shard-local scoring bounds and candidate ids.
+                dcp_world_size=self.dcp_world_size,
+                dcp_rank=self.dcp_rank,
+                cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             )
             if self.pcp_world_size > 1:
                 compressed_slot_mapping = get_pcp_group().all_gather(

@@ -631,6 +631,14 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         if replay_start is None:
             # Graph captures build without it; their dummy batches replay nothing.
             replay_start = self.no_replay_start
+        elif self.dcp_world_size > 1:
+            # The DCP compressed-write guard (compressor_utils) relies on
+            # replay never happening: the owner-masked raw mapping cannot
+            # signal replays rank-neutrally. Fail loud before caches corrupt.
+            raise NotImplementedError(
+                "SWA bounded replay is not supported with DCP: the "
+                "compressed-cache replay guard is not rank-neutral."
+            )
 
         non_causal = not common_attn_metadata.causal
         decode_swa_width = (
