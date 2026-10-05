@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, ClassVar
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -127,6 +128,9 @@ QUANTIZED_DS_MLA_CACHE_FORMATS: frozenset[str] = frozenset(
     {"fp8_ds_mla", "nvfp4_ds_mla"}
 )
 
+# RoPE dims in an fp8_ds_mla row (the bf16 tail of the 656B layout).
+FP8_DS_MLA_ROPE_DIM = 64
+
 
 class FlashMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
@@ -186,16 +190,16 @@ class FlashMLASparseBackend(AttentionBackend):
     ) -> str | None:
         if head_size == 512:
             # GLM5Next NoPE (qk_rope_head_dim == 0, kv_lora_rank == 512) has
-            # head_size 512 and is served here by the direct 512-wide bf16
-            # cache on SM90. Quantized DS-MLA caches need the zero-padded
-            # 576/656B envelope, which is wired up separately; plain fp8,
-            # SM100 bf16, and rope-carrying 512 models must fall through to
+            # head_size 512 and is served here on SM90, either by the direct
+            # 512-wide bf16 cache or by the 576 fp8_ds_mla layout with a zero
+            # RoPE slot (see FlashMLASparseImpl.q_head_size). Plain fp8,
+            # SM100, and rope-carrying 512 models must fall through to
             # FlashInfer/TRITON.
             if (
-                kv_cache_dtype in (None, "auto", "bfloat16", "float16")
+                kv_cache_dtype in (None, "auto", "bfloat16", "float16", "fp8_ds_mla")
                 and device_capability.major == 9
             ):
-                # Direct bf16 NoPE-512 is only correct for rope-free models.
+                # NoPE-512 is only correct for rope-free models.
                 # Precedent for reading hf_text_config in supports_combination:
                 # flashinfer_mla_sparse.py.
                 from vllm.config import get_current_vllm_config
@@ -210,8 +214,8 @@ class FlashMLASparseBackend(AttentionBackend):
                         )
             else:
                 return (
-                    "FLASHMLA_SPARSE supports head_size 512 only with bf16 "
-                    "kv-cache on SM90 (NoPE), got "
+                    "FLASHMLA_SPARSE supports head_size 512 only with bf16 or "
+                    "fp8_ds_mla kv-cache on SM90 (NoPE), got "
                     f"kv_cache_dtype={kv_cache_dtype}, "
                     f"capability={device_capability}"
                 )
@@ -732,6 +736,16 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         )
         self.fp8_decode_padded_heads = self._compute_fp8_decode_padded_heads(num_heads)
 
+        # The kernels read queries as wide as the cache rows. A NoPE model on
+        # fp8_ds_mla keeps the DeepSeek 576 layout: the cache writer zero-fills
+        # the RoPE slot and forward_mqa zero-pads q_pe to match (q_pe . 0 = 0).
+        self.q_head_size = head_size
+        if kv_cache_dtype == "fp8_ds_mla" and self.qk_rope_head_dim == 0:
+            self.q_head_size = self.kv_lora_rank + FP8_DS_MLA_ROPE_DIM
+            # Dense-MHA prefill would gather the cache into a
+            # kv_lora_rank-wide workspace, too narrow for the 576 rows.
+            self.supports_dense_mha_prefill = False
+
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         q_concat_heads = num_heads
@@ -741,7 +755,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 // self.prefill_padding
                 * self.prefill_padding
             )
-        q_concat_shape = (max_tokens, q_concat_heads, head_size)
+        q_concat_shape = (max_tokens, q_concat_heads, self.q_head_size)
         if is_quantized_kv_cache(kv_cache_dtype):
             assert kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS, (
                 "FlashMLA Sparse Attention backend only supports the "
@@ -777,11 +791,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 # PCP+DCP upconverts this rank's KV shard, then all-gathers the
                 # shards into a workspace of the full prefill size.
                 shard_rows //= parallel_config.decode_context_parallel_size
-            self.prefill_workspace_shape = (shard_rows, head_size)
+            self.prefill_workspace_shape = (shard_rows, self.q_head_size)
             self.workspace_specs.append((self.prefill_workspace_shape, torch.bfloat16))
             if self.pcp_dcp_kv_gather:
                 self.workspace_specs.append(
-                    ((prefill_workspace_size, head_size), torch.bfloat16)
+                    ((prefill_workspace_size, self.q_head_size), torch.bfloat16)
                 )
             prefill_query_heads = num_heads
             if self.pcp_dcp_kv_gather and self.dcp_world_size > self.pcp_world_size:
@@ -792,7 +806,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             self.workspace_specs.extend(
                 (shape, torch.bfloat16)
                 for shape in (
-                    (max_tokens, padded_prefill_query_heads, head_size),
+                    (max_tokens, padded_prefill_query_heads, self.q_head_size),
                     (max_tokens, padded_prefill_query_heads, self.kv_lora_rank),
                     (max_tokens, prefill_query_heads, self.kv_lora_rank),
                 )
@@ -1370,11 +1384,16 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             if q_pe.size(-1) == 0:
                 # NoPE (GLM5Next): concat_mla_q requires rope_dim == 64,
                 # copy directly into the head-padded buffer instead.
-                q[:, : ql_nope.shape[1]].copy_(ql_nope)
+                q[:, : ql_nope.shape[1], : self.kv_lora_rank].copy_(ql_nope)
+                if self.q_head_size > self.kv_lora_rank:
+                    q[..., self.kv_lora_rank :].zero_()
             else:
                 ops.concat_mla_q(ql_nope, q_pe, q)
         else:
             actual_num_heads = q.shape[1]
+            if q.shape[-1] < self.q_head_size:
+                # DCP gathers the unpadded NoPE query.
+                q = F.pad(q, (0, self.q_head_size - q.shape[-1]))
 
         num_actual_toks = q.shape[0]
 

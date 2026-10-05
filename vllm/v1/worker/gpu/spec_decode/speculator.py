@@ -97,6 +97,7 @@ class BaseSpeculator(ABC):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
 
@@ -373,6 +374,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
+            positions=self.input_buffers.positions[:num_tokens],
             is_prefilling=self.draft_is_prefilling[:num_reqs_padded],
         )
         return attn_metadata
