@@ -713,8 +713,8 @@ def test_low_latency_table_capability_routing(
 def test_qwen4_exp_hopper_plans_are_valid() -> None:
     plans = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS
 
-    assert len(plans) == 6
-    assert sum(map(len, plans.values())) == 21
+    assert len(plans) == 7
+    assert sum(map(len, plans.values())) == 24
     assert (320, 10240) in plans
     assert (10240, 320) not in plans
     for (n, k), shape_plans in plans.items():
