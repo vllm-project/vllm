@@ -89,6 +89,8 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    KVCacheSpec,
+    UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
     is_full_attention_spec,
 )
@@ -112,14 +114,21 @@ def _dtype_str(dtype: Any) -> str | None:
     return None if dtype is None else str(dtype).removeprefix("torch.")
 
 
-def _serialize_kv_cache_spec(spec: KVCacheSpec) -> dict[str, Any]:
-    """Return msgspec serializable fields describing KVCacheSpec."""
+def _serialize_kv_cache_spec(spec: KVCacheSpec, block_size: int) -> dict[str, Any]:
+    """Return msgspec serializable fields describing KVCacheSpec.
+
+    Args:
+        spec: The KV cache spec to serialize.
+        block_size: Effective scheduler block size, which may differ from
+            ``spec.block_size`` (e.g. scaled by DCP).
+
+    """
     shapes = getattr(spec, "shapes", None)
     dtypes = getattr(spec, "dtypes", None)
     mamba_type = getattr(spec, "mamba_type", None)
     return {
         "kind": get_kv_cache_spec_kind(spec).value,
-        "block_size": spec.block_size,
+        "block_size": block_size,
         "sliding_window": getattr(spec, "sliding_window", None),
         "attention_chunk_size": getattr(spec, "attention_chunk_size", None),
         "num_kv_heads": getattr(spec, "num_kv_heads", None),
@@ -488,10 +497,9 @@ class EngineCore:
             supported_pooling_tasks,
         )
 
-    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
+    def get_kv_cache_group_metadata(self) -> list[dict[str, Any]]:
         """Return serializable KV cache metadata for external event consumers
-        (e.g., Dynamo). This function has no call sites within vLLM but needs to
-        be kept.
+        (e.g., Dynamo) and the frontend.
         """
         kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
         if kv_cache_config is None:
@@ -499,19 +507,28 @@ class EngineCore:
 
         kv_cache_manager = cast(Any, self.scheduler).kv_cache_manager
         managers = kv_cache_manager.coordinator.single_type_managers
-        metadata: list[dict[str, int | str | None]] = []
+        metadata: list[dict[str, Any]] = []
         for group_idx, (group, manager) in enumerate(
             zip(kv_cache_config.kv_cache_groups, managers, strict=True)
         ):
             spec = group.kv_cache_spec
-            metadata.append(
-                {
-                    "group_idx": group_idx,
-                    "kind": get_kv_cache_spec_kind(spec).value,
-                    "block_size": manager.block_size,
-                    "sliding_window": getattr(spec, "sliding_window", None),
-                }
-            )
+            entry: dict[str, Any] = {
+                "group_idx": group_idx,
+                "layer_count": len(group.layer_names),
+                "layer_names": list(group.layer_names),
+                **_serialize_kv_cache_spec(spec, manager.block_size),
+            }
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                entry["layer_specs"] = [
+                    {
+                        "layer_names": [layer_name],
+                        **_serialize_kv_cache_spec(sub_spec, manager.block_size),
+                    }
+                    for layer_name, sub_spec in spec.kv_cache_specs.items()
+                ]
+            else:
+                entry["layer_specs"] = None
+            metadata.append(entry)
         return metadata
 
     def add_request(self, request: Request, request_wave: int = 0):
