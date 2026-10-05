@@ -28,6 +28,8 @@ _request_failures: Counter | None = None
 class RequestFailureStage(Enum):
     # Before generation started, e.g. validation, rendering or admission.
     INPUT_PROCESSING = "input_processing"
+    # After the stream started, so the HTTP status was already sent as 200.
+    STREAMING = "streaming"
 
 
 def init_request_failure_metrics(*, model_name: str) -> None:
@@ -95,9 +97,12 @@ class RequestFailureMetricsMiddleware:
         except ClientDisconnect:
             raise
         except Exception:
-            # Unhandled errors become a 500 in ServerErrorMiddleware, which
-            # runs outside of this middleware.
-            if not response_started:
+            if response_started:
+                # The response body broke off, e.g. a stream generator raised.
+                record_request_failure(RequestFailureStage.STREAMING, 500)
+            else:
+                # Unhandled errors become a 500 in ServerErrorMiddleware,
+                # which runs outside of this middleware.
                 self._record(scope, 500)
             raise
 

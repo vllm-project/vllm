@@ -8,6 +8,7 @@ from argparse import Namespace
 import httpx
 import pytest
 from fastapi import Request
+from fastapi.responses import StreamingResponse
 from prometheus_client import REGISTRY
 
 from vllm.entrypoints.launchers.api_server.entry import build_app
@@ -60,6 +61,14 @@ def app():
         mark_generation_started(raw_request)
         raise RuntimeError("unexpected server error")
 
+    @app.get("/stream_breaks_off")
+    async def stream_breaks_off():
+        async def generate():
+            yield "data: first\n\n"
+            raise RuntimeError("unexpected server error")
+
+        return StreamingResponse(generate(), media_type="text/event-stream")
+
     return app
 
 
@@ -104,3 +113,14 @@ async def test_input_processing_failures_are_counted(app, path, code, num_record
 
     assert response.status_code == code
     assert _num_failures("input_processing", code) - before == num_recorded
+
+
+@pytest.mark.asyncio
+async def test_stream_breaking_off_is_counted(app):
+    """The status was already sent as 200 when the stream generator raised."""
+    before = _num_failures("streaming", 500)
+
+    response = await _get(app, "/stream_breaks_off")
+
+    assert response.status_code == 200
+    assert _num_failures("streaming", 500) - before == 1

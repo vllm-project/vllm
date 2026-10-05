@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
+from vllm.entrypoints.serve.middleware.request_failures import RequestFailureStage
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
@@ -389,6 +390,60 @@ async def test_chat_error_stream_first_chunk(include_usage: bool):
         f"Expected error message in chunks: {chunks}"
     )
     assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_failure_is_counted():
+    """A failure after the stream started is sent as an error chunk on a 200
+    response, so it is only observable if it is counted as a request failure."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    request_output = RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="Hello",
+                token_ids=[100],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason=None,
+            )
+        ],
+        finished=False,
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield request_output
+        raise RuntimeError("fixture failure mid-stream")
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=True,
+    )
+
+    with patch(
+        "vllm.entrypoints.generate.base.serving.record_request_failure"
+    ) as record_request_failure:
+        response = await serving_chat.create_chat_completion(request)
+        chunks = [chunk async for chunk in response]
+
+    assert any("Hello" in chunk for chunk in chunks)
+    assert chunks[-1] == "data: [DONE]\n\n"
+    record_request_failure.assert_called_once_with(RequestFailureStage.STREAMING, 500)
 
 
 @pytest.mark.parametrize(
