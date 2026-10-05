@@ -34,6 +34,33 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 DEFAULT_MODELS = ["meta-llama/Llama-2-7b-hf/TP1"]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
 
+# Marlin caps thread_m_blocks at 4, so one launch covers at most 64 rows and the
+# leftover rows get their own launch. Every default batch size above 64 is a
+# multiple of 64, so the default sweep never leaves a remainder. These offsets
+# land just past a tile boundary so that it does.
+MARLIN_M_TILE = 64
+RAGGED_M_OFFSETS = [1, 8]
+
+
+def expand_ragged_m(batch_sizes: list[int]) -> list[int]:
+    """Add batch sizes that are not multiples of the Marlin M tile.
+
+    Args:
+        batch_sizes: The requested sweep.
+
+    Returns:
+        The sweep plus, for every entry at or above one M tile, sizes just past
+        that entry's tile boundary.
+
+    """
+    expanded = set(batch_sizes)
+    for size_m in batch_sizes:
+        if size_m < MARLIN_M_TILE:
+            continue
+        tile_end = size_m - (size_m % MARLIN_M_TILE)
+        expanded.update(tile_end + offset for offset in RAGGED_M_OFFSETS)
+    return sorted(expanded)
+
 
 def bench_run(
     results: list[benchmark.Measurement],
@@ -186,6 +213,11 @@ def main(args):
         print(f"[{i}]  {model}")
     results: list[benchmark.Measurement] = []
 
+    batch_sizes = args.batch_sizes
+    if args.ragged_m:
+        batch_sizes = expand_ragged_m(batch_sizes)
+    print(f"Batch sizes: {batch_sizes}")
+
     for model in args.models:
         for layer in WEIGHT_SHAPES[model]:
             size_k = layer[0]
@@ -213,7 +245,7 @@ def main(args):
                     ):
                         continue
 
-                    for size_m in args.batch_sizes:
+                    for size_m in batch_sizes:
                         bench_run(
                             results,
                             model,
@@ -244,6 +276,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--batch-sizes", nargs="+", type=int, default=DEFAULT_BATCH_SIZES
+    )
+    parser.add_argument(
+        "--ragged-m",
+        action="store_true",
+        help="Also sweep batch sizes just past each 64-row Marlin M tile, "
+        "where the leftover rows take an extra kernel launch.",
     )
     parser.add_argument("--limit-k", nargs="+", type=int, default=[])
     parser.add_argument("--limit-n", nargs="+", type=int, default=[])
