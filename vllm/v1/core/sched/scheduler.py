@@ -3,7 +3,7 @@
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from typing import Any
 
@@ -245,6 +245,8 @@ class Scheduler(SchedulerInterface):
 
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
+        # Loads that failed or were cut short by release_transfer_kv(); they
+        # recompute, and their 0 computed tokens exempt them from block checks.
         self.failed_recving_kv_req_ids: set[str] = set()
 
         # Grammar compilation failures to finish as per-request errors in
@@ -2762,24 +2764,30 @@ class Scheduler(SchedulerInterface):
         self._pause_state = pause_state
         self._releasing_transfer_kv = False
 
-    def release_transfer_kv(self) -> list[Request]:
-        # A load still in flight cannot be recomputed while its KV is written;
-        # aborting it asks the remote side to end the transfer.
+    def release_transfer_kv(self) -> None:
+        # A load in flight ends as a failed load that recomputes; its blocks
+        # are freed once the transfer stops writing them.
         self._releasing_transfer_kv = True
-        aborted = self.finish_requests(
-            [
-                request.request_id
-                for request in self.kv_holding_waiting
-                if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-                and request.request_id not in self.finished_recving_kv_req_ids
-            ],
-            RequestStatus.FINISHED_ABORTED,
+        for request in self._loads_in_flight():
+            request.num_computed_tokens = 0
+            self.failed_recving_kv_req_ids.add(request.request_id)
+        if self.connector is not None and self._holds_transfer_kv():
+            # Stepping is pending anyway, which delivers this to the workers.
+            self.connector.abort_transfers()
+
+    def _loads_in_flight(self) -> Iterator[Request]:
+        return (
+            request
+            for request in self.kv_holding_waiting
+            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            and request.request_id not in self.finished_recving_kv_req_ids
         )
-        if self.connector is not None and self.has_finished_requests():
-            # Finished requests hold KV for remote readers; the next step
-            # delivers this to the workers.
-            self.connector.abort_pending_sends()
-        return aborted
+
+    def _holds_transfer_kv(self) -> bool:
+        """Whether remote KV transfers still hold blocks of this engine."""
+        return self.has_finished_requests() or any(
+            True for _ in self._loads_in_flight()
+        )
 
     def _request_blocks_can_be_freed(self, request: Request) -> bool:
         # We must defer freeing blocks if an async kv connector may
@@ -2852,18 +2860,17 @@ class Scheduler(SchedulerInterface):
         # the engine would quiesce before the connector can drain completions.
         # TODO: replace with a more general mechanism for connectors to keep
         # the scheduler alive.
-        # A paused engine does not wait for the KV finished requests hold for
-        # remote readers, unless it is releasing that KV.
-        waits_for_held_kv = (
-            self._pause_state == PauseState.UNPAUSED or self._releasing_transfer_kv
-        )
+        # A paused engine waits for KV that remote transfers hold only while
+        # releasing it.
+        if self._releasing_transfer_kv:
+            holds_kv = self._holds_transfer_kv()
+        elif self._pause_state == PauseState.UNPAUSED:
+            holds_kv = self.has_finished_requests()
+        else:
+            holds_kv = bool(self.finished_req_ids)
         return (
             self.has_unfinished_requests()
-            or (
-                self.has_finished_requests()
-                if waits_for_held_kv
-                else bool(self.finished_req_ids)
-            )
+            or holds_kv
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
                 self.ec_connector is not None
@@ -3395,6 +3402,7 @@ class Scheduler(SchedulerInterface):
             if (
                 request is not None
                 and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                and req_id not in self.failed_recving_kv_req_ids
             ):
                 affected_req_ids.add(req_id)
                 if self.recompute_kv_load_failures:

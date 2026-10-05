@@ -1112,10 +1112,11 @@ def test_scheduler_request_finished():
     assert "id-1" in scheduler_connector._reqs_not_processed
 
 
+@pytest.mark.parametrize("dropped_by", ["request-finished", "abort-transfers"])
 @pytest.mark.parametrize("load_done", [False, True])
-def test_consumer_releases_transfer_finished_mid_load(load_done: bool):
-    """D asks P to drop the transfer of a request that finishes while its KV
-    is still arriving, and only then."""
+def test_consumer_releases_transfer_finished_mid_load(load_done: bool, dropped_by: str):
+    """D asks P to drop the transfer of a request whose KV is still arriving,
+    once the request finishes or its transfers are aborted, and only then."""
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_consumer"
     )
@@ -1135,8 +1136,11 @@ def test_consumer_releases_transfer_finished_mid_load(load_done: bool):
             KVConnectorOutput(finished_recving={request.request_id})
         )
 
-    request.status = RequestStatus.FINISHED_ABORTED
-    assert connector.request_finished(request, [5, 6]) == (False, None)
+    if dropped_by == "abort-transfers":
+        connector.abort_transfers()
+    else:
+        request.status = RequestStatus.FINISHED_ABORTED
+        assert connector.request_finished(request, [5, 6]) == (False, None)
     pulls = connector.build_connector_meta(SchedulerOutput.make_empty()).reqs_to_recv
     release = pulls.get("p", {}).get(request.request_id)
     assert (release is not None) == (not load_done)

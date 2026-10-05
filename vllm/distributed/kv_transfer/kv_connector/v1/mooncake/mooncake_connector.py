@@ -804,9 +804,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
 
-    def abort_pending_sends(self) -> None:
+    def abort_transfers(self) -> None:
         assert self.connector_scheduler is not None
-        self.connector_scheduler.abort_pending_sends()
+        self.connector_scheduler.abort_transfers()
 
     def request_finished(
         self,
@@ -952,7 +952,7 @@ class MooncakeConnectorScheduler:
         # remote prefill or aborted.
         self._reqs_not_processed: set[TransferId] = set()
         # D: requests whose KV is still being pulled.
-        self._reqs_loading: set[ReqId] = set()
+        self._reqs_loading: dict[ReqId, Request] = {}
         # P: drop the KV held for D at the next step.
         self._abort_pending_sends = False
 
@@ -1140,7 +1140,7 @@ class MooncakeConnectorScheduler:
                     kv_transfer_params=req.kv_transfer_params,
                 )
                 if any(block_ids):
-                    self._reqs_loading.add(req_id)
+                    self._reqs_loading[req_id] = req
             self._reqs_need_recv.clear()
 
         if not self.is_kv_consumer:
@@ -1161,10 +1161,14 @@ class MooncakeConnectorScheduler:
         return meta
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        self._reqs_loading.difference_update(connector_output.finished_recving or ())
+        for req_id in connector_output.finished_recving or ():
+            self._reqs_loading.pop(req_id, None)
 
-    def abort_pending_sends(self) -> None:
+    def abort_transfers(self) -> None:
         self._abort_pending_sends = True
+        # Ask P to drop each load in flight; the load ends with P's answer.
+        for req_id, request in self._reqs_loading.items():
+            self._reqs_need_recv[req_id] = (request, [])
 
     def request_finished(
         self,

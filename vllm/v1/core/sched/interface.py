@@ -211,10 +211,10 @@ class SchedulerInterface(ABC):
     def set_pause_state(self, pause_state: PauseState) -> None:
         raise NotImplementedError
 
-    def release_transfer_kv(self) -> list["Request"]:
+    def release_transfer_kv(self) -> None:
         """Make remote KV transfers give back the blocks they hold, before a
-        cache reset; returns the requests aborted for it."""
-        return []
+        cache reset; requests whose KV is still arriving recompute it."""
+        return
 
     @abstractmethod
     def reset_prefix_cache(

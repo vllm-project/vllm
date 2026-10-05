@@ -689,9 +689,9 @@ class KVConnectorBase_V1(ABC):
         # scheduler alive (e.g. extend has_unfinished_requests).
         return False
 
-    def abort_pending_sends(self) -> None:
-        """Stop holding finished requests' KV for remote readers; idempotent.
-        The blocks come back through get_finished as usual."""
+    def abort_transfers(self) -> None:
+        """Stop holding finished requests' KV for remote readers and end remote
+        loads in flight; their blocks come back through get_finished as usual."""
         return
 
     @classmethod

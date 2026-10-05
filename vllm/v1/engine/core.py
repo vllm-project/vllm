@@ -1007,7 +1007,7 @@ class EngineCore:
 
     def release_kv_cache_memory(self) -> None | Future:
         """Discard KV cache memory of a completed pause with resident memory. Kept
-        requests recompute after wake-up; those loading remote KV are aborted."""
+        requests, including those still loading remote KV, recompute after wake-up."""
         if not (
             self.is_scheduler_paused()
             and not self.scheduler.has_requests()
@@ -2113,8 +2113,7 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Resumed before the operation completed.")
                 if release_transfer_kv:
                     release_transfer_kv = False
-                    aborted = engine.scheduler.release_transfer_kv()
-                    engine._send_abort_outputs(aborted)
+                    engine.scheduler.release_transfer_kv()
                     if engine.has_work():
                         # Wait until the transfers give back their blocks.
                         engine._idle_state_callbacks.append(callback)

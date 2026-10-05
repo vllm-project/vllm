@@ -5652,9 +5652,12 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
-def test_release_transfer_kv_frees_blocks_for_reset():
-    """Releasing transfer KV aborts only loads still in flight and drops held
-    sends; the reset recomputes the rest of the waiting KV."""
+@pytest.mark.parametrize("then", ["reset", "resume"])
+@pytest.mark.parametrize("load_outcome", ["written", "failed-blocks", "failed-request"])
+def test_release_transfer_kv_frees_blocks_for_reset(load_outcome, then):
+    """Releasing transfer KV ends loads in flight and drops held sends; the
+    reset recomputes all waiting KV, and a load in flight once it ends, even
+    under the default fail policy and if a resume cancels the reset first."""
     scheduler = create_scheduler(use_kv_connector=True)
     running, loading, arrived, loaded, session, queued = create_requests(
         num_requests=6,
@@ -5682,17 +5685,18 @@ def test_release_transfer_kv_frees_blocks_for_reset():
         request.status = status
         scheduler._enqueue_waiting_request(request)
     scheduler.finished_recving_kv_req_ids.add(arrived.request_id)
-    scheduler.connector.abort_pending_sends = Mock()
+    scheduler.connector.abort_transfers = Mock()
     blocks = scheduler.kv_cache_manager.get_block_ids
 
     scheduler.set_pause_state(PauseState.PAUSED_ALL)
-    assert scheduler.release_transfer_kv() == [loading]
-    scheduler.connector.abort_pending_sends.assert_called_once()
-    assert loading.status == RequestStatus.FINISHED_ABORTED
+    scheduler.release_transfer_kv()
+    scheduler.connector.abort_transfers.assert_called_once()
+    # The paused engine keeps stepping until the load in flight ends.
+    assert scheduler.has_requests()
     assert running.status == RequestStatus.RUNNING
     assert list(scheduler.waiting) == [queued]
 
-    # The aborted load keeps its blocks until its transfer ends; the session
+    # The load in flight keeps its blocks until its transfer ends; the session
     # keeps its KV; loaded KV is recomputed.
     assert not scheduler.reset_prefix_cache(reset_running_requests=True)
     assert blocks(loading.request_id)[0] and blocks(session.request_id)[0]
@@ -5704,17 +5708,32 @@ def test_release_transfer_kv_frees_blocks_for_reset():
         assert request.num_computed_tokens == 0
         assert not blocks(request.request_id)[0]
 
+    if then == "resume":
+        scheduler.set_pause_state(PauseState.UNPAUSED)
+    output = KVConnectorOutput(finished_recving={loading.request_id})
+    if load_outcome == "failed-blocks":
+        output.invalid_block_ids = set(blocks(loading.request_id)[0])
+    elif load_outcome == "failed-request":
+        output.failed_recving = {loading.request_id}
     scheduler.update_from_output(
         SchedulerOutput.make_empty(),
-        ModelRunnerOutput(
-            req_ids=[],
-            req_id_to_index={},
-            kv_connector_output=KVConnectorOutput(
-                finished_recving={loading.request_id}
-            ),
-        ),
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}, kv_connector_output=output),
     )
-    assert loading.request_id not in scheduler.requests
+    # Not failed, not even under the default fail policy.
+    assert scheduler.requests[loading.request_id] is loading
+    if then == "resume":
+        # Recomputed locally from scratch, without another remote load.
+        output = scheduler.schedule()
+        assert loading.status == RequestStatus.RUNNING
+        assert output.num_scheduled_tokens[loading.request_id] == len(
+            loading.prompt_token_ids
+        )
+    else:
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+        assert loading.status == RequestStatus.WAITING
+        assert loading.num_computed_tokens == 0 and not blocks(loading.request_id)[0]
+        assert loading in scheduler.waiting
+    assert loading.request_id not in scheduler.failed_recving_kv_req_ids
 
 
 def test_delayed_kv_connector_free_keeps_scheduler_active():
