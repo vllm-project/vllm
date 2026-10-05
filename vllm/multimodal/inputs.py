@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     import torch
     import torch.types
     from transformers.feature_extraction_utils import BatchFeature
+
+    from vllm.utils.torch_utils import PinnedStagingBuffer
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -306,6 +308,33 @@ def _is_dense(t: torch.Tensor) -> bool:
     return True
 
 
+_pinned_staging_buffer: "PinnedStagingBuffer | None" = None
+
+
+def _get_pinned_staging_buffer() -> "PinnedStagingBuffer":
+    global _pinned_staging_buffer
+    if _pinned_staging_buffer is None:
+        import vllm.envs as envs
+        from vllm.utils.torch_utils import PinnedStagingBuffer
+
+        _pinned_staging_buffer = PinnedStagingBuffer(
+            envs.VLLM_MM_PINNED_STAGING_BUFFER_MB << 20
+        )
+    return _pinned_staging_buffer
+
+
+def _new_empty(
+    t: torch.Tensor, shape: Sequence[int], *, pin_memory: bool
+) -> torch.Tensor:
+    """Allocate a host tensor like `t`, in the pinned staging buffer if
+    `pin_memory` and it fits there. Otherwise it is staged when copied."""
+    if pin_memory:
+        out = _get_pinned_staging_buffer().empty(shape, t.dtype)
+        if out is not None:
+            return out
+    return t.new_empty(shape)
+
+
 def _nested_tensors_h2d(
     tensors: NestedTensors,
     device: torch.types.Device,
@@ -315,13 +344,20 @@ def _nested_tensors_h2d(
     if device is None:
         return tensors
 
+    staging = _get_pinned_staging_buffer() if pin_memory else None
+
     def _h2d(x: torch.Tensor) -> torch.Tensor:
         if not isinstance(x, torch.Tensor):
             return x
-        if pin_memory and x.is_cpu and not (x.is_pinned() and _is_dense(x)):
-            # Ensure tensor is pinned and dense for non_blocking H2D copy.
-            x = x.new_empty(x.shape, pin_memory=True).copy_(x)
-        return x.to(device=device, non_blocking=True)
+        if staging is None or not x.is_cpu:
+            return x.to(device=device, non_blocking=True)
+        if not (x.is_pinned() and _is_dense(x)):
+            # Stage through pinned memory for a non_blocking H2D copy.
+            return staging.copy_to_device(x, device)
+        x = x.to(device=device, non_blocking=True)
+        # Release the staging region if `x` was allocated by `_new_empty`.
+        staging.record()
+        return x
 
     return json_map_leaves(_h2d, tensors)
 
@@ -528,8 +564,8 @@ class MultiModalBatchedField(BaseMultiModalField):
                 return batch[0].unsqueeze(0)
             first_shape = batch[0].shape
             if all(elem.shape == first_shape for elem in batch):
-                out = batch[0].new_empty(
-                    (len(batch), *first_shape), pin_memory=pin_memory
+                out = _new_empty(
+                    batch[0], (len(batch), *first_shape), pin_memory=pin_memory
                 )
                 return torch.stack(batch, out=out)
 
@@ -580,8 +616,10 @@ class MultiModalFlatField(BaseMultiModalField):
             if all(_shape_before_after(elem) == first_shape for elem in batch):
                 shape_before, shape_after = first_shape
                 shape_concat = sum(item.shape[dim] for item in batch)
-                out = batch[0].new_empty(
-                    (*shape_before, shape_concat, *shape_after), pin_memory=pin_memory
+                out = _new_empty(
+                    batch[0],
+                    (*shape_before, shape_concat, *shape_after),
+                    pin_memory=pin_memory,
                 )
                 return torch.concat(batch, dim=self.dim, out=out)
 
@@ -603,7 +641,7 @@ class MultiModalFlatField(BaseMultiModalField):
                     max_sizes.append(max(t.shape[d] for t in batch))
 
             # Step 2: Create zero-initialized output tensor
-            out = batch[0].new_zeros(max_sizes, pin_memory=pin_memory)
+            out = _new_empty(batch[0], max_sizes, pin_memory=pin_memory).zero_()
 
             # Step 3: Slice-assign each tensor to its proper position
             concat_offset = 0

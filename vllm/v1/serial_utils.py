@@ -33,7 +33,6 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
-from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)
@@ -326,7 +325,6 @@ class MsgpackDecoder:
         oob_tensor_provider: OOBTensorProvider | None = None,
     ):
         self.share_mem = share_mem
-        self.pin_tensors = PIN_MEMORY
         args = () if t is None else (t,)
         self.decoder = msgpack.Decoder(
             *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook
@@ -414,12 +412,9 @@ class MsgpackDecoder:
         # Create uint8 array
         arr = torch.frombuffer(buffer, dtype=torch.uint8)
         # Clone ensures tensor is backed by pytorch-owned memory for safe
-        # future async CPU->GPU transfer.
-        # Pin larger tensors for more efficient CPU->GPU transfer.
-        if not is_aux:
+        # future async CPU->GPU transfer, which stages it through pinned memory.
+        if not is_aux or not self.share_mem:
             arr = arr.clone()
-        elif not self.share_mem:
-            arr = arr.pin_memory() if self.pin_tensors else arr.clone()
         # Convert back to proper shape & type
         return arr.view(torch_dtype).view(shape)
 
