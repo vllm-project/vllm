@@ -409,13 +409,11 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
         # MegaMoE's shared FP8 MMA consumes a 1x32 scale for every weight row,
         # while the checkpoint uses coarser block-FP8 scales (usually
-        # 128x128). Build a dedicated, numerically equivalent scale view before
-        # the generic linear post-load hook replaces the raw checkpoint scales
-        # with its 128x128 DeepGEMM layout.
-        checkpoint_scale_dtypes = (torch.float8_e8m0fnu, torch.uint8)
+        # 128x128). Build a dedicated, numerically equivalent scale view.
+        ue8m0_scale_dtypes = (torch.float8_e8m0fnu, torch.uint8, torch.int32)
         if (
-            gate_up_scale.dtype in checkpoint_scale_dtypes
-            and down_scale.dtype in checkpoint_scale_dtypes
+            gate_up_scale.dtype in ue8m0_scale_dtypes
+            and down_scale.dtype in ue8m0_scale_dtypes
         ):
             gate_up_scale = self._prepare_shared_expert_scale(
                 deep_gemm,
@@ -501,9 +499,13 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             return None
 
         block_m, block_k = block_size
+        num_k_blocks = (k + block_k - 1) // block_k
+        # The linear hook's DeepGEMM layout packs four k-block bytes per int32.
+        packed = scale.dtype == torch.int32
         expected_shape = (
-            (mn + block_m - 1) // block_m,
-            (k + block_k - 1) // block_k,
+            (mn, (num_k_blocks + 3) // 4)
+            if packed
+            else ((mn + block_m - 1) // block_m, num_k_blocks)
         )
         if block_k % 32 != 0 or tuple(scale.shape) != expected_shape:
             logger.warning(
@@ -518,10 +520,13 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             )
             return None
 
-        scale_fp32 = self._ue8m0_uint8_to_float(scale.view(torch.uint8))
+        if packed:
+            row_scale = scale.flatten().view(torch.uint8).view(mn, -1)[:, :num_k_blocks]
+        else:
+            row_scale = scale.view(torch.uint8).repeat_interleave(block_m, dim=0)[:mn]
         scale_1x32 = (
-            scale_fp32.repeat_interleave(block_m, dim=0)
-            .repeat_interleave(block_k // 32, dim=1)[:mn, : k // 32]
+            self._ue8m0_uint8_to_float(row_scale)
+            .repeat_interleave(block_k // 32, dim=1)[:, : k // 32]
             .contiguous()
         )
         # The grouped API is used with a singleton dimension to request the
