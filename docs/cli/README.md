@@ -217,8 +217,8 @@ See [vllm run-batch](./run-batch.md) for the full reference of all available arg
 Launch weight cache daemons (one per GPU) that hold the post-quantized,
 TP-sharded weights in GPU memory and serve CUDA IPC handles to vLLM engines
 over a Unix domain socket. Restarting engines then map the weights via
-zero-copy IPC instead of reloading from disk, so an engine restart takes
-seconds instead of minutes.
+zero-copy IPC instead of reloading from disk, so the weight-loading part of
+an engine restart takes seconds instead of minutes.
 
 ```bash
 # Launch one daemon per GPU
