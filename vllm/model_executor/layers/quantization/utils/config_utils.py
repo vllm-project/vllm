@@ -125,7 +125,7 @@ def is_shared_expert_quant_fse_compatible(
                 "online quantization FSE compatibility check is not implemented for "
                 f"{type(quant_config).__name__}"
             )
-            logger.warning(reason)
+            logger.warning_once(reason)
             return False, reason
 
         if routed_weight_key not in ONLINE_SHARED_EXPERT_QUANTIZERS:

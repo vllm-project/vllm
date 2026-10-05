@@ -386,36 +386,33 @@ def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
 def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    global_quant_config = {
-        "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32}
-    }
+    class DeepseekV4Config:
+        expert_dtype = "fp4"
+        online_quantization_config = None
+
+        def _is_quark_mxfp4_ocp(self, hf_config: object) -> bool:
+            return True
+
     hf_config = SimpleNamespace(
-        expert_dtype="fp4",
         num_hidden_layers=2,
         quantization_config={
             "layer_quant_config": {
-                "mtp.0.ffn.shared_experts.w1": {"weight": {"dtype": "fp4"}},
-                "model.layers.2.ffn.shared_experts.w1": {"weight": {"dtype": "fp8"}},
+                r"re:mtp\.0\.ffn\.shared_experts\.w1": {"weight": {"dtype": "fp4"}}
             },
-            "global_quant_config": global_quant_config,
+            "global_quant_config": {"weight": {"dtype": "fp8"}},
         },
     )
-
-    def get_config() -> SimpleNamespace:
-        return SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
-
-    monkeypatch.setattr(vllm_config_module, "get_current_vllm_config", get_config)
-    monkeypatch.setattr(deepseek_v4_quant_config, "get_current_vllm_config", get_config)
-    quant_config = deepseek_v4_quant_config.DeepseekV4FP8Config.from_config(
-        {
-            "quant_method": "quark",
-            "global_quant_config": global_quant_config,
-            "exclude": [],
-        }
+    monkeypatch.setattr(
+        deepseek_v4_quant_config, "DeepseekV4FP8Config", DeepseekV4Config
+    )
+    monkeypatch.setattr(
+        vllm_config_module,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config)),
     )
 
     compatible, reason = is_shared_expert_quant_fse_compatible(
-        quant_config,
+        DeepseekV4Config(),
         "model.layers.2.ffn.experts",
         "model.layers.2.ffn.shared_experts",
     )
