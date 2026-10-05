@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Candidate exchange for MiniMax-M3 Triton indexer CP (graph-safe).
 
-Matches PR #57909: each rank keeps its own top-k over a 1/P block shard,
-all-gathers ``P * k`` packed keys (payload independent of context length),
-then merges. Forced init/local blocks are pinned on both the shard and the
-merge so they cannot be dropped before the exchange.
+Matches PR #57909: each rank keeps, per index head, its own top-k over a 1/P
+block shard, all-gathers the packed keys (payload independent of context
+length), then merges per head. The merge is exact only when every shard
+scored the same head, so callers must score every global head on every
+rank. Forced init/local blocks are pinned on both the shard and the merge so
+they cannot be dropped before the exchange.
 """
 
 import torch
@@ -239,50 +241,45 @@ def local_topk_keys(
     return out
 
 
-def aiter_all_gather_keys(keys: torch.Tensor) -> torch.Tensor | None:
-    """AITER IPC all-gather over the TP group, or None if unavailable.
+def aiter_all_gather(x: torch.Tensor) -> torch.Tensor | None:
+    """AITER IPC all-gather over the TP group as ``[world, *x.shape]``, or None.
 
-    Same path as PR #57909: int64 keys are viewed as int32 so AITER's pybind
+    Same path as PR #57909: the payload is viewed as int32 so AITER's pybind
     layer (which has no float64 after it relabels integers as floats) accepts
-    the buffer. Concatenates along dim 0, then views back as
-    ``[world, heads, tokens, topk]``.
+    it -- int64 keys and bf16 index queries alike. Concatenates along dim 0,
+    then views back to ``x``'s dtype.
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
     comm = rocm_aiter_ops.get_aiter_allreduce()
     if comm is None or comm.disabled:
         return None
-    if not keys.is_contiguous():
+    if not x.is_contiguous() or (x.shape[-1] * x.element_size()) % 4:
         return None
-    packed = keys.view(torch.int32)
+    packed = x.view(torch.int32)
     if not comm.should_custom_ag(packed):
         return None
     gathered = comm.custom_all_gather(packed, dim=0)
     if gathered is None:
         return None
     world = get_tp_group().world_size
-    return gathered.view(torch.int64).view(world, *keys.shape)
+    return gathered.view(x.dtype).view(world, *x.shape)
 
 
-def exchange_keys(
-    keys: torch.Tensor,
-    gathered: torch.Tensor,
-    group,
-) -> torch.Tensor:
-    """All-gather ``[heads, tokens, topk]`` keys to ``[world, heads, tokens, topk]``.
+def all_gather(x: torch.Tensor, dest: torch.Tensor, group) -> torch.Tensor:
+    """All-gather contiguous ``x`` to ``[world, *x.shape]``.
 
-    Prefers AITER's IPC all-gather (~6 µs at P=4 in #57909). Falls back to
-    ``all_gather_into_tensor`` on the caller-provided contiguous ``gathered``
-    buffer so CUDA graphs never see a non-contiguous NCCL payload.
+    Prefers AITER's IPC all-gather; otherwise gathers into ``dest``, a
+    caller-owned contiguous ``[world, *x.shape]`` buffer, so CUDA graphs never
+    record a fresh allocation or a non-contiguous NCCL payload.
     """
-    ag = aiter_all_gather_keys(keys)
-    if ag is not None:
-        return ag
-    world = group.world_size
-    heads, tokens, topk = keys.shape
-    dest = gathered.reshape(world * heads, tokens, topk)
-    dist.all_gather_into_tensor(dest, keys, group=group.device_group)
-    return gathered.view(world, heads, tokens, topk)
+    gathered = aiter_all_gather(x)
+    if gathered is not None:
+        return gathered
+    dist.all_gather_into_tensor(
+        dest.view(-1, *x.shape[1:]), x, group=group.device_group
+    )
+    return dest
 
 
 def merge_topk_keys(

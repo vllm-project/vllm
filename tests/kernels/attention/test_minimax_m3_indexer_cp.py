@@ -255,11 +255,16 @@ def _lexsort_topk(score_row: torch.Tensor, n: int) -> torch.Tensor:
     return order[:n]
 
 
+@pytest.mark.parametrize("heads", [1, 4])
 @torch.inference_mode()
-def test_local_topk_merge_matches_full_topk():
-    """Sharded local top-k + merge equals a full-row top-k (PR #57909)."""
+def test_local_topk_merge_matches_full_topk(heads: int):
+    """Sharded per-head local top-k + merge equals a full-row top-k per head.
+
+    Every shard scores every head, as the CP decode does after gathering the
+    index queries; the merge is exact only under that condition.
+    """
     torch.manual_seed(2)
-    world, heads, query_len, topk = 4, 1, 1, 16
+    world, query_len, topk = 4, 1, 16
     init_blocks, local_keep = 1, 2
     seq_lens = torch.tensor([128 * 20, 128 * 7], device=DEVICE, dtype=torch.int32)
     tokens = seq_lens.numel() * query_len
@@ -313,3 +318,36 @@ def test_local_topk_merge_matches_full_topk():
     )
     torch.accelerator.synchronize()
     assert torch.equal(got, ref)
+
+
+@pytest.mark.parametrize(
+    "total_heads,world,expected",
+    [
+        (4, 4, [(1, 0), (1, 1), (1, 2), (1, 3)]),
+        (4, 2, [(2, 0), (2, 2)]),
+        (4, 8, [(1, 0), (1, 0), (1, 1), (1, 1), (1, 2), (1, 2), (1, 3), (1, 3)]),
+    ],
+)
+def test_cp_decode_owns_kv_sharded_heads(
+    total_heads: int, world: int, expected: list[tuple[int, int]]
+):
+    """Each rank merges the index heads the fused QKV linear gives it."""
+    from vllm.models.minimax_m3.amd.indexer_context_parallel import IndexerCPDecode
+
+    for rank, (local_heads, offset) in enumerate(expected):
+        dec = IndexerCPDecode(
+            total_heads=total_heads,
+            rank=rank,
+            world_size=world,
+            max_tokens=1,
+            max_seq_len=BLOCK,
+            topk=16,
+            init_blocks=0,
+            local_blocks=1,
+            scale=1.0,
+            group=None,  # type: ignore[arg-type]  # only used by forward()
+            device=torch.device(DEVICE),
+        )
+        assert (dec.local_heads, dec.head_offset) == (local_heads, offset)
+        assert dec._q_full.shape[1] == total_heads
+        assert dec._scores.shape[0] == total_heads

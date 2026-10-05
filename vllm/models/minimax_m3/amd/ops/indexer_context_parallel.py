@@ -158,12 +158,12 @@ def indexer_context_scores(
         or not index_cache.is_contiguous()
     ):
         raise ValueError("index cache must be contiguous [pages,128,128]")
-    if index_cache.dtype not in (
-        torch.bfloat16,
-        torch.float8_e4m3fn,
-        torch.float8_e4m3fnuz,
-    ):
-        raise ValueError("unsupported index cache dtype")
+    if index_cache.dtype != torch.bfloat16:
+        # The score loop applies no per-token scale; an fp8 index cache needs
+        # the AITER indexer (#57909).
+        raise ValueError(
+            f"index cache must be bf16 for CP scoring, got {index_cache.dtype}"
+        )
     num_pages = int(index_cache.shape[0])
     if num_pages < 1:
         raise ValueError("index cache has no pages")

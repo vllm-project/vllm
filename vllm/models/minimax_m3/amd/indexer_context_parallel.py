@@ -2,23 +2,31 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax-M3 context-parallel Triton indexer for ROCm.
 
-Each TP rank scores its own round-robin shard of KV blocks (1/P of the index
-cache), packs that shard's full top-k as ``(score, global block id)`` keys,
-all-gathers ``P * k`` keys per token, and merges. Prefill is unchanged.
+M3's index heads shard like its KV heads, so at TP=4 each rank owns one of
+the four index heads. Partitioning the *blocks* across ranks therefore needs
+every rank to score every head:
 
-This is the same candidate-exchange as PR #57909, not a MAX allreduce of the
-full score tensor: the payload is ``P * k * 8`` bytes per token and does not
-grow with context length.
+1. all-gather the index queries (``heads * 128`` bf16 per token),
+2. score all global heads on this rank's round-robin block shard (1/P of the
+   index cache),
+3. pack each head's shard top-k as ``(score, global block id)`` keys and
+   all-gather them,
+4. merge per global head, keeping only the heads this rank owns.
 
-Enabled by ``VLLM_ROCM_MINIMAX_INDEXER_CP=1`` (ROCm, TP>1 only).
+Each head's merge sees every shard's top-k *for that head*, so it is exact: a
+global winner is in its own shard's top-k. Prefill is unchanged.
+
+Enabled by ``VLLM_ROCM_MINIMAX_INDEXER_CP=1`` (ROCm, TP>1, bf16 index cache).
 """
 
+import math
+
 import torch
-import torch.distributed as dist
+from torch import nn
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.models.minimax_m3.amd.ops.index_topk import (
     SPARSE_BLOCK_SIZE,
@@ -29,7 +37,7 @@ from vllm.models.minimax_m3.amd.ops.indexer_context_parallel import (
     indexer_context_scores,
 )
 from vllm.models.minimax_m3.amd.ops.indexer_cp_exchange import (
-    aiter_all_gather_keys,
+    all_gather,
     local_topk_keys,
     merge_topk_keys,
 )
@@ -41,100 +49,200 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
 
+def _packed(buf: torch.Tensor, dim: int, n: int) -> torch.Tensor:
+    """Contiguous view of ``buf`` with ``shape[dim]`` cut to ``n``.
+
+    Uses the buffer's leading storage rather than slicing, so collectives and
+    kernels that need contiguous memory get it at a stable address.
+    """
+    shape = list(buf.shape)
+    shape[dim] = n
+    return buf.view(-1)[: math.prod(shape)].view(shape)
+
+
+class IndexerCPDecode(nn.Module):
+    """Decode top-k for this rank's index heads, scored context-parallel.
+
+    Holds the persistent buffers so the path is allocation-free under CUDA
+    graph capture. Every shape is sized from ``max_seq_len`` (pass
+    ``max_model_len``): capture runs ``_dummy_run`` with a one-block context,
+    and shapes derived from the batch would be baked into the graph.
+    """
+
+    def __init__(
+        self,
+        *,
+        total_heads: int,
+        rank: int,
+        world_size: int,
+        max_tokens: int,
+        max_seq_len: int,
+        topk: int,
+        init_blocks: int,
+        local_blocks: int,
+        scale: float,
+        group: GroupCoordinator,
+        device: torch.device,
+        head_dim: int = 128,
+    ) -> None:
+        super().__init__()
+        if total_heads >= world_size:
+            if total_heads % world_size:
+                raise ValueError("index heads must divide evenly across TP ranks")
+            local_heads, replicas = total_heads // world_size, 1
+        else:
+            if world_size % total_heads:
+                raise ValueError("TP ranks must replicate index heads evenly")
+            local_heads, replicas = 1, world_size // total_heads
+        self.total_heads = total_heads
+        self.local_heads = local_heads
+        self.replicas = replicas
+        # Same layout as the KV-head shard/replication in the fused QKV linear.
+        self.head_offset = (rank // replicas) * local_heads
+        self.rank = rank
+        self.world_size = world_size
+        self.max_seq_len = max_seq_len
+        self.max_blocks = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
+        self.topk = topk
+        self.init_blocks = init_blocks
+        self.local_blocks = local_blocks
+        self.scale = scale
+        self.group = group
+
+        max_local = triton.cdiv(self.max_blocks, world_size)
+
+        def buf(name: str, *shape: int, dtype: torch.dtype) -> None:
+            self.register_buffer(
+                name,
+                torch.empty(shape, dtype=dtype, device=device),
+                persistent=False,
+            )
+
+        bf16, f32, i64 = torch.bfloat16, torch.float32, torch.int64
+        buf("_q_local", max_tokens, local_heads, head_dim, dtype=bf16)
+        buf("_q_gathered", world_size, max_tokens, local_heads, head_dim, dtype=bf16)
+        buf("_q_full", max_tokens, total_heads, head_dim, dtype=bf16)
+        buf("_scores", total_heads, max_tokens, max_local, dtype=f32)
+        buf("_keys", total_heads, max_tokens, topk, dtype=i64)
+        buf("_keys_gathered", world_size, total_heads, max_tokens, topk, dtype=i64)
+
+    def _full_queries(self, local_q: torch.Tensor) -> torch.Tensor:
+        """All-gather ``[n, local_heads, D]`` queries to ``[n, total_heads, D]``."""
+        n = local_q.shape[0]
+        q = _packed(self._q_local, 0, n)
+        q.copy_(local_q)
+        gathered = all_gather(q, _packed(self._q_gathered, 1, n), self.group)
+        # Replicated ranks carry the same head; keep the first of each group.
+        owners = gathered[:: self.replicas]
+        full = _packed(self._q_full, 0, n)
+        full.view(n, -1, self.local_heads, full.shape[-1]).copy_(
+            owners.permute(1, 0, 2, 3)
+        )
+        return full
+
+    def forward(
+        self,
+        local_q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+        query_len: int,
+        out: torch.Tensor,
+        *,
+        attention_block_table: torch.Tensor | None = None,
+        sparse_block_table_out: torch.Tensor | None = None,
+        sparse_context_lens_out: torch.Tensor | None = None,
+        block_page_stride: int | None = None,
+    ) -> torch.Tensor:
+        """Write ``[local_heads, n, topk]`` block ids for this rank's heads."""
+        n = local_q.shape[0]
+        scores = indexer_context_scores(
+            self._full_queries(local_q),
+            kv_cache,
+            block_table,
+            seq_lens,
+            self.max_seq_len,
+            self.rank,
+            self.world_size,
+            query_len,
+            self.scale,
+            out=self._scores,
+        )
+        keys = _packed(self._keys, 1, n)
+        local_topk_keys(
+            scores,
+            seq_lens,
+            topk=self.topk,
+            rank=self.rank,
+            world=self.world_size,
+            query_len=query_len,
+            global_blocks=self.max_blocks,
+            init_blocks=self.init_blocks,
+            local_blocks=self.local_blocks,
+            out=keys,
+        )
+        gathered = all_gather(keys, _packed(self._keys_gathered, 2, n), self.group)
+        own = slice(self.head_offset, self.head_offset + self.local_heads)
+        return merge_topk_keys(
+            gathered[:, own],
+            out,
+            seq_lens,
+            query_len=query_len,
+            init_blocks=self.init_blocks,
+            local_blocks=self.local_blocks,
+            attention_block_table=attention_block_table,
+            sparse_block_table_out=sparse_block_table_out,
+            sparse_context_lens_out=sparse_context_lens_out,
+            block_page_stride=block_page_stride,
+        )
+
+
 class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
     """Triton indexer with context-parallel decode scoring for ROCm.
 
-    Decode: score 1/world_size of the blocks, local top-k of the full k,
-    all-gather packed keys, merge. Prefill uses the base Triton kernels.
+    Decode runs through :class:`IndexerCPDecode`. Prefill uses the base Triton
+    kernels.
 
     CUDAGraph: v2 FULL capture records the model with
     ``cudagraph_runtime_mode=NONE`` (see ``ModelCudaGraphManager.capture``), so
     a ``CUDAGraphMode.FULL`` guard never fires and a stream-capturing skip
     would bake the non-CP indexer into decode graphs. Persistent buffers keep
     this path allocation-free so CP is what gets captured.
-
-    Every kernel shape is therefore taken from ``max_model_len`` rather than
-    the batch's ``max_seq_len``: capture runs ``_dummy_run`` with
-    ``seq_lens = max_query_len``, so shapes derived from the batch would bake
-    a one-block context into the graph and replay it at full length.
     """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         vllm_config = get_current_vllm_config()
-        max_model_len = vllm_config.model_config.max_model_len
+        hf_config = vllm_config.model_config.hf_config
+        text_config = getattr(hf_config, "text_config", hf_config)
+        total_heads = text_config.sparse_attention_config["sparse_num_index_heads"]
+        comp = vllm_config.compilation_config
+        max_cg = getattr(comp, "max_cudagraph_capture_size", 0) or 0
+        spec = getattr(vllm_config, "speculative_config", None)
+        n_spec = int(getattr(spec, "num_speculative_tokens", 0) or 0) if spec else 0
+        max_tokens = max(vllm_config.scheduler_config.max_num_seqs, max_cg) * (
+            n_spec + 1
+        )
         device = (
             torch.device("cuda", torch.accelerator.current_device_index())
             if torch.cuda.is_available()
             else torch.device("cpu")
         )
-        comp = vllm_config.compilation_config
-        max_cg = getattr(comp, "max_cudagraph_capture_size", 0) or 0
-        spec = getattr(vllm_config, "speculative_config", None)
-        n_spec = int(getattr(spec, "num_speculative_tokens", 0) or 0) if spec else 0
-        max_nd = max(vllm_config.scheduler_config.max_num_seqs, max_cg) * (n_spec + 1)
-        max_blocks = triton.cdiv(max_model_len, SPARSE_BLOCK_SIZE)
-        world_size = get_tensor_model_parallel_world_size()
-        rank = get_tp_group().rank_in_group
-        max_local = triton.cdiv(max_blocks, world_size)
-        self._cp_world_size = world_size
-        self._cp_rank = rank
-        self._cp_max_seq_len = max_model_len
-        self._cp_max_blocks = max_blocks
-        self.register_buffer(
-            "_local_score_buf",
-            torch.empty(
-                (self.num_index_heads, max_nd, max_local),
-                dtype=torch.float32,
-                device=device,
-            ),
-            persistent=False,
+        self.cp_decode = IndexerCPDecode(
+            total_heads=total_heads,
+            rank=get_tp_group().rank_in_group,
+            world_size=get_tensor_model_parallel_world_size(),
+            max_tokens=max_tokens,
+            max_seq_len=vllm_config.model_config.max_model_len,
+            topk=self.topk_blocks,
+            init_blocks=self.init_blocks,
+            local_blocks=self.local_blocks,
+            scale=self.scale,
+            group=get_tp_group(),
+            device=device,
+            head_dim=self.index_head_dim,
         )
-        self.register_buffer(
-            "_local_keys_buf",
-            torch.empty(
-                (self.num_index_heads, max_nd, self.topk_blocks),
-                dtype=torch.int64,
-                device=device,
-            ),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_gathered_keys_buf",
-            torch.empty(
-                (world_size, self.num_index_heads, max_nd, self.topk_blocks),
-                dtype=torch.int64,
-                device=device,
-            ),
-            persistent=False,
-        )
-
-    def _packed_local_keys(self, nd: int) -> torch.Tensor:
-        """Contiguous ``[heads, nd, topk]`` prefix of the persistent key buffer."""
-        heads, _, topk = self._local_keys_buf.shape
-        return self._local_keys_buf.view(-1)[: heads * nd * topk].view(heads, nd, topk)
-
-    def _packed_gathered_keys(self, nd: int) -> torch.Tensor:
-        """Contiguous ``[world, heads, nd, topk]`` prefix of the gather buffer."""
-        world, heads, _, topk = self._gathered_keys_buf.shape
-        n = heads * nd * topk
-        return self._gathered_keys_buf.view(-1)[: world * n].view(
-            world, heads, nd, topk
-        )
-
-    def _exchange_keys(self, nd: int) -> torch.Tensor:
-        """All-gather this rank's packed keys. Payload is independent of ctx."""
-        keys = self._packed_local_keys(nd)
-        gathered = aiter_all_gather_keys(keys)
-        if gathered is not None:
-            return gathered
-        dest = self._packed_gathered_keys(nd)
-        dist.all_gather_into_tensor(
-            dest.reshape(-1, nd, keys.shape[-1]),
-            keys,
-            group=get_tp_group().device_group,
-        )
-        return dest
+        assert self.cp_decode.local_heads == self.num_index_heads
 
     def forward(
         self,
@@ -182,39 +290,14 @@ class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
                 or kv.ndim != 3
                 or kv.numel() == 0
             ):
-                decode_topk, prefill_topk = super().forward(
+                return super().forward(
                     index_query,
                     attention_block_table=attention_block_table,
                     sparse_block_table_out=sparse_block_table_out,
                     sparse_context_lens_out=sparse_context_lens_out,
                     block_page_stride=block_page_stride,
                 )
-                return decode_topk, prefill_topk
 
-            local_scores = indexer_context_scores(
-                iq[:nd],
-                kv,
-                d.block_table,
-                d.seq_lens,
-                self._cp_max_seq_len,
-                self._cp_rank,
-                self._cp_world_size,
-                d.decode_query_len,
-                self.scale,
-                out=self._local_score_buf,
-            )
-            local_topk_keys(
-                local_scores,
-                d.seq_lens,
-                topk=self.topk_blocks,
-                rank=self._cp_rank,
-                world=self._cp_world_size,
-                query_len=d.decode_query_len,
-                global_blocks=self._cp_max_blocks,
-                init_blocks=self.init_blocks,
-                local_blocks=self.local_blocks,
-                out=self._packed_local_keys(nd),
-            )
             if buf_htk is None:
                 decode_topk = torch.empty(
                     (self.num_index_heads, nd, self.topk_blocks),
@@ -223,13 +306,13 @@ class MiniMaxM3IndexerTritonCPImpl(MiniMaxM3IndexerTritonImpl):
                 )
             else:
                 decode_topk = buf_htk[:, :nd]
-            merge_topk_keys(
-                self._exchange_keys(nd),
-                decode_topk,
+            self.cp_decode(
+                iq[:nd],
+                kv,
+                d.block_table,
                 d.seq_lens,
-                query_len=d.decode_query_len,
-                init_blocks=self.init_blocks,
-                local_blocks=self.local_blocks,
+                d.decode_query_len,
+                decode_topk,
                 attention_block_table=attention_block_table,
                 sparse_block_table_out=sparse_block_table_out,
                 sparse_context_lens_out=sparse_context_lens_out,
