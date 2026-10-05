@@ -340,6 +340,26 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_prompt_tokens_details: bool,
 
+    /// If set to True, including usage on every request.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1,
+        overrides_with = "no_enable_force_include_usage"
+    )]
+    #[serde(default)]
+    pub enable_force_include_usage: bool,
+
+    /// Negation of `--enable-force-include-usage`, matching Python's
+    /// `--no-enable-force-include-usage`
+    #[arg(
+        long = "no-enable-force-include-usage",
+        default_missing_value = "false",
+        num_args = 0..=1
+    )]
+    #[serde(skip)]
+    no_enable_force_include_usage: bool,
+
     /// If specified, API server will add X-Request-Id header to responses.
     #[arg(
         long,
@@ -625,6 +645,7 @@ impl SharedRuntimeArgs {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
+            enable_force_include_usage: self.enable_force_include_usage,
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
