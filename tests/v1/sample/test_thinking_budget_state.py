@@ -64,6 +64,31 @@ def test_swap_budgeted_with_unbudgeted_clears_empty_side():
     assert h._state[0] is budget_state
 
 
+def test_unidirectional_move_clears_stale_destination_state():
+    """A move into an index must not leave that index's prior state behind
+    when the incoming source index has no state of its own."""
+    h = _make_holder()
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=[(1, SamplingParams(thinking_token_budget=5), None, [])],
+            moved=(),
+        )
+    )
+    assert list(h._state.keys()) == [1]
+
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=2,
+            removed=(),
+            added=(),
+            moved=[(0, 1, MoveDirectionality.UNIDIRECTIONAL)],
+        )
+    )
+    assert h._state == {}
+
+
 def test_swap_exchanges_two_budgeted_states():
     h = _make_holder()
     h.sync_batch(
