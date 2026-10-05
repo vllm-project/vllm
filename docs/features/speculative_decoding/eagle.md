@@ -56,6 +56,29 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
+## Reloading an Updated Draft Model
+
+A draft model that keeps training while vLLM serves (for example on the live
+request stream) can be swapped into the running engine without a restart and
+without touching the target model, by calling `reload_draft_weights` on the
+workers. With the offline API:
+
+```python
+llm.collective_rpc("reload_draft_weights", kwargs={"weights_path": "/path/to/new-draft"})
+```
+
+With an online server started with `VLLM_SERVER_DEV_MODE=1`:
+
+```bash
+curl -X POST http://localhost:8000/collective_rpc \
+    -H "Content-Type: application/json" \
+    -d '{"method": "reload_draft_weights", "kwargs": {"weights_path": "/path/to/new-draft"}}'
+```
+
+The new checkpoint must have the same architecture as the configured draft
+model; omitting `weights_path` reloads from the configured path. Submodules the
+drafter shares with the target model (such as the embedding) are left untouched.
+
 ## Pre-Trained Eagle Draft Models
 
 A variety of EAGLE draft models are available on the Hugging Face hub:
