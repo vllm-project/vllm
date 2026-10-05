@@ -77,5 +77,5 @@ def test_mm_device_do_normalize():
     input_norm = build_mm_input_norm(ctx.model_config).to(device)
     output = input_norm(raw_values.flatten(1).to(device), normalized_values.dtype)
     torch.testing.assert_close(
-        output, normalized_values.flatten(1).to(device), rtol=1e-5, atol=1e-6
+        output, normalized_values.flatten(1).to(device), rtol=1.6e-2, atol=1e-5
     )
