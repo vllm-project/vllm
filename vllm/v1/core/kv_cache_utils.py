@@ -1546,6 +1546,16 @@ def _get_kv_cache_groups_uniform_page_size(
         The generated KVCacheGroupSpecs
 
     """
+    tp_invariant = False
+    if (kv_transfer_config := vllm_config.kv_transfer_config) is not None:
+        # Lazy import to avoid circular dependencies
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+
+        connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+        tp_invariant = connector_cls.requires_matching_kv_cache_groups(vllm_config)
+
     # Group all layers by kv_cache_spec.
     # E.g., 2 full attention layers and 3 sliding window attention layers,
     # -> (full.0, full.1), (sw.0, sw.1, sw.2).
@@ -1568,10 +1578,10 @@ def _get_kv_cache_groups_uniform_page_size(
             except (AssertionError, ValueError):
                 # Attention layers of different shapes can still share a
                 # block table if their page sizes match; each keeps its own
-                # spec. Page sizes depend on TP, so not with a KV connector.
+                # spec. Page sizes depend on TP, so not if tp_invariant.
                 candidate = {str(i): s for i, s in enumerate([*specs, layer_spec])}
                 if (
-                    vllm_config.kv_transfer_config is not None
+                    tp_invariant
                     or not isinstance(layer_spec, AttentionSpec)
                     or layer_spec.page_size_bytes != specs[0].page_size_bytes
                     or not UniformTypeKVCacheSpecs.is_uniform_type(candidate)
@@ -1596,11 +1606,10 @@ def _get_kv_cache_groups_uniform_page_size(
     # fewer groups.
     bucket_sizes = [len(layers) for layers in layer_buckets]
     min_group_layers = vllm_config.cache_config.min_kv_cache_group_layers
-    # Worst-case memory a padding layer holds per request. With a KV connector,
+    # Worst-case memory a padding layer holds per request. If tp_invariant,
     # peers (e.g. P/D) may use different TP sizes, which change page bytes but
     # not the pages each layer needs at its own pre-unification page size, so
     # count those pages instead of bytes.
-    tp_invariant = vllm_config.kv_transfer_config is not None
     cost_specs = (
         (unscaled_kv_cache_spec or kv_cache_spec) if tp_invariant else kv_cache_spec
     )

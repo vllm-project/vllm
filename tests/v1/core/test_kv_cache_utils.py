@@ -3592,8 +3592,16 @@ def test_hybrid_group_size_selection(
     assert max(len(group.layer_names) for group in groups) == expected_group_size
 
 
-@pytest.mark.parametrize("kv_connector", [False, True])
-def test_kv_transfer_group_planning_is_tp_invariant(kv_connector):
+@pytest.mark.parametrize(
+    "kv_connector,tp_invariant",
+    [
+        (None, False),
+        ("NixlPushConnector", True),
+        ("OffloadingConnector", False),
+        ("MultiConnector", False),
+    ],
+)
+def test_kv_transfer_group_planning_is_tp_invariant(kv_connector, tp_invariant):
     # 13 target + 4 drafter full attention layers. At TP8 the target's 8 KV
     # heads shard to 1 while the drafter's 2 are replicated to 1, which changes
     # their relative bytes and, with byte-based planning, the group size.
@@ -3609,13 +3617,23 @@ def test_kv_transfer_group_planning_is_tp_invariant(kv_connector):
             },
         }
         config = _grouping_config()
-        config.kv_transfer_config = object() if kv_connector else None
+        # MultiConnector wraps an OffloadingConnector.
+        offloading = {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"}
+        config.kv_transfer_config = (
+            KVTransferConfig(
+                kv_connector=kv_connector,
+                kv_role="kv_both",
+                kv_connector_extra_config={"connectors": [offloading]},
+            )
+            if kv_connector
+            else None
+        )
         groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(
             kv_cache_utils.unify_kv_cache_spec_page_size(specs), config, specs
         )
         return max(len(group.layer_names) for group in groups)
 
-    assert (group_size(8, 2) == group_size(1, 1)) == kv_connector
+    assert (group_size(8, 2) == group_size(1, 1)) == tp_invariant
 
 
 @pytest.mark.parametrize("kv_connector", [False, True])
@@ -3628,7 +3646,11 @@ def test_equal_page_size_sharing_disabled_with_kv_connector(kv_connector):
     draft = replace(full, num_kv_heads=8, head_size=128, head_size_v=128)
     specs = {**{f"target.{i}": full for i in range(8)}, "draft": draft}
     config = _grouping_config()
-    config.kv_transfer_config = object() if kv_connector else None
+    config.kv_transfer_config = (
+        KVTransferConfig(kv_connector="NixlPushConnector", kv_role="kv_both")
+        if kv_connector
+        else None
+    )
     groups = kv_cache_utils._get_kv_cache_groups_uniform_page_size(specs, config)
     shared = any(
         "draft" in group.layer_names and len(group.layer_names) > 1 for group in groups

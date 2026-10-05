@@ -227,6 +227,13 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             return "BLHNC"
         return "LBHNC"
 
+    @classmethod
+    def requires_matching_kv_cache_groups(cls, vllm_config: VllmConfig) -> bool:
+        # CPUOffloadingSpec keeps offloaded KV within this engine.
+        assert vllm_config.kv_transfer_config is not None
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        return extra_config.get("spec_name", "CPUOffloadingSpec") != "CPUOffloadingSpec"
+
     def reset_cache(self) -> bool | None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.reset_cache()

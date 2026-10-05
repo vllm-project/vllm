@@ -673,6 +673,12 @@ class KVConnectorBase_V1(ABC):
         return None
 
     @classmethod
+    def requires_matching_kv_cache_groups(cls, vllm_config: "VllmConfig") -> bool:
+        """Whether engines exchanging KV through this connector need the same
+        KV cache groups, so the planner plans them TP-invariantly."""
+        return True
+
+    @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """Check if this connector requires PIECEWISE CUDA graph mode.
 
