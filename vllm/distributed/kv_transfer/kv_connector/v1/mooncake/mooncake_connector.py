@@ -748,6 +748,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler Side Methods
     ############################################################
 
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        return self._kv_cache_config.transfer_group_ids
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -2404,7 +2407,9 @@ class MooncakeConnectorWorker:
                 continue
             # No race because we are in async loop.
             pull_meta.pull_tasks_count -= 1
-            if pull_meta.pull_tasks_count == 0:
+            # Empty pulls only release the producer's blocks; the consumer
+            # did not enter WAITING_FOR_REMOTE_KVS.
+            if pull_meta.pull_tasks_count == 0 and any(pull_meta.local_block_ids):
                 self.finished_recving_reqs.add(pull_meta.d_req_id)
 
         if ok_reqs:

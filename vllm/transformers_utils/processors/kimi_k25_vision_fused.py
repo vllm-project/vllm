@@ -14,6 +14,7 @@ from PIL import Image
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.utils import TensorType
 
+from vllm.multimodal.image import open_image
 from vllm.utils.import_utils import is_numba_available
 from vllm.utils.jit_monitor import numba_workqueue_threading_layer
 
@@ -151,10 +152,10 @@ def _to_pil(data: Any) -> Image.Image:
     if isinstance(data, str):
         if data.startswith("data:"):
             raw_base64 = data.split(",", 1)[1]
-            return Image.open(io.BytesIO(base64.b64decode(raw_base64))).convert("RGB")
-        return Image.open(data).convert("RGB")
+            return open_image(io.BytesIO(base64.b64decode(raw_base64))).convert("RGB")
+        return open_image(data).convert("RGB")
     if isinstance(data, bytes):
-        return Image.open(io.BytesIO(data)).convert("RGB")
+        return open_image(io.BytesIO(data)).convert("RGB")
     raise ValueError(f"Unsupported data type: {type(data)}")
 
 

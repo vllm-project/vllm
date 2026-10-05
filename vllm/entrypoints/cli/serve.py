@@ -17,6 +17,7 @@ from vllm.entrypoints.launchers.cli_args import (
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
+from vllm.entrypoints.launchers.launcher import create_server_socket
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -295,6 +296,13 @@ def run_multi_api_server(args: argparse.Namespace):
     signal.signal(signal.SIGINT, signal_handler)
 
     listen_address, sock = setup_server(args, reuse_port=num_api_servers > 1)
+    # `--grpc-port` is only accepted for the Rust frontend, which inherits this
+    # listener like the HTTP one. gRPC follows the HTTP TCP host, or IPv4
+    # loopback when HTTP uses a Unix socket.
+    grpc_sock = None
+    if args.grpc_port is not None:
+        grpc_host = "127.0.0.1" if args.uds else (args.host or "")
+        grpc_sock = create_server_socket((grpc_host, args.grpc_port), reuse_port=False)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     propagate_flash_late_interaction(args, engine_args)
@@ -355,6 +363,7 @@ def run_multi_api_server(args: argparse.Namespace):
             api_server_manager = RustFrontendProcessManager(
                 binary_path=rust_frontend_path,
                 sock=sock,
+                grpc_sock=grpc_sock,
                 args=args,
                 input_address=addresses.inputs[0],
                 output_address=addresses.outputs[0],

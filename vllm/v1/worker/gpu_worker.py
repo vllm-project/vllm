@@ -615,7 +615,10 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+            with set_current_vllm_config(self.vllm_config):
+                self.model_runner.profile_run(
+                    randomize_inputs=self.randomize_dummy_inputs
+                )
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -651,6 +654,7 @@ class Worker(WorkerBase):
             # limit are never split, so they stay releasable. Exits before
             # memory_profiling measures, restoring the original limit.
             self._scoped_allocator_max_split(max_split_size_mb=20),
+            set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
@@ -841,10 +845,17 @@ class Worker(WorkerBase):
         if mem_pool_context is None:
             mem_pool_context = self._maybe_get_memory_pool_context(tag="kv_cache")
 
-        self.model_runner.initialize_kv_cache(
-            kv_cache_config,
-            kv_cache_allocation_context=mem_pool_context,
+        # Offload KV-init state, except on XPU, whose outermost pool would win.
+        runtime_pool = (
+            nullcontext()
+            if current_platform.is_xpu()
+            else self._maybe_get_memory_pool_context(tag="runtime")
         )
+        with runtime_pool:
+            self.model_runner.initialize_kv_cache(
+                kv_cache_config,
+                kv_cache_allocation_context=mem_pool_context,
+            )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch

@@ -130,6 +130,14 @@ class GenerationError(VLLMServerError):
         self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
 
 
+class RetryableRequestError(GenerationError):
+    """A transient request-level failure that is safe for clients to retry."""
+
+    def __init__(self, message: str = "Request failed; please retry"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.SERVICE_UNAVAILABLE
+
+
 class GracefulHTTPError(VLLMError):
     """Exception that should be translated into an HTTP error response.
 

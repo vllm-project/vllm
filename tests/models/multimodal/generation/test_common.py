@@ -799,7 +799,6 @@ VLM_TEST_SETTINGS = {
         dtype="half",
         num_logprobs=10,
         patch_hf_runner=model_utils.ovis2_5_patch_hf_runner,
-        hf_model_kwargs={"revision": "refs/pr/5"},
     ),
     "paddleocr_vl": VLMTestInfo(
         models=["PaddlePaddle/PaddleOCR-VL"],

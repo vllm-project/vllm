@@ -97,9 +97,9 @@ pub struct SamplingParams {
     ///
     /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
     pub prompt_logprobs: Option<i32>,
-    /// Candidate token IDs scored at every scored causal prompt row, where row
-    /// `i` scores them as predictions of prompt token `i + 1`.
-    pub prompt_logprob_token_ids: Option<Vec<u32>>,
+    /// Candidate token IDs per scored causal prompt row, where row `i` scores
+    /// its IDs as predictions of prompt token `prompt_logprob_start + i + 1`.
+    pub prompt_logprob_token_ids: Option<Vec<Vec<i32>>>,
     /// First causal prompt row to score; `None` scores from the first row.
     pub prompt_logprob_start: Option<u32>,
     /// Minimum probability threshold for token sampling. `None` means no

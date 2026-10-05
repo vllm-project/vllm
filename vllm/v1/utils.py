@@ -354,6 +354,7 @@ class RustFrontendProcessManager:
         engine_count: int,
         data_parallel_size: int,
         stats_update_address: str | None = None,
+        grpc_sock: Any | None = None,
     ):
         import os
         import subprocess
@@ -377,6 +378,12 @@ class RustFrontendProcessManager:
             "--data-parallel-size",
             str(data_parallel_size),
         ]
+        pass_fds = [fd]
+        if grpc_sock is not None:
+            grpc_fd = grpc_sock.fileno()
+            os.set_inheritable(grpc_fd, True)
+            cmd.extend(["--grpc-listen-fd", str(grpc_fd)])
+            pass_fds.append(grpc_fd)
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
         from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
@@ -418,7 +425,7 @@ class RustFrontendProcessManager:
 
         redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
-        self._proc = subprocess.Popen(cmd, pass_fds=(fd,))
+        self._proc = subprocess.Popen(cmd, pass_fds=pass_fds)
 
         # Create a process wrapper with a sentinel fd for monitoring
         self.processes: list[_SubprocessWrapper] = [

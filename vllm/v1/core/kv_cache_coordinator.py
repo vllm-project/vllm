@@ -241,6 +241,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        skip_zeroing_group_ids: tuple[int, ...] = (),
     ) -> None:
         """Add the new computed blocks to the request. Optionally allocate new
             blocks for external computed tokens (if any).
@@ -251,6 +252,8 @@ class KVCacheCoordinator(ABC):
                 prefix cache.
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
+            skip_zeroing_group_ids: Groups whose external-token blocks are
+                written by an async load and must not be zeroed.
 
         """
         # A running request is already tracked in num_cached_block and won't
@@ -274,11 +277,12 @@ class KVCacheCoordinator(ABC):
                 num_external_computed_tokens,
             )
         if num_external_computed_tokens > 0:
-            for manager in self.single_type_managers:
+            for i, manager in enumerate(self.single_type_managers):
                 manager.allocate_external_computed_blocks(
                     request_id,
                     num_local_computed_tokens,
                     num_external_computed_tokens,
+                    record_for_zeroing=i not in skip_zeroing_group_ids,
                 )
 
     def allocate_new_blocks(

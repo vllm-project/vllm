@@ -801,7 +801,7 @@ pathvalidate==3.2.1
     # via pytablewriter
 patsy==1.0.1
     # via statsmodels
-peft==0.19.1
+peft==0.21.1
     # via -r requirements/test/cuda.in
 perceptron==0.1.4
     # via -r requirements/test/cuda.in
@@ -1266,7 +1266,7 @@ timm==1.0.17
     #   -r requirements/test/cuda.in
     #   open-clip-torch
     #   segmentation-models-pytorch
-tokenizers==0.23.1
+tokenizers==0.23.2
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1335,7 +1335,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.17.0
+transformers==5.18.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

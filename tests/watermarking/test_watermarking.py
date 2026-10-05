@@ -26,6 +26,7 @@ from vllm.v1.watermarking.spec_decode import (
     speculative_target_watermark_key,
 )
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
+from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.watermark import (
     draft_watermarking_mask,
@@ -1497,6 +1498,53 @@ def test_draft_watermarker_deduplicates_across_a_block_on_cuda(
         # The 0-d draft step selects the logits cache column.
         assert torch.equal(draft_logits[:, step, :vocab_size], logits)
     assert not draft_logits[:, :, -1].any()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_draft_watermarker_cuda_graph_reads_current_prompt_lens():
+    draft_watermarker = DraftWatermarker(
+        GumbelWatermarker(key=42, context_width=2),
+        max_num_reqs=1,
+        device=torch.device("cuda"),
+        num_speculative_steps=1,
+        deduplicate_contexts="single_turn",
+        deduplicate_contexts_max_history=None,
+    )
+    prompt_lens = UvaBackedTensor(1, dtype=torch.int32)
+    contexts = torch.tensor([[5, 6]]).cuda()
+    enabled = torch.ones(1, dtype=torch.bool).cuda()
+    # [5, 6] repeats only while the prompt counts as history.
+    all_token_ids = torch.tensor([[5, 6, 9, 5, 6]]).cuda()
+    total_lens = torch.tensor([5]).cuda()
+    logits = torch.zeros(1, 8).cuda()
+    idx_mapping = torch.zeros(1, dtype=torch.int32).cuda()
+    temperature = torch.ones(1).cuda()
+    draft_step = torch.tensor(0).cuda()
+
+    def prepare():
+        draft_watermarker.prepare(
+            contexts, enabled, all_token_ids, prompt_lens.gpu, total_lens
+        )
+
+    def watermark_mask():
+        _, mask = draft_watermarker._sampling_state(
+            logits, idx_mapping, temperature, draft_step, contexts
+        )
+        return mask
+
+    prepare()
+    assert not watermark_mask().item()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        mask = watermark_mask()
+    # A step that adds requests moves prompt_lens.gpu to the next pool buffer.
+    prompt_lens.np[:] = 3
+    prompt_lens.copy_to_uva()
+    prepare()
+    graph.replay()
+    assert mask.item()
 
 
 def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):

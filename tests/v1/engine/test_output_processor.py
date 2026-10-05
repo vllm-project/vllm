@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, Mock
 
 import numpy as np
 import pytest
+import torch
 
 from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
@@ -18,7 +19,12 @@ from tests.v1.engine.utils import (
 from vllm import PoolingParams
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
+from vllm.outputs import (
+    CompletionOutput,
+    PoolingRequestOutput,
+    RequestOutput,
+    SamplingMask,
+)
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
@@ -1630,3 +1636,92 @@ def test_request_output_add_merges_delta_sampling_masks():
 
     assert merged.outputs[0].token_ids == [10, 20]
     assert merged.outputs[0].sampling_mask.token_ids == [[10, 11], [20]]
+
+
+@pytest.mark.skip_global_cleanup
+def test_pooling_cache_miss_is_a_request_error_and_batch_continues():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=[1, 2],
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=None,
+            pooling_params=PoolingParams(task="embed"),
+        )
+        for idx in range(2)
+    ]
+    for request in requests:
+        output_processor.add_request(request, prompt=None)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=requests[0].request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["missing-hash"],
+            ),
+            EngineCoreOutput(
+                request_id=requests[1].request_id,
+                new_token_ids=[],
+                pooling_output=torch.tensor([1.0, 2.0]),
+                finish_reason=FinishReason.STOP,
+            ),
+        ]
+    )
+
+    assert len(processed.request_outputs) == 2
+    failed, succeeded = processed.request_outputs
+    assert isinstance(failed, PoolingRequestOutput)
+    assert failed.error is not None
+    assert failed.error.code == "multimodal_cache_miss"
+    assert failed.error.retryable
+    assert isinstance(succeeded, PoolingRequestOutput)
+    assert succeeded.error is None
+    assert torch.equal(succeeded.outputs.data, torch.tensor([1.0, 2.0]))
+
+
+@pytest.mark.skip_global_cleanup
+def test_async_pooling_cache_miss_does_not_fail_output_processor():
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-int",
+        external_req_id="request",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(task="embed"),
+    )
+    queue = RequestOutputCollector(
+        output_kind=RequestOutputKind.FINAL_ONLY,
+        request_id=request.request_id,
+    )
+    output_processor.add_request(request, prompt=None, queue=queue)
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["missing-hash"],
+            )
+        ]
+    )
+
+    assert processed.request_outputs == []
+    output = queue.get_nowait()
+    assert isinstance(output, PoolingRequestOutput)
+    assert output.error is not None
+    assert output.error.retryable
+    assert not output_processor.has_unfinished_requests()
