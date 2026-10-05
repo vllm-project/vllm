@@ -12,6 +12,7 @@
 #include <cstdint>
 
 #include "topk_histogram_4096.cuh"
+#include "persistent_topk_overflow.cuh"
 
 namespace vllm {
 namespace persistent {
@@ -162,9 +163,8 @@ __device__ __noinline__ bool histogram_medium_topk(
 
   if (thread_id == 0) {
     shared_threshold_bin = threshold_bin;
-    shared_buffered_count[0] = threshold_bin_count > MAX_BUFFERED_ITEMS
-                                   ? MAX_BUFFERED_ITEMS + 1
-                                   : 0;
+    shared_buffered_count[0] = overflow::initial_buffered_count(
+        threshold_bin_count, MAX_BUFFERED_ITEMS);
     shared_output_count = 0;
   }
   __syncthreads();
@@ -200,13 +200,9 @@ __device__ __noinline__ bool histogram_medium_topk(
     return false;
   }
 
-  if (__builtin_expect(shared_buffered_count[0] > MAX_BUFFERED_ITEMS, 0)) {
-    if (thread_id == 0) {
-      auto* fallback_state = reinterpret_cast<uint32_t*>(medium_smem);
-      fallback_state[0] = static_cast<uint32_t>(threshold_bin) << 21;
-      fallback_state[1] = static_cast<uint32_t>(remaining_k);
-    }
-    __syncthreads();
+  if (overflow::prepare_medium_fallback(
+          shared_buffered_count[0], MAX_BUFFERED_ITEMS, threshold_bin,
+          remaining_k, medium_smem)) {
     return true;
   }
 
@@ -654,7 +650,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
             row_output[i] = (i < seq_len) ? static_cast<int32_t>(i) : -1;
           }
         } else {
-          auto* fallback_state = reinterpret_cast<uint32_t*>(smem_raw);
           if (seq_len <= static_cast<uint32_t>(SHORT_EXACT_THRESHOLD)) {
             topk_histogram_4096::exact_topk_rescan<
                 TopK, kThreadsPerBlock, true, VEC_SIZE, true>(
@@ -664,13 +659,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
                     histogram_medium_topk<TopK>(row_input, row_output, 0,
                                                 seq_len),
                     0)) {
-              const uint32_t initial_prefix = fallback_state[0];
-              const uint32_t initial_remaining = fallback_state[1];
-              __syncthreads();
-              topk_histogram_4096::exact_topk_rescan<
-                  TopK, kThreadsPerBlock, true, VEC_SIZE, true, 1, 4096>(
-                  row_input, row_output, seq_len, smem_raw, initial_prefix,
-                  initial_remaining);
+              overflow::recover_medium<TopK, kThreadsPerBlock, VEC_SIZE>(
+                  row_input, row_output, seq_len, smem_raw);
             }
           }
         }
@@ -753,157 +743,11 @@ struct FilteredTopKTraits<float, UseWideCoarse> {
   }
 };
 
-// Sample a pivot, bound the candidate set, then select it exactly by radix.
-template <typename DType, typename IdType, int VecSize, uint32_t BlockSize,
-          uint32_t CandidateCapacity>
-__device__ bool try_sampled_exact_topk(
-    const DType* __restrict__ scores, IdType* __restrict__ output,
-    uint32_t length, uint32_t top_k, void* dynamic_smem, int* histogram,
-    int* candidate_count, int* output_counter, int* radix_prefix,
-    int* radix_remaining) {
-  using Traits = FilteredTopKTraits<DType>;
-  using Radix = hist4096::ExactRadixTraits<false>;
-  constexpr uint32_t kItemsPerThread = 2;
-  constexpr uint32_t kSampleSize = BlockSize * kItemsPerThread;
-  using SampleSort =
-      cub::BlockRadixSort<uint32_t, BlockSize, kItemsPerThread>;
-  static_assert(sizeof(typename SampleSort::TempStorage) <=
-                2 * CandidateCapacity * sizeof(int));
-
-  const uint32_t tx = threadIdx.x;
-  uint32_t sample_keys[kItemsPerThread];
-#pragma unroll
-  for (uint32_t i = 0; i < kItemsPerThread; ++i) {
-    const uint32_t sample_idx = tx * kItemsPerThread + i;
-    const uint32_t score_idx = static_cast<uint32_t>(
-        (static_cast<uint64_t>(2 * sample_idx + 1) * length) /
-        (2 * kSampleSize));
-    sample_keys[i] = Traits::ToOrdered(scores[score_idx]);
-  }
-
-  auto* sort_smem =
-      static_cast<typename SampleSort::TempStorage*>(dynamic_smem);
-  SampleSort(*sort_smem).SortDescending(sample_keys);
-  __syncthreads();
-
-  const uint32_t target_candidates =
-      min(CandidateCapacity / 2, (top_k < 2048) ? 4 * top_k : 2 * top_k);
-  uint32_t sample_rank = static_cast<uint32_t>(
-      (static_cast<uint64_t>(target_candidates) * kSampleSize + length - 1) /
-      length);
-  sample_rank = max(1u, min(sample_rank, kSampleSize));
-  const uint32_t rank_index = sample_rank - 1;
-  if (tx == rank_index / kItemsPerThread) {
-    *radix_prefix = static_cast<int>(sample_keys[rank_index % kItemsPerThread]);
-  }
-  if (tx == 0) *candidate_count = 0;
-  __syncthreads();
-
-  auto* candidates = static_cast<int*>(dynamic_smem);
-  const uint32_t proposed_pivot = static_cast<uint32_t>(*radix_prefix);
-  const auto collect_candidate = [&](uint32_t idx, DType score) {
-    if (Traits::ToOrdered(score) >= proposed_pivot) {
-      const int pos = atomicAdd(candidate_count, 1);
-      if (pos < static_cast<int>(CandidateCapacity)) candidates[pos] = idx;
-    }
-  };
-
-  vec_t<DType, VecSize> score_vec;
-  const uint32_t aligned_length = length / VecSize * VecSize;
-  for (uint32_t base = tx * VecSize; base < aligned_length;
-       base += BlockSize * VecSize) {
-    score_vec.cast_load(scores + base);
-#pragma unroll
-    for (uint32_t i = 0; i < VecSize; ++i) {
-      collect_candidate(base + i, score_vec[i]);
-    }
-  }
-  for (uint32_t idx = aligned_length + tx; idx < length; idx += BlockSize) {
-    collect_candidate(idx, scores[idx]);
-  }
-  __syncthreads();
-
-  const int num_candidates = *candidate_count;
-  if (num_candidates < static_cast<int>(top_k) ||
-      num_candidates > static_cast<int>(CandidateCapacity)) {
-    return false;
-  }
-
-  auto* candidate_keys = candidates + CandidateCapacity;
-  for (int i = tx; i < num_candidates; i += BlockSize) {
-    candidate_keys[i] =
-        static_cast<int>(Traits::ToOrdered(scores[candidates[i]]));
-  }
-
-  if (tx == 0) {
-    *radix_prefix = 0;
-    *radix_remaining = static_cast<int>(top_k);
-  }
-  __syncthreads();
-
-#pragma unroll
-  for (uint32_t round = 0; round < Radix::kRounds; ++round) {
-    if (tx < Radix::kBins) histogram[tx] = 0;
-    __syncthreads();
-
-    const uint32_t prefix = static_cast<uint32_t>(*radix_prefix);
-    const uint32_t prefix_mask = Radix::prefix_mask(round);
-    const uint32_t shift = Radix::shift(round);
-    for (int i = tx; i < num_candidates; i += BlockSize) {
-      const uint32_t ordered = static_cast<uint32_t>(candidate_keys[i]);
-      if ((ordered & prefix_mask) == prefix) {
-        atomicAdd(&histogram[(ordered >> shift) & Radix::digit_mask(round)], 1);
-      }
-    }
-    __syncthreads();
-
-    if (tx == 0) {
-      int count_above = 0;
-      const int remaining = *radix_remaining;
-      for (int bin = static_cast<int>(Radix::kBins) - 1; bin >= 0; --bin) {
-        const int count = histogram[bin];
-        if (count_above + count >= remaining) {
-          *radix_remaining = remaining - count_above;
-          *radix_prefix =
-              static_cast<int>(prefix | (static_cast<uint32_t>(bin) << shift));
-          break;
-        }
-        count_above += count;
-      }
-    }
-    __syncthreads();
-  }
-
-  if (tx == 0) {
-    *output_counter = 0;
-    histogram[0] = 0;
-  }
-  __syncthreads();
-
-  const uint32_t pivot = static_cast<uint32_t>(*radix_prefix);
-  const int equal_count = *radix_remaining;
-  const int equal_base = static_cast<int>(top_k) - equal_count;
-  for (int i = tx; i < num_candidates; i += BlockSize) {
-    const int idx = candidates[i];
-    const uint32_t ordered = static_cast<uint32_t>(candidate_keys[i]);
-    if (ordered > pivot) {
-      output[atomicAdd(output_counter, 1)] = static_cast<IdType>(idx);
-    } else if (ordered == pivot) {
-      const int pos = atomicAdd(&histogram[0], 1);
-      if (pos < equal_count) output[equal_base + pos] = static_cast<IdType>(idx);
-    }
-  }
-  __syncthreads();
-  return true;
-}
-
 constexpr uint32_t FILTERED_TOPK_BLOCK_THREADS = 1024;
 constexpr uint32_t FILTERED_TOPK_SMEM_INPUT_SIZE =
     16 * 1024;  // 16K indices per buffer
 constexpr size_t FILTERED_TOPK_SMEM_DYNAMIC =
     sizeof(int) * 2 * FILTERED_TOPK_SMEM_INPUT_SIZE;  // 128KB
-constexpr uint32_t FILTERED_TOPK_SAMPLING_MIN_ROWS = 96;
-constexpr uint32_t FILTERED_TOPK_SAMPLING_MIN_LENGTH = 192 * 1024;
 constexpr uint32_t FILTERED_TOPK_WIDE_COARSE_MIN_LENGTH = 64 * 1024;
 constexpr uint32_t FILTERED_TOPK_WIDE_COARSE_MAX_LENGTH = 192 * 1024;
 static_assert(hist4096::kExactCandidateOffset +
@@ -1098,40 +942,12 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
     }
     __syncthreads();
   } else {
-    // The fixed candidate buffer cannot safely truncate the threshold bin.
-    const bool coarse_overflow =
-        s_coarse_histogram[threshold_bin] -
-            s_coarse_histogram[threshold_bin + 1] >
-        SMEM_INPUT_SIZE;
-    __syncthreads();
-    if (__builtin_expect(coarse_overflow, 0)) {
-      // Sampling amortizes its fixed block-sort cost only for long rows at
-      // enough concurrency to saturate memory bandwidth.
-      if (num_rows >= FILTERED_TOPK_SAMPLING_MIN_ROWS &&
-          length >= FILTERED_TOPK_SAMPLING_MIN_LENGTH &&
-          try_sampled_exact_topk<DType, IdType, VEC_SIZE, BLOCK_SIZE,
-                                 SMEM_INPUT_SIZE>(
-              score, dst, length, top_k, dynamic_smem, s_histogram,
-              &s_num_input[0], &s_counter, &s_threshold_bin_id,
-              &s_num_input[1])) {
-        return;
-      }
-      if constexpr (Traits::COARSE_BITS == 12) {
-        const uint32_t high11_bin =
-            static_cast<uint32_t>(threshold_bin) >> 1;
-        const uint32_t count_above_high11 =
-            s_coarse_histogram[(high11_bin + 1) << 1];
-        hist4096::exact_topk_rescan<MAX_K, BLOCK_SIZE, true, VEC_SIZE, true, 1,
-                                    SMEM_INPUT_SIZE>(
-            score, dst, length, dynamic_smem, high11_bin << 21,
-            static_cast<uint32_t>(top_k) - count_above_high11);
-      } else {
-        hist4096::exact_topk_rescan<MAX_K, BLOCK_SIZE, true, VEC_SIZE, true, 1,
-                                    SMEM_INPUT_SIZE>(
-            score, dst, length, dynamic_smem,
-            static_cast<uint32_t>(threshold_bin) << 21,
-            static_cast<uint32_t>(topk));
-      }
+    if (overflow::recover_coarse_if_needed<
+            DType, IdType, VEC_SIZE, BLOCK_SIZE, MAX_K, SMEM_INPUT_SIZE,
+            UseWideCoarse>(
+            score, dst, length, top_k, num_rows, threshold_bin, topk,
+            s_coarse_histogram, dynamic_smem, s_histogram, &s_num_input[0],
+            &s_counter, &s_threshold_bin_id, &s_num_input[1])) {
       return;
     }
     for (int bin = tx; bin < RADIX + 1; bin += BLOCK_SIZE) {
@@ -1177,10 +993,9 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
       const auto r_idx = round % 2;
 
       const auto _raw_num_input = s_num_input[r_idx];
-      // Refinement overflow falls back to an exact full-row selection.
-      if (_raw_num_input > SMEM_INPUT_SIZE) {
-        hist4096::exact_topk_rescan<MAX_K, BLOCK_SIZE, true, VEC_SIZE, true>(
-            score, dst, length, s_input_idx);
+      if (overflow::recover_refinement_if_needed<
+              MAX_K, BLOCK_SIZE, VEC_SIZE, SMEM_INPUT_SIZE>(
+              _raw_num_input, score, dst, length, s_input_idx)) {
         return;
       }
       const auto num_input =
