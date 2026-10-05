@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
-from referencing.jsonschema import DRAFT202012
 
 import vllm.envs
 from vllm.exceptions import VLLMValidationError
@@ -265,111 +264,108 @@ def _schema_types(schema: dict[str, Any]) -> set[str]:
     return set()
 
 
-def _node_has_unsupported_features(obj: dict[str, Any]) -> bool:
-    if not isinstance(obj, dict):
-        return False
-
-    schema_types = _schema_types(obj)
-
-    # Check for numeric ranges
-    if (schema_types & {"integer", "number"}) and ("multipleOf" in obj):
-        return True
-
-    # Check for array unsupported keywords
-    if "array" in schema_types and any(
-        key in obj for key in ("uniqueItems", "contains", "minContains", "maxContains")
-    ):
-        return True
-
-    # Unsupported keywords for strings
-    if (
-        "string" in schema_types
-        and "format" in obj
-        and obj["format"] not in STRING_SUPPORTED_FORMATS
-    ):
-        return True
-
-    # A string mixing a generative constraint (pattern or format) with
-    # explicit length bounds. xgrammar compiles the pattern/format side
-    # and silently drops minLength/maxLength from the grammar, so output
-    # can violate the bound without any error surfacing. Verified against
-    # the compiled EBNF: pattern/format grammars come out byte-identical
-    # with and without the length keywords, while maxLength alone lowers
-    # to {0, N} correctly.
-    if "string" in schema_types and _has_pattern_and_length_bounds(obj):
-        return True
-
-    # propertyNames validates names, so it is a string schema even when it
-    # omits "type", which is the form that escapes the check above.
-    if (
-        "object" in schema_types
-        and isinstance(obj.get("propertyNames"), dict)
-        and _has_pattern_and_length_bounds(obj["propertyNames"])
-    ):
-        return True
-
-    # FIXME: propertyNames conflicts with properties/patternProperties/
-    # additionalProperties/unevaluatedProperties under xgrammar.
-    # https://github.com/mlc-ai/xgrammar/issues/826
-    if (
-        "object" in schema_types
-        and "propertyNames" in obj
-        and (
-            "properties" in obj
-            or "patternProperties" in obj
-            or isinstance(obj.get("additionalProperties"), dict)
-            or obj.get("unevaluatedProperties", True) is not True
-        )
-    ):
-        return True
-
-    # FIXME: multiple patternProperties, or patternProperties alongside
-    # properties, conflict under xgrammar.
-    if (
-        "object" in schema_types
-        and isinstance(obj.get("patternProperties"), dict)
-        and ("properties" in obj or len(obj["patternProperties"]) > 1)
-    ):
-        return True
-
-    # Note(arpera):
-    # Xgrammar lacks support of multi-branch allOf
-    # For instance, this schema:
-    # {
-    #   "allOf": [
-    #     { "type": "string" },
-    #     { "enum": ["yes", "no"] }
-    #   ]
-    # }
-    # would accept any kind of json, such as
-    # "maybe", "", 42, {}, [], {"a": 1}, etc.
-    # which is NOT what is expected.
-    # Reported this issue to xgrammar team to track progress on resolving:
-    # https://github.com/mlc-ai/xgrammar/issues/937
-    return isinstance(obj.get("allOf"), list) and len(obj["allOf"]) >= 2
-
-
-def _walk_schema(schema: dict[str, Any]):
-    yield schema
-
-    try:
-        resource = DRAFT202012.create_resource(schema)
-        for subresource in resource.subresources():
-            yield from _walk_schema(subresource.contents)
-    except (AttributeError, TypeError):
-        # Malformed schema
-        return
-
-
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
-    if not isinstance(schema, dict):
+
+    def check_object(obj: dict[str, Any]) -> bool:
+        if not isinstance(obj, dict):
+            return False
+
+        schema_types = _schema_types(obj)
+
+        # Check for numeric ranges
+        if (schema_types & {"integer", "number"}) and ("multipleOf" in obj):
+            return True
+
+        # Check for array unsupported keywords
+        if "array" in schema_types and any(
+            key in obj
+            for key in ("uniqueItems", "contains", "minContains", "maxContains")
+        ):
+            return True
+
+        # Unsupported keywords for strings
+        if (
+            "string" in schema_types
+            and "format" in obj
+            and obj["format"] not in STRING_SUPPORTED_FORMATS
+        ):
+            return True
+
+        # A string mixing a generative constraint (pattern or format) with
+        # explicit length bounds. xgrammar compiles the pattern/format side
+        # and silently drops minLength/maxLength from the grammar, so output
+        # can violate the bound without any error surfacing. Verified against
+        # the compiled EBNF: pattern/format grammars come out byte-identical
+        # with and without the length keywords, while maxLength alone lowers
+        # to {0, N} correctly.
+        if "string" in schema_types and _has_pattern_and_length_bounds(obj):
+            return True
+
+        # propertyNames validates names, so it is a string schema even when it
+        # omits "type", which is the form that escapes the check above.
+        if (
+            "object" in schema_types
+            and isinstance(obj.get("propertyNames"), dict)
+            and _has_pattern_and_length_bounds(obj["propertyNames"])
+        ):
+            return True
+
+        # FIXME: propertyNames conflicts with properties/patternProperties/
+        # additionalProperties/unevaluatedProperties under xgrammar.
+        # https://github.com/mlc-ai/xgrammar/issues/826
+        if (
+            "object" in schema_types
+            and "propertyNames" in obj
+            and (
+                "properties" in obj
+                or "patternProperties" in obj
+                or isinstance(obj.get("additionalProperties"), dict)
+                or obj.get("unevaluatedProperties", True) is not True
+            )
+        ):
+            return True
+
+        # FIXME: multiple patternProperties, or patternProperties alongside
+        # properties, conflict under xgrammar.
+        if (
+            "object" in schema_types
+            and isinstance(obj.get("patternProperties"), dict)
+            and ("properties" in obj or len(obj["patternProperties"]) > 1)
+        ):
+            return True
+
+        # Note(arpera):
+        # Xgrammar lacks support of multi-branch allOf
+        # For instance, this schema:
+        # {
+        #   "allOf": [
+        #     { "type": "string" },
+        #     { "enum": ["yes", "no"] }
+        #   ]
+        # }
+        # would accept any kind of json, such as
+        # "maybe", "", 42, {}, [], {"a": 1}, etc.
+        # which is NOT what is expected.
+        # Reported this issue to xgrammar team to track progress on resolving:
+        # https://github.com/mlc-ai/xgrammar/issues/937
+        allof = obj.get("allOf")
+        if isinstance(allof, list) and len(allof) >= 2:
+            return True
+
+        # Recursively check all nested objects and arrays
+        for value in obj.values():
+            if isinstance(value, dict):
+                if check_object(value):
+                    return True
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict) and check_object(item):
+                        return True
+
         return False
 
-    for subschema in _walk_schema(schema):
-        if _node_has_unsupported_features(subschema):
-            return True
-    return False
+    return check_object(schema)
 
 
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:

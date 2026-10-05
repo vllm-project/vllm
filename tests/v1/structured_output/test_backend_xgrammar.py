@@ -41,16 +41,12 @@ def unsupported_string_schemas():
 
 
 @pytest.fixture
-def unsupported_integer_schemas():
-    return [
-        {"type": "integer", "multipleOf": 120},
-    ]
-
-
-@pytest.fixture
-def unsupported_number_schemas():
+def unsupported_multipleOf_schemas():
     return [
         {"type": "number", "multipleOf": 120},
+        {"Even": {"type": "number", "multipleOf": 2}},
+        {"type": "integer", "multipleOf": 120},
+        {"Even": {"type": "integer", "multipleOf": 2}},
     ]
 
 
@@ -330,8 +326,7 @@ class TestHasXGrammarUnsupportedJsonFeatures:
         "schema_type",
         [
             "unsupported_string_schemas",
-            "unsupported_integer_schemas",
-            "unsupported_number_schemas",
+            "unsupported_multipleOf_schemas",
             "unsupported_array_schemas",
             "unsupported_property_names_combinations",
             "unsupported_pattern_properties_combinations",
