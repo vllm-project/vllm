@@ -49,9 +49,7 @@ from pydantic import (
     BeforeValidator,
     Field,
     ValidationError,
-    ValidationInfo,
     field_serializer,
-    field_validator,
     model_validator,
 )
 
@@ -63,6 +61,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     StopParam,
+    TopLogprobsParam,
     validate_cache_salt,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
@@ -212,7 +211,7 @@ class ResponsesRequest(OpenAIBaseModel):
     text: ResponseTextConfig | None = None
     tool_choice: ToolChoice = "auto"
     tools: list[Tool] = Field(default_factory=list)
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     top_p: float | None = None
     top_k: int | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
@@ -500,16 +499,6 @@ class ResponsesRequest(OpenAIBaseModel):
         return (
             isinstance(self.include, list)
             and "message.output_text.logprobs" in self.include
-        )
-
-    @field_validator("top_logprobs")
-    @classmethod
-    def normalize_top_logprobs(
-        cls, value: int | None, info: ValidationInfo
-    ) -> int | None:
-        include = info.data.get("include") or []
-        return (
-            0 if value is None and "message.output_text.logprobs" in include else value
         )
 
     @model_validator(mode="before")

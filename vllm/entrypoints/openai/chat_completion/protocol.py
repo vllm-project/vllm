@@ -14,8 +14,6 @@ from pydantic import (
     Field,
     PrivateAttr,
     SerializeAsAny,
-    ValidationInfo,
-    field_validator,
     model_serializer,
     model_validator,
 )
@@ -35,6 +33,7 @@ from vllm.entrypoints.generate.base.protocol import (
     StopParam,
     StreamOptions,
     ToolCall,
+    TopLogprobsParam,
     structured_outputs_from_response_format,
     validate_cache_salt,
     validate_structural_tag_response_format,
@@ -224,7 +223,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     max_tokens: int | None = Field(
         default=None,
         deprecated="max_tokens is deprecated in favor of "
@@ -458,13 +457,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "exactly what was fed into the model."
         ),
     )
-
-    @field_validator("top_logprobs")
-    @classmethod
-    def normalize_top_logprobs(
-        cls, value: int | None, info: ValidationInfo
-    ) -> int | None:
-        return 0 if value is None and info.data.get("logprobs") else value
 
     cache_salt: str | None = Field(
         default=None,
@@ -1104,7 +1096,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     logprob_token_ids: list[int] | None = Field(
         default=None,
         description=(
@@ -1152,13 +1144,6 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     # matching ChatCompletionRequest.return_tokens_as_token_ids.
     return_tokens_as_token_ids: bool | None = None
     return_token_ids: bool = False
-
-    @field_validator("top_logprobs")
-    @classmethod
-    def normalize_top_logprobs(
-        cls, value: int | None, info: ValidationInfo
-    ) -> int | None:
-        return 0 if value is None and info.data.get("logprobs") else value
 
     @model_validator(mode="before")
     @classmethod
