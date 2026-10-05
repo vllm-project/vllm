@@ -564,9 +564,6 @@ class BertMLMHead(nn.Module):
         self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
         self.decoder = nn.Linear(hidden_size, vocab_size, bias=True)
 
-    def tie_weights_with_embeddings(self, embeddings_weight: torch.Tensor):
-        self.decoder.weight = embeddings_weight
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         x = self.dense(hidden_states)
         x = self.activation(x)

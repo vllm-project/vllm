@@ -973,34 +973,6 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
         )
 
 
-# ===========================================================================
-# INT8 W8A8 MoE
-# ===========================================================================
-
-
-def prepare_int8_moe_layer_for_cpu(
-    w13: torch.Tensor,
-    w2: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Prepack INT8 MoE weights for the current CPU architecture."""
-    # SMMLA packing for AArch64
-    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-        return (
-            cpu_prepack_moe_weight_int8(w13, "neon"),
-            cpu_prepack_moe_weight_int8(w2, "neon"),
-        )
-    # VSX packing for POWER
-    if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
-        return (
-            cpu_prepack_moe_weight_int8(w13, "vsx"),
-            cpu_prepack_moe_weight_int8(w2, "vsx"),
-        )
-    # VNNI packing for x86
-    packed_w13 = torch.ops._C.convert_weight_packed(w13)
-    packed_w2 = torch.ops._C.convert_weight_packed(w2)
-    return packed_w13, packed_w2
-
-
 class CPUExpertsInt8(mk.FusedMoEExpertsModular):
     """CPU INT8 W8A8 per-channel weight / dynamic per-token activation
     modular MoE experts."""

@@ -1256,12 +1256,6 @@ class AudioEmbedding(nn.Module):
         self.input_embeds = None
         self.audio_embed_sizes = None
 
-    def set_audio_embeds(self, input_embeds: torch.Tensor) -> None:
-        self.input_embeds = input_embeds
-
-    def set_audio_embed_sizes(self, audio_embed_sizes: torch.Tensor) -> None:
-        self.audio_embed_sizes = audio_embed_sizes
-
     def get_audio_features(
         self,
         input_embeds: torch.Tensor,
