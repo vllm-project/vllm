@@ -228,3 +228,63 @@ def compute_acceptance_len(
         if n_drafts <= 0:
             return 1
     return 1 + (n_accepted_toks / n_drafts)
+
+
+def check_spec_decode_matches_reference(
+    vllm_runner,
+    sampling_config: SamplingParams,
+    prompts: list[Messages],
+    *,
+    ref_model: str,
+    ref_kwargs: dict[str, Any],
+    spec_model: str,
+    spec_kwargs: dict[str, Any],
+    required_matches: int,
+    context: str,
+    spec_accuracy_threshold: float,
+    ref_accuracy_threshold: float = 0.0,
+    expect_async_scheduling: bool = False,
+    expected_verifier: str | None = None,
+) -> None:
+    """Check that a speculative engine reproduces a reference engine's outputs.
+
+    A GSM8K threshold <= 0 skips that engine's accuracy check. Set
+    `expected_verifier` for speculators checkpoints, whose speculative config
+    is auto-detected from the checkpoint.
+    """
+    with vllm_runner(ref_model, **ref_kwargs) as ref_runner:
+        evaluate_llm_for_gsm8k(
+            ref_runner.llm, expected_accuracy_threshold=ref_accuracy_threshold
+        )
+        ref_outputs = ref_runner.llm.chat(prompts, sampling_config)
+
+    with vllm_runner(spec_model, **spec_kwargs) as spec_runner:
+        vllm_config = spec_runner.llm.llm_engine.vllm_config
+        if expect_async_scheduling:
+            has_async = vllm_config.scheduler_config.async_scheduling
+            assert has_async, f"{context}: expected async scheduling; got {has_async}"
+        if expected_verifier is not None:
+            spec_config = vllm_config.speculative_config
+            assert spec_config is not None, (
+                f"{context}: speculative config should be auto-detected"
+            )
+            assert spec_config.num_speculative_tokens > 0, (
+                f"{context}: expected positive speculative tokens, "
+                f"got {spec_config.num_speculative_tokens}"
+            )
+            assert spec_config.model == spec_model, (
+                f"{context}: draft model should be {spec_model}, "
+                f"got {spec_config.model}"
+            )
+            verifier = vllm_config.model_config.model
+            assert verifier == expected_verifier, (
+                f"{context}: verifier should be {expected_verifier}, got {verifier}"
+            )
+        evaluate_llm_for_gsm8k(
+            spec_runner.llm, expected_accuracy_threshold=spec_accuracy_threshold
+        )
+        spec_outputs = spec_runner.llm.chat(prompts, sampling_config)
+
+    assert_request_outputs_match(
+        ref_outputs, spec_outputs, required_matches=required_matches, context=context
+    )
