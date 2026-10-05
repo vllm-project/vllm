@@ -109,9 +109,7 @@ pub fn to_text_request(
             let map = sampling_params.vllm_xargs.get_or_insert_with(Default::default);
             map.insert("ec_transfer_params".to_string(), ec_json);
         }
-        if kv.bypass_prefix_cache {
-            sampling_params.skip_reading_prefix_cache = Some(true);
-        }
+        sampling_params.skip_reading_prefix_cache = kv.bypass_prefix_cache;
     }
 
     let decode_options = TextDecodeOptions {
@@ -161,10 +159,8 @@ fn build_sampling_params(
         ..SamplingParams::default()
     };
 
-    // RandomSampling: for every remaining sampling field the protobuf default (`0`)
-    // is treated as "unset" and leaves the resolved value to the lowering
-    // stage, which falls back to the model-provided default or a
-    // neutral/disabled value otherwise.
+    // Preserve explicit disabled values; omitted fields inherit model defaults
+    // during lowering. The legacy top_p scalar still uses zero as unset.
     if let Some(s) = sampling {
         // num_sequences (n > 1) is not supported yet by the TextLlm layer; the response
         // path also hardcodes SequenceOutput.index = 0, so accepting >1 would silently
@@ -174,15 +170,11 @@ fn build_sampling_params(
                 "num_sequences > 1 is not supported",
             ));
         }
-        if s.top_k != 0 {
-            params.top_k = Some(s.top_k);
-        }
+        params.top_k = s.top_k;
         if s.top_p != 0.0 {
             params.top_p = Some(s.top_p);
         }
-        if s.min_p != 0.0 {
-            params.min_p = Some(s.min_p);
-        }
+        params.min_p = s.min_p;
         params.seed = s.seed;
     }
 
@@ -751,10 +743,61 @@ mod tests {
     }
 
     #[test]
+    fn grpc_controls_preserve_explicit_values_and_model_defaults_through_lowering() {
+        for (top_k, min_p, bypass) in [
+            (None, None, None),
+            (Some(0), Some(0.0), Some(false)),
+            (Some(50), Some(0.1), Some(true)),
+        ] {
+            let request = pb::GenerateRequest {
+                temperature: Some(0.7),
+                sampling: Some(pb::RandomSampling {
+                    top_k,
+                    min_p,
+                    ..Default::default()
+                }),
+                kv: Some(pb::KvCacheParameters {
+                    bypass_prefix_cache: bypass,
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let encoded = request.encode_to_vec();
+            for stream in [false, true] {
+                let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+                let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+                let engine = vllm_text::lower_text_request(
+                    text,
+                    vec![1],
+                    SamplingHints {
+                        default_top_k: Some(8),
+                        default_min_p: Some(0.2),
+                        ..Default::default()
+                    },
+                    SamplingLimits {
+                        max_model_len: 256,
+                        max_logprobs: 20,
+                        model_vocab_size: 512,
+                        tokenizer_vocab_size: 512,
+                    },
+                    &TestTokenizer::new(),
+                )
+                .unwrap()
+                .generate_request;
+                let params = engine.sampling_params;
+                assert_eq!(
+                    (params.top_k, params.min_p, params.skip_reading_prefix_cache),
+                    (top_k.unwrap_or(8), min_p.unwrap_or(0.2), bypass),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn bypass_prefix_cache_maps_to_skip_reading_prefix_cache() {
         let req = pb::GenerateRequest {
             kv: Some(pb::KvCacheParameters {
-                bypass_prefix_cache: true,
+                bypass_prefix_cache: Some(true),
                 ..Default::default()
             }),
             ..base_request()
@@ -764,16 +807,16 @@ mod tests {
     }
 
     #[test]
-    fn bypass_prefix_cache_false_leaves_field_unset() {
+    fn bypass_prefix_cache_false_is_preserved() {
         let req = pb::GenerateRequest {
             kv: Some(pb::KvCacheParameters {
-                bypass_prefix_cache: false,
+                bypass_prefix_cache: Some(false),
                 ..Default::default()
             }),
             ..base_request()
         };
         let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
-        assert_eq!(text.sampling_params.skip_reading_prefix_cache, None);
+        assert_eq!(text.sampling_params.skip_reading_prefix_cache, Some(false));
         // Prompt conversion still succeeds and reaches the expected variant.
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
     }
