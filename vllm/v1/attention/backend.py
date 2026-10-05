@@ -54,6 +54,9 @@ class MultipleOf:
     def __init__(self, base: int):
         self.base = base
 
+    def __repr__(self) -> str:
+        return f"MultipleOf({self.base})"
+
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
@@ -813,8 +816,9 @@ class AttentionImplBase(ABC, Generic[T]):
     is_sparse: ClassVar[bool] = False
 
     # Whether this impl provides a dense-MHA prefill path (forward_mha). Sparse
-    # impls without one run the top-k MQA path for all requests.
-    supports_dense_mha_prefill: ClassVar[bool] = True
+    # impls without one run the top-k MQA path for all requests. Impls may
+    # override it per instance, depending on the kv-cache layout.
+    supports_dense_mha_prefill: bool = True
 
     # Required attributes that all impls should have
     num_heads: int
