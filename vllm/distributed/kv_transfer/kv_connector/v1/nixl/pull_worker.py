@@ -599,7 +599,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_ids = np.asarray(remote_block_descs_ids)
         is_dram = desc_is_dram[local_ids]
 
-        assert local_dram_handle is not None
+        if self._skip_dram_xfer:
+            # TP rank 0 reads the DRAM (shared host pool) part for every
+            # local rank; keep only the device part. Register the request
+            # even if nothing is left, so it still completes and notifies.
+            keep = ~is_dram
+            local_ids = local_ids[keep]
+            remote_ids = remote_ids[keep]
+            is_dram = is_dram[keep]
+            self._recving_transfers.setdefault(request_id, [])
+        assert local_dram_handle is not None or not is_dram.any()
         reads = (
             (is_dram, local_dram_handle),
             (~is_dram, local_device_handle),
