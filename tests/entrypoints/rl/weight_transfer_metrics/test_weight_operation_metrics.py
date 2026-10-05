@@ -153,36 +153,73 @@ def test_rejected_request_is_not_recorded(registry):
     assert sample(registry, DURATION, "update") is None
 
 
-def test_default_recorder_is_created_lazily_on_the_default_registry():
-    """The default recorder registers on the process registry only when first used.
+@pytest.mark.parametrize("multiprocess", [False, True])
+@pytest.mark.parametrize(
+    "feature,prefix,operations",
+    [
+        (
+            "rlhf",
+            "rl_weight_update",
+            ("init", "start", "start_draft", "update", "finish"),
+        ),
+        ("sleep", "sleep_mode", ("sleep", "release_kv_cache_memory", "wake")),
+    ],
+)
+def test_router_initializes_gauges_without_import_time_registration(
+    tmp_path, multiprocess, feature, prefix, operations
+):
+    """Router setup exports idle gauges without registering them at import time.
 
     Runs in a fresh interpreter: the registry is process-global, so a route test
     elsewhere in the session may already have registered these collectors, and
     "not registered yet" would then be unobservable.
     """
     probe = """
+import importlib
+import sys
 from prometheus_client import REGISTRY
+from fastapi import FastAPI
+from vllm.v1.metrics.prometheus import get_prometheus_registry
 
-from vllm.entrypoints.rl.online import metrics as rl_metrics
+feature, prefix = sys.argv[1:3]
+if feature == "rlhf":
+    module = "vllm.entrypoints.rl.online"
+    from vllm.entrypoints.rl.factories import register_rl_api_routers as attach_router
+else:
+    module = f"vllm.entrypoints.serve.dev.{feature}"
+    attach_router = importlib.import_module(f"{module}.api_router").attach_router
+metrics_module = importlib.import_module(f"{module}.metrics")
 
 NAMES = [
-    "vllm:rl_weight_update_operation_duration_seconds",
-    "vllm:rl_weight_update_operations_in_flight",
+    f"vllm:{prefix}_operation_duration_seconds",
+    f"vllm:{prefix}_operations_in_flight",
 ]
-assert rl_metrics._metrics is None
+assert metrics_module._metrics is None
 assert not set(NAMES) & set(REGISTRY._names_to_collectors)
 
-metrics = rl_metrics.weight_operation_metrics()
+attach_router(FastAPI())
+registry = get_prometheus_registry()
+for operation in sys.argv[3:]:
+    assert registry.get_sample_value(NAMES[1], {"operation": operation}) == 0
+metrics = metrics_module._metrics
 assert REGISTRY._names_to_collectors[NAMES[0]] is metrics.duration
 assert REGISTRY._names_to_collectors[NAMES[1]] is metrics.in_flight
-assert rl_metrics.weight_operation_metrics() is metrics
+attach_router(FastAPI())
+assert metrics_module._metrics is metrics
 print("lazy registration ok")
 """
+    env = os.environ.copy()
+    env.pop("PROMETHEUS_MULTIPROC_DIR", None)
+    env.pop("prometheus_multiproc_dir", None)
+    if multiprocess:
+        env["PROMETHEUS_MULTIPROC_DIR"] = str(tmp_path)
     result = subprocess.run(
-        [sys.executable, "-c", probe],
-        cwd=Path(__file__).parents[3],
+        [sys.executable, "-c", probe, feature, prefix, *operations],
+        cwd=Path(__file__).parents[4],
+        env=env,
         capture_output=True,
         text=True,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
     assert "lazy registration ok" in result.stdout
