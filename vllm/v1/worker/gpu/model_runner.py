@@ -1821,14 +1821,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
+            # PIECEWISE pads model inputs without adding queries.
+            dummy_num_tokens = (
+                num_toks
+                if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE
+                else batch_desc.num_tokens
+            )
             input_batch = InputBatch.make_dummy(
                 dummy_num_reqs,
-                batch_desc.num_tokens,
+                dummy_num_tokens,
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
                 # Profiling and warmup must route the dummy tokens to experts
                 # so MoE memory is measured and MoE kernels are exercised.
                 is_padding=not is_profile,
+                num_tokens_after_padding=batch_desc.num_tokens,
             )
             if randomize_inputs:
                 # All-zero input_ids route every token to the same experts.
