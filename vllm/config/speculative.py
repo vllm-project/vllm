@@ -960,7 +960,7 @@ class SpeculativeConfig:
                     "architectures": [architecture],
                 }
             )
-        if hf_config.model_type in ("longcat_flash", "longcat_flash_ngram"):
+        if hf_config.model_type == "longcat_flash":
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update(
@@ -1059,7 +1059,7 @@ class SpeculativeConfig:
             )
         if hf_config.model_type == "glm5_next":
             hf_config.model_type = "glm5_next_mtp"
-            n_predict = hf_config.num_nextn_predict_layers
+            n_predict = hf_config.get_text_config().num_nextn_predict_layers
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Glm5NextMTPModel"]}
             )
