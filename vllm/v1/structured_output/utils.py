@@ -7,9 +7,10 @@ import importlib.metadata
 import os
 import sqlite3
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from typing import TYPE_CHECKING, TypeVar
+from itertools import chain, islice
+from typing import TYPE_CHECKING, TypeVar, overload
 
 import regex as re
 import torch
@@ -57,6 +58,73 @@ def strip_speculative_padding(token_ids: list[int]) -> list[int]:
         if token_id < 0:
             return token_ids[:i]
     return token_ids
+
+
+class TokenIdsView(Sequence[int]):
+    """Read-only view of the first `length` ids of `prefix + suffix`.
+
+    Lets reasoning parsers see the token history plus speculative tokens
+    without copying the history on every decode step.
+    """
+
+    __slots__ = ("_prefix", "_suffix", "_split", "_len")
+
+    def __init__(self, prefix: list[int], suffix: Sequence[int], length: int):
+        if not 0 <= length <= len(prefix) + len(suffix):
+            raise ValueError(f"length {length} out of range")
+        self._prefix = prefix
+        self._suffix = suffix
+        self._split = len(prefix)
+        self._len = length
+
+    def __len__(self) -> int:
+        return self._len
+
+    @overload
+    def __getitem__(self, idx: int) -> int: ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> list[int]: ...
+
+    def __getitem__(self, idx: int | slice) -> int | list[int]:
+        if isinstance(idx, slice):
+            start, stop, step = idx.indices(self._len)
+            if step == 1 and stop <= self._split:
+                return self._prefix[start:stop]
+            return [self[i] for i in range(start, stop, step)]
+        if idx < 0:
+            idx += self._len
+        if not 0 <= idx < self._len:
+            raise IndexError("TokenIdsView index out of range")
+        if idx < self._split:
+            return self._prefix[idx]
+        return self._suffix[idx - self._split]
+
+    def __iter__(self) -> Iterator[int]:
+        return islice(chain(self._prefix, self._suffix), self._len)
+
+    def __contains__(self, value: object) -> bool:
+        if self._len >= self._split:
+            return (
+                value in self._prefix
+                or value in self._suffix[: self._len - self._split]
+            )
+        return value in self._prefix[: self._len]
+
+    def index(self, value: int, start: int = 0, stop: int | None = None) -> int:
+        start, stop, _ = slice(start, stop).indices(self._len)
+        n = self._split
+        if start < n:
+            try:
+                return self._prefix.index(value, start, min(stop, n))
+            except ValueError:
+                pass
+        if stop > n:
+            try:
+                return n + self._suffix.index(value, max(start - n, 0), stop - n)
+            except ValueError:
+                pass
+        raise ValueError(f"{value} is not in TokenIdsView")
 
 
 def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:

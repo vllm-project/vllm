@@ -17,7 +17,10 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputGrammar,
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
-from vllm.v1.structured_output.utils import strip_speculative_padding
+from vllm.v1.structured_output.utils import (
+    TokenIdsView,
+    strip_speculative_padding,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -266,28 +269,29 @@ class StructuredOutputManager:
             if offset is not None:
                 return offset + 1
 
-        # Fallback to `find_reasoning_end_offset`
-        # TODO: Build a read-only Sequence view over all_token_ids
-        # instead of copying the entire all_token_ids into input_ids.
+        # Fallback to `is_reasoning_end_streaming`. Views over the token
+        # history stand in for copies of it on every step.
+        all_token_ids = request._all_token_ids
         if spec_tokens_committed:
             if not spec_tokens or not reasoner.is_reasoning_end_streaming(
-                request.all_token_ids, spec_tokens
+                all_token_ids, spec_tokens
+            ):
+                return num_spec_tokens + 1
+            suffix: Sequence[int] = ()
+            end = len(all_token_ids)
+        else:
+            suffix = spec_tokens
+            end = len(all_token_ids) + num_spec_tokens
+            if not reasoner.is_reasoning_end_streaming(
+                TokenIdsView(all_token_ids, suffix, end), spec_tokens
             ):
                 return num_spec_tokens + 1
 
-            input_ids = request.all_token_ids.copy()
-            delta_ids = list(spec_tokens)
-        else:
-            input_ids = request.all_token_ids.copy()
-            input_ids.extend(spec_tokens)
-            if not reasoner.is_reasoning_end_streaming(input_ids, spec_tokens):
-                return num_spec_tokens + 1
-            delta_ids = list(spec_tokens)
-
         for i in range(num_spec_tokens - 1, 0, -1):
-            input_ids.pop()
-            delta_ids.pop()
-            if not reasoner.is_reasoning_end_streaming(input_ids, delta_ids):
+            if not reasoner.is_reasoning_end_streaming(
+                TokenIdsView(all_token_ids, suffix, end - num_spec_tokens + i),
+                spec_tokens[:i],
+            ):
                 return i + 1
         return 1
 
