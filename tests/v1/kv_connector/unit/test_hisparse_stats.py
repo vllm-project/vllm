@@ -36,8 +36,7 @@ def test_record_host_usage_reports_latest_level():
 
 
 def test_aggregate_keeps_latest_host_usage_level_per_engine():
-    """Data-parallel engines share one CLI accumulator, which averages their
-    latest levels like the GPU KV cache usage."""
+    """Data-parallel engines share one CLI accumulator; each keeps its own level."""
     first = HiSparseKVConnectorStats()
     first.record_host_usage(0, usage=0.4, pending_page_transfers=2)
     second = HiSparseKVConnectorStats()
@@ -51,7 +50,10 @@ def test_aggregate_keeps_latest_host_usage_level_per_engine():
 
     assert first.data["host_cache_usage_perc"] == [[0, 0.6], [1, 0.1]]
     assert first.data["pending_page_transfers"] == [[0, 1], [1, 4]]
-    assert first.reduce()["HiSparse host KV cache usage %"] == 35.0
+    reduced = first.reduce()
+    assert reduced["HiSparse host KV cache usage % (DP0)"] == 60.0
+    assert reduced["HiSparse host KV cache usage % (DP1)"] == 10.0
+    assert "HiSparse host KV cache usage %" not in reduced
 
 
 def test_aggregate_extends_snapshot_deltas():

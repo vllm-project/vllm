@@ -76,9 +76,11 @@ class HiSparseKVConnectorStats(KVConnectorStats):
             "HiSparse host-to-device bytes": sum(self.data["host_to_device_bytes"]),
         }
         usage_by_engine = dict(self.data["host_cache_usage_perc"])
-        if usage_by_engine:
-            usage = sum(usage_by_engine.values()) / len(usage_by_engine)
-            reduced["HiSparse host KV cache usage %"] = round(100 * usage, 1)
+        for engine, usage in sorted(usage_by_engine.items()):
+            key = "HiSparse host KV cache usage %"
+            if len(usage_by_engine) > 1:
+                key += f" (DP{engine})"
+            reduced[key] = round(100 * usage, 1)
         return reduced
 
     def is_empty(self) -> bool:
