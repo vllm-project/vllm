@@ -653,9 +653,9 @@ class HiSparseConnectorWorker:
             if source_index >= self._row_mirror_source_starts.shape[1]:
                 raise RuntimeError("HiSparse row DMA source index is out of range.")
             source_rows = self._row_mirror_source_starts[:, source_index]
-            source: torch.Tensor = self.resident_caches[layer_index]
-            destination: torch.Tensor = self.host_caches[layer_index]
-            row_bytes: int = source.shape[-1] * source.element_size()
+            source = self.resident_caches[layer_index]
+            destination = self.host_caches[layer_index]
+            row_bytes = source.shape[-1] * source.element_size()
             if (
                 source.stride(1) * source.element_size() != row_bytes
                 or destination.shape[1] * destination.element_size() != row_bytes
@@ -747,8 +747,8 @@ class HiSparseConnectorWorker:
             return
         for layer_index, cache in enumerate(self.cache_handles):
             source_index = cache.runtime.resident_source_index
-            source: torch.Tensor = self.host_caches[layer_index]
-            destination: torch.Tensor = self.resident_caches[layer_index]
+            source = self.host_caches[layer_index]
+            destination = self.resident_caches[layer_index]
             for transfer in transfers:
                 host_start = transfer.host_block_id * self.kernel_block_size
                 resident_block = transfer.resident_block_ids[source_index]
@@ -794,15 +794,15 @@ class HiSparseConnectorWorker:
             if source_index >= source_blocks_by_transfer.shape[1]:
                 raise RuntimeError("HiSparse spill DMA source index is out of range.")
             source_blocks = source_blocks_by_transfer[:, source_index]
-            source: torch.Tensor = self.resident_caches[layer_index]
-            destination: torch.Tensor = self.host_caches[layer_index]
+            source = self.resident_caches[layer_index]
+            destination = self.host_caches[layer_index]
             if np.any(source_blocks < 0) or np.any(source_blocks >= source.shape[0]):
                 raise RuntimeError("HiSparse spill DMA source is out of range.")
             if np.any(destination_rows < 0) or np.any(
                 destination_rows + self.kernel_block_size > destination.shape[0]
             ):
                 raise RuntimeError("HiSparse spill DMA destination is out of range.")
-            row_bytes: int = source.shape[-1] * source.element_size()
+            row_bytes = source.shape[-1] * source.element_size()
             descriptor_slice = slice(layer_index, descriptor_count, num_layers)
             descriptors.src_np[descriptor_slice] = (
                 source.data_ptr()
