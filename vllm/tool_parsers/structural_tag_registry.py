@@ -39,6 +39,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
+from vllm.tool_parsers.utils import get_function_tools, require_function_tools
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -85,18 +86,58 @@ SUPPORTED_STRUCTURAL_TAG_MODELS = (
 )
 
 _VLLM_STRUCTURAL_TAG_REGISTRY: dict[str, StructuralTagBuilder] = {}
+_BUILTIN_TOOL_STRUCTURAL_TAG_MODELS: set[str] = set()
 
 
 def register_vllm_structural_tag(
     model: str,
+    *,
+    builtin_tools: bool = False,
 ) -> Callable[[StructuralTagBuilder], StructuralTagBuilder]:
-    """Register a vLLM-owned structural tag builder."""
+    """Register a vLLM-owned structural tag builder.
+
+    Args:
+        model: Structural tag model key.
+        builtin_tools: Whether the model can call non-function tools, so its
+            builder receives every request tool instead of only the function
+            tools from ``get_function_tools``.
+
+    """
 
     def decorator(func: StructuralTagBuilder) -> StructuralTagBuilder:
         _VLLM_STRUCTURAL_TAG_REGISTRY[model] = func
+        if builtin_tools:
+            _BUILTIN_TOOL_STRUCTURAL_TAG_MODELS.add(model)
         return func
 
     return decorator
+
+
+def get_structural_tag_tools(
+    model: str,
+    tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
+    tool_choice: ToolChoice,
+) -> Sequence[ChatCompletionToolsParam | ResponsesTool]:
+    """Return the tools a structural tag for ``model`` lets the model call.
+
+    Most models are only shown function tools, so their grammar must cover
+    exactly those: a tool missing from the prompt cannot be called, and one
+    missing from the grammar is shown but blocked.
+
+    Raises:
+        VLLMValidationError: ``tool_choice`` requires a call, but the model
+            has no tool it can call.
+
+    """
+    if model in _BUILTIN_TOOL_STRUCTURAL_TAG_MODELS:
+        return tools
+    if (
+        tool_choice is None
+        or tool_choice == "auto"
+        or getattr(tool_choice, "mode", None) == "auto"
+    ):
+        return get_function_tools(tools)
+    return require_function_tools(tools)
 
 
 def _tool_is_strict(tool: ChatCompletionToolsParam | ResponsesTool) -> bool:
@@ -164,6 +205,9 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
+    tools = get_structural_tag_tools(model, tools, tool_choice)
+    if not tools:
+        return None
     tools = resolve_tool_strictness(tools, tool_choice, strict_level)
     if tools is None:
         return None

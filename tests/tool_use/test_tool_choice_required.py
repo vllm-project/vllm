@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import (
     find_tool_properties,
@@ -402,6 +403,11 @@ class TestNonFunctionToolsSkipped:
         any_of = schema["items"]["anyOf"]
         assert len(any_of) == 1
         assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]
+
+    def test_get_json_schema_rejects_only_non_function_tools(self):
+        # An empty anyOf would compile to a grammar no output can satisfy.
+        with pytest.raises(VLLMValidationError, match="no function tool"):
+            get_json_schema_from_tools(tools=[WEB_SEARCH_TOOL], tool_choice="required")
 
 
 class TestParallelToolCallsConstraint:

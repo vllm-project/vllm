@@ -50,6 +50,7 @@ from vllm.tool_parsers.streaming import (
     extract_required_tool_call_streaming,
 )
 from vllm.tool_parsers.structural_tag_registry import (
+    get_structural_tag_tools,
     limit_to_single_tool_call,
     resolve_tool_strictness,
 )
@@ -520,7 +521,11 @@ class DelegatingParser(Parser):
         resolved_tools = None
         if tool_parser.structural_tag_model is not None:
             resolved_tools = resolve_tool_strictness(
-                request.tools,
+                get_structural_tag_tools(
+                    tool_parser.structural_tag_model,
+                    request.tools,
+                    request.tool_choice,
+                ),
                 request.tool_choice,
                 strict_level,
             )
