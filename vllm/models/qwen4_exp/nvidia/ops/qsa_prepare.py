@@ -154,6 +154,7 @@ def _qsa_prepare_kernel(
     MROPE_H: tl.constexpr,
     MROPE_W: tl.constexpr,
     main_qkv_ptr,
+    main_qkv_stride_token,
     main_q_norm_weight_ptr,
     main_k_norm_weight_ptr,
     main_eps,
@@ -178,12 +179,12 @@ def _qsa_prepare_kernel(
         # indexer work. RoPE covers the first D // 2 dims, the width of the
         # shared cos/sin table.
         main_pid = pid - num_index_work
-        token = main_pid // (MAIN_HQ + MAIN_HK)
+        token = (main_pid // (MAIN_HQ + MAIN_HK)).to(tl.int64)
         head = main_pid % (MAIN_HQ + MAIN_HK)
         HALF: tl.constexpr = D // 4
         dims = tl.arange(0, MAIN_D)
         rot = tl.arange(0, HALF)
-        row = main_qkv_ptr + token * (2 * (MAIN_HQ + MAIN_HK) * MAIN_D)
+        row = main_qkv_ptr + token * main_qkv_stride_token
         is_k = head >= MAIN_HQ
         kv_head = head - MAIN_HQ
         if is_k:
@@ -241,7 +242,7 @@ def _qsa_prepare_kernel(
         num_head_tiles: tl.constexpr = tl.cdiv(HQ, TILE_H_Q)
         token_tile = q_pid // num_head_tiles
         head_tile = q_pid % num_head_tiles
-        tokens = token_tile * TILE_T_Q + tl.arange(0, TILE_T_Q)
+        tokens = (token_tile * TILE_T_Q + tl.arange(0, TILE_T_Q)).to(tl.int64)
         heads = head_tile * TILE_H_Q + tl.arange(0, TILE_H_Q)
         valid_tokens = tokens < num_tokens
         valid_heads = heads < HQ
@@ -342,7 +343,8 @@ def _qsa_prepare_kernel(
                 & (source_tokens < num_tokens)
             )
             current_base = (
-                k_ptr + tl.maximum(source_tokens, 0)[:, None] * k_stride_token
+                k_ptr
+                + tl.maximum(source_tokens, 0).to(tl.int64)[:, None] * k_stride_token
             )
             cached_base = (
                 state_cache_ptr
@@ -449,7 +451,7 @@ def _qsa_prepare_kernel(
             # One CTA per request commits only the suffix retained by the ring.
             num_state_rows = tl.minimum(query_len, STATE_SIZE)
             for state_offset in tl.range(0, num_state_rows):
-                token = query_end - num_state_rows + state_offset
+                token = (query_end - num_state_rows + state_offset).to(tl.int64)
                 valid_token = (
                     (token >= query_start) & (token < query_end) & (token < num_tokens)
                 )
@@ -567,7 +569,8 @@ def qsa_prepare(
     section = mrope_section if mrope_section is not None else (0, 0, 0)
     assert len(section) == 3
     qkv_width = 2 * (num_main_q_heads + num_main_kv_heads) * main_head_dim
-    assert main_qkv.shape == (num_tokens, qkv_width) and main_qkv.is_contiguous()
+    assert main_qkv.shape == (num_tokens, qkv_width)
+    assert main_qkv.stride(-1) == 1
     assert main_slot_mapping.shape == (num_tokens,)
 
     if num_tokens <= 4096:
@@ -622,6 +625,7 @@ def qsa_prepare(
         MROPE_H=section[1],
         MROPE_W=section[2],
         main_qkv_ptr=main_qkv,
+        main_qkv_stride_token=main_qkv.stride(0),
         main_q_norm_weight_ptr=main_q_norm_weight,
         main_k_norm_weight_ptr=main_k_norm_weight,
         main_eps=main_eps,
