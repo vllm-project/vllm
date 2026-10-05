@@ -429,10 +429,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                         )
                 elif scheduler_mmap is not None:
                     try:
-                        scheduler_mmap.cleanup()
+                        scheduler_mmap.abort_startup_cleanup()
                     except Exception:
                         logger.exception(
-                            "Failed to clean up scheduler mmap during "
+                            "Failed to abort scheduler mmap during "
                             "initialization cleanup"
                         )
                 self._scheduler_mmap = None
