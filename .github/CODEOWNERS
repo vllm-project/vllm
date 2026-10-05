@@ -4,6 +4,7 @@
 # This lists cover the "core" components of vLLM that require careful review
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg @BoyuanFeng
 /vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi @ivanium @wzhao18
+/vllm/distributed/kv_transfer/kv_connector/v1/hisparse @MatthewBonanni
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye @wzhao18
@@ -77,6 +78,7 @@
 /vllm/v1/kv_cache_interface.py @heheda12345 @ivanium
 /vllm/v1/kv_offload @ApostaC @orozery
 /vllm/v1/simple_kv_offload @ivanium
+/vllm/v1/hisparse @MatthewBonanni
 /vllm/v1/engine @njhill
 /vllm/v1/executor @njhill
 /vllm/v1/worker @njhill
@@ -166,16 +168,6 @@ mkdocs.yaml @hmellor
 # DeepseekV4-specific files
 /vllm/models/deepseek_v4 @zyongye
 /vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
-
-# HiSparse
-/csrc/libtorch_stable/hisparse_kernels.cu @MatthewBonanni
-/docs/design/hisparse.md @MatthewBonanni
-/tests/evals/gsm8k/configs/*HiSparse* @MatthewBonanni
-/tests/evals/gsm8k/configs/models-hisparse.txt @MatthewBonanni
-/tests/v1/e2e/general/test_hisparse.py @MatthewBonanni
-/tests/v1/kv_connector/unit/test_hisparse_*.py @MatthewBonanni
-/vllm/distributed/kv_transfer/kv_connector/v1/hisparse @MatthewBonanni
-/vllm/v1/hisparse @MatthewBonanni
 
 # Kimi-K3-specific files
 /vllm/models/kimi_k3/nvidia/kda.py @gau-nernst
