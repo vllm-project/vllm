@@ -1920,9 +1920,10 @@ class NixlBaseConnectorWorker:
         descriptors must cover the whole PLE page or part of the conv state
         never reaches the decode side."""
         assert self._ple_region_index is not None
-        if self._ple_block_len is not None:
-            return self._ple_block_len
-        return self.block_len_per_layer[self._ple_region_index]
+        assert self._ple_block_len is not None, (
+            "PLE region registered without its page length"
+        )
+        return self._ple_block_len
 
     def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
         """Build desc regions (conv sub-projections + ssm) per layer for
@@ -2039,10 +2040,14 @@ class NixlBaseConnectorWorker:
             local_block_len = (
                 self._ple_page_len() * self._physical_blocks_per_logical_kv_block
             )
-            remote_ple_len = getattr(nixl_agent_meta, "ple_block_len", None)
-            if remote_ple_len is None:
-                remote_ple_len = nixl_agent_meta.block_lens[region_index]
-            remote_block_len = remote_ple_len * remote_physical_per_logical
+            if nixl_agent_meta.ple_block_len is None:
+                raise ValueError(
+                    "Remote engine did not advertise its PLE page length; "
+                    "P and D must run the same vLLM version."
+                )
+            remote_block_len = (
+                nixl_agent_meta.ple_block_len * remote_physical_per_logical
+            )
             if local_block_len != remote_block_len:
                 raise ValueError(
                     "PLE pages require identical P/D geometry: "

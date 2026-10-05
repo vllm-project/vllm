@@ -1523,6 +1523,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
         kv_cache_layout="HND",
         block_size=4,
         ssm_sizes=(24, 32),
+        ple_block_len=256,
         attn_backend_name="test",
         physical_blocks_per_logical_kv_block=1,
     )
@@ -1535,7 +1536,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
     assert descriptors[-2:, 0].tolist() == [0x10000, 0x10100]
     assert descriptors[-2:, 1].tolist() == [256, 256]
 
-    metadata.block_lens[0] = 128
+    metadata.ple_block_len = 128
     with pytest.raises(ValueError, match="PLE pages require identical"):
         worker._build_mamba_remote(
             metadata,
