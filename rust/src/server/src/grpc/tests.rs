@@ -1517,7 +1517,7 @@ async fn unary_generate_with_sampling_params() {
             prompt: Some(pb::generate_request::Prompt::Text("test".to_string())),
             temperature: Some(0.7),
             sampling: Some(pb::RandomSampling {
-                top_k: Some(50),
+                top_k: 50,
                 top_p: 0.9,
                 seed: Some(42),
                 ..Default::default()
