@@ -75,40 +75,26 @@ class ReadStrategy(ABC):
         """One read per question, in order."""
 
 
-def generation_tail(
+def reply_label_ids(
     tokenizer: TokenizerLike, prompt_ids: Sequence[int]
-) -> tuple[list[int], str]:
-    """The prompt after its last added token. Labels are checked against it, so
-    the check does not grow with the state."""
+) -> tuple[list[int], list[int]]:
+    """The prompt's ids after its last added token, and the token each of LABELS
+    adds after them as the first token of the reply. Raises ValueError if a
+    label is not one distinct token there."""
     added = set(tokenizer.get_added_vocab().values())
     start = max((i + 1 for i, t in enumerate(prompt_ids) if t in added), default=0)
-    tail_ids = list(prompt_ids[start:])
-    return tail_ids, tokenizer.decode(tail_ids)
-
-
-def label_token_id(
-    tokenizer: TokenizerLike, tail_ids: list[int], tail: str, label: str
-) -> int | None:
-    """The one token ``label`` adds after the tail, or None."""
-    ids = tokenizer.encode(tail + label, add_special_tokens=False)
-    return ids[-1] if ids[:-1] == tail_ids else None
-
-
-def label_token_ids(
-    tokenizer: TokenizerLike, prompt_ids: Sequence[int], question: Question
-) -> list[int]:
-    """The token each label adds as the reply's first token."""
-    tail_ids, tail = generation_tail(tokenizer, prompt_ids)
+    tail = list(prompt_ids[start:])
+    text = tokenizer.decode(tail)
     ids: list[int] = []
-    for label in question.labels:
-        token = label_token_id(tokenizer, tail_ids, tail, label)
-        if token is None or token in ids:
-            raise StructuredDecisionError(
-                f"question {question.id!r}: label {label!r} is not one distinct "
-                "token after this model's chat prompt"
+    for label in LABELS:
+        extended = tokenizer.encode(text + label, add_special_tokens=False)
+        if extended[:-1] != tail or extended[-1] in ids:
+            raise ValueError(
+                f"label {label!r} is not one distinct token after this model's "
+                "chat prompt"
             )
-        ids.append(token)
-    return ids
+        ids.append(extended[-1])
+    return tail, ids
 
 
 class NextTokenStrategy(ReadStrategy):
@@ -116,6 +102,23 @@ class NextTokenStrategy(ReadStrategy):
     question with its labeled options, and the logprobs of the label tokens as
     the reply's first token. The requests share the state. With prefix caching,
     it is prefilled once."""
+
+    def __init__(self, context: ReadContext):
+        super().__init__(context)
+        tokenizer = context.online_renderer.renderer.get_tokenizer()
+        probe = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "x"}],
+            chat_template=context.chat_template,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=False,
+            **{**context.default_chat_template_kwargs, "enable_thinking": False},
+        )
+        if isinstance(probe, str):
+            probe = tokenizer.encode(probe, add_special_tokens=False)
+        # Every prompt ends with the same generation prompt, so the labels'
+        # tokens are the same for every question.
+        self.tail, self.label_ids = reply_label_ids(tokenizer, probe)
 
     def limits(self) -> DecisionLimits:
         return DecisionLimits(max_questions=64, max_options=len(LABELS))
@@ -157,7 +160,6 @@ class NextTokenStrategy(ReadStrategy):
         priority: int,
     ) -> list[QuestionRead]:
         ctx = self.context
-        tokenizer = ctx.online_renderer.renderer.get_tokenizer()
         read_request = self._read_request(chat_template_kwargs)
 
         slots, engine_inputs = [], []
@@ -166,7 +168,12 @@ class NextTokenStrategy(ReadStrategy):
             if instructions:
                 messages.insert(0, {"role": "system", "content": instructions})
             engine_input, prompt_ids = await self._render(read_request, messages)
-            slots.append(label_token_ids(tokenizer, prompt_ids, q))
+            if prompt_ids[len(prompt_ids) - len(self.tail) :] != self.tail:
+                raise StructuredDecisionError(
+                    "these chat options end the prompt differently, so the "
+                    "labels' tokens are unknown"
+                )
+            slots.append(self.label_ids[: len(q.labels)])
             engine_inputs.append(engine_input)
 
         label_reads = await next_token_label_reads(

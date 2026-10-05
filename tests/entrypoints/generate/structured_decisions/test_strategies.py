@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,13 +9,10 @@ from fastapi import FastAPI
 from vllm.entrypoints.generate.structured_decisions.api_router import (
     register_structured_decisions_api_router,
 )
-from vllm.entrypoints.generate.structured_decisions.question_types import (
-    StructuredDecisionError,
-    build_question,
-)
+from vllm.entrypoints.generate.structured_decisions.question_types import LABELS
 from vllm.entrypoints.generate.structured_decisions.strategies import (
     NextTokenStrategy,
-    label_token_ids,
+    reply_label_ids,
     select_read_strategy,
 )
 
@@ -59,8 +55,9 @@ def qwen():
 
 def test_labels_start_the_reply(qwen):
     tokenizer, prompt_ids = qwen
-    q = build_question("q", "choice", "", dict.fromkeys(["x", "y", "z"]), 128)
-    ids = label_token_ids(tokenizer, prompt_ids, q)
-    assert [tokenizer.decode([i]) for i in ids] == ["A", "B", "C"]
-    with pytest.raises(StructuredDecisionError, match="not one distinct token"):
-        label_token_ids(tokenizer, prompt_ids, replace(q, labels=("A", "A", "B")))
+    tail, ids = reply_label_ids(tokenizer, prompt_ids)
+    assert tokenizer.decode(tail) == "\n\n"
+    assert [tokenizer.decode([i]) for i in ids] == list(LABELS)
+    # After a colon, Qwen writes ":A" as one token, so "A" is not one token.
+    with pytest.raises(ValueError, match="not one distinct token"):
+        reply_label_ids(tokenizer, tokenizer.encode("team:"))
