@@ -43,6 +43,18 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        cache_config = vllm_config.cache_config
+        if cache_config.cache_dtype == "auto":
+            if current_platform.is_xpu():
+                cache_config.cache_dtype = "bfloat16"
+            elif current_platform.is_cuda_alike():
+                capability = current_platform.get_device_capability()
+                cache_config.cache_dtype = (
+                    "fp8_e4m3" if capability and capability.major >= 10 else "bfloat16"
+                )
+
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
         vllm_config.parallel_config.set_dcp_defaults(
