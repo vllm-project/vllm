@@ -17,6 +17,8 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 Under `--mamba-cache-mode align`, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.
 
+Align mode also prepares and aligns Mamba state on each scheduled step, even when no prefix-cache blocks are reused. This work can increase decode latency, and block-aligned prefill can require additional prefill steps. Measure with prefix caching enabled and disabled using a representative workload and cache-hit rate; the impact depends on the model, device, and workload.
+
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
 
 - `--mamba-cache-mode align`
@@ -44,4 +46,4 @@ We describe two example workloads, where APC can provide huge performance benefi
 
 ## Limits
 
-APC in general does not reduce the performance of vLLM. With that being said, APC only reduces the time of processing the queries (the prefilling phase) and does not reduce the time of generating new tokens (the decoding phase). So APC does not bring performance gain when vLLM spends most of the time generating answers to the queries (e.g. when the length of the answer is long), or new queries do not share the same prefix with any of existing queries (so that the computation cannot be reused).
+APC usually reduces prefill work when requests share prefixes, but it does not reduce the time spent generating new tokens. It may therefore provide little benefit when requests have long outputs or do not share prefixes. Hybrid Mamba models in align mode can also incur state-alignment overhead when there are no cache hits; see [Hybrid Mamba models](#hybrid-mamba-models) and measure with a representative workload.
