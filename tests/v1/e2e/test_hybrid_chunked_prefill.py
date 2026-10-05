@@ -68,7 +68,6 @@ def test_mtp_speculative_mixed_batch_short_prefill(
 ):
     """Test to ensure MTP speculative decoding correctly handles
     short prefill chunks that fall below the reorder_batch_threshold."""
-
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     # Set so large that both prefills will be classified as decodes in a mixed batch

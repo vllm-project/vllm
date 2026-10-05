@@ -12,8 +12,6 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
