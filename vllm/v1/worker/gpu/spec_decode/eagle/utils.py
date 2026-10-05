@@ -6,10 +6,12 @@ import torch.nn as nn
 from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    quantized_lm_head_copy,
+)
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.v1.worker.gpu.spec_decode.draft_lm_head import QuantizedDraftLMHead
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 
@@ -109,7 +111,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     ):
         draft_head = target_lm_head
         if speculative_config.draft_lm_head_quantization is not None:
-            draft_head = QuantizedDraftLMHead(
+            draft_head = quantized_lm_head_copy(
                 target_lm_head, speculative_config.draft_lm_head_quantization
             )
         if draft_lm_head is not None:
