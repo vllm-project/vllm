@@ -4,11 +4,16 @@
 GLM-5.2 shapes (hidden 6144, q_lora 2048, 32 index heads x 128, rope 64 interleaved,
 block 16, top-k 2048), and of the kernel-side address / ordering models built on it."""
 
+import itertools
+import random
+
 import torch
 
 from tests.models.deepseek_v32.amd_mono import indexer_ref as R
 
 g = torch.Generator().manual_seed(0)
+WAVES, LANES, THREADS, TOPK, MAXS = 8, 64, 512, 2048, 4096
+ITEMS = MAXS // THREADS
 
 
 def test_cache_layout():
@@ -168,11 +173,11 @@ def test_decode_step_glm_shapes():
     assert out["indptr"].tolist() == [0, 37, 37 + 2048, 37 + 2 * 2048]
 
 
-def test_fused_golden_weights():
-    """Kernel-format weights (FP8 block-128 index projections + FP8 qkv_a) -> golden
-    decode_step weights."""
+def test_pack_index_weights():
+    """Fused-indexer weights: FP8 block-128 index projections (rounding only) + the
+    BF16 weights_proj."""
     from vllm.models.deepseek_v32.amd.mono import index_weights as IW
-    from vllm.models.deepseek_v32.amd.mono.fp8_attention import quant_fp8_block
+    from vllm.models.deepseek_v32.amd.mono.fp8_attention import dequant_fp8_block
 
     bf = torch.bfloat16
     wk, wq = (
@@ -181,23 +186,14 @@ def test_fused_golden_weights():
     )
     wp = torch.randn(32, 6144, generator=g).to(bf)
     t = IW.pack_index_weights(wk, wq, wp, torch.ones(128), torch.zeros(128))
-    assert (
-        t["s_index_k"].shape == (1, 48)
-        and t["s_index_q"].shape == (32, 16)
-        and t["w_index_w"].dtype == bf
-    )
-    t["w_qkv_a"], t["s_qkv_a"] = quant_fp8_block(
-        torch.randn(2624, 6144, generator=g).to(bf), 128, 128
-    )
-    t["g_q"] = torch.ones(2048)
-    W = R.fused_golden_weights(t)
-    assert (
-        W["w_qa"].shape == (2624, 6144)
-        and W["w_qb"].shape == (4096, 2048)
-        and W["w_wk"].shape == (160, 6144)
-    )
-    rel = float((W["w_qb"] - wq.float()).norm() / wq.float().norm())
-    assert rel < 0.05, rel  # FP8 block-128 rounding only
+    assert t["s_index_k"].shape == (1, 48) and t["s_index_q"].shape == (32, 16)
+    assert t["w_index_w"].dtype == bf and t["g_index_k"].dtype == torch.float32
+    for (w, s), ref in (
+        ((t["w_index_q"], t["s_index_q"]), wq),
+        ((t["w_index_k"], t["s_index_k"]), wk),
+    ):
+        d = dequant_fp8_block(w, s, 128)
+        assert float((d - ref.float()).norm() / ref.float().norm()) < 0.05
 
 
 def test_fused_kernel_addressing():
@@ -208,25 +204,13 @@ def test_fused_kernel_addressing():
     HD, BS, STRIDE = 128, 16, 16 * 132  # uint8 cache.stride(0)
 
     def vllm_off(slot, d):  # byte offset of value d of the token at slot
-        blk, off = slot // BS, slot % BS
-        return (
-            blk * STRIDE
-            + off // 16 * 16 * HD
-            + off % 16 * 16
-            + d // 16 * 16 * 16
-            + d % 16
-        )
+        return slot // BS * STRIDE + int(R.value_offset(slot % BS, torch.tensor(d)))
 
     for slot in (0, 5, 15, 16, 37, 16 * 99 + 15):
         blk, off = slot // 16, slot % 16
         written = {}
-        for lane in range(
-            0,
-            64,
-            2,
-            # cache stage: byte = blk*stride + off*16 + (i0//16)*256 + i0%16,
-            # i0 = 2*lane
-        ):
+        # cache stage: byte = blk*stride + off*16 + (i0//16)*256 + i0%16, i0 = 2*lane
+        for lane in range(0, 64, 2):
             i0 = lane * 2
             byte = blk * STRIDE + off * 16 + (i0 // 16) * 256 + i0 % 16
             assert byte % 4 == 0
@@ -274,7 +258,6 @@ def test_ue8m0_exponent_bits():
         p = 448.0 * 2.0**k
         vals += [p, f32(p * (1 + 2**-23)), f32(p * (1 - 2**-24))]
     vals += torch.rand(2000, generator=g).mul(50).exp2().mul(1e-6).tolist()
-    window = 0
     for a in vals:
         sc, inv = kernel(a)
         t = torch.tensor([[a, -a]], dtype=torch.float32)
@@ -283,63 +266,10 @@ def test_ue8m0_exponent_bits():
         assert sc * inv == 1.0
         assert f32(a) / sc <= 448.0, a  # in range: no E4M3 overflow
         lg = float(R.ue8m0_fp8(t)[1][0])  # vLLM-style fp32 log2
-        if (
-            lg != sc
-            # only the fp32-log2 rounding window just above a power of two: 2x, and lg
-            # overflows 448
-        ):
+        # only in the fp32-log2 rounding window just above a power of two: 2x, and lg
+        # overflows 448
+        if lg != sc:
             assert sc == 2 * lg and f32(a) / lg > 448.0, (a, sc, lg)
-            window += 1
-
-
-def test_fused_select_order():
-    """The kernel's paged select (radix threshold, thread-major compaction: every key
-    above the threshold in ascending position, then the lowest-position threshold ties)
-    == indexer_ref.topk_ref canonical order, incl. -0.0 / +0.0 and heavy ties; identity
-    for L <= 2048; CSR via the block table == indexer_ref.csr."""
-    THREADS, MAXS, K = 512, 4096, 2048
-    for L, mode in (
-        (1, "rand"),
-        (2048, "rand"),
-        (2049, "rand"),
-        (3001, "ties"),
-        (4096, "zeros"),
-        (2500, "rand"),
-    ):
-        if mode == "rand":
-            x = torch.randn(L, generator=g)
-        elif mode == "ties":
-            x = torch.randint(-3, 4, (L,), generator=g).float()
-        else:
-            x = torch.where(
-                torch.rand(L, generator=g) < 0.5, torch.tensor(0.0), torch.tensor(-0.0)
-            )
-            x[::7] = torch.randn(len(x[::7]), generator=g)
-        key = R.order_key(x)
-        if L <= K:
-            sel = list(range(L))
-        else:
-            thr = int(torch.sort(key, descending=True).values[K - 1])
-            items = MAXS // THREADS
-            gt = [
-                i
-                for t in range(THREADS)
-                for i in range(t * items, (t + 1) * items)
-                if i < L and int(key[i]) > thr
-            ]
-            eq = [
-                i
-                for t in range(THREADS)
-                for i in range(t * items, (t + 1) * items)
-                if i < L and int(key[i]) == thr
-            ]
-            sel = gt + eq[: K - len(gt)]
-        want, _ = R.topk_ref(x[None], torch.tensor([L]))
-        assert sel == want[0, : min(L, K)].tolist(), (L, mode)
-        bt = torch.randperm(400, generator=g)[: (L + 15) // 16 + 1].int()[None]
-        slots = [int(bt[0, i // 16]) * 16 + i % 16 for i in sel]
-        _, csr = R.csr(want, torch.tensor([L]), bt)
-        assert csr.tolist() == slots
 
 
 def test_rowpar_layernorm_order():
@@ -349,10 +279,7 @@ def test_rowpar_layernorm_order():
     1-code E4M3 neighbour, <= 4 per row (the GPU check's bound), scale
     identical. (FMA contraction on GPU moves single roundings the same way.)"""
 
-    # v [rows, 64] fp32, butterfly lane ^ 32, ^ 16, ... ^ 1 (kernel wave_sum)
-    def wave_sum(
-        v,
-    ):
+    def wave_sum(v):  # v [rows, 64] fp32, butterfly lane ^ 32, ^ 16, ... ^ 1
         for off in (32, 16, 8, 4, 2, 1):
             idx = torch.arange(64) ^ off
             v = v + v[:, idx]
@@ -535,3 +462,95 @@ def test_select_radix11():
         sel = above + ties[:rem]
         want, _ = R.topk_ref(x[None], torch.tensor([L]))
         assert sel == want[0].tolist()
+
+
+def _lds_select(
+    scores: torch.Tensor, barrier_after_digit: bool, order
+) -> tuple[list, list]:
+    """-> (CSR positions written in [0, topk) order, out-of-range offsets written).
+    ``order``: wave order within every barrier phase."""
+    L = scores.numel()
+    key = R.order_key(scores).tolist() + [0] * (MAXS - L)
+    thr_true = sorted(key[:L], reverse=True)[TOPK - 1]
+    # final select_digit's hit thread
+    keys = {256: thr_true, 257: TOPK - sum(k > thr_true for k in key[:L])}
+    wave_state: list[dict] = [dict() for _ in range(WAVES)]
+    out, oob = {}, []
+
+    # phase A (after select_digit's last barrier): every wave reads (prefix, remain) =
+    # keys[256], keys[257]
+    def a_read(w):
+        wave_state[w]["thr"] = keys[256]
+
+    # phase B: item flags + gt scan_flags -> lane 63 of wave w stores keys[256 + w] (its
+    # gt count)
+    def b_write(w):
+        thr = wave_state[w]["thr"]
+        cnt = []
+        for lane in range(LANES):
+            t = w * LANES + lane
+            items = [t * ITEMS + j for j in range(ITEMS)]
+            cnt.append(sum((i < L) and key[i] > thr for i in items))
+        wave_state[w]["cnt"] = cnt
+        keys[256 + w] = sum(cnt)
+
+    # phase C (after scan barrier): offsets from keys[256..263], gt stores
+    def c_store(w):
+        thr = wave_state[w]["thr"]
+        before = sum(keys[256 + v] for v in range(w))
+        run_ = before
+        for lane in range(LANES):
+            t = w * LANES + lane
+            for j in range(ITEMS):
+                i = t * ITEMS + j
+                if i < L and key[i] > thr:
+                    if run_ < TOPK:
+                        out[run_] = i
+                    else:
+                        oob.append(run_)
+                    run_ += 1
+
+    phases = (
+        [[a_read], [b_write], [c_store]]
+        if barrier_after_digit
+        else [[a_read, b_write], [c_store]]
+    )
+    for ph in phases:
+        for w in order:
+            for op in ph:
+                op(w)
+    return [out.get(k, -1) for k in range(TOPK)], oob
+
+
+def test_barrier_after_select_digit_is_schedule_independent():
+    """CPU model of the fused paged indexer's select-stage LDS protocol (index_paged,
+    last radix digit through the gt / eq compaction scans): the 8 waves run one at a
+    time between barriers in an adversarial order (a legal GPU interleaving). Without
+    the barrier after select_digit some schedules corrupt the CSR; with it every
+    schedule gives the canonical result."""
+    g = torch.Generator().manual_seed(0)
+    L = 3500
+    scores = torch.randn(L, generator=g)
+    k = R.order_key(scores)
+    thr = torch.sort(k, descending=True).values[TOPK - 1]
+    want = torch.nonzero(k > thr).view(-1).tolist()  # canonical gt part (ascending)
+    orders = [list(range(WAVES)), list(reversed(range(WAVES)))]
+    rnd = random.Random(1)
+    for _ in range(30):
+        o = list(range(WAVES))
+        rnd.shuffle(o)
+        orders.append(o)
+    # without the barrier: the in-order schedule (lagging waves read after wave 0 / 1
+    # stored their counts) breaks
+    bad = 0
+    for o in orders:
+        got, oob = _lds_select(scores, False, o)
+        if got[: len(want)] != want or oob:
+            bad += 1
+    assert bad > 0, "the model should expose the race without the barrier"
+    # with the barrier: every schedule gives the canonical result
+    for o in orders + [
+        list(p) for p in itertools.islice(itertools.permutations(range(WAVES)), 200)
+    ]:
+        got, oob = _lds_select(scores, True, o)
+        assert got[: len(want)] == want and not oob, o

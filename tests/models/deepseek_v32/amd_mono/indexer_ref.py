@@ -53,10 +53,7 @@ HEAD_DIM = 128  # index_head_dim
 N_HEAD = 32  # index_n_heads
 ROPE = 64  # qk_rope_head_dim (index rope covers dims [0, 64), interleaved pairs)
 TOPK = 2048
-# 128 fp8 + one fp32 scale per token: cache [blocks, 16, 132] uint8
-ROW_BYTES = HEAD_DIM + 4
-# _INDEXER_CACHE_BLOCK_TILE (tokens) == _INDEXER_CACHE_HEAD_TILE_BYTES (bytes) for
-# 1-byte fp8
+# _INDEXER_CACHE_BLOCK_TILE (tokens) == _INDEXER_CACHE_HEAD_TILE_BYTES (bytes), fp8
 TILE = 16
 
 
@@ -117,8 +114,7 @@ def ue8m0_fp8(v: torch.Tensor, exact: bool = False):
     return (v / scale).to(FP8), scale.squeeze(-1)
 
 
-# ------------------------------------------------------------------ index cache (uint8
-# [blocks, 16, 132])
+# ------------------------------------------------------------------ index cache
 def value_offset(block_offset: int | torch.Tensor, d: torch.Tensor) -> torch.Tensor:
     """SHUFFLE layout byte offset inside a block (kernels.py
     _fp8_quant_and_cache_write): [blk/16, D/16, 16 tokens, 16 bytes]."""
@@ -130,41 +126,26 @@ def value_offset(block_offset: int | torch.Tensor, d: torch.Tensor) -> torch.Ten
     )
 
 
-def cache_write(
-    cache: torch.Tensor,
-    slot: int,
-    k_fp8: torch.Tensor,
-    scale: float,
-    shuffle: bool = True,
-) -> None:
+def cache_write(cache: torch.Tensor, slot: int, k_fp8: torch.Tensor, scale: float):
     blk, off = slot // BLOCK, slot % BLOCK
     flat = cache.view(cache.shape[0], -1)
-    d = torch.arange(HEAD_DIM)
-    vo = value_offset(off, d) if shuffle else off * HEAD_DIM + d
-    flat[blk, vo] = k_fp8.view(torch.uint8)
+    flat[blk, value_offset(off, torch.arange(HEAD_DIM))] = k_fp8.view(torch.uint8)
     flat[blk, BLOCK * HEAD_DIM + off * 4 : BLOCK * HEAD_DIM + off * 4 + 4] = (
         torch.tensor([scale], dtype=torch.float32).view(torch.uint8)
     )
 
 
-def cache_read(
-    cache: torch.Tensor, block: int, shuffle: bool = True
-) -> tuple[torch.Tensor, torch.Tensor]:
+def cache_read(cache: torch.Tensor, block: int) -> tuple[torch.Tensor, torch.Tensor]:
     """(fp8 values [16, 128], fp32 scales [16]) of one physical block."""
     flat = cache.view(cache.shape[0], -1)[block]
-    o = torch.arange(BLOCK)[:, None]
-    d = torch.arange(HEAD_DIM)[None, :]
-    vo = value_offset(o, d) if shuffle else o * HEAD_DIM + d
-    vals = flat[vo].view(FP8)
+    vals = flat[value_offset(torch.arange(BLOCK)[:, None], torch.arange(HEAD_DIM))]
+    vals = vals.view(FP8)
     scales = flat[BLOCK * HEAD_DIM : BLOCK * HEAD_DIM + 4 * BLOCK].view(torch.float32)
     return vals, scales
 
 
-# ------------------------------------------------------------------ scoring / selection
-# / CSR
-def paged_logits(
-    iq_fp8, w, cache, block_table, seq_lens, max_len: int, shuffle: bool = True
-) -> torch.Tensor:
+# ----------------------------------------------------------- score / select / CSR
+def paged_logits(iq_fp8, w, cache, block_table, seq_lens, max_len: int) -> torch.Tensor:
     """[T, max_len] fp32, -inf past seq_len (fp8_paged_mqa_logits_torch,
     next_n == 1)."""
     T = iq_fp8.shape[0]
@@ -173,7 +154,7 @@ def paged_logits(
         L = int(seq_lens[r])
         nb = (L + BLOCK - 1) // BLOCK
         vals, scales = zip(
-            *(cache_read(cache, int(block_table[r, b]), shuffle) for b in range(nb))
+            *(cache_read(cache, int(block_table[r, b])) for b in range(nb))
         )
         K = torch.cat(vals).float()[:L]  # [L, 128]
         S = torch.cat(scales)[:L]
@@ -266,10 +247,7 @@ def decode_step(
     block_table: torch.Tensor,
     cache: torch.Tensor,
     cos_sin: torch.Tensor,
-    *,
     eps_q: float = 1e-5,
-    max_len: int | None = None,
-    write: bool = True,
 ) -> dict:
     """W: w_qa [q_lora + ..., H] (only the first q_lora rows used), w_qa_norm [q_lora],
     w_qb [32*128, q_lora], w_wk [128 + 32, H], k_norm_w / k_norm_b [128]. h: [T, H] bf16
@@ -287,58 +265,18 @@ def decode_step(
     k = layer_norm(kw[:, :HEAD_DIM], W["k_norm_w"], W["k_norm_b"], 1e-6)
     k = rope_interleave(k, cos_sin, pos)
     k_fp8, s_k = ue8m0_fp8(k)
-    if write:
-        for r in range(T):
-            if int(slots[r]) >= 0:
-                cache_write(cache, int(slots[r]), k_fp8[r], float(s_k[r]))
-    L = int(seq_lens.max()) if max_len is None else max_len
-    logits = paged_logits(iq_fp8, w, cache, block_table, seq_lens, L)
+    for r in range(T):
+        if int(slots[r]) >= 0:
+            cache_write(cache, int(slots[r]), k_fp8[r], float(s_k[r]))
+    logits = paged_logits(iq_fp8, w, cache, block_table, seq_lens, int(seq_lens.max()))
     top, info = topk_ref(logits, seq_lens)
-    indptr, indices = csr(top, seq_lens, block_table)
+    indptr, _ = csr(top, seq_lens, block_table)
     return dict(
-        q_c=q_c,
         iq_fp8=iq_fp8,
-        s_q=s_q,
         weights=w,
         k_fp8=k_fp8,
-        s_k=s_k,
         logits=logits,
         topk=top,
         topk_info=info,
         indptr=indptr,
-        indices=indices,
     )
-
-
-# ------------------------------------------------------------------ golden for the
-# in-kernel (fused) indexer
-def fused_golden_weights(t: dict) -> dict:
-    """``decode_step`` weights equivalent to a fused-indexer kernel layer: the
-    kernel computes q_a with its FP8 block-128 qkv_a and the index projections
-    with FP8 wk / wq_b (mono/index_weights.py), so the golden uses their dequantized
-    values (the rest of the math is vLLM's, which the kernel reproduces)."""
-    from vllm.models.deepseek_v32.amd.mono.fp8_attention import dequant_fp8_block
-
-    qkv_a = (
-        dequant_fp8_block(t["w_qkv_a"], t["s_qkv_a"], 128)
-        if "s_qkv_a" in t
-        else t["w_qkv_a"].float()
-    )
-    wk = dequant_fp8_block(t["w_index_k"], t["s_index_k"], 128)
-    wq = dequant_fp8_block(t["w_index_q"], t["s_index_q"], 128)
-    return dict(
-        w_qa=qkv_a,
-        w_qa_norm=t["g_q"],
-        w_qb=wq,
-        w_wk=torch.cat([wk, t["w_index_w"].float()], 0),
-        k_norm_w=t["g_index_k"],
-        k_norm_b=t["b_index_k"],
-    )
-
-
-def layer_input_norm(
-    x: torch.Tensor, g_in: torch.Tensor, eps: float = 1e-5
-) -> torch.Tensor:
-    """VLLM's input_layernorm output (the indexer's ``hidden_states``) from the layer's
-    pre-norm input x."""
-    return bf16(rms_norm(x, g_in, eps))
