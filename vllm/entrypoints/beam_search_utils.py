@@ -14,19 +14,34 @@ easier.
 from __future__ import annotations
 
 import json as _json
-from typing import Any
+from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.choice_trie import ChoiceTrie
+from vllm.entrypoints.generate.beam_search.choice_trie import ChoiceTrie
 from vllm.entrypoints.generate.beam_search.utils import BeamSearchSequence
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.bitmask import bitmask_to_token_ids
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputOptions,
 )
+from vllm.v1.structured_output.bitmask import bitmask_to_token_ids
 from vllm.v1.structured_output.request import get_structured_output_key
+
+
+class BeamSearchSOState(NamedTuple):
+    """Resolved structured-output state for a beam-search request.
+
+    Exactly one path is populated: the CHOICE fast path sets ``trie`` and
+    leaves ``backend``, ``key``, and ``bitmask`` as ``None``; the
+    grammar/JSON/regex path sets ``backend``, ``key``, and ``bitmask`` and
+    leaves ``trie`` as ``None``.
+    """
+
+    backend: StructuredOutputBackend | None
+    key: tuple | None
+    bitmask: Any
+    trie: ChoiceTrie | None
 
 
 def validate_and_resolve_beam_search_so(
@@ -68,7 +83,7 @@ def init_beam_search_so_backend(
     tokenizer: TokenizerLike,
     vocab_size: int,
     structured_outputs: StructuredOutputsParams,
-) -> tuple[StructuredOutputBackend | None, tuple | None, Any, ChoiceTrie | None]:
+) -> BeamSearchSOState:
     """Initialise a structured output backend for beam search.
 
     For ``CHOICE``-type requests the xgrammar backend is bypassed entirely
@@ -79,8 +94,8 @@ def init_beam_search_so_backend(
     For all other request types the behaviour is identical to before: an
     xgrammar (or other configured) backend is instantiated and returned.
 
-    Returns a 4-tuple ``(backend, key, bitmask, trie)``.  Exactly one of
-    the following is true:
+    Returns a :class:`BeamSearchSOState`.  Exactly one of the following is
+    true:
 
     * ``trie is not None`` — CHOICE fast path; ``backend``, ``key``, and
       ``bitmask`` are all ``None``.
@@ -95,7 +110,7 @@ def init_beam_search_so_backend(
             request.
 
     Returns:
-        A ``(backend, key, bitmask, trie)`` 4-tuple.
+        A :class:`BeamSearchSOState`.
 
     Raises:
         ValueError: If the requested backend is not supported.
@@ -111,7 +126,7 @@ def init_beam_search_so_backend(
         choices = _json.loads(grammar_spec)
         eos_token_id = tokenizer.eos_token_id
         trie = ChoiceTrie.build(choices, tokenizer, eos_token_id=eos_token_id)
-        return None, None, None, trie
+        return BeamSearchSOState(None, None, None, trie)
 
     # `_backend` is now a concrete backend resolved by the validator above.
     backend_name = structured_outputs._backend
@@ -162,7 +177,7 @@ def init_beam_search_so_backend(
 
     bitmask = backend.allocate_token_bitmask(1)
 
-    return backend, key, bitmask, None
+    return BeamSearchSOState(backend, key, bitmask, None)
 
 
 def get_trie_allowed_token_ids(

@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm.entrypoints.choice_trie import ChoiceTrie
+from vllm.entrypoints.generate.beam_search.choice_trie import ChoiceTrie
 
 # ---------------------------------------------------------------------------
 # Helpers

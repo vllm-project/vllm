@@ -14,8 +14,12 @@ from vllm.entrypoints.beam_search_utils import (
     get_trie_allowed_token_ids,
     init_beam_search_so_backend,
 )
-from vllm.entrypoints.choice_trie import ChoiceTrie
-from vllm.inputs import EngineInput
+from vllm.inputs import (
+    EncoderDecoderInput,
+    EngineInput,
+    MultiModalInput,
+    TokensInput,
+)
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -23,6 +27,7 @@ from vllm.utils import random_uuid
 from vllm.utils.async_utils import collect_from_async_generator
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
 
+from .choice_trie import ChoiceTrie
 from .utils import BeamSearchSequence, create_sort_beams_key_function
 
 # Engine-side cap on `SamplingParams.allowed_token_ids`; keep in sync with
@@ -102,159 +107,35 @@ class BeamSearchOnlineMixin(ABC):
                 lora_request=lora_request,
             )
         ]
-        completed = []
+        completed: list[BeamSearchSequence] = []
 
         try:
             for _ in range(max_tokens):
-                if so_backend is not None or so_trie is not None:
-                    # Grammar compile/accept/fill_bitmask (and the trie walk)
-                    # are CPU-bound and run once per beam per step. Offload to a
-                    # worker thread so they do not block the API server's
-                    # asyncio event loop and stall other concurrent requests,
-                    # mirroring StructuredOutputManager's executor offload.
-                    (
-                        active_beams,
-                        beam_params_list,
-                        allowed_sets,
-                        newly_completed,
-                    ) = await asyncio.to_thread(
-                        self._build_online_so_params,
-                        all_beams,
-                        logprobs_num,
-                        temperature,
-                        so_backend,
-                        so_key,
-                        so_bitmask,
-                        so_trie,
-                        vocab_size,
-                    )
-                    completed.extend(newly_completed)
-                    if not active_beams:
-                        all_beams = []
-                        break
-                else:
-                    active_beams = all_beams
-                    beam_params_list = [sampling_params] * len(all_beams)
-                    allowed_sets = [None] * len(all_beams)
-
-                tasks = []
-                request_id_batch = f"{request_id}-{random_uuid()}"
-
-                for i, beam in enumerate(active_beams):
-                    prompt_item = beam.get_prompt()
-                    lora_request_item = beam.lora_request
-                    request_id_item = f"{request_id_batch}-beam-{i}"
-                    task = asyncio.create_task(
-                        collect_from_async_generator(
-                            self.engine_client.generate(
-                                prompt_item,
-                                beam_params_list[i],
-                                request_id_item,
-                                lora_request=lora_request_item,
-                                trace_headers=trace_headers,
-                                session_id=session_id,
-                            )
-                        )
-                    )
-                    tasks.append(task)
-
-                output = [x[0] for x in await asyncio.gather(*tasks)]
-
-                for result in output:
-                    # check for error finish reason and abort beam search
-                    if result.outputs[0].finish_reason == "error":
-                        # yield error output and terminate beam search
-                        yield RequestOutput(
-                            request_id=request_id,
-                            prompt=prompt_text,
-                            outputs=[
-                                CompletionOutput(
-                                    index=0,
-                                    text="",
-                                    token_ids=[],
-                                    cumulative_logprob=None,
-                                    logprobs=None,
-                                    finish_reason="error",
-                                )
-                            ],
-                            finished=True,
-                            prompt_token_ids=prompt_token_ids,
-                            prompt_logprobs=None,
-                        )
-                        return
-
-                if any(result.outputs[0].finish_reason == "abort" for result in output):
-                    for beam in active_beams:
-                        beam.finish_reason = "abort"
-                        completed.append(beam)
-                    all_beams = []
-                    break
-
-                candidates = []
-                for i, result in enumerate(output):
-                    current_beam = active_beams[i]
-
-                    if result.outputs[0].logprobs is not None:
-                        logprobs = result.outputs[0].logprobs[0]
-                        allowed = allowed_sets[i]
-                        for token_id, logprob_obj in logprobs.items():
-                            if allowed is not None and token_id not in allowed:
-                                continue
-                            candidate_logprob = (
-                                current_beam.cum_logprob + logprob_obj.logprob
-                            )
-                            if token_id == eos_token_id and not ignore_eos:
-                                completed.append(
-                                    BeamSearchSequence(
-                                        orig_prompt=prompt,
-                                        tokens=current_beam.tokens + [eos_token_id]
-                                        if include_stop_str_in_output
-                                        else current_beam.tokens,
-                                        logprobs=current_beam.logprobs + [logprobs],
-                                        cum_logprob=candidate_logprob,
-                                        finish_reason="stop",
-                                        stop_reason=eos_token_id,
-                                    )
-                                )
-                            else:
-                                candidates.append(
-                                    (
-                                        candidate_logprob,
-                                        int(token_id),
-                                        current_beam,
-                                        logprobs,
-                                    )
-                                )
-
-                # Processing non-EOS tokens
-                candidate_logprobs = np.fromiter(
-                    (candidate[0] for candidate in candidates),
-                    dtype=np.float64,
-                    count=len(candidates),
+                all_beams, error_output = await self._beam_search_step(
+                    all_beams=all_beams,
+                    completed=completed,
+                    prompt=prompt,
+                    prompt_text=prompt_text,
+                    prompt_token_ids=prompt_token_ids,
+                    request_id=request_id,
+                    sampling_params=sampling_params,
+                    logprobs_num=logprobs_num,
+                    beam_width=beam_width,
+                    temperature=temperature,
+                    eos_token_id=eos_token_id,
+                    ignore_eos=ignore_eos,
+                    include_stop_str_in_output=include_stop_str_in_output,
+                    so_backend=so_backend,
+                    so_key=so_key,
+                    so_bitmask=so_bitmask,
+                    so_trie=so_trie,
+                    vocab_size=vocab_size,
+                    trace_headers=trace_headers,
+                    session_id=session_id,
                 )
-                if len(candidates) <= beam_width:
-                    topn_idx = np.argsort(-candidate_logprobs)
-                else:
-                    topn_idx = np.argpartition(
-                        -candidate_logprobs,
-                        beam_width - 1,
-                    )[:beam_width]
-                    topn_idx = topn_idx[np.argsort(-candidate_logprobs[topn_idx])]
-
-                new_beams = []
-                for idx in topn_idx:
-                    cum_logprob, token_id, current_beam, logprobs = candidates[int(idx)]
-                    new_beams.append(
-                        BeamSearchSequence(
-                            orig_prompt=prompt,
-                            tokens=current_beam.tokens + [token_id],
-                            logprobs=current_beam.logprobs + [logprobs],
-                            lora_request=current_beam.lora_request,
-                            cum_logprob=cum_logprob,
-                        )
-                    )
-
-                all_beams = new_beams
+                if error_output is not None:
+                    yield error_output
+                    return
                 if not all_beams:
                     break
         finally:
@@ -296,6 +177,183 @@ class BeamSearchOnlineMixin(ABC):
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=None,
         )
+
+    async def _beam_search_step(
+        self,
+        *,
+        all_beams: list[BeamSearchSequence],
+        completed: list[BeamSearchSequence],
+        prompt: TokensInput | MultiModalInput | EncoderDecoderInput,
+        prompt_text: str | None,
+        prompt_token_ids: list[int],
+        request_id: str,
+        sampling_params: SamplingParams,
+        logprobs_num: int,
+        beam_width: int,
+        temperature: float,
+        eos_token_id: int | None,
+        ignore_eos: bool,
+        include_stop_str_in_output: bool,
+        so_backend: StructuredOutputBackend | None,
+        so_key: tuple | None,
+        so_bitmask,
+        so_trie: ChoiceTrie | None,
+        vocab_size: int,
+        trace_headers: Mapping[str, str] | None,
+        session_id: str | None,
+    ) -> tuple[list[BeamSearchSequence], RequestOutput | None]:
+        """Advance beam search by one token step.
+
+        Finished beams are appended to ``completed`` in place. Returns
+        ``(next_beams, error_output)``: a non-``None`` ``error_output`` means
+        the engine aborted with an error and the caller must yield it and
+        stop; an empty ``next_beams`` means the search is complete.
+        """
+        if so_backend is not None or so_trie is not None:
+            # Grammar compile/accept/fill_bitmask (and the trie walk)
+            # are CPU-bound and run once per beam per step. Offload to a
+            # worker thread so they do not block the API server's
+            # asyncio event loop and stall other concurrent requests,
+            # mirroring StructuredOutputManager's executor offload.
+            (
+                active_beams,
+                beam_params_list,
+                allowed_sets,
+                newly_completed,
+            ) = await asyncio.to_thread(
+                self._build_online_so_params,
+                all_beams,
+                logprobs_num,
+                temperature,
+                so_backend,
+                so_key,
+                so_bitmask,
+                so_trie,
+                vocab_size,
+            )
+            completed.extend(newly_completed)
+            if not active_beams:
+                return [], None
+        else:
+            active_beams = all_beams
+            beam_params_list = [sampling_params] * len(all_beams)
+            allowed_sets = [None] * len(all_beams)
+
+        tasks = []
+        request_id_batch = f"{request_id}-{random_uuid()}"
+
+        for i, beam in enumerate(active_beams):
+            prompt_item = beam.get_prompt()
+            lora_request_item = beam.lora_request
+            request_id_item = f"{request_id_batch}-beam-{i}"
+            task = asyncio.create_task(
+                collect_from_async_generator(
+                    self.engine_client.generate(
+                        prompt_item,
+                        beam_params_list[i],
+                        request_id_item,
+                        lora_request=lora_request_item,
+                        trace_headers=trace_headers,
+                        session_id=session_id,
+                    )
+                )
+            )
+            tasks.append(task)
+
+        output = [x[0] for x in await asyncio.gather(*tasks)]
+
+        for result in output:
+            # check for error finish reason and abort beam search
+            if result.outputs[0].finish_reason == "error":
+                # signal the caller to yield an error output and terminate
+                error_output = RequestOutput(
+                    request_id=request_id,
+                    prompt=prompt_text,
+                    outputs=[
+                        CompletionOutput(
+                            index=0,
+                            text="",
+                            token_ids=[],
+                            cumulative_logprob=None,
+                            logprobs=None,
+                            finish_reason="error",
+                        )
+                    ],
+                    finished=True,
+                    prompt_token_ids=prompt_token_ids,
+                    prompt_logprobs=None,
+                )
+                return all_beams, error_output
+
+        if any(result.outputs[0].finish_reason == "abort" for result in output):
+            for beam in active_beams:
+                beam.finish_reason = "abort"
+                completed.append(beam)
+            return [], None
+
+        candidates = []
+        for i, result in enumerate(output):
+            current_beam = active_beams[i]
+
+            if result.outputs[0].logprobs is not None:
+                logprobs = result.outputs[0].logprobs[0]
+                allowed = allowed_sets[i]
+                for token_id, logprob_obj in logprobs.items():
+                    if allowed is not None and token_id not in allowed:
+                        continue
+                    candidate_logprob = current_beam.cum_logprob + logprob_obj.logprob
+                    if token_id == eos_token_id and not ignore_eos:
+                        completed.append(
+                            BeamSearchSequence(
+                                orig_prompt=prompt,
+                                tokens=current_beam.tokens + [eos_token_id]
+                                if include_stop_str_in_output
+                                else current_beam.tokens,
+                                logprobs=current_beam.logprobs + [logprobs],
+                                cum_logprob=candidate_logprob,
+                                finish_reason="stop",
+                                stop_reason=eos_token_id,
+                            )
+                        )
+                    else:
+                        candidates.append(
+                            (
+                                candidate_logprob,
+                                int(token_id),
+                                current_beam,
+                                logprobs,
+                            )
+                        )
+
+        # Processing non-EOS tokens
+        candidate_logprobs = np.fromiter(
+            (candidate[0] for candidate in candidates),
+            dtype=np.float64,
+            count=len(candidates),
+        )
+        if len(candidates) <= beam_width:
+            topn_idx = np.argsort(-candidate_logprobs)
+        else:
+            topn_idx = np.argpartition(
+                -candidate_logprobs,
+                beam_width - 1,
+            )[:beam_width]
+            topn_idx = topn_idx[np.argsort(-candidate_logprobs[topn_idx])]
+
+        new_beams = []
+        for idx in topn_idx:
+            cum_logprob, token_id, current_beam, logprobs = candidates[int(idx)]
+            new_beams.append(
+                BeamSearchSequence(
+                    orig_prompt=prompt,
+                    tokens=current_beam.tokens + [token_id],
+                    logprobs=current_beam.logprobs + [logprobs],
+                    lora_request=current_beam.lora_request,
+                    cum_logprob=cum_logprob,
+                )
+            )
+
+        return new_beams, None
 
     def _build_online_so_params(
         self,

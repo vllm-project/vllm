@@ -10,10 +10,10 @@ from tqdm import tqdm
 
 from vllm import RequestOutput, TextPrompt, TokensPrompt
 from vllm.entrypoints.beam_search_utils import (
+    BeamSearchSOState,
     get_trie_allowed_token_ids,
     validate_and_resolve_beam_search_so,
 )
-from vllm.entrypoints.choice_trie import ChoiceTrie
 from vllm.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -30,6 +30,7 @@ from vllm.v1.structured_output.backend_types import (
 )
 from vllm.v1.structured_output.request import get_structured_output_key
 
+from .choice_trie import ChoiceTrie
 from .utils import (
     BeamSearchInstance,
     BeamSearchOutput,
@@ -372,19 +373,13 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         self,
         structured_outputs: StructuredOutputsParams,
         tokenizer: TokenizerLike,
-    ) -> tuple[
-        StructuredOutputBackend | None,
-        tuple | None,
-        torch.Tensor | None,
-        ChoiceTrie | None,
-    ]:
+    ) -> BeamSearchSOState:
         """Initialize the structured output backend for beam search.
 
         For CHOICE requests a token-level prefix trie is built and returned
         instead of a grammar backend; it is choice-count independent and much
-        faster for large choice sets. Returns a 4-tuple
-        ``(backend, key, bitmask, trie)`` where exactly one of ``backend`` or
-        ``trie`` is set.
+        faster for large choice sets. Returns a :class:`BeamSearchSOState`
+        where exactly one of ``backend`` or ``trie`` is set.
         """
         # CHOICE fast path: build a prefix trie and skip the grammar backend.
         vllm_config = self.llm_engine.vllm_config
@@ -396,7 +391,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             trie = ChoiceTrie.build(
                 choices, tokenizer, eos_token_id=tokenizer.eos_token_id
             )
-            return None, None, None, trie
+            return BeamSearchSOState(None, None, None, trie)
 
         so_config = vllm_config.structured_outputs_config
         if so_config is None:
@@ -455,7 +450,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
         bitmask = backend.allocate_token_bitmask(1)
 
-        return backend, key, bitmask, None
+        return BeamSearchSOState(backend, key, bitmask, None)
 
     def _build_beam_sampling_params(
         self,
