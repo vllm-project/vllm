@@ -711,7 +711,8 @@ def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
 def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     """The ring group's generic slot mapping is disabled (all PAD), so the
     builder must map every real token to ``ring_block * capacity + pos %
-    capacity`` and keep padding tokens at PAD."""
+    capacity``. Padding tokens and requests on the null block (block 0, as in
+    dummy batches) must stay at PAD."""
     from unittest.mock import MagicMock
 
     from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
@@ -731,29 +732,30 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     device = torch.device("cuda")
     builder = CompressorMetadataBuilder(spec, ["state"], vllm_config, device)
 
-    # Two requests: 3 tokens at positions 13..15 on ring block 5, then 2
-    # tokens at positions 7..8 on ring block 2; three padding tokens.
-    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
-    positions = torch.tensor([13, 14, 15, 7, 8, 0, 0, 0], device=device)
-    block_table = torch.tensor([[5], [2]], dtype=torch.int32, device=device)
+    # Three requests: 3 tokens at positions 13..15 on ring block 5, 2 tokens
+    # at positions 7..8 on ring block 2, then 2 tokens on the null block;
+    # three padding tokens.
+    query_start_loc = torch.tensor([0, 3, 5, 7], dtype=torch.int32, device=device)
+    positions = torch.tensor([13, 14, 15, 7, 8, 0, 1, 0, 0, 0], device=device)
+    block_table = torch.tensor([[5], [2], [0]], dtype=torch.int32, device=device)
     common = CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
-        seq_lens=torch.tensor([16, 9], dtype=torch.int32, device=device),
-        num_reqs=2,
-        num_actual_tokens=5,
+        seq_lens=torch.tensor([16, 9, 2], dtype=torch.int32, device=device),
+        num_reqs=3,
+        num_actual_tokens=7,
         max_query_len=3,
         max_seq_len=16,
         block_table_tensor=block_table,
-        slot_mapping=torch.full((8,), -1, dtype=torch.int64, device=device),
+        slot_mapping=torch.full((10,), -1, dtype=torch.int64, device=device),
         positions=positions,
     )
     metadata = builder.build(0, common)
 
-    expected = [5 * 8 + 5, 5 * 8 + 6, 5 * 8 + 7, 2 * 8 + 7, 2 * 8 + 0, -1, -1, -1]
-    assert metadata.slot_mapping.tolist() == expected
+    ring = [5 * 8 + 5, 5 * 8 + 6, 5 * 8 + 7, 2 * 8 + 7, 2 * 8 + 0]
+    assert metadata.slot_mapping.tolist() == ring + [-1] * 5
     assert metadata.query_start_loc is query_start_loc
-    assert metadata.token_to_req_indices.tolist() == [0, 0, 0, 1, 1]
+    assert metadata.token_to_req_indices.tolist() == [0, 0, 0, 1, 1, 2, 2]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA stream coverage")
