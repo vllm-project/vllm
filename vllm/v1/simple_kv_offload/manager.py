@@ -34,6 +34,7 @@ from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
     resolve_block_hashes,
     resolve_dcp_kv_block_size,
+    to_event_extra_keys,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -737,14 +738,19 @@ class SimpleCPUOffloadScheduler:
             if scheduled_for_req:
                 req_ids.append(req_id)
 
-        for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
+        # Preemption frees the request's blocks. It resumes with a full new
+        # block table (MRV1 resumed-cached, MRV2 NewRequestData).
+        for req_id in preempted_req_ids:
+            state = self._reqs_to_store.get(req_id)
+            if state is not None:
+                state.block_ids = tuple([] for _ in range(num_groups))
+                state.num_stored_blocks = [0] * num_groups
+
+        for req_id, new_block_id_groups, _ in yield_req_data(scheduler_output):
             state = self._reqs_to_store.get(req_id)
             if state is None or state.finished:
                 continue
 
-            if preempted:
-                state.block_ids = tuple([] for _ in range(num_groups))
-                state.num_stored_blocks = [0] * num_groups
             if new_block_id_groups:
                 for g in range(min(num_groups, len(new_block_id_groups))):
                     if new_block_id_groups[g] is not None:
@@ -1147,9 +1153,7 @@ class SimpleCPUOffloadScheduler:
                             lora_id=meta.lora_id if meta else None,
                             medium=self.kv_event_medium,
                             lora_name=meta.lora_name if meta else None,
-                            extra_keys=(
-                                [extra_keys] if extra_keys is not None else None
-                            ),
+                            extra_keys=to_event_extra_keys(extra_keys and [extra_keys]),
                             group_idx=group_idx,
                             kv_cache_spec_kind=get_kv_cache_spec_kind(spec).value,
                             kv_cache_spec_sliding_window=(
@@ -1396,6 +1400,10 @@ class SimpleCPUOffloadScheduler:
         the transfer finished, then release refs without caching abandoned
         store results.
         """
+        for pending in self._pending_cpu_hits.values():
+            self._free_pending_cpu_hit(pending)
+        self._pending_cpu_hits.clear()
+
         self._abandoned_store_event_to_blocks.update(self._store_event_to_blocks)
         for transfer in self._pending_finished_stores:
             self._release_transfer_refs(transfer)
