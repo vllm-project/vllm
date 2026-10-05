@@ -682,6 +682,8 @@ class NixlBaseConnectorWorker:
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
             dict
         )
+        # Resources owned by a handshake that has not been published yet.
+        self._pending_remote_agents: dict[EngineId, set[str]] = {}
         # Map of engine_id -> clock offset.
         self._engine_clock_offset: dict[EngineId, float] = {}
 
@@ -1014,6 +1016,8 @@ class NixlBaseConnectorWorker:
         notif_agents_only: bool = False,
     ) -> tuple[dict[tuple[int, int], str], float]:
         """Do a NIXL handshake with a remote instance."""
+        if expected_engine_id in self._pending_remote_agents:
+            self._cleanup_remote_engine(expected_engine_id, log_eviction=False)
         if self._is_csa_linear:
             self._validate_csa_linear_tp_layout(remote_tp_size)
 
@@ -1167,6 +1171,9 @@ class NixlBaseConnectorWorker:
         Skips descriptor setup but records engine info for block accounting.
         """
         assert self.transfer_topo is not None
+        pending_agents = self._pending_remote_agents.setdefault(
+            metadata.engine_id, set()
+        )
         self.transfer_topo.register_remote_engine(
             metadata.engine_id,
             EngineTransferInfo(
@@ -1179,7 +1186,9 @@ class NixlBaseConnectorWorker:
                 remote_dcp_size=remote_dcp_size,
             ),
         )
-        return self.nixl_wrapper.add_remote_agent(metadata.agent_metadata)
+        agent_name = self.nixl_wrapper.add_remote_agent(metadata.agent_metadata)
+        pending_agents.add(agent_name)
+        return agent_name
 
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Initialize transfer buffer in CPU mem for accelerators
@@ -1335,6 +1344,7 @@ class NixlBaseConnectorWorker:
                         self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
                         self._track_remote_engine_replacement(eid, host, port)
+                        self._pending_remote_agents.pop(eid, None)
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -1344,6 +1354,13 @@ class NixlBaseConnectorWorker:
                         )
                         # Count once per handshake, regardless of waiting requests.
                         self.xfer_stats.record_failed_handshake()
+                        if eid in self._pending_remote_agents:
+                            try:
+                                self._cleanup_remote_engine(eid, log_eviction=False)
+                            except Exception:
+                                logger.exception(
+                                    "Failed to roll back NIXL handshake for %s", eid
+                                )
 
             fut.add_done_callback(done_callback)
             return fut
@@ -2303,6 +2320,7 @@ class NixlBaseConnectorWorker:
                 ]
 
         ### Register remote engine in TransferTopology (idempotent).
+        pending_agents = self._pending_remote_agents.setdefault(engine_id, set())
         physical_blocks_per_logical = (
             nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
@@ -2326,6 +2344,7 @@ class NixlBaseConnectorWorker:
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
         )
+        pending_agents.add(remote_agent_name)
 
         # Create dst descs and xfer side handles. TP workers have same #blocks
         # so we only register once per engine_id.
@@ -3673,19 +3692,32 @@ class NixlBaseConnectorWorker:
         all per-engine data structures. Used by TTL eviction, replaced peer
         cleanup and shutdown.
         """
-        assert engine_id in self._remote_agents
+        assert (
+            engine_id in self._remote_agents or engine_id in self._pending_remote_agents
+        )
 
         # Notif-only engines (push-mode D side) have no descriptor state.
-        for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
+        handles = self.dst_xfer_side_handles.get(engine_id, {})
+        for rank, handle in list(handles.items()):
             self.nixl_wrapper.release_dlist_handle(handle)
-        # Pop under the handshake lock; NIXL teardown stays outside it.
+            del handles[rank]
+        self.dst_xfer_side_handles.pop(engine_id, None)
         with self._handshake_lock:
-            agents = self._remote_agents.pop(engine_id)
+            agents = self._remote_agents.get(engine_id, {})
+            pending_agents = self._pending_remote_agents.get(engine_id, set())
+        for agent_name in set(agents.values()) | pending_agents:
+            self.nixl_wrapper.remove_remote_agent(agent_name)
+            with self._handshake_lock:
+                for peer_rank, name in list(agents.items()):
+                    if name == agent_name:
+                        del agents[peer_rank]
+                pending_agents.discard(agent_name)
+        with self._handshake_lock:
+            self._remote_agents.pop(engine_id, None)
+            self._pending_remote_agents.pop(engine_id, None)
             for address, eid in list(self._engine_by_address.items()):
                 if eid == engine_id:
                     del self._engine_by_address[address]
-        for agent_name in agents.values():
-            self.nixl_wrapper.remove_remote_agent(agent_name)
 
         self.kv_caches_base_addr.pop(engine_id, None)
         self.dst_num_blocks.pop(engine_id, None)
@@ -3733,7 +3765,7 @@ class NixlBaseConnectorWorker:
         self._dram_src_handles_by_tp_ratio.clear()
         self._dram_src_handles_by_block_size.clear()
         try:
-            for engine_id in list(self._remote_agents):
+            for engine_id in self._remote_agents.keys() | self._pending_remote_agents:
                 self._cleanup_remote_engine(engine_id, log_eviction=False)
         except Exception:
             logger.exception("NIXL remote-engine cleanup failed at shutdown.")

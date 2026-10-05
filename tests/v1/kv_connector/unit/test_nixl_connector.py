@@ -2860,6 +2860,81 @@ class TestPeerReplacement:
         assert self.worker._engine_by_address == {("localhost", 1234): "old"}
         self.transport.remove_remote_agent.assert_not_called()
 
+    @pytest.mark.parametrize("failure", ["register", "validate", "prepare"])
+    def test_failed_registration_is_rolled_back_and_retry_succeeds(self, failure):
+        worker = self.worker
+        future = worker._ensure_handshake("new", "localhost", 1234, 1)
+        worker.REMOTE_ENGINE_ID = "new"
+        self.nixl.REMOTE_AGENT_NAME = "new"
+        target, method = {
+            "register": (self.transport, "add_remote_agent"),
+            "validate": (worker, "_validate_remote_agent_handshake"),
+            "prepare": (self.transport, "prep_xfer_dlist"),
+        }[failure]
+        error = RuntimeError("injected registration failure")
+        with patch.object(target, method, side_effect=error):
+            with pytest.raises(RuntimeError, match="injected registration failure"):
+                worker._nixl_handshake("localhost", 1234, 1, "new")
+            future.set_exception(error)
+
+        assert future.exception() is error
+        assert set(worker._remote_agents) == {"old"}
+        assert worker._engine_by_address == {("localhost", 1234): "old"}
+        for name in (
+            "dst_xfer_side_handles",
+            "kv_caches_base_addr",
+            "dst_num_blocks",
+            "dst_region_num_blocks",
+            "dst_region_group_ids",
+            "dst_uses_region_group_mapping",
+            "dst_region_mem_types",
+            "tp_mappings",
+            "_engine_clock_offset",
+            "_engine_last_active",
+            "_handshake_futures",
+            "_pending_remote_agents",
+        ):
+            assert "new" not in getattr(worker, name), name
+        with pytest.raises(KeyError):
+            worker.transfer_topo.get_engine_info("new")
+        if failure == "register":
+            self.transport.remove_remote_agent.assert_not_called()
+        else:
+            self.transport.remove_remote_agent.assert_called_once_with("new")
+
+        self._connect()
+        assert set(worker._remote_agents) == {"old", "new"}
+        assert not worker._pending_remote_agents
+        worker.get_transfer_results()
+        assert set(worker._remote_agents) == {"new"}
+
+    def test_later_rank_failure_releases_earlier_rank(self):
+        worker = self.worker
+        worker.num_descs = len(worker.src_blocks_data)
+        future = worker._ensure_handshake("new", "localhost", 1234, 2)
+        worker.REMOTE_ENGINE_ID = "new"
+        error = RuntimeError("second rank failed validation")
+        with (
+            patch.object(
+                self.transport, "add_remote_agent", side_effect=["new-0", "new-1"]
+            ),
+            patch.object(
+                worker, "_validate_remote_agent_handshake", side_effect=[None, error]
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="second rank failed"):
+                worker._nixl_handshake("localhost", 1234, 2, "new")
+            handle = worker.dst_xfer_side_handles["new"][0]
+            future.set_exception(error)
+
+        self.transport.release_dlist_handle.assert_called_once_with(handle)
+        assert {
+            call.args[0] for call in self.transport.remove_remote_agent.call_args_list
+        } == {"new-0", "new-1"}
+        assert not worker._pending_remote_agents
+        assert "new" not in worker.dst_xfer_side_handles
+        assert set(worker._remote_agents) == {"old"}
+
     @pytest.mark.parametrize(
         "states,failed",
         [
