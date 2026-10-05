@@ -5,6 +5,7 @@ import contextlib
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -253,6 +254,64 @@ def test_append_block_ids_rejects_write_past_row_capacity():
         )
 
     assert block_tables.num_blocks.np[0, 1] == 3
+
+
+def test_new_request_table_update_is_written_once():
+    """A table update for a request added in the same step must not race its row.
+
+    The staged block-table writer applies a step's writes without ordering, so
+    a new request's row and its table update must reach it as one write.
+    """
+    runner = object.__new__(GPUModelRunner)
+    req_id_to_index: dict[str, int] = {}
+    runner.req_states = Mock(
+        req_id_to_index=req_id_to_index,
+        remove_request=Mock(return_value=None),
+        add_request=Mock(
+            side_effect=lambda req_id, **_: req_id_to_index.setdefault(req_id, 3)
+        ),
+        num_computed_tokens_np=np.zeros(4, dtype=np.int32),
+        prefill_len=SimpleNamespace(np=np.zeros(4, dtype=np.int32)),
+        num_computed_prefill_tokens=np.zeros(4, dtype=np.int32),
+    )
+    runner.block_tables = Mock()
+    runner.adaptive_verification = None
+    runner.pooling_runner = None
+    runner.encoder_cache = None
+    runner.pp_handler = None
+    runner.prompt_logprobs_worker = None
+    runner.is_last_pp_rank = False
+    runner.sampler = None
+    runner.model_state = Mock()
+    runner.lora_state = Mock()
+    updated = ([7, 8], [9])
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[
+            SimpleNamespace(
+                req_id="new",
+                prefill_token_ids=[1, 2],
+                prompt_len=2,
+                sampling_params=None,
+                num_computed_tokens=0,
+                block_ids=([0, 8], [9]),
+                mm_features=None,
+                lora_request=None,
+            )
+        ],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[], num_computed_tokens=[], new_block_ids=[]
+        ),
+        block_table_updates={"new": updated},
+        new_block_ids_to_zero=None,
+        kv_cache_block_copies=None,
+    )
+
+    runner.add_requests(scheduler_output)
+    runner.update_requests(scheduler_output)
+
+    runner.block_tables.append_block_ids.assert_called_once_with(
+        3, updated, overwrite=True
+    )
 
 
 def _make_capture_runner(captured: bool) -> GPUModelRunner:

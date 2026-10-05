@@ -1155,6 +1155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.postprocess_sampled(**outputs)
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
+        table_updates = scheduler_output.block_table_updates or {}
         for new_req_data in scheduler_output.scheduled_new_reqs:
             assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
@@ -1191,7 +1192,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             self.model_state.add_request(req_index, new_req_data)
             self.block_tables.append_block_ids(
-                req_index, new_req_data.block_ids, overwrite=True
+                req_index,
+                table_updates.get(req_id, new_req_data.block_ids),
+                overwrite=True,
             )
             self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
 
@@ -1213,9 +1216,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Add new blocks and update num_computed_tokens for the existing requests.
         reqs = scheduler_output.scheduled_cached_reqs
         table_updates = scheduler_output.block_table_updates or {}
-        for req_id, block_ids in table_updates.items():
-            if (idx := self.req_states.req_id_to_index.get(req_id)) is not None:
-                self.block_tables.append_block_ids(idx, block_ids, overwrite=True)
+        if table_updates:
+            # add_requests already wrote new requests' updated rows; a second
+            # staged write to the same row would race with it.
+            new_req_ids = {req.req_id for req in scheduler_output.scheduled_new_reqs}
+            for req_id, block_ids in table_updates.items():
+                if req_id in new_req_ids:
+                    continue
+                if (idx := self.req_states.req_id_to_index.get(req_id)) is not None:
+                    self.block_tables.append_block_ids(idx, block_ids, overwrite=True)
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
         for req_id, num_computed_tokens, req_new_block_ids in zip(
             reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
