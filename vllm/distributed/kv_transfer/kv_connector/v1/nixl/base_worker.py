@@ -3245,6 +3245,9 @@ class NixlBaseConnectorWorker:
             ):
                 continue  # handshake is still pending
 
+            # Refresh the TTL: a heartbeat means the router still paired this P-D,
+            # so requests are still waiting on this engine
+            self._engine_last_active[engine_id] = time.perf_counter()
             # Build the heartbeat message: "HB:req1,req2,..."
             hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
             for agent_name in self._remote_agents[engine_id].values():
@@ -3595,10 +3598,13 @@ class NixlBaseConnectorWorker:
         prevents us from using background threads, though memory usage is not guaranteed
         to be "optimal" until a new handshake is performed.
 
-        Engines with active transfers or pending handshakes cannot be stale:
+        Engines with active transfers, heartbeats or pending handshakes cannot
+        be stale:
         - Reads stamp _engine_last_active when they are issued, and engines a
           transfer is still reading from are held back explicitly, since the
           stamp is not refreshed while the read runs.
+        - Heartbeats stamp it too, so an engine stays registered while this
+          instance holds requests waiting on it.
         - Pending handshakes don't have an _engine_last_active entry yet
         """
         # NOTE (NickLucche): This does NOT currently prevent OOMing if a huge number
