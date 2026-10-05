@@ -15,6 +15,7 @@ from vllm.models.deepseek_v4.nvidia import dspark as dsv4_dspark
 from vllm.models.kimi_k3.common import dspark_mla as common_dspark_mla
 from vllm.models.kimi_k3.nvidia import dspark_mla
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
+from vllm.platforms import current_platform
 
 
 def test_nvidia_dspark_binding_uses_multi_head_latent_attention():
@@ -109,8 +110,85 @@ def test_wrapper_uses_mla_attn_cls():
 
 
 def test_dspark_mla_uses_compile_free_model_entrypoint():
-    assert ModelRegistry._try_load_model_cls("K3DSparkModel") is K3DSparkForCausalLM
+    from vllm.models.kimi_k3 import K3DSparkForCausalLM as registered
+
+    assert ModelRegistry._try_load_model_cls("K3DSparkModel") is registered
     assert not issubclass(K3DSparkModel, TorchCompileWithNoGuardsWrapper)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="Kimi-K3 DSpark MLA wrapper is the ROCm draft path",
+)
+def test_k3_dspark_decoder_uses_mla_wrapper(monkeypatch: pytest.MonkeyPatch):
+    from vllm.models.kimi_k3.amd import dspark_mla as amd_dspark_mla
+
+    captured: dict = {}
+
+    class DummyLinear(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            self.reduce_results = True
+
+    class DummyRope(nn.Module):
+        pass
+
+    class DummyWrapper(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            self.o_proj = DummyLinear()
+            self.rotary_emb = DummyRope()
+            self.mla_attn = SimpleNamespace(
+                layer_name=f"{args[11]}.attn",
+                non_causal_multi_token_decode=kwargs["non_causal_multi_token_decode"],
+            )
+
+    monkeypatch.setattr(common_dspark_mla, "get_draft_quant_config", lambda _: None)
+    monkeypatch.setattr(common_dspark_mla, "RMSNorm", DummyLinear)
+    monkeypatch.setattr(
+        amd_dspark_mla, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    monkeypatch.setattr(amd_dspark_mla, "MergedColumnParallelLinear", DummyLinear)
+    monkeypatch.setattr(amd_dspark_mla, "ColumnParallelLinear", DummyLinear)
+    monkeypatch.setattr(amd_dspark_mla, "RowParallelLinear", DummyLinear)
+    monkeypatch.setattr(amd_dspark_mla, "RMSNorm", DummyLinear)
+    monkeypatch.setattr(amd_dspark_mla, "KimiMLP", DummyLinear)
+    monkeypatch.setattr(amd_dspark_mla, "get_rope", lambda *args, **kwargs: DummyRope())
+    monkeypatch.setattr(
+        amd_dspark_mla, "KimiK3MultiHeadLatentAttentionWrapper", DummyWrapper
+    )
+
+    config = SimpleNamespace(
+        hidden_size=8,
+        num_attention_heads=2,
+        qk_nope_head_dim=4,
+        qk_rope_head_dim=2,
+        v_head_dim=4,
+        q_lora_rank=16,
+        kv_lora_rank=8,
+        rms_norm_eps=1e-6,
+        intermediate_size=16,
+        hidden_act="silu",
+        max_position_embeddings=128,
+        rope_parameters={"rope_type": "default"},
+    )
+    vllm_config = SimpleNamespace(cache_config=None)
+    layer = amd_dspark_mla.K3DSparkDecoderLayer(
+        vllm_config=vllm_config,
+        config=config,
+        layer_idx=0,
+        start_layer_id=61,
+        prefix="model",
+    )
+
+    assert isinstance(layer.self_attn, DummyWrapper)
+    assert layer.self_attn.o_proj.reduce_results is False
+    assert captured["kwargs"]["non_causal_multi_token_decode"] is True
+    assert captured["args"][11] == "model.layers.61.self_attn"
+    assert captured["args"][8].rotary_emb is not None
+    assert layer.self_attn.mla_attn.layer_name == "model.layers.61.self_attn.attn"
 
 
 @pytest.mark.parametrize(
