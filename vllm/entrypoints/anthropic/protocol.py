@@ -44,6 +44,8 @@ class AnthropicContentBlock(BaseModel):
         "tool_reference",
         "thinking",
         "redacted_thinking",
+        "tool_addition",
+        "tool_removal",
     ]
     text: str | None = None
     # For image content
@@ -62,6 +64,28 @@ class AnthropicContentBlock(BaseModel):
     signature: str | None = None
     # For redacted thinking content (safety-filtered by the API)
     data: str | None = None
+    # For tool_addition/tool_removal content
+    tool: "AnthropicToolChange | None" = None
+
+    @model_validator(mode="after")
+    def validate_tool_change(self) -> "AnthropicContentBlock":
+        if self.type not in ("tool_addition", "tool_removal"):
+            return self
+        if self.tool is None:
+            raise ValueError(f"tool is required for {self.type} blocks")
+        if self.type == "tool_removal" and self.tool.type != "tool_reference":
+            raise ValueError("tool_removal only accepts a tool_reference")
+        return self
+
+
+def _reject_tool_changes(content: str | list[AnthropicContentBlock] | None) -> None:
+    if content is None or isinstance(content, str):
+        return
+    for block in content:
+        if block.type in ("tool_addition", "tool_removal"):
+            raise ValueError(
+                f'{block.type} blocks are only allowed in messages with role "system"'
+            )
 
 
 class AnthropicMessage(BaseModel):
@@ -69,6 +93,12 @@ class AnthropicMessage(BaseModel):
 
     role: Literal["user", "assistant", "system"]
     content: str | list[AnthropicContentBlock]
+
+    @model_validator(mode="after")
+    def validate_tool_change_role(self) -> "AnthropicMessage":
+        if self.role != "system":
+            _reject_tool_changes(self.content)
+        return self
 
 
 class AnthropicTool(BaseModel):
@@ -88,6 +118,26 @@ class AnthropicTool(BaseModel):
         if "type" not in v:
             v["type"] = "object"  # Default to object type
         return v
+
+
+class AnthropicToolChangeReference(BaseModel):
+    """A tool named by a tool_addition or tool_removal block."""
+
+    type: Literal["tool_reference"]
+    name: str
+
+
+class AnthropicToolChangeDefinition(BaseModel):
+    """A tool defined by value in a tool_addition block."""
+
+    type: Literal["tool_definition"]
+    definition: AnthropicTool
+
+
+AnthropicToolChange = Annotated[
+    AnthropicToolChangeReference | AnthropicToolChangeDefinition,
+    Field(discriminator="type"),
+]
 
 
 class AnthropicToolChoice(BaseModel):
@@ -111,11 +161,51 @@ class AnthropicJsonOutputFormat(BaseModel):
     type: Literal["json_schema"] = "json_schema"
 
 
+AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
+# reasoning_effort sent to the chat template for thinking.type=disabled.
+AnthropicDisabledThinkingEffort = Literal["none", AnthropicEffort]
+AnthropicDisabledThinkingEffortOption = Literal["auto", AnthropicDisabledThinkingEffort]
+AnthropicThinkingDisplay = Literal["summarized", "omitted", "updates"]
+
+
 class AnthropicOutputConfig(BaseModel):
     """Configuration options for the model's output, such as the output format."""
 
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    effort: AnthropicEffort | None = None
     format: AnthropicJsonOutputFormat | None = None
+
+
+class AnthropicThinkingConfigEnabled(BaseModel):
+    """Extended thinking with a fixed token budget.
+
+    ``display`` is accepted but ignored: reasoning is always returned.
+    """
+
+    type: Literal["enabled"]
+    budget_tokens: int = Field(ge=1024)
+    display: AnthropicThinkingDisplay | None = None
+
+
+class AnthropicThinkingConfigDisabled(BaseModel):
+    type: Literal["disabled"]
+
+
+class AnthropicThinkingConfigAdaptive(BaseModel):
+    """Extended thinking whose depth the model chooses.
+
+    ``display`` is accepted but ignored: reasoning is always returned.
+    """
+
+    type: Literal["adaptive"]
+    display: AnthropicThinkingDisplay | None = None
+
+
+AnthropicThinkingConfig = Annotated[
+    AnthropicThinkingConfigEnabled
+    | AnthropicThinkingConfigDisabled
+    | AnthropicThinkingConfigAdaptive,
+    Field(discriminator="type"),
+]
 
 
 class AnthropicMessagesRequest(BaseModel):
@@ -126,6 +216,7 @@ class AnthropicMessagesRequest(BaseModel):
     max_tokens: int
     metadata: dict[str, Any] | None = None
     output_config: AnthropicOutputConfig | None = None
+    thinking: AnthropicThinkingConfig | None = None
     stop_sequences: (
         Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
     ) = None
@@ -189,6 +280,25 @@ class AnthropicMessagesRequest(BaseModel):
         if v <= 0:
             raise ValueError("max_tokens must be positive")
         return v
+
+    @field_validator("system")
+    @classmethod
+    def validate_system(cls, v):
+        _reject_tool_changes(v)
+        return v
+
+    @model_validator(mode="after")
+    def validate_thinking_budget(self) -> "AnthropicMessagesRequest":
+        # P/D prefill legs are sent with max_tokens=1 and never decode; the
+        # decode leg carries the client's max_tokens and is still checked.
+        if self.kv_transfer_params and self.kv_transfer_params.get("do_remote_decode"):
+            return self
+        if (
+            isinstance(self.thinking, AnthropicThinkingConfigEnabled)
+            and self.thinking.budget_tokens >= self.max_tokens
+        ):
+            raise ValueError("thinking.budget_tokens must be less than max_tokens")
+        return self
 
 
 class AnthropicDelta(BaseModel):
@@ -287,6 +397,12 @@ class AnthropicCountTokensRequest(BaseModel):
     def validate_model(cls, v):
         if not v:
             raise ValueError("Model is required")
+        return v
+
+    @field_validator("system")
+    @classmethod
+    def validate_system(cls, v):
+        _reject_tool_changes(v)
         return v
 
 

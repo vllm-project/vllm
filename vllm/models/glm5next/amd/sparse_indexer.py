@@ -8,10 +8,11 @@ import vllm.envs as envs
 from vllm import _custom_ops  # noqa: F401  # registers the torch.ops._C kernels
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import get_current_vllm_config_or_none
+from vllm.config import CUDAGraphMode, get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.models.glm5next.amd.ops import kpool_compress as kpool_ops
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
@@ -24,6 +25,7 @@ from vllm.models.glm5next.common.sparse_indexer import (
     kv_cache_as_quant_view,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -36,6 +38,9 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+_GFX950_KPOOL_AITER_MAX_POOLS = 256 * 1024  # (1M ctx)
+_GFX950_KPOOL_AITER_MIN_POOLS = 16 * 1024
 
 # kpool write helper: form pools from the current token batch and compress them
 # into the index K cache via the fused Triton kernel.
@@ -87,6 +92,51 @@ def _kpool_compress_insert(
     )
 
 
+def _kpool_decode_topk_backend(
+    configured: str,
+    *,
+    num_rows: int,
+    max_valid_seq_len: int,
+    select_k: int,
+    index_kpool: int,
+    full_cudagraph: bool,
+) -> str:
+    """Select the topk backend for decodes.
+
+    Heuristic based on ctx lengths:
+    - <16k pools: in-tree hip kernel
+    - 16-256k pools: use aiter
+    - >256k pools: in-tree because not measured on >1m ctx
+
+    Since under FULL cudagraphs we cannot access the context length,
+    and the aiter kernel does not always outperform the in-tree kernel,
+    we default to in-tree kernel under FULL cudagraphs. Users can opt in
+    if they know their context length is long enough to benefit from aiter.
+    """
+    if (
+        configured != "auto"
+        or full_cudagraph
+        or not rocm_aiter_ops.is_indexer_top_k_enabled()
+    ):
+        return configured
+    if rocm_aiter_ops.is_indexer_top_k_supported(
+        is_prefill=False,
+        compress_ratio=index_kpool,
+        num_rows=num_rows,
+        max_valid_seq_len=max_valid_seq_len,
+    ):
+        return "aiter"
+    if (
+        index_kpool > 1
+        and select_k == 512
+        and _GFX950_KPOOL_AITER_MIN_POOLS
+        <= max_valid_seq_len
+        <= _GFX950_KPOOL_AITER_MAX_POOLS
+    ):
+        return "aiter"
+    return configured
+
+
 @eager_break_during_capture
 def sparse_attn_indexer_kpool(
     hidden_states: torch.Tensor,
@@ -117,6 +167,7 @@ def sparse_attn_indexer_kpool(
     # path and when the tail cache is disabled.
     tail_kv_cache: torch.Tensor | None = None,
     tail_prefix: str | None = None,
+    topk_backend: str = "auto",
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -580,15 +631,29 @@ def sparse_attn_indexer_kpool(
         else:
             topk_dst = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        torch.ops._C.top_k_per_row_decode(
+        full_cudagraph = (
+            get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
+        )
+        if full_cudagraph:
+            topk_max_seq_len = max_pool_len * index_kpool
+        else:
+            topk_max_seq_len = attn_metadata_narrowed.max_seq_len
+
+        resolved_backend = _kpool_decode_topk_backend(
+            topk_backend,
+            num_rows=num_rows,
+            max_valid_seq_len=cdiv(topk_max_seq_len, index_kpool),
+            select_k=select_k,
+            index_kpool=index_kpool,
+            full_cudagraph=full_cudagraph,
+        )
+        get_indexer_topk(resolved_backend)(
             logits,
-            next_n,
             seq_lens,
+            next_n,
             topk_dst,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
             select_k,
+            topk_max_seq_len,
         )
 
         # Resolve to token-level indices in the output buffer.
@@ -664,6 +729,10 @@ class SparseAttnIndexerKpool(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        cfg = get_current_vllm_config_or_none()
+        self.topk_backend = (
+            cfg.kernel_config.sparse_indexer_topk_backend if cfg is not None else "auto"
+        )
 
     def forward_hip(
         self,
@@ -726,6 +795,7 @@ class SparseAttnIndexerKpool(CustomOp):
             positions,
             self.tail_cache.kv_cache if self.tail_cache is not None else None,
             self.tail_cache.prefix if self.tail_cache is not None else None,
+            self.topk_backend,
         )
 
     def forward_native(

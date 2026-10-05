@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from abc import ABC, abstractmethod
 
 import torch
@@ -27,6 +28,11 @@ class BaseModelLoader(ABC):
 
     def __init__(self, load_config: LoadConfig):
         self.load_config = load_config
+
+    def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
+        """Get weights memory from external process;
+        0 when the weights are not external."""
+        return 0
 
     @abstractmethod
     def download_model(self, model_config: ModelConfig) -> None:
@@ -65,10 +71,16 @@ class BaseModelLoader(ABC):
         target_device = torch.device(load_device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
+                time_before_load = time.perf_counter()
                 model = self.create_model(
                     vllm_config=vllm_config,
                     model_config=model_config,
                     prefix=prefix,
+                )
+                time_after_load = time.perf_counter()
+                logger.info_once(
+                    "Initializing model took %.6f seconds",
+                    time_after_load - time_before_load,
                 )
 
             logger.debug("Loading weights on %s ...", load_device)

@@ -6,7 +6,7 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     from vllm.config import CacheConfig, ModelConfig, VllmConfig
     from vllm.config.cache import MambaDType
@@ -546,6 +546,7 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
         config.num_labels = 1
+        config.get_text_config().num_labels = 1
         pooler_config = model_config.pooler_config
         assert pooler_config is not None
         if pooler_config.logit_mean is None:
@@ -645,20 +646,9 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     cache_config.mamba_cache_mode,
                     model_config.architecture,
                 )
-            if (
-                cache_config.mamba_cache_mode == "all"
-                and not model_config.supports_mamba_prefix_caching
-            ):
-                cache_config.mamba_cache_mode = "align"
-                logger.warning(
-                    "Hybrid or mamba-based model detected without support "
-                    "for prefix caching with Mamba cache 'all' mode: "
-                    "falling back to 'align' mode."
-                )
-            if cache_config.mamba_cache_mode == "align":
-                assert vllm_config.scheduler_config.enable_chunked_prefill, (
-                    "Chunked prefill is required for mamba cache mode 'align'."
-                )
+            assert vllm_config.scheduler_config.enable_chunked_prefill, (
+                "Chunked prefill is required for mamba cache mode 'align'."
+            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
@@ -680,7 +670,7 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
 
     @classmethod
     def update_mamba_ssm_cache_dtype(
-        cls, *, cache_config: "CacheConfig", hf_config: "PretrainedConfig"
+        cls, *, cache_config: "CacheConfig", hf_config: "PreTrainedConfig"
     ) -> None:
         """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config, or to
