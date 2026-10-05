@@ -40,18 +40,18 @@ def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
 
 
 def test_mm_encoder_attn_backend_str_conversion():
-    config = MultiModalConfig(mm_encoder_attn_backend="FLASH_ATTN")  # type: ignore[arg-type]
+    config = MultiModalConfig(mm_encoder_attn_backend="FLASH_ATTN")
     assert config.mm_encoder_attn_backend == AttentionBackendEnum.FLASH_ATTN
 
 
 def test_mm_encoder_attn_backend_invalid():
     with pytest.raises(ValueError):
-        MultiModalConfig(mm_encoder_attn_backend="not_a_backend")  # type: ignore[arg-type]
+        MultiModalConfig(mm_encoder_attn_backend="not_a_backend")
 
 
 def test_mm_hasher_algorithm_invalid():
     with pytest.raises(ValueError, match="mm_hasher_algorithm"):
-        MultiModalConfig(mm_hasher_algorithm="md5")  # type: ignore[arg-type]
+        MultiModalConfig(mm_hasher_algorithm="md5")
 
 
 def test_mm_encoder_attn_backend_hash_updates():
@@ -235,6 +235,43 @@ def test_merge_mm_processor_kwargs_scoped_precedence():
             "size": {
                 "shortest_edge": 128,
                 "longest_edge": 2048,
+            },
+        },
+    }
+
+
+def test_merge_mm_processor_kwargs_preserves_scoped_siblings_and_precedence():
+    config = MultiModalConfig(
+        mm_processor_kwargs={
+            "size": {
+                "shortest_edge": 100,
+                "longest_edge": 1000,
+            },
+            "videos_kwargs": {
+                "fps": 2,
+                "size": {"longest_edge": 1200},
+            },
+        },
+        mm_device_do_normalize=False,
+    )
+
+    assert config.merge_mm_processor_kwargs(
+        {
+            "size": {"longest_edge": 1800},
+            "videos_kwargs": {
+                "size": {"shortest_edge": 200},
+            },
+        }
+    ) == {
+        "size": {
+            "shortest_edge": 100,
+            "longest_edge": 1800,
+        },
+        "videos_kwargs": {
+            "fps": 2,
+            "size": {
+                "shortest_edge": 200,
+                "longest_edge": 1800,
             },
         },
     }
@@ -523,7 +560,7 @@ def _resolve_mm_processor_device(
     """Run the `auto` resolution and report where the processor ended up."""
     mm_config = MultiModalConfig(
         mm_processor_kwargs={} if device is None else {"device": device},
-        mm_tensor_ipc=mm_tensor_ipc,  # type: ignore[arg-type]
+        mm_tensor_ipc=mm_tensor_ipc,
     )
     model_config = MagicMock(spec=ModelConfig)
     model_config.multimodal_config = mm_config
@@ -625,7 +662,7 @@ def _resolve_mm_video_decode_device(
     the resulting video media IO kwargs."""
     mm_config = MultiModalConfig(
         mm_processor_kwargs={} if device is None else {"device": device},
-        mm_tensor_ipc=mm_tensor_ipc,  # type: ignore[arg-type]
+        mm_tensor_ipc=mm_tensor_ipc,
         media_io_kwargs={} if video_kwargs is None else {"video": dict(video_kwargs)},
     )
     model_config = MagicMock(spec=ModelConfig)
