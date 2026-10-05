@@ -322,14 +322,14 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
 
 
 @pytest.mark.parametrize(
-    ("method", "sample_from_anchor", "expected"),
+    ("method", "draft_hf_config", "expected"),
     [
         ("eagle", None, NUM_SPEC_STEPS),
         ("eagle3", None, NUM_SPEC_STEPS),
         ("mtp", None, NUM_SPEC_STEPS),
         ("dspark", None, NUM_SPEC_STEPS),
-        ("dspark", True, NUM_SPEC_STEPS),
-        ("dspark", False, NUM_SPEC_STEPS + 1),
+        ("dspark", {"sample_from_anchor": True}, NUM_SPEC_STEPS),
+        ("dspark", {"sample_from_anchor": False}, NUM_SPEC_STEPS + 1),
         ("draft_model", None, NUM_SPEC_STEPS),
         # DFlash's in-fill decoding adds a query for the last sampled token.
         ("dflash", None, NUM_SPEC_STEPS + 1),
@@ -342,7 +342,7 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
     ],
 )
 def test_num_lookahead_tokens_per_method(
-    method: str, sample_from_anchor: bool | None, expected: int
+    method: str, draft_hf_config: dict | None, expected: int
 ):
     """`VllmConfig.num_lookahead_tokens` is the single source of the reservation.
 
@@ -362,15 +362,12 @@ def test_num_lookahead_tokens_per_method(
     speculative_config = object.__new__(SpeculativeConfig)
     object.__setattr__(speculative_config, "method", method)
     object.__setattr__(speculative_config, "num_speculative_tokens", NUM_SPEC_STEPS)
-    if method == "dspark":
-        hf_config = SimpleNamespace()
-        if sample_from_anchor is not None:
-            hf_config.sample_from_anchor = sample_from_anchor
-        object.__setattr__(
-            speculative_config,
-            "draft_model_config",
-            SimpleNamespace(hf_config=hf_config),
-        )
+    hf_config = SimpleNamespace(**(draft_hf_config or {}))
+    object.__setattr__(
+        speculative_config,
+        "draft_model_config",
+        SimpleNamespace(hf_config=hf_config),
+    )
 
     config = _Config()
     config.speculative_config = speculative_config
