@@ -5,6 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
+from functools import cached_property
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -1236,7 +1237,7 @@ class Scheduler(SchedulerInterface):
                     # predictable preemptions.
                     reserved_blocks = (
                         self._inflight_prefill_reserved_blocks()
-                        + self._spec_decode_step_blocks()
+                        + self._spec_decode_step_blocks
                     )
 
                 # Replayed tokens are already counted in the adopted hit; a
@@ -3070,12 +3071,14 @@ class Scheduler(SchedulerInterface):
             apply_admission_cap=True,
             prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
         )
-        return num_blocks + self._spec_decode_step_blocks()
+        return num_blocks + self._spec_decode_step_blocks
 
+    @cached_property
     def _spec_decode_step_blocks(self) -> int:
         """Return the block reservation for a speculative decode step.
 
         Async KV loads must leave enough free blocks to start decoding.
+        The token limits and allocation block sizes are fixed at initialization.
         """
         if not self.num_spec_tokens:
             return 0
