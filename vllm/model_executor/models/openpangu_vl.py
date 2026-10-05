@@ -805,12 +805,12 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
                 num_tokens = int(grid_thw.prod()) // merge_length
                 replacement = prefix + [pad_id] * num_tokens + suffix
             else:
-                # Video placeholders are expanded per frame.
+                # Video placeholders are expanded per frame, with the outer
+                # wrapper tokens stripped (preserving the original layout).
                 grid_t, grid_h, grid_w = grid_thw
                 tokens_per_frame = (grid_h * grid_w).item() // merge_length
-                replacement = (prefix + [pad_id] * tokens_per_frame + suffix) * (
-                    grid_t.item()
-                )
+                per_frame = prefix + [pad_id] * tokens_per_frame + suffix
+                replacement = (per_frame * grid_t.item())[1:-1]
             return PromptUpdateDetails.select_token_id(replacement, pad_id)
 
         return [
@@ -826,7 +826,8 @@ class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
 
 
 class OpenPanguVLDummyInputsBuilder(Qwen2_5_VLDummyInputsBuilder):
-    pass
+    def _get_model_cls(self) -> type[nn.Module]:
+        return OpenPanguVLForConditionalGeneration
 
 
 @MULTIMODAL_REGISTRY.register_processor(
