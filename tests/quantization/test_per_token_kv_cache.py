@@ -167,6 +167,19 @@ class TestIsQuantizedKvCache:
 
         assert get_kv_quant_mode("fp8_per_token_head") == KVQuantMode.FP8_PER_TOKEN_HEAD
 
+    @pytest.mark.parametrize(
+        "cache_dtype", ["splitq_k3v4", "splitq_k3v3", "splitq_k3v3_compact"]
+    )
+    def test_splitq(self, cache_dtype):
+        from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+        from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+        mode = get_kv_quant_mode(cache_dtype)
+        assert mode.name.lower() == cache_dtype
+        assert mode.is_splitq and not mode.is_per_token_head
+        assert is_quantized_kv_cache(cache_dtype)
+        assert kv_cache_dtype_str_to_dtype(cache_dtype, None) == torch.uint8
+
 
 # ===========================================================================
 # 2. Triton per-token-head kernel (reshape-and-cache)
