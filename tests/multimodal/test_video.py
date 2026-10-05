@@ -289,6 +289,11 @@ def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
         "_decode_to_pinned_host",
         classmethod(fake_decode),
     )
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackendMixin,
+        "_validate_decoder_caps",
+        classmethod(lambda cls, file_path, nvc: None),
+    )
 
     loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
     frames, metadata = loader.load_bytes(b"fake video", num_frames=4)
@@ -351,6 +356,11 @@ def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
         "_decode_to_pinned_host",
         classmethod(fake_decode),
     )
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackendMixin,
+        "_validate_decoder_caps",
+        classmethod(lambda cls, file_path, nvc: None),
+    )
 
     loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
     frames, metadata = loader.load_bytes(
@@ -385,7 +395,8 @@ def test_pynvvideocodec_corrupted_videos_raise_value_error():
                 hw_decoders=1,
             )
 
-        assert malformed_exc.value.__cause__ is not None
+        assert malformed_exc.value.__cause__ is None
+        assert malformed_exc.value.__context__ is None
 
         with pytest.raises(
             ValueError,
@@ -397,7 +408,8 @@ def test_pynvvideocodec_corrupted_videos_raise_value_error():
                 hw_decoders=1,
             )
 
-        assert exc_info.value.__cause__ is not None
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
 
         frames, _ = loader.load_bytes(
             valid_video,
@@ -563,13 +575,98 @@ def test_pynvvideocodec_failed_rebuild_retires_decoder_slot(
         pool.max_slots = old_max
 
 
+def test_pynvvideocodec_native_metadata_error_is_not_chained(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeUnsupported(Exception):
+        pass
+
+    class FakeNvc:
+        PyNvVCExceptionUnsupported = FakeUnsupported
+
+    def raise_unsupported(cls, file_path, nvc):
+        raise FakeUnsupported("metadata failed")
+
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", FakeNvc)
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackendMixin,
+        "_read_source_metadata",
+        classmethod(raise_unsupported),
+    )
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackendMixin,
+        "_validate_decoder_caps",
+        classmethod(lambda cls, file_path, nvc: None),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Invalid or unsupported video file\.$",
+    ) as exc_info:
+        PyNvVideoCodecVideoBackendMixin.decode_frames_pynvvideocodec(
+            loader_cls=None,
+            data=b"unsupported",
+            target=None,
+        )
+
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+
+
+def test_pynvvideocodec_rejects_unsupported_decoder_caps():
+    class FakeDemuxer:
+        def Width(self):
+            return 7680
+
+        def Height(self):
+            return 4320
+
+        def GetNvCodecId(self):
+            return "h264"
+
+        def ChromaFormat(self):
+            return "420"
+
+        def BitDepth(self):
+            return 8
+
+    class FakeNvc:
+        @staticmethod
+        def CreateDemuxer(file_path):
+            return FakeDemuxer()
+
+        @staticmethod
+        def GetDecoderCaps(device_index, codec, chroma_format, bit_depth):
+            assert (device_index, codec, chroma_format, bit_depth) == (
+                0,
+                "h264",
+                "420",
+                8,
+            )
+            return {
+                "supported": 1,
+                "width_min": 48,
+                "width_max": 4096,
+                "height_min": 16,
+                "height_max": 4096,
+                "mb_num_max": 65536,
+            }
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Invalid or unsupported video file\.$",
+    ):
+        PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
+            "unsupported-8k.mp4", FakeNvc
+        )
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-def test_pynvvideocodec_h200_recovers_after_unsupported_8k():
-    import PyNvVideoCodec as nvc
+def test_pynvvideocodec_h100_h200_recovers_after_repeated_unsupported_8k():
     import torch
 
-    if "H200" not in torch.cuda.get_device_name(0):
-        pytest.skip("Requires H200 NVDEC resolution limits")
+    if not any(gpu in torch.cuda.get_device_name(0) for gpu in ("H100", "H200")):
+        pytest.skip("Requires H100 or H200 NVDEC resolution limits")
 
     valid_video = create_long_gop_video(num_frames=2, width=64, height=64)
     unsupported_video = (ASSETS_DIR / "unsupported_8k_h264.mp4").read_bytes()
@@ -591,26 +688,27 @@ def test_pynvvideocodec_h200_recovers_after_unsupported_8k():
             hw_decoders=1,
         )
 
-        with pytest.raises(Exception) as exc_info:
-            loader.load_bytes(
-                unsupported_video,
+        for _ in range(2):
+            with pytest.raises(
+                ValueError,
+                match=r"^Invalid or unsupported video file\.$",
+            ) as exc_info:
+                loader.load_bytes(
+                    unsupported_video,
+                    num_frames=1,
+                    hw_decoders=1,
+                )
+
+            assert exc_info.value.__cause__ is None
+            assert exc_info.value.__context__ is None
+
+            frames_after, _ = loader.load_bytes(
+                valid_video,
                 num_frames=1,
                 hw_decoders=1,
             )
 
-        root_cause = exc_info.value
-        while root_cause.__cause__ is not None:
-            root_cause = root_cause.__cause__
-        assert isinstance(root_cause, nvc.PyNvVCExceptionUnsupported)
-        assert "MBCount not supported" in str(root_cause)
-
-        frames_after, _ = loader.load_bytes(
-            valid_video,
-            num_frames=1,
-            hw_decoders=1,
-        )
-
-        assert frames_after.shape == frames_before.shape
+            assert frames_after.shape == frames_before.shape
     finally:
         for slot in _pynv_decoder_pool.slots:
             slot.invalidate()
