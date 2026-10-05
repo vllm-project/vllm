@@ -158,22 +158,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         if num_external_tokens > 0
                         else ()
                     )
-                    if self.hisparse is not None and self.hisparse.imports_to_host(
-                        request.request_id
-                    ):
-                        source_group_ids = [
-                            group_id
-                            for group_id, group in enumerate(
-                                self.kv_cache_config.kv_cache_groups
-                            )
-                            if group.role is KVCacheGroupRole.HISPARSE_SOURCE
-                        ]
-                        assert len(source_group_ids) == 1
-                        self._hisparse_host_blocks_to_recv[request.request_id] = (
-                            list(unhashed_local_block_ids[source_group_ids[0]])
-                            if unhashed_local_block_ids
-                            else []
-                        )
+                    local_block_ids = self.get_exchange_clipped_blocks(
+                        unhashed_local_block_ids
+                    )
                     # Blocks covered by the local prefix cache, per KV cache group.
                     # Each count fixes where that group's DCP slice starts, which the
                     # worker needs to line up with the remote's slice.
@@ -189,16 +176,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         and unhashed_local_block_ids
                         and not self.hisparse.imports_to_host(request.request_id)
                     ):
-                        unhashed_local_block_ids, local_num_computed_blocks = (
-                            self._skip_hisparse_resident_prefix(
-                                blocks,
-                                unhashed_local_block_ids,
-                                local_num_computed_blocks,
-                            )
+                        local_num_computed_blocks = self._land_on_hisparse_resident(
+                            request.request_id, blocks, local_num_computed_blocks
                         )
-                    local_block_ids = self.get_exchange_clipped_blocks(
-                        unhashed_local_block_ids
-                    )
 
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
@@ -223,13 +203,13 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             params["do_remote_prefill"] = False
             params["_remote_blocks_processed"] = True
 
-    def _skip_hisparse_resident_prefix(
+    def _land_on_hisparse_resident(
         self,
+        request_id: str,
         blocks: "KVCacheBlocks",
-        unhashed_block_ids: BlockIds,
         num_computed_blocks: tuple[int, ...],
-    ) -> tuple[BlockIds, tuple[int, ...]]:
-        """Drop resident pages of the local prefix, including adopted copies.
+    ) -> tuple[int, ...]:
+        """Pull host source pages into resident GPU pages past the local prefix.
 
         Resident pages are never hashed. The indexer's hashed pages give the
         local hit length; host source pages can outlast it.
@@ -240,18 +220,24 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             for group_id, group in enumerate(groups)
             if group.role is KVCacheGroupRole.HISPARSE_INDEXER
         )
+        (source_group_id,) = (
+            group_id
+            for group_id, group in enumerate(groups)
+            if group.role is KVCacheGroupRole.HISPARSE_SOURCE
+        )
         num_prefix_pages = num_computed_blocks[indexer_group_id]
-        block_ids = list(unhashed_block_ids)
+        self._reqs_alias_block_ids[request_id] = {
+            group_id: [
+                block.block_id
+                for block in blocks.blocks[group_id][num_prefix_pages:]
+                if not block.is_null
+            ]
+            for group_id, group in enumerate(groups)
+            if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+        }
         computed = list(num_computed_blocks)
-        for group_id, group in enumerate(groups):
-            if isinstance(group.kv_cache_spec, HiSparseResidentSpec):
-                block_ids[group_id] = [
-                    block.block_id
-                    for block in blocks.blocks[group_id][num_prefix_pages:]
-                    if not block.is_null
-                ]
-                computed[group_id] = num_prefix_pages
-        return block_ids, tuple(computed)
+        computed[source_group_id] = num_prefix_pages
+        return tuple(computed)
 
     def request_finished(
         self,
@@ -337,14 +323,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # blocks are always at the start of the list.
             # Here we "unpad" blocks to send the actual remote blocks to be read.
             block_ids = self.get_exchange_clipped_blocks(block_ids)
-            if self.hisparse is not None and any(0 in group for group in block_ids):
-                logger.warning(
-                    "Not exporting KV for %s: HiSparse holds part of it only on "
-                    "the host.",
-                    request.request_id,
-                )
-                self._reqs_need_send.pop(request.request_id)
-                return False, None
 
             remote_num_tokens = request.num_computed_tokens
 

@@ -180,7 +180,6 @@ def make_hisparse_kv_cache_config(
         KVCacheGroupSpec(
             ["source"],
             source_spec,
-            enable_kv_transfer=not transfer_device_cache,
             role=KVCacheGroupRole.HISPARSE_SOURCE,
             host_resident=True,
         ),
@@ -617,23 +616,6 @@ def make_nixl_hisparse_scheduler(manager: KVCacheManager):
     return connector
 
 
-def test_nixl_hisparse_transfer_view_keeps_store_groups():
-    """NIXL lands in resident pages; stores keep transferring the host source."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.nixl import (
-        hisparse_nixl_transfer_view,
-    )
-
-    config = make_hisparse_kv_cache_config(8, 8)
-    source, _, resident, hot = range(4)
-    view = hisparse_nixl_transfer_view(config)
-
-    assert source in config.prefix_cacheable_group_ids
-    assert resident not in config.transfer_group_ids
-    assert source not in view.transfer_group_ids
-    assert resident in view.transfer_group_ids
-    assert hot not in view.transfer_group_ids
-
-
 def test_nixl_hisparse_gpu_landing_only_for_nixl_loads():
     """Loads served by other connectors keep importing to host."""
     manager = make_hisparse_kv_cache_manager(32, 16, transfer_device_cache=True)
@@ -697,28 +679,43 @@ def test_nixl_hisparse_gpu_landing_skips_local_prefix_pages():
 
     _, indexer, resident, _ = manager.get_blocks(request.request_id).blocks
     _, local_block_ids, num_computed, _ = connector._reqs_need_recv[request.request_id]
-    assert local_block_ids == (
-        [block.block_id for block in indexer[2:]],
-        [block.block_id for block in resident[2:]],
-    )
-    assert num_computed[1:3] == (2, 2)
+    assert local_block_ids[1] == [block.block_id for block in indexer[2:]]
+    assert connector._reqs_alias_block_ids[request.request_id] == {
+        2: [block.block_id for block in resident[2:]]
+    }
+    assert num_computed[:2] == (2, 2)
 
 
-def test_nixl_hisparse_does_not_export_host_only_pages():
-    """A null resident page would make the peer read block 0."""
-    from vllm.v1.request import RequestStatus
-
+def test_nixl_hisparse_host_fallback_pulls_into_host_pages():
+    """After a failed GPU admission, the retry must pull into host source pages."""
     manager = make_hisparse_kv_cache_manager(32, 16, transfer_device_cache=True)
     connector = make_nixl_hisparse_scheduler(manager)
-    request = make_request("request", list(range(32)), HISPARSE_BLOCK_SIZE, sha256)
-    request.kv_transfer_params = {"do_remote_decode": True}
-    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-
-    assert connector.request_finished(request, ([], [3, 4], [0, 5], [])) == (
-        False,
-        None,
+    coordinator = get_hisparse_coordinator(manager)
+    tokens = list(range(2 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    request.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "remote_block_ids": ([0, 1], [2, 3]),
+        "remote_engine_id": "prefill",
+        "remote_request_id": "prefill-request",
+        "remote_host": "localhost",
+        "remote_port": 1234,
+    }
+    assert connector.get_num_new_matched_tokens(request, 0) == (len(tokens), True)
+    assert connector.get_num_new_matched_tokens(request, 0) == (len(tokens), True)
+    assert coordinator.imports_to_host(request.request_id)
+    assert (
+        allocate_external_prefix(manager, request, len(tokens), gpu_landing=False)
+        is not None
     )
-    assert request.request_id not in connector._reqs_need_send
+    connector.update_state_after_alloc(
+        request, manager.get_blocks(request.request_id), len(tokens)
+    )
+
+    source = manager.get_blocks(request.request_id).blocks[0]
+    _, local_block_ids, _, _ = connector._reqs_need_recv[request.request_id]
+    assert local_block_ids[0] == [block.block_id for block in source]
+    assert request.request_id not in connector._reqs_alias_block_ids
 
 
 @pytest.mark.parametrize("num_tokens", [1, 15, 16, 17, 31, 32, 33, 127])

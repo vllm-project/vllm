@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import msgspec
-import numpy as np
 import pytest
 import torch
 
@@ -29,7 +28,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupRole,
@@ -586,23 +584,19 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "is_rocm,is_cuda,has_mamba,has_hisparse,use_host_buffer,"
-    "done_recving,expected_syncs",
+    "is_rocm,has_mamba,use_host_buffer,done_recving,expected_syncs",
     [
-        (True, False, True, False, False, {"req"}, 1),
-        (False, True, False, True, False, {"req"}, 0),
-        (False, False, False, False, False, {"req"}, 0),
-        (False, False, True, False, False, {"req"}, 0),
-        (True, False, True, False, True, {"req"}, 0),
-        (True, False, True, False, False, set(), 0),
+        (True, True, False, {"req"}, 1),
+        (False, False, False, {"req"}, 0),
+        (False, True, False, {"req"}, 0),
+        (True, True, True, {"req"}, 0),
+        (True, True, False, set(), 0),
     ],
 )
 def test_sync_device_after_direct_recv_gates(
     monkeypatch,
     is_rocm,
-    is_cuda,
     has_mamba,
-    has_hisparse,
     use_host_buffer,
     done_recving,
     expected_syncs,
@@ -615,12 +609,10 @@ def test_sync_device_after_direct_recv_gates(
 
     worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = has_mamba
-    worker._hisparse_destination = object() if has_hisparse else None
     worker.use_host_buffer = use_host_buffer
 
     sync_calls = []
     monkeypatch.setattr(base_worker.current_platform, "is_rocm", lambda: is_rocm)
-    monkeypatch.setattr(base_worker.current_platform, "is_cuda", lambda: is_cuda)
     monkeypatch.setattr(
         base_worker.torch.accelerator,
         "synchronize",
@@ -754,70 +746,6 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     assert meta.remote.block_ids == expected_remote_block_ids, (
         f"Expected {expected_remote_block_ids}, got {meta.remote.block_ids}"
-    )
-
-
-@pytest.mark.cpu_test
-def test_divergent_regions_notify_prefill_when_decode_request_is_aborted():
-    """An aborted decode request must release remote KV without local blocks."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-        NixlConnectorMetadata,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
-        NixlPullConnectorWorker,
-    )
-
-    worker = object.__new__(NixlPullConnectorWorker)
-    worker._physical_blocks_per_logical_kv_block = 1
-    worker._engine_last_active = {}
-    worker._recving_transfers = {}
-    worker._bidirectional_kv_xfer_enabled = False
-    worker._has_mamba = False
-    worker._hisparse_destination = None
-    worker._mixed_mem_types = False
-    worker.use_mla = True
-    worker.dcp_size = 1
-    worker.region_group_ids = [0, 1]
-
-    remote_engine_id = "remote-engine"
-    remote_info = MagicMock()
-    remote_info.remote_block_size = 16
-    remote_info.remote_dcp_size = 1
-    remote_info.remote_physical_blocks_per_logical = 1
-    worker.transfer_topo = MagicMock()
-    worker.transfer_topo.get_engine_info.return_value = remote_info
-    worker.transfer_topo.tp_ratio.return_value = 1
-    worker.transfer_topo.block_size_ratio.return_value = 1
-
-    plan = MagicMock()
-    plan.all_source_ranks = (0,)
-    plan.local_consumers = 1
-    worker.tp_mappings = {remote_engine_id: plan}
-    worker.dst_region_group_ids = {remote_engine_id: [0]}
-    worker.src_xfer_handles_by_block_size = {16: 1}
-    worker.dst_xfer_side_handles = {remote_engine_id: {0: 2}}
-    worker._remote_agents = {remote_engine_id: {(0, 0): "remote-agent"}}
-    worker.nixl_wrapper = MagicMock()
-
-    metadata = NixlConnectorMetadata()
-    metadata.add_new_req_to_recv(
-        request_id="aborted-request",
-        local_block_ids=[],
-        kv_transfer_params={
-            "remote_block_ids": [[3, 4]],
-            "remote_engine_id": remote_engine_id,
-            "remote_request_id": "prefill-request",
-            "remote_host": "localhost",
-            "remote_port": 1234,
-        },
-    )
-
-    worker._read_blocks_for_req(
-        "aborted-request", metadata.reqs_to_recv["aborted-request"]
-    )
-
-    worker.nixl_wrapper.send_notif.assert_called_once_with(
-        "remote-agent", notif_msg=b"prefill-request:1"
     )
 
 
@@ -1472,16 +1400,6 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
     worker._group_spec_types = (FullAttentionSpec,)
     local, remote = worker._map_block_ids_for_block_size_ratio([[]], [[30, 31]], 4)
     assert local == []
-
-
-@pytest.mark.cpu_test
-def test_prefix_caching_by_region_preserves_empty_region_geometry():
-    worker = object.__new__(bw.NixlBaseConnectorWorker)
-    local, remote = worker._apply_prefix_caching_by_region(
-        [[], []], [[10, 11], [20, 21]]
-    )
-
-    assert local == remote == [[], []]
 
 
 @pytest.mark.cpu_test
@@ -2186,124 +2104,6 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "shared,num_chunks,fail_unregister",
-    [(False, 1, False), (True, 1, False), (True, 2, False), (True, 2, True)],
-)
-def test_hisparse_host_registration_handoff(shared, num_chunks, fail_unregister):
-    """Release all CUDA chunks before NIXL registration, preserving cleanup on error."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.nixl import (
-        HiSparseNixlDestination,
-    )
-
-    pool = torch.empty(num_chunks * 16, dtype=torch.uint8)
-    base = pool.data_ptr()
-    registered = {base + i * 16 for i in range(num_chunks)}
-    region = (
-        SimpleNamespace(pinned_addresses=sorted(registered), is_pinned=True)
-        if shared
-        else None
-    )
-    runtimes = [
-        SimpleNamespace(
-            shared_host_region=region, host_pool_registration_owned_by_hisparse=True
-        )
-        for _ in range(2 if shared else 1)
-    ]
-    destination = HiSparseNixlDestination(
-        SimpleNamespace(hisparse_host_num_blocks=1), MagicMock()
-    )
-    destination._host_pools[base] = (pool, runtimes)
-    worker = MagicMock()
-
-    def unregister(address):
-        if fail_unregister and address == base:
-            return SimpleNamespace(value=1)
-        registered.remove(address)
-        return SimpleNamespace(value=0)
-
-    def register_memory(*args, **kwargs):
-        assert not registered, "NIXL registration overlaps a live CUDA registration"
-
-    worker.nixl_wrapper.register_memory.side_effect = register_memory
-    with (
-        patch("torch.accelerator.synchronize"),
-        patch("torch.cuda.cudart") as cudart,
-    ):
-        cudart.return_value.cudaHostUnregister.side_effect = unregister
-        if fail_unregister:
-            assert region is not None
-            with pytest.raises(RuntimeError, match="cudaHostUnregister failed"):
-                destination.prepare_host_descriptors(worker)
-            worker.nixl_wrapper.register_memory.assert_not_called()
-            assert registered == set(region.pinned_addresses) == {base}
-            assert region.is_pinned
-            assert all(r.host_pool_registration_owned_by_hisparse for r in runtimes)
-            return
-        destination.prepare_host_descriptors(worker)
-
-    worker.nixl_wrapper.register_memory.assert_called_once()
-    assert not any(r.host_pool_registration_owned_by_hisparse for r in runtimes)
-    if region is not None:
-        assert not region.pinned_addresses
-        assert not region.is_pinned
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("remote_ratio", [1, 2])
-def test_hisparse_maps_host_and_device_reads_without_submitting(remote_ratio):
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.nixl import (
-        HiSparseNixlDestination,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import ReadSpec
-
-    worker = _make_mock_worker_for_desc_ids(2, False, (MLAAttentionSpec,))
-    worker.nixl_wrapper = MagicMock()
-    worker.engine_id = "decode"
-    worker.region_group_ids = [0, 1]
-    worker.region_num_blocks = [4, 4]
-    worker.dst_region_group_ids = {"prefill": [0, 0]}
-    worker.dst_region_num_blocks = {"prefill": [8, 8]}
-    worker.dst_num_blocks = {"prefill": 8, "decode": 4}
-    worker._physical_blocks_per_logical_kv_block = 1
-    worker.kv_cache_config = make_kv_cache_config(block_size=16)
-    worker.transfer_topo = MagicMock()
-    worker.transfer_topo.block_size_ratio.return_value = 1
-    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
-        remote_block_size=16, remote_physical_blocks_per_logical=remote_ratio
-    )
-    worker.src_xfer_handles_by_block_size = {16: 20}
-    worker._block_ids_by_region = NixlConnectorWorker._block_ids_by_region
-    worker._apply_prefix_caching_by_region = (
-        NixlConnectorWorker._apply_prefix_caching_by_region.__get__(worker)
-    )
-    worker._logical_to_kernel_block_ids = (
-        NixlConnectorWorker._logical_to_kernel_block_ids.__get__(worker)
-    )
-    destination = HiSparseNixlDestination(
-        SimpleNamespace(hisparse_host_num_blocks=6), MagicMock()
-    )
-    destination.host_regions = [None, (1000, 16)]
-    destination._descriptor_offsets = [None, 0]
-    destination._xfer_handle = 10
-    local = list(range(2 * remote_ratio))
-
-    reads = destination.prepare_reads(
-        worker, ReadSpec(0, (local, []), ([2, 3],)), local, "prefill"
-    )
-
-    host, device = reads
-    assert (host[0], device[0]) == (10, 20)
-    np.testing.assert_array_equal(host[1], local)
-    np.testing.assert_array_equal(device[1], local)
-    remote = np.arange(2 * remote_ratio, 4 * remote_ratio)
-    np.testing.assert_array_equal(host[2], 8 + remote)
-    np.testing.assert_array_equal(device[2], remote)
-    worker.nixl_wrapper.make_prepped_xfer.assert_not_called()
-    worker.nixl_wrapper.transfer.assert_not_called()
-
-
-@pytest.mark.cpu_test
 @pytest.mark.parametrize("kernel_block_size", [16, 8])
 def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size):
     host_num_blocks = 4
@@ -2393,57 +2193,123 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
 
 
 @pytest.mark.cpu_test
-def test_hisparse_host_import_keeps_host_blocks_out_of_gpu_regions():
-    """Fallback metadata must route source IDs separately from GPU IDs."""
-    spec = make_kv_cache_config(block_size=16).kv_cache_groups[0].kv_cache_spec
-    scheduler = make_nixl_scheduler(heartbeat=True)
-    scheduler._is_hma_required = False
-    scheduler.kv_cache_config = KVCacheConfig(
-        num_blocks=32,
-        hisparse_host_num_blocks=16,
-        kv_cache_tensors=[],
+def test_nixl_hisparse_gpu_import_pulls_into_resident_pages():
+    """A GPU import must land on resident pages, not the host source region."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    host_num_blocks = 4
+    gpu_num_blocks = 6
+    spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float16
+    )
+    page = spec.page_size_bytes
+    kv_cache_config = KVCacheConfig(
+        num_blocks=gpu_num_blocks,
+        hisparse_host_num_blocks=host_num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=host_num_blocks * page,
+                layers=["mla"],
+                layer_stride=host_num_blocks * page,
+                block_stride=page,
+                host_resident=True,
+            ),
+            KVCacheTensor(
+                size=gpu_num_blocks * page,
+                layers=["mla.hisparse_resident"],
+                layer_stride=gpu_num_blocks * page,
+                block_stride=page,
+            ),
+        ],
         kv_cache_groups=[
             KVCacheGroupSpec(
-                ["source"],
+                ["mla"],
                 spec,
                 host_resident=True,
-                enable_kv_transfer=False,
                 role=KVCacheGroupRole.HISPARSE_SOURCE,
             ),
             KVCacheGroupSpec(
-                ["indexer"],
-                spec,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
-            ),
-            KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(block_size=16, page_size=32),
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(block_size=16, page_size=32, blocks_per_request=2),
+                ["mla.hisparse_resident"],
+                HiSparseResidentSpec(block_size=16, page_size=page),
                 enable_kv_transfer=False,
             ),
         ],
     )
-    request = create_request(do_remote_prefill=True)
-    scheduler.hisparse = MagicMock()
-    assert request.kv_transfer_params is not None
-    request.kv_transfer_params["remote_block_ids"] = ([1, 2],)
-    blocks = MagicMock()
-    blocks.get_unhashed_block_ids_all_groups.return_value = (
-        [5, 6],
-        [10, 11],
-        [20],
-        [30, 31],
+    vllm_config = create_vllm_config(block_size=16)
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [16]
+    fake_backend.get_name.return_value = "FLASHMLA"
+    fake_backend.full_cls_name.return_value = "fake.FLASHMLA"
+    fake_backend.get_kv_cache_shape.return_value = (1, 16, 1, 1)
+    fake_platform = MagicMock()
+    fake_platform.device_type = "cuda"
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
+    host_cache = torch.zeros(host_num_blocks, page, dtype=torch.uint8)
+    resident_cache = torch.zeros(gpu_num_blocks, page, dtype=torch.uint8)
+
+    with (
+        patch.object(bw, "NixlWrapper"),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(bw, "current_platform", fake_platform),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlConnectorWorker(vllm_config, "decode", kv_cache_config)
+        worker.use_mla = True
+        worker.nixl_wrapper.get_agent_metadata.return_value = b"metadata"
+        worker.register_kv_caches(
+            {"mla": host_cache, "mla.hisparse_resident": resident_cache}
+        )
+
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_block_size=16,
+        remote_physical_blocks_per_logical=1,
+        remote_dcp_size=1,
+        remote_tp_size=1,
+    )
+    worker.transfer_topo.tp_ratio.return_value = 1
+    worker.transfer_topo.block_size_ratio.return_value = 1
+    worker.tp_mappings = {
+        "prefill": SimpleNamespace(all_source_ranks=(0,), local_consumers=1)
+    }
+    worker.dst_region_group_ids["prefill"] = [0]
+    worker.dst_region_num_blocks["prefill"] = [8]
+    worker.dst_num_blocks["prefill"] = 8
+    worker.dst_uses_region_group_mapping["prefill"] = False
+    worker.dst_xfer_side_handles["prefill"] = {0: 30}
+    worker._remote_agents = {"prefill": {(0, 0): "prefill-agent"}}
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="request",
+        local_block_ids=([1, 2],),
+        kv_transfer_params={
+            "remote_block_ids": ([6, 7],),
+            "remote_engine_id": "prefill",
+            "remote_request_id": "prefill-request",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+        },
+        alias_block_ids={1: [3, 5]},
     )
 
-    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
-    metadata = scheduler.build_connector_meta(MagicMock())
-    request_metadata = metadata.reqs_to_recv[request.request_id]
+    worker._read_blocks_for_req("request", metadata.reqs_to_recv["request"])
 
-    assert request_metadata.hisparse_host_block_ids == [5, 6]
-    assert request_metadata.local_block_ids == ([10, 11], [20])
+    (call,) = worker.nixl_wrapper.make_prepped_xfer.call_args_list
+    is_dram = worker._desc_is_dram_by_block_size[16]
+    device_descs = [
+        desc
+        for desc, dram in zip(worker.src_blocks_data, is_dram, strict=True)
+        if not dram
+    ]
+    assert [device_descs[i][0] for i in call.args[2]] == [
+        resident_cache.data_ptr() + block * page for block in (3, 5)
+    ]
+    assert call.args[4].tolist() == [6, 7]
 
 
 @pytest.mark.cpu_test

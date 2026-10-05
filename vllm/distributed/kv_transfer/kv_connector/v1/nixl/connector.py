@@ -29,9 +29,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.nixl import (
-    hisparse_nixl_transfer_view,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -358,7 +355,6 @@ class NixlPullConnector(NixlBaseConnector):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
-        kv_cache_config = hisparse_nixl_transfer_view(kv_cache_config)
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = NixlPullConnectorScheduler(
                 vllm_config, self.engine_id, kv_cache_config

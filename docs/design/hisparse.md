@@ -148,6 +148,11 @@ host-backed GPU footprint plus host source blocks. The request keeps the host
 tier across further admission retries. There is no context-length threshold or
 other heuristic, and the generic KV cache manager is unaware of the choice.
 
+NIXL registers each layer's resident pages as a local-only alias of that
+layer's host source region. A GPU import passes its resident blocks as alias
+block IDs, and the pull writes those regions into their aliases. A host import
+pulls into the host source regions as before.
+
 A host import reads through a bounded decoder-GPU staging pool before copying
 into registered host memory. Pages needed immediately are mirrored into their
 resident destinations during that copy. Both landing targets then use the same

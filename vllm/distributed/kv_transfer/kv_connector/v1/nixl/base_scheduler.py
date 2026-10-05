@@ -117,7 +117,7 @@ class NixlBaseConnectorScheduler:
         self._reqs_need_recv: dict[
             ReqId, tuple[Request, BlockIds, tuple[int, ...], bool]
         ] = {}
-        self._hisparse_host_blocks_to_recv: dict[ReqId, list[int]] = {}
+        self._reqs_alias_block_ids: dict[ReqId, dict[int, list[int]]] = {}
         self.hisparse: HiSparseCoordinator | None = None
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
@@ -483,7 +483,7 @@ class NixlBaseConnectorScheduler:
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
-                hisparse_host_block_ids=self._hisparse_host_blocks_to_recv.get(req_id),
+                alias_block_ids=self._reqs_alias_block_ids.get(req_id),
                 local_num_computed_blocks=cached,
                 awaiting_kvs=awaiting_kvs,
             )
@@ -508,7 +508,7 @@ class NixlBaseConnectorScheduler:
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
-        self._hisparse_host_blocks_to_recv.clear()
+        self._reqs_alias_block_ids.clear()
         self._reqs_in_batch = set()
         self._reqs_not_processed = set()
         self._reqs_need_send = {}

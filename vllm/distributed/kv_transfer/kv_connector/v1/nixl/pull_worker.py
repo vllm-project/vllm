@@ -192,27 +192,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
                 for rank in plan.all_source_ranks
             ]
-        elif meta.hisparse_host_block_ids is not None:
-            if self._hisparse_destination is None:
-                raise RuntimeError("HiSparse NIXL metadata requires its destination")
-            if not self.use_mla or self._has_mamba or dcp_active:
-                raise NotImplementedError(
-                    "HiSparse host imports require pure MLA without DCP"
-                )
-            if len(plan.all_source_ranks) != 1:
-                raise NotImplementedError("HiSparse host imports require replicated KV")
-            if self.block_size != remote_info.remote_block_size:
-                raise NotImplementedError(
-                    "HiSparse host imports require matching physical block sizes"
-                )
-            read_specs = [
-                ReadSpec(
-                    remote_rank=plan.all_source_ranks[0],
-                    local_block_ids=local_block_ids,
-                    remote_block_ids=meta.remote.block_ids,
-                )
-            ]
-        elif local_region_groups != remote_region_groups:
+        elif (
+            meta.alias_block_ids is not None
+            or local_region_groups != remote_region_groups
+        ):
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
@@ -232,6 +215,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             local_by_region = self._block_ids_by_region(
                 local_block_ids, local_region_groups
             )
+            if meta.alias_block_ids is not None:
+                if dcp_active or len(plan.all_source_ranks) != 1:
+                    raise NotImplementedError(
+                        "Alias-region pulls require one source rank without DCP"
+                    )
+                local_by_region = list(local_by_region)
+                for region, alias in self._region_aliases.items():
+                    local_by_region[region] = self._logical_to_kernel_block_ids(
+                        [meta.alias_block_ids[alias.group_id]],
+                        self._physical_blocks_per_logical_kv_block,
+                    )[0]
             num_computed_blocks = None
             num_remote_blocks = None
             if (
@@ -271,6 +265,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         remote_dcp_size=remote_info.remote_dcp_size,
                     ),
                     block_ids_by_region=True,
+                    use_alias_regions=meta.alias_block_ids is not None,
                 )
                 for rank in plan.all_source_ranks
             ]
@@ -389,7 +384,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
                 awaiting_kvs=meta.awaiting_kvs,
-                host_block_ids=meta.hisparse_host_block_ids,
             ):
                 return
 
@@ -428,7 +422,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_xfer_side_handle: int,
         expected_consumers: int,
         awaiting_kvs: bool,
-        host_block_ids: list[int] | None = None,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
@@ -471,7 +464,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.
-        if not any(len(group) > 0 for group in local_block_ids) and not host_block_ids:
+        if not any(len(group) > 0 for group in local_block_ids):
             # A full prefix cache hit is indicated with an empty list.
             agent_name = self._remote_agents[dst_engine_id][(0, remote_rank)]
             try:
@@ -495,7 +488,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 self._recving_transfers.setdefault(request_id, [])
             return True
 
-        if host_block_ids is None and not read_spec.block_ids_by_region:
+        if not read_spec.block_ids_by_region:
             assert (
                 len(remote_block_ids)
                 == len(local_block_ids)
@@ -517,67 +510,51 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
         # workers will issue xfers to parts of the P worker remote kv caches.
 
-        host_reads = None
-        if host_block_ids is not None:
-            assert self._hisparse_destination is not None
-            host_reads = self._hisparse_destination.prepare_reads(
-                self, read_spec, host_block_ids, dst_engine_id
-            )
-        else:
-            # Get descs ids.
-            remote_block_descs_ids = self._compute_desc_ids(
-                block_ids=remote_block_ids,
-                dst_num_blocks=self.dst_num_blocks[dst_engine_id],
-                block_size_ratio=None,
-                physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-                region_num_blocks=(
-                    self.dst_region_num_blocks.get(dst_engine_id) or None
-                ),
-                region_group_ids=(
-                    list(range(self.num_regions))
-                    if read_spec.block_ids_by_region
-                    else (self.dst_region_group_ids.get(dst_engine_id) or None)
-                ),
-                uses_region_group_mapping=(
-                    self.num_regions > 1
-                    if read_spec.block_ids_by_region
-                    else self.dst_uses_region_group_mapping[dst_engine_id]
-                ),
-            )
-            local_block_descs_ids = self._compute_desc_ids(
-                block_ids=local_block_ids,
-                dst_num_blocks=self.dst_num_blocks[self.engine_id],
-                block_size_ratio=block_size_ratio,
-                physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-                region_num_blocks=(
-                    self.dst_region_num_blocks.get(self.engine_id) or None
-                ),
-                region_group_ids=(
-                    list(range(self.num_regions))
-                    if read_spec.block_ids_by_region
-                    else (self.region_group_ids or None)
-                ),
-                uses_region_group_mapping=(
-                    self.num_regions > 1
-                    if read_spec.block_ids_by_region
-                    else self._uses_region_group_mapping
-                ),
-            )
+        # Get descs ids.
+        remote_block_descs_ids = self._compute_desc_ids(
+            block_ids=remote_block_ids,
+            dst_num_blocks=self.dst_num_blocks[dst_engine_id],
+            block_size_ratio=None,
+            physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
+            region_num_blocks=(self.dst_region_num_blocks.get(dst_engine_id) or None),
+            region_group_ids=(
+                list(range(self.num_regions))
+                if read_spec.block_ids_by_region
+                else (self.dst_region_group_ids.get(dst_engine_id) or None)
+            ),
+            uses_region_group_mapping=(
+                self.num_regions > 1
+                if read_spec.block_ids_by_region
+                else self.dst_uses_region_group_mapping[dst_engine_id]
+            ),
+        )
+        local_block_descs_ids = self._compute_desc_ids(
+            block_ids=local_block_ids,
+            dst_num_blocks=self.dst_num_blocks[self.engine_id],
+            block_size_ratio=block_size_ratio,
+            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+            region_num_blocks=(self.dst_region_num_blocks.get(self.engine_id) or None),
+            region_group_ids=(
+                list(range(self.num_regions))
+                if read_spec.block_ids_by_region
+                else (self.region_group_ids or None)
+            ),
+            uses_region_group_mapping=(
+                self.num_regions > 1
+                if read_spec.block_ids_by_region
+                else self._uses_region_group_mapping
+            ),
+        )
 
-            assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+        if read_spec.use_alias_regions:
+            local_block_descs_ids = self._alias_local_desc_ids(
+                local_block_ids, local_block_descs_ids
+            )
+        assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
         handle = None
         try:
-            if host_reads is not None:
-                self._submit_read_transfers(
-                    request_id,
-                    remote_xfer_side_handle,
-                    host_reads,
-                    self._remote_agents[dst_engine_id][(0, remote_rank)],
-                    notif_id,
-                )
-                return True
             if self._mixed_mem_types:
                 self._read_blocks_mixed(
                     request_id=request_id,
@@ -646,38 +623,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             (is_dram, local_dram_handle),
             (~is_dram, local_device_handle),
         )
-        self._submit_read_transfers(
-            request_id,
-            remote_xfer_side_handle,
-            [
-                (local_handle, desc_pos[local_ids[mask]], remote_ids[mask])
-                for mask, local_handle in reads
-                if mask.any()
-            ],
-            notif_agent,
-            notif_id,
-        )
-
-    def _submit_read_transfers(
-        self,
-        request_id: str,
-        remote_xfer_side_handle: int,
-        reads: list[tuple[int, np.ndarray, np.ndarray]],
-        notif_agent: str,
-        notif_id: bytes,
-    ) -> None:
-        """Submit split reads with shared notification and failure ownership."""
         handles: list[int] = []
         try:
-            for local_handle, local_ids, remote_ids in reads:
-                if len(local_ids):
+            for mask, local_handle in reads:
+                if mask.any():
                     handles.append(
                         self.nixl_wrapper.make_prepped_xfer(
                             "READ",
                             local_handle,
-                            local_ids,
+                            desc_pos[local_ids[mask]],
                             remote_xfer_side_handle,
-                            remote_ids,
+                            remote_ids[mask],
                         )
                     )
         except Exception:

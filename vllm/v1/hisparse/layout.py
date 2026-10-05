@@ -373,3 +373,15 @@ def get_hisparse_kv_cache_config(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
     )
+
+
+def get_hisparse_resident_aliases(
+    kv_cache_config: KVCacheConfig,
+) -> dict[str, tuple[str, int]]:
+    """Map each host source layer to its resident layer and cache group."""
+    return {
+        name[: -len(HISPARSE_RESIDENT_SUFFIX)]: (name, group_id)
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+        for name in group.layer_names
+    }

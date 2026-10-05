@@ -401,20 +401,6 @@ def release_pinned_state(
     shared_host_region: SharedOffloadRegion | None = None,
 ) -> None:
     """Synchronize and release registered host KV pools."""
-    hisparse_owned_pools = {
-        runtime.registered_host_pool.data_ptr()
-        for runtime in runtimes
-        if runtime.host_pool_registration_owned_by_hisparse
-    }
-    externally_owned_pools = {
-        runtime.registered_host_pool.data_ptr()
-        for runtime in runtimes
-        if not runtime.host_pool_registration_owned_by_hisparse
-    }
-    hisparse_owned_pools -= externally_owned_pools
-    pinned_host_pools[:] = [
-        pool for pool in pinned_host_pools if pool.data_ptr() in hisparse_owned_pools
-    ]
     if pinned_host_pools or shared_host_region is not None:
         try:
             torch.accelerator.synchronize()
@@ -819,7 +805,6 @@ class HiSparseRuntime:
         self.registered_host_pool = (
             registered_host_pool if registered_host_pool is not None else kv_cache
         )
-        self.host_pool_registration_owned_by_hisparse = True
 
     def gather_prefill_cache(
         self,
