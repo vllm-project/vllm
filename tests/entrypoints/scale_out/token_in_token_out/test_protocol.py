@@ -124,30 +124,12 @@ def test_generate_request_rejects_placeholder_outside_prompt():
         )
 
 
-def test_reasoning_fields_default_to_none():
-    req = GenerateRequest.model_validate(_base_payload())
-    assert req.reasoning_ended is None
-    assert req.reasoning_parser_kwargs is None
-
-
-def test_reasoning_fields_roundtrip():
-    payload = {
-        **_base_payload(),
-        "reasoning_ended": True,
-        "reasoning_parser_kwargs": {
-            "chat_template_kwargs": {"enable_thinking": False},
-        },
-    }
-    req = GenerateRequest.model_validate(payload)
-    assert req.reasoning_ended is True
-    assert req.reasoning_parser_kwargs == {
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
-    dumped = req.model_dump(mode="json")
-    assert dumped["reasoning_ended"] is True
-    assert dumped["reasoning_parser_kwargs"] == {
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
+def test_reasoning_parser_kwargs_rejects_unknown_keys():
+    """The engine splats these into its reasoning parser's constructor, so a
+    client must not be able to pass arbitrary keyword arguments."""
+    payload = {**_base_payload(), "reasoning_parser_kwargs": {"tokenizer": None}}
+    with pytest.raises(ValidationError, match="tokenizer"):
+        GenerateRequest.model_validate(payload)
 
 
 def test_output_mode_defaults_to_tokens():

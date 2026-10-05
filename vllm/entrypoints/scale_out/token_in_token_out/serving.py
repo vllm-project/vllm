@@ -350,7 +350,11 @@ class ServingTokens(GenerateBaseServing):
             data_parallel_rank=data_parallel_rank,
             session_id=session_id,
             reasoning_ended=request.reasoning_ended,
-            reasoning_parser_kwargs=request.reasoning_parser_kwargs,
+            reasoning_parser_kwargs=(
+                request.reasoning_parser_kwargs.model_dump()
+                if request.reasoning_parser_kwargs is not None
+                else None
+            ),
         )
 
         assert result_generator is not None

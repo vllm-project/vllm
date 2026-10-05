@@ -4,6 +4,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Discriminator,
     Field,
     NonNegativeInt,
@@ -147,6 +148,16 @@ class MultiModalFeatures(BaseModel):
         return self
 
 
+class ReasoningParserKwargs(BaseModel):
+    """Kwargs for the engine-side reasoning parser that gates structured
+    outputs. Typed so clients cannot pass arbitrary constructor kwargs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
+    """The effective chat template kwargs the prompt was rendered with."""
+
+
 class GenerateRequest(BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
@@ -212,27 +223,14 @@ class GenerateRequest(BaseModel):
 
     model: str | None = None
 
-    reasoning_ended: bool | None = Field(
-        default=None,
-        description=(
-            "Whether reasoning has already ended for this prompt, matching "
-            "OpenAIServingChat's engine_client.generate(reasoning_ended=...). "
-            "Set by /render so /inference/v1/generate can start structured "
-            "outputs at the same token as /v1/chat/completions. True means "
-            "constrain from the first generated token; None lets the engine "
-            "decide from the prompt and --reasoning-parser."
-        ),
-    )
+    reasoning_ended: bool | None = None
+    """Whether reasoning has ended before the first generated token, as
+    resolved by /render. `True` applies structured outputs from the first
+    token; `None` lets the engine check the prompt with its reasoning parser."""
 
-    reasoning_parser_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Kwargs for the engine-side reasoner, matching "
-            "OpenAIServingChat's reasoning_parser_kwargs. Typically "
-            '{"chat_template_kwargs": {...}} so enable_thinking and similar '
-            "flags agree between the frontend and the engine."
-        ),
-    )
+    reasoning_parser_kwargs: ReasoningParserKwargs | None = None
+    """Set by /render when it has a reasoning parser, so the engine-side
+    parser agrees with the frontend on flags such as `enable_thinking`."""
 
     return_token_ids: bool | None = Field(
         default=None,
