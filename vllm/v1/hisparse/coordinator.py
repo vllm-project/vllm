@@ -19,6 +19,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
 )
 from vllm.v1.hisparse.types import (
+    ACTIVE_TAIL_PAGES,
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
     SparseKVRowMirror,
@@ -31,10 +32,6 @@ from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
-
-# Sealed pages this many positions behind the block-table tail stay pinned so
-# a page written by an in-flight step is never handed out under it.
-_ACTIVE_TAIL_PAGES = 2
 
 
 @dataclass
@@ -171,6 +168,10 @@ class HiSparseCoordinator:
         # request -> prefix length an external load is still filling in.
         self._pending_imports: dict[str, int] = {}
         self.block_table_updates: set[str] = set()
+        # Requests whose resident pages were all non-null when last scanned.
+        # Pages only become null at admission or import (before the first
+        # scan) and when the pool reuses an unpinned page (_lose_page).
+        self._resident_requests: set[str] = set()
         self.spills_to_send: list[SparseKVPageTransfer] = []
         self.pending_spills: dict[int, _PendingSpill] = {}
         self.request_states: dict[str, _HiSparseRequestState] = {}
@@ -191,6 +192,7 @@ class HiSparseCoordinator:
 
     def commit_computed_blocks(self, request_id: str, num_host_pages: int) -> None:
         """Account for a prefix hit on host pages the request now references."""
+        self._resident_requests.discard(request_id)
         if not self.resident_managers or self.host_manager is None:
             return
         host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
@@ -343,7 +345,7 @@ class HiSparseCoordinator:
             req_blocks = manager.req_to_blocks.get(request_id)
             if (
                 req_blocks is None
-                or page_idx >= len(req_blocks) - _ACTIVE_TAIL_PAGES
+                or page_idx >= len(req_blocks) - ACTIVE_TAIL_PAGES
                 or req_blocks[page_idx].is_null
             ):
                 return None
@@ -385,6 +387,7 @@ class HiSparseCoordinator:
             self._lose_page(request_id, page_idx)
 
     def _lose_page(self, request_id: str, page_idx: int) -> None:
+        self._resident_requests.discard(request_id)
         state = self.request_states.get(request_id)
         if state is None:
             return
@@ -533,6 +536,7 @@ class HiSparseCoordinator:
 
     def record_pending_host_import(self, request_id: str, num_tokens: int) -> None:
         """Note a prefix an external load is populating in host pages."""
+        self._resident_requests.discard(request_id)
         self._pending_imports[request_id] = num_tokens
 
     def finish_host_import(self, request_id: str, *, failed: bool) -> None:
@@ -677,15 +681,22 @@ class HiSparseCoordinator:
         """Return whether every scheduled request can read only resident KV."""
         if not self.resident_managers:
             return False
-        block_size = self.resident_managers[0].block_size
+        first = self.resident_managers[0]
         for request_id, num_computed_tokens, num_scheduled_tokens in requests:
-            num_pages = cdiv(num_computed_tokens + num_scheduled_tokens, block_size)
-            for page_idx in range(num_pages):
-                if any(
-                    manager.get_resident_page(request_id, page_idx) is None
-                    for manager in self.resident_managers
-                ):
-                    return False
+            num_pages = cdiv(
+                num_computed_tokens + num_scheduled_tokens, first.block_size
+            )
+            if len(first.req_to_blocks.get(request_id, ())) < num_pages:
+                return False
+            if request_id in self._resident_requests:
+                continue
+            if any(
+                block.is_null
+                for manager in self.resident_managers
+                for block in manager.req_to_blocks.get(request_id, ())
+            ):
+                return False
+            self._resident_requests.add(request_id)
         return True
 
     def take_block_table_updates(self) -> dict[str, tuple[list[int], ...]]:
@@ -809,6 +820,7 @@ class HiSparseCoordinator:
 
     def free(self, request_id: str) -> None:
         """Detach the request; its clean pages stay readable copies in the pool."""
+        self._resident_requests.discard(request_id)
         self._pending_imports.pop(request_id, None)
         state = self.request_states.pop(request_id, None)
         if state is None:
