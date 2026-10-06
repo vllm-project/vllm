@@ -361,8 +361,8 @@ def initialize_mamba_checkpoint_builders(
         )
         else scheduler_block_size
     )
-    for builder in checkpoint_builders:
-        builder.set_block_sizes(
+    for checkpoint_builder in checkpoint_builders:
+        checkpoint_builder.set_block_sizes(
             hash_block_size=hash_block_size,
             mamba_ckpt_block_size=mamba_ckpt_block_size,
         )
