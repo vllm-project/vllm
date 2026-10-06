@@ -77,7 +77,9 @@ def test_mtp_draft_lm_head_quantization(
         assert_request_outputs_match(
             ref_outputs,
             outputs,
-            required_matches=int(0.8 * len(ref_outputs)) + 1,
+            # Not bit-exact: a different acceptance length changes the target's
+            # verify batch shapes, which can flip a near-tied greedy token.
+            required_matches=int(0.95 * len(ref_outputs)),
             context=f"draft_lm_head_quantization={quant}",
         )
         assert al >= 0.9 * ref_al, (
