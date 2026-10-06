@@ -472,7 +472,7 @@ def _assemble_tag(
     return StructuralTag(format=SequenceFormat(elements=tags))
 
 
-@register_vllm_structural_tag("harmony")
+@register_vllm_structural_tag("harmony", builtin_tools=True)
 def get_harmony_structural_tag(
     tools: list[FunctionToolParam],
     builtin_tools: list[BuiltinToolParam],

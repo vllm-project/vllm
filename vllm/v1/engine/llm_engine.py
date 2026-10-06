@@ -254,6 +254,13 @@ class LLMEngine:
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
+            request_params = request.params
+            if isinstance(request_params, SamplingParams):
+                # This request object is owned by the engine from here on.
+                self.input_processor.apply_watermarking(
+                    request_params,
+                    self.input_processor.resolve_watermarking(request_params),
+                )
         else:
             request = self.input_processor.process_inputs(
                 request_id,
@@ -323,6 +330,14 @@ class LLMEngine:
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
             )
+
+            mm_processor_cache = self.renderer.mm_processor_cache
+            if mm_processor_cache is not None:
+                for engine_core_output in outputs.outputs:
+                    if engine_core_output.mm_cache_miss_hashes:
+                        for mm_hash in engine_core_output.mm_cache_miss_hashes:
+                            mm_processor_cache.invalidate(mm_hash)
+
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.

@@ -80,6 +80,7 @@ from vllm.config.cache import (
 )
 from vllm.config.device import Device
 from vllm.config.kernel import (
+    PASSTHROUGH_ALL2ALL_BACKEND,
     IrOpPriorityConfig,
     LinearBackend,
     MoEBackend,
@@ -769,6 +770,7 @@ class EngineArgs:
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    sleep_mode_offload_cudagraph: bool = ModelConfig.sleep_mode_offload_cudagraph
     sleep_preserve_parameter_names: list[str] = get_field(
         ModelConfig, "sleep_preserve_parameter_names"
     )
@@ -1007,6 +1009,10 @@ class EngineArgs:
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
         )
         model_group.add_argument(
+            "--sleep-mode-offload-cudagraph",
+            **model_kwargs["sleep_mode_offload_cudagraph"],
+        )
+        model_group.add_argument(
             "--sleep-preserve-parameter-names",
             **model_kwargs["sleep_preserve_parameter_names"],
         )
@@ -1104,6 +1110,10 @@ class EngineArgs:
 
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
+        # Bound from --moe-backend in KernelConfig.set_platform_defaults().
+        parallel_kwargs["all2all_backend"]["choices"].remove(
+            PASSTHROUGH_ALL2ALL_BACKEND
+        )
         parallel_group = parser.add_argument_group(
             title="ParallelConfig",
             description=ParallelConfig.__doc__,
@@ -1979,6 +1989,7 @@ class EngineArgs:
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
             enable_cumem_allocator=self.enable_cumem_allocator,
             enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
