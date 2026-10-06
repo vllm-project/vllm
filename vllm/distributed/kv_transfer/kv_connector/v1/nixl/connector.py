@@ -244,6 +244,9 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self, finished_req_ids: set[str]
     ) -> KVConnectorTransferResults:
         assert self.connector_worker is not None
+        # Replicated-KV PCP: D sees and reads from rank 0 only. Ranks > 0 report
+        # each request as sent at once, and the aggregation over all world_size
+        # workers needs those reports, so pass them through.
         return self.connector_worker.get_transfer_results()
 
     def get_block_ids_with_load_errors(self) -> set[int]:

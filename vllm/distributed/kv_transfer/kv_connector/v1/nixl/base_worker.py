@@ -957,6 +957,9 @@ class NixlBaseConnectorWorker:
                 "Remote NixlConnector PCP+DCP does not span the full PCP group. "
                 f"Remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
             )
+        # A replicated-KV PCP peer (DCP == 1) publishes only its PCP rank 0, so
+        # transfers and notifs go to rank 0 alone. Its ranks > 0 report their
+        # sends locally (see NixlBaseConnector.get_transfer_results).
         if (local_pcp_size > 1 and local_dcp_size == 1 and remote_dcp_size > 1) or (
             remote_pcp_size > 1 and remote_dcp_size == 1 and local_dcp_size > 1
         ):

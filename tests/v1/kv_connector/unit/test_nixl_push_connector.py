@@ -32,10 +32,14 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 
-from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    KVOutputAggregator,
+    TransferTopology,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import NixlPushConnector
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -60,7 +64,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
-from .utils import create_request, make_nixl_push_scheduler
+from .utils import (
+    create_model_runner_output,
+    create_request,
+    make_nixl_pcp_producer,
+    make_nixl_push_scheduler,
+)
 
 # ----------------------------------------------------------------- #
 #  Helpers / fakes                                                   #
@@ -375,6 +384,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.tp_rank = 0
         w.pcp_rank = 0
         w.pcp_dcp_sharded = False
+        w._replicated_pcp_done_sending = set()
         w.world_size = 1
         w.pp_size = 1
         w.engine_id = "test-decode-engine"
@@ -667,6 +677,36 @@ class TestPushWriterStartLoadKv:
         assert ("req" in w._reqs_to_send) is sharded
         assert w._push_writer_wake.is_set() is sharded
         assert w._send_heartbeats.called is sharded
+        assert w._replicated_pcp_done_sending == (set() if sharded else {"req"})
+
+    @patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper")
+    def test_replicated_pcp_producer_send_aggregation_completes(
+        self, _mock_nixl, default_vllm_config, dist_init
+    ):
+        """PCP=2 replicated producer: D notifies only rank 0 and rank 1 reports
+        a synthetic completion, so the world_size=2 aggregation frees the
+        request on P."""
+        req_id = "req"
+        connectors = [make_nixl_pcp_producer(NixlPushConnector, r) for r in (0, 1)]
+        for connector in connectors:
+            connector.connector_worker.transfer_topo = MagicMock()
+            meta = NixlConnectorMetadata()
+            meta.reqs_in_batch.add(req_id)
+            meta.reqs_to_send[req_id] = time.perf_counter() + 30
+            connector.connector_worker.start_load_kv(meta)
+        connectors[0].connector_worker._get_new_notifs = MagicMock(
+            return_value={req_id}
+        )
+
+        aggregator = KVOutputAggregator.from_connector(connectors[0], world_size=2)
+        outputs = [
+            create_model_runner_output(
+                [], finished_sending=c.get_transfer_results(set()).finished_sending
+            )
+            for c in connectors
+        ]
+        aggregated = aggregator.aggregate(outputs)
+        assert aggregated.kv_connector_output.finished_sending == {req_id}
 
 
 # The P→D handshake must run on the base worker's background executor, never
@@ -970,7 +1010,6 @@ class TestPushWriterNotifs:
         w._log_failure = MagicMock()  # type: ignore[method-assign]
         w._invalid_block_ids = queue.Queue()
         w._pending_recv_notifs = {}
-        w._replicated_pcp_done_sending = set()
         w.use_host_buffer = False
         return w
 

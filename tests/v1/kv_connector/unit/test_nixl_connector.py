@@ -32,10 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backend,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1 import nixl
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorRole,
-    KVConnectorTransferResults,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiKVConnectorStats,
@@ -83,6 +80,7 @@ from .utils import (
     create_scheduler,
     create_vllm_config,
     make_kv_cache_config,
+    make_nixl_pcp_producer,
 )
 
 
@@ -666,28 +664,7 @@ class TestNixlHandshake:
         expected_tracked,
     ):
         """Replicated PCP is canonicalized; PCP-DCP publishes every shard."""
-        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-        vllm_config = create_vllm_config(kv_role="kv_producer")
-        vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
-        vllm_config.parallel_config.decode_context_parallel_size = dcp_size
-        with (
-            patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
-                "base_worker.get_current_attn_backends",
-                return_value=[FlashAttentionBackend],
-            ),
-            patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
-                "base_worker.get_pcp_group"
-            ) as mock_get_pcp_group,
-        ):
-            mock_get_pcp_group.return_value.rank_in_group = pcp_rank
-            connector = NixlConnector(
-                vllm_config,
-                KVConnectorRole.WORKER,
-                make_kv_cache_config(block_size=16),
-            )
+        connector = make_nixl_pcp_producer(NixlConnector, pcp_rank, pcp_size, dcp_size)
 
         worker = connector.connector_worker
         assert worker is not None
@@ -719,15 +696,6 @@ class TestNixlHandshake:
         if not expected_tracked:
             assert connector.get_finished(set()) == (set(), set())
 
-        worker.get_transfer_results = MagicMock(
-            return_value=KVConnectorTransferResults(finished_sending={"sent"})
-        )
-        # The runner reads completions through get_transfer_results, so it must
-        # agree with get_finished: replicated ranks report their synthetic
-        # completions too, or the world_size aggregation never finishes.
-        results = connector.get_transfer_results(set())
-        assert results.finished_sending == {"sent"}
-
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
@@ -735,58 +703,25 @@ class TestNixlHandshake:
     def test_replicated_pcp_producer_send_aggregation_completes(
         self, default_vllm_config, dist_init
     ):
-        """PCP=2 replicated producer: D reads from the canonical rank 0 and
-        notifies only it; rank 1 reports a synthetic completion. The
-        world_size=2 aggregation must report the request as sent so the
-        scheduler frees its blocks on P."""
-        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-        vllm_config = create_vllm_config(kv_role="kv_producer")
-        vllm_config.parallel_config.prefill_context_parallel_size = 2
-        vllm_config.parallel_config.decode_context_parallel_size = 1
+        """PCP=2 replicated producer: D notifies only rank 0 and rank 1 reports
+        a synthetic completion, so the world_size=2 aggregation frees the
+        request on P."""
         req_id = "req"
-        connectors = []
-        for pcp_rank in (0, 1):
-            with (
-                patch(
-                    "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
-                    "base_worker.get_current_attn_backends",
-                    return_value=[FlashAttentionBackend],
-                ),
-                patch(
-                    "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
-                    "base_worker.get_pcp_group"
-                ) as mock_get_pcp_group,
-            ):
-                mock_get_pcp_group.return_value.rank_in_group = pcp_rank
-                connector = NixlConnector(
-                    vllm_config,
-                    KVConnectorRole.WORKER,
-                    make_kv_cache_config(block_size=16),
-                )
-            worker = connector.connector_worker
-            worker.transfer_topo = MagicMock()
+        connectors = [make_nixl_pcp_producer(NixlConnector, r) for r in (0, 1)]
+        for connector in connectors:
+            connector.connector_worker.transfer_topo = MagicMock()
             metadata = NixlConnectorMetadata()
             metadata.reqs_in_batch.add(req_id)
             metadata.reqs_to_send[req_id] = time.perf_counter() + 30
-            worker.start_load_kv(metadata)
-            connectors.append(connector)
+            connector.connector_worker.start_load_kv(metadata)
         connectors[0].connector_worker._get_new_notifs = MagicMock(
             return_value={req_id}
         )
 
         aggregator = KVOutputAggregator.from_connector(connectors[0], world_size=2)
         outputs = [
-            ModelRunnerOutput(
-                req_ids=[],
-                req_id_to_index={},
-                sampled_token_ids=[],
-                logprobs=None,
-                prompt_logprobs_dict={},
-                pooler_output=[],
-                kv_connector_output=KVConnectorOutput(
-                    finished_sending=c.get_transfer_results(set()).finished_sending
-                ),
+            create_model_runner_output(
+                [], finished_sending=c.get_transfer_results(set()).finished_sending
             )
             for c in connectors
         ]

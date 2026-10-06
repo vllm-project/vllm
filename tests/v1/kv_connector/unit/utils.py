@@ -636,6 +636,37 @@ def make_nixl_push_scheduler(
     return sched
 
 
+def make_nixl_pcp_producer(
+    connector_cls: type[KVConnectorBase_V1],
+    pcp_rank: int,
+    pcp_size: int = 2,
+    dcp_size: int = 1,
+) -> Any:
+    """Build a worker-role NIXL connector for one PCP rank of a kv_producer.
+
+    The caller patches ``base_worker.NixlWrapper``.
+    """
+    from unittest.mock import patch
+
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    vllm_config = create_vllm_config(kv_role="kv_producer")
+    vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    base_worker = "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker"
+    with (
+        patch(
+            f"{base_worker}.get_current_attn_backends",
+            return_value=[FlashAttentionBackend],
+        ),
+        patch(f"{base_worker}.get_pcp_group") as mock_get_pcp_group,
+    ):
+        mock_get_pcp_group.return_value.rank_in_group = pcp_rank
+        return connector_cls(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
+
+
 def make_moriio_writer(fake_worker: Any) -> Any:
     """Build a MoRIIOWriter with internals stubbed for unit tests.
 
