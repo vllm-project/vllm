@@ -190,6 +190,24 @@ def get_flash_attn_version(
                 )
                 fa_version = 2
 
+        # FA4 runs d = dv = 512 GQA on its Blackwell MLA kernel.
+        if (
+            fa_version == 4
+            and uses_fa4_hd512_kernel(head_size, head_size_v)
+            and (
+                reason := _fa4_hd512_fallback_reason(
+                    has_sinks, requires_softcap, vllm_config
+                )
+            )
+            is not None
+        ):
+            logger.warning_once(
+                "FA4's Blackwell head_size=512 kernel does not support %s, "
+                "defaulting to FA version 2.",
+                reason,
+            )
+            fa_version = 2
+
         # FA4 head dimensions on Blackwell are limited by TMEM capacity.
         if (
             fa_version == 4
@@ -199,6 +217,7 @@ def get_flash_attn_version(
             and not (
                 (head_size == 256 and head_size_v in (None, 256))
                 or (head_size == 192 and head_size_v == 128)
+                or uses_fa4_hd512_kernel(head_size, head_size_v)
             )
         ):
             logger.warning_once(
@@ -231,6 +250,47 @@ def uses_fa4_hd256_kernel(
         return False
     capability = current_platform.get_device_capability()
     return capability is not None and capability.major in (10, 11)
+
+
+def uses_fa4_hd512_kernel(
+    head_size: int | None, head_size_v: int | None = None
+) -> bool:
+    """Return whether FA4 runs hd512 GQA on its Blackwell MLA kernel."""
+    if head_size != 512 or head_size_v not in (None, 512):
+        return False
+    capability = current_platform.get_device_capability()
+    return capability is not None and capability.major in (10, 11)
+
+
+def _fa4_hd512_fallback_reason(
+    has_sinks: bool,
+    requires_softcap: bool,
+    vllm_config: Any,
+) -> str | None:
+    model_config = vllm_config.model_config if vllm_config is not None else None
+    cache_config = vllm_config.cache_config if vllm_config is not None else None
+    if has_sinks:
+        return "attention sinks"
+    if requires_softcap or (
+        model_config is not None
+        and getattr(model_config.hf_text_config, "attn_logit_softcapping", None)
+    ):
+        return "logits soft capping"
+    if cache_config is not None and is_quantized_kv_cache(cache_config.cache_dtype):
+        return f"quantized KV cache dtype {cache_config.cache_dtype}"
+    if model_config is not None:
+        # Diffusion models pass a per-sequence causal flag, which bypasses the
+        # mm_prefix mask_mod the MLA kernel cannot apply.
+        if model_config.is_mm_prefix_lm and not model_config.is_diffusion:
+            return "mm_prefix bidirectional attention"
+        if model_config.rswa_window is not None:
+            return "R-SWA"
+    if (
+        vllm_config is not None
+        and vllm_config.parallel_config.decode_context_parallel_size > 1
+    ):
+        return "decode context parallelism"
+    return None
 
 
 def _fa4_hd256_fallback_reason(

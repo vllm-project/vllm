@@ -316,3 +316,81 @@ def test_flash_attn4_mixed_causal(
     )
 
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    _major not in (10, 11),
+    reason="FA4 hd512 runs on the SM100 MLA kernel.",
+)
+@pytest.mark.parametrize(
+    "per_seq_causal",
+    [[True, False, True], [False, False, False], [True, True, True]],
+)
+@torch.inference_mode()
+def test_flash_attn4_hd512_mixed_causal(per_seq_causal: list[bool]):
+    """SM100 FA4 has no ``dynamic_causal``; the backend splits a mixed batch
+    into a causal and a non-causal launch gated by ``seqused_q``."""
+    from vllm.v1.attention.backends.flash_attn import split_dynamic_causal
+    from vllm.vllm_flash_attn import flash_attn_varlen_func, is_fa_version_supported
+
+    if not is_fa_version_supported(4):
+        pytest.skip("FA4 not supported")
+
+    set_random_seed(42)
+    device, dtype, head_size, block_size = "cuda", torch.bfloat16, 512, 16
+    num_query_heads, num_kv_heads = 16, 2
+    query_lens, kv_lens = [32, 32, 1], [32, 160, 96]
+    num_seqs = len(query_lens)
+    max_num_blocks = max(kv_lens) // block_size
+    num_blocks = max_num_blocks * num_seqs
+
+    scale = head_size**-0.5
+    query = torch.randn(
+        sum(query_lens), num_query_heads, head_size, dtype=dtype, device=device
+    )
+    key_cache, value_cache = (
+        torch.randn(
+            num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device
+        )
+        for _ in range(2)
+    )
+    block_tables = torch.randperm(num_blocks, dtype=torch.int32, device=device).view(
+        num_seqs, max_num_blocks
+    )
+    cu_seqlens_q = torch.tensor(
+        [0, *torch.tensor(query_lens).cumsum(0).tolist()],
+        dtype=torch.int32,
+        device=device,
+    )
+    seqused_k = torch.tensor(kv_lens, dtype=torch.int32, device=device)
+    dynamic_causal = torch.tensor(per_seq_causal, dtype=torch.int32, device=device)
+
+    output = torch.empty_like(query)
+    for causal, seqused_q in split_dynamic_causal(cu_seqlens_q, dynamic_causal):
+        flash_attn_varlen_func(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max(query_lens),
+            seqused_k=seqused_k,
+            max_seqlen_k=max(kv_lens),
+            softmax_scale=scale,
+            causal=causal,
+            block_table=block_tables,
+            seqused_q=seqused_q,
+            fa_version=4,
+        )
+
+    ref_output = ref_paged_attn(
+        query,
+        key_cache,
+        value_cache,
+        query_lens,
+        kv_lens,
+        block_tables,
+        scale,
+        per_seq_causal,
+    )
+    torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
