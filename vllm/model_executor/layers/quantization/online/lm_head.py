@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Online-quantized copies of an already-loaded lm_head."""
 
+from itertools import chain
 from typing import Literal
+from weakref import WeakKeyDictionary
 
 import torch
 from torch.nn import Module, Parameter
@@ -30,6 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
 )
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -76,7 +79,9 @@ class _LMHeadNvfp4MarlinMethod(OnlineLinearBase):
         layer.weight_scale = Parameter(scales, requires_grad=False)
         layer.weight_global_scale = Parameter(global_scale, requires_grad=False)
         prepare_fp4_layer_for_marlin(layer)
-        layer.workspace = marlin_make_workspace_new(packed.device)
+        layer.register_buffer(
+            "workspace", marlin_make_workspace_new(packed.device), persistent=False
+        )
 
     def apply(
         self, layer: Module, x: torch.Tensor, bias: torch.Tensor | None = None
@@ -99,15 +104,7 @@ _LM_HEAD_METHODS: dict[str, type[OnlineLinearBase]] = {
 }
 
 
-def quantized_lm_head_copy(
-    lm_head: ParallelLMHead, quantization: Literal["fp8", "nvfp4"]
-) -> ParallelLMHead:
-    """A ParallelLMHead holding this rank's shard of `lm_head`, quantized.
-
-    "fp8" uses per-row weight and per-token activation scales on the platform's
-    FP8 linear kernel; "nvfp4" is weight-only on Marlin. `lm_head` is left
-    unchanged and no bf16 copy of its weight is made.
-    """
+def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead:
     if (
         not isinstance(
             lm_head.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
@@ -140,6 +137,29 @@ def quantized_lm_head_copy(
         )
     replace_parameter(head, "weight", lm_head.weight.data)
     head.quant_method.process_weights_after_loading(head)
+    return head
+
+
+# Each quantized copy maps to the head it is derived from. Weak keys, and no
+# module attribute, so the copy never owns the source as a submodule.
+_SOURCES: WeakKeyDictionary[Module, tuple[ParallelLMHead, str]] = WeakKeyDictionary()
+
+
+def quantized_lm_head_copy(
+    lm_head: ParallelLMHead, quantization: Literal["fp8", "nvfp4"]
+) -> ParallelLMHead:
+    """A ParallelLMHead holding this rank's shard of `lm_head`, quantized.
+
+    "fp8" uses per-row weight and per-token activation scales on the platform's
+    FP8 linear kernel; "nvfp4" is weight-only on Marlin. `lm_head` is left
+    unchanged and no bf16 copy of its weight is made. The copy is derived state:
+    `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
+    """
+    head = _quantize_copy(lm_head, quantization)
+    # Keep it out of layerwise reload, which would re-run
+    # process_weights_after_loading on the already-quantized weight.
+    get_layerwise_info(head).reset()
+    _SOURCES[head] = (lm_head, quantization)
     logger.info(
         "Quantized a %s copy of the lm_head (%d x %d per rank).",
         quantization,
@@ -147,3 +167,19 @@ def quantized_lm_head_copy(
         head.input_size_per_partition,
     )
     return head
+
+
+@torch.no_grad()
+def refresh_quantized_lm_heads(model: Module) -> None:
+    """Re-derive the quantized lm_head copies in `model` from their source heads.
+
+    Copies in place, so CUDA graphs keep pointing at valid tensors.
+    """
+    for module in model.modules():
+        if module not in _SOURCES:
+            continue
+        fresh = _quantize_copy(*_SOURCES[module])
+        for name, tensor in chain(
+            fresh.named_parameters(recurse=False), fresh.named_buffers(recurse=False)
+        ):
+            getattr(module, name).copy_(tensor)

@@ -1424,7 +1424,6 @@ class VllmConfig:
             return
 
         self._resolve_mm_encoder_only()
-        self._check_draft_lm_head_quantization()
 
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
             # Such an instance publishes encoder embeddings and runs no language
@@ -3071,27 +3070,6 @@ class VllmConfig:
             return
 
         mm_config.validate_mm_processor_device(self.ec_transfer_config)
-
-    def _check_draft_lm_head_quantization(self) -> None:
-        """The quantized draft copy of the lm_head is derived once at load time,
-        so features that replace or restore weights afterwards would leave it
-        stale or re-quantize it."""
-        speculative_config = self.speculative_config
-        if (
-            speculative_config is None
-            or speculative_config.draft_lm_head_quantization is None
-        ):
-            return
-        unsupported = []
-        if self.model_config is not None and self.model_config.enable_sleep_mode:
-            unsupported.append("sleep mode")
-        if self.weight_transfer_config is not None:
-            unsupported.append("weight transfer")
-        if unsupported:
-            raise ValueError(
-                "draft_lm_head_quantization is not supported with "
-                f"{' or '.join(unsupported)}."
-            )
 
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""

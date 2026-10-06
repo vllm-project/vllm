@@ -85,3 +85,59 @@ def test_mtp_draft_lm_head_quantization(
         assert al >= 0.9 * ref_al, (
             f"{quant}: acceptance length {al:.3f} vs {ref_al:.3f}"
         )
+
+
+@single_gpu_only
+def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    vllm_runner,
+):
+    """The quantized draft head is derived from the target head: it must come
+    back intact after a level 1 sleep and be re-derived after a target weight
+    reload, so outputs and acceptance match the run before."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    prompts = get_test_prompts(mm_enabled=False)
+    with vllm_runner(
+        "Qwen/Qwen3.5-0.8B-Base",
+        block_size=None,
+        enable_chunked_prefill=None,
+        max_model_len=2048,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+            "draft_lm_head_quantization": "nvfp4",
+        },
+        enable_sleep_mode=True,
+        disable_log_stats=False,
+    ) as runner:
+        llm = runner.llm
+
+        def run():
+            before = llm.get_metrics()
+            outputs = llm.chat(prompts, sampling_config)
+            return outputs, compute_acceptance_len(llm.get_metrics(), before)
+
+        ref_outputs, ref_al = run()
+
+        llm.sleep(level=1)
+        llm.wake_up()
+        outputs, al = run()
+        assert_request_outputs_match(
+            ref_outputs,
+            outputs,
+            required_matches=int(0.95 * len(ref_outputs)),
+            context="after level 1 sleep",
+        )
+        assert al == pytest.approx(ref_al, rel=0.03)
+
+        llm.collective_rpc("reload_weights")
+        outputs, al = run()
+        assert_request_outputs_match(
+            ref_outputs,
+            outputs,
+            required_matches=int(0.95 * len(ref_outputs)),
+            context="after weight reload",
+        )
+        assert al == pytest.approx(ref_al, rel=0.03)
