@@ -380,12 +380,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Llama4ForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ),
-    "LongcatFlashForCausalLM": _HfExamplesInfo(
-        "meituan-longcat/LongCat-Flash-Chat", trust_remote_code=True
-    ),
+    "LongcatFlashForCausalLM": _HfExamplesInfo("meituan-longcat/LongCat-Flash-Chat"),
     "LongcatFlashNgramForCausalLM": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Lite",
-        trust_remote_code=True,
         # Shrink the ~62GB n-gram tables (ngram_vocab_size_ratio * vocab_size)
         # so the dummy-weight init test fits in CI memory.
         hf_overrides={"ngram_vocab_size_ratio": 1},
@@ -583,6 +580,11 @@ _EMBEDDING_EXAMPLE_MODELS = {
         "ai-sage/Giga-Embeddings-instruct-10B-A1.8B-0826",
         trust_remote_code=True,
         hf_overrides={"model_type": "deepseek_v3", "auto_map": None},
+    ),
+    "EmbeddingGemma2Model": _HfExamplesInfo(
+        "google/embeddinggemma-2",
+        min_transformers_version="5.18.0",
+        is_available_online=False,
     ),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
@@ -1752,7 +1754,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
-        trust_remote_code=True,
         speculative_model="meituan-longcat/LongCat-Flash-Chat",
     ),
     "MiMoMTPModel": _HfExamplesInfo(
