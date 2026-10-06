@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
+from vllm.exceptions import EnginePausedError
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -697,6 +698,15 @@ class OutputProcessor:
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
+            if finish_reason == FinishReason.PAUSED:
+                # Rejected: end the session, including chunks sent since then.
+                if req_state.streaming_input:
+                    req_state.streaming_input = False
+                    reqs_to_abort.append(req_id)
+                if req_state.queue is not None:
+                    req_state.queue.close()
+                if pooling_output is None and req_state.detokenizer is None:
+                    pooling_output = EMPTY_CPU_TENSOR
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
@@ -771,6 +781,9 @@ class OutputProcessor:
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
+            if finish_reason == FinishReason.PAUSED and req_state.queue is not None:
+                # Retryable rejection; overrides any output still to be consumed.
+                req_state.queue.put(EnginePausedError())
 
             # Free completed requests.
             if finish_reason is not None:

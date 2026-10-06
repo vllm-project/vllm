@@ -87,6 +87,8 @@ pub enum FinishReason {
     Error,
     /// A repetitive token pattern was detected.
     Repetition(Option<StopReason>),
+    /// Rejected on arrival because generation is paused; retryable.
+    Paused,
 }
 
 impl FinishReason {
@@ -105,6 +107,7 @@ impl FinishReason {
             Self::Abort => "abort",
             Self::Error => "error",
             Self::Repetition(_) => "repetition",
+            Self::Paused => "paused",
         }
     }
 
@@ -139,6 +142,7 @@ fn finish_reason_from_engine(
         EngineCoreFinishReason::Abort => FinishReason::Abort,
         EngineCoreFinishReason::Error => FinishReason::Error,
         EngineCoreFinishReason::Repetition => FinishReason::Repetition(stop_reason),
+        EngineCoreFinishReason::Paused => FinishReason::Paused,
     })
 }
 

@@ -192,8 +192,10 @@ async fn generate_chunk_stream(
                 usage.output_token_count = usage.output_token_count.saturating_add(token_ids.len());
                 let finish_reason = output.finish_reason;
 
-                if matches!(finish_reason.as_ref(), Some(FinishReason::Error)) {
-                    bail_server_error!("Internal server error");
+                match finish_reason.as_ref() {
+                    Some(FinishReason::Error) => bail_server_error!("Internal server error"),
+                    Some(FinishReason::Paused) => return Err(ApiError::EnginePaused),
+                    _ => {}
                 }
 
                 if let Some(finish_reason) = finish_reason.as_ref()
@@ -288,6 +290,9 @@ fn collect_generate(
     }: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
+    if collected.finish_reason == FinishReason::Paused {
+        return Err(ApiError::EnginePaused);
+    }
     let logprobs = if include_logprobs {
         let logprobs = collected.logprobs.as_ref().ok_or_else(|| {
             ApiError::server_error(

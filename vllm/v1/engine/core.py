@@ -1605,7 +1605,7 @@ class EngineCoreProc(EngineCore):
             return
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-            if self._reject_add_in_shutdown(req):
+            if self._reject_add_in_shutdown(req) or self._reject_add_while_paused(req):
                 return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
@@ -1640,6 +1640,20 @@ class EngineCoreProc(EngineCore):
             request.request_id,
         )
         self._send_abort_outputs_to_client([request.request_id], request.client_index)
+        return True
+
+    def _reject_add_while_paused(self, request: Request) -> bool:
+        # A cleanup marker carries no work; it must still reach the KV connector.
+        if (
+            request.abort_immediately
+            or self.scheduler.pause_state != PauseState.PAUSED_NEW
+        ):
+            return False
+        self._send_finish_outputs_to_client(
+            [request.request_id], request.client_index, FinishReason.PAUSED
+        )
+        # The client drops a rejected id, so end any open session under it.
+        self.abort_requests([request.request_id])
         return True
 
     def _reject_utility_in_shutdown(
@@ -1989,13 +2003,13 @@ class EngineCoreProc(EngineCore):
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
-        All pause modes queue new adds -- "abort" and "keep" skip step();
-        "wait" allows step() so in-flight requests can drain.
+        "abort" and "wait" reject new adds; "keep" queues them. "abort" and
+        "keep" skip step(); "wait" allows step() so in-flight requests can drain.
 
         - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
+        - ``wait``: Set PAUSED_NEW (reject adds, keep stepping); when drained,
           optionally clear caches, then complete the returned Future.
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
@@ -2159,15 +2173,14 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
-        if self.has_coordinator and request_wave != self.current_wave:
+        if self.has_coordinator:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
-            elif (
+            if (
                 not self.engines_running
                 and self.scheduler.pause_state == PauseState.UNPAUSED
             ):
-                # Request received for an already-completed wave, notify
-                # front-end that we need to start the next one.
+                # Engines alone start waves: have the coordinator wake the others.
                 self.engines_running = True
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
