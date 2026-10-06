@@ -41,8 +41,12 @@ class BaseModelLoader(ABC):
 
     @abstractmethod
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        """Load weights into a model. This standalone API allows
-        inplace weights loading for an already-initialized model"""
+        """Load checkpoint weights into an initialized model.
+
+        ``load_model`` follows this with ``process_weights_after_loading``; a
+        cold load that bypasses ``load_model`` must call it too. A loader that
+        restores already-processed weights (vLLM-serialized tensorizer) skips it.
+        """
         raise NotImplementedError
 
     def create_model(
