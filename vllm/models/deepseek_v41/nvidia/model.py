@@ -766,6 +766,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
         ):
             self.decoder_replay_start = cut + 1
+            # The attention metadata keys the replay layers read.
+            metadata_prefixes = set()
+            for layer in islice(self.layers, cut + 1, self.end_layer):
+                attn = typing.cast(DeepseekV4DecoderLayer, layer).attn
+                metadata_prefixes.add(attn.swa_cache_layer.prefix)
+                if attn.compressed_cache_prefix is not None:
+                    metadata_prefixes.add(attn.compressed_cache_prefix)
+                if attn.indexer is not None:
+                    metadata_prefixes.add(attn.indexer.k_cache.prefix)
             self.decoder_replay_layers = DecoderReplayLayers(
                 config.sliding_window,
                 self._run_replay_layers,
@@ -774,6 +783,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     for buf in (self.topk_indices_buffer, self.candidate_block_buffer)
                     if buf is not None
                 ],
+                metadata_prefixes,
             )
             logger.info_once(
                 "Decoder SWA bounded replay: in eager prefill steps, layers "
