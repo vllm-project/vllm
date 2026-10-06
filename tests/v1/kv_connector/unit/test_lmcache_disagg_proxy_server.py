@@ -1,28 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Prefill-leg request hygiene of the LMCache disaggregated proxy server.
-
-`disagg_proxy_server.py` forwards every client request to P first and throws
-P's response away: P only exists to populate the KV cache that D will read. The
-forwarded payload therefore has to be rewritten - P is pinned to a single token
-and must not be asked to stream - and the rewrite has to stay confined to a
-copy, because the caller's payload is what the decode leg is built from.
-
-Every other PD proxy that pins `max_tokens=1` also pins `stream=False` and
-drops `stream_options`:
-
-* `tests/v1/kv_connector/nixl_integration/toy_proxy_server.py`
-* `examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py`
-* `examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py`
-* `examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py`
-* `examples/disaggregated/disaggregated_serving/disagg_proxy_multiturn.py`
-
-Two of those (`toy_proxy_server.py`, `disagg_proxy_multiturn.py`) also drop
-`min_tokens`, which `toy_proxy_server.py` documents as "not supported for P".
-This one only overrode `max_tokens`, so a client request carrying
-`min_tokens > 1` was forwarded as `max_tokens=1, min_tokens=10` and rejected by
-`SamplingParams` on P.
-"""
+"""Prefill must request one non-streaming token without changing decode arguments."""
 
 import runpy
 from pathlib import Path
