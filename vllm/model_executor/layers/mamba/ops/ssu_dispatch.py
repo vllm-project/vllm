@@ -210,8 +210,8 @@ def _postprocess_replayssm_kernel(
             # Mode none has one live column, regardless of the prompt length.
             tl.store(tracker_start + live_slot, 0, mask=valid_live)
             tl.store(tracker_committed + live_slot, 0, mask=valid_live)
-        if materialize:
-            # Prefill produced canonical state, so publish an exact copy.
+        if materialize & (live_slot != dst_slot):
+            # Prefill already wrote canonical state; only another slot needs a copy.
             tl.store(plan_flush_count + batch_idx, 0)
     elif valid_live:
         old_start = tl.load(tracker_start + live_slot)

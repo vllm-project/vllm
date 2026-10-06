@@ -178,6 +178,70 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_
         torch.testing.assert_close(tensor[4], before, atol=0, rtol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("post_step", [False, True], ids=["v1", "v2"])
+def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_step):
+    """Skip only prefill self-copies; preserve other copies and in-place replay."""
+
+    def ints(values):
+        return torch.tensor(values, dtype=torch.int32, device="cuda")
+
+    mixer = SimpleNamespace(
+        kv_cache=(
+            torch.empty(0, device="cuda"),
+            torch.empty(9, 1, 1, 1, device="cuda"),
+        ),
+        replayssm_cache=(
+            torch.empty(9, 1, 20, 1, device="cuda"),
+            torch.empty(9, 1, 20, device="cuda"),
+            torch.empty(9, 1, 20, 1, device="cuda"),
+        ),
+        _replayssm_ring_start=ints([3] * 9),
+        _replayssm_prev_num_accepted=ints([2] * 9),
+        replayssm_buffer_len=16,
+        A=torch.empty(1, device="cuda"),
+    )
+    group = _ReplaySSMGroupContext.create(
+        [mixer],
+        ints(
+            [
+                [0, 1, 2],
+                [3, 4, 5],
+                [6, 7, 8],
+                [NULL_BLOCK_ID] * 3,
+                [NULL_BLOCK_ID] * 3,
+            ]
+        ),
+        "align",
+        16,
+        5,
+    )
+    # Reordered rows: canonical prefill in slot 2; prefill copy 5 -> 4;
+    # positive-token replay in slot 7; padded slot; padded request.
+    group.postprocess(
+        idx_mapping=ints([2, 0, 3, 1, -1]),
+        query_metadata=(
+            ints([0, 48, 80, 84, 100, 100]) if post_step else ints([48, 32, 4, 16, 0])
+        ),
+        query_metadata_is_cumulative=post_step,
+        num_computed_tokens=ints([32, 16, 48, 32])
+        if post_step
+        else ints([0, 0, 0, 31]),
+        num_computed_is_post_step=post_step,
+        num_accepted_tokens=ints([1] * 4),
+        is_prefilling=torch.tensor([True, True, False, True, True], device="cuda"),
+        live_cols=ints([2, 0, 2, 1]),
+        num_reqs=5,
+    )
+
+    assert group.plan_flush_count.tolist() == [-1, 0, 3, -1, -1]
+    assert group.active_request_indices.tolist() == [1, 2, -1, -1, -1]
+    assert group.src_slots[0, 1:3].tolist() == [5, 7]
+    assert group.dst_slots[0, 1:3].tolist() == [4, 7]
+    assert mixer._replayssm_ring_start.tolist() == [3, 0, 0, 0, 0, 3, 3, 0, 3]
+    assert mixer._replayssm_prev_num_accepted.tolist() == [2, 0, 0, 0, 0, 2, 2, 0, 2]
+
+
 def test_default_backend_is_triton():
     initialize_mamba_ssu_backend(MambaConfig(), _kv_cache_config_with_ssu())
     backend = get_mamba_ssu_backend()
