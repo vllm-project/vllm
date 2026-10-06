@@ -10,11 +10,38 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbeddingBase
 from vllm.platforms import current_platform
 
 _OPT_KV_LORA_RANK = 512
 _OPT_ROT_DIM = 64
 _OPT_MIN_SIZE = 2048
+
+
+def apply_kimi_k3_rope(
+    rotary_emb: RotaryEmbeddingBase,
+    positions: torch.Tensor,
+    q_pe: torch.Tensor,
+    k_pe: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply Kimi-K3 RoPE from the module's existing cos/sin table.
+
+    AITER applies that table in place. Otherwise this is the module forward.
+    """
+    if rocm_aiter_ops.is_enabled():
+        cos_sin_cache = rotary_emb._match_cos_sin_cache_dtype(q_pe)
+        rocm_aiter_ops.get_triton_rotary_embedding_op()(
+            positions,
+            q_pe,
+            k_pe,
+            rotary_emb.head_size,
+            cos_sin_cache,
+            rotary_emb.is_neox_style,
+        )
+        return q_pe, k_pe
+    q_out, k_out = rotary_emb(positions, q_pe, k_pe)
+    assert k_out is not None
+    return q_out, k_out
 
 
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
@@ -224,9 +251,10 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         q = q.view(-1, heads, self.qk_head_dim)
 
         if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
+            q_pe = q[..., self.qk_nope_head_dim :]
+            q_pe_out, k_pe = apply_kimi_k3_rope(self.rotary_emb, positions, q_pe, k_pe)
+            if q_pe_out.data_ptr() != q_pe.data_ptr():
+                q_pe.copy_(q_pe_out)
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)

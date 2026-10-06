@@ -5,7 +5,6 @@ import math
 
 import torch
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -70,15 +69,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             dtype,
             init_cache=init_cache,
         )
-        # The YaRN table is already in cos_sin_cache. Apply it with the cached
-        # AITER kernel instead of recompiling the reciprocal/clamp/cat formula
-        # into a pointwise kernel on every MLA layer. VLLM_ROCM_USE_AITER is the
-        # gate; the narrower Triton-RoPE flag stays off in the K3 recipe.
-        self.use_aiter_cached_rope = rocm_aiter_ops.is_enabled()
-        if self.use_aiter_cached_rope and not self.use_aiter:
-            self.rocm_aiter_triton_rotary_embedding = (
-                rocm_aiter_ops.get_triton_rotary_embedding_op()
-            )
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
         pos_freqs = self.base ** (
@@ -208,20 +198,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # Same apply as ATOM's rope_cached_positions_2c_fwd_inplace: the cos/sin
-        # table is an input, not a per-layer rebuild. Offsets stay on the
-        # PyTorch path; decode does not pass them.
-        if self.use_aiter_cached_rope and key is not None and offsets is None:
-            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            self.rocm_aiter_triton_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox_style,
-            )
-            return query, key
         return self.forward_native(positions, query, key, offsets)
 
     def forward_cuda(
