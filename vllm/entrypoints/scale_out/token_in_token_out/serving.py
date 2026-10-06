@@ -232,7 +232,8 @@ class ServingTokens(GenerateBaseServing):
         engine_input: EngineInput
         features = request.features
         if request.content_parts:
-            # Items in features are already expanded; render only what follows.
+            # Items in features are already expanded; render every token
+            # after the last of them, so new placeholders must lie there.
             ranges = features.mm_placeholders.values() if features else ()
             start = max((p.offset + p.length for rs in ranges for p in rs), default=0)
             tracker = AsyncMultiModalItemTracker(self.model_config)
