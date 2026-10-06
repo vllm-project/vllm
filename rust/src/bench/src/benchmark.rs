@@ -370,14 +370,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             config.num_prompts,
             config.dataset_path.as_deref().unwrap_or("auto-download")
         ),
-        DatasetName::Sonnet => format!(
-            "{} prompts from Sonnet ({}, isl={}, osl={}, prefix={})",
-            config.num_prompts,
-            config.dataset_path.as_deref().unwrap_or("built-in"),
-            config.sonnet_input_len,
-            config.sonnet_output_len,
-            config.sonnet_prefix_len,
-        ),
         DatasetName::SpeedBench => {
             let truncate_info = config
                 .speed_bench_max_input_len
@@ -482,21 +474,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 &config.request_id_prefix,
                 config.no_oversample,
                 config.disable_shuffle,
-            )?
-        }
-        DatasetName::Sonnet => {
-            let tok = tokenizer
-                .as_ref()
-                .ok_or_else(|| BenchError::Config("Sonnet dataset requires a tokenizer".into()))?;
-            crate::datasets::sonnet::load_sonnet_dataset(
-                tok,
-                config.dataset_path.as_deref(),
-                config.num_prompts,
-                config.sonnet_input_len,
-                config.sonnet_output_len,
-                config.sonnet_prefix_len,
-                config.seed,
-                &config.request_id_prefix,
             )?
         }
         DatasetName::SpeedBench => {

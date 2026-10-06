@@ -145,9 +145,6 @@ pub struct BenchConfig {
     pub prefix_repetition_num_prefixes: usize,
     pub prefix_repetition_output_len: usize,
     pub sharegpt_output_len: Option<usize>,
-    pub sonnet_input_len: usize,
-    pub sonnet_output_len: usize,
-    pub sonnet_prefix_len: usize,
     pub no_oversample: bool,
     pub disable_shuffle: bool,
     pub num_prompts: usize,
@@ -447,8 +444,7 @@ impl BenchConfig {
             (MmLimitPerPrompt::default(), Vec::new())
         };
 
-        // Note: --dataset-path is optional for sharegpt (auto-downloads) and
-        // sonnet (uses built-in Shakespeare's sonnets).
+        // --dataset-path is optional for sharegpt (auto-downloads).
 
         // Range ratio (Python semantics: [len*(1-r), len*(1+r)], each r in [0,1))
         let random_range_ratio = RangeRatio::parse(&args.random_range_ratio)?;
@@ -689,9 +685,6 @@ impl BenchConfig {
             random_cache_hit_fraction: args.random_cache_hit_fraction,
             random_cache_ratio: args.random_cache_ratio,
             sharegpt_output_len: args.sharegpt_output_len,
-            sonnet_input_len: args.sonnet_input_len,
-            sonnet_output_len: args.sonnet_output_len,
-            sonnet_prefix_len: args.sonnet_prefix_len,
             no_oversample: args.no_oversample,
             disable_shuffle: args.disable_shuffle,
             num_prompts: args.num_prompts,
