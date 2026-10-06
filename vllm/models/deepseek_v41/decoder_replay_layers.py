@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Decoder-side SWA bounded replay: running the replay layers on their batch.
 
-The layers past the last KV-source layer own nothing but sliding-window KV, so
-in eager prefill steps they run on each request's last ``window`` rows only.
+The layers past the last KV-source layer own nothing but sliding-window KV, and
+the rest of the last KV source feeds only them; so once that layer has written
+its KV for every row, it and the layers past it run on each request's last
+``window`` rows only.
 ``DeepseekV41ModelState`` prepares those rows as a sub-batch with attention
 metadata and a forward context of its own, like a microbatch;
 ``DecoderReplayLayers`` gathers the layer inputs by its rows, runs the layers
@@ -40,23 +42,23 @@ class DecoderReplayLayers:
     """Runs the replay layers on the step's replay batch.
 
     ``run_layers`` takes a batch's layer inputs and returns its per-row
-    outputs. ``row_buffers`` hold per-row results the source layer's indexer
-    publishes for the layers after it; they are compacted to the replay rows
-    in place. ``metadata_prefixes`` are the attention metadata keys the layers
-    read, so the replay batch builds only those.
+    outputs. ``metadata_prefixes`` are the attention metadata keys the layers
+    read, so the replay batch builds only those. ``first_swa_prefix`` is the
+    first replay layer's sliding-window key: that layer wrote every row's window
+    KV, so its metadata keeps the batch's window starts.
     """
 
     def __init__(
         self,
         window: int,
         run_layers: Callable[..., tuple[torch.Tensor, ...]],
-        row_buffers: list[torch.Tensor],
         metadata_prefixes: set[str],
+        first_swa_prefix: str,
     ) -> None:
         self.window = window
         self.run_layers = run_layers
-        self.row_buffers = row_buffers
         self.metadata_prefixes = metadata_prefixes
+        self.first_swa_prefix = first_swa_prefix
         # Set by the model state every step; None runs the layers on the batch.
         self.replay_batch: ReplayBatch | None = None
         self._break_outputs: list[torch.Tensor] | None = None
@@ -91,9 +93,6 @@ class DecoderReplayLayers:
         # Replay batch steps hold more than `window` tokens: no deferred MoE finalize.
         assert isinstance(hidden_states, torch.Tensor)
         rows = replay_batch.rows
-        num_rows = rows.shape[0]
-        for buf in self.row_buffers:
-            buf[:num_rows].copy_(buf.index_select(0, rows))
         inputs = (hidden_states, *states)
         with override_forward_context(replay_batch.forward_context):
             if replay_batch.run_graph is not None:

@@ -686,6 +686,23 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         return self._o_proj(attn_out, positions)
 
+    def forward_kv(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> None:
+        """Write the KV ``forward`` writes, without attending: the SWA KV, the
+        compressor's latent into the compressed cache and, where this layer owns
+        it, the index K."""
+        attn_metadata = get_forward_context().attn_metadata
+        qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
+        qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
+        # The fused SWA insert takes Q along.
+        q = self._wq_b_proj(qr, qr_scale).view(-1, self.n_local_heads, self.head_dim)
+        self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+        latent: torch.Tensor | None = None
+        if self.compressor is not None:
+            latent = self.compressor(kv_score, positions)
+            self.compressor.insert_cache(latent, positions, self.rotary_emb)
+        if self.indexer is not None and self.indexer.owns_k:
+            self.indexer._produce_k(latent, positions, self.indexer_rotary_emb)
+
     def bind_gemm_rs(self) -> None:
         """Fuse ``wo_b`` with the sequence-parallel TP reduce-scatter.
 

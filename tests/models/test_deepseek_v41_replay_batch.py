@@ -59,7 +59,12 @@ def state(monkeypatch):
     cfg.parallel_config.data_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
+    layers = SimpleNamespace(
+        window=WINDOW,
+        replay_batch=None,
+        metadata_prefixes=set(),
+        first_swa_prefix="swa_first",
+    )
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     builds: list = []
 
@@ -72,7 +77,7 @@ def state(monkeypatch):
             attn_metadata=object(),
         )
         builds.append(build)
-        return {"swa": build.attn_metadata}
+        return {"swa": build.attn_metadata, "swa_first": build.attn_metadata}
 
     monkeypatch.setattr(DefaultModelState, "prepare_attn", prepare_attn)
     state = DeepseekV41ModelState(cfg, model, None, DEVICE)
@@ -120,7 +125,8 @@ def _slot_mappings(num_tokens: int) -> torch.Tensor:
 
 
 def _prepare(state, batch, cg_mode):
-    """Runs prepare_attn; returns the replay batch and the replay build's inputs."""
+    """Runs prepare_attn; returns the replay batch and the replay build's inputs.
+    The first replay layer's sliding-window build follows the replay build."""
     state.prepare_attn(
         batch,
         cg_mode,
@@ -130,7 +136,7 @@ def _prepare(state, batch, cg_mode):
         GROUPS,
     )
     replay = state.decoder_replay_layers.replay_batch
-    return (None, None) if replay is None else (replay, state.builds[-1])
+    return (None, None) if replay is None else (replay, state.builds[-2])
 
 
 def test_replay_batch_keeps_each_request_window(state):
@@ -151,8 +157,16 @@ def test_replay_batch_keeps_each_request_window(state):
     assert build.replay_start.tolist() == [0, 300 - WINDOW, 50]
     assert torch.equal(sub.positions, batch.positions[rows])
     assert torch.equal(build.slot_mappings, _slot_mappings(401)[:, rows])
+    # The first replay layer keeps the encoder-side window starts: it wrote
+    # every row's window KV.
+    first = state.builds[-1]
+    assert first.batch is sub and first.cg_mode == CUDAGraphMode.NONE
+    assert first.replay_start.tolist() == [0, 0, 50]
     context = replay.forward_context
-    assert context.attn_metadata == {"swa": build.attn_metadata}
+    assert context.attn_metadata == {
+        "swa": build.attn_metadata,
+        "swa_first": first.attn_metadata,
+    }
     assert torch.equal(context.slot_mapping["mla"], _slot_mappings(401)[1, rows])
     assert context.dp_metadata is None and context.is_padding is None
 

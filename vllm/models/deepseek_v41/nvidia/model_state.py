@@ -239,6 +239,7 @@ class DeepseekV41ModelState(DefaultModelState):
                 self.max_num_reqs, dtype=torch.int32, device=device
             )
             self._replay_attn_groups: list[list[AttentionGroup]] | None = None
+            self._first_swa_attn_groups: list[list[AttentionGroup]] | None = None
         layers = self.decoder_replay_layers
         compilation_config = vllm_config.compilation_config
         self.replay_cudagraphs: DecoderReplayCudaGraphManager | None = None
@@ -520,6 +521,18 @@ class DeepseekV41ModelState(DefaultModelState):
                 self._kept_kv_start[:num_reqs]
             ),
         )
+        # The first replay layer wrote every row's window KV, so its window
+        # starts are the batch's.
+        first_swa = layers.first_swa_prefix
+        attn_metadata[first_swa] = super().prepare_attn(
+            kept_batch,
+            CUDAGraphMode.NONE,
+            block_tables,
+            kept_slot_mappings,
+            self._first_swa_groups(attn_groups),
+            kv_cache_config,
+            model_specific_attn_metadata=ReplayAttnMetadata(replay_start),
+        )[first_swa]
         layers.replay_batch = ReplayBatch(
             self._kept_rows[:num_tokens],
             create_forward_context(
@@ -559,7 +572,7 @@ class DeepseekV41ModelState(DefaultModelState):
 
         if self.replay_cudagraphs is not None:
             # profile_only captures use pre-KV-cache groups: drop the cache.
-            self._replay_attn_groups = None
+            self._replay_attn_groups = self._first_swa_attn_groups = None
             self.replay_cudagraphs.capture_replay_graphs(prepare)
 
     def _kept_input_batch(
@@ -644,19 +657,39 @@ class DeepseekV41ModelState(DefaultModelState):
         hold the batch's. Only the groups the replay layers read are built."""
         if self._replay_attn_groups is None:
             assert self.decoder_replay_layers is not None
-            prefixes = self.decoder_replay_layers.metadata_prefixes
-            self._replay_attn_groups = []
-            for groups in attn_groups:
-                replay_groups = []
-                for group in groups:
-                    if prefixes.isdisjoint(group.layer_names):
-                        continue
-                    replay_group = replace(group, metadata_builders=[])
-                    replay_group.create_metadata_builders(
-                        self.vllm_config,
-                        self.device,
-                        group.metadata_builders[0].kernel_block_size,
-                    )
-                    replay_groups.append(replay_group)
-                self._replay_attn_groups.append(replay_groups)
+            self._replay_attn_groups = self._own_groups(
+                attn_groups, self.decoder_replay_layers.metadata_prefixes
+            )
         return self._replay_attn_groups
+
+    def _first_swa_groups(
+        self, attn_groups: list[list[AttentionGroup]]
+    ) -> list[list[AttentionGroup]]:
+        """The first replay layer's sliding-window group, with builders of its
+        own as well: its metadata lives alongside the replay layers'."""
+        if self._first_swa_attn_groups is None:
+            assert self.decoder_replay_layers is not None
+            self._first_swa_attn_groups = self._own_groups(
+                attn_groups, {self.decoder_replay_layers.first_swa_prefix}
+            )
+        return self._first_swa_attn_groups
+
+    def _own_groups(
+        self, attn_groups: list[list[AttentionGroup]], prefixes: set[str]
+    ) -> list[list[AttentionGroup]]:
+        """New-builder copies of the groups holding any of ``prefixes``."""
+        own_groups = []
+        for groups in attn_groups:
+            copies = []
+            for group in groups:
+                if prefixes.isdisjoint(group.layer_names):
+                    continue
+                copy = replace(group, metadata_builders=[])
+                copy.create_metadata_builders(
+                    self.vllm_config,
+                    self.device,
+                    group.metadata_builders[0].kernel_block_size,
+                )
+                copies.append(copy)
+            own_groups.append(copies)
+        return own_groups

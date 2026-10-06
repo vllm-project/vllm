@@ -67,10 +67,7 @@ def _states(num_tokens: int):
     )
 
 
-def test_run_gathers_states_and_realigns_shared_indexer_buffers():
-    topk = torch.arange(NUM_TOKENS * 4, device=DEVICE).view(NUM_TOKENS, 4).int()
-    candidates = torch.arange(NUM_TOKENS * 3, device=DEVICE).view(NUM_TOKENS, 3).int()
-    topk_before, candidates_before = topk.clone(), candidates.clone()
+def test_run_gathers_states():
     seen = {}
 
     def run_layers(hidden_states, positions, input_ids, pre_mix, post, res, residual):
@@ -80,7 +77,7 @@ def test_run_gathers_states_and_realigns_shared_indexer_buffers():
         seen["is_padding"] = replay_context.is_padding
         return residual, pre_mix
 
-    layers = DecoderReplayLayers(WINDOW, run_layers, [topk, candidates], set())
+    layers = DecoderReplayLayers(WINDOW, run_layers, set(), "swa")
     states = _states(NUM_TOKENS)
     hidden, residual = states[0], states[-1]
     full, sub = object(), object()
@@ -93,8 +90,6 @@ def test_run_gathers_states_and_realigns_shared_indexer_buffers():
     rows = torch.tensor(REPLAY_ROWS, device=DEVICE)
     assert torch.equal(seen["hidden_states"], hidden[rows])
     assert seen["attn_metadata"] is sub and seen["is_padding"] is None
-    assert torch.equal(topk[: len(REPLAY_ROWS)], topk_before[rows])
-    assert torch.equal(candidates[: len(REPLAY_ROWS)], candidates_before[rows])
     assert len(outputs) == 2 and outputs[0].shape == residual.shape
     assert torch.equal(outputs[0][rows], residual[rows])
     assert outputs[0][1:173].abs().sum() == 0
@@ -107,7 +102,7 @@ def test_no_replay_batch_runs_the_whole_batch():
         seen["attn_metadata"] = get_forward_context().attn_metadata
         return (hidden_states,)
 
-    layers = DecoderReplayLayers(WINDOW, run_layers, [], set())
+    layers = DecoderReplayLayers(WINDOW, run_layers, set(), "swa")
     states = _states(NUM_TOKENS)
     full = object()
     with override_forward_context(_context(full)):
@@ -140,7 +135,7 @@ def test_replay_graph_matches_eager(monkeypatch):
     def run_layers(hidden, positions, ids, pre, post, mix, residual):
         return residual + hidden[:, None] + positions[:, None, None], pre + ids[:, None]
 
-    layers = DecoderReplayLayers(4, run_layers, [], set())
+    layers = DecoderReplayLayers(4, run_layers, set(), "swa")
     manager = DecoderReplayCudaGraphManager(cfg, DEVICE, layers)
 
     def prepare(desc):
