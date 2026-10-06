@@ -62,8 +62,15 @@ class WatermarkConfig:
     def validate_watermark_settings(self) -> Self:
         if self.key > 2**64 - 1:
             raise ValueError("philox keys must fit in 64 bits")
-        if self.algorithm == "synthid_text" and not 1 <= self.depth <= 32:
-            raise ValueError("SynthID-Text depth must be between 1 and 32")
+        if self.algorithm == "synthid_text":
+            if self.depth < 1:
+                raise ValueError("SynthID-Text depth must be positive")
+            if self.depth > 32:
+                logger.warning_once(
+                    "SynthID-Text depths above 32 require additional Philox "
+                    "evaluations and may reduce sampling performance.",
+                    scope="global",
+                )
         history_is_too_short = (
             self.deduplicate_contexts_max_history is not None
             and self.deduplicate_contexts_max_history < _MIN_RECOMMENDED_DEDUP_HISTORY

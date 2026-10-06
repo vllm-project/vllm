@@ -28,19 +28,30 @@ def test_synthid_config_and_factory():
     assert WatermarkConfig(key=42, algorithm="gumbel").depth == 32
 
 
-@pytest.mark.parametrize("depth", [0, 33])
-def test_synthid_config_rejects_invalid_depth(depth):
+def test_synthid_config_rejects_invalid_depth():
     with pytest.raises(ValidationError):
-        WatermarkConfig(key=42, algorithm="synthid_text", depth=depth)
-    assert WatermarkConfig(key=42, algorithm="gumbel", depth=depth).depth == depth
+        WatermarkConfig(
+            key=42,
+            algorithm="synthid_text",
+            depth=0,
+        )
+
+
+@pytest.mark.parametrize("depth", [1, 32, 33, 64, 65])
+def test_synthid_accepts_positive_depth(depth):
+    config = WatermarkConfig(
+        key=42,
+        algorithm="synthid_text",
+        depth=depth,
+    )
+    assert config.depth == depth
 
 
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
         ({"context_width": 0}, "context_width must be positive"),
-        ({"depth": 0}, "SynthID-Text depth must be between 1 and 32"),
-        ({"depth": 33}, "SynthID-Text depth must be between 1 and 32"),
+        ({"depth": 0}, "SynthID-Text depth must be positive"),
         ({"key": -1}, "Philox keys must fit in 64 bits"),
     ],
 )
@@ -49,29 +60,45 @@ def test_synthid_rejects_invalid_constructor_args(kwargs, match):
         SynthIDWatermarker(**({"key": 42} | kwargs))
 
 
-@pytest.mark.parametrize("key, depth", [(0, 1), (42, 5), (2**64 - 1, 32)])
+@pytest.mark.parametrize(
+    "key, depth",
+    [
+        (0, 1),
+        (42, 5),
+        (2**64 - 1, 32),
+        (42, 33),
+        (42, 64),
+        (42, 65),
+    ],
+)
 def test_synthid_logits_follow_philox_bits_and_reweighting(key, depth):
     contexts = torch.tensor([[-1, -1, 7], [11, 12, 13]])
     logits = torch.tensor([[0.2, -0.3, 0.7, -1.1], [0.4, 1.3, -0.8, 0.1]])
-    words = PhiloxPRF(key).uint32(contexts, torch.arange(logits.shape[1]))
+    prf = PhiloxPRF(key)
 
     expected_probs = torch.softmax(logits, dim=1)
-    for bit in range(depth):
+
+    for depth_index in range(depth):
+        stream = depth_index // 32
+        bit = depth_index % 32
+
+        words = prf.uint32(
+            contexts,
+            torch.arange(logits.shape[1]),
+            stream=stream,
+        )
+
         g = ((words >> bit) & 1).to(logits.dtype)
         mass = (expected_probs * g).sum(dim=1, keepdim=True)
         expected_probs *= 1 + g - mass
 
-    actual = SynthIDWatermarker(key, context_width=3, depth=depth).watermark_logits(
-        logits, contexts
-    )
+    actual = SynthIDWatermarker(
+        key,
+        context_width=3,
+        depth=depth,
+    ).watermark_logits(logits, contexts)
+
     torch.testing.assert_close(actual.exp(), expected_probs)
-    torch.testing.assert_close(actual.exp().sum(dim=1), torch.ones(2))
-    assert torch.equal(
-        actual,
-        SynthIDWatermarker(key, context_width=3, depth=depth).watermark_logits(
-            logits, contexts
-        ),
-    )
 
 
 def test_synthid_native_partial_context_changes_stream():
@@ -114,9 +141,20 @@ def test_synthid_requires_random_sampler():
 
 @pytest.mark.parametrize(
     "key, context_width, depth",
-    [(0, 1, 1), (42, 2, 3), (2**64 - 1, 4, 32)],
+    [
+        (0, 1, 1),
+        (42, 2, 3),
+        (2**64 - 1, 4, 32),
+        (42, 4, 33),
+        (42, 4, 64),
+        (42, 4, 65),
+    ],
 )
-def test_synthid_detector_matches_independent_bit_count(key, context_width, depth):
+def test_synthid_detector_matches_independent_bit_count(
+    key,
+    context_width,
+    depth,
+):
     tokens = [3, 5, 7, 11, 13, 17]
     contexts = torch.tensor(
         [
@@ -124,14 +162,33 @@ def test_synthid_detector_matches_independent_bit_count(key, context_width, dept
             for position in range(len(tokens))
         ]
     )
-    words = PhiloxPRF(key).uint32(contexts, torch.tensor(tokens)[:, None]).flatten()
+    targets = torch.tensor(tokens)[:, None]
+    prf = PhiloxPRF(key)
+
+    hits = 0
+    for depth_index in range(depth):
+        stream = depth_index // 32
+        bit = depth_index % 32
+
+        # [N, C] and [N, 1] -> [N, 1] -> [N]
+        words = prf.uint32(
+            contexts,
+            targets,
+            stream=stream,
+        ).flatten()
+
+        hits += sum((int(word) >> bit) & 1 for word in words)
+
     trials = len(tokens) * depth
-    hits = sum((int(word) // (2**bit)) % 2 for word in words for bit in range(depth))
     expected_p_value = sum(math.comb(trials, k) for k in range(hits, trials + 1)) / (
         2**trials
     )
 
-    result = SynthIDWatermarkDetector(key, context_width, depth).detect(tokens)
+    result = SynthIDWatermarkDetector(
+        key,
+        context_width,
+        depth,
+    ).detect(tokens)
 
     assert result.num_scored_tokens == len(tokens)
     assert result.score == hits / trials

@@ -60,7 +60,10 @@ def _philox_uint32(
     key_1_value: int,
     contexts: torch.Tensor,
     token_ids: torch.Tensor,
+    stream: int = 0,
 ) -> torch.Tensor:
+    stream_0 = stream & _UINT32_MASK
+    stream_1 = (stream >> 32) & _UINT32_MASK
     contexts = contexts.to(torch.int64) & _UINT32_MASK
     prefix_shape = contexts.shape[:-1]
     device = contexts.device
@@ -114,8 +117,8 @@ def _philox_uint32(
             state[2],
         ),
         (
-            (candidate_key_0 ^ state[3]) & _UINT32_MASK,
-            (candidate_key_1 ^ _TOKEN_DOMAIN) & _UINT32_MASK,
+            (candidate_key_0 ^ state[3] ^ stream_1) & _UINT32_MASK,
+            (candidate_key_1 ^ _TOKEN_DOMAIN ^ stream_0) & _UINT32_MASK,
         ),
     )
     word_index = token_words & 3
@@ -158,12 +161,21 @@ class PhiloxPRF(WatermarkPRF):
             return _compiled_philox_uniform(*key_words, contexts, token_ids)
         return _philox_uniform(*key_words, contexts, token_ids)
 
-    def uint32(self, contexts: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
-        """Return raw words as int64 values in [0, 2**32) for each token.
+    def uint32(
+        self,
+        contexts: torch.Tensor,
+        token_ids: torch.Tensor,
+        stream: int = 0,
+    ) -> torch.Tensor:
+        """Return raw words as int64 values in [0, 2**32).
 
         Contexts shaped [B, C] and token IDs shaped [V] produce [B, V].
+        Contexts shaped [N, C] and token IDs shaped [N, 1] produce [N, 1].
         """
+        if not 0 <= stream <= 2**64 - 1:
+            raise ValueError("Philox streams must fit in 64 bits")
+
         key_words = self.key & _UINT32_MASK, self.key >> 32
         if contexts.device.type == "cuda":
-            return _compiled_philox_uint32(*key_words, contexts, token_ids)
-        return _philox_uint32(*key_words, contexts, token_ids)
+            return _compiled_philox_uint32(*key_words, contexts, token_ids, stream)
+        return _philox_uint32(*key_words, contexts, token_ids, stream)

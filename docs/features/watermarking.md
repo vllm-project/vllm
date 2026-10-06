@@ -206,8 +206,7 @@ vllm serve MODEL \
 categorical distribution using multiple binary tournament-sampling layers before
 vLLM's normal random sampler selects a token.
 
-Configure it with `algorithm="synthid_text"` and `depth`, which defaults to 32
-and currently supports values from 1 to 32:
+Configure it with `algorithm="synthid_text"` and `depth`, which defaults to 32:
 
 ```bash
 vllm serve MODEL \
@@ -216,7 +215,8 @@ vllm serve MODEL \
 ```
 
 `depth` controls the number of tournament-sampling layers. Higher values
-strengthen the watermark but add sampling overhead.
+strengthen the watermark but add sampling overhead. Depths above 32 require
+additional Philox evaluations.
 
 `SynthIDWatermarkDetector` implements the corresponding unweighted-mean detector
 using the same generation parameters. Its reported p-value assumes independent
