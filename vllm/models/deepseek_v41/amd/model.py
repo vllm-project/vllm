@@ -73,103 +73,6 @@ if typing.TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Delayed mHC seam. On gfx942 when aiter exports mhc_fused_post_pre_delayed.
-# From 64 tokens this calls that op. Below that, the folded post path stays on.
-_AITER_SEAM_MIN_TOKENS = 64
-
-
-def _mhc_seam_enabled() -> bool:
-    from vllm.platforms.rocm import on_gfx942
-
-    if not on_gfx942():
-        return False
-    try:
-        from aiter.ops.mhc import mhc_fused_post_pre_delayed
-    except Exception:
-        return False
-    return callable(mhc_fused_post_pre_delayed)
-
-
-_MHC_SEAM = _mhc_seam_enabled()
-
-
-@torch.library.custom_op("mhc_seam::seam", mutates_args=())
-def _mhc_seam(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    post_mix: torch.Tensor,
-    res_mix: torch.Tensor,
-    pre_mix: torch.Tensor,
-    fn: torch.Tensor,
-    hc_scale: torch.Tensor,
-    hc_base: torch.Tensor,
-    rms_eps: float,
-    hc_eps: float,
-    post_mult: float,
-    sinkhorn_repeat: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """residual, post_mix, res_mix, layer_input, next pre_mix."""
-    if residual.shape[0] < _AITER_SEAM_MIN_TOKENS:
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        res_new = rocm_aiter_ops.mhc_post(x, residual, post_mix, res_mix)
-        post, comb, li, pre = rocm_aiter_ops.mhc_pre_delayed(
-            res_new,
-            fn,
-            hc_scale,
-            hc_base,
-            rms_eps,
-            hc_eps,
-            hc_eps,
-            post_mult,
-            sinkhorn_repeat,
-            pre_mix,
-        )
-        return res_new, post, comb, li, pre
-    from aiter.ops.mhc import mhc_fused_post_pre_delayed
-
-    return mhc_fused_post_pre_delayed(
-        residual,
-        fn,
-        hc_scale,
-        hc_base,
-        rms_eps,
-        hc_eps,
-        hc_eps,
-        post_mult,
-        sinkhorn_repeat,
-        pre_mix,
-        x,
-        post_mix,
-        res_mix,
-    )
-
-
-@_mhc_seam.register_fake
-def _(
-    x,
-    residual,
-    post_mix,
-    res_mix,
-    pre_mix,
-    fn,
-    hc_scale,
-    hc_base,
-    rms_eps,
-    hc_eps,
-    post_mult,
-    sinkhorn_repeat,
-):
-    t, hc, h = residual.shape
-    f32 = torch.float32
-    return (
-        torch.empty_like(residual),
-        residual.new_empty(t, hc, 1, dtype=f32),
-        residual.new_empty(t, hc, hc, dtype=f32),
-        residual.new_empty(t, h),
-        residual.new_empty(t, hc, dtype=f32),
-    )
-
 
 class DeepseekV4MoE(DeepseekV4MoEBase):
     def __init__(
@@ -348,11 +251,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         self.mhc_pre_delayed = MHCPreDelayedOp()
         self.mhc_post = MHCPostOp()
-        if _MHC_SEAM:
-            logger.info_once(
-                "mhc_seam: aiter mhc_fused_post_pre_delayed from %d tokens",
-                _AITER_SEAM_MIN_TOKENS,
-            )
         # Where aiter's fused seam kernel runs (gfx950), it folds the following
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
@@ -362,22 +260,6 @@ class DeepseekV4DecoderLayer(nn.Module):
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
         """Hyper-connection collapse used by DSpark on ROCm."""
         return torch.ops.vllm.hc_collapse_triton(x, pre_mix)
-
-    def _seam(self, x, residual, post_mix, res_mix, pre_mix, fn, scale, base):
-        return torch.ops.mhc_seam.seam(
-            x,
-            residual,
-            post_mix,
-            res_mix,
-            pre_mix,
-            fn,
-            scale,
-            base,
-            self.rms_norm_eps,
-            self.hc_eps,
-            self.hc_post_alpha,
-            self.hc_sinkhorn_iters,
-        )
 
     def forward(
         self,
@@ -463,20 +345,6 @@ class DeepseekV4DecoderLayer(nn.Module):
                     norm_weight=self.attn_norm.weight if self.fuse_seam_norm else None,
                     norm_eps=self.attn_norm.variance_epsilon,
                 )
-            elif _MHC_SEAM and pre_mix is not None:
-                # The gfx942 seam does not fold RMSNorm. gfx950's fused norm
-                # stays on the branch below.
-                residual, post_mix, res_mix, x, attn_pre = self._seam(
-                    x,
-                    residual,
-                    post_mix,
-                    res_mix,
-                    pre_mix,
-                    self.hc_attn_fn,
-                    self.hc_attn_scale,
-                    self.hc_attn_base,
-                )
-                fuse_attn_norm = False
             else:
                 (
                     residual,
@@ -504,38 +372,25 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        if _MHC_SEAM:
-            residual, post_mix, res_mix, x, ffn_pre = self._seam(
-                x,
-                residual,
-                post_mix,
-                res_mix,
-                attn_pre,
-                self.hc_ffn_fn,
-                self.hc_ffn_scale,
-                self.hc_ffn_base,
-            )
+        residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
+            residual,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+            pre_mix=attn_pre,
+            sublayer_out=x,
+            post_layer_mix=post_mix,
+            comb_res_mix=res_mix,
+            norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
+            norm_eps=self.ffn_norm.variance_epsilon,
+        )
+        if not self.fuse_seam_norm:
             x = self.ffn_norm(x)
-        else:
-            residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
-                residual,
-                self.hc_ffn_fn,
-                self.hc_ffn_scale,
-                self.hc_ffn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
-                pre_mix=attn_pre,
-                sublayer_out=x,
-                post_layer_mix=post_mix,
-                comb_res_mix=res_mix,
-                norm_weight=self.ffn_norm.weight if self.fuse_seam_norm else None,
-                norm_eps=self.ffn_norm.variance_epsilon,
-            )
-            if not self.fuse_seam_norm:
-                x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix, ffn_pre
 
