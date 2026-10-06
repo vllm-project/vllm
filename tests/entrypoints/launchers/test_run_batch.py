@@ -1376,8 +1376,9 @@ async def test_batch_output_writer_uploads_url_output_once(
 
 @pytest.mark.asyncio
 async def test_dispatch_batch_cancels_inflight_on_failure(tmp_path, monkeypatch):
-    """An aborted batch must not leave requests running behind it."""
+    """An aborted batch leaves nothing running and writes nothing it cancelled."""
     input_path = _write_batch(tmp_path, [json.dumps(r) for r in _chat_requests(8)])
+    output_path = tmp_path / "output.jsonl"
 
     started: list[asyncio.Task | None] = []
 
@@ -1385,13 +1386,17 @@ async def test_dispatch_batch_cancels_inflight_on_failure(tmp_path, monkeypatch)
         started.append(asyncio.current_task())
         if len(started) == 1:
             raise RuntimeError("request blew up")
-        await asyncio.Event().wait()  # never finishes on its own
+        try:
+            await asyncio.Event().wait()  # never finishes on its own
+        except asyncio.CancelledError:
+            # The serving handlers answer a cancellation instead of raising.
+            return _response(request_json)
 
     monkeypatch.setattr(run_batch_module, "run_one_request", fake_run_one_request)
 
     with (
         open(input_path, encoding="utf-8") as input_file,
-        open(tmp_path / "output.jsonl", "w", encoding="utf-8") as output_file,
+        open(output_path, "w", encoding="utf-8") as output_file,
         pytest.raises(RuntimeError, match="request blew up"),
     ):
         await dispatch_batch(
@@ -1399,9 +1404,11 @@ async def test_dispatch_batch_cancels_inflight_on_failure(tmp_path, monkeypatch)
         )
 
     await asyncio.sleep(0)
+    assert len(started) == 4
     assert all(task is not None and task.done() for task in started), (
         "requests were left in flight"
     )
+    assert output_path.read_text() == ""
 
 
 @pytest.mark.asyncio

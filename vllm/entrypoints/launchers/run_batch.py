@@ -914,11 +914,15 @@ async def dispatch_batch(
     slots = asyncio.Semaphore(max_inflight)
     inflight: set[asyncio.Task[None]] = set()
     failure: BaseException | None = None
+    stopping = False
 
     async def run_and_write(request_json: str) -> None:
         nonlocal failure
         try:
             response = await run_one_request(request_json, endpoint_registry)
+            # Handlers answer a cancellation with an error response; drop it.
+            if stopping:
+                return
             print(response.model_dump_json(), file=output_file)
             output_file.flush()
             tracker.completed()
@@ -954,6 +958,7 @@ async def dispatch_batch(
         if failure is not None:
             raise failure
     finally:
+        stopping = True
         for task in inflight:
             task.cancel()
         if inflight:
