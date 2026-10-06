@@ -6,7 +6,6 @@ import functools
 import json
 import os
 from collections.abc import Callable, Sequence
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -39,42 +38,15 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
 
-_PACKAGED_BATCH_INVARIANT_KERNEL = (
-    Path(__file__).resolve().parents[4] / "_vllm_batch_invariant_C.abi3.so"
-)
-
-
-def _batch_invariant_kernel_path() -> Path:
-    override = os.environ.get("VLLM_BATCH_INVARIANT_KERNEL_LIB")
-    return Path(override).expanduser() if override else _PACKAGED_BATCH_INVARIANT_KERNEL
-
-
-@functools.cache
-def _load_batch_invariant_kernel_library(path: str) -> None:
-    library = Path(path).expanduser().resolve()
-    if not library.is_file():
-        raise RuntimeError(f"batch-invariant kernel library does not exist: {library}")
-    try:
-        torch.ops.load_library(str(library))
-        _ = torch.ops.vllm_batch_invariant.fused_silu_mul_per_token_group_quant
-    except (OSError, RuntimeError, AttributeError) as exc:
-        raise RuntimeError(
-            f"failed to load the batch-invariant kernel library: {library}"
-        ) from exc
-
 
 def is_batch_invariant_quant_kernel_enabled() -> bool:
-    path = _batch_invariant_kernel_path()
-    if not path.is_file():
-        return False
-    _load_batch_invariant_kernel_library(str(path))
-    return True
+    return hasattr(torch.ops._C, "fused_silu_mul_per_token_group_quant")
 
 
 def require_batch_invariant_quant_kernel() -> None:
-    """Load the BI activation kernel or fail before expert execution."""
-    path = _batch_invariant_kernel_path()
-    _load_batch_invariant_kernel_library(str(path))
+    """Fail if the stable CUDA extension lacks the BI activation kernel."""
+    if not is_batch_invariant_quant_kernel_enabled():
+        raise RuntimeError("batch-invariant quant kernel is not available")
 
 
 def fused_silu_mul_per_token_group_quant_fp8(
@@ -88,8 +60,7 @@ def fused_silu_mul_per_token_group_quant_fp8(
     group_size: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the batch-invariant fused SiLU*up and per-token FP8 quant kernel."""
-    path = _batch_invariant_kernel_path()
-    _load_batch_invariant_kernel_library(str(path))
+    require_batch_invariant_quant_kernel()
     if round_scale is None:
         round_scale = use_ue8m0
     if use_ue8m0 and not round_scale:
@@ -135,7 +106,7 @@ def fused_silu_mul_per_token_group_quant_fp8(
         )
     output_s.zero_()
 
-    torch.ops.vllm_batch_invariant.fused_silu_mul_per_token_group_quant(
+    torch.ops._C.fused_silu_mul_per_token_group_quant(
         input,
         output_q,
         output_s,

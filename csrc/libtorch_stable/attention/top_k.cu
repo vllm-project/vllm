@@ -4,10 +4,9 @@
 #include <algorithm>
 #include <cstdint>
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "../torch_utils.h"
+
 #include <cub/block/block_radix_sort.cuh>
-#include <torch/library.h>
 
 namespace vllm::batch_invariant {
 namespace {
@@ -157,28 +156,35 @@ __global__ __launch_bounds__(kThreads) void deterministic_top_k_per_row_prefill(
 
 }  // namespace
 
-void top_k_per_row_prefill(const at::Tensor& logits,
-                           const at::Tensor& row_starts,
-                           const at::Tensor& row_ends, at::Tensor& indices,
-                           int64_t num_rows, int64_t stride0, int64_t stride1,
-                           int64_t top_k) {
-  TORCH_CHECK(logits.is_cuda(), "logits must be CUDA");
-  TORCH_CHECK(logits.scalar_type() == at::kFloat, "logits must be float32");
-  TORCH_CHECK(row_starts.scalar_type() == at::kInt, "row_starts must be int32");
-  TORCH_CHECK(row_ends.scalar_type() == at::kInt, "row_ends must be int32");
-  TORCH_CHECK(indices.scalar_type() == at::kInt, "indices must be int32");
-  TORCH_CHECK(logits.dim() == 2, "logits must be rank 2");
-  TORCH_CHECK(top_k > 0 && top_k <= kMaxTopK,
-              "DS4 deterministic Top-K requires 0 < top_k <= ", kMaxTopK,
-              ", got ", top_k);
-  TORCH_CHECK(indices.size(0) >= num_rows && indices.size(1) >= top_k,
-              "indices output is too small");
+void deterministic_top_k_per_row_prefill(
+    const torch::stable::Tensor& logits,
+    const torch::stable::Tensor& row_starts,
+    const torch::stable::Tensor& row_ends, torch::stable::Tensor& indices,
+    int64_t num_rows, int64_t stride0, int64_t stride1, int64_t top_k) {
+  STD_TORCH_CHECK(logits.device().is_cuda(), "logits must be CUDA");
+  STD_TORCH_CHECK(logits.scalar_type() == torch::headeronly::ScalarType::Float,
+                  "logits must be float32");
+  STD_TORCH_CHECK(
+      row_starts.scalar_type() == torch::headeronly::ScalarType::Int,
+      "row_starts must be int32");
+  STD_TORCH_CHECK(row_ends.scalar_type() == torch::headeronly::ScalarType::Int,
+                  "row_ends must be int32");
+  STD_TORCH_CHECK(indices.scalar_type() == torch::headeronly::ScalarType::Int,
+                  "indices must be int32");
+  STD_TORCH_CHECK(logits.dim() == 2, "logits must be rank 2");
+  STD_TORCH_CHECK(top_k > 0 && top_k <= kMaxTopK,
+                  "DS4 deterministic Top-K requires 0 < top_k <= ", kMaxTopK,
+                  ", got ", top_k);
+  STD_TORCH_CHECK(indices.size(0) >= num_rows && indices.size(1) >= top_k,
+                  "indices output is too small");
   if (num_rows == 0) {
     return;
   }
 
-  const c10::cuda::CUDAGuard device_guard(logits.device());
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      logits.get_device_index());
+  const cudaStream_t stream =
+      get_current_cuda_stream(logits.get_device_index());
   deterministic_top_k_per_row_prefill<<<num_rows, kThreads, 0, stream>>>(
       logits.const_data_ptr<float>(), row_starts.const_data_ptr<int>(),
       row_ends.const_data_ptr<int>(), indices.mutable_data_ptr<int>(), stride0,

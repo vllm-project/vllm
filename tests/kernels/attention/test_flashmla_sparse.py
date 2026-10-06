@@ -1201,7 +1201,7 @@ def test_fused_c4_decode_indices_match_existing_pipeline(
 
     actual_indices = torch.empty_like(expected_indices)
     actual_lens = torch.empty_like(expected_lens)
-    torch.ops.vllm_batch_invariant.combine_topk_swa_decode(
+    torch.ops._C.combine_topk_swa_decode(
         actual_indices,
         actual_lens,
         topk_indices,
@@ -1267,7 +1267,7 @@ def test_fused_c128_decode_indices_match_existing_pipeline(
 
     actual_indices = torch.empty_like(expected_indices)
     actual_lens = torch.empty_like(expected_lens)
-    torch.ops.vllm_batch_invariant.combine_c128_swa_decode(
+    torch.ops._C.combine_c128_swa_decode(
         actual_indices,
         actual_lens,
         seq_lens,

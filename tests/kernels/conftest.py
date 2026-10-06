@@ -17,7 +17,7 @@ def reset_default_torch_device():
 
 @pytest.fixture
 def batch_invariant_kernel() -> None:
-    """Require the packaged batch-invariant CUDA extension."""
+    """Require the batch-invariant kernels in the stable CUDA extension."""
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         require_batch_invariant_quant_kernel,
     )
@@ -26,3 +26,5 @@ def batch_invariant_kernel() -> None:
         require_batch_invariant_quant_kernel()
     except RuntimeError as error:
         pytest.skip(str(error))
+    if not hasattr(torch.ops._C, "deterministic_top_k_per_row_prefill"):
+        pytest.skip("deterministic sparse top-k kernel is not available")
