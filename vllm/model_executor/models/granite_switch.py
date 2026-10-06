@@ -567,13 +567,10 @@ class SwitchedLoRALinear(nn.Module):
             lora_A_all = [p.data for p in self.lora_A_slices]
             lora_B_all = [p.data for p in self.lora_B_slices]
 
-        # Detect coverage: adapters with all-zero lora_A (over their first r
-        # rows, any slice) do not cover this module. Computed as ONE batched
-        # GPU reduction with a single host sync, not NA*S separate .item()
-        # calls. finalize_weights runs on every SwitchedLoRALinear in the
-        # model, so the per-element .item() syncs (each a GPU->CPU stall)
-        # dominated load time; collapsing them to one .tolist() per module is
-        # the bulk of that cost.
+        # Adapters with all-zero lora_A (over their first r rows, any slice) do
+        # not cover this module. One batched reduction with a single host sync
+        # rather than NA*S .item() calls, whose GPU->CPU stalls dominated load
+        # time across every SwitchedLoRALinear in the model.
         max_rank = lora_A_all[0].shape[2]
         ranks_t = torch.tensor(adapter_ranks, device=device)  # [NA]
         # rank_mask[i, j] = j < r_i - restricts the check to each adapter's rows.
@@ -585,24 +582,15 @@ class SwitchedLoRALinear(nn.Module):
             applicable_t |= (nz & rank_mask).any(dim=1)
         applicable = applicable_t.tolist()  # single sync
 
-        # Build remap_table: global adapter_id (1-based) -> kernel-local
-        # position. Non-applicable adapters map to 0 (base model, no LoRA
-        # contribution).
+        # remap_table: global adapter_id (1-based) -> kernel-local position;
+        # non-applicable adapters map to 0 (base, no LoRA contribution).
         applicable_adapters = [i for i in range(NA) if applicable[i]]
 
-        # The kernel's tier-based position numbering only knows
-        # SUPPORTED_RANKS, but a checkpoint may legitimately carry an off-tier
-        # rank - rank 8 is a common LoRA choice, and every adapter is zero-
-        # padded on disk to the checkpoint's max_lora_rank, so the whole
-        # checkpoint can sit between tiers. Promote each such adapter to the
-        # next supported tier and zero-pad its lora_A rows / lora_B columns to
-        # match: the padded rows contribute nothing to the shrink and their
-        # lora_B columns contribute nothing to the expand, so the promoted
-        # adapter is numerically identical to the original.
-        #
-        # Promotion (rather than adding the rank to SUPPORTED_RANKS) is what
-        # the kernel plumbing allows: slice_col_r is built as [S, 6] and _na as
-        # a 6-tuple, so the tier count is fixed at six.
+        # Off-tier ranks (rank 8 is a common LoRA choice) are promoted to the
+        # next tier and zero-padded, which is numerically identical since the
+        # padded rows contribute nothing. Promoting rather than extending
+        # SUPPORTED_RANKS: slice_col_r is [S, 6] and _na a 6-tuple, so the tier
+        # count is fixed at six.
         eff_ranks = [promote_rank(r) for r in adapter_ranks]
         pad_to = max((eff_ranks[i] for i in applicable_adapters), default=0)
         if pad_to > max_rank:
@@ -735,13 +723,9 @@ class SwitchedLoRALinear(nn.Module):
                 )
             self._H = N_total // 2
 
-        # Bias. Register the buffer slot as None FIRST, then assign through it.
-        # Setting ``self._fused_bias = None`` as a plain attribute up front and
-        # then calling register_buffer("_fused_bias", ...) would raise
-        # ("attribute already exists"): nn.Module.register_buffer rejects a
-        # name that is already a non-buffer attribute. Registering the slot as
-        # None and assigning the tensor afterwards routes through the buffer
-        # machinery.
+        # Register the buffer slot as None first, then assign through it:
+        # register_buffer rejects a name that already exists as a plain
+        # attribute.
         self.register_buffer("_fused_bias", None, persistent=False)
         self._output_bias = None
         if getattr(self.base_layer, "bias", None) is not None:
@@ -796,14 +780,10 @@ class SwitchedLoRALinear(nn.Module):
             # standalone buffer rather than sharing x_ext.
             base_out = tensor_model_parallel_all_reduce(base_out.contiguous())
 
-        # Bias is added AFTER the all-reduce, never folded into the local
-        # partial before it. A row-parallel rank holds only a partial sum; the
-        # bias belongs to the full (reduced) output, so adding it pre-reduce
-        # would sum it tp_size times. The LoRA delta, by contrast, IS a partial
-        # and must go in pre-reduce (above). For TP=1 and column-parallel there
-        # is no reduce, so this is just "add the bias once" and its order vs
-        # the delta does not matter. (skip_bias_add=True returns the bias via
-        # _output_bias instead; the caller applies it, so it is untouched here.)
+        # Bias goes in after the all-reduce: a row-parallel rank holds a partial
+        # sum, so pre-reduce would sum the bias tp_size times. The LoRA delta IS
+        # a partial and must go pre-reduce (above). Under skip_bias_add the
+        # caller applies _output_bias instead.
         if self._fused_bias is not None:
             base_out = base_out + self._fused_bias
 
@@ -996,30 +976,15 @@ class MultiSwitch(nn.Module):
 
     def __init__(self, config: GraniteSwitchConfig, vllm_config: VllmConfig):
         super().__init__()
-        # num_adapters counts real LoRA adapters and does NOT include the base.
-        # Index 0 always means base/no-adapter, so valid adapter indices are
-        # 0..num_adapters.
+        # Index 0 means base/no-adapter, so valid indices are 0..num_adapters.
         self.num_adapters = config.num_adapters
         self.dtype = vllm_config.model_config.dtype
 
-        # Expert-id offset. Two adapter_token_ids layouts are accepted:
-        #
-        #   * num_adapters entries (no base-reset slot): adapter_token_ids[i]
-        #     fires adapter i+1, so expert_id = argmax + 1.
-        #   * num_adapters + 1 entries (base-reset layout): adapter_token_ids[0]
-        #     is the base-reset token (fires 0) and [1..] fire 1.., so
-        #     expert_id = argmax with no shift. This lets a request transition
-        #     back to base mid-sequence.
-        #
-        # Ordinary aLoRA chat does not need the base-reset slot: a chat template
-        # emits one control token for the current turn only, so prior turns
-        # carry none and route to base already. An explicit base token is needed
-        # when a single sequence holds several control tokens and must return to
-        # base between them - agentic per-step switching, or a preserved
-        # multi-turn history.
-        #
-        # This is a static, shape-derived Python constant computed once here, so
-        # forward stays branch-free and @support_torch_compile-safe.
+        # Two adapter_token_ids layouts: num_adapters entries, where id[i] fires
+        # adapter i+1; or num_adapters + 1, where id[0] is a base-reset token
+        # letting a sequence return to base mid-stream (needed for agentic
+        # per-step switching or a preserved multi-turn history). Resolved to a
+        # shape-derived constant here so forward stays branch-free.
         ctrl_ids = config.adapter_token_ids
         if ctrl_ids is not None and len(ctrl_ids) == self.num_adapters + 1:
             self._expert_id_offset = 0  # base-reset layout; argmax is the id
@@ -1028,21 +993,11 @@ class MultiSwitch(nn.Module):
 
         self.memory_gain = config.ms_memory_gain
 
-        # Kerdock/DG code generator plus the precomputed codebook buffer.
-        # precompute_codebook returns [capacity, N] unit-norm codewords, where N
-        # is the code (= memory) dimension. m=6 kerdock gives N=64,
-        # capacity=2048.
-        #
-        # The buffer MUST be persistent. A non-persistent buffer is absent from
-        # the state_dict, so a loader that materializes modules on the meta
-        # device (vLLM's weight loader fills only checkpoint tensors) discards
-        # what __init__ computed and leaves the buffer ALL ZEROS. A zeroed
-        # codebook makes every memory key and query zero, so all logits collapse
-        # to 0, the retrieval softmax goes UNIFORM, and each position averages
-        # the visible expert ids instead of selecting the most recent one.
-        # Keeping it persistent also turns a missing or incompatible checkpoint
-        # into a loud missing-key error instead of silent misrouting. The cost
-        # is ~512 KB on a multi-GB checkpoint.
+        # The codebook buffer below must stay persistent. Absent from the
+        # state_dict it would be left all zeros by a meta-device loader, which
+        # zeros every memory key and query, flattens the retrieval softmax to
+        # uniform, and averages visible expert ids instead of selecting the most
+        # recent - silent misrouting rather than a missing-key error. ~512 KB.
         self.code_gen = KerdockDGCodeGenerator(
             m=config.ms_code_m, code_type=config.ms_code_type
         )
@@ -1519,13 +1474,11 @@ class GraniteSwitchDecoderLayer(nn.Module):
                 prefix=f"{prefix}.block_sparse_moe",
             )
 
-        # The dense shared MLP is ABSENT on a pure sparse MoE base
-        # (granitemoe), which is encoded as shared_intermediate_size == 0. It
-        # must be skipped, not merely built zero-width: GraniteMoeSharedMLP
-        # sets self.hidden_size = config.shared_intermediate_size, so building
-        # it here would register [0, H] / [H, 0] weights that no checkpoint
-        # ships and then add their output into the MoE result. Same gate as
-        # granitemoehybrid.py.
+        # A pure sparse-MoE base (granitemoe) has no dense shared MLP, encoded
+        # as shared_intermediate_size == 0. It must be skipped, not built
+        # zero-width: GraniteMoeSharedMLP sizes itself from that value, so it
+        # would register [0, H] / [H, 0] weights no checkpoint ships and add
+        # their output into the MoE result. Same gate as granitemoehybrid.py.
         self.has_shared_mlp = config.shared_intermediate_size > 0
         if self.has_shared_mlp:
             shared_mlp = GraniteMoeSharedMLP(
@@ -1946,14 +1899,11 @@ class ShadowResidualAttention(nn.Module):
         max_lora_rank = max(config.adapter_ranks) if config.adapter_ranks else 0
 
         self.hidden_size = config.hidden_size
-        # Total vs per-rank (local) head geometry under tensor parallelism,
-        # mirroring GraniteLoRAEmbeddedAttention: the parallel linears are built
-        # with TOTAL head counts (they shard themselves internally); the
-        # doubled-Q glue and the qkv split operate on LOCAL counts. SR's stacked
-        # [2M, H] streams live on the token axis, orthogonal to TP's head
-        # sharding, so both halves shard identically and the base/adapter -> KV
-        # mapping is preserved per rank. Both the divisible-KV and replicated-KV
-        # (num_key_value_heads < tp_size) regimes are supported.
+        # As in GraniteLoRAEmbeddedAttention: parallel linears take TOTAL head
+        # counts (they shard internally); the doubled-Q glue and qkv split use
+        # LOCAL counts. SR's [2M, H] stack is on the token axis, orthogonal to
+        # head sharding, so both halves shard identically. Divisible-KV and
+        # replicated-KV (num_key_value_heads < tp_size) are both supported.
         self.total_num_heads = config.num_attention_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -2101,12 +2051,10 @@ class ShadowResidualDecoderLayer(nn.Module):
         self.has_shared_mlp = config.shared_intermediate_size > 0
         if self.has_shared_mlp:
             # Fused shared MLP (gate|up with in-kernel SwiGLU, plus down), each
-            # wrapped in SwitchedLoRALinear. Runs over the [2M, H] stack; the
-            # base half gets no delta. Wrapped UNCONDITIONALLY, unlike
-            # replace_shared_mlp_projections_with_lora, which gates on
-            # config.lora_target_modules: an SR checkpoint with MLP LoRA always
-            # has a home, and one without just leaves the zero tiers (no delta).
-            # Either way the result is correct.
+            # wrapped in SwitchedLoRALinear over the [2M, H] stack; the base
+            # half gets no delta. Wrapped unconditionally, unlike
+            # replace_shared_mlp_projections_with_lora: a checkpoint without MLP
+            # LoRA just leaves the tiers zero, which is the same result.
             shared_mlp = GraniteMoeSharedMLP(
                 config=config,
                 quant_config=quant_config,
@@ -2172,13 +2120,11 @@ class ShadowResidualDecoderLayer(nn.Module):
         mlp_out = None
 
         if self.has_experts:
-            # FusedMoE takes router_logits as an ARGUMENT and derives both the
-            # top-k selection and the renormalized gate scalars from them itself
-            # (renormalize=True is a softmax over the top k). So sharing the RAW
-            # logits is exactly equivalent to sharing post-softmax
-            # (top_k_index, top_k_weights) routing: one duplicate of the base
-            # half's logits routes the whole [2M, H] stack in a single expert
-            # call. GraniteMoeMoE.forward is bypassed to inject them.
+            # FusedMoE takes router_logits as an argument and derives top-k and
+            # the renormalized gates itself, so duplicating the base half's raw
+            # logits is equivalent to sharing post-softmax routing and routes
+            # the whole [2M, H] stack in one expert call. GraniteMoeMoE.forward
+            # is bypassed to inject them.
             logits, _ = self.block_sparse_moe.gate(normed[:m])  # [M, E]
             logits = torch.cat([logits, logits], dim=0)  # [2M, E]
             # FusedMoE modifies its input in place, hence the clone. The doubled
@@ -2205,49 +2151,27 @@ class ShadowResidualDecoderLayer(nn.Module):
 # ---------------------------------------------------------------------------
 # Decoder interfaces
 #
-# Granite Switch is a *host*: a base model, embedded adapters, and a switch that
-# fires them. LoRA/aLoRA and Shadow Residual are two *adaptations* hosted on it,
-# each exposed to the shared model through a DecoderInterface.
-# GraniteSwitchModel / GraniteSwitchForCausalLM hold one of these objects as
-# self.decoder_interface and call its hooks instead of inlining
-# adaptation-specific logic, so the shared forward / __init__ never branch on
-# which adaptation is in use.
-#
-# The split is confined to the decoder tier: the decoder layer type, its
-# kernel-metadata layout, its ctx-wire types, its weight-fuse rules, and - for SR
-# - the stream doubling ([M, H] -> [2M, H]) and the terminal per-token merge.
-# Everything above the decoder (vocab sizing, PP handoff, compute_logits) is
-# shared, adaptation-agnostic host code.
+# LoRA/aLoRA and Shadow Residual are two adaptations of the same host model,
+# each reached through a DecoderInterface held as self.decoder_interface, so the
+# shared __init__ and forward never branch on which is in use. The split is
+# confined to the decoder tier: layer type, kernel-metadata layout, ctx-wire
+# types, weight-fuse rules, and for SR the [M, H] -> [2M, H] stream doubling and
+# terminal merge.
 # ---------------------------------------------------------------------------
 
-# Shadow Residual load-time skips.
-#
-# An on-disk SR checkpoint carries q/k/v pre-fused into qkv_proj and gate/up
-# pre-fused into shared_mlp.input_linear (GraniteSwitchConfig rejects
-# unfused_qkv=True), so its parameter names match this model 1:1 and load
-# directly by name. No fuse-at-load shard mapping is needed.
-#
-# These names are still skipped on load:
-#   * .cross_stream.base_layer. - a checkpoint may carry a zeros base for the
-#     cross_stream module, but WCrossShunt is W-less (it has no base_layer).
-#   * control_to_substitute_lut / adapter_token_ids - regenerated from config.
+# Skipped when loading a Shadow Residual checkpoint: cross_stream.base_layer
+# (WCrossShunt is W-less, but a checkpoint may carry a zeros base for it) and the
+# two LUTs, which are regenerated from config.
 _SR_SKIP_SUBSTRINGS = (
     "adapter_token_ids",
     "control_to_substitute_lut",
     ".cross_stream.base_layer.",
 )
 
-# Post-load audit.
-#
-# LoRA delta parameters are constructed ZEROED, so a checkpoint that omits one is
-# *correct*: an adapter that does not target that fused slice simply contributes
-# no delta there. Those may go unloaded.
-#
-# Nothing else may. A base weight, a FusedMoE expert bank, a norm or a switch
-# parameter that is never loaded is uninitialized memory, and serving it yields
-# plausible-looking garbage rather than an error. That is not hypothetical:
-# _try_load_stacked_moe below is all that stands between an MoE checkpoint and a
-# bank of uninitialized experts, and a name mismatch in it fails silently.
+# LoRA deltas are constructed zeroed, so a checkpoint omitting one is correct -
+# that adapter does not target the slice. Nothing else may go unloaded: an
+# unloaded base weight, expert bank or norm is uninitialized memory, which
+# serves plausible garbage instead of raising.
 _ZERO_INIT_PARAM_MARKERS = (".lora_A", ".lora_B")
 
 
@@ -2286,10 +2210,8 @@ def _audit_loaded(params_dict, loaded_params, model, *, label: str) -> None:
     )
 
 
-# Stacked MoE -> FusedMoE.
-#
-# The checkpoint keeps the expert bank in three stacked tensors; FusedMoE wants
-# packed per-expert shards addressed by (shard_id, expert_id):
+# Stacked MoE -> FusedMoE. The checkpoint stacks the expert bank; FusedMoE
+# wants per-expert shards addressed by (shard_id, expert_id):
 #
 #   block_sparse_moe.experts.gate_up_proj [E, 2I, H]
 #       -> experts.routed_experts.w13_weight (w1|w3)
@@ -2298,10 +2220,7 @@ def _audit_loaded(params_dict, loaded_params, model, *, label: str) -> None:
 #   block_sparse_moe.router.weight        [E, H]
 #       -> block_sparse_moe.gate.weight
 #
-# The target parameters carry a ``routed_experts.`` segment because FusedMoE
-# builds the bank through FusedMoEFactory. Shared by BOTH adaptations: an SR
-# checkpoint holds the same expert bank, so the tensor names and stacked shapes
-# are identical to the LoRA case.
+# The ``routed_experts.`` segment comes from FusedMoEFactory. Identical for SR.
 _MOE_INPUT_SUFFIX = ".block_sparse_moe.experts.gate_up_proj"
 _MOE_OUTPUT_SUFFIX = ".block_sparse_moe.experts.down_proj"
 _MOE_ROUTER_SUFFIX = ".block_sparse_moe.router.weight"
@@ -2842,14 +2761,10 @@ class GraniteSwitchModel(nn.Module):
             self.lora_meta = None
             self.lora_ctx = None
 
-        # When adapters are present, the on-disk config.num_hidden_layers
-        # includes placeholder entries for the switch's KV-cache slots
-        # (MultiSwitch uses 2: a counting slot and a memory slot). Those
-        # placeholders exist so that a Transformers DynamicCache sizes
-        # correctly; vLLM auto-discovers its Attention layers and does not need
-        # them. Subtract the switch's slot count to recover the true number of
-        # decoder layers. GraniteSwitchConfigVerifier enforces that the
-        # subtraction leaves at least one decoder layer.
+        # With adapters, config.num_hidden_layers counts the switch's KV-cache
+        # slots (2 for MultiSwitch) so a Transformers DynamicCache sizes
+        # correctly. vLLM auto-discovers Attention layers, so subtract them to
+        # get the decoder-layer count. The verifier enforces >= 1 remains.
         if self.switch is not None:
             num_decoder_layers = config.num_hidden_layers - self.switch.num_cache_layers
         else:
@@ -2943,16 +2858,10 @@ class GraniteSwitchModel(nn.Module):
             # input_ids can be None when the request supplies prompt embeddings
             # directly, and the switch reads ids - hence the guard.
             if self.switch is not None and input_ids is not None:
-                # positions MUST be forwarded. vLLM flattens a batch into a
-                # single [total_tokens] tensor, so the switch cannot infer
-                # per-request token offsets on its own. The coded engine derives
-                # its 1/(1+n) counting anchor from positions == 0; with a
-                # locally-fabricated arange(total_tokens) only the FIRST request
-                # in the batch would contain an anchor, so every other request
-                # would count against a missing baseline, recover a wrong write
-                # address n, and retrieve whatever adapter happens to live at
-                # that address - arbitrary misrouting, not a uniform
-                # off-by-one.
+                # positions must be forwarded, not fabricated: the coded engine
+                # anchors on positions == 0, and vLLM flattens the batch, so a
+                # local arange would anchor only the first request and misroute
+                # every other one to an arbitrary adapter.
                 adapter_indices, modified_input_ids = self.switch(
                     input_ids=input_ids,
                     adapter_token_ids=self.adapter_token_ids,

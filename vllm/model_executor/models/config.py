@@ -1142,21 +1142,14 @@ class GraniteSwitchConfigVerifier(VerifyAndUpdateConfig):
         num_layers = hf_config.num_hidden_layers
         num_adapters = getattr(hf_config, "num_adapters", 0)
 
-        # 1. Every layer must be counted as an attention layer.
-        #
-        # GraniteSwitchForCausalLM deliberately does not declare IsHybrid, so
-        # ModelConfig.get_num_layers_by_block_type takes its plain-transformer
-        # branch and reports num_hidden_layers attention layers. That is the
-        # right answer: the two switch cache layers are attention layers too.
-        #
-        # But the config's parent, GraniteMoeHybridConfig, aliases
-        # layers_block_type onto layer_types through attribute_map, and the
-        # hybrid branch of that counter sums entries equal to the literal
-        # "attention" - which a Transformers-normalized config spells
-        # "full_attention". If anything ever routed this model down the hybrid
-        # branch, the count would come out ZERO, vLLM would size the KV cache
-        # for zero attention layers, and generation would produce wrong output
-        # with no error anywhere. So check the premise instead of trusting it.
+        # 1. Every layer must be counted as an attention layer, including the
+        # two switch cache layers. The class does not declare IsHybrid, so
+        # get_num_layers_by_block_type takes its plain-transformer branch and
+        # reports num_hidden_layers. Its hybrid branch instead sums layer_types
+        # entries equal to the literal "attention", which Transformers
+        # normalizes to "full_attention" - so were this model ever routed down
+        # that branch the count would be zero, vLLM would size the KV cache for
+        # zero attention layers, and output would be wrong with no error.
         if model_config.is_hybrid or model_config.is_attention_free:
             raise ValueError(
                 "Granite Switch is an attention-only architecture, but this "
@@ -1229,20 +1222,14 @@ class GraniteSwitchConfigVerifier(VerifyAndUpdateConfig):
                     "largest tier has nowhere to go."
                 )
 
-        # 5. The counting head's dtype bound.
-        #
-        # MultiSwitch recovers a control token's write address from a 1/(1 + n)
-        # attention signal. Both switch heads are real paged-KV attention
-        # layers, so that signal is stored at the KV-cache dtype - not a choice
-        # the switch gets to make. bfloat16 has an 8-bit mantissa and inverts
-        # 1/(1 + n) exactly only up to n = 188; at 189 the reciprocal rounds
-        # onto the same value as 188 and the two addresses alias, so the 189th
-        # control token in a sequence retrieves the 188th's adapter. float32
-        # inverts exactly well past n = 4095.
-        #
-        # This is reported, not rejected: 188 retained control tokens per
-        # sequence is ample for ordinary serving, and the bound is a capacity
-        # limit rather than a misconfiguration.
+        # 5. The counting head's dtype bound. MultiSwitch recovers a control
+        # token's write address from a 1/(1 + n) attention signal, and since
+        # both switch heads are paged-KV attention layers that signal takes the
+        # KV-cache dtype. bfloat16's 8-bit mantissa inverts 1/(1 + n) exactly
+        # only to n = 188; at 189 the reciprocal aliases onto 188's, so that
+        # token retrieves the wrong adapter. float32 is exact past n = 4095.
+        # Reported rather than rejected - it is a capacity limit, not a
+        # misconfiguration.
         cache_dtype = vllm_config.cache_config.cache_dtype
         if "fp8" in str(cache_dtype):
             raise ValueError(

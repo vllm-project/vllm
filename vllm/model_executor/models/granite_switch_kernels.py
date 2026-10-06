@@ -184,11 +184,10 @@ def build_w_ext(
 
 @triton.jit
 def _switch_lora_expand_kernel(
-    # x_ext  [M, N_total + sum_r(n_r * S * r)] - base output is cols [0, N).
-    # Single buffer: shrink cols (>= N) are read; base cols [0, N) are
-    # accumulated into IN PLACE. Folding the output into x_ext (disjoint cols,
-    # hazard-free) keeps the inductor graph glue-free (no clone + slice_scatter)
-    # and saves a pointer arg per launch.
+    # x_ext  [M, N_total + sum_r(n_r * S * r)] - base output is cols [0, N),
+    # accumulated into in place; shrink cols (>= N) are read. One buffer over
+    # disjoint cols is hazard-free, keeps the inductor graph free of
+    # clone + slice_scatter, and saves a pointer arg per launch.
     XExt,
     stride_xe_m,
     stride_xe_n,
@@ -220,14 +219,10 @@ def _switch_lora_expand_kernel(
 ):
     pid_m = tl.program_id(0)
 
-    # Invariant (by design, not checked here): M - the token/row count of x_ext
-    # that sets this grid's pid_m range - equals the token count used to build
-    # AdapIdx and Bitmask. Granite Switch routes per token: adapter_indices is
-    # sized 1:1 to the input tokens, and the decoder preserves that count, so the
-    # kernel metadata and the activations always share the same M. The Bitmask
-    # load below and the AdapIdx load are therefore unmasked against their own
-    # length; if a future change broke the per-token contract (M_fwd > M_prepare),
-    # these would read out of bounds.
+    # Unchecked invariant: x_ext's M equals the token count AdapIdx and Bitmask
+    # were built from. Routing is per token and the decoder preserves the count,
+    # so the loads below are unmasked against their own length; breaking that
+    # contract (M_fwd > M_prepare) would read out of bounds.
 
     # One bit per adapter for this row-tile; bit a set iff adapter (a+1) is
     # present somewhere in the tile. All-zero tile touches no adapter -> skip.
@@ -275,12 +270,10 @@ def _switch_lora_expand_kernel(
     lb_off_256 = lb_off_128 + NA_128 * N * 128
     lb_off_512 = lb_off_256 + NA_256 * N * 256
 
-    # Per tier, loop over that tier's adapters; the bit test skips adapters not
-    # present in this tile. For each active adapter: load its r shrink values
-    # from x_ext, load its lora_B block, and accumulate shrink @ lora_B into the
-    # output delta. The static_range unrolls at compile time, so absent tiers
-    # (NA_r == 0) emit no code. Only the tier-16 loop is annotated; tiers 32..512
-    # are the identical pattern with r and the tier offsets substituted.
+    # Per tier, loop over that tier's adapters, bit-testing to skip those absent
+    # from the tile; for each active one accumulate shrink @ lora_B into the
+    # delta. static_range unrolls at compile time, so absent tiers emit no code.
+    # Only the tier-16 loop is annotated; 32..512 are identical.
     r16 = tl.arange(0, 16)
     for a in tl.static_range(NA_16):
         if (bitmask >> a) & 1:  # adapter (a+1) in this tile?
@@ -512,17 +505,13 @@ granite_switch_lora_expand = torch.ops.vllm.granite_switch_lora_expand
 # Fused gate/up expand + SwiGLU (shared-MLP first projection ONLY)
 # ---------------------------------------------------------------------------
 #
-# The merged gate/up projection is the one module whose output is consumed by a
-# packed-layout kernel (vLLM SiluAndMul). Rather than materialize the corrected
-# [M, 2H] gate|up to HBM and re-read it in a separate activation kernel (and pay
-# a .contiguous() because the base slice of x_ext is strided), this kernel does
-# the whole epilogue in one pass: apply the LoRA delta to the gate (slice 0) and
-# up (slice 1) columns, then write silu(gate)*up directly as a CONTIGUOUS [M, H].
-#
-# It reads x_ext (gate, up, shrink) by explicit stride, so the strided base is a
-# non-issue; nothing downstream ever sees it. The bitmask gates only the LoRA
-# delta work - the silu(gate)*up store ALWAYS runs (base-only tiles still need
-# their activation written).
+# The merged gate/up projection is the one module whose output feeds a
+# packed-layout kernel (vLLM SiluAndMul). Instead of materializing the corrected
+# [M, 2H] gate|up to HBM, re-reading it in a separate activation kernel and
+# paying a .contiguous() for x_ext's strided base slice, this kernel applies the
+# delta to the gate and up columns and writes silu(gate)*up directly as a
+# contiguous [M, H]. The bitmask gates only the delta work; the store always
+# runs, since base-only tiles still need their activation written.
 
 
 @triton.jit
@@ -948,23 +937,14 @@ granite_switch_lora_expand_swiglu = torch.ops.vllm.granite_switch_lora_expand_sw
 # Shrink-only ("W-less") expand - the Shadow-Residual W_cross shunt
 # ---------------------------------------------------------------------------
 #
-# The Shadow-Residual cross-stream link W_cross has NO base weight: its output is
-# purely ``(x @ lora_A_cross.T) @ lora_B_cross.T``. There is no base region to
-# accumulate into, so the in-place read-modify-write of switch_lora_expand does
-# not apply. This kernel writes the delta to a FRESH, PRE-ZEROED ``out[M, N]``:
-#
-#   * ``x_ext`` holds ONLY shrink columns: ``x @ w_ext_cross.T`` where
-#     ``w_ext_cross = build_w_ext(W=<empty [0, K]>, lora_A_cross_by_rank)``. With
-#     an empty base the shrink rows start at column 0, so the caller's
-#     ``slice_col_r`` bases start at 0 (not N_total).
-#   * the read-modify-write epilogue becomes a plain STORE of the delta.
-#   * a base token (kernel-local id 0) contributes ``delta == 0`` (its shrink
-#     loads are masked to zero), and the launcher pre-zeros ``out``, so a base
-#     token - and any tile the bitmask skips entirely - reads back exactly zero.
-#     This keeps the cross-stream injection off the base stream: the SR invariant.
-#
-# Structurally identical to _switch_lora_expand_kernel except for the extra
-# ``Out`` pointer and the store epilogue; the tier loops are copied verbatim.
+# W_cross has no base weight: its output is purely
+# ``(x @ lora_A_cross.T) @ lora_B_cross.T``. With no base region to accumulate
+# into, this kernel STORES the delta to a fresh, pre-zeroed ``out[M, N]`` rather
+# than doing switch_lora_expand's read-modify-write. ``x_ext`` is therefore all
+# shrink columns, so ``slice_col_r`` bases start at 0, not N_total. A base token
+# (kernel-local id 0) and any bitmask-skipped tile read back exactly zero, which
+# keeps the cross-stream injection off the base stream - the SR invariant.
+# Otherwise structurally identical to _switch_lora_expand_kernel.
 
 
 @triton.jit

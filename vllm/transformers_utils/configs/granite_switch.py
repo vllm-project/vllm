@@ -156,15 +156,10 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         layer_types: list[str] | None = None,
         **kwargs,
     ):
-        # The switch model is attention-only with RoPE, but its parent
-        # ``GraniteMoeHybridConfig`` is a mamba/attention hybrid whose
-        # ``__post_init__`` fills an *unset* ``layer_types`` with
-        # ``["linear_attention"] * num_hidden_layers`` - i.e. all mamba, which
-        # would size the per-layer cache wrongly. So the switch config must pin
-        # ``layer_types`` to all-attention itself. The length must equal
-        # ``num_hidden_layers`` (already inflated by the cache slots, which are
-        # attention too) or the parent's ``validate_layer_type`` length check
-        # rejects the config.
+        # This model is attention-only, but the hybrid parent fills an unset
+        # ``layer_types`` with all-mamba, which would size the per-layer cache
+        # wrongly. Pin it here. Length must equal ``num_hidden_layers`` (cache
+        # slots included - they are attention too) for the parent's check.
         if layer_types is None:
             num_hidden_layers = kwargs.get("num_hidden_layers", 32)
             layer_types = ["full_attention"] * num_hidden_layers
@@ -176,14 +171,10 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             **kwargs,
         )
 
-        # Resolve shared_intermediate_size independently of the parent default.
-        # The GraniteMoeHybrid parent defaults it to a fixed 1024, which is the
-        # wrong width for dense bases and does not encode the "no shared MLP"
-        # sentinel (0) that pure sparse-MoE bases rely on. So the switch config
-        # must decide it itself rather than inherit a magic default: an
-        # explicitly-supplied value (including 0) is honored verbatim; only when
-        # it is left unset do we resolve it - dense (no experts) gets a shared
-        # MLP sized to intermediate_size, pure MoE keeps the 0 sentinel.
+        # The parent's fixed 1024 default is the wrong width for dense bases and
+        # cannot express the "no shared MLP" sentinel (0) that pure sparse-MoE
+        # bases need, so resolve it here. An explicit value (including 0) is
+        # honored; only an unset one is resolved.
         if kwargs.get("shared_intermediate_size") is None:
             self.shared_intermediate_size = (
                 0 if num_local_experts > 0 else self.intermediate_size
@@ -287,13 +278,10 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
 
         self.adapter_names = adapter_names
 
-        # Projection head dimension.
-        # The QKV projection outputs vectors of size projection_head_dim
-        # (= hidden_size / num_attention_heads). The KV cache stores
-        # native-head_dim tensors - no expansion under token exchange.
-        # head_dim is deliberately not set here, because RoPE also reads it.
-        # Use the explicit head_dim when the base model supplies one, since
-        # head_dim != hidden_size // num_attention_heads for some models.
+        # QKV outputs vectors of size projection_head_dim. Prefer the base
+        # model's explicit head_dim, since some models have
+        # head_dim != hidden_size // num_attention_heads. Kept separate from
+        # head_dim, which RoPE also reads.
         explicit_head_dim = kwargs.get("head_dim")
         self.projection_head_dim = (
             explicit_head_dim
