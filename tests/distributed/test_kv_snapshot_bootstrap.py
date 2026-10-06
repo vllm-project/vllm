@@ -71,14 +71,15 @@ def test_cpu_only_block_retains_gpu_metadata():
     assert consume(wire(snap.export())) == consume(history)
 
 
-def test_restated_block_with_unknown_parent_is_unavailable():
+def test_restated_block_with_unknown_parent_is_left_out():
     # A strict consumer cannot resolve the parent either.
     snap = KVCacheSnapshot()
     update = store([1], parent=99)
     update.medium = "CPU"
     snap.apply([store([1]), remove([1])])
     snap.apply([update])
-    assert snap.tainted == 1 and 99 not in snap._records
+    assert consume(wire(snap.export())) == Counter()
+    assert 99 not in snap._records
 
 
 def test_duplicate_references_survive_one_remove():
@@ -88,12 +89,12 @@ def test_duplicate_references_survive_one_remove():
     assert consume(wire(snap.export())) == consume(history)
 
 
-def test_sparse_store_alone_is_unavailable():
+def test_sparse_store_alone_is_left_out():
     # A store that leaves out blocks gives no hash its own token span, so
     # without another store of those hashes they cannot be rebuilt.
     snap = KVCacheSnapshot()
     snap.apply([store([1, 3], tokens=list(range(12)))])
-    assert snap.tainted == 2
+    assert consume(wire(snap.export())) == Counter()
 
 
 def test_reset_keeps_cpu_dependencies():

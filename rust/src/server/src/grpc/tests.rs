@@ -2335,7 +2335,6 @@ fn kv_event_source_filters_and_exposes_zmq_publisher() {
     config.snapshot_endpoint = Some("tcp://10.0.0.2:5561".to_string());
     let source = kv_event_source(&ready).expect("configured ZMQ event source");
     assert_eq!(source.snapshot_endpoint, "tcp://10.0.0.2:5561");
-    assert_eq!(source.schema_version, 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

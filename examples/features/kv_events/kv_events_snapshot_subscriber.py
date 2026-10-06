@@ -13,6 +13,18 @@ class ResyncRequired(RuntimeError):
     pass
 
 
+class _Identity(msgspec.Struct, array_like=True):
+    """The trailing publisher identity of a live batch; events stay encoded."""
+
+    ts: float
+    events: msgspec.Raw
+    data_parallel_rank: int | None = None
+    publisher_id: bytes | None = None
+
+
+_identity = msgspec.msgpack.Decoder(_Identity)
+
+
 class SnapshotClient:
     """One publisher's snapshot/live transport; use from a single thread.
 
@@ -29,20 +41,22 @@ class SnapshotClient:
         self.sub.connect(live_endpoint)
         self.endpoint = snapshot_endpoint
         self.ready = False
-        self.stream_id = None
+        self.publisher_id = None
         self.next_seq = None
         self.last_receive = time.monotonic()
 
     def _read(self):
         frames = self.sub.recv_multipart()
         self.last_receive = time.monotonic()
-        if len(frames) != 3 or len(frames[1]) != 24:
+        if len(frames) != 3 or len(frames[1]) != 8:
             self.ready = False
-            raise ResyncRequired(
-                "publisher does not support snapshot stream identities"
-            )
+            raise ResyncRequired("malformed live message")
         _, sequence, payload = frames
-        return sequence[8:], int.from_bytes(sequence[:8], "big"), payload
+        publisher_id = _identity.decode(payload).publisher_id
+        if publisher_id is None:
+            self.ready = False
+            raise ResyncRequired("publisher does not serve snapshots")
+        return publisher_id, int.from_bytes(sequence, "big"), payload
 
     def bootstrap(self, timeout=10):
         """Return snapshot chunks plus a contiguous buffered suffix.
@@ -86,19 +100,19 @@ class SnapshotClient:
         seq = int.from_bytes(frames[0], "big", signed=True)
         if seq < -1:
             raise ResyncRequired("snapshot unavailable")
-        stream_id = frames[1]
-        if buffered[-1][0] != stream_id:
+        publisher_id = frames[1]
+        if buffered[-1][0] != publisher_id:
             raise ResyncRequired("publisher restarted during bootstrap")
         next_seq = seq + 1
         payloads = frames[2:]
         for epoch, number, payload in buffered:
-            if epoch != stream_id or number <= seq:
+            if epoch != publisher_id or number <= seq:
                 continue
             if number != next_seq:
                 raise ResyncRequired("gap during bootstrap")
             payloads.append(payload)
             next_seq += 1
-        self.stream_id = stream_id
+        self.publisher_id = publisher_id
         self.next_seq = next_seq
         self.ready = True
         return seq, payloads
@@ -112,7 +126,7 @@ class SnapshotClient:
                 raise ResyncRequired("publisher heartbeat timed out")
             return None
         epoch, seq, payload = self._read()
-        if epoch != self.stream_id or seq > self.next_seq:
+        if epoch != self.publisher_id or seq > self.next_seq:
             self.ready = False
             raise ResyncRequired("publisher restart or live sequence gap")
         if seq < self.next_seq:

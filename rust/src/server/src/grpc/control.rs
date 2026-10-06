@@ -531,11 +531,7 @@ pub(super) fn kv_event_source(response: &EngineCoreReadyResponse) -> Option<pb::
         replay_endpoint: config.replay_endpoint.clone().unwrap_or_default(),
         data_parallel_rank: Some(response.data_parallel_rank),
         encoding: "msgpack".to_string(),
-        schema_version: if config.snapshot_endpoint.is_some() {
-            2
-        } else {
-            1
-        },
+        schema_version: 1,
         buffer_steps: config.buffer_steps,
         hwm: config.hwm,
         max_queue_size: config.max_queue_size,

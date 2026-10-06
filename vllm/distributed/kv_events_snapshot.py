@@ -1,27 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Live-state KV event snapshots.
+"""KV cache snapshots for routers that join a ZMQ KV event stream late.
 
-A snapshot is a synthesized event program that a consumer applies like live
-events. It stores every block the consumer must be able to name after the cut,
-parents first, removes the dead ones again, stores each live residency by hash
-with its exact count, and then removes the first store of each live block.
+A router builds its prefix index from KV events, and replay only keeps recent
+batches. A snapshot gives a joining router the publisher's current cache
+state, plus the sequence of the last live batch it covers.
 
-State is per block, not per source event. A block's record holds its parent,
-tokens and hash inputs. Residency is counted per scope: medium, KV cache group,
-locality and ownership. A record is retained while the block is resident in
-any scope, while a retained record names it as parent, or while it is among
-the most recently dead blocks, because an offload store can arrive after its
-GPU copy was evicted. Retention therefore follows the live cache, not the event
-history.
+How it works:
 
-The recorder must observe the stream from its beginning. A block it cannot
-rebuild is tainted: snapshots are unavailable while any retained record is
-tainted, and become available again once none is. Lost input, unsupported
-events and exhausted budgets disable snapshots until the publisher restarts.
-Snapshots are never partial.
+- The publisher thread hands every batch it publishes to
+  `KVEventSnapshotRecorder.record()`, which queues it.
+- The recorder thread folds queued batches into a `KVCacheSnapshot`: one
+  record per block hash with its parent, tokens and hash inputs, and a live
+  reference count per scope (medium, KV cache group, locality, ownership).
+- On a request, the recorder folds everything queued so far and replies with
+  the last folded sequence, the publisher identity, and event batches that
+  rebuild the live state. The router applies them like live events, then
+  follows the live stream from the next sequence.
+
+A record stays while its block is resident in any scope, while a retained
+record names it as parent, and for `RING_BATCHES` event-carrying batches after
+its last residency ends, because an offload store can complete after its GPU
+copy was evicted.
+
+Snapshots are best effort. A block cannot be rebuilt when no store taught its
+tokens: a token-less offload store that lands after the block's record left,
+or a store that skips blocks (sliding window, Mamba) for a hash no other store
+taught. A hash restated with other inputs, as by KV cache groups with
+different block sizes, cannot be rebuilt either. The export leaves such blocks
+and their descendants out, and routers learn them when they are stored again.
+
+Any recorder error, including a full input queue or an exceeded limit, stops
+the recorder: it logs, frees its state, and answers every request as
+unavailable until the engine restarts. Live publishing is unaffected.
 """
 
+import queue
 import threading
 import time
 import uuid
@@ -39,6 +53,7 @@ from vllm.distributed.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
     BlockStored,
+    EventBatch,
     KVEventBatch,
     ZmqEventPublisher,
 )
@@ -50,6 +65,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 
 logger = init_logger(__name__)
+SNAPSHOT_REQUEST = b"snapshot"
 SNAPSHOT_UNAVAILABLE_SEQ = -2
 # medium, group_idx, locality, ownership
 _Scope = tuple[str | None, int | None, str | None, str | None]
@@ -81,8 +97,8 @@ class _Record(msgspec.Struct, gc=False):  # type: ignore[call-arg]
     children: int = 0
     # Ring generation while recently dead, else 0.
     death: int = 0
-    # The block cannot be rebuilt: a placeholder or conflicting inputs.
-    tainted: bool = False
+    # The hash was restated with other inputs.
+    conflict: bool = False
 
 
 class KVCacheSnapshot:
@@ -110,14 +126,6 @@ class KVCacheSnapshot:
         self._generation = 0
         self._batch = 0
         self._references = 0
-        # Retained records that cannot be rebuilt, and the first reason.
-        self.tainted = 0
-        self.taint_reason = ""
-        # Removals of hashes without a record; consumers bootstrapped after
-        # the record left fail on them once.
-        self.forgotten_removals = 0
-        # Dead records dropped before RING_BATCHES to keep the ring in budget.
-        self.expired_early = 0
 
     def __len__(self) -> int:
         return len(self._live)
@@ -180,8 +188,7 @@ class KVCacheSnapshot:
             # token span. It adds residency to blocks other stores taught.
             for h in hashes:
                 if h not in self._records:
-                    placeholder = self._new_record(h, event.group_idx)
-                    self._taint(placeholder, f"no reconstruction metadata for {h!r}")
+                    self._new_record(h, event.group_idx)
                 self._add_live((scope, h))
             return
         parent = (
@@ -202,8 +209,6 @@ class KVCacheSnapshot:
                 self._fill(record, parent, tokens, event, extra_key)
             elif not record.tokens:
                 self._fill(record, parent, tokens, event, extra_key)
-                record.tainted = False
-                self.tainted -= 1
             elif (
                 record.parent,
                 record.tokens,
@@ -215,9 +220,8 @@ class KVCacheSnapshot:
                 and record.extra_known
                 and record.extra_key != extra_key
             ):
-                # One record per hash: a hash restated with other inputs, as by
-                # KV cache groups with different block sizes, cannot be rebuilt.
-                self._taint(record, f"conflicting reconstruction metadata for {h!r}")
+                # One record per hash cannot hold two sets of inputs.
+                record.conflict = True
             elif extra is not None and not record.extra_known:
                 record.extra_key = extra_key
                 record.extra_known = True
@@ -250,16 +254,7 @@ class KVCacheSnapshot:
             parent_record = self._records.get(parent)
             if parent_record is None:
                 parent_record = self._new_record(parent, event.group_idx)
-                self._taint(parent_record, f"no reconstruction metadata for {parent!r}")
             parent_record.children += 1
-
-    def _taint(self, record: _Record, reason: str) -> None:
-        if record.tainted:
-            return
-        if not self.tainted:
-            self.taint_reason = reason
-        record.tainted = True
-        self.tainted += 1
 
     def _add_live(self, key: _BlockKey) -> None:
         self._live[key] = self._live.get(key, 0) + 1
@@ -273,8 +268,6 @@ class KVCacheSnapshot:
     def _remove(self, key: _BlockKey) -> None:
         count = self._live.get(key)
         if count is None:
-            if key[1] not in self._records:
-                self.forgotten_removals += 1
             return
         if count > 1:
             self._live[key] = count - 1
@@ -297,12 +290,10 @@ class KVCacheSnapshot:
         while self._ring and (
             self._ring[0][2] <= oldest or self._ring_size > self.MAX_RING_BLOCKS
         ):
-            h, generation, batch = self._ring.popleft()
+            h, generation, _ = self._ring.popleft()
             record = self._records.get(h)
             if record is None or record.death != generation:
                 continue
-            if batch > oldest:
-                self.expired_early += 1
             record.death = 0
             self._ring_size -= 1
             self._drop(h, record)
@@ -317,8 +308,6 @@ class KVCacheSnapshot:
     def _drop(self, h: ExternalBlockHash, record: _Record) -> None:
         while not (record.live or record.children or record.death):
             del self._records[h]
-            if record.tainted:
-                self.tainted -= 1
             if record.parent is None:
                 return
             h = record.parent
@@ -330,17 +319,16 @@ class KVCacheSnapshot:
     ) -> Iterator[BlockStored | BlockRemoved]:
         """Teach every retained block, clear the dead, then set live residency.
 
-        Each retained block is stored once with its tokens, parents first: a
-        live block in one of its live scopes, a dead block in its group's GPU
-        scope. Dead blocks are removed again. Token-less stores then bring
+        Each rebuildable block is stored once with its tokens, parents first:
+        a live block in one of its live scopes, a dead block in its group's
+        GPU scope. Dead blocks are removed again. Token-less stores then bring
         every live scope to its exact count, and a last removal drops the
         teaching store of each live block. The consumer counts references per
         scope and hash, so that removal never evicts, a live block keeps its
         engine hash resolvable throughout, and a dead block the consumer keys
-        like a live one is removed before the live residency is set.
-        Only an untainted snapshot can be exported.
+        like a live one is removed before the live residency is set. Blocks
+        that cannot be rebuilt, and their descendants, are left out.
         """
-        assert not self.tainted
         # Most blocks have one child, so only branch points allocate a list.
         first_child: dict[ExternalBlockHash, ExternalBlockHash] = {}
         more_children: dict[ExternalBlockHash, list[ExternalBlockHash]] = {}
@@ -355,6 +343,10 @@ class KVCacheSnapshot:
         live_scope: dict[ExternalBlockHash, _Scope] = {}
         for live_key in self._live:
             live_scope.setdefault(live_key[1], live_key[0])
+
+        def buildable(h: ExternalBlockHash) -> bool:
+            record = self._records[h]
+            return bool(record.tokens) and not record.conflict
 
         def scope(h: ExternalBlockHash) -> _Scope:
             return live_scope.get(h) or (MEDIUM_GPU, self._records[h].group, None, None)
@@ -403,17 +395,23 @@ class KVCacheSnapshot:
                         ownership=ownership,
                     )
 
-        stack = list(reversed(roots))
+        included: set[ExternalBlockHash] = set()
+        stack = [h for h in reversed(roots) if buildable(h)]
         while stack:
             h = stack.pop()
             blocks = [h]
             key = attrs(h)
             while True:
+                included.add(h)
                 child = first_child.get(h)
                 if child is None:
                     break
                 if h in more_children:
-                    stack.extend(reversed([child, *more_children[h]]))
+                    stack.extend(
+                        c for c in reversed([child, *more_children[h]]) if buildable(c)
+                    )
+                    break
+                if not buildable(child):
                     break
                 if attrs(child) != key or len(blocks) == max_blocks_per_event:
                     stack.append(child)
@@ -422,12 +420,13 @@ class KVCacheSnapshot:
                 h = child
             yield segment(blocks)
 
-        yield from removals(h for h in self._records if h not in live_scope)
+        yield from removals(h for h in included if h not in live_scope)
 
         # Every live scope reaches its exact count, one reference per round.
         refs: dict[_Scope, list[tuple[ExternalBlockHash, int]]] = {}
         for (live_scope_key, h), count in self._live.items():
-            refs.setdefault(live_scope_key, []).append((h, count))
+            if h in included:
+                refs.setdefault(live_scope_key, []).append((h, count))
         for (medium, group, locality, ownership), owed in refs.items():
             round_ = 0
             while owed:
@@ -450,30 +449,25 @@ class KVCacheSnapshot:
                 round_ += 1
                 owed = [(h, count) for h, count in owed if count > round_]
 
-        yield from removals(iter(live_scope))
+        yield from removals(h for h in live_scope if h in included)
 
 
 class KVEventSnapshotRecorder:
-    """Owns snapshot state and its ROUTER socket on one thread.
+    """Folds published batches on its own thread and serves snapshots.
 
-    Input is the immutable payload sent on PUB. While the snapshot is tainted,
-    requests receive the unavailable sequence and retry later. `stream_id`
-    changes only with the publisher, so consumers that are following the live
-    stream keep their state. Lost input or exhausted budgets invalidate the
-    recorder for this publisher lifetime; live publishing continues.
+    `publisher_id` identifies the publisher until it restarts. Any recorder
+    error stops the recorder for the rest of the publisher's life, and live
+    publishing continues.
     """
 
-    # Reply framing, polling and backpressure. Deployment-dependent limits
-    # are constructor arguments.
+    # The publisher waits this long for queue room before the recorder stops.
+    MAX_RECORD_WAIT_S = 1.0
+    MAX_PENDING_BATCHES = 4096
+    POLL_INTERVAL_MS = 20
+    # Bounds replies queued for one requester that stopped reading.
+    MAX_QUEUED_REPLIES = 4
     EVENTS_PER_CHUNK = 256
     BLOCKS_PER_EVENT = 1024
-    POLL_INTERVAL_MS = 20
-    MAX_PENDING_BATCHES = 4096
-    MAX_PENDING_BYTES = 64 * 1024 * 1024
-    # The publisher waits this long for room before the recorder gives up.
-    MAX_RECORD_WAIT_S = 1.0
-    MAX_REQUESTS = 32
-    REPORT_INTERVAL_S = 60.0
 
     def __init__(
         self,
@@ -483,99 +477,69 @@ class KVEventSnapshotRecorder:
         max_response_bytes: int = 256 * 1024 * 1024,
     ) -> None:
         self._dp_rank = data_parallel_rank
-        self._max_blocks = max_blocks
         self._max_response_bytes = max_response_bytes
-        # The publisher identity sent with every live frame and reply.
-        self.stream_id = uuid.uuid4().bytes
-        self._inbox: deque[tuple[int, bytes]] = deque()
-        self._pending_bytes = 0
-        self._room = threading.Condition()
-        self._snapshot = KVCacheSnapshot(max_blocks)
+        self.publisher_id = uuid.uuid4().bytes
+        self._inbox: queue.Queue[tuple[int, EventBatch]] = queue.Queue(
+            self.MAX_PENDING_BATCHES
+        )
+        # None once the recorder has stopped.
+        self._snapshot: KVCacheSnapshot | None = KVCacheSnapshot(max_blocks)
         self._seq = -1
-        self._tainted = False
-        self._reported = (0, 0)
-        self._next_report = 0.0
         self._failed = threading.Event()
         self._stop = threading.Event()
-        self._ready = threading.Event()
-        self.endpoint: str | None = None
+        # Bound on the caller's thread so a bind error raises to the caller,
+        # as ZmqEventPublisher does; the recorder thread owns it afterwards.
+        self._router = zmq.Context.instance().socket(zmq.ROUTER)
+        self._router.setsockopt(zmq.LINGER, 0)
+        self._router.setsockopt(zmq.SNDHWM, self.MAX_QUEUED_REPLIES)
+        try:
+            self.endpoint = ZmqEventPublisher._bind(self._router, endpoint)
+        except Exception:
+            self._router.close()
+            raise
         self._thread = threading.Thread(
-            target=self._run, args=(endpoint,), daemon=True, name="kv-snapshot-recorder"
+            target=self._run, daemon=True, name="kv-snapshot-recorder"
         )
         self._thread.start()
-        self._ready.wait(timeout=5)
-        if self.endpoint is None:
-            self.shutdown(timeout=1)
-            raise RuntimeError(f"Unable to bind KV snapshot endpoint {endpoint}")
 
-    def record(self, seq: int, payload: bytes) -> None:
+    def record(self, seq: int, batch: EventBatch) -> None:
         """Queue a published batch, waiting a bounded time for room."""
-        size = len(payload)
-        with self._room:
-            if not self._room.wait_for(
-                lambda: (
-                    self._failed.is_set() or self._stop.is_set() or self._fits(size)
-                ),
-                timeout=self.MAX_RECORD_WAIT_S,
-            ):
-                logger.error(
-                    "KV snapshot recorder is %d batches behind at sequence %d; "
-                    "snapshots are unavailable until the engine restarts",
-                    len(self._inbox),
-                    seq,
-                )
-                self._failed.set()
-            if self._failed.is_set() or self._stop.is_set():
-                return
-            self._inbox.append((seq, payload))
-            self._pending_bytes += size
-
-    def _fits(self, size: int) -> bool:
-        return not self._inbox or (
-            len(self._inbox) < self.MAX_PENDING_BATCHES
-            and self._pending_bytes + size <= self.MAX_PENDING_BYTES
-        )
+        if self._failed.is_set():
+            return
+        try:
+            self._inbox.put((seq, batch), timeout=self.MAX_RECORD_WAIT_S)
+        except queue.Full:
+            logger.error(
+                "KV snapshot recorder is %d batches behind at sequence %d; "
+                "snapshots are unavailable until the engine restarts",
+                self.MAX_PENDING_BATCHES,
+                seq,
+            )
+            self._failed.set()
 
     def shutdown(self, timeout: float) -> None:
         self._stop.set()
-        with self._room:
-            self._room.notify_all()
         self._thread.join(timeout=timeout)
 
-    def _run(self, endpoint: str) -> None:
-        encoder = msgspec.msgpack.Encoder()
-        decoder = msgspec.msgpack.Decoder(type=KVEventBatch)
-        try:
-            with zmq.Context.instance().socket(zmq.ROUTER) as router:
-                router.setsockopt(zmq.LINGER, 0)
-                router.setsockopt(zmq.SNDHWM, self.MAX_REQUESTS)
-                router.setsockopt(zmq.SNDTIMEO, 100)
-                self.endpoint = ZmqEventPublisher._bind(router, endpoint)
-                self._ready.set()
-                while not self._stop.is_set():
-                    if router.poll(self.POLL_INTERVAL_MS):
-                        self._serve(router, encoder, decoder)
-                    else:
-                        self._drain(decoder)
-        except Exception:
-            self._failed.set()
-            logger.exception("KV snapshot service stopped; live publishing continues")
-        finally:
-            self._ready.set()
+    def _run(self) -> None:
+        with self._router as router:
+            while not self._stop.is_set():
+                requested = router.poll(self.POLL_INTERVAL_MS)
+                # Fold before replying, so a snapshot covers every batch
+                # published before the request, which the requester may
+                # already hold from the live stream.
+                self._drain()
+                if requested:
+                    self._serve(router)
 
-    def _drain(self, decoder: msgspec.msgpack.Decoder) -> None:
-        # A finite FIFO cut: future arrivals cannot postpone this snapshot.
-        with self._room:
-            cut = len(self._inbox)
-        for _ in range(cut):
-            with self._room:
-                seq, payload = self._inbox.popleft()
-                self._pending_bytes -= len(payload)
-                self._room.notify()
-            if self._failed.is_set():
+    def _drain(self) -> None:
+        # A finite cut: batches published while folding wait for the next call.
+        for _ in range(self._inbox.qsize()):
+            seq, batch = self._inbox.get_nowait()
+            if self._snapshot is None:
                 continue
             try:
-                self._snapshot.apply(decoder.decode(payload).events)
+                self._snapshot.apply(batch.events)
             except Exception:
                 logger.exception(
                     "KV snapshot fold failed at sequence %d; snapshots are "
@@ -583,78 +547,55 @@ class KVEventSnapshotRecorder:
                     seq,
                 )
                 self._failed.set()
-                continue
-            self._seq = seq
-            self._report(seq)
-        if self._failed.is_set():
-            self._snapshot = KVCacheSnapshot(self._max_blocks)
-
-    def _report(self, seq: int) -> None:
-        snapshot = self._snapshot
-        if bool(snapshot.tainted) != self._tainted:
-            self._tainted = not self._tainted
-            if self._tainted:
-                logger.warning(
-                    "KV snapshots unavailable from sequence %d: %s",
-                    seq,
-                    snapshot.taint_reason,
-                )
             else:
-                logger.info("KV snapshots available again from sequence %d", seq)
-        counters = (snapshot.forgotten_removals, snapshot.expired_early)
-        if counters != self._reported and time.monotonic() >= self._next_report:
-            self._reported = counters
-            self._next_report = time.monotonic() + self.REPORT_INTERVAL_S
-            logger.warning(
-                "KV snapshot recorder totals: %d removals of blocks without a "
-                "record, %d dead blocks dropped early to keep the ring in budget",
-                *counters,
-            )
+                self._seq = seq
+        if self._failed.is_set():
+            self._snapshot = None
 
-    def _serve(self, router, encoder, decoder) -> None:
-        envelopes: list[list[bytes]] = []
-        for _ in range(self.MAX_REQUESTS):
-            if not router.poll(0):
-                break
-            frames = router.recv_multipart()
+    def _serve(self, router: zmq.Socket) -> None:
+        # A REQ request arrives on the ROUTER as [peer identity, empty
+        # delimiter, request]; the reply goes back under the same two frames.
+        frames = router.recv_multipart()
+        if len(frames) != 3 or frames[1] or frames[2] != SNAPSHOT_REQUEST:
+            logger.warning(
+                "Ignoring a malformed KV snapshot request of %d frames", len(frames)
+            )
+            return
+        reply = [
+            SNAPSHOT_UNAVAILABLE_SEQ.to_bytes(8, "big", signed=True),
+            self.publisher_id,
+        ]
+        if self._snapshot is not None:
             try:
-                envelopes.append(frames[: frames.index(b"") + 1])
-            except ValueError:
-                envelopes.append(frames[:1])
-        self._drain(decoder)
-        reply = [self._seq.to_bytes(8, "big", signed=True), self.stream_id]
-        if not (self._failed.is_set() or self._snapshot.tainted):
-            try:
-                size = 0
-                for chunk in self._encode_chunks(encoder):
+                chunks, size = [], 0
+                for chunk in self._encode_chunks(self._snapshot):
                     size += len(chunk)
                     if size > self._max_response_bytes:
                         raise ValueError("Snapshot response budget exceeded")
-                    reply.append(chunk)
+                    chunks.append(chunk)
+                reply[0] = self._seq.to_bytes(8, "big", signed=True)
+                reply.extend(chunks)
             except Exception:
                 logger.exception(
-                    "KV snapshot export failed; snapshots are unavailable until "
-                    "the engine restarts"
+                    "KV snapshot export failed; snapshots are unavailable "
+                    "until the engine restarts"
                 )
                 self._failed.set()
-        if self._failed.is_set() or self._snapshot.tainted:
-            reply = [
-                SNAPSHOT_UNAVAILABLE_SEQ.to_bytes(8, "big", signed=True),
-                self.stream_id,
-            ]
-        for envelope in envelopes:
-            # A slow requester retries; it cannot hold the recorder thread.
-            with suppress(zmq.Again):
-                router.send_multipart(envelope + reply, flags=zmq.DONTWAIT, copy=False)
+                self._snapshot = None
+        # A requester that stopped reading retries; it cannot hold this thread.
+        with suppress(zmq.Again):
+            router.send_multipart(frames[:2] + reply, flags=zmq.DONTWAIT, copy=False)
 
-    def _encode_chunks(self, encoder: msgspec.msgpack.Encoder) -> Iterator[bytes]:
+    def _encode_chunks(self, snapshot: KVCacheSnapshot) -> Iterator[bytes]:
+        encoder = msgspec.msgpack.Encoder()
         ts = time.time()
         events: list[BlockStored | BlockRemoved] = []
-        for event in self._snapshot.export(self.BLOCKS_PER_EVENT):
+        for event in snapshot.export(self.BLOCKS_PER_EVENT):
             events.append(event)
             if len(events) == self.EVENTS_PER_CHUNK:
                 yield encoder.encode(self._chunk(ts, events))
                 events = []
+                # Let the engine threads take the GIL between chunks.
                 time.sleep(0)
         if events:
             yield encoder.encode(self._chunk(ts, events))

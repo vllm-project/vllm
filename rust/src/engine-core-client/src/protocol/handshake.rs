@@ -31,8 +31,8 @@ pub struct KvEventsConfig {
     pub publisher: String,
     pub endpoint: String,
     pub replay_endpoint: Option<String>,
-    /// Snapshot ROUTER address. When set, live and replay sequence frames
-    /// carry a 16-byte publisher identity after the 8-byte sequence.
+    /// Snapshot ROUTER address. When set, live and replay batches carry a
+    /// trailing publisher identity.
     pub snapshot_endpoint: Option<String>,
     pub snapshot_max_blocks: Option<u64>,
     pub snapshot_max_response_bytes: Option<u64>,

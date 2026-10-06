@@ -145,6 +145,16 @@ class KVEventBatch(EventBatch):
     events: list[BlockStored | BlockRemoved | AllBlocksCleared]
 
 
+class IdentifiedKVEventBatch(KVEventBatch):
+    """A live or replayed batch from a publisher that serves snapshots.
+
+    `publisher_id` changes only when the publisher restarts. It is the last
+    array element, so `KVEventBatch` decoders read these batches unchanged.
+    """
+
+    publisher_id: bytes | None = None
+
+
 class KVEventAggregator:
     """Aggregates KV events across multiple workers.
     Tracks how many times each event appears and returns only those
@@ -321,10 +331,10 @@ class ZmqEventPublisher(EventPublisher):
         request missed batches by sending the starting sequence number as an
         8-byte big-endian integer.
     snapshot_endpoint:
-        Optional ROUTER address serving compacted snapshots of the live KV
-        cache state. When enabled, live sequence frames append a 16-byte
-        publisher identity to the sequence number, and idle publishers emit
-        empty KV batches every second. See `vllm.distributed.kv_events_snapshot`.
+        Optional ROUTER address serving snapshots of the live KV cache state.
+        When enabled, live and replay batches are `IdentifiedKVEventBatch`, and
+        idle publishers emit empty batches. See
+        `vllm.distributed.kv_events_snapshot`.
     snapshot_max_blocks:
         Most block records the snapshot recorder retains, and separately most
         live block references across all tiers.
@@ -343,6 +353,11 @@ class ZmqEventPublisher(EventPublisher):
 
     SHUTDOWN_TIMEOUT: float = 1.0
     END_SEQ = (-1).to_bytes(8, "big", signed=True)
+    # With snapshots on, an idle publisher sends an empty batch this often. A
+    # subscriber waits for a live message before it requests a snapshot, since
+    # a SUB socket drops messages until its subscription reaches the publisher,
+    # and the next sequence number exposes a lost final batch.
+    HEARTBEAT_INTERVAL_S: float = 1.0
 
     def __init__(
         self,
@@ -391,8 +406,6 @@ class ZmqEventPublisher(EventPublisher):
         )
 
         self._snapshot_recorder: KVEventSnapshotRecorder | None = None
-        # Appended to each live and replay sequence frame when snapshots are on.
-        self._snapshot_stream_id = b""
         if snapshot_endpoint is not None:
             # Imported here because kv_events_snapshot imports this module.
             from vllm.distributed import kv_events_snapshot
@@ -405,13 +418,13 @@ class ZmqEventPublisher(EventPublisher):
                     max_response_bytes=snapshot_max_response_bytes,
                 )
             except Exception:
+                logger.error("Failed to start KV snapshots on %s", snapshot_endpoint)
                 if self._pub is not None:
                     self._pub.close(linger=0)
                 if self._replay is not None:
                     self._replay.close(linger=0)
                 raise
             self._publisher_config.snapshot_endpoint = self._snapshot_recorder.endpoint
-            self._snapshot_stream_id = self._snapshot_recorder.stream_id
 
         # Payload
         self._seq_gen = count()
@@ -531,33 +544,45 @@ class ZmqEventPublisher(EventPublisher):
                     logger.exception("Error in replay: %s", e)
 
             # --- main queue (critical) ---------------------------------
-            queued = True
+            is_heartbeat = False
             try:
                 event = self._event_queue.get(timeout=0.1)
                 if event is None:
                     break  # Sentinel received, exit thread
             except queue.Empty:
-                if not self._snapshot_stream_id or time.monotonic() - last_send < 1:
+                if (
+                    self._snapshot_recorder is None
+                    or time.monotonic() - last_send < self.HEARTBEAT_INTERVAL_S
+                ):
                     continue
-                queued = False
+                is_heartbeat = True
                 event = KVEventBatch(
                     ts=time.time(), events=[], data_parallel_rank=self._dp_rank
                 )
 
             try:
                 seq = next(self._seq_gen)
-                payload = self._pack.encode(event)
-                # Record before sending so that any batch a subscriber has
-                # received is covered by the next snapshot it requests.
-                if self._snapshot_recorder is not None:
-                    self._snapshot_recorder.record(seq, payload)
+                if self._snapshot_recorder is None:
+                    payload = self._pack.encode(event)
+                else:
+                    # Record before sending so that any batch a subscriber has
+                    # received is covered by the next snapshot it requests.
+                    self._snapshot_recorder.record(seq, event)
+                    payload = self._pack.encode(
+                        IdentifiedKVEventBatch(
+                            ts=event.ts,
+                            events=event.events,
+                            data_parallel_rank=event.data_parallel_rank,
+                            publisher_id=self._snapshot_recorder.publisher_id,
+                        )
+                    )
 
-                seq_bytes = seq.to_bytes(8, "big") + self._snapshot_stream_id
+                seq_bytes = seq.to_bytes(8, "big")
                 self._pub.send_multipart((self._topic_bytes, seq_bytes, payload))
 
                 self._buffer.append((seq, payload))
                 last_send = time.monotonic()
-                if queued:
+                if not is_heartbeat:
                     self._event_queue.task_done()
 
             except Exception as e:
@@ -580,13 +605,7 @@ class ZmqEventPublisher(EventPublisher):
             if seq >= start_seq:
                 # Subscriber receives (topic, seq_bytes, payload)
                 self._replay.send_multipart(
-                    (
-                        client_id,
-                        b"",
-                        self._topic_bytes,
-                        seq.to_bytes(8, "big") + self._snapshot_stream_id,
-                        buf,
-                    )
+                    (client_id, b"", self._topic_bytes, seq.to_bytes(8, "big"), buf)
                 )
         # Send end of sequence marker
         self._replay.send_multipart((client_id, b"", b"", self.END_SEQ, b""))
