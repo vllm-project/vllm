@@ -178,6 +178,7 @@ fn tool_declare_omits_absent_fields_and_preserves_parameter_nulls() {
             }
         }),
         strict: None,
+        defer_loading: None,
     }];
     request.tool_context =
         crate::request::ResolvedToolContext::new(&request.messages, tools, None, true)
@@ -200,6 +201,7 @@ fn tool_declare_preserves_present_optional_fields() {
         description: Some("Look up a record".to_string()),
         parameters: json!({"type": "object"}),
         strict: Some(false),
+        defer_loading: None,
     }];
     request.tool_context =
         crate::request::ResolvedToolContext::new(&request.messages, tools, None, true)
