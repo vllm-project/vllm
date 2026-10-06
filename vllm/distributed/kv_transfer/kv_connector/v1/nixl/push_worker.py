@@ -154,7 +154,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
 
     def _prepare_remote_regions(self, metadata: NixlAgentMetadata) -> None:
-        """Match hybrid regions by name and occurrence, excluding draft KV."""
+        """Match hybrid cache regions by name and occurrence."""
         if not self._has_mamba or metadata.region_names is None:
             return
         if metadata.region_names == self.region_names:
