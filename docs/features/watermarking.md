@@ -48,12 +48,12 @@ callers, or strip and validate the field at the ingress boundary.
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
-contexts. Values above 16 are allowed; Gumbel-max emits a warning for them.
+contexts for all algorithms. Values above 16 are allowed and trigger a warning
+when using `gumbel` or `dual_key_gumbel`.
 
 `allow_target_only_watermarking` defaults to false and only has an effect when
 speculative decoding is enabled. It permits target-only Gumbel-max watermarking
-at the cost of weaker detectability. SynthID-Text does not support speculative
-decoding with either value of this setting. See
+at the cost of weaker detectability. See
 [Speculative decoding](#speculative-decoding).
 
 ## Architecture
@@ -71,7 +71,7 @@ generation.
 
 ## Interactions with generation features
 
-- Greedy decoding (`temperature=0`) cannot apply a Gumbel watermark. The first
+- Greedy decoding (`temperature=0`) cannot apply a watermark. The first
   such request emits a server-side warning; it and subsequent greedy requests
   use ordinary greedy sampling without a watermark. This includes
   transcription, translation, and realtime transcription, which default to
@@ -103,9 +103,10 @@ standard rejection sampling, and an autoregressive model-based method (`dspark`,
 For `gumbel`, set `"allow_target_only_watermarking": true` to leave accepted
 draft tokens unwatermarked while watermarking target-side rejection recovery
 and bonus sampling. The signal is diluted in proportion to the share of output
-tokens supplied by accepted drafts. SynthID-Text is rejected before model
-loading even with this setting, because the target-side speculative recovery
-path does not support SynthID reweighting.
+tokens supplied by accepted drafts.
+
+SynthID-Text does not support speculative decoding, including target-only
+watermarking, and is rejected before model loading.
 
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
@@ -148,8 +149,10 @@ longer. A smaller value reduces scanning cost but only provides the guarantee
 within that window. Set it to `null` to search back to the start of the
 generation for `"single_turn"`, or of the request for `"all"`; an unbounded
 search costs more as the sequence grows. The setting has no effect when
-`deduplicate_contexts` is `"none"`. Values below 1,024 emit a warning because a
-short window can miss repetition loops whose contexts recur farther apart.
+`deduplicate_contexts` is `"none"`. For Gumbel-max algorithms, disabling
+deduplication or setting a value below 1,024 emits a warning about degenerate
+generations, including repetition loops. A short window can miss contexts
+that recur farther apart.
 
 For example, this checks prompt and completion history within the default
 8,192-position window:
@@ -198,46 +201,24 @@ vllm serve MODEL \
 ### SynthID-Text
 
 [SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) reweights the
-categorical distribution before vLLM's ordinary random sampler selects a token.
-Configure it with one secret key and a tournament `depth` from 1 to 32
-(default 32):
+categorical distribution using multiple binary tournament-sampling layers before
+vLLM's normal random sampler selects a token.
+
+Configure it with `algorithm="synthid_text"` and `depth`, which defaults to 32
+and currently supports values from 1 to 32:
 
 ```bash
 vllm serve MODEL \
   --watermark-config \
-  '{"algorithm":"synthid","key":42,"context_width":4,"depth":32}'
+  '{"algorithm":"synthid_text","key":42,"context_width":4,"depth":32}'
 ```
 
-`context_width` is the number of previous generated tokens used in each PRF
-input; the corresponding n-gram length is `context_width + 1`. Missing tokens
-at the start of a completion use vLLM's native `-1` context value. The usual
-`deduplicate_contexts` policy applies: repeated contexts use ordinary sampling,
-and `"all"` also leaves the first `context_width` generated tokens unwatermarked.
+`depth` controls the number of tournament-sampling layers. Higher values
+strengthen the watermark but add sampling overhead.
 
-SynthID uses the `philox` PRF. For each context and candidate token, one Philox
-32-bit word supplies the binary values for all configured depths: depth `d`
-uses bit `(word >> d) & 1`. The watermark is applied after top-k and top-p
-filtering. It requires stochastic sampling; requests with `temperature=0` use
-ordinary greedy sampling without a watermark.
-
-`SynthIDWatermarkDetector` recomputes those bits from generated token IDs using
-the same key, `context_width`, `depth`, and PRF. Its score is their mean. Its
-one-sided p-value assumes independent Bernoulli(0.5) bits under the null;
-repeated contexts are deduplicated by default. As with other detectors, measure
-false-positive behavior on representative unwatermarked traffic before relying
-on the threshold:
-
-```python
-from vllm.v1.watermarking import SynthIDWatermarkDetector
-
-result = SynthIDWatermarkDetector(key=42, context_width=4, depth=32).detect(
-    generated_token_ids
-)
-print(result.score, result.p_value, result.is_watermarked)
-```
-
-SynthID-Text does not currently support speculative decoding, including
-target-only watermarking with `allow_target_only_watermarking=true`.
+`SynthIDWatermarkDetector` implements the corresponding unweighted-mean detector
+using the same generation parameters. Its reported p-value assumes independent
+Bernoulli(0.5) values under the null.
 
 ## Pseudorandom functions
 
@@ -280,7 +261,7 @@ candidate configurations they have served, test the text against each
 candidate, and correct for multiple testing, for example with a Bonferroni
 correction to the resulting p-values.
 
-Gumbel-max detection scores repeated contexts once by default so identical PRF
+Detection scores repeated contexts once by default so identical PRF
 random vectors are not treated as independent evidence. Keep
 `deduplicate_contexts=True` unless the detector's calibration has been adjusted
 for correlated scores.

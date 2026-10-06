@@ -20,7 +20,7 @@ def create_watermarker(config: WatermarkConfig) -> Watermarker:
             config.prf,
             config.alpha,
         )
-    if config.algorithm == "synthid":
+    if config.algorithm == "synthid_text":
         return SynthIDWatermarker(
             config.key, config.context_width, config.depth, config.prf
         )
