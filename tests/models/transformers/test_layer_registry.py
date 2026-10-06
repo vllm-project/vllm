@@ -63,7 +63,7 @@ def test_uses_hw_agnostic_when_enabled(monkeypatch, fake_hw_layernorm, resolve_l
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
     resolved = hw_agnostic.resolve("layernorm", "RMSNorm")
     assert resolved is fake_hw_layernorm.RMSNorm
-    assert resolve_logs == ["Using hw-agnostic layer layernorm.RMSNorm"]
+    assert resolve_logs == ["Using hardware agnostic layer layernorm.RMSNorm"]
 
 
 def test_falls_back_when_symbol_missing(monkeypatch, resolve_logs):
