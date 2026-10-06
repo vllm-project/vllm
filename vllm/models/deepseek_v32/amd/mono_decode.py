@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -115,6 +116,14 @@ class GlmMonoDecode:
                 "dense ones to be a MoE layer."
             )
         self._layer_name = layers[self._num_dense].self_attn.layer_name
+        self._fused_indexer = envs.VLLM_ROCM_GLM_MONO_FUSED_INDEXER
+        if self._fused_indexer and not getattr(
+            model.config, "indexer_rope_interleave", False
+        ):
+            raise ValueError(
+                "VLLM_ROCM_GLM_MONO_FUSED_INDEXER requires indexer_rope_interleave."
+            )
+        self._max_model_len = vllm_config.model_config.max_model_len
         self._ops: dict[int, list[Glm5MonoKernel]] = {}
         self._cos: torch.Tensor | None = None
         self._sin: torch.Tensor | None = None
@@ -165,11 +174,32 @@ class GlmMonoDecode:
 
         fp8 = current_platform.fp8_dtype()
         ops = self._ops[max(n, 2)]
+        req_ids = md.req_id_per_token[:n]
+        if n == 1:
+            req_ids = torch.cat([req_ids, req_ids])
         for layer, op in zip(model.layers[self._num_dense :], ops):
             attn = layer.self_attn
-            if attn.indexer is not None and not attn.skip_topk:
-                self._refresh_indices(layer, state[:n], positions, md)
             cache = attn.kv_cache.view(fp8).view(-1, attn.kv_cache.shape[-1])
+            if op.with_indexer:
+                state = op.forward(
+                    state,
+                    self._cur_pos,
+                    cache,
+                    cache,
+                    None,
+                    self._cos,
+                    self._sin,
+                    positions=kernel_positions,
+                    slot_mapping=slots,
+                    sparse_kv_indptr=indptr,
+                    index_cache=attn.indexer.k_cache.kv_cache,
+                    block_table=md.block_table,
+                    req_ids=req_ids,
+                    out_indices=md.paged_kv_indices,
+                )
+                continue
+            if _computes_indices(layer):
+                self._refresh_indices(layer, state[:n], positions, md)
             state = op.forward(
                 state,
                 self._cur_pos,
@@ -220,14 +250,19 @@ class GlmMonoDecode:
         rank = get_tensor_model_parallel_rank()
         group = get_tp_group().cpu_group
         sparse = list(self._model.layers[self._num_dense :])
-        weights = [_layer_weights(layer, cfg, rank, tp) for layer in sparse]
+        fused = [self._fused_indexer and _computes_indices(layer) for layer in sparse]
+        weights = [
+            _layer_weights(layer, cfg, rank, tp, with_indexer=f)
+            for layer, f in zip(sparse, fused)
+        ]
         prepared = [
             prepare_glm5_weights(w, AttentionWeight.FP8_BLOCK128) for w in weights
         ]
+        index_options = self._index_options(sparse, fused)
         for chunk in sorted({max(n, 2) for n in _STEP_TOKENS}):
-            runtime = None
+            runtimes: dict[bool, Glm5MonoKernel | None] = {False: None, True: None}
             ops = []
-            for w, p in zip(weights, prepared):
+            for w, p, f in zip(weights, prepared, fused):
                 op = Glm5MonoKernel(
                     w,
                     chunk,
@@ -236,15 +271,16 @@ class GlmMonoDecode:
                     group=group,
                     topk=_SPARSE_TOPK,
                     launches_per_step=1,
-                    with_indexer=False,
+                    with_indexer=f,
                     attention_weight=AttentionWeight.FP8_BLOCK128,
                     kv_cache_layout=KvCacheLayout.ATOM,
                     kv_cache_dtype="fp8",
                     prepared_weights=p,
-                    runtime=runtime,
+                    runtime=runtimes[f],
                     native_fp4_mfma=True,
+                    **(index_options if f else {}),
                 )
-                runtime = runtime or op
+                runtimes[f] = runtimes[f] or op
                 ops.append(op)
             self._ops[chunk] = ops
         # Drop the unpacked attention copies; every op reads the packed ones.
@@ -259,9 +295,37 @@ class GlmMonoDecode:
         self._sin = cos_sin[:, half:].to(torch.bfloat16).contiguous()
         self._cur_pos = torch.zeros(1, dtype=torch.int32, device=cos_sin.device)
         logger.info_once(
-            "GLM fused decode enabled for %d MoE layers, decode steps of %s tokens.",
+            "GLM fused decode enabled for %d MoE layers (%d with the fused "
+            "indexer), decode steps of %s tokens.",
             len(sparse),
+            sum(fused),
             "/".join(map(str, _STEP_TOKENS)),
+        )
+
+    def _index_options(
+        self, sparse: list[DeepseekV32DecoderLayer], fused: list[bool]
+    ) -> dict:
+        if not any(fused):
+            return {}
+        attn = next(layer.self_attn for layer, f in zip(sparse, fused) if f)
+        if not torch.equal(
+            attn.rotary_emb.cos_sin_cache, attn.indexer_rope_emb.cos_sin_cache
+        ):
+            raise ValueError(
+                "VLLM_ROCM_GLM_MONO_FUSED_INDEXER requires the indexer and MLA "
+                "RoPE tables to match."
+            )
+        cache = attn.indexer.k_cache.kv_cache
+        md = get_forward_context().attn_metadata[self._layer_name]
+        block = md.block_size
+        return dict(
+            index_max_seq=(self._max_model_len + block - 1) // block * block,
+            index_paged=True,
+            index_block_size=cache.shape[1],
+            index_block_bytes=cache.stride(0) * cache.element_size(),
+            index_shuffled=attn.indexer.k_cache.uses_shuffled_layout,
+            block_table_stride=md.block_table.stride(0),
+            index_k_bf16=True,
         )
 
 
@@ -344,6 +408,30 @@ def _block_fp8(linear: torch.nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
     return weight.contiguous(), scale.contiguous()
 
 
+def _computes_indices(layer: DeepseekV32DecoderLayer) -> bool:
+    attn = layer.self_attn
+    return attn.indexer is not None and not attn.skip_topk
+
+
+def _indexer_weights(layer: DeepseekV32DecoderLayer) -> dict[str, torch.Tensor]:
+    indexer = layer.self_attn.indexer
+    wk_w = indexer.wk_weights_proj.weight
+    if wk_w.dtype != torch.bfloat16 or wk_w.shape[0] != indexer.head_dim + indexer.n_head:
+        raise ValueError(
+            "VLLM_ROCM_GLM_MONO_FUSED_INDEXER requires a bf16 wk_weights_proj, "
+            f"got {wk_w.dtype} {tuple(wk_w.shape)}."
+        )
+    w_index_q, s_index_q = _block_fp8(indexer.wq_b)
+    return {
+        "w_index_k": wk_w[: indexer.head_dim].contiguous(),
+        "w_index_w": wk_w[indexer.head_dim :].contiguous(),
+        "w_index_q": w_index_q,
+        "s_index_q": s_index_q,
+        "g_index_k": indexer.k_norm.weight.float().contiguous(),
+        "b_index_k": indexer.k_norm.bias.float().contiguous(),
+    }
+
+
 def _fp4_storage(tensor: torch.Tensor) -> torch.Tensor:
     view = tensor.view(torch.uint8)
     view.is_shuffled = True
@@ -351,7 +439,7 @@ def _fp4_storage(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def _layer_weights(
-    layer: DeepseekV32DecoderLayer, cfg, rank: int, tp: int
+    layer: DeepseekV32DecoderLayer, cfg, rank: int, tp: int, with_indexer: bool = False
 ) -> LayerWeights:
     from aiter.ops.flydsl.glm5_mono import (
         LayerWeights,
@@ -397,6 +485,8 @@ def _layer_weights(
         "w_dn": _fp4_storage(experts.w2_weight),
         "s_dn": experts.w2_weight_scale.view(torch.uint8),
     }
+    if with_indexer:
+        tensors.update(_indexer_weights(layer))
     return LayerWeights(
         cfg.local_heads,
         tensors,
