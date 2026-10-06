@@ -11,7 +11,6 @@ members = [
     "src/metrics",
     "src/mock-engine",
     "src/parser",
-    "src/parser/python",
     "src/server",
     "src/text",
     "src/tokenizer",
@@ -79,8 +78,6 @@ prometheus-client-derive-encode = "0.5.0"
 prost = "0.14.3"
 prost-types = "0.14.3"
 protox = "0.9.1"
-pyo3 = "0.29.0"
-pythonize = "0.29.0"
 rand = "0.9.3"
 rand_distr = "0.5.1"
 rayon = "1.11.0"

@@ -55,14 +55,15 @@ def rust_extensions(*, optional: bool = False) -> list[RustExtension]:
             binding=Binding.Exec,
             optional=optional,
         ),
-        RustExtension(
-            target="vllm._rust_tool_parser",
-            path="rust/src/parser/python/Cargo.toml",
-            features=["pyo3/abi3-py38"],
-            binding=Binding.PyO3,
-            optional=optional,
-            py_limited_api=True,
-        ),
+        # Example PyO3 module (the removed tool-parser bridge):
+        # RustExtension(
+        #     target="vllm._rust_tool_parser",
+        #     path="rust/src/parser/python/Cargo.toml",
+        #     features=["pyo3/abi3-py38"],
+        #     binding=Binding.PyO3,
+        #     optional=optional,
+        #     py_limited_api=True,
+        # ),
     ]
 
 
