@@ -213,10 +213,14 @@ class HYV4ReasoningExtractor:
             else:
                 return ReasoningDelta(reasoning=delta_text, content=None)
         elif self.start_token_id in delta_token_ids:
+            # Drop the marker text; it is absent when special tokens were
+            # skipped during detokenization.
+            start_index = delta_text.find(self.start_token)
+            if start_index != -1:
+                delta_text = delta_text[start_index + len(self.start_token) :]
             if self.end_token_id in delta_token_ids:
-                start_index = delta_text.find(self.start_token)
                 end_index = delta_text.find(self.end_token)
-                reasoning = delta_text[start_index + len(self.start_token) : end_index]
+                reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.end_token) :]
                 return ReasoningDelta(reasoning=reasoning, content=content or None)
             else:
