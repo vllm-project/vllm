@@ -10,7 +10,6 @@ pub mod random;
 pub mod random_mm;
 pub mod random_rerank;
 pub mod sharegpt;
-pub mod sonnet;
 pub mod speed_bench;
 
 use std::sync::Arc;
