@@ -32,5 +32,5 @@ class Pard2Qwen3Model(Pard2ModelBase):
         )
 
 
-class Pard2Qwen3ForCausalLM(Pard2ForCausalLMMixin, Qwen3ForCausalLM):
+class Pard2Qwen3ForCausalLM(Pard2ForCausalLMMixin, Qwen3ForCausalLM):  # type: ignore[misc]
     pard2_model_cls = Pard2Qwen3Model

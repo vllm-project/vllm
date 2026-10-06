@@ -38,5 +38,5 @@ class Pard2LlamaModel(Pard2ModelBase):
         return Pard2LlamaDecoderLayer(vllm_config, prefix=prefix, config=self.config)
 
 
-class Pard2LlamaForCausalLM(Pard2ForCausalLMMixin, LlamaForCausalLM):
+class Pard2LlamaForCausalLM(Pard2ForCausalLMMixin, LlamaForCausalLM):  # type: ignore[misc]
     pard2_model_cls = Pard2LlamaModel

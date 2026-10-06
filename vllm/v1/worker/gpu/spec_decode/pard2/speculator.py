@@ -178,6 +178,9 @@ class Pard2Speculator(DraftModelSpeculator):
             self.kv_cache_config,
             self.max_model_len,
             causal=True,
+            # DFlash bakes its context pass into the graph; PARD-2's is a
+            # target-shaped forward that runs eagerly, so keep it out.
+            precompute_context_kv=lambda num_reqs: None,
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
 
@@ -437,7 +440,7 @@ class Pard2Speculator(DraftModelSpeculator):
 
         # Repeat-last-feat: no new real features exist past the context, so all K
         # rows reuse the last accepted one.
-        if self.target_dependent:
+        if target_hidden_states is not None and last_accepted_rows is not None:
             self.hidden_states[:num_query_tokens].view(
                 num_reqs, self.num_query_per_req, -1
             ).copy_(

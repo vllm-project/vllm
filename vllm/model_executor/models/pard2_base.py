@@ -39,7 +39,7 @@ from .utils import (
 logger = init_logger(__name__)
 
 # Shared torch.compile dynamic dims for every PARD-2 draft model body.
-PARD2_COMPILE_DYNAMIC_ARG_DIMS = {
+PARD2_COMPILE_DYNAMIC_ARG_DIMS: dict[str, int | list[int] | dict[int, str]] = {
     "input_ids": 0,
     "positions": -1,
     "hidden_states": 0,
@@ -52,6 +52,10 @@ class Pard2ModelBase(nn.Module):
     target hidden state) embeddings. Subclasses implement ``_make_decoder_layer``
     for their model family and apply ``@support_torch_compile`` themselves."""
 
+    # None in target-independent mode, where there is no fusion to project.
+    target_proj: ReplicatedLinear | None
+    target_layer_perm: torch.Tensor
+
     def __init__(
         self,
         *,
@@ -60,7 +64,9 @@ class Pard2ModelBase(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.config = speculative_config.draft_model_config.hf_config
         self.quant_config = get_draft_quant_config(vllm_config)
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -150,6 +156,9 @@ class Pard2ModelBase(nn.Module):
         return self.embed_tokens(input_ids)
 
     def project_target_feat(self, target_feat: torch.Tensor) -> torch.Tensor:
+        assert self.target_proj is not None, (
+            "project_target_feat is target-dependent only"
+        )
         if self._needs_reorder:
             # Move the tiny permutation index onto the compute device once (device
             # check is host-side, no sync), then cache it in the buffer.
@@ -221,11 +230,12 @@ class Pard2ForCausalLMMixin:
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
-        self._draft_model_name = vllm_config.speculative_config.draft_model_config.model
-        self._draft_model_revision = (
-            vllm_config.speculative_config.draft_model_config.revision
-        )
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        draft_model_config = speculative_config.draft_model_config
+        self.config = draft_model_config.hf_config
+        self._draft_model_name = draft_model_config.model
+        self._draft_model_revision = draft_model_config.revision
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
@@ -247,7 +257,7 @@ class Pard2ForCausalLMMixin:
             self.config.vocab_size, scale=logit_scale
         )
 
-        self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
+        self.use_parallel_drafting = speculative_config.parallel_drafting
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -285,6 +295,7 @@ class Pard2ForCausalLMMixin:
         # Copy into the existing target_proj params, moving the loaded tensors to
         # their device/dtype (GPU when the draft is placed there).
         proj = self.model.target_proj
+        assert proj is not None
         with torch.no_grad():
             proj.weight.copy_(
                 warp["target_proj.weight"].to(proj.weight.device, proj.weight.dtype)
