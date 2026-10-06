@@ -340,7 +340,7 @@ class NixlBaseConnectorWorker:
         )
 
         # Per-FA-descriptor replicate flag, in _build_fa_local emission order.
-        fa_desc_replicated = self._fa_desc_replicated(num_fa_descs)
+        fa_desc_replicated = self._fa_desc_replicated(num_fa_descs, block_size_ratio)
         sharded_desc_end = len(src_blocks_data) - (
             self._logical_num_blocks if self._ple_region_index is not None else 0
         )
@@ -383,19 +383,22 @@ class NixlBaseConnectorWorker:
         """
         return tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1)
 
-    def _fa_desc_replicated(self, num_fa_descs: int) -> list[bool]:
-        """Per-FA-descriptor replicate flag, in _build_fa_local emission order
-        (region-major; one desc per block, with K/V packed). Length ``num_fa_descs``.
+    def _fa_desc_replicated(
+        self, num_fa_descs: int, block_size_ratio: int = 1
+    ) -> list[bool]:
+        """Per-FA-descriptor replicate flag, in _build_fa_local emission order:
+        region-major, ``region_num_blocks[i] * block_size_ratio`` descs per
+        region. Length ``num_fa_descs``.
         """
         assert self.transfer_topo is not None
         n_regions = len(self.block_len_per_layer)
         if n_regions == 0 or self.num_regions == 0:
             return [False] * num_fa_descs
-        nblk = num_fa_descs // self.num_regions
+        region_indices = self._transfer_layer_region_indices or range(n_regions)
         flags: list[bool] = []
-        for i in range(n_regions):
-            replicated = self._is_region_replicated(i)
-            flags.extend([replicated] * nblk)
+        for i in region_indices:
+            num_descs = self.region_num_blocks[i] * block_size_ratio
+            flags.extend([self._is_region_replicated(i)] * num_descs)
         assert len(flags) == num_fa_descs, (
             f"FA desc flags {len(flags)} != num_fa_descs {num_fa_descs}"
         )
@@ -2174,14 +2177,9 @@ class NixlBaseConnectorWorker:
             self._desc_pos_by_block_size[block_size] = desc_pos
 
             # DRAM descriptors are registered under CPU device 0.
-            blocks_data = [
-                (addr, length, 0) if is_dram else (addr, length, dev)
-                for (addr, length, dev), is_dram in zip(
-                    blocks_data, desc_is_dram, strict=True
-                )
-            ]
-            dram_blocks = [blocks_data[i] for i in dram_idx]
-            vram_blocks = [blocks_data[i] for i in vram_idx]
+            blocks_data[desc_is_dram, 2] = 0
+            dram_blocks = blocks_data[dram_idx]
+            vram_blocks = blocks_data[vram_idx]
             dram_descs = self.nixl_wrapper.get_xfer_descs(dram_blocks, "DRAM")
             self._dram_src_handles_by_block_size[block_size] = (
                 self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", dram_descs)
