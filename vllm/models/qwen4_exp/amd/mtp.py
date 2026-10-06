@@ -241,7 +241,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         hc_config = HyperConnectionConfig(
             hc_count=config.hc_count,
             hidden_size=config.hidden_size,
-            params_dtype=torch.bfloat16,
+            params_dtype=torch.get_default_dtype(),
             hc_lowrank=config.hc_lowrank,
             rms_norm_eps=config.rms_norm_eps,
             hc_per_branch_norm=True,

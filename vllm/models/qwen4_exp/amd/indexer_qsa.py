@@ -89,8 +89,8 @@ class QSAIndexer(nn.Module):
         super().__init__()
         if vllm_config.cache_config is None:
             raise ValueError("QSA requires a paged KV cache")
-        if vllm_config.model_config.dtype != torch.bfloat16:
-            raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
+        if vllm_config.model_config.dtype not in (torch.bfloat16, torch.float16):
+            raise NotImplementedError("Qwen4Exp QSA requires BF16 or FP16")
 
         self.layer_id = int(layer_id)
         self.index_n_heads = int(config.indexer_n_heads)
@@ -130,7 +130,7 @@ class QSAIndexer(nn.Module):
         cache_prefix = f"{prefix}." if prefix else ""
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=vllm_config.model_config.dtype,
             cache_rope_positions=vllm_config.model_config.uses_mrope,
             prefix=f"{cache_prefix}raw_key_cache",
             cache_config=cache_config,
@@ -139,7 +139,7 @@ class QSAIndexer(nn.Module):
         )
         self.compressed_key_cache = QSACompressedKeyCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=vllm_config.model_config.dtype,
             compress_ratio=self.compress_ratio,
             prefix=f"{cache_prefix}compressed_key_cache",
             cache_config=cache_config,
