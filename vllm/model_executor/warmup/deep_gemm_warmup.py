@@ -179,6 +179,7 @@ def _deepgemm_fp8_gemm_nt_warmup(
 
     device = w.device
     a1q = torch.empty((max_tokens, k), device=device, dtype=torch.float8_e4m3fn)
+    # Must be initialized (UE8M0 packing asserts zero sign/mantissa bits).
     a1q_scales = torch.zeros(
         (max_tokens, k // block_m), device=device, dtype=torch.float32
     )
@@ -284,6 +285,7 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
             ((MAX_M, k // block_m), torch.float32),
             ((MAX_M, n), torch.bfloat16),
         )
+        # Must be initialized (UE8M0 packing asserts zero sign/mantissa bits).
         a1q_scales.zero_()
 
         for num_tokens, align_used, expert_ids in warmup_cases:
