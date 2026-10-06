@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -74,24 +73,21 @@ if typing.TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Delayed mHC seam. Off unless VLLM_MHC_SEAM_GFX942=1 on gfx942.
-# From 64 tokens this calls aiter mhc_fused_post_pre_delayed. Below that,
-# the folded post path stays on.
+# Delayed mHC seam. On gfx942 when aiter exports mhc_fused_post_pre_delayed.
+# From 64 tokens this calls that op. Below that, the folded post path stays on.
 _AITER_SEAM_MIN_TOKENS = 64
 
 
 def _mhc_seam_enabled() -> bool:
-    if os.environ.get("VLLM_MHC_SEAM_GFX942", "0") != "1":
-        return False
     from vllm.platforms.rocm import on_gfx942
 
-    if on_gfx942():
-        return True
-    logger.info_once(
-        "VLLM_MHC_SEAM_GFX942 is set, but this device is not gfx942; "
-        "keeping the AITER mHC seam"
-    )
-    return False
+    if not on_gfx942():
+        return False
+    try:
+        from aiter.ops.mhc import mhc_fused_post_pre_delayed
+    except Exception:
+        return False
+    return callable(mhc_fused_post_pre_delayed)
 
 
 _MHC_SEAM = _mhc_seam_enabled()
@@ -468,8 +464,8 @@ class DeepseekV4DecoderLayer(nn.Module):
                     norm_eps=self.attn_norm.variance_epsilon,
                 )
             elif _MHC_SEAM and pre_mix is not None:
-                # PyISA seam does not fold RMSNorm. gfx950's fused norm stays
-                # on the branch below, which this flag does not take.
+                # The gfx942 seam does not fold RMSNorm. gfx950's fused norm
+                # stays on the branch below.
                 residual, post_mix, res_mix, x, attn_pre = self._seam(
                     x,
                     residual,
