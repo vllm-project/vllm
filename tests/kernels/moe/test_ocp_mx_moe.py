@@ -781,6 +781,7 @@ def test_trtllm_mxfp4_deferred_finalize(
                 global_num_experts=num_experts,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                routing_sink=None,
             ),
         )
         return
@@ -1780,6 +1781,7 @@ def test_rocm_mxfp4_moe_oracle(
                 global_num_experts=num_experts,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                routing_sink=None,
             )
         else:
             # Modular impl uses topk_weights and topk_ids

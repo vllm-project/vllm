@@ -88,6 +88,15 @@ class Config:
 
     torch_trace_dir_path: str | None = None
 
+    # Force AiterExperts's hidden_pad/intermediate_pad computation
+    # (`experts/rocm_aiter_moe.py`) to diverge from the padded K/N sizes above.
+    # None (default) preserves today's behavior: FusedMoEConfig defaults both
+    # to the (unpadded) K/intermediate_size_per_partition, so hidden_pad and
+    # intermediate_pad come out to 0.
+    # See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
+    hidden_dim_unpadded: int | None = None
+    intermediate_size_per_partition_unpadded: int | None = None
+
     def __post_init__(self):
         if self.quant_config is None:
             self.quant_config = TestMoEQuantConfig(None, False, False, None)
@@ -664,6 +673,10 @@ def make_modular_kernel(
         activation=config.activation,
         device=vllm_config.device_config.device,
         routing_method=RoutingMethodType.DeepSeekV3,
+        hidden_dim_unpadded=config.hidden_dim_unpadded,
+        intermediate_size_per_partition_unpadded=(
+            config.intermediate_size_per_partition_unpadded
+        ),
     )
 
     prepare_finalize = maybe_make_prepare_finalize(
