@@ -993,6 +993,9 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         self.late_interaction_runner.clear()
 
+    def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
+        self.late_interaction_runner.release_queries(query_keys)
+
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
@@ -3019,10 +3022,8 @@ class GPUModelRunner(
             )
             self.lora_manager.set_active_adapters(lora_requests, tower_mapping)
 
-            # Only set connector mapping if the model actually has a connector.
-            # Some multimodal models inherit a stub `get_num_mm_connector_tokens`
-            # from `SupportsMultiModal`, which returns None and should not be
-            # treated as a signal that connector LoRA is supported.
+            # Only set connector mapping if the model actually has a connector
+            # and reports connector token counts.
             mm_mapping = (
                 self.model.get_mm_mapping()  # type: ignore[attr-defined]
                 if hasattr(self.model, "get_mm_mapping")
