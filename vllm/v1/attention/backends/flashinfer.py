@@ -117,7 +117,7 @@ _KVPair = tuple[torch.Tensor, torch.Tensor]
 
 
 def _nvfp4_kv_views(
-    kv_cache: torch.Tensor, num_kv_heads: int, head_size: int
+    kv_cache: torch.Tensor, num_kv_heads: int
 ) -> tuple[_KVPair, _KVPair, str]:
     """Views of NVFP4 pages laid out as [K data | K scale | V data | V scale]."""
     num_blocks, num_slots, block_size, full_dim = kv_cache.shape
@@ -125,20 +125,18 @@ def _nvfp4_kv_views(
     if not hnd and kv_cache.stride()[1:] != (full_dim, num_slots * full_dim, 1):
         raise ValueError(f"NVFP4 KV pages must be dense, got {kv_cache.stride()}")
     dims = (num_kv_heads, block_size) if hnd else (block_size, num_kv_heads)
-    plane = num_kv_heads * block_size
-
-    def view(offset: int, dim: int) -> torch.Tensor:
-        return kv_cache.as_strided(
-            (num_blocks, *dims, dim),
-            (kv_cache.stride(0), dims[1] * dim, dim, 1),
-            kv_cache.storage_offset() + plane * offset,
+    side_size = num_kv_heads * block_size * full_dim
+    (k_data, k_scale), (v_data, v_scale) = (
+        nvfp4_split_data_scale(
+            kv_cache.as_strided(
+                (num_blocks, *dims, full_dim),
+                (kv_cache.stride(0), dims[1] * full_dim, full_dim, 1),
+                kv_cache.storage_offset() + side * side_size,
+            )
         )
-
-    data_dim, scale_dim = head_size // 2, head_size // 16
-    k_scale = view(data_dim, scale_dim).view(torch.float8_e4m3fn)
-    v_scale = view(full_dim + data_dim, scale_dim).view(torch.float8_e4m3fn)
-    data = (view(0, data_dim), view(full_dim, data_dim))
-    return data, (k_scale, v_scale), "HND" if hnd else "NHD"
+        for side in range(2)
+    )
+    return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
 
 
 def _get_trtllm_workspace_buffer():
@@ -2278,15 +2276,9 @@ class FlashInferImpl(AttentionImpl):
                 canonicalize_singleton_dim_strides(k_cache.permute(*stride_order)),
                 canonicalize_singleton_dim_strides(v_cache.permute(*stride_order)),
             )
-            if self.nvfp4_fa2:
-                nvfp4_kv_data, nvfp4_kv_block_scales, _ = _nvfp4_kv_views(
-                    kv_cache, self.num_kv_heads, self.head_size
-                )
-            else:
-                k_data, k_sf = nvfp4_split_data_scale(kv_cache_tuple[0])
-                v_data, v_sf = nvfp4_split_data_scale(kv_cache_tuple[1])
-                nvfp4_kv_data = (k_data, v_data)
-                nvfp4_kv_block_scales = (k_sf, v_sf)
+            nvfp4_kv_data, nvfp4_kv_block_scales, _ = _nvfp4_kv_views(
+                kv_cache, self.num_kv_heads
+            )
         else:
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
 
@@ -2758,9 +2750,7 @@ class FlashInferImpl(AttentionImpl):
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
             if self.nvfp4_fa2:
-                data, scales, kv_layout = _nvfp4_kv_views(
-                    kv_cache, self.num_kv_heads, self.head_size
-                )
+                data, scales, kv_layout = _nvfp4_kv_views(kv_cache, self.num_kv_heads)
                 nvfp4_quantize_append_paged_kv_cache_with_slot_mapping(
                     key,
                     value,

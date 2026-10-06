@@ -726,7 +726,7 @@ def test_flashinfer_nvfp4_kv_cache_update(default_vllm_config, layout):
     impl = fi.FlashInferImpl(4, 128, 1.0, 2, None, None, "nvfp4")
     impl.do_kv_cache_update(layer, kv[0], kv[1], layers[1], torch.arange(96))
 
-    data, scales, kv_layout = fi._nvfp4_kv_views(layers[1], 2, 128)
+    data, scales, kv_layout = fi._nvfp4_kv_views(layers[1], 2)
     pages = torch.arange(6, dtype=torch.int32)[None]
     seq_lens = torch.tensor([96], dtype=torch.int32)
     deq = torch.empty_like(kv)[:, None]
