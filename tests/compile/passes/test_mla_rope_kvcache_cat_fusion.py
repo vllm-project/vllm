@@ -11,6 +11,7 @@ from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.fusion.mla_rope_kvcache_cat_fusion import (
     MLARoPEKVCacheCatFusionPass,
 )
+from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
 )
@@ -377,10 +378,19 @@ def test_mla_rope_kvcache_cat_fusion(
             kv_cache_fused = attn_layer.kv_cache
         del dummy
 
-        assert fusion_pass.matched_count == 1
-
-        backend.check_before_ops(model.ops_in_model_before())
-        backend.check_after_ops(model.ops_in_model_after())
+        # AITER on uses the cached RoPE op, so the native index/cat pattern
+        # this pass fuses is not in the graph.
+        if getattr(model.rotary_emb, "use_aiter_cached_rope", False):
+            assert fusion_pass.matched_count == 0
+            rope_op = torch.ops.vllm.rocm_aiter_triton_rotary_embedding
+            assert backend.op_count(rope_op, before=True) >= 1
+            pre_graph = backend.graph_pre_compile.graph
+            for op in (torch.ops.aten.reciprocal, torch.ops.aten.clamp):
+                assert not any(find_op_nodes(op, pre_graph))
+        else:
+            assert fusion_pass.matched_count == 1
+            backend.check_before_ops(model.ops_in_model_before())
+            backend.check_after_ops(model.ops_in_model_after())
 
         if dtype == torch.float16:
             ATOL, RTOL = (2e-3, 2e-3)
