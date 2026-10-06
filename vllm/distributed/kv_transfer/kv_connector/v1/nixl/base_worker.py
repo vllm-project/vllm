@@ -2174,14 +2174,9 @@ class NixlBaseConnectorWorker:
             self._desc_pos_by_block_size[block_size] = desc_pos
 
             # DRAM descriptors are registered under CPU device 0.
-            blocks_data = [
-                (addr, length, 0) if is_dram else (addr, length, dev)
-                for (addr, length, dev), is_dram in zip(
-                    blocks_data, desc_is_dram, strict=True
-                )
-            ]
-            dram_blocks = [blocks_data[i] for i in dram_idx]
-            vram_blocks = [blocks_data[i] for i in vram_idx]
+            blocks_data[desc_is_dram, 2] = 0
+            dram_blocks = blocks_data[dram_idx]
+            vram_blocks = blocks_data[vram_idx]
             dram_descs = self.nixl_wrapper.get_xfer_descs(dram_blocks, "DRAM")
             self._dram_src_handles_by_block_size[block_size] = (
                 self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", dram_descs)

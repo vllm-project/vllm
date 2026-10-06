@@ -2100,7 +2100,9 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
 
     assert handle == 22
     assert worker._dram_src_handles_by_block_size[worker.block_size] == 11
-    assert [block[2] for block in blocks] == [0, 0, 3, 3]
+    # Must stay an array: P_TP > D_TP splits call .tolist() on it.
+    assert isinstance(blocks, np.ndarray)
+    assert blocks[:, 2].tolist() == [0, 0, 3, 3]
     memory_types = [
         call.args[1] for call in worker.nixl_wrapper.get_xfer_descs.call_args_list
     ]
