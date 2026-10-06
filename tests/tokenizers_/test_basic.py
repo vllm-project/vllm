@@ -195,6 +195,7 @@ def test_gte_preserves_serialized_template(gte_tokenizer_files, serialized_eos):
 
 def test_gte_tokenizer_roundtrip(gte_tokenizer_files, tmp_path):
     tokenizer = get_tokenizer(gte_tokenizer_files, trust_remote_code=True)
+    assert isinstance(tokenizer, TokenizersBackend)
     saved = tmp_path / "saved"
     tokenizer.save_pretrained(saved)
     assert "auto_map" in json.loads((saved / "tokenizer_config.json").read_text())
@@ -202,6 +203,7 @@ def test_gte_tokenizer_roundtrip(gte_tokenizer_files, tmp_path):
         (gte_tokenizer_files / "config.json").read_text()
     )
     reloaded = get_tokenizer(saved, trust_remote_code=True)
+    assert isinstance(reloaded, TokenizersBackend)
     assert reloaded.encode("hello world") == [1, 2, 3]
     for side, expected in [("left", [2, 1, 3]), ("right", [1, 2, 3])]:
         reloaded.truncation_side = side
@@ -231,6 +233,7 @@ def test_gte_preserves_custom_initialization(gte_tokenizer_files, fixed_initiali
     tokenizer = get_tokenizer(
         gte_tokenizer_files, trust_remote_code=True, runner_type="pooling"
     )
+    assert isinstance(tokenizer, TokenizersBackend)
     assert tokenizer.__class__.__mro__[1].__name__ == "Qwen2TokenizerFast"
     assert tokenizer.truncation_side == "left"
     assert tokenizer.encode("hello world hello", max_length=3, truncation=True) == [
