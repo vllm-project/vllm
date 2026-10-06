@@ -19,6 +19,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.parser.cohere_command import (
     CohereCommandParser,
     CohereNormalizedTool,
@@ -339,6 +340,14 @@ class TestAdjustRequestFoldFromStructuredOutputs:
                 _make_chat_request(structured_outputs={"json": json_value}),
             )
 
+    def test_deeply_nested_json_string_rejected(self, parser) -> None:
+        """json.loads raises RecursionError on a string nested this deeply."""
+        schema = '{"type": "array", "items": ' * 20_000 + "{}" + "}" * 20_000
+        with pytest.raises(VLLMValidationError, match="nested too deeply"):
+            parser.adjust_request(
+                _make_chat_request(structured_outputs={"json": schema}),
+            )
+
     @pytest.mark.parametrize(
         "construct",
         [
@@ -449,6 +458,15 @@ class TestCollectToolSchemaDefs:
             grammar,
             self._tool_calls_json("get_weather", {"location": {"city": 1}}),
         )
+
+    def test_deeply_nested_parameters_rejected(self) -> None:
+        """Tool schemas are compiled here, before request validation, and end up
+        inside an EBNF grammar that the nesting check cannot see later."""
+        parameters = json.loads('{"type": "array", "items": ' * 200 + "{}" + "}" * 200)
+        with pytest.raises(VLLMValidationError, match="nested too deeply"):
+            collect_tool_schema(
+                [CohereNormalizedTool(name="deep", parameters=parameters)]
+            )
 
     def test_input_parameters_not_mutated(self) -> None:
         params = json.loads(json.dumps(NESTED_DEFS_PARAMETERS))
