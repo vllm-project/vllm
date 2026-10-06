@@ -55,6 +55,12 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
         return True, None
 
     @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
+
+    @classmethod
     def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 

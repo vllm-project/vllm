@@ -82,6 +82,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _is_humming_quant_method() -> bool:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    return (
+        vllm_config is not None
+        and vllm_config.model_config is not None
+        and vllm_config.model_config.quantization == "humming"
+    )
+
+
 def _is_supported_wna16_weight_key(weight_key: QuantKey | None) -> bool:
     if weight_key is None or weight_key.scale2 is not None:
         return False
@@ -301,6 +312,23 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     @classmethod
     def is_batched(cls) -> bool:
         return cls.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def executed_activation_key(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        # Humming runs the input schema its weights are converted with. The
+        # Humming quant method, the WNA16/W4A8 oracles and
+        # VLLM_HUMMING_INPUT_QUANT_CONFIG supply one; the FP8/NVFP4/MXFP8/INT8
+        # oracles convert checkpoint weights for unquantized activations.
+        if (
+            envs.VLLM_HUMMING_INPUT_QUANT_CONFIG
+            or _is_supported_wna16_weight_key(weight_key)
+            or _is_humming_quant_method()
+        ):
+            return activation_key
+        return None
 
     @staticmethod
     def _supports_quant_scheme(
@@ -635,26 +663,24 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
-        supported, reason = mk.FusedMoEExpertsModular.is_supported_config(
+        # Check the gemm type first: the base check warns about activation
+        # quantization fallbacks of kernels it accepts.
+        if cls._supports_current_device():
+            assert hasattr(cls, "humming_gemm_type")
+            gemm_type = cls.humming_gemm_type().value.lower()
+            preferred_gemm_type = get_humming_moe_gemm_type(moe_config)
+            if preferred_gemm_type.lower() != gemm_type:
+                return False, (
+                    f"preferred gemm type {preferred_gemm_type} != "
+                    f"supported gemm type {gemm_type}"
+                )
+        return mk.FusedMoEExpertsModular.is_supported_config(
             cls,
             moe_config,
             weight_key,
             activation_key,
             activation_format,
         )
-
-        if supported:
-            assert hasattr(cls, "humming_gemm_type")
-            gemm_type = cls.humming_gemm_type().value.lower()
-            preferred_gemm_type = get_humming_moe_gemm_type(moe_config)
-            supported = preferred_gemm_type.lower() == gemm_type
-            if not supported:
-                reason = (
-                    f"preferred gemm type {preferred_gemm_type} != "
-                    f"supported gemm type {gemm_type}"
-                )
-
-        return supported, reason
 
     def apply_activation(
         self,

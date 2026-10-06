@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 
@@ -40,6 +41,12 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "Humming only supported on SM75+"
 
         return True, None
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
 
     @classmethod
     def can_implement(
@@ -131,6 +138,12 @@ class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             return False, "Humming only supported on SM75+"
 
         return True, None
+
+    @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
 
     @classmethod
     def can_implement(

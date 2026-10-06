@@ -593,6 +593,13 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         return True
 
     @staticmethod
+    def executed_activation_key(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        return None
+
+    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
@@ -612,7 +619,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             kInt4StaticAsym,
             kInt4Static32Asym,
         ]
-        return weight_key in SUPPORTED_W
+        return weight_key in SUPPORTED_W and activation_key is None
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:

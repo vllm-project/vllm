@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    check_activation_quant_fallback,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -553,15 +554,16 @@ class FusedMoEExperts(ABC):
         def _make_reason(reason: str) -> str:
             return f"kernel does not support {reason}"
 
+        executed_key = cls.executed_activation_key(weight_key, activation_key)
         if not cls._supports_current_device():
             return False, _make_reason(f"current device {current_platform.device_name}")
         elif not (moe_config.is_act_and_mul or cls._supports_no_act_and_mul()):
             return False, _make_reason("no act_and_mul MLP layer")
         elif not cls._supports_activation(moe_config.activation):
             return False, _make_reason(f"{moe_config.activation} activation")
-        elif not cls._supports_quant_scheme(weight_key, activation_key):
+        elif not cls._supports_quant_scheme(weight_key, executed_key):
             return False, _make_reason(
-                f"quantization scheme {weight_key}x{activation_key}"
+                f"quantization scheme {weight_key}x{executed_key}"
             )
         elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
             return False, _make_reason(
@@ -570,7 +572,7 @@ class FusedMoEExperts(ABC):
         elif moe_config.has_hash_routing and cls.is_monolithic():
             return False, _make_reason("hash routing")
         elif not cls._supports_routing_method(
-            moe_config.routing_method, weight_key, activation_key
+            moe_config.routing_method, weight_key, executed_key
         ):
             return False, _make_reason(f"routing method {moe_config.routing_method}")
         elif not cls._supports_router_logits_dtype(
@@ -590,6 +592,10 @@ class FusedMoEExperts(ABC):
             return False, _make_reason("batch invariance")
         elif moe_config.is_lora_enabled and not cls.supports_lora():
             return False, _make_reason("LoRA")
+        elif reason := check_activation_quant_fallback(
+            cls.__name__, activation_key, executed_key
+        ):
+            return False, reason
         return True, None
 
     @staticmethod
@@ -607,6 +613,17 @@ class FusedMoEExperts(ABC):
         non-gated MoE models like Nemotron-Nano.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def executed_activation_key(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        """The activation quantization the kernel runs for a layer requesting
+        `activation_key`. Weight-only kernels return None; `is_supported_config`
+        then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids, the
+        fallback."""
+        return activation_key
 
     @staticmethod
     @abstractmethod
