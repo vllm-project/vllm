@@ -92,6 +92,61 @@ def _make_pf(out: torch.Tensor):
     return pf
 
 
+@requires_deep_ep_v2
+@pytest.mark.parametrize(
+    "prefix,rows,expected_ids,expected_counts",
+    [
+        ([0, 0], 8, [-1] * 8, [0, 0]),
+        ([3, 4, 7], 12, [20] * 3 + [-1] + [22] * 3 + [-1] * 5, [3, 0, 3]),
+    ],
+)
+def test_expanded_metadata_masks_alignment_gaps_and_unused_capacity(
+    prefix, rows, expected_ids, expected_counts
+):
+    ids, counts = _dv2._expanded_recv_metadata(
+        torch.tensor(prefix, dtype=torch.int32), rows, 4, 20
+    )
+    assert ids[:, 0].tolist() == expected_ids
+    assert counts.tolist() == expected_counts
+
+
+@requires_deep_ep_v2
+def test_cpu_sync_rejects_capture_before_dispatch(monkeypatch):
+    pf = _make_pf(torch.empty(0, dtype=torch.bfloat16))
+    pf.do_cpu_sync = True
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(ValueError, match="cannot be captured"):
+        pf._do_dispatch(None, None, None, None, 8, None, None, False)
+    assert not pf.buffer.calls
+
+
+@requires_deep_ep_v2
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_expanded_receiver_uses_gpu_counts_and_clears_padding(dtype):
+    pf = _make_pf(torch.empty(0, dtype=torch.bfloat16))
+    pf.do_expand = True
+    x = torch.full((8, 4), float("nan")).to(dtype)
+    x[:2] = torch.ones(2, 4).to(dtype)
+    scales = torch.full((8, 1), float("nan"))
+    scales[:2] = 1
+    weights = torch.full((8,), float("nan"))
+    weights[:2] = 0.5
+    handle = SimpleNamespace(
+        psum_num_recv_tokens_per_expert=torch.tensor([2, 4], dtype=torch.int32),
+        expert_alignment=4,
+    )
+    prepared_x, prepared_scales, meta, ids, prepared_weights = pf._receiver(
+        _FakeEvent(False), (x, scales), None, weights, handle, None, None, True
+    )
+    assert ids[:, 0].tolist() == [0, 0] + [-1] * 6
+    assert meta.expert_num_tokens.tolist() == [2, 0]
+    assert meta.expert_num_tokens_cpu is None
+    assert meta.psum_recv_per_rank is None
+    for tensor in (prepared_x.float(), prepared_scales, prepared_weights):
+        assert torch.isfinite(tensor).all()
+        assert torch.count_nonzero(tensor[2:]) == 0
+
+
 def _run(pf, output: torch.Tensor, do_async: bool):
     empty = torch.empty(0, dtype=torch.bfloat16)
     weights = torch.empty(0, 2)

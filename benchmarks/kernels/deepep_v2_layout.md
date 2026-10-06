@@ -3,6 +3,30 @@
 The first experiment separates layout from host count synchronization. It uses
 fresh dispatch handles and leaves the production always-off policy unchanged.
 
+The follow-up also implements all four combinations in vLLM's
+`DeepEPV2PrepareAndFinalize`. Select them independently with `KernelConfig`
+fields `deepep_v2_do_expand` and `deepep_v2_do_cpu_sync`; both default to `False`.
+For example, a DeepEP v2 server can select expanded eager dispatch with:
+
+```bash
+vllm serve MODEL --data-parallel-size 2 --enable-expert-parallel \
+  --all2all-backend deepep_v2 \
+  --enforce-eager \
+  --kernel-config '{"deepep_v2_do_expand":true,"deepep_v2_do_cpu_sync":true}'
+```
+
+Use the same flags on every EP rank. CPU-sync configurations require eager
+execution; attempting CPU count polling during capture raises an error before
+dispatch. With CPU sync disabled, either layout supports capture. No adaptive
+threshold or rank-local layout selection is introduced.
+
+The integrated receiver reconstructs expanded routing IDs and real expert
+counts from GPU prefixes, including alignment gaps and unused capacity. It
+clears padding activations, scales and weights before quantization. The
+existing expert backends consume this through their standard routing contract;
+this compatibility path does not yet bypass their own expert input permutation.
+The standalone benchmark below separately demonstrates direct grouped GEMM.
+
 | Case | Expanded expert groups | CPU count wait | Receive allocation |
 | --- | --- | --- | --- |
 | `nonexpanded-nosync` | No | No | Deduplicated-token capacity |
@@ -84,11 +108,12 @@ prototype; tune/fuse it only after validation. No production threshold or
 rank-local automatic policy is introduced.
 
 The grouped experiment is one dense GEMM with synthetic diagonal weights, not
-a full MoE layer or a serving workload. After correctness and paired timing,
-add a second GEMM and activation with realistic weights, then integrate the
-layout contract into the expert backend and validate full forwards, accuracy
-and non-overloaded serving. Coordinate with existing PR #51589, which already
-reconstructs sync-less expanded metadata.
+a full MoE layer or a serving workload. The vLLM integration is validated
+separately with full two-GEMM reference comparisons and graph replay tests in
+`tests/kernels/moe/test_deepep_v2_moe.py`. Bypassing permutation in the real
+expert backends and choosing a production threshold remain follow-up work.
+Coordinate with existing PR #51589, which already reconstructs sync-less
+expanded metadata.
 
 Reference implementation:
 <https://github.com/deepseek-ai/DeepEP/blob/d4f41e4e93602a15e95f55f6ee8df8f1aaa0e4bb/csrc/elastic/buffer.hpp>
