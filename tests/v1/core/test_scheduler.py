@@ -670,6 +670,71 @@ def test_prefill_cadence_counts_executed_steps_not_schedule_calls():
     assert scheduler.current_step > scheduler.num_executed_steps
 
 
+def test_prefill_cadence_releases_when_no_step_can_execute():
+    """The hold must not depend on something being schedulable to expire.
+
+    #54627 times the cadence in EXECUTED steps, and a step only counts if it
+    scheduled tokens. That is the right fix for the early-expiry bug reported
+    against the LMCache MP connector, but it creates a liveness question in the
+    other direction: if nothing can be scheduled, the counter cannot advance,
+    so the hold cannot expire, so prefill is never admitted.
+
+    That state is reachable under async scheduling. Every running request with
+    `num_output_placeholders > 0` is skipped by the running loop (its batch is
+    still in flight), so schedule() returns zero tokens -- while the deferral
+    guard `any(not r.is_prefill_chunk for r in self.running)` is still true,
+    because those requests ARE decodes. With a wedged async KV connector the
+    in-flight batch may not retire for a long time.
+
+    The externally visible symptom would be a server with requests resident but
+    KV near-empty and no output: exactly the "2 running / 3 waiting, KV 2.2%,
+    output ~0 tok/s" report on #54627.
+
+    This test pins the property we actually want: a waiting prefill is admitted
+    within a bounded number of schedule() calls, even when NO call in between
+    manages to execute a step.
+    """
+    interval = 4
+    scheduler = create_scheduler(prefill_schedule_interval=interval)
+    _start_decoding(scheduler)
+
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+
+    # Leave a batch permanently in flight: schedule once and never feed the
+    # output back. The running request now carries output placeholders, so the
+    # running loop skips it and every later call schedules nothing.
+    inflight = scheduler.schedule()
+    assert inflight.total_num_scheduled_tokens > 0
+    executed_at_stall = scheduler.num_executed_steps
+
+    admitted_after = None
+    empty_calls = 0
+    for i in range(1, 200):
+        # Checked BEFORE the call: the admitting call itself schedules the
+        # prefill and therefore does execute a step, so asserting this after
+        # the loop would always fail. What we care about is that nothing
+        # executed during the stall that precedes admission.
+        assert scheduler.num_executed_steps == executed_at_stall, (
+            "a step executed while the batch was still in flight; the test is "
+            "not exercising the stall it claims to"
+        )
+        output = scheduler.schedule()
+        if "new0" in output.num_scheduled_tokens:
+            admitted_after = i
+            break
+        if output.total_num_scheduled_tokens == 0:
+            empty_calls += 1
+
+    assert empty_calls > 0, "test never produced an empty schedule() call"
+    assert admitted_after is not None, (
+        f"prefill was never admitted in 200 schedule() calls while no step "
+        f"could execute (executed_steps stuck at {executed_at_stall}). The "
+        f"cadence hold can only expire via executed steps, so a wedged async "
+        f"KV connector starves admission indefinitely."
+    )
+
+
 def test_local_prefill_interval_defaults_to_no_gating():
     """The default interval of 1 leaves admission exactly as it was: a waiting
     prefill is admitted on the very next step.

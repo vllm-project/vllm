@@ -368,6 +368,15 @@ class Scheduler(SchedulerInterface):
         # executed steps than the interval asks for. `current_step` keeps its
         # own meaning: it drives next_decode_eligible_step for PP + async.
         self.num_executed_steps = 0
+        # schedule() calls since the last step that executed anything.
+        # The cadence hold is measured in EXECUTED steps, and a step only
+        # executes if something was scheduled. Under async scheduling every
+        # running request can carry output placeholders (its batch is still
+        # in flight) and be skipped, so schedule() returns nothing while the
+        # deferral guard still holds -- those requests ARE decodes. Without
+        # a bound the hold could then never expire and prefill would be
+        # starved indefinitely at near-zero KV usage.
+        self.empty_schedules_since_executed = 0
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -675,6 +684,12 @@ class Scheduler(SchedulerInterface):
             # executed-step counter can only be advanced once the step is known
             # to be non-empty, which is after the gate.
             and (self.num_executed_steps + 1) - self.last_prefill_step
+            < self.local_prefill_interval
+            # Liveness bound. Once `interval` schedule() calls have passed
+            # without a single executed step, waiting longer cannot help:
+            # the counter that would release this hold can only advance on
+            # a step that schedules something. Release instead of starving.
+            and self.empty_schedules_since_executed
             < self.local_prefill_interval
             and any(not r.is_prefill_chunk for r in self.running)
         ):
@@ -1428,6 +1443,9 @@ class Scheduler(SchedulerInterface):
         # at the top of schedule().
         if total_num_scheduled_tokens > 0:
             self.num_executed_steps += 1
+            self.empty_schedules_since_executed = 0
+        else:
+            self.empty_schedules_since_executed += 1
 
         # Restart the cadence interval from any step that carried prefill,
         # whether a new admission or a running chunk.
