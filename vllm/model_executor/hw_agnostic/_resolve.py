@@ -65,9 +65,9 @@ def resolve(module: str, name: str) -> Any:
     """
     if envs.VLLM_USE_HW_AGNOSTIC:
         hw_module = _import_hw_agnostic(module)
-        if hw_module is not None and hasattr(hw_module, name):
-            logger.info_once("Using hw-agnostic layer %s.%s", module, name)
-            return getattr(hw_module, name)
+        if hw_module is not None and (layer := getattr(hw_module, name)):
+            logger.info_once("Using hardware agnostic layer %s.%s", module, name)
+            return layer
         logger.warning_once(
             "hw-agnostic layer %s.%s is not available; using the in-tree layer",
             module,
