@@ -1163,9 +1163,18 @@ def _dcp_merge_params() -> tuple[int, int, int]:
     except AssertionError:
         # DCP group not initialized (single-process runs).
         return 1, 0, 1
-    interleave = (
-        get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
-    )
+    if group.world_size == 1:
+        return 1, 0, 1
+    try:
+        interleave = (
+            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
+        )
+    except AssertionError:
+        # First call can land at forward time, outside any config context
+        # (init dummy passes don't exercise every scorer branch). The merge
+        # only needs the interleave the cache was laid out with; fall back
+        # to the default when the config is unreachable.
+        interleave = 1
     return group.world_size, group.rank_in_group, interleave
 
 
