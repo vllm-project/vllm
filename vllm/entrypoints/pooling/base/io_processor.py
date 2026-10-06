@@ -20,6 +20,7 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
 
+from ..late_chunking import build_late_chunking_metadata, prepare_late_chunking_input
 from ..typing import (
     AnyOfflineInputsContext,
     AnyRenderParam,
@@ -223,6 +224,11 @@ class PoolingIOProcessor:
                 msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
                 raise VLLMValidationError(msg)
 
+        if any(param.late_chunk_size is not None for param in params_seq) and (
+            ctx.tokenization_kwargs or {}
+        ).get("padding") not in (None, False, "do_not_pad"):
+            raise VLLMValidationError("late_chunk_size does not support input padding")
+
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
@@ -255,6 +261,14 @@ class PoolingIOProcessor:
         | EncodeChatRenderParams
         | ScoringRenderParams,
     ) -> PoolingEngineInput:
+        chunk_size = render_params["params"].late_chunk_size
+        text = None
+        if chunk_size is not None:
+            text, tok_params = prepare_late_chunking_input(
+                self.vllm_config, render_params
+            )
+            render_params = render_params.copy()
+            render_params["tok_params"] = tok_params
         if "conversations" in render_params:
             render_params = cast(EncodeChatRenderParams, render_params)
             (_,), engine_input = self.renderer.render_chat(
@@ -277,12 +291,24 @@ class PoolingIOProcessor:
                 f"Unsupported render_params type {render_params.__class__.__name__}"
             )
 
-        return PoolingEngineInput(
+        result = PoolingEngineInput(
             prompts=engine_input[0],
             params=render_params["params"],
             lora_requests=render_params["lora_requests"],
             priorities=render_params["priorities"],
         )
+        if chunk_size is not None:
+            prompt = engine_input[0]
+            assert text is not None
+            if prompt["type"] != "token":
+                raise VLLMValidationError("late_chunk_size requires tokenized text")
+            result["late_chunking"] = build_late_chunking_metadata(
+                text,
+                len(prompt["prompt_token_ids"]),
+                prompt.pop("prompt_token_offsets", None),
+                chunk_size,
+            )
+        return result
 
     def _validate_chat_template(
         self,

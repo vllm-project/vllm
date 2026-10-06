@@ -72,16 +72,19 @@ class PoolingParams(
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
+    late_chunk_size: int | None = None
+    """Mean-pool contextual tokens into fixed-size chunks for `token_embed`."""
+
     @property
     def all_parameters(self) -> list[str]:
-        return ["dimensions", "use_activation"]
+        return ["dimensions", "use_activation", "late_chunk_size"]
 
     @property
     def valid_parameters(self):
         return {
             "embed": ["dimensions", "use_activation"],
             "classify": ["use_activation"],
-            "token_embed": ["dimensions", "use_activation"],
+            "token_embed": ["dimensions", "use_activation", "late_chunk_size"],
             "token_classify": ["use_activation"],
         }
 
@@ -90,6 +93,27 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(self, model_config: ModelConfig) -> None:
+        self._verify_late_chunk_size()
+        if self.late_chunk_size is not None:
+            if self.task != "token_embed":
+                raise VLLMValidationError("late_chunk_size requires token_embed")
+            if not supports_late_chunking(model_config):
+                raise VLLMValidationError(
+                    "late_chunk_size requires a dense NomicBertModel with "
+                    "MEAN sequence pooling and ALL token pooling"
+                )
+            pooler_config = model_config.pooler_config
+            assert pooler_config is not None
+            if (
+                self.dimensions is not None
+                or pooler_config.dimensions is not None
+                or self.late_interaction_params is not None
+            ):
+                raise VLLMValidationError(
+                    "late_chunk_size does not support dimension reduction, "
+                    "late-interaction scoring"
+                )
+
         # plugin task uses io_processor.parse_data to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":
@@ -228,13 +252,36 @@ class PoolingParams(
             f"requires_token_ids={self.requires_token_ids}, "
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
             f"late_interaction_params={self.late_interaction_params}, "
+            f"late_chunk_size={self.late_chunk_size}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 
     def __post_init__(self) -> None:
         check_removed_pooling_task(self.task)
+        self._verify_late_chunk_size()
         if self.output_kind != RequestOutputKind.FINAL_ONLY:
             raise VLLMValidationError(
                 "For pooling output_kind has to be FINAL_ONLY, "
                 f"got {self.output_kind!r}"
             )
+
+    def _verify_late_chunk_size(self) -> None:
+        if self.late_chunk_size is not None and (
+            type(self.late_chunk_size) is not int or self.late_chunk_size <= 0
+        ):
+            raise VLLMValidationError("late_chunk_size must be a positive integer")
+
+
+def supports_late_chunking(model_config: ModelConfig) -> bool:
+    """Only enable the initial, validated mean-pooling/head contract."""
+    pooler_config = model_config.pooler_config
+    return (
+        model_config.architecture == "NomicBertModel"
+        and model_config.model_impl != "transformers"
+        and not model_config.is_matryoshka
+        and not getattr(model_config.hf_config, "num_experts", 0)
+        and pooler_config is not None
+        and pooler_config.seq_pooling_type == "MEAN"
+        and pooler_config.tok_pooling_type == "ALL"
+        and not pooler_config.enable_chunked_processing
+    )

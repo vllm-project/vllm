@@ -606,3 +606,82 @@ class TestGetTokPoolingMethod:
     def test_unknown_raises(self):
         with pytest.raises(NotImplementedError, match="UNKNOWN"):
             get_tok_pooling_method("UNKNOWN")
+
+
+def _make_late_chunk_pool(*, head_dtype=None, chunked=False, async_scheduling=False):
+    from vllm.model_executor.layers.pooler.tokwise.methods import LateChunkPool
+
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            enable_chunked_prefill=chunked, async_scheduling=async_scheduling
+        )
+    )
+    with patch(
+        "vllm.model_executor.layers.pooler.tokwise.methods.get_current_vllm_config",
+        return_value=config,
+    ):
+        return LateChunkPool(head_dtype)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 7, 10, 2**63 - 1])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("head_dtype", [None, torch.float32])
+def test_late_chunk_pool_matches_fp32_means_before_projection_and_normalization(
+    chunk_size, dtype, head_dtype
+):
+    from vllm.model_executor.layers.pooler.activations import PoolerNormalize
+    from vllm.model_executor.layers.pooler.tokwise.heads import TokenEmbeddingPoolerHead
+    from vllm.model_executor.layers.pooler.tokwise.poolers import TokenPooler
+
+    # Unequal norms expose the incorrect normalize-then-average implementation.
+    hidden = (torch.arange(28).reshape(7, 4) - 10).to(dtype)
+    projector = torch.nn.Linear(4, 3, bias=True).to(head_dtype or dtype)
+    head = TokenEmbeddingPoolerHead(head_dtype, projector, PoolerNormalize())
+    pooler = TokenPooler(_make_late_chunk_pool(head_dtype=head_dtype), head)
+    params = PoolingParams(
+        task="token_embed", late_chunk_size=chunk_size, use_activation=True
+    )
+    metadata = _make_metadata([7], pooling_params=[params])
+    actual = pooler(hidden, metadata)[0]
+    means = torch.stack(
+        [hidden[a : a + chunk_size].float().mean(0) for a in range(0, 7, chunk_size)]
+    ).to(head_dtype or dtype)
+    expected = torch.nn.functional.normalize(projector(means), p=2, dim=-1)
+    torch.testing.assert_close(actual, expected)
+    assert actual.dtype == (head_dtype or dtype)
+
+
+def test_late_chunk_pool_isolates_mixed_requests_and_owns_finished_storage():
+    hidden = torch.arange(36, dtype=torch.float32).reshape(9, 4)
+    params = [
+        PoolingParams(task="token_embed", late_chunk_size=2),
+        PoolingParams(task="token_embed"),
+        PoolingParams(task="token_embed", late_chunk_size=1),
+    ]
+    pooler = _make_late_chunk_pool(async_scheduling=True)
+    outputs = pooler(hidden, _make_metadata([3, 4, 2], pooling_params=params))
+    expected = [
+        torch.stack([hidden[:2].mean(0), hidden[2]]),
+        hidden[3:7].clone(),
+        hidden[7:].clone(),
+    ]
+    hidden.fill_(-999)
+    for actual, reference in zip(outputs, expected):
+        torch.testing.assert_close(actual, reference)
+
+
+def test_late_chunk_pool_waits_for_complete_states():
+    pooler = _make_late_chunk_pool(chunked=True)
+    params = [PoolingParams(task="token_embed", late_chunk_size=3)]
+    first = _make_metadata(
+        [4], pooling_params=params, num_scheduled_tokens=[2], seq_lens=[2]
+    )
+    hidden = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+    assert pooler(hidden[:2], first) == [None]
+    last = _make_metadata(
+        [4], pooling_params=params, num_scheduled_tokens=[2], seq_lens=[4]
+    )
+    last.pooling_states = first.pooling_states
+    actual = pooler(hidden[2:], last)[0]
+    torch.testing.assert_close(actual, torch.stack([hidden[:3].mean(0), hidden[3]]))
+    assert not last.pooling_states[0].hidden_states_cache
