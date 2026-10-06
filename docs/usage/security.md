@@ -206,7 +206,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
-- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`)
+- `/abort_requests` - Abort in-flight requests (available with `--tokens-only`. Use the authenticated `/inference/v1/abort_requests` otherwise)
 
 **Utility endpoints:**
 
@@ -289,6 +289,19 @@ To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter 
 - **Reverse proxy layer:** In addition to vLLM's built-in limit, consider enforcing request body validation and rate limiting at your reverse proxy to further constrain abusive payloads.
 - **Monitoring:** Monitor per-request resource consumption to detect anomalous patterns that may indicate abuse.
 
+### Per-request multimodal arguments
+
+API server endpoints reject non-empty per-request `mm_processor_kwargs` and
+`media_io_kwargs` by default. These arguments can change image, video, or audio
+loading, sizing, sampling, and preprocessing behavior, causing excessive CPU,
+GPU, or memory use when controlled by an untrusted client. Server-level
+`--mm-processor-kwargs` and `--media-io-kwargs` remain available for deployment
+configuration.
+
+Only deployments whose API clients are trusted should start the server with
+`--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
+this option on an endpoint exposed to untrusted clients.
+
 ## Tool Server and MCP Security
 
 vLLM supports connecting to external tool servers via the `--tool-server` argument. This enables models to call tools through the Responses API (`/v1/responses`). Tool server support works with all models — it is not limited to specific model architectures.
@@ -362,7 +375,7 @@ An attacker who can reach the gRPC port can:
 1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
 2. **Mutate engine state** by pausing generation, sleeping the engine, or initiating configured RL weight updates through the `Control` service
 3. **Consume GPU and compute resources** by submitting unbounded generation requests
-4. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
+4. **Stop a managed engine** through `Control.Shutdown`, or cause denial of service by exploiting bugs in the gRPC interface.
 
 ### Recommendations
 
