@@ -1095,6 +1095,50 @@ async def test_e2e_parsed_reasoning(parser_client, parser_tokenizer):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_reasoning", [True, False])
+async def test_e2e_parsed_logprobs_follow_include_reasoning(
+    parser_client, parser_tokenizer, include_reasoning
+):
+    """With a parser configured, batch derender returns logprobs only when
+    reasoning is shown. Hidden reasoning drops them, as the coupled chat
+    endpoint does, because decoded logprob tokens would reveal it."""
+    messages = [{"role": "user", "content": "What is 2+3?"}]
+    gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
+    output_ids = _require_markers_survive(
+        parser_tokenizer, "<think>Two plus three.</think>Five.", "</think>"
+    )
+    generate_response = _e2e_generate_response(output_ids)
+    generate_response["choices"][0]["logprobs"] = {
+        "content": [
+            {"token_id": tid, "logprob": -0.5, "rank": 1, "top_logprobs": []}
+            for tid in output_ids
+        ]
+    }
+    resp = await parser_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": PARSER_MODEL,
+            "generate_response": generate_response,
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {
+                "model": PARSER_MODEL,
+                "messages": messages,
+                "include_reasoning": include_reasoning,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    choice = resp.json()["choices"][0]
+    assert choice["message"]["content"] == "Five."
+    if include_reasoning:
+        assert choice["message"]["reasoning"]
+        assert len(choice["logprobs"]["content"]) == len(output_ids)
+    else:
+        assert choice["message"]["reasoning"] is None
+        assert choice["logprobs"] is None
+
+
+@pytest.mark.asyncio
 async def test_e2e_parsed_tool_call(parser_client, parser_tokenizer):
     """<tool_call> extracted into tool_calls field."""
     messages = [{"role": "user", "content": "Weather in Paris?"}]

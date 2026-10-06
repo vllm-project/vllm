@@ -1323,6 +1323,132 @@ class TestDerenderChatStreamParsed:
         assert delta.reasoning is None
         assert delta.content == "c"
 
+    @pytest.mark.asyncio
+    async def test_logprobs_attached_to_each_parsed_delta(
+        self, parsed_derenderer, tokenizer
+    ):
+        """A chunk's logprobs ride on whatever delta the parser emits for it
+        (reasoning, content or tool call), with token ids decoded, as on
+        `/v1/chat/completions`."""
+        chunks = [
+            [_FakeParser.REASON],
+            [_FakeParser.CONTENT],
+            [_FakeParser.TOOL_START, _FakeParser.TOOL_ARG],
+        ]
+        state = None
+        seen = []
+        for ids in chunks:
+            chunk, state = await parsed_derenderer.derender_chat_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk(
+                    ids, logprobs=_generate_logprobs(ids)
+                ),
+                state=state,
+                chat_request=_chat_request(),
+                prompt_token_ids=[1, 2],
+            )
+            choice = chunk.choices[0]
+            assert choice.logprobs is not None and choice.logprobs.content is not None
+            assert [e.token for e in choice.logprobs.content] == (
+                convert_ids_list_to_tokens(tokenizer, ids)
+            )
+            seen.append(choice.delta)
+        assert seen[0].reasoning == "r"
+        assert seen[1].content == "c"
+        assert (
+            seen[2].tool_calls and seen[2].tool_calls[0].function.name == "get_weather"
+        )
+
+    @pytest.mark.asyncio
+    async def test_logprobs_kept_when_parser_swallows_chunk(
+        self, parsed_derenderer, tokenizer
+    ):
+        """A chunk the parser emits nothing for (buffered markup) still
+        carries its logprobs on an empty delta, so no token's logprobs are
+        lost. Mirrors the coupled endpoint, which emits a chunk whenever
+        logprobs are present even if the delta is empty."""
+        swallowed = [_FakeParser.CONTENT + 1]  # unknown to _FakeParser -> None
+        chunk, _ = await parsed_derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                swallowed, logprobs=_generate_logprobs(swallowed)
+            ),
+            chat_request=_chat_request(),
+            prompt_token_ids=[1, 2],
+        )
+        choice = chunk.choices[0]
+        assert choice.delta.content is None and not choice.delta.tool_calls
+        assert [e.token for e in choice.logprobs.content] == (
+            convert_ids_list_to_tokens(tokenizer, swallowed)
+        )
+
+    @pytest.mark.asyncio
+    async def test_include_reasoning_false_drops_logprobs_on_every_chunk(
+        self, parsed_derenderer
+    ):
+        """Hidden reasoning suppresses logprobs on reasoning *and* content
+        chunks (decoded logprob tokens would leak the reasoning), the same
+        rule `/v1/chat/completions` applies with a parser configured."""
+        state = None
+        for ids in ([_FakeParser.REASON], [_FakeParser.CONTENT]):
+            chunk, state = await parsed_derenderer.derender_chat_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk(
+                    ids, logprobs=_generate_logprobs(ids)
+                ),
+                state=state,
+                chat_request=_chat_request(include_reasoning=False),
+                prompt_token_ids=[1, 2],
+            )
+            assert chunk.choices[0].logprobs is None
+        assert chunk.choices[0].delta.content == "c"
+
+    @pytest.mark.asyncio
+    async def test_logprobs_multibyte_across_chunks(self, parsed_derenderer, tokenizer):
+        """Byte-fallback correction crosses chunk boundaries on the parser
+        path too, via the carried `logprob_context_token_ids`, which starts
+        empty like the engine's and never includes the prompt."""
+        token_ids = tokenizer.encode("👍", add_special_tokens=False)
+        if len(token_ids) < 2 or "�" not in tokenizer.decode([token_ids[-1]]):
+            pytest.skip("Tokenizer does not byte-split this character")
+        state = None
+        last_chunk = None
+        for tid in token_ids:
+            last_chunk, state = await parsed_derenderer.derender_chat_stream(
+                model=MODEL_NAME,
+                generate_chunk=_make_stream_chunk(
+                    [tid], logprobs=_generate_logprobs([tid])
+                ),
+                state=state,
+                chat_request=_chat_request(),
+                prompt_token_ids=[1, 2, 3, 4, 5],
+            )
+        assert last_chunk is not None and state is not None
+        final_entry = last_chunk.choices[0].logprobs.content[0]
+        assert not final_entry.token.endswith("�"), final_entry.token
+        assert state.logprob_context_token_ids == token_ids[-4:]
+
+    @pytest.mark.asyncio
+    async def test_logprob_context_advances_without_logprobs(self, parsed_derenderer):
+        """The context tail tracks sampled ids whether or not the chunk
+        carries logprobs, so a later chunk that does can still be corrected."""
+        ids = [_FakeParser.REASON, _FakeParser.CONTENT, _FakeParser.CONTENT]
+        _, state = await parsed_derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(ids),
+            chat_request=_chat_request(),
+            prompt_token_ids=[1, 2],
+        )
+        assert state.logprob_context_token_ids == ids
+        _, state = await parsed_derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([], finish_reason="stop"),
+            state=state,
+            chat_request=_chat_request(),
+            prompt_token_ids=[1, 2],
+        )
+        assert state.logprob_context_token_ids == ids
+
 
 # ---------------------------------------------------------------------------
 # Harmony / GPT-OSS replay — unit, no server
