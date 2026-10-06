@@ -101,55 +101,6 @@ class AllPool(TokenPoolingMethod):
         return output_list
 
 
-class LateChunkPool(AllPool):
-    """Reduce complete contextual states before the token-embedding head."""
-
-    def __init__(self, head_dtype: torch.dtype | str | None):
-        super().__init__()
-        self.head_dtype = head_dtype
-
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"token_embed"}
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> list[TokenPoolingMethodOutputItem]:
-        outputs = super().forward(hidden_states, pooling_metadata)
-        cursor = pooling_metadata.get_pooling_cursor()
-        for i, (data, params, finished, prompt_len) in enumerate(
-            zip(
-                outputs,
-                pooling_metadata.pooling_params,
-                cursor.get_finished_mask(),
-                cursor.prompt_lens_cpu.tolist(),
-            )
-        ):
-            chunk_size = params.late_chunk_size
-            if chunk_size is None:
-                continue
-            if not finished or data is None:
-                outputs[i] = None
-                continue
-            if len(data) == 0 or len(data) != prompt_len:
-                raise ValueError("Late chunking requires complete, nonempty states")
-
-            chunk_size = min(chunk_size, len(data))
-            num_full, remainder = divmod(len(data), chunk_size)
-            full_end = num_full * chunk_size
-            means = (
-                data[:full_end]
-                .reshape(num_full, chunk_size, data.shape[-1])
-                .mean(dim=1, dtype=torch.float32)
-            )
-            if remainder:
-                tail = data[full_end:].mean(dim=0, keepdim=True, dtype=torch.float32)
-                means = torch.cat((means, tail), dim=0)
-            outputs[i] = means.to(data.dtype) if self.head_dtype is None else means
-        return outputs
-
-
 class StepPool(AllPool):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return PoolingParamsUpdate(requires_token_ids=True)
