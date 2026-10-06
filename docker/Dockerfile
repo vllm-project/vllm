@@ -557,7 +557,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Build NIXL and its NIXL EP extension against the PyTorch installed here when
 # requested. The wheels are installed by the final image, which has no compiler.
 ARG BUILD_NIXL
-COPY tools/install_nixl_from_source_ubuntu.py /tmp/install_nixl_from_source.py
+COPY tools/build_nixl_with_torch215_for_rubin.py /tmp/build_nixl_for_rubin.py
 RUN --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
     set -eux; \
     NIXL_WORKSPACE=/tmp/nixl_workspace; \
@@ -569,7 +569,7 @@ RUN --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
         NIXL_REQUIREMENTS_FILE=/tmp/vllm-requirements/kv_connectors.txt \
         WHEELS_CACHE_HOME="${NIXL_WORKSPACE}/dist" \
         MAX_JOBS="${max_jobs:-}" \
-            python3 /tmp/install_nixl_from_source.py --skip-system-deps --build-only; \
+            python3 /tmp/build_nixl_for_rubin.py --skip-system-deps --build-only; \
     fi
 #################### EXTENSIONS BUILD IMAGE ####################
 
