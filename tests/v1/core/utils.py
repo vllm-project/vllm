@@ -7,7 +7,6 @@ import vllm.envs as envs
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
-    DeviceConfig,
     DiffusionConfig,
     ECTransferConfig,
     KVTransferConfig,
@@ -19,6 +18,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.model import RunnerOption
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -79,8 +79,7 @@ def create_scheduler(
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
-    runner_type: str | None = None,
-    device: str | None = None,
+    runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
@@ -112,9 +111,8 @@ def create_scheduler(
         # The scheduler reads model_config.max_model_len, not the
         # SchedulerConfig one, so both must agree.
         max_model_len=max_model_len,
+        runner=runner,
     )
-    if runner_type is not None:
-        model_config.runner_type = runner_type
     if mm_encoder_only:
         model_config.multimodal_config.mm_encoder_only = True
     if use_ec_connector and ec_role == "ec_producer":
@@ -194,9 +192,6 @@ def create_scheduler(
         else None
     )
 
-    vllm_config_kwargs = {}
-    if device is not None:
-        vllm_config_kwargs["device_config"] = DeviceConfig(device=device)
     diffusion_config: DiffusionConfig | None = None
     if diffusion_canvas_length is not None:
         # A diffusion checkpoint declares its canvas in the HF config.
@@ -218,7 +213,6 @@ def create_scheduler(
         observability_config=ObservabilityConfig(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,
         ),
-        **vllm_config_kwargs,
     )
     if kv_cache_spec is None:
         kv_cache_spec = FullAttentionSpec(
