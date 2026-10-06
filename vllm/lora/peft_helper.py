@@ -11,7 +11,6 @@ from typing import Literal
 
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 logger = init_logger(__name__)
 
@@ -89,33 +88,10 @@ class PEFTHelper:
         cls,
         lora_path: str,
         max_position_embeddings: int | None,
-        tensorizer_config_dict: dict | None = None,
     ) -> "PEFTHelper":
         lora_config_path = os.path.join(lora_path, "adapter_config.json")
-
-        if tensorizer_config_dict:
-            tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
-            tensorizer_args = tensorizer_config._construct_tensorizer_args()
-            from tensorizer.stream_io import open_stream
-
-            tensorizer_dir = tensorizer_config.tensorizer_dir
-            if tensorizer_dir is None:
-                raise ValueError("tensorizer_dir must be set in tensorizer config.")
-
-            lora_config_path = os.path.join(tensorizer_dir, "adapter_config.json")
-            with open_stream(
-                lora_config_path, mode="rb", **tensorizer_args.stream_kwargs
-            ) as f:
-                config = json.load(f)
-
-            logger.info(
-                "Successfully deserialized LoRA config from %s",
-                tensorizer_config.tensorizer_dir,
-            )
-
-        else:
-            with open(lora_config_path) as f:
-                config = json.load(f)
+        with open(lora_config_path) as f:
+            config = json.load(f)
 
         config["vllm_max_position_embeddings"] = max_position_embeddings
         return cls.from_dict(config)
