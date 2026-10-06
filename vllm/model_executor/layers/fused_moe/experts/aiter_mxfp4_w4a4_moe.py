@@ -69,6 +69,8 @@ def aiter_triton_kernel_w4a4_moe_forward(
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
 
+    gating_output = torch.nan_to_num(gating_output, nan=0.0, posinf=0.0, neginf=0.0)
+
     if hash_indices_table is not None:
         assert input_ids is not None, "hash routing requires input_ids"
         n_tokens, n_expts_tot = gating_output.shape
@@ -96,7 +98,11 @@ def aiter_triton_kernel_w4a4_moe_forward(
             gating_output,
             topk,
             score_mode=score_mode,
-            bias=e_score_correction_bias,
+            bias=(
+                e_score_correction_bias.float()
+                if e_score_correction_bias is not None
+                else None
+            ),
             renorm=renormalize,
             routed_scaling_factor=(
                 routed_scaling_factor
