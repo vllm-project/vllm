@@ -310,9 +310,11 @@ def _qsa_pre_indexer_kernel(
             current = tl.load(current_base + dims[None, :], mask=from_chunk, other=0.0)
             cached = tl.load(cached_base + dims[None, :], mask=from_cache, other=0.0)
             source = tl.where(source_in_chunk[:, None], current, cached).to(tl.float32)
-            # Match the unfused path's BF16 pooled tensor before RMSNorm.
+            # Match the unfused path's pooled tensor (cache dtype) before RMSNorm.
             pooled = (
-                (tl.sum(source, axis=0) / COMPRESS_RATIO).to(tl.bfloat16).to(tl.float32)
+                (tl.sum(source, axis=0) / COMPRESS_RATIO)
+                .to(state_cache_ptr.dtype.element_ty)
+                .to(tl.float32)
             )
 
             first_position = end_position - (COMPRESS_RATIO - 1)
