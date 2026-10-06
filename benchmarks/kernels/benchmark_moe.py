@@ -15,6 +15,7 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -35,6 +36,8 @@ from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import set_random_seed
+
+logger = init_logger(__name__)
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_cdna
@@ -673,8 +676,11 @@ class BenchmarkWorker:
                         block_quant_shape=block_quant_shape,
                         use_deep_gemm=use_deep_gemm,
                     )
-                except (triton.runtime.autotuner.OutOfResources, RuntimeError):
+                except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
+                    continue
+                except RuntimeError as e:
+                    logger.warning("Skipping config %s: %s", config, e)
                     continue
 
                 if kernel_time < best_time:
