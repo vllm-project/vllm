@@ -70,6 +70,37 @@ def test_get_raw_stream_patch():
         assert get_raw_stream is _cuda_getCurrentRawStream
 
 
+# Inductor can initialize CUDA even for CPU inputs.
+@pytest.mark.forked
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_e8m0_custom_op_fullgraph(use_v2, use_fresh_inductor_cache):
+    """E8M0 inputs must not prevent mutable custom-op decomposition."""
+    with torch.library._scoped_library("test_e8m0", "FRAGMENT") as lib:
+        lib.define("scale_(Tensor(a!) out, Tensor scale) -> ()")
+
+        @torch.library.impl(lib, "scale_", "CPU")
+        def scale_impl(out, scale):
+            out.mul_(scale.float())
+
+        @torch.library.register_fake("test_e8m0::scale_", lib=lib)
+        def scale_fake(out, scale):
+            return None
+
+        def forward(x, scale):
+            out = x.clone()
+            torch.ops.test_e8m0.scale_(out, scale)
+            return out
+
+        x = torch.randn(4, 4)
+        scale = torch.full((4,), 128, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+        compiled = torch.compile(
+            forward,
+            fullgraph=True,
+            options={"enable_auto_functionalized_v2": use_v2},
+        )
+        torch.testing.assert_close(compiled(x, scale), x * 2)
+
+
 def test_copy_pass():
     vllm_config = VllmConfig()
     inductor_pass = FixFunctionalizationPass(vllm_config)
@@ -184,7 +215,9 @@ def test_use_cudagraphs(
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-def test_stock_torch_compile(vllm_runner, monkeypatch):
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_stock_torch_compile(vllm_runner, monkeypatch, use_v2_model_runner):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -195,9 +228,10 @@ def test_stock_torch_compile(vllm_runner, monkeypatch):
             "facebook/opt-125m",
             compilation_config={"mode": CompilationMode.STOCK_TORCH_COMPILE},
             gpu_memory_utilization=0.4,
-        ) as _,
+        ) as runner,
     ):
-        pass
+        outputs = runner.generate_greedy(["Hello, my name is"], max_tokens=5)
+        assert outputs[0][0]
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
@@ -231,6 +265,21 @@ def test_enforce_eager(vllm_runner, monkeypatch):
         ) as _,
     ):
         pass
+
+
+@pytest.mark.parametrize("enable_fault_tolerance", [False, True])
+def test_enforce_eager_jit_warmup(enable_fault_tolerance):
+    """Enforce-eager disables JIT warmup unless fault tolerance is on.
+
+    FT fault detection runs against deadlines that in-inference Triton
+    compilation latency spikes can blow past, so warmup stays enabled.
+    """
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", enforce_eager=True),
+        parallel_config=ParallelConfig(enable_fault_tolerance=enable_fault_tolerance),
+    )
+    assert config.compilation_config.mode == CompilationMode.NONE
+    assert config.kernel_config.enable_jit_warmup == enable_fault_tolerance
 
 
 @pytest.mark.forked

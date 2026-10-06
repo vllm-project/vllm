@@ -383,6 +383,7 @@ def _prefill_logits(
     page_table: torch.Tensor,
     query_start_loc: torch.Tensor,
     visible_blocks: torch.Tensor,
+    logits_workspace: torch.Tensor,
     max_query_len: int,
     logits_width: int,
     query_offset: int,
@@ -392,10 +393,14 @@ def _prefill_logits(
     assert visible_blocks.shape == (q.shape[0],)
     assert 0 <= query_offset <= query_offset + num_queries <= q.shape[0]
     assert 0 < logits_width <= page_table.shape[1] * k_cache.shape[1]
+    assert logits_workspace.is_contiguous()
+    assert logits_workspace.numel() >= num_queries * logits_width
 
-    logits = torch.empty(
-        (num_queries, logits_width), dtype=torch.float32, device=q.device
+    # slice from pre-allocated workspace
+    logits = logits_workspace[: num_queries * logits_width].view(
+        num_queries, logits_width
     )
+
     # tuned on GB300
     if k_cache.dtype == torch.float8_e4m3fn:
         TILE_R, STAGES, num_warps = 32, 2, 8
@@ -610,8 +615,13 @@ def qsa_select_paged_prefill(
     logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
 
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
+    # always allocate the worst case to avoid memory fragmentation.
     max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     rows_per_chunk = max(1, max_logits_bytes // (logits_width * 4))
+
+    budget_bytes = max(max_logits_bytes, page_table.shape[1] * k_cache.shape[1] * 4)
+    logits_workspace = q.new_empty(budget_bytes // 4, dtype=torch.float32)
+
     topk_workspace = torch.empty(
         (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
     )
@@ -625,6 +635,7 @@ def qsa_select_paged_prefill(
             page_table,
             query_start_loc,
             visible_blocks,
+            logits_workspace,
             max_query_len,
             logits_width,
             query_offset=query_start,
