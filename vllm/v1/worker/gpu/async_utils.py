@@ -112,6 +112,21 @@ class StepTimingCollector:
             self._step = None
 
 
+class AsyncCacheOnlyOutput(AsyncModelRunnerOutput):
+    """Publish a zero-token result only after this rank's KV writes finish."""
+
+    def __init__(
+        self, model_runner_output: ModelRunnerOutput, main_stream: torch.cuda.Stream
+    ) -> None:
+        self.model_runner_output = model_runner_output
+        self.ready_event = torch.Event(blocking=True)
+        self.ready_event.record(main_stream)
+
+    def get_output(self) -> ModelRunnerOutput:
+        self.ready_event.synchronize()
+        return self.model_runner_output
+
+
 class AsyncOutput(AsyncModelRunnerOutput):
     def __init__(
         self,

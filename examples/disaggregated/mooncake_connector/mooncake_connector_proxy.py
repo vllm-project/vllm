@@ -255,6 +255,7 @@ async def send_request_to_service(
     req_data["kv_transfer_params"] = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
+        "cache_only": True,
         "transfer_id": f"xfer-{request_id}",
     }
     req_data["stream"] = False
