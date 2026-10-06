@@ -46,6 +46,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
+from vllm.v1.worker.gpu.generic_kvp import get_generic_kvp
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -352,6 +353,8 @@ def sparse_attn_indexer(
     attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
+    if (generic_kvp := get_generic_kvp()) is not None:
+        generic_kvp.acquire(k_cache_prefix)
 
     if candidate_blocks is not None:
         # Candidate blocks are request-local; the DCP-sharded logits layout

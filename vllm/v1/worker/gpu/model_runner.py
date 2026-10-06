@@ -110,6 +110,11 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
+from vllm.v1.worker.gpu.generic_kvp import (
+    GenericKVP,
+    get_generic_kvp_size,
+    maybe_build_generic_kvp,
+)
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -305,6 +310,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
         self.pcp_manager: pcp.PCPManager | None = None
+        self.generic_kvp: GenericKVP | None = None
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
@@ -621,7 +627,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dcp_sharded = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
-            block_sizes.append(spec.block_size)
+            # A sharded block spans one block-sized page per generic-KVP rank.
+            kvp_size = get_generic_kvp_size() if spec.dcp_sharded else 1
+            block_sizes.append(spec.block_size * kvp_size)
             layer_spec = (
                 spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             )
@@ -778,6 +786,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
+        self.generic_kvp = maybe_build_generic_kvp(self, kv_caches_dict)
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -2017,6 +2026,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
+                if self.generic_kvp is not None:
+                    self.generic_kvp.prepare(
+                        batch_req_state, self.req_states.num_computed_tokens_np
+                    )
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None
                     model_output = self.ubatch_runner.run(

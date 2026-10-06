@@ -308,6 +308,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     get_kv_quant_mode,
 )
+from vllm.v1.worker.gpu.generic_kvp import get_generic_kvp
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import (
@@ -1430,6 +1431,8 @@ def unified_mla_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
+    if (generic_kvp := get_generic_kvp()) is not None:
+        generic_kvp.acquire(layer_name)
     attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
         layer_name
     )
@@ -1487,6 +1490,8 @@ def unified_mla_attention_with_output(
     # attention forward.
     del kv_cache_dummy_dep
     layer_name = _resolve_layer_name(layer_name)
+    if (generic_kvp := get_generic_kvp()) is not None:
+        generic_kvp.acquire(layer_name)
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     if layer.hisparse_cache is not None:
         layer.hisparse_cache.finish_kv_update()
@@ -1505,6 +1510,8 @@ def unified_mla_attention_with_output(
         quant_tma_aligned=quant_tma_aligned,
         q_dcp_replicated=q_dcp_replicated,
     )
+    if generic_kvp is not None:
+        generic_kvp.release(layer_name)
 
 
 direct_register_custom_op(

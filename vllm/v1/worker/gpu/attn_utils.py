@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -27,10 +27,15 @@ from vllm.v1.hisparse.binding import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+)
+from vllm.v1.worker.gpu.generic_kvp import (
+    get_generic_kvp_size,
+    symmetric_kv_cache_allocation,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.ubatch_utils import get_num_ubatches
@@ -144,6 +149,16 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             kv_cache_spec[layer_name] = spec
     if vllm_config.attention_config.hisparse_config is not None:
         kv_cache_spec = resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers)
+    if get_generic_kvp_size() > 1:
+        # Generic KVP shards full-attention caches only; windowed and recurrent state
+        # stays replicated on every rank.
+        kv_cache_spec = {
+            name: replace(spec, dcp_sharded=False)
+            if isinstance(spec, AttentionSpec)
+            and not isinstance(spec, FullAttentionSpec)
+            else spec
+            for name, spec in kv_cache_spec.items()
+        }
     return kv_cache_spec
 
 
@@ -375,6 +390,8 @@ def init_kv_cache(
     block_tables: "BlockTables | None" = None,
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
+    if get_generic_kvp_size() > 1:
+        allocation_context = symmetric_kv_cache_allocation(device)
     with allocation_context:
         if vllm_config.attention_config.hisparse_config is not None:
             assert block_tables is not None

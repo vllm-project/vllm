@@ -460,6 +460,13 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # No native DCP for the compressed and sliding-window caches: gather the
+        # sharded KV cache per layer instead.
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            vllm_config.parallel_config.dcp_gather = True
+
+    @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
         if quant_config is not None and quant_config.get("quant_method") == "fp8":
