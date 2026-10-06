@@ -87,6 +87,8 @@ def get_missing_precompiled_rust_extension_modules() -> list[str]:
 
 
 def has_precompiled_rust_extensions() -> bool:
+    if not rust_build.rust_py_extension_module_names():
+        return False
     return not get_missing_precompiled_rust_extension_modules()
 
 
