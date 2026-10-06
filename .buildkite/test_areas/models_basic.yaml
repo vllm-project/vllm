@@ -191,7 +191,9 @@ steps:
     print(port, metrics_port)
     PY
     )
-    read -r MOONCAKE_MASTER_PORT MOONCAKE_METRICS_PORT <<< "$$MOONCAKE_PORTS"
+    read -r MOONCAKE_MASTER_PORT MOONCAKE_METRICS_PORT <<EOF
+    $$MOONCAKE_PORTS
+    EOF
     mooncake_master --port="$$MOONCAKE_MASTER_PORT" \
       --metrics_port="$$MOONCAKE_METRICS_PORT" --enable_metric_reporting=false \
       --default_kv_lease_ttl=60000 \
