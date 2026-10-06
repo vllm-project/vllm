@@ -24,6 +24,10 @@ def server():
         "4096",
         "--max-num-seqs",
         "2",
+        # Streaming and non-streaming runs must match bitwise; a prefix-cache
+        # hit resumes the second from a mid-prefill Mamba checkpoint, whose
+        # numerics differ slightly from the cold single-pass prefill.
+        "--no-enable-prefix-caching",
     ]
     with RemoteOpenAIServer(model, args_for_model, max_wait_seconds=480) as server:
         yield server

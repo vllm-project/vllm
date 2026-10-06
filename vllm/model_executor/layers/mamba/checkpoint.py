@@ -70,6 +70,9 @@ def _gather_checkpoint_state_indices(
 class MambaPrefillCheckpointMetadata:
     checkpoint_offsets: torch.Tensor
     state_indices: torch.Tensor
+    # Host copy of ``checkpoint_offsets``, for backends that lay out the
+    # checkpoint before any tensor exists (Mamba2's SSD chunk split).
+    offsets: list[int] | None = None
     # Gather indices into the block table, kept so that another KV cache group
     # with the same spec can re-derive its own ``state_indices``.
     request_rows: torch.Tensor | None = None
@@ -139,6 +142,7 @@ class MambaPrefillCheckpointBuilder:
             _gather_checkpoint_state_indices(
                 m.block_table_tensor, request_rows_tensor, checkpoint_cols_tensor
             ),
+            offsets=checkpoint_offsets,
             request_rows=request_rows_tensor,
             block_cols=checkpoint_cols_tensor,
         )
