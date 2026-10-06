@@ -256,6 +256,27 @@ async def test_features_with_content_parts(client, test_image):
 
 
 @pytest.mark.asyncio
+async def test_content_parts_before_features_is_rejected(client, test_image):
+    """A content_parts placeholder before the last features range is a 400."""
+    data_url = encode_image_url(test_image, format="PNG")
+    render_data = await _render_image_prompt(client, data_url, data_url)
+    features = render_data["features"]
+
+    gen_resp = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "token_ids": render_data["token_ids"],
+            "features": {
+                k: {"image": v["image"][1:]} for k, v in features.items() if v
+            },
+            "content_parts": [{"type": "image_url", "url": data_url}],
+            "sampling_params": {"max_tokens": 1},
+        },
+    )
+    assert gen_resp.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_content_parts_streaming(client, test_image):
     """content_parts should work with streaming."""
     import json as json_mod
