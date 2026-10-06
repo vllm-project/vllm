@@ -58,6 +58,13 @@ PAGE_SIZE = 1
 MAX_MODEL_LEN = 1024
 MAX_NUM_SEQS = 8
 
+# The builder resolves the verify routing and records it on the metadata, so
+# the gfx950 feature probe has to be forced for the build as well as for the
+# forward; ROCm CI also runs gfx942, where the real probe is False.
+_GLUON_SUPPORTED_TARGET = (
+    "vllm.v1.attention.backends.mla.rocm_aiter_mla._gluon_mla_decode_supported"
+)
+
 
 def _seq_lens() -> list[int]:
     return [c + QLEN for c in CONTEXT_LENS] + [0] * PADDING_ROWS
@@ -75,6 +82,7 @@ def _run_verify_block():
     )
     from vllm.config import SpeculativeConfig
     from vllm.config.vllm import set_current_vllm_config
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAImpl
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
     from vllm.v1.worker.workspace import init_workspace_manager
@@ -98,6 +106,10 @@ def _run_verify_block():
     # classified as a decode instead of a prefill. ngram needs no draft model.
     vllm_config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=QLEN - 1
+    )
+    vllm_config.model_config.get_num_attention_heads = types.MethodType(  # type: ignore[method-assign]
+        lambda self, parallel_config, arch_config=None: NUM_QUERY_HEADS,
+        vllm_config.model_config,
     )
 
     spec = MLAAttentionSpec(
@@ -138,7 +150,10 @@ def _run_verify_block():
         captured["page_table"] = kwargs["page_table"].detach().clone()
         captured["seq_info"] = kwargs["seq_info"].detach().clone()
 
-    with set_current_vllm_config(vllm_config):
+    with (
+        patch(_GLUON_SUPPORTED_TARGET, lambda: True),
+        set_current_vllm_config(vllm_config),
+    ):
         builder = builder_cls(spec, [layer_name], vllm_config, device)
         common_attn_metadata = create_common_attn_metadata(
             batch_spec, PAGE_SIZE, device, arange_block_indices=True
@@ -182,15 +197,13 @@ def _run_verify_block():
     # The Gluon kernel only reads the metadata this test is about, so a spy in
     # its place keeps the assertions independent of the AITER build.
     with (
-        patch(
-            "vllm.v1.attention.backends.mla.rocm_aiter_mla._gluon_mla_decode_supported",
-            lambda: True,
-        ),
+        patch(_GLUON_SUPPORTED_TARGET, lambda: True),
         patch(
             "vllm.v1.attention.backends.mla.rocm_aiter_mla._get_mla_gluon",
             lambda: spy,
         ),
     ):
+        assert isinstance(impl, AiterMLAImpl)
         impl.forward_mqa((q_nope, q_pe), kv_cache, metadata, layer=None)
 
     return metadata, captured
@@ -210,6 +223,10 @@ def test_verify_mtp_uses_native_4d_gluon_entry():
     assert decode.max_qo_len == QLEN, (
         f"expected a {QLEN}-token verify block, got max_qo_len="
         f"{decode.max_qo_len}; the MTP path under test was not reached"
+    )
+    assert decode.use_gluon_verify, (
+        "the builder owns verify routing, so the metadata -- not the impl -- "
+        "has to select the Gluon MTP entry for a small-head bf16 verify block"
     )
     assert captured, "forward_mqa did not reach the Gluon kernel"
 
