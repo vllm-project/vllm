@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import threading
 import time
 from contextlib import ExitStack
 from http import HTTPStatus
@@ -25,6 +26,7 @@ from vllm.exceptions import ProfilerAlreadyActiveError, VLLMValidationError
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
+from vllm.profiler.wrapper import WorkerProfiler
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -179,7 +181,10 @@ def test_profile_forwards_overrides_rejects_duplicate_and_allows_restart(
 def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
     vllm_config = _mock_vllm_config()
     engine_core = _mock_async_llm_dependencies(monkeypatch)
+    events: list[str] = []
     frontend_profiler = MagicMock()
+    frontend_profiler.start.side_effect = lambda: events.append("frontend_start")
+    frontend_profiler.stop.side_effect = lambda: events.append("frontend_stop")
 
     engine = AsyncLLM(
         vllm_config,
@@ -196,6 +201,9 @@ def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
             if is_start:
                 start_rpc_entered.set()
                 await release_start_rpc.wait()
+                events.append("engine_start_done")
+            else:
+                events.append("engine_stop")
 
         engine_core.profile_async.side_effect = profile_async
 
@@ -205,12 +213,12 @@ def test_stop_profile_waits_for_inflight_start(monkeypatch: pytest.MonkeyPatch):
         stop_task = asyncio.create_task(engine.stop_profile())
         await asyncio.sleep(0)
         release_start_rpc.set()
-        await asyncio.gather(start_task, stop_task)
+        await asyncio.wait_for(asyncio.gather(start_task, stop_task), timeout=5)
 
     asyncio.run(profile())
 
-    frontend_profiler.start.assert_called_once_with()
-    frontend_profiler.stop.assert_called_once_with()
+    assert events[:2] == ["engine_start_done", "frontend_start"]
+    assert sorted(events[2:]) == ["engine_stop", "frontend_stop"]
     assert engine._profile_session_active is False
 
 
@@ -259,6 +267,68 @@ def test_interrupted_engine_profile_start_skips_frontend_profiler(
     asyncio.run(profile())
 
     frontend_profiler.start.assert_not_called()
+
+
+class _BlockingStartProfiler(WorkerProfiler):
+    def __init__(self) -> None:
+        self.in_start = threading.Event()
+        self.release_start = threading.Event()
+        self.stop_call_count = 0
+        super().__init__(
+            ProfilerConfig(profiler="torch", torch_profiler_dir="/tmp/mock")
+        )
+
+    def _start(self) -> None:
+        self.in_start.set()
+        if not self.release_start.wait(timeout=5):
+            raise TimeoutError("start was never released")
+
+    def _stop(self) -> None:
+        self.stop_call_count += 1
+
+
+def test_stop_after_cancelled_frontend_start_stops_frontend_profiler(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Cancelling start_profile while the frontend profiler is starting keeps
+    the session active, and the next stop_profile still stops the backend."""
+    vllm_config = _mock_vllm_config()
+    engine_core = _mock_async_llm_dependencies(monkeypatch)
+    frontend_profiler = _BlockingStartProfiler()
+    engine = AsyncLLM(
+        vllm_config,
+        MagicMock(),
+        log_stats=False,
+        profiler=frontend_profiler,
+    )
+
+    async def profile():
+        try:
+            start_task = asyncio.create_task(engine.start_profile())
+            assert await asyncio.to_thread(frontend_profiler.in_start.wait, 5)
+            start_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
+            assert engine._profile_session_active is True
+
+            stop_task = asyncio.create_task(engine.stop_profile())
+            done, _ = await asyncio.wait({stop_task}, timeout=0.1)
+            assert not done, "stop_profile did not wait for the in-flight start"
+            frontend_profiler.release_start.set()
+            await asyncio.wait_for(stop_task, timeout=5)
+        finally:
+            frontend_profiler.release_start.set()
+
+    asyncio.run(profile())
+
+    assert frontend_profiler.stop_call_count == 1
+    assert frontend_profiler._active is False
+    assert frontend_profiler._running is False
+    assert engine._profile_session_active is False
+    assert engine_core.profile_async.await_args_list == [
+        call(True, None, None, None),
+        call(False),
+    ]
 
 
 def test_multi_client_profile_uses_idempotent_engine_requests(

@@ -7845,22 +7845,13 @@ async fn start_profile_route_sends_expected_utility_call() {
 async fn start_profile_route_forwards_session_overrides() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let utility = recv_engine_message(dealer).await;
-            let payload = decode_value(&utility[1]).expect("decode utility payload");
-            let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_u64().expect("call id");
-
-            assert_eq!(array[2], Value::from("profile"));
-            assert_eq!(
-                array[3],
-                Value::Array(vec![
-                    Value::from(true),
-                    Value::from("sharegpt_run-1"),
-                    Value::from(5000),
-                    Value::from(20),
-                ])
-            );
-
+            let start = vec![
+                Value::from(true),
+                Value::from("sharegpt_run-1"),
+                Value::from(5000),
+                Value::from(20),
+            ];
+            let call_id = recv_profile_call(dealer, start).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
     })
@@ -7895,16 +7886,8 @@ async fn start_profile_route_forwards_session_overrides() {
 async fn start_profile_route_ignores_completion_payload() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let utility = recv_engine_message(dealer).await;
-            let payload = decode_value(&utility[1]).expect("decode utility payload");
-            let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_u64().expect("call id");
-
-            assert_eq!(
-                array[3],
-                Value::Array(vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil,])
-            );
-
+            let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let call_id = recv_profile_call(dealer, start).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
     })
@@ -7940,10 +7923,8 @@ async fn start_profile_route_ignores_completion_payload() {
 async fn duplicate_start_profile_returns_conflict() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let utility = recv_engine_message(dealer).await;
-            let payload = decode_value(&utility[1]).expect("decode utility payload");
-            let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_u64().expect("call id");
+            let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let call_id = recv_profile_call(dealer, start).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
     })
@@ -7989,14 +7970,7 @@ async fn start_profile_succeeds_again_after_stop() {
                 vec![Value::from(false), Value::Nil],
             ];
             for expected in expected_args {
-                let utility = recv_engine_message(dealer).await;
-                let payload = decode_value(&utility[1]).expect("decode utility payload");
-                let array = payload.as_array().expect("utility payload array");
-                let call_id = array[1].as_u64().expect("call id");
-
-                assert_eq!(array[2], Value::from("profile"));
-                assert_eq!(array[3], Value::Array(expected));
-
+                let call_id = recv_profile_call(dealer, expected).await;
                 send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
             }
         })
@@ -8078,17 +8052,28 @@ async fn start_profile_waits_for_inflight_stop() {
         }
     };
 
+    let timeout = Duration::from_secs(2);
     assert_eq!(post("/start_profile").await, StatusCode::OK);
     let stop = tokio::spawn(post("/stop_profile"));
-    stop_received_rx.await.expect("stop received");
-    let restart = tokio::spawn(post("/start_profile"));
-    // No hook observes the restart reaching the profile lock; give it time so
-    // an unserialized client would reject it against the stale session.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(timeout, stop_received_rx)
+        .await
+        .expect("stop dispatch timeout")
+        .expect("stop received");
+
+    // Nothing before the profile lock awaits, so one poll reaches it; an
+    // unserialized client would instead reject against the stale session.
+    let mut restart = std::pin::pin!(post("/start_profile"));
+    assert!(futures::poll!(restart.as_mut()).is_pending());
+
     release_stop_tx.send(()).expect("release stop");
-    assert_eq!(stop.await.expect("stop task"), StatusCode::OK);
-    assert_eq!(restart.await.expect("restart task"), StatusCode::OK);
-    engine_task.await.expect("mock engine task");
+    let stop = tokio::time::timeout(timeout, stop).await.expect("stop timeout");
+    assert_eq!(stop.expect("stop task"), StatusCode::OK);
+    let restart = tokio::time::timeout(timeout, restart).await.expect("restart timeout");
+    assert_eq!(restart, StatusCode::OK);
+    tokio::time::timeout(timeout, engine_task)
+        .await
+        .expect("mock engine timeout")
+        .expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8121,16 +8106,8 @@ async fn start_profile_route_rejects_invalid_prefix() {
 async fn stop_profile_route_sends_expected_utility_call() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let utility = recv_engine_message(dealer).await;
-            assert_eq!(utility[0].as_ref(), &[0x03]);
-
-            let payload = decode_value(&utility[1]).expect("decode utility payload");
-            let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_u64().expect("call id");
-
-            assert_eq!(array[2], Value::from("profile"));
-            assert_eq!(array[3], Value::Array(vec![Value::from(false), Value::Nil]));
-
+            let stop = vec![Value::from(false), Value::Nil];
+            let call_id = recv_profile_call(dealer, stop).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
     })
