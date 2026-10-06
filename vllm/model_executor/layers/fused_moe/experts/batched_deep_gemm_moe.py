@@ -247,7 +247,7 @@ def persistent_masked_m_silu_mul_quant(
     assert group_size == 128, "H must be divisible by 8"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
 
-    if is_batch_invariant_quant_kernel_enabled():
+    if envs.VLLM_BATCH_INVARIANT and is_batch_invariant_quant_kernel_enabled():
         if quant_scale_fmt not in (
             DeepGemmQuantScaleFMT.FLOAT32,
             DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
