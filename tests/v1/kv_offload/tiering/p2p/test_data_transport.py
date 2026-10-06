@@ -373,15 +373,40 @@ class TestNixlTransportWithMockedAgent:
         assert tid in result.failed
         assert tid not in transport._inflight
 
-    def test_poll_keeps_transfer_on_other_state_check_errors(self):
+    def test_poll_keeps_transfer_on_unknown_state_check_errors(self):
         transport = self._make_transport()
         transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
 
         tid = transport.write_blocks("peer:1", [0], [1])
-        transport._agent.check_xfer_state.side_effect = RuntimeError("NOT_FOUND")
+        transport._agent.check_xfer_state.side_effect = RuntimeError("temporary error")
 
         assert transport.poll() == PollResult(done=(), failed=())
         assert tid in transport._inflight
+
+    def test_poll_reports_not_found_as_failed(self):
+        """A NIXL peer lookup failure must not leave a transfer wedged."""
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport._agent.check_xfer_state.side_effect = RuntimeError(
+            "NIXL_ERR_NOT_FOUND"
+        )
+
+        result = transport.poll()
+        assert result.done == ()
+        assert result.failed == [tid]
+        assert tid not in transport._inflight
+
+    def test_remove_remote_peer_runs_both_teardown_operations(self):
+        """A failed dlist release must not skip remote-agent removal."""
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        transport._agent.release_dlist_handle.side_effect = RuntimeError("gone")
+
+        transport.remove_remote_peer("peer:1")
+
+        transport._agent.remove_remote_agent.assert_called_once()
 
     def test_cancel_wait_release_raises(self):
         """wait-mode cancel keeps the entry and returns the tid on raise."""
@@ -424,6 +449,21 @@ class TestNixlTransportWithMockedAgent:
         assert "peer:1" not in transport._remote_dlists
         transport._agent.release_dlist_handle.assert_called()
         transport._agent.remove_remote_agent.assert_called()
+
+    def test_add_remote_peer_replaces_existing_registration(self):
+        transport = self._make_transport()
+        old_dlist = MagicMock(name="old_dlist")
+        new_dlist = MagicMock(name="new_dlist")
+        transport._agent.add_remote_agent.side_effect = ["old-agent", "new-agent"]
+        transport._agent.prep_xfer_dlist.side_effect = [old_dlist, new_dlist]
+
+        transport.add_remote_peer("peer:1", b"old-meta", 0x1000, 8, 1024)
+        transport.add_remote_peer("peer:1", b"new-meta", 0x2000, 8, 1024)
+
+        transport._agent.release_dlist_handle.assert_called_once_with(old_dlist)
+        transport._agent.remove_remote_agent.assert_called_once_with("old-agent")
+        assert transport._peer_nixl_names["peer:1"] == "new-agent"
+        assert transport._remote_dlists["peer:1"] is new_dlist
 
     def test_close_releases_everything(self):
         """Close releases all handles and clears state."""

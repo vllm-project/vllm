@@ -668,6 +668,7 @@ class _FakeSession:
         self.last_activity_at: float = (
             last_activity_at if last_activity_at is not None else time.monotonic()
         )
+        self.close_calls = 0
         # Mirror P2PSession._server._inflight (transfer_id → handle) and
         # P2PSession._client.has_active_loads for the shutdown-drain and
         # drain_jobs paths. Tests populate _server._inflight when needed.
@@ -703,6 +704,7 @@ class _FakeSession:
         self.finishes.append(kv_request_id)
 
     def close(self):
+        self.close_calls += 1
         return SessionCloseResult(
             failed_jobs=self._close_jobs,
             failed_req_ids=self._close_req_ids,

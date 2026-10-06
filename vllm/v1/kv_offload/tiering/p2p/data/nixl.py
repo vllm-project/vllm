@@ -45,6 +45,11 @@ def _is_remote_disconnect(exc: Exception) -> bool:
     )
 
 
+def _is_terminal_xfer_error(exc: Exception) -> bool:
+    """Whether a state-check error means the transfer cannot make progress."""
+    return _is_remote_disconnect(exc) or "NIXL_ERR_NOT_FOUND" in str(exc)
+
+
 class _Inflight(NamedTuple):
     """A submitted-but-not-yet-drained transfer.
 
@@ -161,6 +166,7 @@ class NixlTransport(DataTransport):
         num_blocks: int,
         block_len: int,
     ) -> None:
+        self._replace_remote_peer(peer_id)
         gen = self._begin_registration(peer_id)
         nixl_name, remote_dlist = self._build_peer_handles(
             agent_metadata, base_addr, num_blocks, block_len
@@ -175,6 +181,7 @@ class NixlTransport(DataTransport):
         num_blocks: int,
         block_len: int,
     ) -> Future[None]:
+        self._replace_remote_peer(peer_id)
         gen = self._begin_registration(peer_id)
 
         def register() -> None:
@@ -197,10 +204,22 @@ class NixlTransport(DataTransport):
             nixl_name = self._peer_nixl_names.pop(peer_id, None)
             dlist = self._remote_dlists.pop(peer_id, None)
         if self._agent is not None:
-            if dlist is not None:
-                self._agent.release_dlist_handle(dlist)
-            if nixl_name:
-                self._agent.remove_remote_agent(nixl_name)
+            self._release_remote_handles(peer_id, dlist, nixl_name)
+
+            stale_ids = [
+                tid for tid, entry in self._inflight.items() if entry.peer_id == peer_id
+            ]
+            handles = [self._inflight.pop(tid).handle for tid in stale_ids]
+            self._release_handles(handles)
+
+    def _replace_remote_peer(self, peer_id: str) -> None:
+        if peer_id in self._peer_nixl_names or peer_id in self._remote_dlists:
+            logger.info(
+                "NixlTransport %s: replacing remote peer registration for %s",
+                self._agent_name,
+                peer_id,
+            )
+            self.remove_remote_peer(peer_id)
 
     def _begin_registration(self, peer_id: str) -> int:
         """Claim the next registration generation for *peer_id*."""
@@ -256,17 +275,7 @@ class NixlTransport(DataTransport):
             peer_id,
         )
         if self._agent is not None:
-            try:
-                self._agent.release_dlist_handle(remote_dlist)
-                self._agent.remove_remote_agent(nixl_name)
-            except Exception as exc:
-                logger.warning(
-                    "NixlTransport %s: releasing superseded registration "
-                    "for peer=%s failed: %s",
-                    self._agent_name,
-                    peer_id,
-                    exc,
-                )
+            self._release_remote_handles(peer_id, remote_dlist, nixl_name)
         return False
 
     # ------------------------------------------------------------------
@@ -341,7 +350,7 @@ class NixlTransport(DataTransport):
                     transfer_id,
                     exc,
                 )
-                if not _is_remote_disconnect(exc):
+                if not _is_terminal_xfer_error(exc):
                     continue
                 state = "ERR"
             if state == "DONE":
@@ -408,7 +417,7 @@ class NixlTransport(DataTransport):
                     tid,
                     exc,
                 )
-                if not _is_remote_disconnect(exc):
+                if not _is_terminal_xfer_error(exc):
                     still_inflight.append(tid)
                     continue
                 # The handle may no longer be releasable; it is terminal
@@ -469,5 +478,35 @@ class NixlTransport(DataTransport):
                 logger.warning(
                     "NixlTransport %s: release_xfer_handle failed: %s",
                     self._agent_name,
+                    exc,
+                )
+
+    def _release_remote_handles(
+        self, peer_id: str, dlist: object | None, nixl_name: str | None
+    ) -> None:
+        """Release a peer dlist and agent independently.
+
+        NIXL may reject one teardown operation after a transport failure. The
+        other operation must still run, otherwise a stale remote agent can
+        survive a reconnect with closed UCX endpoints.
+        """
+        if dlist is not None:
+            try:
+                self._agent.release_dlist_handle(dlist)
+            except Exception as exc:
+                logger.warning(
+                    "NixlTransport %s: release dlist for peer=%s failed: %s",
+                    self._agent_name,
+                    peer_id,
+                    exc,
+                )
+        if nixl_name:
+            try:
+                self._agent.remove_remote_agent(nixl_name)
+            except Exception as exc:
+                logger.warning(
+                    "NixlTransport %s: remove remote agent for peer=%s failed: %s",
+                    self._agent_name,
+                    peer_id,
                     exc,
                 )
