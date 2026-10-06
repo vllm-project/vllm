@@ -204,7 +204,7 @@ def is_flashinfer_fused_kda_decode_supported(
         return False
     compute_capability = (capability.major, capability.minor)
     return (
-        compute_capability in ((10, 0), (10, 3))
+        compute_capability in ((10, 0), (10, 3), (10, 7))
         and num_heads in (12, 24, 32, 48, 96)
         and head_dim == 128
         and conv_width == 4
@@ -331,7 +331,7 @@ def resolve_kda_decode_backend(
         return "flashinfer"
     if backend == "flashinfer":
         raise RuntimeError(
-            "FlashInfer fused KDA decode requires CUDA SM100 or SM103, "
+            "FlashInfer fused KDA decode requires CUDA SM100/SM103/SM107, "
             "bfloat16 activations and convolution state, bfloat16 or float32 "
             "recurrent state, head_dim=128, convolution width 4, no speculation."
         )
@@ -370,7 +370,7 @@ def is_flashinfer_recurrent_kda_prefill_supported(
         return False
     compute_capability = (capability.major, capability.minor)
     return (
-        compute_capability in ((10, 0), (10, 3))
+        compute_capability in ((10, 0), (10, 3), (10, 7))
         and head_dim == 128
         and input_dtype == torch.bfloat16
         and recurrent_state_dtype == torch.bfloat16
@@ -483,7 +483,7 @@ def resolve_kda_prefill_backend(
     )
     if backend == "flashinfer" and not flashinfer_supported:
         raise RuntimeError(
-            "FlashInfer KDA prefill requires CUDA SM100 or SM103, bfloat16 "
+            "FlashInfer KDA prefill requires CUDA SM100/SM103/SM107, bfloat16 "
             "activations and recurrent state, head_dim=128, a bounded KDA "
             "gate, and flashinfer-python 0.6.18 or newer."
         )

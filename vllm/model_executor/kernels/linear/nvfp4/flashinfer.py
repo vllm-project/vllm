@@ -46,10 +46,12 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
                 return False, "CUDA compute capability is unavailable"
             compute_capability = capability.to_int()
 
-        if compute_capability not in (100, 103) and not (
+        if compute_capability not in (100, 103, 107) and not (
             compute_capability >= 120 and compute_capability < 130
         ):
-            return False, "FlashInfer CuTe-DSL W4A16 requires sm_100 or sm_12x"
+            return False, (
+                "FlashInfer CuTe-DSL W4A16 requires sm_100, sm_103, sm_107 or sm_12x"
+            )
         if not has_flashinfer_bf16_fp4():
             return False, "FlashInfer CuTe-DSL BF16 x FP4 GEMM is unavailable"
         return True, None

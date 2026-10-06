@@ -109,6 +109,7 @@ def _supports_mnnvl_multimem_reduce_scatter(
         and (
             current_platform.is_device_capability((10, 0), device.index)
             or current_platform.is_device_capability((10, 3), device.index)
+            or current_platform.is_device_capability((10, 7), device.index)
         )
         and _has_local_multicast_support(device)
     )
