@@ -433,7 +433,9 @@ class Llama4Model(LlamaModel):
         # [num_experts, hidden_in, hidden_out], so we must transpose the last
         # two dimensions to match the expected layout of the parameters.
         if fused and loaded_weight.ndim == 3:
-            loaded_weight = loaded_weight.transpose(-1, -2)
+            # Make contiguous after transpose to avoid slow CPU-to-GPU copies.
+            # See: https://github.com/vllm-project/vllm/issues/31624
+            loaded_weight = loaded_weight.transpose(-1, -2).contiguous()
 
             # If the gate_proj and up_proj weights are fused into a single
             # weight tensor, we need to split the weight tensor into a tuple
@@ -517,6 +519,10 @@ class Llama4Model(LlamaModel):
                         ].to(new_loaded_weight.dtype)
                     else:
                         new_loaded_weight = new_loaded_weight[local_expert_indices]
+                    # Make contiguous after indexing to avoid slow CPU-to-GPU
+                    # copies. See: https://github.com/vllm-project/vllm/issues/31624
+                    if not new_loaded_weight.is_contiguous():
+                        new_loaded_weight = new_loaded_weight.contiguous()
                     expert_id = local_expert_indices[0].item()
             else:
                 # TODO: add EP support for non fused weights
@@ -679,7 +685,10 @@ class Llama4Model(LlamaModel):
                             and loaded_weight.dtype == torch.float8_e4m3fn
                             and loaded_weight.ndim == 3
                         ):
-                            loaded_weight = loaded_weight.transpose(-1, -2)
+                            # Make contiguous after transpose to avoid slow
+                            # CPU-to-GPU copies.
+                            # See: https://github.com/vllm-project/vllm/issues/31624
+                            loaded_weight = loaded_weight.transpose(-1, -2).contiguous()
 
                         # Load the weight into the module parameter with
                         # corresponding shard id and expert id.
