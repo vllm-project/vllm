@@ -380,10 +380,10 @@ async def test_generate_return_token_logprobs(client):
     choice = resp.json()["choices"][0]
 
     assert choice["token_ids"] == ref["token_ids"]
-    assert choice["logprobs"] is None
-    assert len(choice["token_logprobs"]) == len(choice["token_ids"])
+    assert choice["logprobs"]["content"] is None
+    assert len(choice["logprobs"]["sampled"]) == len(choice["token_ids"])
     expected = [entry["logprob"] for entry in ref["logprobs"]["content"]]
-    assert choice["token_logprobs"] == pytest.approx(expected, abs=1e-6)
+    assert choice["logprobs"]["sampled"] == pytest.approx(expected, abs=1e-6)
 
 
 @pytest.mark.asyncio
@@ -399,9 +399,9 @@ async def test_generate_return_token_logprobs_defaults_logprobs(client):
     resp = await client.post(GEN_ENDPOINT, json=payload)
     resp.raise_for_status()
     choice = resp.json()["choices"][0]
-    assert choice["logprobs"] is None
-    assert len(choice["token_logprobs"]) == len(choice["token_ids"])
-    assert all(v <= 0.0 for v in choice["token_logprobs"])
+    assert choice["logprobs"]["content"] is None
+    assert len(choice["logprobs"]["sampled"]) == len(choice["token_ids"])
+    assert all(v <= 0.0 for v in choice["logprobs"]["sampled"])
 
 
 @pytest.mark.asyncio
@@ -418,10 +418,9 @@ async def test_generate_return_token_logprobs_keeps_top_logprobs(client):
     resp.raise_for_status()
     choice = resp.json()["choices"][0]
     content = choice["logprobs"]["content"]
-    assert len(content) == len(choice["token_ids"]) == len(choice["token_logprobs"])
-    assert choice["token_logprobs"] == pytest.approx(
-        [entry["logprob"] for entry in content], abs=1e-6
-    )
+    sampled = choice["logprobs"]["sampled"]
+    assert len(content) == len(choice["token_ids"]) == len(sampled)
+    assert sampled == pytest.approx([entry["logprob"] for entry in content], abs=1e-6)
     assert all(len(entry["top_logprobs"]) == 2 for entry in content)
 
 
@@ -448,8 +447,8 @@ async def test_generate_return_token_logprobs_n_choices(client, n):
     assert len(choices) == n
     assert sorted(c["index"] for c in choices) == list(range(n))
     for choice in choices:
-        assert len(choice["token_logprobs"]) == len(choice["token_ids"])
-        assert choice["token_logprobs"] == pytest.approx(
+        assert len(choice["logprobs"]["sampled"]) == len(choice["token_ids"])
+        assert choice["logprobs"]["sampled"] == pytest.approx(
             [entry["logprob"] for entry in choice["logprobs"]["content"]], abs=1e-6
         )
 
@@ -487,7 +486,7 @@ def test_sampled_token_logprobs_clamp_nan():
 
 
 @pytest.mark.asyncio
-async def test_generate_omits_token_logprobs_unless_requested(client):
+async def test_generate_omits_sampled_unless_requested(client):
     """Callers that did not ask for the field must not see it (schema stays)."""
     payload = {
         "model": MODEL_NAME,
@@ -497,7 +496,7 @@ async def test_generate_omits_token_logprobs_unless_requested(client):
     }
     resp = await client.post(GEN_ENDPOINT, json=payload)
     resp.raise_for_status()
-    assert "token_logprobs" not in resp.json()["choices"][0]
+    assert "sampled" not in resp.json()["choices"][0]["logprobs"]
 
 
 @pytest.mark.asyncio
@@ -540,8 +539,8 @@ async def test_generate_return_token_logprobs_with_speculative_decoding(client):
     resp.raise_for_status()
     choice = resp.json()["choices"][0]
     assert choice["token_ids"] == ref["token_ids"]
-    assert len(choice["token_logprobs"]) == len(choice["token_ids"]) == 24
-    assert choice["token_logprobs"] == pytest.approx(
+    assert len(choice["logprobs"]["sampled"]) == len(choice["token_ids"]) == 24
+    assert choice["logprobs"]["sampled"] == pytest.approx(
         [entry["logprob"] for entry in ref["logprobs"]["content"]], abs=1e-6
     )
 
@@ -558,6 +557,21 @@ async def test_generate_return_token_logprobs_rejects_stream(client):
     resp = await client.post(GEN_ENDPOINT, json=payload)
     assert resp.status_code == 400
     assert "return_token_logprobs" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_generate_return_token_logprobs_requires_tokens_mode(client):
+    """``sampled`` lives on the tokens-mode ``GenerateLogProbs``."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 0.0},
+        "output_mode": "text",
+        "return_token_logprobs": True,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "output_mode" in resp.text
 
 
 @pytest.mark.asyncio

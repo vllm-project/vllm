@@ -201,6 +201,11 @@ class ServingTokens(GenerateBaseServing):
 
         sampling_params = request.sampling_params
         if request.return_token_logprobs:
+            if request.output_mode != "tokens":
+                # ``sampled`` lives on the tokens-mode ``GenerateLogProbs``.
+                return self.create_error_response(
+                    "return_token_logprobs requires output_mode='tokens'"
+                )
             if request.stream:
                 return self.create_error_response(
                     "return_token_logprobs is not supported with stream=True"
@@ -443,17 +448,15 @@ class ServingTokens(GenerateBaseServing):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
-            token_logprobs = None
+            sampled = None
             if request.return_token_logprobs:
                 if output.sampled_logprobs is not None:
-                    token_logprobs = [
-                        _clamp_logprob(x) for x in output.sampled_logprobs
-                    ]
+                    sampled = [_clamp_logprob(x) for x in output.sampled_logprobs]
                 else:
                     assert isinstance(out_logprobs, FlatLogprobs), (
                         "Did not output logprobs"
                     )
-                    token_logprobs = self._sampled_token_logprobs(out_logprobs)
+                    sampled = self._sampled_token_logprobs(out_logprobs)
 
             # This is top_logprobs in completions API. With
             # return_token_logprobs the objects are only built when the
@@ -478,6 +481,14 @@ class ServingTokens(GenerateBaseServing):
                     )
             else:
                 logprobs = None
+            if sampled is not None:
+                # Tokens mode only (checked above). With logprobs=0 no content
+                # entries were built: content stays None, only sampled is set.
+                if logprobs is None:
+                    logprobs = GenerateLogProbs(sampled=sampled)
+                else:
+                    assert isinstance(logprobs, GenerateLogProbs)
+                    logprobs.sampled = sampled
 
             routed_experts_b64 = (
                 numpy2base64(output.routed_experts)
@@ -492,7 +503,6 @@ class ServingTokens(GenerateBaseServing):
             choice_fields: dict[str, Any] = dict(
                 index=output.index,
                 logprobs=logprobs,
-                token_logprobs=token_logprobs,
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
