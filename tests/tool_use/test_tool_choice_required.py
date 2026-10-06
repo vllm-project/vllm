@@ -406,17 +406,7 @@ class TestNonFunctionToolsSkipped:
 
 
 class TestMalformedToolSchemaDefs:
-    """`parameters` is an arbitrary caller-supplied dict, so `$defs` is
-    whatever the request said it was.
-
-    `_get_tool_schema_defs` defaulted it with `params.pop("$defs", {})`, which
-    only covers the key being *absent*. An explicit `"$defs": null` reached
-    `.items()` and raised `AttributeError`. Nothing between
-    `get_json_schema_from_tools` and the route catches that
-    (`ToolParser.adjust_request` -> `OnlineRenderer.render_chat` ->
-    `render_chat_request` -> `create_chat_completion`), so it surfaced as a
-    500 for a request the caller got wrong.
-    """
+    """Malformed `$defs` in caller-supplied tool parameters is a 400, not a 500."""
 
     @staticmethod
     def _tool(params: dict) -> ChatCompletionToolsParam:
@@ -497,6 +487,7 @@ class TestMalformedToolSchemaDefs:
 
         schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
 
+        assert isinstance(schema, dict)
         assert schema["$defs"] == {"D": {"type": "string"}}
 
     def test_absent_defs_still_works(self):
