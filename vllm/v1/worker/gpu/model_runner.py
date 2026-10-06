@@ -1161,7 +1161,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.postprocess_sampled(**outputs)
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
-        table_updates = scheduler_output.block_table_updates or {}
         for new_req_data in scheduler_output.scheduled_new_reqs:
             assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
@@ -1197,6 +1196,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
 
             self.model_state.add_request(req_index, new_req_data)
+            table_updates = scheduler_output.block_table_updates or {}
             if req_id not in table_updates:
                 self.block_tables.append_block_ids(
                     req_index, new_req_data.block_ids, overwrite=True
