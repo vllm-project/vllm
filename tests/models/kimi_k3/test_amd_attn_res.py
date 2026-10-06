@@ -114,13 +114,16 @@ def test_amd_attn_res_matches_reference(
         "has_delta",
         "write_block",
         "apply_output_norm",
+        "capture_prefix",
     ),
     [
-        pytest.param(1, 0, 128, False, True, True, id="empty-write-norm"),
-        pytest.param(7, 1, 1024, True, False, True, id="single-add-norm"),
-        pytest.param(17, 5, 7168, True, True, True, id="padded-write-add"),
-        pytest.param(3, 8, 7168, True, False, True, id="full-add-norm"),
-        pytest.param(320, 4, 7168, True, False, False, id="prefill-add"),
+        pytest.param(1, 0, 128, False, True, True, True, id="empty-write-norm"),
+        pytest.param(7, 1, 1024, True, False, True, False, id="single-add-norm"),
+        pytest.param(17, 5, 7168, True, True, True, True, id="padded-write-add"),
+        pytest.param(3, 8, 7168, True, False, True, False, id="full-add-norm"),
+        pytest.param(320, 4, 7168, True, False, False, True, id="prefill-add"),
+        pytest.param(0, 3, 1024, True, False, True, True, id="no-token-add"),
+        pytest.param(0, 3, 1024, False, False, True, True, id="no-token-copy"),
     ],
 )
 def test_amd_attn_res_fused_contract(
@@ -130,6 +133,7 @@ def test_amd_attn_res_fused_contract(
     has_delta: bool,
     write_block: bool,
     apply_output_norm: bool,
+    capture_prefix: bool,
 ) -> None:
     torch.manual_seed(42)
     eps = 1e-5
@@ -171,7 +175,9 @@ def test_amd_attn_res_fused_contract(
     expected = expected.to(prefix.dtype)
     original_blocks = blocks.clone()
     block_write_idx = num_blocks if write_block else -1
-    prefix_snapshot = torch.empty_like(prefix)
+    # The auxiliary buffer is allocated contiguous, so its row pitch differs
+    # from the padded prefix pitch the same launch reads.
+    prefix_snapshot = torch.empty_like(prefix) if capture_prefix else None
 
     actual = attn_res(
         prefix,
@@ -189,7 +195,8 @@ def test_amd_attn_res_fused_contract(
 
     torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
     torch.testing.assert_close(prefix, expected_prefix, atol=0, rtol=0)
-    torch.testing.assert_close(prefix_snapshot, expected_prefix, atol=0, rtol=0)
+    if prefix_snapshot is not None:
+        torch.testing.assert_close(prefix_snapshot, expected_prefix, atol=0, rtol=0)
     if write_block:
         original_blocks[:, block_write_idx].copy_(expected_prefix)
     torch.testing.assert_close(blocks, original_blocks, atol=0, rtol=0)
