@@ -83,6 +83,9 @@ class Sampler:
             TraceReplayState(req_states) if enable_trace_replay else None
         )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
+        # Rows whose logits processors or thinking budget touch logits outside
+        # the top-k set, so they cannot sample from gathered top-k logits.
+        self.needs_full_vocab = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -94,13 +97,16 @@ class Sampler:
         )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
-        needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
-        needs_processing |= self.thinking_budget_state.add_request(
+        needs_full_vocab = self.thinking_budget_state.add_request(
             req_idx, sampling_params
         )
         for processor in self.logits_processors:
-            needs_processing |= processor.add_request(req_idx, sampling_params)
-        self.needs_logits_processing[req_idx] = needs_processing
+            needs_full_vocab |= processor.add_request(req_idx, sampling_params)
+        self.needs_full_vocab[req_idx] = needs_full_vocab
+        self.needs_logits_processing[req_idx] = (
+            self.sampling_states.add_request(req_idx, sampling_params)
+            or needs_full_vocab
+        )
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
@@ -147,15 +153,7 @@ class Sampler:
         if top_k.size == 0 or top_k.max() > max_k:
             return 0
         if (
-            np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np])
-            or np.any(self.penalties_state.use_penalty[idx_mapping_np])
-            or np.any(self.bad_words_state.num_bad_words.np[idx_mapping_np] > 0)
-            or (
-                self.thinking_budget_state.enabled
-                and np.any(
-                    self.thinking_budget_state.use_thinking_budget[idx_mapping_np]
-                )
-            )
+            np.any(self.needs_full_vocab[idx_mapping_np])
             or self.get_logprobs_dims(idx_mapping_np) is not None
         ):
             return 0
