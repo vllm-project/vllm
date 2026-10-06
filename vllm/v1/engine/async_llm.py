@@ -614,6 +614,8 @@ class AsyncLLM(EngineClient):
 
         async def handle_inputs():
             cancelled = False
+            errored = False
+            any_added = False
             first_chunk = True
             try:
                 async for input_chunk in input_stream:
@@ -640,6 +642,7 @@ class AsyncLLM(EngineClient):
                         self.model_config, input_chunk.prompt
                     )
                     await self._add_request(req, prompt_text, None, 0, queue)
+                    any_added = True
                     first_chunk = False
             except (asyncio.CancelledError, GeneratorExit):
                 cancelled = True
@@ -647,11 +650,15 @@ class AsyncLLM(EngineClient):
                 # Wrap in InputStreamError so generate() can propagate it
                 # without wrapping in EngineGenerateError.
                 queue.put(InputStreamError(error))
+                errored = True
             finally:
                 if not cancelled:
-                    # Send empty final request to indicate that inputs have
-                    # finished. Don't send if cancelled (session was aborted).
-                    await self._add_request(final_req, None, None, 0, queue)
+                    if any_added:
+                        # Send empty final request to indicate that inputs have
+                        # finished. Don't send if cancelled (session was aborted).
+                        await self._add_request(final_req, None, None, 0, queue)
+                    elif not errored:
+                        queue.put(STREAM_FINISHED)
                 # Cleared only after the final send, so an abort racing us
                 # can still find and cancel-and-await this task.
                 queue._input_stream_task = None
