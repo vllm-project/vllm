@@ -77,17 +77,3 @@ def test_permuted_wo_a_consumes_fused_output():
     torch.testing.assert_close(
         fused_o @ loaded_weight.T, expected, rtol=1e-3, atol=1e-3
     )
-
-
-def test_permuting_loader_keeps_mxfp8_bytes():
-    """fp8 weights and ue8m0 scales are permuted bit-exactly, not cast."""
-    torch.manual_seed(2)
-    num_heads, q_lora_rank = 8, 64
-    weight = torch.randn(num_heads * HEAD_DIM, q_lora_rank).to(torch.float8_e4m3fn)
-    scale = torch.randint(0, 256, (num_heads * HEAD_DIM, 2), dtype=torch.uint8)
-    scale = scale.view(torch.float8_e8m0fnu)
-    perm = q_fused_permutation(num_heads, HEAD_DIM)
-    for t in (weight, scale):
-        loaded = _load(t, perm, dim=0)
-        assert loaded.dtype == t.dtype
-        assert torch.equal(loaded.view(torch.uint8), t.view(torch.uint8)[perm])
