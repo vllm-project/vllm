@@ -36,6 +36,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
+    neutralize_dcp_empty_rows_,
     request_row_bounds,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
@@ -1219,9 +1220,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # Rows where this rank owns none of the selected tokens (all indices
         # -1) have undefined out/lse; (0, -inf) is the identity element of the
         # cross-rank LSE merge, so it drops this rank from those rows.
-        empty_rows = (topk_indices == -1).all(dim=-1)
-        out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
-        lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+        neutralize_dcp_empty_rows_(out, lse, topk_indices)
         # The head-padding slice above can leave `out` non-contiguous, and the
         # merge feeds it to reduce_scatter.
         return out.contiguous(), lse

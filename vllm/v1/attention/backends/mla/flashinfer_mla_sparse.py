@@ -30,6 +30,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
+    neutralize_dcp_empty_rows_,
     prepare_sparse_mla_safe_lengths,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
@@ -737,9 +738,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             else:
                 out.masked_fill_(empty_queries[:, None, None], 0.0)
         elif lse is not None:
-            empty_rows = (topk_indices == -1).all(dim=-1)
-            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
-            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+            neutralize_dcp_empty_rows_(out, lse, topk_indices)
         return out, lse
 
     @staticmethod
