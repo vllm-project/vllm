@@ -334,12 +334,15 @@ _ZMQ_LARGE_BUFFER_MIN_AVAILABLE_MEMORY = 16 * 1024**3
 def _get_zmq_socket_buffer_size() -> int:
     """Choose the shared libzmq and inherited-listener buffer policy."""
     mem = psutil.virtual_memory()
+    # For systems with substantial memory (>32GB total, >16GB available):
+    # - Set a large 0.5GB buffer to improve throughput
+    # For systems with less memory:
+    # - Use system default (-1) to avoid excessive memory consumption
     if (
         mem.total > _ZMQ_LARGE_BUFFER_MIN_TOTAL_MEMORY
         and mem.available > _ZMQ_LARGE_BUFFER_MIN_AVAILABLE_MEMORY
     ):
         return _ZMQ_LARGE_BUFFER_SIZE
-    # libzmq interprets -1 as the system default.
     return -1
 
 
