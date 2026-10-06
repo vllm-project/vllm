@@ -1217,8 +1217,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         reqs = scheduler_output.scheduled_cached_reqs
         table_updates = scheduler_output.block_table_updates or {}
         if table_updates:
-            # add_requests already wrote new requests' updated rows; a second
-            # staged write to the same row would race with it.
             new_req_ids = {req.req_id for req in scheduler_output.scheduled_new_reqs}
             for req_id, block_ids in table_updates.items():
                 if req_id in new_req_ids:
