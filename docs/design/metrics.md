@@ -272,89 +272,43 @@ record:
 ### KV Cache Residency Metrics
 
 Enable `--kv-cache-metrics` to sample GPU block lifetimes. Sampling
-(`--kv-cache-metrics-sample`) is per allocation. Observations are emitted when
-blocks are evicted from the prefix cache; still-resident blocks do not
-contribute yet. Recycling never-cached working blocks emits no observation.
-These histograms count block lifetimes, not requests, tokens, or bytes.
+(`--kv-cache-metrics-sample`) is per allocation. Observations are emitted at
+prefix-cache eviction. Never-cached working blocks are skipped automatically;
+releasing a reference only updates the idle clock.
 
-- `vllm:kv_block_lifetime_seconds`: allocation to prefix-cache eviction, including
-  time held by requests or transfers.
+- `vllm:kv_block_lifetime_seconds`: allocation to prefix-cache eviction,
+  including time held by requests or transfers.
 - `vllm:kv_block_idle_before_evict_seconds`: the final uninterrupted interval
-  with zero references, when the block was eligible for reuse. Any new request
-  reference or transfer pin ends that interval. Explicit invalidation of a
-  still-referenced block records zero idle time.
+  with zero references, when the block was eligible for reuse. A request
+  reference or transfer pin ends that interval. Eviction while still referenced
+  records zero idle time.
 - `vllm:kv_block_reuse_gap_seconds`: gaps between prefix reuses by requests,
-  excluding transfer-only pins. Only the last four reuses are retained, giving
-  at most three gaps per sampled lifetime.
+  excluding transfer-only pins. The last four reuses are retained, giving at
+  most three gaps per sampled lifetime.
 
-All three histograms carry a `kv_cache_group_id` label. Nonnegative values
-identify prefix-cache groups in the resolved KV cache configuration, allowing
-full-attention and sliding-window groups to be examined separately. `-1` means
-group metadata was absent from an older engine. Current engines only emit
-events with an actual cache group; never-cached allocations are skipped at
-collection time. Short-lived sliding-window blocks that were prefix-cached
-still count as real evictions in their group. CPU-offload residency is not
-included. These metrics measure individual block evictions, not the survival
-of a complete reusable request prefix.
+For example, a block allocated at 0s, last released at 99s, and evicted at 100s
+has a lifetime of 100s and an idle time of 1s.
 
-**Label cardinality:** with `G` configured KV cache groups, this label has at
-most `G + 1` values per existing `(model_name, engine)` label set: the group
-IDs and the legacy `-1` value. The Python exporter initializes an empty `-1`
-series for each histogram; its count stays zero with current engines. Groups
-are fixed by the resolved model/cache layout; their IDs
-do not grow with requests, allocations, or DCP ranks. Other layouts can have
-more groups, so check the resolved `kv_cache_config.kv_cache_groups` rather
-than assuming a universal count or target/draft ordering.
+These histograms count individual cached-block evictions. Still-resident
+blocks and CPU-offload residency are excluded. Short-lived SWA blocks that
+were actually prefix-cached remain valid observations; the histogram does not
+measure the survival of a complete reusable request prefix.
 
-For example, a layout with one target group and one uniform sliding-window
-draft group has `G = 2`. If the target is group `0` and the draft is group `1`,
-the possible label values are `0`, `1`, and `-1`. With unchanged buckets, this
-means up to three times the series for these three histograms. Other metric
-families are unaffected by this label.
-
-Bucket count adds a separate cost: with `B` finite buckets, each histogram
-uses `B + 3` series per label set (`B` finite buckets, `+Inf`, `_sum`, and
-`_count`), plus `_created` if the exporter emits it. The current defaults have
-26 finite buckets, so all three histograms together use up to 261 series per
-engine for `G = 2`, or 270 with `_created`.
-
-For example, plot median idle time separately for each cached group, scoped to
-one model/deployment. The `-1` filter excludes legacy events without group
-metadata; current engines already skip never-cached blocks:
-
-```promql
-histogram_quantile(0.5,
-  sum by (le, kv_cache_group_id) (
-    rate(vllm:kv_block_idle_before_evict_seconds_bucket{kv_cache_group_id!="-1"}[5m])
-  )
-)
-```
-
-The default finite buckets extend to 24 hours. Values above the final finite
-bucket still increment `+Inf`; `histogram_quantile` returns the last finite
-boundary when the requested quantile falls into that overflow bucket. Check the
-overflow fraction alongside tail quantiles:
+The default finite buckets extend to 24 hours. Values beyond the last finite
+bucket increment `+Inf`; `histogram_quantile` returns the last finite boundary
+when the requested quantile falls there. Scope queries to one model/deployment
+and check the overflow fraction alongside tail quantiles:
 
 ```promql
 1 -
-  sum by (kv_cache_group_id) (
-    rate(vllm:kv_block_lifetime_seconds_bucket{le="86400.0",kv_cache_group_id!="-1"}[5m])
-  )
-  /
-  sum by (kv_cache_group_id) (
-    rate(vllm:kv_block_lifetime_seconds_count{kv_cache_group_id!="-1"}[5m])
-  )
+  sum(rate(vllm:kv_block_lifetime_seconds_bucket{le="86400.0"}[5m]))
+  / sum(rate(vllm:kv_block_lifetime_seconds_count[5m]))
 ```
 
-Use the final boundary actually exposed by the exporter when using custom
-buckets. Adding buckets or labels requires care during rolling upgrades: avoid
-combining instances with different histogram schemas when calculating quantiles.
-
-The engine core ships eviction samples via `SchedulerStats`. Both Python and
-Rust frontends publish these histograms; `LLM.get_metrics()` exposes them too.
-The idle metric previously measured time since allocation or the last `touch`,
-which included transfer pins and time actively held by a request. Its corrected
-meaning is time continuously eligible for eviction.
+Use the actual final boundary when overriding buckets. Avoid combining
+instances with different bucket configurations during rolling upgrades.
+Both Python and Rust frontends publish these metrics; `LLM.get_metrics()`
+exposes them too.
 
 ### Metrics Publishing - Logging
 

@@ -265,7 +265,6 @@ def test_idle_starts_when_last_reference_is_released(cached_pool, release):
     (event,) = collector.drain_events()
     assert event.lifetime_seconds == 100.0
     assert event.idle_seconds == 1.0
-    assert event.kv_cache_group_id == 7
 
 
 @pytest.mark.parametrize("evict_while_pinned", [False, True])

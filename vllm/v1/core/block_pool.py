@@ -748,9 +748,7 @@ class BlockPool:
             return False
 
         if self.metrics_collector:
-            self.metrics_collector.on_block_evicted(
-                block, get_group_id(evicted_hashes[0])
-            )
+            self.metrics_collector.on_block_evicted(block)
         self._emit_block_removed_events(evicted_hashes)
         return True
 

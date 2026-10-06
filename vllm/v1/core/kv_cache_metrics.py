@@ -84,9 +84,7 @@ class KVCacheMetricsCollector:
         if metrics:
             metrics.idle_since_ns = time.monotonic_ns()
 
-    def on_block_evicted(
-        self, block: "KVCacheBlock", kv_cache_group_id: int | None = None
-    ) -> None:
+    def on_block_evicted(self, block: "KVCacheBlock") -> None:
         metrics = self.block_metrics.pop(block.block_id, None)
         if not metrics:
             return
@@ -100,7 +98,6 @@ class KVCacheMetricsCollector:
                 lifetime_seconds=lifetime,
                 idle_seconds=idle_time,
                 reuse_gaps_seconds=reuse_gaps,
-                kv_cache_group_id=kv_cache_group_id,
             )
         )
 

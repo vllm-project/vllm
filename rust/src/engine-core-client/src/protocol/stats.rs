@@ -52,9 +52,6 @@ pub struct KvCacheEvictionEvent {
     pub idle_seconds: f64,
     /// Time gaps between consecutive prefix reuses, excluding transfer pins.
     pub reuse_gaps_seconds: Vec<f64>,
-    /// Prefix-cache group; absent in events from older engines.
-    #[serde(default)]
-    pub kv_cache_group_id: Option<u32>,
 }
 
 /// Per-step iteration decoding stats from scheduler.

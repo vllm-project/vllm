@@ -973,7 +973,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         #
         # KV Cache residency metrics
         #
-        self.kv_cache_histograms: tuple[Histogram, Histogram, Histogram] | None = None
         if self.kv_cache_metrics_enabled:
             kv_cache_residency_buckets = histogram_buckets(
                 "kv_cache_residency", overrides=custom_buckets
@@ -987,7 +986,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     "Sampled metrics (controlled by --kv-cache-metrics-sample)."
                 ),
                 buckets=kv_cache_residency_buckets,
-                labelnames=labelnames + ["kv_cache_group_id"],
+                labelnames=labelnames,
+            )
+            self.histogram_kv_block_lifetime = create_metric_per_engine(
+                histogram_kv_block_lifetime, per_engine_labelvalues
             )
 
             histogram_kv_block_idle_before_evict = self._histogram_cls(
@@ -998,7 +1000,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     "Sampled metrics (controlled by --kv-cache-metrics-sample)."
                 ),
                 buckets=kv_cache_residency_buckets,
-                labelnames=labelnames + ["kv_cache_group_id"],
+                labelnames=labelnames,
+            )
+            self.histogram_kv_block_idle_before_evict = create_metric_per_engine(
+                histogram_kv_block_idle_before_evict, per_engine_labelvalues
             )
 
             histogram_kv_block_reuse_gap = self._histogram_cls(
@@ -1011,16 +1016,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     "--kv-cache-metrics-sample)."
                 ),
                 buckets=kv_cache_residency_buckets,
-                labelnames=labelnames + ["kv_cache_group_id"],
+                labelnames=labelnames,
             )
-            self.kv_cache_histograms = (
-                histogram_kv_block_lifetime,
-                histogram_kv_block_idle_before_evict,
-                histogram_kv_block_reuse_gap,
+            self.histogram_kv_block_reuse_gap = create_metric_per_engine(
+                histogram_kv_block_reuse_gap, per_engine_labelvalues
             )
-            for histogram in self.kv_cache_histograms:
-                for labelvalues in per_engine_labelvalues.values():
-                    histogram.labels(*labelvalues, "-1")
+        else:
+            self.histogram_kv_block_lifetime = {}
+            self.histogram_kv_block_idle_before_evict = {}
+            self.histogram_kv_block_reuse_gap = {}
 
         #
         # LoRA metrics
@@ -1140,19 +1144,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.kv_cache_metrics_enabled
                 and scheduler_stats.kv_cache_eviction_events
             ):
-                assert self.kv_cache_histograms is not None
+                lifetime_hist = self.histogram_kv_block_lifetime[engine_idx]
+                idle_hist = self.histogram_kv_block_idle_before_evict[engine_idx]
+                reuse_hist = self.histogram_kv_block_reuse_gap[engine_idx]
+
                 for event in scheduler_stats.kv_cache_eviction_events:
-                    group_id = (
-                        event.kv_cache_group_id
-                        if event.kv_cache_group_id is not None
-                        else -1
-                    )
-                    lifetime_hist, idle_hist, reuse_hist = (
-                        histogram.labels(
-                            *self.per_engine_labelvalues[engine_idx], str(group_id)
-                        )
-                        for histogram in self.kv_cache_histograms
-                    )
                     lifetime_hist.observe(event.lifetime_seconds)
                     idle_hist.observe(event.idle_seconds)
                     for gap in event.reuse_gaps_seconds:

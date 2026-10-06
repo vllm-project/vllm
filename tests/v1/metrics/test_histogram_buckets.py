@@ -325,63 +325,27 @@ def test_prometheus_logger_applies_overrides():
         unregister_vllm_metrics()
 
 
-def test_kv_residency_groups_and_long_lifetimes():
+def test_kv_residency_long_lifetimes():
     config = build_logger_config(ObservabilityConfig(kv_cache_metrics=True))
     try:
-        logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
-        for engine in (0, 1):
-            logger.record(
-                SchedulerStats(
-                    kv_cache_eviction_events=[
-                        KVCacheEvictionEvent(2.0, 1.0, (), None),
-                        KVCacheEvictionEvent(5400.0, 3600.0, (5.0,), 0),
-                        KVCacheEvictionEvent(20.0, 3.0, (), 1),
-                    ]
-                ),
-                None,
-                engine_idx=engine,
-            )
+        logger = PrometheusStatLogger(config, engine_indexes=[0])
+        logger.record(
+            SchedulerStats(
+                kv_cache_eviction_events=[KVCacheEvictionEvent(5400.0, 3600.0, (5.0,))]
+            ),
+            None,
+            engine_idx=0,
+        )
         samples = {
-            (
-                sample.name,
-                sample.labels["engine"],
-                sample.labels["kv_cache_group_id"],
-                sample.labels.get("le"),
-            ): sample.value
+            (sample.name, sample.labels.get("le")): sample.value
             for metric in prometheus_client.REGISTRY.collect()
             if metric.name.startswith("vllm:kv_block_")
             for sample in metric.samples
         }
-        for engine in ("0", "1"):
-            assert (
-                samples[("vllm:kv_block_lifetime_seconds_sum", engine, "-1", None)]
-                == 2.0
-            )
-            assert (
-                samples[("vllm:kv_block_lifetime_seconds_sum", engine, "0", None)]
-                == 5400.0
-            )
-            assert (
-                samples[
-                    ("vllm:kv_block_lifetime_seconds_bucket", engine, "0", "1800.0")
-                ]
-                == 0.0
-            )
-            assert (
-                samples[
-                    ("vllm:kv_block_lifetime_seconds_bucket", engine, "0", "7200.0")
-                ]
-                == 1.0
-            )
-            assert (
-                samples[
-                    ("vllm:kv_block_idle_before_evict_seconds_sum", engine, "1", None)
-                ]
-                == 3.0
-            )
-            assert (
-                samples[("vllm:kv_block_reuse_gap_seconds_count", engine, "0", None)]
-                == 1.0
-            )
+        assert samples[("vllm:kv_block_lifetime_seconds_sum", None)] == 5400.0
+        assert samples[("vllm:kv_block_lifetime_seconds_bucket", "1800.0")] == 0.0
+        assert samples[("vllm:kv_block_lifetime_seconds_bucket", "7200.0")] == 1.0
+        assert samples[("vllm:kv_block_idle_before_evict_seconds_sum", None)] == 3600.0
+        assert samples[("vllm:kv_block_reuse_gap_seconds_count", None)] == 1.0
     finally:
         unregister_vllm_metrics()

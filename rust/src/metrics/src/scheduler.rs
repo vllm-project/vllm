@@ -16,15 +16,6 @@ const KV_CACHE_RESIDENCY_BUCKETS: [f64; 26] = [
     120.0, 300.0, 600.0, 1200.0, 1800.0, 3600.0, 7200.0, 14400.0, 28800.0, 86400.0,
 ];
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct KvCacheLabels {
-    pub model_name: String,
-    pub engine: u32,
-    pub kv_cache_group_id: String,
-}
-
-pub type KvCacheHistogramFamily = Family<KvCacheLabels, Histogram, fn() -> Histogram>;
-
 fn kv_block_lifetime_histogram() -> Histogram {
     Histogram::new(KV_CACHE_RESIDENCY_BUCKETS.iter().copied())
 }
@@ -258,9 +249,9 @@ pub struct SchedulerMetrics {
     pub estimated_write_bytes_per_gpu: Family<EngineLabels, U64Counter>,
 
     // Sampled KV-cache residency histograms.
-    pub kv_block_lifetime_seconds: KvCacheHistogramFamily,
-    pub kv_block_idle_before_evict_seconds: KvCacheHistogramFamily,
-    pub kv_block_reuse_gap_seconds: KvCacheHistogramFamily,
+    pub kv_block_lifetime_seconds: HistogramFamily,
+    pub kv_block_idle_before_evict_seconds: HistogramFamily,
+    pub kv_block_reuse_gap_seconds: HistogramFamily,
 
     // Mooncake store connector telemetry. Mirrors `MooncakeStorePromMetrics`.
     pub mooncake_operation_time_seconds: MooncakeOperationHistogramFamily,

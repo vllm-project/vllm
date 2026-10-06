@@ -6,10 +6,10 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_metrics::{
-    EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric, KvCacheHistogramFamily,
-    KvCacheLabels, LoraAdapterNames, LoraInfoLabels, MooncakeOperationCounterFamily,
-    MooncakeOperationHistogramFamily, MooncakeOperationLabels, RequestMetrics,
-    SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge, WaitingReasonLabels,
+    EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric, LoraAdapterNames,
+    LoraInfoLabels, MooncakeOperationCounterFamily, MooncakeOperationHistogramFamily,
+    MooncakeOperationLabels, RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics,
+    U64Counter, U64Gauge, WaitingReasonLabels,
 };
 
 use crate::protocol::stats::{
@@ -73,9 +73,9 @@ struct SchedulerStatsHandles {
     estimated_write_bytes_per_gpu: U64Counter,
 
     // Sampled KV-cache residency histograms.
-    kv_block_lifetime_seconds: KvCacheHistogramFamily,
-    kv_block_idle_before_evict_seconds: KvCacheHistogramFamily,
-    kv_block_reuse_gap_seconds: KvCacheHistogramFamily,
+    kv_block_lifetime_seconds: HistogramMetric,
+    kv_block_idle_before_evict_seconds: HistogramMetric,
+    kv_block_reuse_gap_seconds: HistogramMetric,
 
     // Mooncake store connector telemetry, decoded from `kv_connector_stats`.
     // Kept as `Family` (not pre-resolved) because `operation`/`status` are
@@ -183,9 +183,11 @@ fn resolve_scheduler_stats_handles(
         estimated_write_bytes_per_gpu: metrics
             .estimated_write_bytes_per_gpu
             .get_or_create_owned(&labels),
-        kv_block_lifetime_seconds: metrics.kv_block_lifetime_seconds.clone(),
-        kv_block_idle_before_evict_seconds: metrics.kv_block_idle_before_evict_seconds.clone(),
-        kv_block_reuse_gap_seconds: metrics.kv_block_reuse_gap_seconds.clone(),
+        kv_block_lifetime_seconds: metrics.kv_block_lifetime_seconds.get_or_create_owned(&labels),
+        kv_block_idle_before_evict_seconds: metrics
+            .kv_block_idle_before_evict_seconds
+            .get_or_create_owned(&labels),
+        kv_block_reuse_gap_seconds: metrics.kv_block_reuse_gap_seconds.get_or_create_owned(&labels),
         mooncake_operation_time_seconds: metrics.mooncake_operation_time_seconds.clone(),
         mooncake_operation_total: metrics.mooncake_operation_total.clone(),
         mooncake_operation_keys_total: metrics.mooncake_operation_keys_total.clone(),
@@ -279,24 +281,10 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
     // Sampled KV-cache residency histograms.
     if !stats.kv_cache_eviction_events.is_empty() {
         for event in &stats.kv_cache_eviction_events {
-            let labels = KvCacheLabels {
-                model_name: handles.labels.model_name.clone(),
-                engine: handles.labels.engine,
-                kv_cache_group_id: event
-                    .kv_cache_group_id
-                    .map_or_else(|| "-1".to_string(), |id| id.to_string()),
-            };
-            handles
-                .kv_block_lifetime_seconds
-                .get_or_create_owned(&labels)
-                .observe(event.lifetime_seconds);
-            handles
-                .kv_block_idle_before_evict_seconds
-                .get_or_create_owned(&labels)
-                .observe(event.idle_seconds);
-            let reuse_hist = handles.kv_block_reuse_gap_seconds.get_or_create_owned(&labels);
+            handles.kv_block_lifetime_seconds.observe(event.lifetime_seconds);
+            handles.kv_block_idle_before_evict_seconds.observe(event.idle_seconds);
             for reuse_gap_seconds in &event.reuse_gaps_seconds {
-                reuse_hist.observe(*reuse_gap_seconds);
+                handles.kv_block_reuse_gap_seconds.observe(*reuse_gap_seconds);
             }
         }
     }
@@ -513,31 +501,17 @@ mod tests {
     }
 
     #[test]
-    fn kv_residency_groups_and_long_lifetimes() {
+    fn kv_residency_long_lifetimes() {
         use crate::protocol::stats::KvCacheEvictionEvent;
 
         let metrics = Metrics::new();
         let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
         let stats = SchedulerStats {
-            kv_cache_eviction_events: vec![
-                // Older engines omit group metadata.
-                serde_json::from_str::<KvCacheEvictionEvent>(
-                    r#"{"lifetime_seconds":2.0,"idle_seconds":1.0,"reuse_gaps_seconds":[]}"#,
-                )
-                .unwrap(),
-                KvCacheEvictionEvent {
-                    lifetime_seconds: 5400.0,
-                    idle_seconds: 3600.0,
-                    reuse_gaps_seconds: vec![5.0],
-                    kv_cache_group_id: Some(0),
-                },
-                KvCacheEvictionEvent {
-                    lifetime_seconds: 20.0,
-                    idle_seconds: 3.0,
-                    kv_cache_group_id: Some(1),
-                    ..Default::default()
-                },
-            ],
+            kv_cache_eviction_events: vec![KvCacheEvictionEvent {
+                lifetime_seconds: 5400.0,
+                idle_seconds: 3600.0,
+                reuse_gaps_seconds: vec![5.0],
+            }],
             ..Default::default()
         };
         super::record_scheduler_stats_with_handles(&handles, &stats);
@@ -553,32 +527,16 @@ mod tests {
             })
             .collect::<Vec<_>>();
         series.sort_unstable();
-        let series = series.join("\n");
         expect![[r#"
-            vllm:kv_block_idle_before_evict_seconds_count{model_name="model",engine="0",kv_cache_group_id="-1"} 1
-            vllm:kv_block_idle_before_evict_seconds_count{model_name="model",engine="0",kv_cache_group_id="0"} 1
-            vllm:kv_block_idle_before_evict_seconds_count{model_name="model",engine="0",kv_cache_group_id="1"} 1
-            vllm:kv_block_idle_before_evict_seconds_sum{model_name="model",engine="0",kv_cache_group_id="-1"} 1.0
-            vllm:kv_block_idle_before_evict_seconds_sum{model_name="model",engine="0",kv_cache_group_id="0"} 3600.0
-            vllm:kv_block_idle_before_evict_seconds_sum{model_name="model",engine="0",kv_cache_group_id="1"} 3.0
-            vllm:kv_block_lifetime_seconds_bucket{le="1800.0",model_name="model",engine="0",kv_cache_group_id="-1"} 1
-            vllm:kv_block_lifetime_seconds_bucket{le="1800.0",model_name="model",engine="0",kv_cache_group_id="0"} 0
-            vllm:kv_block_lifetime_seconds_bucket{le="1800.0",model_name="model",engine="0",kv_cache_group_id="1"} 1
-            vllm:kv_block_lifetime_seconds_bucket{le="7200.0",model_name="model",engine="0",kv_cache_group_id="-1"} 1
-            vllm:kv_block_lifetime_seconds_bucket{le="7200.0",model_name="model",engine="0",kv_cache_group_id="0"} 1
-            vllm:kv_block_lifetime_seconds_bucket{le="7200.0",model_name="model",engine="0",kv_cache_group_id="1"} 1
-            vllm:kv_block_lifetime_seconds_count{model_name="model",engine="0",kv_cache_group_id="-1"} 1
-            vllm:kv_block_lifetime_seconds_count{model_name="model",engine="0",kv_cache_group_id="0"} 1
-            vllm:kv_block_lifetime_seconds_count{model_name="model",engine="0",kv_cache_group_id="1"} 1
-            vllm:kv_block_lifetime_seconds_sum{model_name="model",engine="0",kv_cache_group_id="-1"} 2.0
-            vllm:kv_block_lifetime_seconds_sum{model_name="model",engine="0",kv_cache_group_id="0"} 5400.0
-            vllm:kv_block_lifetime_seconds_sum{model_name="model",engine="0",kv_cache_group_id="1"} 20.0
-            vllm:kv_block_reuse_gap_seconds_count{model_name="model",engine="0",kv_cache_group_id="-1"} 0
-            vllm:kv_block_reuse_gap_seconds_count{model_name="model",engine="0",kv_cache_group_id="0"} 1
-            vllm:kv_block_reuse_gap_seconds_count{model_name="model",engine="0",kv_cache_group_id="1"} 0
-            vllm:kv_block_reuse_gap_seconds_sum{model_name="model",engine="0",kv_cache_group_id="-1"} 0.0
-            vllm:kv_block_reuse_gap_seconds_sum{model_name="model",engine="0",kv_cache_group_id="0"} 5.0
-            vllm:kv_block_reuse_gap_seconds_sum{model_name="model",engine="0",kv_cache_group_id="1"} 0.0"#]].assert_eq(&series);
+            vllm:kv_block_idle_before_evict_seconds_count{model_name="model",engine="0"} 1
+            vllm:kv_block_idle_before_evict_seconds_sum{model_name="model",engine="0"} 3600.0
+            vllm:kv_block_lifetime_seconds_bucket{le="1800.0",model_name="model",engine="0"} 0
+            vllm:kv_block_lifetime_seconds_bucket{le="7200.0",model_name="model",engine="0"} 1
+            vllm:kv_block_lifetime_seconds_count{model_name="model",engine="0"} 1
+            vllm:kv_block_lifetime_seconds_sum{model_name="model",engine="0"} 5400.0
+            vllm:kv_block_reuse_gap_seconds_count{model_name="model",engine="0"} 1
+            vllm:kv_block_reuse_gap_seconds_sum{model_name="model",engine="0"} 5.0"#]]
+        .assert_eq(&series.join("\n"));
     }
 
     /// Records one MultiConnector payload into Mooncake and NIXL metrics.
