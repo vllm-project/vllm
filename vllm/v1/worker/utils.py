@@ -327,10 +327,33 @@ class AttentionGroup:
         self.get_metadata_builder().update_draft_decode_metadata(metadata)
 
 
+def _block_size_is_supported(
+    backends: list[type[AttentionBackend]], block_size: int
+) -> bool:
+    """Check if the block size is supported by all backends.
+
+    An exact ``int`` declaration must match exactly; a ``MultipleOf``
+    declaration accepts any multiple of its base.
+    """
+    for backend in backends:
+        is_supported = False
+        for supported_size in backend.get_supported_kernel_block_sizes():
+            if isinstance(supported_size, int):
+                if block_size == supported_size:
+                    is_supported = True
+            elif isinstance(supported_size, MultipleOf):
+                if block_size % supported_size.base == 0:
+                    is_supported = True
+            else:
+                raise ValueError(f"Unknown supported size: {supported_size}")
+        if not is_supported:
+            return False
+    return True
+
+
 def select_common_block_size(
     kv_manager_block_size: int,
     backends: list[type[AttentionBackend]],
-    kv_cache_spec: KVCacheSpec | None = None,
 ) -> int:
     """Select a block size that is supported by all backends and is a factor of
     kv_manager_block_size.
@@ -341,10 +364,6 @@ def select_common_block_size(
     Args:
         kv_manager_block_size: Block size of KV cache.
         backends: List of attention backend classes.
-        kv_cache_spec: The cache group's KV spec, forwarded to
-            ``get_supported_kernel_block_sizes`` so backends whose kernel block
-            depends on the cache layout (e.g. pooled indexer states) can decide
-            without reading global config.
 
     Returns:
         The selected block size.
@@ -353,36 +372,7 @@ def select_common_block_size(
         ValueError: If no valid block size found.
 
     """
-
-    def supported_sizes(
-        backend: type[AttentionBackend],
-    ) -> list[int | MultipleOf]:
-        # Forward the group spec when we have one; use the no-argument form
-        # otherwise so zero-argument backend stubs stay compatible.
-        if kv_cache_spec is None:
-            return backend.get_supported_kernel_block_sizes()
-        return backend.get_supported_kernel_block_sizes(kv_cache_spec)
-
-    def block_size_is_supported(
-        backends: list[type[AttentionBackend]], block_size: int
-    ) -> bool:
-        """Check if the block size is supported by all backends."""
-        for backend in backends:
-            is_supported = False
-            for supported_size in supported_sizes(backend):
-                if isinstance(supported_size, int):
-                    if block_size == supported_size:
-                        is_supported = True
-                elif isinstance(supported_size, MultipleOf):
-                    if block_size % supported_size.base == 0:
-                        is_supported = True
-                else:
-                    raise ValueError(f"Unknown supported size: {supported_size}")
-            if not is_supported:
-                return False
-        return True
-
-    if block_size_is_supported(backends, kv_manager_block_size):
+    if _block_size_is_supported(backends, kv_manager_block_size):
         return kv_manager_block_size
 
     # MultipleOf constraints also accept the manager size if they accept a divisor.
@@ -390,16 +380,18 @@ def select_common_block_size(
     candidates = {
         size
         for backend in backends
-        for size in supported_sizes(backend)
+        for size in backend.get_supported_kernel_block_sizes()
         if isinstance(size, int) and kv_manager_block_size % size == 0
     }
 
     for size in sorted(candidates, reverse=True):
-        if block_size_is_supported(backends, size):
+        if _block_size_is_supported(backends, size):
             return size
     raise ValueError(
         f"No common block size for {kv_manager_block_size} ("
-        + "; ".join(f"{b.get_name()}: {supported_sizes(b)}" for b in backends)
+        + "; ".join(
+            f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}" for b in backends
+        )
         + ")."
     )
 
@@ -505,9 +497,24 @@ def prepare_kernel_block_sizes(
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
             group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
-            selected_kernel_size = select_common_block_size(
-                kv_manager_block_size, group_backends, kv_cache_spec
+            storage_block_size = (
+                kv_cache_spec.storage_block_size
+                if isinstance(kv_cache_spec, MLAAttentionSpec)
+                else None
             )
+            if storage_block_size is not None and _block_size_is_supported(
+                group_backends, storage_block_size
+            ):
+                # Storage-block specs (e.g. the GLM-5.3-Flash kpool indexer
+                # cache) address the cache in pool pages, and every other
+                # consumer (cache views, metadata builders, hisparse) already
+                # uses storage_block_size as the kernel block. Fall back to the
+                # backend vote when the group's backends do not accept it.
+                selected_kernel_size = storage_block_size
+            else:
+                selected_kernel_size = select_common_block_size(
+                    kv_manager_block_size, group_backends
+                )
             kernel_block_sizes.append(selected_kernel_size)
         elif isinstance(kv_cache_spec, MambaSpec):
             # This is likely Mamba or other non-attention cache, no splitting.
