@@ -732,8 +732,9 @@ def test_weight_row_padding_does_not_change_results(dtype, has_zp, M):
         (8192, 4096 + 128),  # 4096 B row: on the cliff, padded
     ],
 )
-def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
-    """The stored weight row stride follows the padding rule."""
+@pytest.mark.parametrize("layout", ["ct", "gptq"])
+def test_process_weights_pads_cliff_rows(K, expected_weight_stride, layout, dist_init):
+    """Both checkpoint layouts preserve packed values and apply row padding."""
     from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
         MPLinearLayerConfig,
     )
@@ -743,10 +744,16 @@ def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
     N, G = 128, 128
 
     w_int4_kn = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
+    packed = _pack_int4_along_k_to_ckpt(w_int4_kn)
+    scales = 0.05 * torch.rand((N, K // G), device=device, dtype=torch.float16)
+    if layout == "gptq":
+        packed = packed.t().contiguous()
+        scales = scales.t().contiguous()
     layer = _build_dummy_layer(
-        _pack_int4_along_k_to_ckpt(w_int4_kn),
-        0.05 * torch.rand((N, K // G), device=device, dtype=torch.float16),
+        packed,
+        scales,
         zeros_ckpt=None,
+        layout=layout,
     )
     config = MPLinearLayerConfig(
         full_weight_shape=(K, N),
@@ -767,5 +774,11 @@ def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
     assert layer.weight_packed.stride(0) == expected_weight_stride
     # The int32 view the Triton path uses survives the padded stride.
     assert tuple(layer.weight_packed.view(torch.int32).shape) == (N, K // 8)
+    torch.testing.assert_close(
+        layer.weight_packed.view(torch.int32),
+        pack_int4_exllama_shuffle(w_int4_kn.t().contiguous()),
+        rtol=0,
+        atol=0,
+    )
     # Metadata is untouched by this change.
     assert layer.weight_scale.is_contiguous()
