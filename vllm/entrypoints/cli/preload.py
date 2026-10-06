@@ -170,6 +170,7 @@ class PreloadSubcommand(CLISubcommand):
         parallel_config = vllm_config.parallel_config
         _reject_unsupported_parallelism(parallel_config)
         tp_size = parallel_config.tensor_parallel_size
+        pp_size = parallel_config.pipeline_parallel_size
         dp_size = parallel_config.data_parallel_size
 
         placements = plan_local_ranks(parallel_config)
@@ -230,16 +231,21 @@ class PreloadSubcommand(CLISubcommand):
 
         ctx = multiprocessing.get_context("spawn")
         ready_queue: multiprocessing.Queue[tuple[str, int]] = ctx.Queue()
-        # Local index == device index; global rank enumerates DP then TP.
+        # Local index == device index; global rank enumerates DP, PP, then TP.
         expected_ready = {
-            (format_daemon_role(is_draft), dp_rank * tp_size + tp_rank)
-            for (is_draft, _, _), (_, dp_rank, tp_rank) in product(groups, placements)
+            (
+                format_daemon_role(is_draft),
+                dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank,
+            )
+            for (is_draft, _, _), (_, dp_rank, pp_rank, tp_rank) in product(
+                groups, placements
+            )
         }
         procs = [
             ctx.Process(
                 target=_run_daemon,
                 args=(
-                    tp_rank,
+                    dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank,
                     local_rank,
                     config,
                     init_method,
@@ -247,13 +253,17 @@ class PreloadSubcommand(CLISubcommand):
                     ready_queue,
                     is_draft,
                     dp_rank,
+                    pp_rank,
                 ),
-                name=f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
-                f"{dp_rank * tp_size + tp_rank}",
+                name=(
+                    f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
+                    f"{(dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank)}"
+                ),
             )
             for (is_draft, config, init_method), (
                 local_rank,
                 dp_rank,
+                pp_rank,
                 tp_rank,
             ) in product(groups, placements)
         ]

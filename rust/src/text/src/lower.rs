@@ -7,7 +7,7 @@ pub(crate) mod logprobs;
 pub(crate) mod sampling;
 pub(crate) mod token_ids;
 
-use logprobs::validate_logprobs;
+use logprobs::{lower_prompt_logprob_token_ids, validate_logprobs};
 use sampling::validate_resolved_sampling_params;
 use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 use vllm_engine_core_client::protocol::sampling::{
@@ -50,7 +50,11 @@ pub fn lower_text_request(
         // multimodal tensor payloads.
         mm_features: request.mm_features.take(),
         sampling_params: lower_sampling_params(
-            request.sampling_params.clone(),
+            SamplingParams {
+                // Move the candidate table rather than cloning it; only lowering reads it.
+                prompt_logprob_token_ids: request.sampling_params.prompt_logprob_token_ids.take(),
+                ..request.sampling_params.clone()
+            },
             sampling_hints,
             sampling_limits,
             prompt_len,
@@ -103,6 +107,8 @@ pub fn lower_sampling_params(
         thinking_token_budget,
         logprobs,
         prompt_logprobs,
+        prompt_logprob_token_ids,
+        prompt_logprob_start,
         min_p,
         frequency_penalty,
         presence_penalty,
@@ -123,6 +129,8 @@ pub fn lower_sampling_params(
         logprobs,
         prompt_logprobs,
         logprob_token_ids.as_deref(),
+        prompt_logprob_token_ids.as_deref(),
+        prompt_logprob_start,
         sampling_limits,
     )?;
     validate_repetition_detection(repetition_detection.as_ref())?;
@@ -176,6 +184,13 @@ pub fn lower_sampling_params(
         thinking_token_budget,
         logprobs,
         prompt_logprobs,
+        prompt_logprob_token_ids: lower_prompt_logprob_token_ids(
+            prompt_logprob_token_ids,
+            prompt_logprob_start,
+            prompt_len,
+            sampling_limits.model_vocab_size,
+        )?,
+        prompt_logprob_start,
         min_p,
         frequency_penalty,
         presence_penalty,
@@ -326,6 +341,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{
         MmFeatureSpec, MmModality, PlaceholderRange,
     };
+    use vllm_engine_core_client::protocol::tensor::WireNdArray;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -646,6 +662,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -701,6 +719,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -870,6 +890,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -935,6 +957,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -1008,6 +1032,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.1,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
@@ -1120,6 +1146,51 @@ mod tests {
                 vocab_size: 1000,
             }) if token_ids == vec![1000]
         ));
+    }
+
+    #[test]
+    fn lower_sampling_params_validates_prompt_logprob_token_ids() {
+        let lower = |ids: Option<Vec<Vec<i32>>>, start: Option<u32>| {
+            lower_sampling_params_with_limits(
+                SamplingParams {
+                    prompt_logprob_token_ids: ids,
+                    prompt_logprob_start: start,
+                    ..Default::default()
+                },
+                sample_sampling_limits(),
+            )
+        };
+        let rejects = |ids, start| match lower(ids, start) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("expected rejection"),
+        };
+
+        let params = lower(Some(vec![vec![1, 2], vec![3]]), None).unwrap();
+        assert_eq!(
+            params.prompt_logprob_token_ids,
+            Some(WireNdArray::from_i32(vec![2, 2], vec![1, 2, 3, -1]).unwrap())
+        );
+        assert_eq!(
+            lower(Some(vec![vec![5]]), Some(1)).unwrap().prompt_logprob_start,
+            Some(1)
+        );
+        expect_test::expect![[r#"
+            [
+                "prompt_logprob_token_ids must be a non-empty integer array of shape [num_rows, num_ids].",
+                "requested prompt_logprob_token_ids of 21, which is greater than max allowed: 20",
+                "prompt_logprob_token_ids contain out-of-vocab token ids (-1 pads a row). Vocabulary size: 1000",
+                "prompt_logprob_token_ids contain out-of-vocab token ids (-1 pads a row). Vocabulary size: 1000",
+                "prompt_logprob_token_ids has 1 rows, but the prompt has 2 scored rows (prompt_len - 1 - prompt_logprob_start).",
+                "prompt_logprob_start requires prompt_logprob_token_ids.",
+            ]
+        "#]].assert_debug_eq(&[
+            rejects(Some(vec![vec![]]), None),
+            rejects(Some(vec![(0..21).collect(), vec![0]]), None),
+            rejects(Some(vec![vec![1000], vec![0]]), None),
+            rejects(Some(vec![vec![-2], vec![0]]), None),
+            rejects(Some(vec![vec![1]]), None),
+            rejects(None, Some(0)),
+        ]);
     }
 
     #[test]
@@ -1259,6 +1330,8 @@ mod tests {
                 thinking_token_budget: None,
                 logprobs: None,
                 prompt_logprobs: None,
+                prompt_logprob_token_ids: None,
+                prompt_logprob_start: None,
                 min_p: 0.1,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,

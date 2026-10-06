@@ -79,7 +79,7 @@ on a validation environment that differs from the user's target deployment.
 
 | Runtime parameter | Why it may need deployment-time refinement | Main decision input | Current policy |
 | --- | --- | --- | --- |
-| `tensor-parallel-size` | The effective CPU/NUMA topology available to a container or pod can differ from the system used to validate the recipe. | Hardware topology | Use the largest power-of-two TP value that does not exceed the effective NUMA-node count. |
+| `tensor-parallel-size` | Available topology and model head counts constrain TP. | Hardware topology + model configuration | Use the largest head-compatible power-of-two TP within the effective NUMA-node count, for DP=1 and PP=1. |
 | `gpu-memory-utilization` | Available memory can differ by machine size, container limits, and other memory use. The vLLM option name is also used by the CPU backend. | Hardware memory + recipe baseline | Calculate a conservative fraction from the most constrained NUMA node. |
 | `max-num-seqs` | The useful scheduler concurrency depends on the number of requests expected to be active at the same time. | Workload concurrency | Set `max-num-seqs` to `--concurrency` when supplied. |
 | `max-num-batched-tokens` | Each scheduler iteration must share its token budget between active decodes and incoming prefills. | Input/output token shape, concurrency, and optional QPS/TPOT | Calculate decode budget + expected prefill demand, with vLLM scheduler constraints as floors. |
@@ -98,6 +98,35 @@ TP = largest power of two <= effective NUMA-node count
 For example, 2 effective NUMA nodes produce TP=2, while 6 nodes currently
 produce TP=4. This is a topology-based starting point and avoids automatically
 selecting unusual non-power-of-two TP sizes before they are validated.
+
+The policy then reads the model configuration through vLLM's config loader,
+without loading weights. It honors the model path/ID, revision, code revision,
+`trust-remote-code`, config format and JSON `hf-overrides`. No model-specific
+numeric head-count table is maintained.
+
+Each candidate must divide the attention-head count. KV heads must divide
+across TP ranks when KV heads >= TP; otherwise TP must be a multiple of the KV
+head count so the heads can be replicated. An incompatible candidate is halved
+until it passes every detected constraint. Nested text configuration, global KV
+heads, Whisper encoder/decoder heads and hybrid linear-attention heads are
+checked. Vision head divisibility is checked conservatively unless
+`mm-encoder-tp-mode: data` is configured.
+
+For Phi-4-reasoning on four NUMA nodes, the detected 40 attention heads and 10
+KV heads reduce the initial TP=4 suggestion to TP=2. The printed tuning notes
+show the detected counts and the reduction; `config.yml` receives TP=2.
+
+If configuration loading or head extraction fails, the tool keeps the recipe
+TP (vLLM's default TP=1 when absent) and prints why detection failed. That
+fallback does not certify an existing recipe TP as compatible. Plain conversion
+without hardware detection does not fetch the model configuration.
+
+Automatic TP selection currently requires recipe DP=1 and PP=1; otherwise the
+recipe's parallelism is retained. Automatic DP tuning remains disabled pending
+CPU DP binding and capacity validation. No unused NUMA nodes are converted into
+DP replicas. These checks establish head compatibility, not memory fit or
+complete model/backend support. Explicit `vllm serve` CLI overrides still take
+precedence over the generated YAML and are validated by vLLM at startup.
 
 ### `gpu-memory-utilization`
 

@@ -1535,53 +1535,6 @@ def preprocess_mamba(
         do_mamba_copy_block(copy_bufs)
 
 
-def postprocess_mamba_all(
-    scheduler_output: SchedulerOutput,
-    kv_cache_config: KVCacheConfig,
-    input_batch: InputBatch,
-    requests: dict[str, CachedRequestState],
-    mamba_state_idx: dict[str, int],
-    num_spec_tokens: int,
-    num_reqs: int,
-):
-    """All-mode postprocess (only meaningful with num_spec_tokens > 0):
-    record per-request the block index of the last token scheduled this
-    step, so the next step can anchor its in-place writes when accepted
-    drafts leave the sequence at a non-block-aligned position.
-    """
-    if num_spec_tokens <= 0:
-        return
-    mamba_groups = get_mamba_groups(kv_cache_config)
-    block_sizes = {mamba_spec.block_size for mamba_spec in mamba_groups}
-    assert len(block_sizes) == 1, "all mamba groups must share block_size"
-    block_size = next(iter(block_sizes))
-    full_decode_len = 1 + num_spec_tokens
-    scheduled = scheduler_output.num_scheduled_tokens
-    for req_id in input_batch.req_ids[:num_reqs]:
-        num_query = scheduled.get(req_id, 0)
-        if num_query == full_decode_len:
-            req = requests[req_id]
-            seq_len = req.num_computed_tokens + num_query
-            mamba_state_idx[req_id] = max(0, (seq_len - 1) // block_size)
-        else:
-            mamba_state_idx.pop(req_id, None)
-
-
-def preprocess_mamba_all_specdec(
-    scheduler_output: SchedulerOutput,
-    input_batch: InputBatch,
-    mamba_state_idx: dict[str, int],
-    num_reqs: int,
-    prev_last_scheduled_idx_buf: CpuGpuBuffer,
-) -> None:
-    cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
-    np_view = prev_last_scheduled_idx_buf.np
-    for i, req_id in enumerate(input_batch.req_ids[:num_reqs]):
-        np_view[i] = mamba_state_idx.get(req_id, -1)
-    np_view[num_reqs:].fill(-1)
-    prev_last_scheduled_idx_buf.copy_to_gpu()
-
-
 def postprocess_mamba_align_gpu(
     *,
     bufs: "MambaBuffers",

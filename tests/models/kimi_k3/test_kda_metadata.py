@@ -447,7 +447,7 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
             2,
             False,
             [False, False],
-            None,
+            1,
             id="no-scheduled-draft-tokens",
         ),
         pytest.param(

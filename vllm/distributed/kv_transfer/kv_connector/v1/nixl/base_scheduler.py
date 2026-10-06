@@ -13,6 +13,7 @@ from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
+    clip_ssm_state_blocks,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -153,11 +154,6 @@ class NixlBaseConnectorScheduler:
             else None
             for g in kv_cache_config.transfer_groups
         ]
-        # Only "all" mode keeps a state per block position; the other modes
-        # keep a single running state in the last non-speculative slot.
-        self._ssm_state_slots_are_positional = (
-            vllm_config.cache_config.mamba_cache_mode == "all"
-        )
 
         # Threshold to decide whether to compute kv cache locally
         # or pull from a remote node: minimum number of remote
@@ -257,11 +253,9 @@ class NixlBaseConnectorScheduler:
         out-of-window blocks only prior to the `request_finished_all_groups`
         hook.
 
-        SSM groups keep only their state-bearing slots: the trailing
-        speculative scratch slots always go, and in single-state cache modes
-        so does everything before the running state (null placeholders and
-        the previous step's superseded state). "all" mode keeps its remaining
-        slots, which the worker pairs position-wise.
+        SSM groups keep only their state-bearing slot: the trailing
+        speculative scratch slots and everything before the running state
+        (null placeholders and the previous step's superseded state) go.
 
         Use this at every block-id exchange point. Pass ``clip_ssm=False``
         for per-step partial lists (host-buffer save), where the SSM strip
@@ -288,11 +282,7 @@ class NixlBaseConnectorScheduler:
                 and blocks
                 and (n_spec_blocks := self._ssm_spec_blocks[i]) is not None
             ):
-                if n_spec := min(n_spec_blocks, len(blocks) - 1):
-                    blocks = blocks[:-n_spec]
-                if not self._ssm_state_slots_are_positional:
-                    # Never empty: downstream reads that as a full prefix hit.
-                    blocks = blocks[-1:]
+                blocks = clip_ssm_state_blocks(blocks, n_spec_blocks)
             clipped.append(blocks)
         return tuple(clipped)
 

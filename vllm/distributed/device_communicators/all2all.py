@@ -49,6 +49,20 @@ if has_flashinfer_nvlink_one_sided():
 logger = init_logger(__name__)
 
 
+class PassThroughAll2AllManager(All2AllManagerBase):
+    """Placeholder for ``all2all_backend="passthrough"``.
+
+    The MoE backend dispatches and combines itself, so there is no all2all to
+    manage.
+    """
+
+    def get_handle(self, kwargs):
+        raise RuntimeError(
+            "passthrough has no all2all handle: dispatch and combine run "
+            "inside the MoE backend."
+        )
+
+
 class AgRsAll2AllManager(All2AllManagerBase):
     """An implementation of all2all communication based on
     all-gather (dispatch) and reduce-scatter (combine).
@@ -156,6 +170,42 @@ class AgRsAll2AllManager(All2AllManagerBase):
         )
         hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
         return hidden_states
+
+    def allocate_combine_input(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor | None:
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(shape[0] // dist_group.world_size, dist_group)
+        if sum(sizes) != shape[0] or any(size != sizes[0] for size in sizes):
+            return None
+        device_communicator = dist_group.device_communicator
+        if device_communicator is None:
+            return None
+        return device_communicator.get_symmetric_memory_buffer(
+            "moe_ag_rs_combine", shape, dtype, device
+        )
+
+    def combine_into_output(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(
+            hidden_states.shape[0] // dist_group.world_size,
+            dist_group,
+        )
+        return dist_group.reduce_scatterv_into_output(
+            hidden_states,
+            output,
+            dim=0,
+            sizes=sizes,
+        )
 
     def destroy(self):
         pass
@@ -721,6 +771,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
 
     rank: int
     world_size: int
+    low_precision_combine: bool = False
 
     def __init__(self, cpu_group):
         assert has_flashinfer_nvlink_one_sided(), (
@@ -741,6 +792,27 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.top_k = 0
         self.num_experts = 0
         self._combine_supports_output = False
+        self.low_precision_combine = self._resolve_low_precision_combine()
+
+    def _resolve_low_precision_combine(self) -> bool:
+        """Whether to use the low-precision combine: requested via the env var
+        and supported by the installed FlashInfer.
+        """
+        if not envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE:
+            return False
+        try:
+            supported = supports_kw(
+                MoeAlltoAll.combine, "use_low_precision", allow_var_kwargs=False
+            )
+        except (TypeError, ValueError):
+            supported = False
+        if not supported:
+            logger.warning_once(
+                "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE is set, but the "
+                "installed FlashInfer MoeAlltoAll.combine() does not accept "
+                "`use_low_precision`. Falling back to a BF16 combine."
+            )
+        return supported
 
     def initialize(
         self,
@@ -758,7 +830,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             + top_k * 4  # int32 topks ids
             + top_k * 4  # float32 topk weights
         )
-        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
+        # Sized from the bf16 payload passed to combine(), which is what the
+        # kernel checks this region against. Low-precision transport quantizes
+        # on write, so it does not shrink the requirement.
+        combine_payload_size_per_token = hidden_size * 2
         needed_workspace_size = moe_a2a_get_workspace_size_per_rank(
             ep_size=self.world_size,
             max_num_tokens=max_num_tokens,
@@ -874,8 +949,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
                 payload=payload,
                 runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
                 output=output,
+                use_low_precision=self.low_precision_combine,
             )
         else:
+            # FlashInfer < 0.6.16 has neither `output` nor `use_low_precision`.
             combined_output = self.moe_alltoall.combine(
                 payload=payload,
                 runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
@@ -1065,7 +1142,9 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         if os.environ.get("EP_DISABLE_GIN", "0") != "0":
             return
 
-        gin_type = query_nccl_gin_type(group)
+        gin_type = query_nccl_gin_type(
+            group, railed=envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE
+        )
         if gin_type is None:
             raise RuntimeError(
                 "DeepEPv2 communicator properties query failed; "

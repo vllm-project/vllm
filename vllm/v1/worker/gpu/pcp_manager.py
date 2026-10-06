@@ -49,6 +49,7 @@ class PCPManager:
         pcp_world_size: int,
         pcp_rank: int,
         device: torch.device,
+        shard_decode_requests: bool,
         max_num_reqs: int | None = None,
         max_num_tokens: int | None = None,
         block_tables: BlockTables | None = None,
@@ -62,6 +63,7 @@ class PCPManager:
         self.dcp_world_size = dcp_world_size
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
+        self.shard_decode_requests = shard_decode_requests
 
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
@@ -131,8 +133,6 @@ class PCPManager:
 
         if not model_config.use_mla:
             raise NotImplementedError("MRV2 PCP currently supports MLA models only.")
-        if parallel_config.pipeline_parallel_size > 1:
-            raise NotImplementedError("MRV2 PCP does not support PP yet.")
         if model_config.is_encoder_decoder:
             raise NotImplementedError(
                 "MRV2 PCP does not support encoder-decoder models yet."
@@ -250,6 +250,7 @@ class PCPManager:
 
         Decodes, and prefills too short to fill all eight, are replicated instead.
         """
+        decode_ordinal = 0
         num_chunks = 2 * self.pcp_world_size
         replicated = self.replicated_requests(num_scheduled_tokens, is_prefilling)
         for global_batch_req_idx, num_tokens in enumerate(num_scheduled_tokens):
@@ -260,7 +261,16 @@ class PCPManager:
             if not replicated[global_batch_req_idx]:
                 chunk_size = (query_len + num_chunks - 1) // num_chunks
                 chunk_indices = (rank, num_chunks - 1 - rank)
-            else:  # decodes, and short prefills under DCP, are replicated
+            elif self.shard_decode_requests:
+                chunk_size = query_len
+                # KV and hidden states are gathered back to every PCP rank, so
+                # decode ownership does not need to persist across steps. Use a
+                # compact decode-only ordinal to keep each step exactly
+                # balanced even when prefills and zero-token rows are present.
+                owner_rank = decode_ordinal % self.pcp_world_size
+                decode_ordinal += 1
+                chunk_indices = (0,) if rank == owner_rank else ()
+            else:  # DCP requires decode queries on every participating rank.
                 chunk_size = query_len
                 chunk_indices = (0,)
 
@@ -348,8 +358,18 @@ class PCPManager:
                     segment.global_batch_slice.stop,
                     dtype=np.int64,
                 )
-                # Cache insertion pairs one slot entry with each rank's local decode.
-                if replicated[segment.global_batch_req_idx] and rank != 0:
+                # Replicated rows contain identical KV, so rank 0 is the
+                # canonical writer. A sharded decode has exactly one owner and
+                # therefore needs no de-duplication here.
+                is_sharded_decode = (
+                    not bool(is_prefilling[segment.global_batch_req_idx])
+                    and self.shard_decode_requests
+                )
+                if (
+                    replicated[segment.global_batch_req_idx]
+                    and not is_sharded_decode
+                    and rank != 0
+                ):
                     continue
                 gathered_kv_write_mask[padded_gathered_slice] = True
                 hidden_restore_idx[segment.global_batch_slice] = np.arange(
@@ -405,6 +425,11 @@ class PCPManager:
     def input_buffers(self) -> InputBuffers:
         assert self._input_buffers is not None
         return self._input_buffers
+
+    @property
+    def global_batch(self) -> InputBatch:
+        assert self._global_batch is not None
+        return self._global_batch
 
     def partition_batch(
         self, input_batch: InputBatch, batch_desc: "BatchExecutionDescriptor"
@@ -595,6 +620,7 @@ class PCPManager:
         )
         local_is_prefilling_np = np.zeros(num_reqs_after_padding, dtype=np.bool_)
         local_is_prefilling_np[:num_local_reqs] = real_local_is_prefilling_np
+        local_has_prefill = bool(local_is_prefilling_np.any())
         seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_after_padding, dtype=np.int32)
         seq_lens_cpu_upper_bound_np[:num_local_reqs] = (
             local_start_pos_np + local_num_scheduled_tokens
@@ -645,7 +671,10 @@ class PCPManager:
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
             is_prefilling_np=local_is_prefilling_np,
-            has_prefill=bool(local_is_prefilling_np.any()),
+            max_seq_len_np=None,
+            has_prefill=local_has_prefill,
+            decode_graph_eligible=not local_has_prefill,
+            prefill_runs_as_decode_np=None,
             input_ids=input_buffers.input_ids[:num_local_tokens_padded],
             positions=input_buffers.positions[:num_local_tokens_padded],
             is_padding=is_padding,
@@ -822,6 +851,7 @@ def maybe_build_pcp_manager(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
         device=device,
+        shard_decode_requests=parallel_config.pcp_shard_decode_requests,
         max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
         max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
         block_tables=block_tables,

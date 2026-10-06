@@ -156,6 +156,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 k: v.to_cpu_nonblocking() if v is not None else None
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items()
             }
+            token_id_logprobs = self.model_runner_output.prompt_token_id_logprobs_dict
+            self.prompt_token_id_logprobs_dict = {
+                k: v.to("cpu", non_blocking=True) for k, v in token_id_logprobs.items()
+            }
             if self.pending_aux_output is not None:
                 self.pending_aux_output.enqueue_cpu_copy(
                     num_sampled=self.num_sampled_tokens_np,
@@ -181,7 +185,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
         if self.sampling_mask_tensors is not None:
             self.model_runner_output.sampling_masks = (
-                self.sampling_mask_tensors.tolists()
+                self.sampling_mask_tensors.tolists(self.num_sampled_tokens_np)
             )
 
         if self.num_nans is not None:
@@ -194,6 +198,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
+        self.model_runner_output.prompt_token_id_logprobs_dict = (
+            self.prompt_token_id_logprobs_dict
+        )
         if self.pending_aux_output is not None:
             self.model_runner_output.aux_output_connector_output = (
                 self.pending_aux_output.process_output()

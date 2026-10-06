@@ -269,6 +269,34 @@ def test_worker_get_finished_counts_structured_release_fan_in():
     assert worker._completed_consumer_notifications == {"tx-fanin"}
 
 
+@pytest.mark.parametrize("exit_kind", ["killed", "eof"])
+def test_worker_reports_unexpected_heartbeat_exit(exit_kind):
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_heartbeat import (
+        MoRIIOHeartbeat,
+    )
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = True
+    worker.mode = MoRIIOMode.READ
+    worker.moriio_wrapper = SimpleNamespace(
+        pop_finished_req_ids=lambda: [], shutdown=lambda: None
+    )
+    worker._pending_unmapped_acks = []
+    worker._heartbeat = MoRIIOHeartbeat("tcp://127.0.0.1:1", {"type": "P"}, 0.02)
+    process = worker._heartbeat._process
+    try:
+        assert worker.get_finished() == (set(), set())
+        if exit_kind == "killed":
+            process.kill()
+        else:
+            process.stdin.close()
+        returncode = process.wait(timeout=5)
+        with pytest.raises(RuntimeError, match=f"heartbeat.*{returncode}"):
+            worker.get_finished()
+    finally:
+        worker.shutdown()
+
+
 def test_read_completion_sends_structured_release_with_consumer_tp_size():
     class DoneStatus:
         def Succeeded(self):

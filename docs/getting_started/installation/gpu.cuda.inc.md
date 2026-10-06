@@ -440,7 +440,8 @@ ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.
 
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
-`nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04` image.
+`nvidia/cuda:13.4.1-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or
+newer, the first NCCL release with Rubin (SM107) support.
 For `BUILD_BASE_IMAGE`, use:
 
 - `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
@@ -462,7 +463,8 @@ For `BUILD_BASE_IMAGE`, use:
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.4 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
-      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.4.1-base-ubuntu24.04" \
+      --build-arg NCCL_VERSION=2.32.3 \
       .
     ```
 
@@ -482,7 +484,8 @@ For `BUILD_BASE_IMAGE`, use:
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.4 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.4" \
-      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.4.1-base-ubuntu24.04" \
+      --build-arg NCCL_VERSION=2.32.3 \
       .
     ```
 
@@ -490,9 +493,6 @@ For `BUILD_BASE_IMAGE`, use:
     Keep the default explicit `torch_cuda_arch_list`. GPU-less BuildKit builds
     cannot inspect the host GPU. R100 and VR200 report compute capability 10.7,
     for which the generic `10.0` target provides family-compatible kernels.
-    The Ubuntu `devel` final image is also required: the corresponding `base`
-    image lacks the CUDA runtime/JIT package closure used by vLLM and the
-    prerelease PyTorch wheel.
 
     `RUN_WHEEL_CHECK=false` disables only the PyPI publication-size guard for
     this private staging image.

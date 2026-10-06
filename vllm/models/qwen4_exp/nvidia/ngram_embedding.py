@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
@@ -13,9 +14,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,

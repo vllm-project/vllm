@@ -101,6 +101,41 @@ llm.release_kv_cache_memory()
 llm.wake_up(tags=["kv_cache"])  # Reallocate KV cache and resume scheduling.
 ```
 
+#### Offloading CUDA graph memory
+
+By default, CUDA graph memory stays on the GPU while asleep. With
+`sleep_mode_offload_cudagraph=True` (off by default), CUDA graphs are captured
+into a cuMem pool that sleep backs up to CPU memory at both levels and any wake
+restores in place, so graphs are replayed, not recaptured. It needs the default
+`cumem` backend, CUDA and CUDA graphs; otherwise it has no effect.
+
+```python
+llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, sleep_mode_offload_cudagraph=True)
+```
+
+or `vllm serve <model> --enable-sleep-mode --sleep-mode-offload-cudagraph`.
+
+The cost is pinned host memory for the pool's backup, also at level 2, and one
+extra copy per captured custom allreduce (about 3% decode latency at batch
+size 1). `NCCL_GRAPH_REGISTER` defaults to `0`, since NCCL graph registration
+would pin the pool; an explicit value is kept with a warning. Graph executables
+outside PyTorch pools stay resident.
+
+#### Releasing NCCL communicator memory
+
+By default, NCCL communicators keep their GPU buffers while asleep. With
+`enable_nccl_comm_suspend=True` (off by default, experimental), sleep releases
+them with `ncclCommSuspend` and wake restores them with `ncclCommResume`. The
+communicators keep their topology, so they are not re-created. It needs NCCL
+2.29.7 or newer; with an older library, a warning is logged and the memory stays
+on the GPU.
+
+```python
+llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, enable_nccl_comm_suspend=True)
+```
+
+or `vllm serve <model> --enable-sleep-mode --enable-nccl-comm-suspend`.
+
 ### Online Serving
 
 To enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server.

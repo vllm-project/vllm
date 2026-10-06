@@ -452,6 +452,7 @@ class XPUPlatform(Platform):
         if new_block_size == cache_config.block_size:
             return
 
+        pre_block_size = cache_config.block_size
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = new_block_size
         original_mamba_page_size_padded = cache_config.mamba_page_size_padded
@@ -464,12 +465,19 @@ class XPUPlatform(Platform):
             )
         cache_config.block_size = new_block_size
         logger.info(
-            "[XPU]Setting attention block size to %d tokens to ensure multiple of %d, "
-            "set mamba_page_size_padded to %d bytes accordingly, before was %d bytes.",
+            "[XPU]Setting attention block size to %d tokens to ensure multiple of %d.",
             new_block_size,
             kernel_block_size,
-            cache_config.mamba_page_size_padded,
-            original_mamba_page_size_padded,
+        )
+        if original_mamba_page_size_padded is not None:
+            logger.info(
+                "[XPU]Scaled mamba_page_size_padded from %d to %d bytes accordingly.",
+                original_mamba_page_size_padded,
+                cache_config.mamba_page_size_padded,
+            )
+        # This rounding runs after super()'s check, so check its result too.
+        cls._check_aligned_block_size(
+            vllm_config, cls._find_non_ssm_backends(vllm_config), pre_block_size
         )
 
     @classmethod

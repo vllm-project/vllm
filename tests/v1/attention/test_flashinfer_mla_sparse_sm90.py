@@ -208,12 +208,14 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
     assert builder.state.plan_calls[0][1].tolist() == expected_lens
 
 
-def test_plan_uses_state_params(monkeypatch):
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_plan_uses_state_params(monkeypatch, kv_dtype):
     """The NoPE/rope dims and scale live on the builder state, not the layer.
 
     Without a device batch layout plan() takes exact per-row KV lengths and
     rebuilds the schedule on every call; the indptrs are always full-size
-    with zero-query padding rows past num_tokens.
+    with zero-query padding rows past num_tokens. An fp8 cache plans as
+    float8_e4m3fn.
     """
     wrapper = FakeWrapper()
     plan_info = [0] * sm90_mod._PLAN_INFO_LEN
@@ -226,7 +228,7 @@ def test_plan_uses_state_params(monkeypatch):
     state.device = torch.device("cpu")
     state.wrapper = wrapper
     state.num_heads = 4
-    state.kv_dtype = torch.bfloat16
+    state.kv_dtype = kv_dtype
     state.kv_lora_rank = HEAD
     state.qk_rope_head_dim = 64
     state.sm_scale = 576**-0.5
@@ -249,7 +251,7 @@ def test_plan_uses_state_params(monkeypatch):
     assert (heads, ckv, kpe, page, causal) == (4, HEAD, 64, 1, False)
     assert scale == 576**-0.5
     assert kwargs["q_data_type"] == torch.bfloat16
-    assert kwargs["kv_data_type"] == torch.bfloat16
+    assert kwargs["kv_data_type"] == kv_dtype
 
     # Replanning a smaller batch must clear the previous rows' lengths.
     state.plan(1, torch.tensor([TOPK], dtype=torch.int32), None, None)
@@ -340,6 +342,14 @@ _NO_KPOOL = object()
 
 
 @pytest.mark.parametrize(
+    "spec_dtype,expected_kv_dtype",
+    [
+        (torch.bfloat16, torch.bfloat16),
+        (torch.uint8, torch.float8_e4m3fn),
+    ],
+    ids=["bf16", "fp8"],
+)
+@pytest.mark.parametrize(
     "index_kpool,prefill_lens",
     [
         (4, [2048, 2049, 2050, 2051]),
@@ -348,9 +358,12 @@ _NO_KPOOL = object()
     ],
     ids=["kpool4", "kpool_none", "no_kpool_attr"],
 )
-def test_builder_kpool_from_model_config(monkeypatch, index_kpool, prefill_lens):
+def test_builder_kpool_from_model_config(
+    monkeypatch, index_kpool, prefill_lens, spec_dtype, expected_kv_dtype
+):
     """The builder took kpool from the KV cache spec, whose tokens_per_state is
-    1, so the tail pool was never read."""
+    1, so the tail pool was never read. The state plans the cache's logical
+    dtype: uint8 fp8 storage becomes float8_e4m3fn."""
     monkeypatch.setattr(
         sm90_mod.FlashInferMLASparseMetadataBuilder,
         "__init__",
@@ -358,14 +371,15 @@ def test_builder_kpool_from_model_config(monkeypatch, index_kpool, prefill_lens)
     )
 
     class _RecordingState:
-        def __init__(self, *_args, **kwargs):
+        def __init__(self, *args, **kwargs):
+            self.kv_dtype = args[2]
             self.index_topk = kwargs["index_topk"]
             self.index_kpool = kwargs["index_kpool"]
 
     monkeypatch.setattr(sm90_mod, "_SM90State", _RecordingState)
     impl, _ = make_impl(64)
     spec = MLAAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=576, dtype=spec_dtype
     )
     assert spec.tokens_per_state == 1
     hf_config = SimpleNamespace(index_topk=2048)
@@ -384,6 +398,7 @@ def test_builder_kpool_from_model_config(monkeypatch, index_kpool, prefill_lens)
     builder = FlashInferMLASparseSM90Builder(
         spec, ["attn"], vllm_config, torch.device("cpu")
     )
+    assert builder.state.kv_dtype == expected_kv_dtype
     # req0: prefill chunk ending at context 42295; req1: context <= topk.
     cam = SimpleNamespace(
         num_reqs=2,

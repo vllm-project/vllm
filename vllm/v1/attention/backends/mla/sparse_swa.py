@@ -124,6 +124,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             bounded_replay=self.bounded_replay,
             block_size=self.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             sliding_window=self.window_size,

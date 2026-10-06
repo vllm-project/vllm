@@ -170,7 +170,7 @@ def test_routed_experts_loads_per_expert_biases():
         ("w1", torch.tensor([1.0, 2.0, 3.0, 4.0])),
         ("w3", torch.tensor([5.0, 6.0, 7.0, 8.0])),
     ):
-        assert RoutedExperts.weight_loader(
+        assert RoutedExperts.weight_loader(  # type: ignore[call-overload]
             loader,
             w13_bias,
             loaded,
@@ -180,7 +180,7 @@ def test_routed_experts_loads_per_expert_biases():
             return_success=True,
         )
 
-    assert RoutedExperts.weight_loader(
+    assert RoutedExperts.weight_loader(  # type: ignore[call-overload]
         loader,
         w2_bias,
         torch.tensor([9.0, 10.0, 11.0, 12.0]),

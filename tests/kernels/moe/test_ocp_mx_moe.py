@@ -781,6 +781,7 @@ def test_trtllm_mxfp4_deferred_finalize(
                 global_num_experts=num_experts,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                routing_sink=None,
             ),
         )
         return
@@ -1724,7 +1725,7 @@ def test_rocm_mxfp4_moe_oracle(
     w13_conv, w2_conv, w13_scale_conv, w2_scale_conv, w13_bias_conv, w2_bias_conv = (
         convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=backend,
-            layer=layer,  # type: ignore[arg-type]
+            layer=layer,
             w13_weight=w13_quant,
             w2_weight=w2_quant,
             w13_weight_scale=w13_scale,
@@ -1780,6 +1781,7 @@ def test_rocm_mxfp4_moe_oracle(
                 global_num_experts=num_experts,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                routing_sink=None,
             )
         else:
             # Modular impl uses topk_weights and topk_ids

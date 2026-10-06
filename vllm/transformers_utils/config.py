@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial, wraps
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
@@ -15,7 +14,6 @@ import huggingface_hub
 import torch
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
-from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
@@ -69,12 +67,6 @@ _DENSE_MODULE_TYPES = {
     "pylate.models.Dense.Dense",
 }
 
-if Version(version("transformers")) < Version("5.0.0"):
-    raise ImportError(
-        "Support for Transformers v4 is deprecated and was removed in vLLM v0.24.0. "
-        "Please upgrade to Transformers v5: pip install --upgrade transformers"
-    )
-
 
 class LazyConfigDict(dict):
     def __getitem__(self, key):
@@ -107,9 +99,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
     granite4_vision="Granite4VisionConfig",
-    glm5_next="Glm5NextConfig",
-    glm5_next_text="Glm5NextTextConfig",
-    glm5_next_vision="Glm5NextVisionConfig",
     hyperclovax="HyperCLOVAXConfig",
     hy_v3="HYV3Config",
     hy_v4="HYV4Config",
@@ -145,8 +134,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
-    qwen4_exp="Qwen4ExpConfig",
-    qwen4_exp_text="Qwen4ExpTextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_text="Qwen3_5TextConfig",
     qwen3_5_moe="Qwen3_5MoeConfig",
@@ -159,6 +146,12 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
 )
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
+
+# Checkpoints whose config.json has no model_type, only remote code in auto_map
+_ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
+    "LongcatFlashForCausalLM": "longcat_flash",
+    "LongcatFlashNgramForCausalLM": "longcat_flash",
+}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
@@ -365,6 +358,8 @@ class HFConfigParser(ConfigParserBase):
                 if config_dict.get("speculators_config") is not None
                 else model_type
             )
+        if model_type is None and (architectures := config_dict.get("architectures")):
+            model_type = _ARCHITECTURE_TO_MODEL_TYPE.get(architectures[0])
         # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
         if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
             if isinstance(hf_overrides, dict) and "model_type" in hf_overrides:
@@ -387,6 +382,15 @@ class HFConfigParser(ConfigParserBase):
         if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
             _patch_hf_transformers_allowed_layer_types(extra_layer_types)
 
+        if model_type == "vlm":
+            # HyperCLOVAX remote code registers this alias in a bare
+            # `try/except` that fails silently since transformers 5.18
+            from transformers import CONFIG_MAPPING, Qwen2_5_VLVisionConfig
+
+            CONFIG_MAPPING.register(
+                "qwen2_5_vl_visual", Qwen2_5_VLVisionConfig, exist_ok=True
+            )
+
         rope_parameters = config_dict.get("rope_parameters") or {}
         if model_type == "gemma4_text" and "full_attention" in rope_parameters:
             from transformers import Gemma4TextConfig
@@ -400,6 +404,11 @@ class HFConfigParser(ConfigParserBase):
             }
             kwargs.setdefault("name_or_path", str(model))
             config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
+        elif model_type in _ARCHITECTURE_TO_MODEL_TYPE.values():
+            from transformers import CONFIG_MAPPING
+
+            kwargs.setdefault("name_or_path", str(model))
+            config = CONFIG_MAPPING[model_type].from_dict(config_dict, **kwargs)
         elif model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
@@ -674,15 +683,15 @@ def patch_rope_parameters(config: PreTrainedConfig) -> None:
         config.validate_rope()
 
 
-def _iter_rope_parameters(config: PreTrainedConfig) -> Iterator[dict[str, Any]]:
+def iter_rope_parameters(config: PreTrainedConfig) -> Iterator[dict[str, Any]]:
     """Yield a config's rope parameters, one dict per layer type if nested."""
     rope_parameters = getattr(config, "rope_parameters", None)
     if not isinstance(rope_parameters, dict):
         return
 
     if is_rope_parameters_nested(rope_parameters):
-        yield from (p for p in rope_parameters.values() if isinstance(p, dict))
-    else:
+        yield from (p for p in rope_parameters.values() if isinstance(p, dict) and p)
+    elif rope_parameters:
         yield rope_parameters
 
 
@@ -696,7 +705,7 @@ def _mrope_section(config: PreTrainedConfig) -> Sequence[int] | None:
 
     names = ("mrope_section", "xdrope_section")
 
-    for params in _iter_rope_parameters(config):
+    for params in iter_rope_parameters(config):
         for i, name in enumerate(names):
             section = params.get(name)
             if isinstance(section, (list, tuple)):

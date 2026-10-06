@@ -225,7 +225,7 @@ def online_renderer(model_config: MockModelConfig, request) -> OnlineRenderer:
     renderer.tokenizer = MagicMock()
 
     return OnlineRenderer(
-        model_config=model_config,  # type: ignore[arg-type]
+        model_config=model_config,
         renderer=renderer,
         request_logger=None,
         chat_template=None,

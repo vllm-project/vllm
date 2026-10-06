@@ -785,16 +785,30 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
-    def start_profile(self, profile_prefix: str | None = None) -> None:
-        """Start profiling with optional custom trace prefix.
+    def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start profiling with optional per-session overrides.
 
         Args:
             profile_prefix: Optional prefix for the trace file names. If provided,
                            trace files will be named as "<prefix>_dp<X>_pp<Y>_tp<Z>".
                            If not provided, default naming will be used.
+            delay_iterations: Optional number of worker iterations to skip before
+                profiling starts.
+            max_iterations: Optional maximum number of worker iterations to profile.
+                Zero means no limit.
 
         """
-        self.llm_engine.start_profile(profile_prefix)
+        self.llm_engine.start_profile(
+            profile_prefix,
+            delay_iterations=delay_iterations,
+            max_iterations=max_iterations,
+        )
 
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
@@ -839,7 +853,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         """
         self.llm_engine.release_kv_cache_memory()
 
-    def wake_up(self, tags: list[str] | None = None):
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         """Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
         method for more details.
 
@@ -851,8 +865,11 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                 (or None) before the engine is used again.
                 Use tags=["scheduling"] to resume from level 0 sleep.
 
+        Returns:
+            Whether the engine is fully awake.
+
         """
-        self.llm_engine.wake_up(tags)
+        return self.llm_engine.wake_up(tags)
 
     def get_metrics(self) -> list["Metric"]:
         """Return a snapshot of aggregated metrics from Prometheus.

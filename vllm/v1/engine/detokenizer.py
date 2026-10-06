@@ -3,9 +3,7 @@
 import sys
 from abc import ABC, abstractmethod
 
-import tokenizers
 import tokenizers.decoders
-from packaging import version
 from tokenizers import Tokenizer
 from transformers import TokenizersBackend
 
@@ -20,12 +18,13 @@ from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
-# Only tokenizers >= 0.22.0 supports DecodeStream with native prefill
-# (ids parameter) used for FastIncrementalDetokenizer.
-USE_FAST_DETOKENIZER = version.parse(tokenizers.__version__) >= version.parse("0.22.0")
-
 # Error string from https://github.com/huggingface/tokenizers/blob/909fdde2a4ffedd9295206f705eb612be2a91b12/tokenizers/src/tokenizer/mod.rs#L1042
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
+
+
+def uses_fast_detokenizer(tokenizer: TokenizerLike) -> bool:
+    """Whether the engine detokenizes with `FastIncrementalDetokenizer`."""
+    return isinstance(tokenizer, TokenizersBackend)
 
 
 class IncrementalDetokenizer:
@@ -58,7 +57,7 @@ class IncrementalDetokenizer:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
 
-        if USE_FAST_DETOKENIZER and isinstance(tokenizer, TokenizersBackend):
+        if uses_fast_detokenizer(tokenizer):
             # Fast tokenizer => use tokenizers library DecodeStream.
             return FastIncrementalDetokenizer(tokenizer, request)
 

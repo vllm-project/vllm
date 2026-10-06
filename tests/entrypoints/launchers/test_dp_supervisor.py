@@ -47,7 +47,6 @@ _SUPERVISOR_PORT = 19256
 _CHILD_PORT_BASE = 18000
 _N_CHILDREN = 2
 _PROBE_INTERVAL = 1.0
-_POLL_INTERVAL = 1.0
 
 
 # ---------------------------------------------------------------------------

@@ -54,10 +54,14 @@ def assert_scheduler_empty(scheduler: Scheduler):
     # Scheduler Metadata.
     assert len(scheduler.requests) == 0
     assert len(scheduler.waiting) == 0
+    assert len(scheduler.kv_holding_waiting) == 0
+    assert not scheduler.deferred_waiting
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
     assert len(scheduler._inflight_prefills) == 0
+    assert not scheduler._kv_fetch_stages
+    assert not any(scheduler._kv_fetch_counts.values())
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
@@ -472,7 +476,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
-    mamba_cache_mode: Literal["all", "align", "none"] = "none",
+    mamba_cache_mode: Literal["align", "none"] = "none",
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(

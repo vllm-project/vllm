@@ -84,6 +84,20 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.stop == []  # Empty list
         assert sampling_params.extra_args == {}  # Empty dict
 
+    def test_null_top_logprobs_is_same_as_omitted(self):
+        """`top_logprobs: null` must not drop the requested output logprobs."""
+        request = ResponsesRequest.model_validate(
+            {
+                "input": "test input",
+                "include": ["message.output_text.logprobs"],
+                "top_logprobs": None,
+            }
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.logprobs == 0
+
     def test_seed_bounds_validation(self):
         """Test that seed values outside torch.long bounds are rejected."""
         # Test seed below minimum

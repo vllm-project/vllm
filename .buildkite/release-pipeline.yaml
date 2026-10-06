@@ -339,7 +339,8 @@ steps:
               --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
               --build-arg RUN_WHEEL_CHECK=false \
               --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.4 \
-              --build-arg FINAL_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04 \
+              --build-arg FINAL_BASE_IMAGE=nvidia/cuda:13.4.1-base-ubuntu24.04 \
+              --build-arg NCCL_VERSION=2.32.3 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -369,7 +370,8 @@ steps:
               --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
               --build-arg RUN_WHEEL_CHECK=false \
               --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.4 \
-              --build-arg FINAL_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04 \
+              --build-arg FINAL_BASE_IMAGE=nvidia/cuda:13.4.1-base-ubuntu24.04 \
+              --build-arg NCCL_VERSION=2.32.3 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .

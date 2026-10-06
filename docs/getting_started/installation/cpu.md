@@ -241,6 +241,9 @@ export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/rel
 uv pip install "vllm[zen]" --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu --index-strategy first-index --torch-backend cpu
 ```
 
+!!! warning
+    `zentorch` is not supported with vLLM 0.27.0 and 0.27.1.
+
 vLLM auto-detects the platform and routes linear layers through ZenDNN-optimized kernels - no flag needed. To verify it is engaged, look for the platform-selection line in the server's startup logs:
 
 ```bash
@@ -312,8 +315,8 @@ vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel
 ### Which quantization configs does vLLM CPU support?
 
 - vLLM CPU supports quantizations:
-    - AWQ (x86, s390x)
-    - GPTQ (x86, s390x)
+    - AWQ (x86, s390x, Power)
+    - GPTQ (x86, s390x, Power)
     - compressed-tensor INT8 W8A8 (x86, s390x only)
 
 ### Why do I see `get_mempolicy: Operation not permitted` when running in Docker?
