@@ -424,7 +424,7 @@ Note: Default multimodal LoRAs are currently only available for `.generate` and 
 
 ## Sequence-Classification LoRA Adapters
 
-vLLM supports PEFT sequence-classification adapters that save a complete, single-layer linear classification head through `modules_to_save`. The saved module must be named `score` or `classifier`.
+vLLM supports PEFT sequence-classification adapters that save the complete classification head through `modules_to_save`. The saved module must be named `score` or `classifier`. It can be a single linear layer, or a head built from linear layers such as RoBERTa's `classifier.dense` and `classifier.out_proj`, where only the last layer may change the number of labels.
 
 See [classification_with_lora_offline.py](../../examples/pooling/classify/classification_with_lora_offline.py) for an offline classification example using a LoRA adapter.
 

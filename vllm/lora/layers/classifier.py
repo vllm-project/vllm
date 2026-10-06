@@ -6,12 +6,21 @@ import torch
 from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.platforms import current_platform
 
 from .replicated_linear import ReplicatedLinearWithLoRA
 
 
 class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
+    def __init__(
+        self, base_layer: ReplicatedLinear, variable_num_labels: bool = True
+    ) -> None:
+        super().__init__(base_layer)
+        # In a multi-layer head only the last linear produces the labels, so
+        # only it may change the number of labels per adapter.
+        self.variable_num_labels = variable_num_labels
+
     def create_lora_weights(
         self,
         max_loras: int,
@@ -21,7 +30,9 @@ class ClassificationHeadWithLoRA(ReplicatedLinearWithLoRA):
         # Preserve ordinary LoRA A/B support for classification heads.
         super().create_lora_weights(max_loras, lora_config, model_config)
 
-        self.max_lora_cls_labels = lora_config.max_lora_cls_labels or self.output_size
+        self.max_lora_cls_labels = (
+            lora_config.max_lora_cls_labels if self.variable_num_labels else None
+        ) or self.output_size
         self.padded_num_labels = max(self.output_size, self.max_lora_cls_labels)
         self.full_weight_stacked = torch.zeros(
             max_loras,
