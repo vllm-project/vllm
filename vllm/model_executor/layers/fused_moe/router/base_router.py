@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
@@ -180,6 +181,37 @@ class BaseRouter(FusedMoERouter):
         self.top_k = top_k
         self.global_num_experts = global_num_experts
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
+        # EMA state for VLLM_MOE_BALANCE_ROUTING_EMA; lazy-initialized on
+        # first forward pass once the device and ep_size are known.
+        self._ema_load: torch.Tensor | None = None
+        self._ema_prev_topk_ids: torch.Tensor | None = None
+        self._ema_expert_to_rank: torch.Tensor | None = None
+        # True once we have seen at least one CUDA-graph-capture pass.
+        # Used to detect the capture→eager transition and reset stale state.
+        self._ema_capturing_seen: bool = False
+        # EP topology for EMA; read from the current VllmConfig at init time
+        # so we use the layer's actual ep_size rather than the EP group size,
+        # which differs when TP is run without --enable-expert-parallel.
+        self._moe_use_ep: bool = False
+        self._moe_ep_size: int = 1
+        self._moe_placement: str = "linear"
+        try:
+            from vllm.config import get_current_vllm_config
+            _cfg = get_current_vllm_config()
+            _pc = _cfg.parallel_config
+            # FusedMoEParallelConfig.make() sets use_ep only when EP is
+            # active; we mirror that logic using the same source fields.
+            _tp = _pc.tensor_parallel_size
+            _dp = _pc.data_parallel_size
+            _ep = getattr(_pc, "enable_expert_parallel", False)
+            self._moe_use_ep = bool(_ep and _tp * _dp > 1)
+            if self._moe_use_ep:
+                self._moe_ep_size = _tp * _dp
+            self._moe_placement = getattr(
+                _pc, "expert_placement_strategy", "linear"
+            )
+        except Exception:
+            pass
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -287,10 +319,76 @@ class BaseRouter(FusedMoERouter):
         # Step 1: Validate EPLB state
         self._validate_eplb_state()
 
-        # Step 2: Compute routing (delegated to subclass)
+        # Step 2: Compute routing (delegated to subclass).
+        # If EMA load-aware routing is enabled, adjust logits before top-k
+        # to proactively steer tokens away from overloaded EP ranks.
+        if envs.VLLM_MOE_BALANCE_ROUTING_EMA and self._moe_use_ep:
+            _capturing = (
+                torch.compiler.is_compiling()
+                or torch.cuda.is_current_stream_capturing()
+            )
+            # Detect the first eager step after CUDA graph capture and reset
+            # stale EMA state.  Profile and warmup passes that precede capture
+            # use all-zero dummy inputs, routing all tokens to the same top-k
+            # experts and leaving a biased _ema_load.  _ema_prev_topk_ids
+            # stored during capture points into graph-pool memory that replay
+            # later overwrites, so it must also be cleared.
+            if self._ema_capturing_seen and not _capturing:
+                self._ema_load = None
+                self._ema_prev_topk_ids = None
+                self._ema_expert_to_rank = None
+                self._ema_capturing_seen = False
+            elif _capturing:
+                self._ema_capturing_seen = True
+
+            if not _capturing:
+                if self.eplb_state is not None:
+                    raise RuntimeError(
+                        "VLLM_MOE_BALANCE_ROUTING_EMA is not compatible with "
+                        "EPLB (--enable-eplb): the expert-to-rank mapping "
+                        "is invalidated by EPLB weight rearrangement. "
+                        "Disable one of them."
+                    )
+                from vllm.model_executor.layers.fused_moe.router \
+                        .balance_routing_ema import (
+                    adjust_logits_ema,
+                    build_expert_to_rank,
+                )
+                if self._ema_load is None:
+                    dev = router_logits.device
+                    self._ema_load = torch.zeros(
+                        self._moe_ep_size, dtype=torch.float32, device=dev
+                    )
+                    self._ema_expert_to_rank = build_expert_to_rank(
+                        num_experts=self.global_num_experts,
+                        ep_size=self._moe_ep_size,
+                        placement=self._moe_placement,
+                        device=dev,
+                    )
+                router_logits = adjust_logits_ema(
+                    router_logits=router_logits,
+                    ema_load=self._ema_load,
+                    prev_topk_ids=self._ema_prev_topk_ids,
+                    expert_to_rank=self._ema_expert_to_rank,
+                    num_experts=self.global_num_experts,
+                    alpha=envs.VLLM_MOE_BALANCE_ROUTING_EMA_ALPHA,
+                    lambda_=envs.VLLM_MOE_BALANCE_ROUTING_EMA_LAMBDA,
+                )
+
         topk_weights, topk_ids = self._compute_routing(
             hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
         )
+
+        # Store logical topk_ids for the next step's EMA update.
+        # Skipped during capture: topk_ids would point into graph-pool memory
+        # that replay overwrites, corrupting the next eager step's update.
+        if (
+            envs.VLLM_MOE_BALANCE_ROUTING_EMA
+            and self._moe_use_ep
+            and not torch.compiler.is_compiling()
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            self._ema_prev_topk_ids = topk_ids.detach()
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
