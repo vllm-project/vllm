@@ -2311,8 +2311,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     llm_pos_ids_list.append(eos_pos)
                     st = offset + video_len + 1
                 else:
-                    audio_bos_pos = np.broadcast_to(np.array([st_idx - 1]), (3, 1))
+                    audio_bos_pos = np.broadcast_to(np.array([st_idx]), (3, 1))
                     llm_pos_ids_list.append(audio_bos_pos)
+                    st_idx += 1
 
                     pos_ids, _ = self._compute_interleaved_positions(st_idx, data)
                     llm_pos_ids_list.append(pos_ids)
@@ -2320,7 +2321,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
                     eos_pos = np.broadcast_to(np.array([st_idx]), (3, 1))
                     llm_pos_ids_list.append(eos_pos)
-                    llm_pos_ids_list.append(eos_pos)
+                    llm_pos_ids_list.append(eos_pos + 1)
 
                     video_len = grid_t * grid_h * grid_w
                     audio_len = self._compute_audio_token_count(
