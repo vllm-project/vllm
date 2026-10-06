@@ -294,11 +294,11 @@ BAKE_FILES=(-f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" -f "${ZSTD_HCL_PATH}
 BAKE_ARGS=()
 
 # VLLM_CI_COLD_BUILD=1 forces a from-scratch build for measurement runs:
-# no layer cache, no sccache. VLLM_USE_PRECOMPILED already defaults to "0"
-# (falsy per vllm/envs.py), so precompiled-wheel reuse stays off.
+# no layer cache, no sccache, no ccache. VLLM_USE_PRECOMPILED already defaults
+# to "0" (falsy per vllm/envs.py), so precompiled-wheel reuse stays off.
 if [[ "${VLLM_CI_COLD_BUILD:-0}" == "1" ]]; then
-    echo "--- :cold_face: VLLM_CI_COLD_BUILD=1: disabling layer cache and sccache"
-    BAKE_ARGS+=(--no-cache)
+    echo "--- :cold_face: VLLM_CI_COLD_BUILD=1: disabling layer cache, sccache, and ccache"
+    BAKE_ARGS+=(--no-cache --set "${TARGET}.args.CCACHE_DISABLE=1")
     export USE_SCCACHE=0
 fi
 
