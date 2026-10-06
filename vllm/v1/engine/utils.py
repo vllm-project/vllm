@@ -1152,13 +1152,8 @@ def launch_core_engines(
     else:
         coordinator = None
 
-    # For coordinated online DP, bind-and-hold a coordination TCPStore so
-    # that engines pick DP master ports at bind time instead of using the
-    # pre-allocated _data_parallel_master_port_list, whose ports can be
-    # taken by other processes before they are bound. Only created when
-    # engine rank 0 is local, i.e. this process runs on the DP master node.
-    # This frame keeps the store alive until engines are ready (rendezvous
-    # done). See ParallelConfig._pick_stateless_dp_port().
+    # Hold a coordination TCPStore (alive for this frame) so engines pick DP
+    # master ports at bind time; pre-allocated ports can be taken before use.
     coord_store = None
     if (
         dp_size > 1
@@ -1170,11 +1165,7 @@ def launch_core_engines(
         from vllm.distributed.utils import create_tcp_store
 
         coord_store = create_tcp_store(
-            host,
-            0,
-            is_master=True,
-            world_size=-1,
-            wait_for_workers=False,
+            host, 0, is_master=True, world_size=-1, wait_for_workers=False
         )
         parallel_config._coord_store_port = coord_store.port
 
