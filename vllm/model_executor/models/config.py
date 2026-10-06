@@ -46,14 +46,22 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         from vllm.platforms import current_platform
 
         cache_config = vllm_config.cache_config
-        if cache_config.cache_dtype == "auto":
-            if current_platform.is_xpu():
-                cache_config.cache_dtype = "bfloat16"
-            elif current_platform.is_cuda_alike():
-                capability = current_platform.get_device_capability()
-                cache_config.cache_dtype = (
-                    "fp8_e4m3" if capability and capability.major >= 10 else "bfloat16"
-                )
+        if (
+            cache_config.cache_dtype == "auto"
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            cache_config.cache_dtype = "fp8_e4m3"
+            logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM100")
+            # MTP shares the target's KV cache layout; a separate draft model
+            # must not inherit a default it was never validated with.
+            spec_config = vllm_config.speculative_config
+            if (
+                spec_config is not None
+                and spec_config.method != "mtp"
+                and spec_config.kv_cache_dtype is None
+            ):
+                spec_config.kv_cache_dtype = "auto"
 
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
