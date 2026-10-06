@@ -9,6 +9,7 @@ import tempfile
 import threading
 from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pydantic
@@ -31,6 +32,7 @@ from vllm.entrypoints.launchers.run_batch import (
     upload_data,
     url_matches,
     validate_batch,
+    validate_run_batch_args,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
@@ -1286,6 +1288,24 @@ async def test_open_batch_input_downloads_a_url(tmp_path, monkeypatch):
     assert url == "https://example.com/batch.jsonl"
     assert save_path.is_relative_to(tmp_path)
     assert not save_path.exists(), "downloaded copy must be removed"
+
+
+def test_unwritable_output_file_is_rejected_before_engine_start(tmp_path):
+    """A bad output path fails argument validation, not after the model loads."""
+
+    def args(output_file):
+        return SimpleNamespace(
+            max_inflight=None,
+            input_file=str(tmp_path / "input.jsonl"),
+            output_file=output_file,
+            structured_outputs_config=SimpleNamespace(reasoning_parser=None),
+        )
+
+    with pytest.raises(ValueError, match="not writable"):
+        validate_run_batch_args(args(str(tmp_path / "missing" / "out.jsonl")))
+
+    validate_run_batch_args(args(str(tmp_path / "out.jsonl")))
+    validate_run_batch_args(args("https://example.com/out.jsonl"))
 
 
 def _chat_requests(n: int) -> list[dict]:

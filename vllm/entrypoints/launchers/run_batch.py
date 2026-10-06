@@ -257,8 +257,8 @@ class BatchFrontendArgs(BaseFrontendArgs):
     memory and URL input is downloaded to the system temporary directory."""
     max_inflight: int | None = None
     """Maximum number of requests queued at the engine at once, which bounds
-    frontend memory. Defaults to twice the scheduler's max_num_seqs, at least
-    1024."""
+    frontend memory. Defaults to twice max_num_seqs across all data-parallel
+    engines, at least 1024."""
     enable_metrics: bool = False
     """Enable Prometheus metrics"""
     host: str | None = None
@@ -864,6 +864,13 @@ def validate_run_batch_args(args):
             "truncated before it has been read."
         )
 
+    output_file = args.output_file
+    if not is_url(output_file):
+        if not os.path.exists(output_file):
+            output_file = os.path.dirname(os.path.abspath(output_file))
+        if not os.access(output_file, os.W_OK):
+            raise ValueError(f"--output-file {args.output_file} is not writable.")
+
     valid_reasoning_parsers = ReasoningParserManager.list_registered()
     if (
         reasoning_parser := args.structured_outputs_config.reasoning_parser
@@ -975,9 +982,15 @@ async def run_batch(
         engine_client=engine_client,
         args=args,
     )
+    config = engine_client.vllm_config
     max_inflight = args.max_inflight or max(
-        1024, 2 * engine_client.vllm_config.scheduler_config.max_num_seqs
+        1024,
+        2
+        * config.scheduler_config.max_num_seqs
+        * config.parallel_config.data_parallel_size,
     )
+    # The final drain reacquires every slot, so hold no more than the batch needs.
+    max_inflight = min(max_inflight, max(num_requests, 1))
     tracker = BatchProgressTracker()
 
     async with batch_output_writer(
