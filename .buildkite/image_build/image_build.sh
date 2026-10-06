@@ -361,8 +361,26 @@ BUILD_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "${BUILD_TMP_DIR}"' EXIT
 BUILD_METADATA_FILE="${BUILD_TMP_DIR}/build-metadata.json"
 BUILD_STATUS=0
+
+# Log host memory usage every 5s during the bake (goes to the job log).
+# Killed explicitly below; a trap would clobber the BUILD_TMP_DIR EXIT trap.
+(
+  while true; do
+    awk '
+      /^MemTotal:/ { total = $2 }
+      /^MemAvailable:/ {
+        printf "Host memory used: %.2f GiB\n", (total - $2) / 1048576
+      }
+    ' /proc/meminfo
+    sleep 5
+  done
+) >&2 &
+memory_sampler_pid=$!
+
 docker --debug buildx bake "${BAKE_FILES[@]}" \
     --progress plain --metadata-file "${BUILD_METADATA_FILE}" "${TARGET}" || BUILD_STATUS=$?
+
+kill "$memory_sampler_pid" 2>/dev/null || true
 
 record_buildkit_trace "${BUILD_METADATA_FILE}" || true
 
