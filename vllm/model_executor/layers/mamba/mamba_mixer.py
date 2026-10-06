@@ -277,6 +277,8 @@ class MambaMixer(MambaBase, PluggableLayer):
             )
             ssm_state = self.kv_cache[1]
             has_initial_states_p = attn_metadata.has_initial_states_p
+            cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
+            last_chunk_indices_p = attn_metadata.last_chunk_indices_p
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
@@ -344,6 +346,8 @@ class MambaMixer(MambaBase, PluggableLayer):
                 cache_indices=state_indices_tensor_p,
                 has_initial_state=has_initial_states_p,
                 query_start_loc=query_start_loc_p,
+                cu_chunk_seqlen=cu_chunk_seqlen_p,
+                last_chunk_indices=last_chunk_indices_p,
             )
             ssm_outputs.append(scan_out_p)
 

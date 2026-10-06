@@ -714,6 +714,12 @@ def selective_scan_fn(
     cache_indices=None,
     has_initial_state=None,
     null_block_id=NULL_BLOCK_ID,
+    block_size=1024,
+    block_idx_first_scheduled_token=None,
+    block_idx_last_scheduled_token=None,
+    initial_state_idx=None,
+    cu_chunk_seqlen=None,
+    last_chunk_indices=None,
 ) -> torch.Tensor:
     """u: (dim, total_length) for varlen or (batch, dim, seqlen)
         applies changes in place.
@@ -736,6 +742,9 @@ def selective_scan_fn(
     cache_indices: (batch) int32
         A tensor with each cell is a correspondent
         input and output ssm_state indices
+      - Without APC: (batch,) - single state index per batch item
+      - With APC: (batch, max_positions) - cache block indices for read/write
+        Each non-zero value indicates a cache block to load from and/or write to.
     has_initial_state: (batch) bool
         A tensor populated with ones and zeros,
         indicate if the ssm_state at the corresponding index should be
@@ -746,6 +755,17 @@ def selective_scan_fn(
         that will not be processed,
         for example: cache_indices = [null_block_id, 1 ,20 ,null_block_id]
         in this case, the kernel will not process entries at indices 0 and 3
+    block_size: int
+        The block size to align the cached states to
+    block_idx_first_scheduled_token: (batch,), dtype int32
+        The pointer into cache_indices, where the first
+        cache block to be filled is located.
+    block_idx_last_scheduled_token: (batch,), dtype int32
+        The pointer into cache_indices, where the last cache block
+        to be filled is located.
+    initial_state_idx: (batch,), dtype int32
+        The pointer into cache_indices, where the cache block
+        containing the initial state is located.
 
     Returns
     -------
@@ -790,6 +810,12 @@ def selective_scan_fn(
             has_initial_state,
             ssm_states,
             null_block_id,
+            block_size,
+            block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token,
+            initial_state_idx,
+            cu_chunk_seqlen,
+            last_chunk_indices,
         )
     else:
         ops.selective_scan_fwd(
@@ -807,6 +833,12 @@ def selective_scan_fn(
             has_initial_state,
             ssm_states,
             null_block_id,
+            block_size,
+            block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token,
+            initial_state_idx,
+            cu_chunk_seqlen,
+            last_chunk_indices,
         )
 
     if z is None:

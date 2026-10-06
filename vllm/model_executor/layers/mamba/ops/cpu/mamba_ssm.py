@@ -19,6 +19,7 @@ def _mamba_chunk_scan_combined_fwd_cpu(
     z=None,
     dt_bias=None,
     initial_states=None,
+    return_intermediate_states=False,
     seq_idx=None,
     cu_seqlens=None,
     cu_chunk_seqlens=None,
