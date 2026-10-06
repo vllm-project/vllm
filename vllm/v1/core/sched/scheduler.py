@@ -2485,30 +2485,34 @@ class Scheduler(SchedulerInterface):
         if not cached_encoder_input_ids:
             return
 
-        # Defer the free by the drafter's look-ahead so an entry stays
-        # referenced until the drafter's read-ahead has also passed it,
-        # mirroring the shift the encoder scheduling path applies.
-        spec_lookahead = self.num_prefill_lookahead
-
         # Here, we use list(set) to avoid modifying the set while iterating
         # over it.
         for input_id in list(cached_encoder_input_ids):
-            mm_feature = request.mm_features[input_id]
-            start_pos = mm_feature.mm_position.offset
-            num_tokens = mm_feature.mm_position.length
             if self.is_encoder_decoder and request.num_computed_tokens > 0:
                 # With Whisper, as soon as we've generated a single token,
                 # we know we're done with the encoder input. Cross Attention
                 # KVs have been calculated and cached already.
                 self._free_encoder_input(request, input_id)
-            elif (
-                start_pos + num_tokens + spec_lookahead
-                <= request.num_computed_tokens - request.num_output_placeholders
+            elif self._encoder_input_consumed(
+                request, input_id, request.num_computed_tokens
             ):
                 # Processed, stored in the decoder KV cache, and far enough past
                 # the placeholder range (plus the drafter's look-ahead) that no
                 # rejection or drafter gather can reference it.
                 self._free_encoder_input(request, input_id)
+
+    def _encoder_input_consumed(
+        self,
+        request: Request,
+        input_id: int,
+        num_computed_tokens: int,
+    ) -> bool:
+        """Whether an input is past the confirmed frontier plus look-ahead."""
+        position = request.mm_features[input_id].mm_position
+        return (
+            position.offset + position.length + self.num_prefill_lookahead
+            <= num_computed_tokens - request.num_output_placeholders
+        )
 
     def _free_encoder_input(self, request: Request, input_id: int) -> None:
         self.encoder_cache_manager.free_encoder_input(request, input_id)
@@ -2520,15 +2524,16 @@ class Scheduler(SchedulerInterface):
     ) -> bool:
         """Drop this request's references to inputs the forward pass consumed.
 
-        Unlike `_free_encoder_inputs` this defers nothing: it runs only where
-        an allocation has already stalled, so the lookahead deferral would be
-        the stall. Returns whether anything was released.
+        Runs mid-scheduling, where this request's own references pin the cache
+        slots a later item needs, so the after-step free cannot unblock the
+        allocation. The retention margin matches `_free_encoder_inputs`:
+        releasing at the frontier would let the drafter's look-ahead or a spec
+        rejection read an evicted entry. Returns whether anything was released.
         """
         released = False
         cached_input_ids = self.encoder_cache_manager.get_cached_input_ids(request)
         for input_id in list(cached_input_ids):
-            position = request.mm_features[input_id].mm_position
-            if position.offset + position.length <= num_computed_tokens:
+            if self._encoder_input_consumed(request, input_id, num_computed_tokens):
                 self._free_encoder_input(request, input_id)
                 released = True
         return released

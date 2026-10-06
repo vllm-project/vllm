@@ -6486,6 +6486,43 @@ def test_waiting_encoder_stall_kv_holder_keeps_drain_priority():
     assert stalled in scheduler.kv_holding_waiting
 
 
+def test_release_consumed_encoder_inputs_defers_for_eagle_lookahead():
+    """The mid-scheduling release must keep the drafter's +1 look-ahead input.
+
+    `_free_encoder_inputs` retains an input one position past its range, so the
+    allocation-stall release must use the same margin or the drafter's
+    embedding gather can read an evicted entry.
+    """
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    scheduler.num_prefill_lookahead = 1
+    request = create_requests(
+        num_requests=1,
+        num_tokens=250,
+        mm_positions=[[PlaceholderRange(offset=50, length=100)]],
+    )[0]
+    scheduler.encoder_cache_manager.allocate(request, 0)
+
+    released = scheduler._release_consumed_encoder_inputs(request, 150)
+
+    assert released is False
+
+
+def test_release_consumed_encoder_inputs_respects_unconfirmed_placeholders():
+    """A spec rejection can rewind into the range: retain until confirmed."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    request = create_requests(
+        num_requests=1,
+        num_tokens=250,
+        mm_positions=[[PlaceholderRange(offset=50, length=100)]],
+    )[0]
+    scheduler.encoder_cache_manager.allocate(request, 0)
+    request.num_output_placeholders = 4
+
+    released = scheduler._release_consumed_encoder_inputs(request, 152)
+
+    assert released is False
+
+
 def test_encoder_cache_retained_across_preemption_and_resume():
     """Regression guard for issue #38551 (preemption path).
 
