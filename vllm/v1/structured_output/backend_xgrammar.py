@@ -10,7 +10,7 @@ import torch
 import vllm.envs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, check_json_nesting
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
@@ -38,6 +38,10 @@ class XgrammarBackend(StructuredOutputBackend):
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
         )
+        model_config = self.vllm_config.model_config
+        is_plamo3 = (
+            model_config is not None and model_config.hf_config.model_type == "plamo3"
+        )
 
         if is_mistral_tokenizer(self.tokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
@@ -57,6 +61,10 @@ class XgrammarBackend(StructuredOutputBackend):
                 stop_token_ids=stop_token_ids,
                 add_prefix_space=True,
             )
+        elif is_plamo3 and callable(
+            init_xgrammar := getattr(self.tokenizer, "init_xgrammar", None)
+        ):
+            tokenizer_info, _ = init_xgrammar()
         else:
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
                 self.tokenizer,
@@ -384,6 +392,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         return
 
     if so_params.json:
+        check_json_nesting(so_params.json)
         if isinstance(so_params.json, str):
             try:
                 schema = json.loads(so_params.json)
@@ -418,6 +427,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         return
 
     if so_params.structural_tag:
+        check_json_nesting(so_params.structural_tag, structural_tag=True)
         try:
             s_tag = json.loads(so_params.structural_tag)
 
