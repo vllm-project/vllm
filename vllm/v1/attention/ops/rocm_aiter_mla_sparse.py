@@ -883,6 +883,15 @@ def mqa_logits_module():
     return None
 
 
+@functools.lru_cache
+def aiter_tuned_mqa_logits():
+    try:
+        from aiter.mqa_logits import mqa_logits
+    except ImportError:
+        return None
+    return mqa_logits
+
+
 def rocm_fp8_mqa_logits(
     q: torch.Tensor,
     kv: tuple[torch.Tensor, torch.Tensor],
@@ -918,6 +927,13 @@ def rocm_fp8_mqa_logits(
         return flydsl_fp8_mqa_logits(
             q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
         )
+
+    if _ON_GFX950 and rocm_aiter_ops.is_enabled():
+        tuned_mqa_logits = aiter_tuned_mqa_logits()
+        if tuned_mqa_logits is not None:
+            return tuned_mqa_logits(
+                q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
+            )
 
     aiter_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
