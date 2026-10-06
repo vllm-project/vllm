@@ -211,8 +211,9 @@ class NixlBaseConnectorScheduler:
         self._req_is_producer: set[ReqId] = set()
         # Per-request digest tracking, driven purely by scheduler_output.
         self._req_digest_state: dict[ReqId, _ReqDigestState] = {}
-        # Worker-computed digests awaiting pickup by request_finished.
-        self._pending_digests: dict[ReqId, list[list[str]]] = {}
+        # Worker-computed digests awaiting pickup by request_finished, keyed
+        # by request id then producer TP rank.
+        self._pending_digests: dict[ReqId, dict[int, list[list[str]]]] = {}
 
     def shutdown(self):
         self._stop_event.set()

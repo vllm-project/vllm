@@ -311,5 +311,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     request.request_id,
                 )
             else:
-                kv_xfer_params["remote_block_digests"] = digests
+                # Indexed by producer TP rank: a D rank verifies against its
+                # own rank's entry. Ranks that produced none ship empty.
+                kv_xfer_params["remote_block_digests"] = [
+                    digests.get(rank, []) for rank in range(self.transfer_tp_size)
+                ]
         return delay_free_blocks, kv_xfer_params

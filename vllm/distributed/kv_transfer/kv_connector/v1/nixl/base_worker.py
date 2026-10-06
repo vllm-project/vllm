@@ -2963,7 +2963,12 @@ class NixlBaseConnectorWorker:
         """Ship this step's P-side block digests back to the scheduler."""
         if not self._pending_digests:
             return None
-        meta = NixlDigestMetadata(self._pending_digests)
+        meta = NixlDigestMetadata(
+            {
+                req_id: {self.tp_rank: digests}
+                for req_id, digests in self._pending_digests.items()
+            }
+        )
         self._pending_digests = {}
         return meta
 
@@ -3007,11 +3012,22 @@ class NixlBaseConnectorWorker:
             and self._physical_blocks_per_logical_kv_block == 1
             and remote_info.remote_physical_blocks_per_logical == 1
             and remote_info.remote_block_size == self.block_size
+            and remote_info.remote_tp_size == self.world_size
             and self.dcp_size == 1
             and remote_info.remote_dcp_size == 1
         )
         if not supported:
             return _skip("unsupported transfer layout")
+
+        # Under homogeneous TP this rank READ exactly the producer shard of
+        # the same rank, so verify against that rank's digests. A missing or
+        # empty entry means the producer rank shipped none; skip rather than
+        # misfire.
+        # Under homogeneous TP this rank READ exactly the producer shard of
+        # the same rank, so verify against that rank's digests.
+        expected_rank = expected[self.tp_rank] if self.tp_rank < len(expected) else []
+        if not expected_rank:
+            return _skip(f"no digests from producer rank {self.tp_rank}")
 
         # Ensure the NIXL READ writes are visible before reading the bytes.
         torch.accelerator.synchronize()
@@ -3019,7 +3035,7 @@ class NixlBaseConnectorWorker:
         for group_idx, local_group in enumerate(meta.local_physical_block_ids):
             if not local_group:
                 continue
-            if group_idx >= len(expected):
+            if group_idx >= len(expected_rank):
                 # This rank read the group but the producer shipped no
                 # digests for it; unverified under fail-closed.
                 if envs.VLLM_NIXL_DIGEST_FAIL:
@@ -3031,7 +3047,7 @@ class NixlBaseConnectorWorker:
                         group_idx,
                     )
                 continue
-            expected_group = expected[group_idx]
+            expected_group = expected_rank[group_idx]
             n = len(local_group)
             if n > len(expected_group):
                 # More blocks read than digests shipped; the uncovered tail

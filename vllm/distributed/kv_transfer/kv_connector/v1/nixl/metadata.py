@@ -234,9 +234,9 @@ class RemoteMeta:
     request_id: str
     blocks_expiry_time: float | None = None
     num_tokens: int | None = None
-    # Producer-side digests of block_ids, aligned per (group, block). None
-    # when the KV digest feature is off.
-    block_digests: list[list[str]] | None = None
+    # Producer-side digests of block_ids, indexed [tp_rank][group][block].
+    # None when the KV digest feature is off.
+    block_digests: list[list[list[str]]] | None = None
 
 
 @dataclass
@@ -348,17 +348,21 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 class NixlDigestMetadata(KVConnectorWorkerMetadata):
     """Per-request KV block digests sent from a worker to the scheduler.
 
-    digests[req_id][group][block] is the serialized digest of one block,
-    aligned with the producer's remote_block_ids for the request.
+    digests[req_id][tp_rank][group][block] is the serialized digest of one
+    block in one producer TP rank's KV shard, aligned with the producer's
+    remote_block_ids for the request.
     """
 
-    def __init__(self, digests: dict[ReqId, list[list[str]]]):
+    def __init__(self, digests: dict[ReqId, dict[int, list[list[str]]]]):
         self.digests = digests
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
-        # Prototype limitation: TP>1 ranks digest disjoint shards under the
-        # same req_id keys, so merging keeps only one rank's digests. Correct
-        # for TP1, which is the tested path.
+        """Union per-rank digests; each rank contributes its own KV shard."""
         assert isinstance(other, NixlDigestMetadata)
-        self.digests.update(other.digests)
+        for req_id, rank_digests in other.digests.items():
+            mine = self.digests.setdefault(req_id, {})
+            assert mine.keys().isdisjoint(rank_digests), (
+                f"Two workers produced digests for the same rank of {req_id}"
+            )
+            mine.update(rank_digests)
         return self
