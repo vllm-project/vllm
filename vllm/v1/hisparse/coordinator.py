@@ -19,6 +19,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
 )
 from vllm.v1.hisparse.types import (
+    ACTIVE_TAIL_PAGES,
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
     SparseKVRowMirror,
@@ -31,10 +32,6 @@ from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
-
-# Sealed pages this many positions behind the block-table tail stay pinned so
-# a page written by an in-flight step is never handed out under it.
-_ACTIVE_TAIL_PAGES = 2
 
 
 @dataclass
@@ -343,7 +340,7 @@ class HiSparseCoordinator:
             req_blocks = manager.req_to_blocks.get(request_id)
             if (
                 req_blocks is None
-                or page_idx >= len(req_blocks) - _ACTIVE_TAIL_PAGES
+                or page_idx >= len(req_blocks) - ACTIVE_TAIL_PAGES
                 or req_blocks[page_idx].is_null
             ):
                 return None
