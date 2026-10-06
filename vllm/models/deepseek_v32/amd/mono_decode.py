@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -77,6 +76,12 @@ def mono_decode_unsupported_reason(vllm_config: VllmConfig) -> str | None:
             vllm_config.speculative_config is None,
             "does not support speculative decoding",
         ),
+        (
+            getattr(
+                vllm_config.model_config.hf_config, "indexer_rope_interleave", False
+            ),
+            "requires indexer_rope_interleave",
+        ),
     )
     for ok, reason in checks:
         if not ok:
@@ -116,13 +121,6 @@ class GlmMonoDecode:
                 "dense ones to be a MoE layer."
             )
         self._layer_name = layers[self._num_dense].self_attn.layer_name
-        self._fused_indexer = envs.VLLM_ROCM_GLM_MONO_FUSED_INDEXER
-        if self._fused_indexer and not getattr(
-            model.config, "indexer_rope_interleave", False
-        ):
-            raise ValueError(
-                "VLLM_ROCM_GLM_MONO_FUSED_INDEXER requires indexer_rope_interleave."
-            )
         self._max_model_len = vllm_config.model_config.max_model_len
         self._ops: dict[int, list[Glm5MonoKernel]] = {}
         self._cos: torch.Tensor | None = None
@@ -206,8 +204,6 @@ class GlmMonoDecode:
                     out_indices=md.paged_kv_indices,
                 )
                 continue
-            if _computes_indices(layer):
-                self._refresh_indices(layer, state[:n], positions, md)
             state = op.forward(
                 state,
                 self._cur_pos,
@@ -221,17 +217,6 @@ class GlmMonoDecode:
                 sparse_kv_indptr=indptr,
             )
         return model.norm(state[:n])
-
-    @staticmethod
-    def _refresh_indices(
-        layer: DeepseekV32DecoderLayer,
-        state: torch.Tensor,
-        positions: torch.Tensor,
-        md,
-    ) -> None:
-        attn = layer.self_attn
-        attn.refresh_sparse_indices(positions, layer.input_layernorm(state))
-        GlmMonoDecode._convert_indices(attn, md)
 
     @staticmethod
     def _convert_indices(attn, md) -> None:
@@ -262,7 +247,7 @@ class GlmMonoDecode:
         rank = get_tensor_model_parallel_rank()
         group = get_tp_group().cpu_group
         sparse = list(self._model.layers[self._num_dense :])
-        fused = [self._fused_indexer and _computes_indices(layer) for layer in sparse]
+        fused = [_computes_indices(layer) for layer in sparse]
         weights = [
             _layer_weights(layer, cfg, rank, tp, with_indexer=f)
             for layer, f in zip(sparse, fused)
@@ -324,7 +309,7 @@ class GlmMonoDecode:
             attn.rotary_emb.cos_sin_cache, attn.indexer_rope_emb.cos_sin_cache
         ):
             raise ValueError(
-                "VLLM_ROCM_GLM_MONO_FUSED_INDEXER requires the indexer and MLA "
+                "VLLM_ROCM_GLM_MONO_DECODE requires the indexer and MLA "
                 "RoPE tables to match."
             )
         cache = attn.indexer.k_cache.kv_cache
@@ -428,9 +413,12 @@ def _computes_indices(layer: DeepseekV32DecoderLayer) -> bool:
 def _indexer_weights(layer: DeepseekV32DecoderLayer) -> dict[str, torch.Tensor]:
     indexer = layer.self_attn.indexer
     wk_w = indexer.wk_weights_proj.weight
-    if wk_w.dtype != torch.bfloat16 or wk_w.shape[0] != indexer.head_dim + indexer.n_head:
+    if (
+        wk_w.dtype != torch.bfloat16
+        or wk_w.shape[0] != indexer.head_dim + indexer.n_head
+    ):
         raise ValueError(
-            "VLLM_ROCM_GLM_MONO_FUSED_INDEXER requires a bf16 wk_weights_proj, "
+            "VLLM_ROCM_GLM_MONO_DECODE requires a bf16 wk_weights_proj, "
             f"got {wk_w.dtype} {tuple(wk_w.shape)}."
         )
     w_index_q, s_index_q = _block_fp8(indexer.wq_b)
