@@ -142,9 +142,37 @@ def test_expanded_receiver_uses_gpu_counts_and_clears_padding(dtype):
     assert meta.expert_num_tokens.tolist() == [2, 0]
     assert meta.expert_num_tokens_cpu is None
     assert meta.psum_recv_per_rank is None
+    assert meta.expert_input_alignment == 4
     for tensor in (prepared_x.float(), prepared_scales, prepared_weights):
         assert torch.isfinite(tensor).all()
         assert torch.count_nonzero(tensor[2:]) == 0
+
+
+@requires_deep_ep_v2
+def test_quantized_expanded_receiver_keeps_dispatch_activation_storage():
+    pf = _make_pf(torch.empty(0, dtype=torch.bfloat16))
+    pf.do_expand = True
+    x = torch.ones(8, 128).to(torch.float8_e4m3fn)
+    scales = torch.full((8, 1), float("nan"))
+    scales[:2] = 1
+    handle = SimpleNamespace(
+        psum_num_recv_tokens_per_expert=torch.tensor([2, 4], dtype=torch.int32),
+        expert_alignment=4,
+    )
+    prepared_x, prepared_scales, _, ids, _ = pf._receiver(
+        _FakeEvent(False),
+        (x, scales),
+        None,
+        None,
+        handle,
+        None,
+        FusedMoEQuantConfig.make(torch.float8_e4m3fn, block_shape=[128, 128]),
+        False,
+    )
+    assert prepared_x.data_ptr() == x.data_ptr()
+    assert ids[:, 0].tolist() == [0, 0] + [-1] * 6
+    assert torch.isfinite(prepared_scales).all()
+    assert torch.count_nonzero(prepared_scales[2:]) == 0
 
 
 def _run(pf, output: torch.Tensor, do_async: bool):

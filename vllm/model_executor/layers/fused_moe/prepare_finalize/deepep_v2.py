@@ -256,17 +256,20 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 self.rank_expert_offset,
             )
             valid = recv_topk_idx >= 0
-            # Padding must be safe for quantizers and scale-layout conversions,
-            # which can read rows that routing kernels subsequently skip.
-            expert_x = torch.where(valid, expert_x.view(torch.uint8), 0).view(
-                expert_x.dtype
-            )
+            # Quantizers read padding; already quantized rows are skipped by
+            # expert routing and can retain the dispatch allocation directly.
+            if not _quantize_before_dispatch(quant_config, defer_input_quant):
+                expert_x = torch.where(valid, expert_x.view(torch.uint8), 0).view(
+                    expert_x.dtype
+                )
             if expert_x_scale is not None:
                 expert_x_scale = torch.where(valid, expert_x_scale, 0)
             if recv_topk_weights is not None:
                 recv_topk_weights = torch.where(valid, recv_topk_weights[:, None], 0)
             expert_tokens_meta = mk.ExpertTokensMetadata(
-                expert_num_tokens=counts, expert_num_tokens_cpu=None
+                expert_num_tokens=counts,
+                expert_num_tokens_cpu=None,
+                expert_input_alignment=handle.expert_alignment,
             )
         else:
             assert recv_topk_idx is not None

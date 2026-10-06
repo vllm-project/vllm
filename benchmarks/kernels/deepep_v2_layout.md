@@ -22,10 +22,26 @@ threshold or rank-local layout selection is introduced.
 
 The integrated receiver reconstructs expanded routing IDs and real expert
 counts from GPU prefixes, including alignment gaps and unused capacity. It
-clears padding activations, scales and weights before quantization. The
-existing expert backends consume this through their standard routing contract;
-this compatibility path does not yet bypass their own expert input permutation.
-The standalone benchmark below separately demonstrates direct grouped GEMM.
+clears padding before quantization, while already quantized activations retain
+the dispatch allocation. Padding scales and weights are sanitized separately.
+
+For block FP8, select `"moe_backend":"deep_gemm"` in the kernel config to consume
+expanded inputs directly. The FP8 oracle requests DeepGEMM's expert alignment
+from DeepEP, and receive metadata identifies the aligned, already grouped rows.
+DeepGEMM skips input permutation and output unpermutation for both expanded
+configurations. It prepares scales, masks unused rows inside fused activation/quantization,
+and weights output rows directly before DeepEP combine.
+Neither choice requires CPU receive counts for input preparation.
+
+```bash
+vllm serve FP8_BLOCK_MODEL --data-parallel-size 2 --enable-expert-parallel \
+  --all2all-backend deepep_v2 \
+  --kernel-config '{"moe_backend":"deep_gemm","deepep_v2_do_expand":true,"deepep_v2_do_cpu_sync":false}'
+```
+
+Non-expanded DeepGEMM inputs retain the permutation path. Other expert backends,
+and quantization schemes outside block FP8, retain their compatibility paths.
+The standalone benchmark below separately demonstrates one grouped GEMM.
 
 | Case | Expanded expert groups | CPU count wait | Receive allocation |
 | --- | --- | --- | --- |
@@ -110,8 +126,9 @@ rank-local automatic policy is introduced.
 The grouped experiment is one dense GEMM with synthetic diagonal weights, not
 a full MoE layer or a serving workload. The vLLM integration is validated
 separately with full two-GEMM reference comparisons and graph replay tests in
-`tests/kernels/moe/test_deepep_v2_moe.py`. Bypassing permutation in the real
-expert backends and choosing a production threshold remain follow-up work.
+`tests/kernels/moe/test_deepep_v2_moe.py`. Direct block-FP8 DeepGEMM forwards bypass both permutations in the integrated
+path. Other expert backends and choosing a production threshold remain
+follow-up work.
 Coordinate with existing PR #51589, which already reconstructs sync-less
 expanded metadata.
 
