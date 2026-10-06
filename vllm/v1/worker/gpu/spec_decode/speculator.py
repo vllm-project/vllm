@@ -447,7 +447,7 @@ class DraftModelSpeculator(BaseSpeculator):
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
         if self.confidence_stop is not None:
             # Before sampling, which may scale the logits in place.
-            self.confidence_stop.update(logits, idx_mapping, draft_step)
+            self.confidence_stop.update(logits, draft_step)
         if draft_logits is not None:
             sampler = (
                 gumbel_sample

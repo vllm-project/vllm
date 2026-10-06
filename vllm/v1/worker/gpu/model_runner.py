@@ -1305,10 +1305,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 confidence_stop is not None
                 and not scheduler_output.has_structured_output_requests
             ):
-                # Verify only the drafts of the last round, which may have
-                # stopped short of the scheduled placeholders. The scheduler
-                # counts the trimmed drafts as rejected. Grammar masks follow
-                # the scheduled layout, so such batches draft and verify all.
+                # Verify only the last round's drafts; the scheduler counts the
+                # trimmed placeholders as rejected.
                 num_verifiable = np.minimum(
                     num_draft_tokens_np,
                     confidence_stop.num_verifiable_drafts(idx_mapping_np),

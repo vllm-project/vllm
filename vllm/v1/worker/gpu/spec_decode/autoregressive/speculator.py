@@ -338,13 +338,12 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 # Grammar masks cover every scheduled draft, so draft them all.
                 stop.fixed_round(input_batch.idx_mapping_np, num_draft_steps)
             elif num_reqs > 1:
-                # The batch drafts while any request is confident, and each
-                # step waits on the GPU, so past one request use a fixed depth.
+                # Past one request the per-step wait does not pay off.
                 num_draft_steps = stop.fallback_depth
                 stop.fixed_round(input_batch.idx_mapping_np, num_draft_steps)
             else:
                 confidence_stop = stop
-                stop.begin_round(input_batch.idx_mapping_np)
+                stop.begin_round(int(input_batch.idx_mapping_np[0]))
                 stop.step_launched()
 
         if num_speculative_tokens <= 1:
@@ -566,8 +565,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     step=step,
                 )
 
-            # Wait for the previous step only now, so that the metadata above
-            # was built while it ran.
+            # Wait only after building this step's metadata.
             if confidence_stop is not None and not confidence_stop.should_continue():
                 return
 

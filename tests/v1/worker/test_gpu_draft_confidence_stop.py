@@ -10,7 +10,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.confidence_stop import DraftConfidenceStop
 
-VOCAB = 20000  # Spans several kernel blocks.
+VOCAB = 20000
 NUM_STEPS = 4
 FALLBACK = 2
 THRESHOLD = 0.6
@@ -24,7 +24,6 @@ def _logits(top_probs: list[float]) -> torch.Tensor:
     """bf16 rows whose top-1 probability is approximately each value."""
     rows = torch.full((len(top_probs), VOCAB), -30.0)
     for row, p in enumerate(top_probs):
-        # The remaining mass spreads over two tokens in different blocks.
         rows[row, 5] = 0.0
         rows[row, VOCAB - 3] = rows[row, VOCAB - 9000] = float(
             np.log((1 - p) / (2 * p))
@@ -32,39 +31,31 @@ def _logits(top_probs: list[float]) -> torch.Tensor:
     return rows.to(device="cuda", dtype=torch.bfloat16)
 
 
-def _run_step(stop, top_probs, idx_mapping, step):
-    stop.update(
-        _logits(top_probs),
-        torch.tensor(idx_mapping, dtype=torch.int32, device="cuda"),
-        torch.tensor(step, device="cuda"),
-    )
+def _run_step(stop, top_probs, step):
+    stop.update(_logits(top_probs), torch.tensor([step], device="cuda"))
     stop.step_launched()
 
 
 @requires_cuda
 def test_chain_state_follows_top_probabilities():
     stop = DraftConfidenceStop(THRESHOLD, FALLBACK, 8, NUM_STEPS, torch.device("cuda"))
-    # Row 2 is cudagraph padding and must never keep the batch drafting.
-    idx_mapping = [3, 1, -1]
-    stop.begin_round(np.array([3, 1]))
-
-    _run_step(stop, [0.9, 0.3, 0.99], idx_mapping, 0)
-    assert stop.alive[:3].tolist() == [1, 0, 0]
+    stop.begin_round(3)
+    # Only the first row is the request; the second is cudagraph padding.
+    _run_step(stop, [0.9, 0.1], 0)
     assert stop.should_continue()
-    # A dead chain stays dead even when the drafter becomes confident again.
-    _run_step(stop, [0.7, 0.99, 0.99], idx_mapping, 1)
-    assert stop.alive[:3].tolist() == [1, 0, 0]
+    _run_step(stop, [0.7, 0.1], 1)
     assert stop.should_continue()
-    _run_step(stop, [0.4, 0.99, 0.99], idx_mapping, 2)
-    assert stop.alive[:3].tolist() == [0, 0, 0]
+    _run_step(stop, [0.4, 0.99], 2)
     assert not stop.should_continue()
-    # Steps 0 and 1 cleared the threshold for slot 3; step 2's draft did not.
-    assert stop.num_verifiable_drafts(np.array([3, 1])).tolist() == [2, 2]
+    # Steps 0 and 1 cleared the threshold; step 2's draft did not.
+    assert stop.num_verifiable_drafts(np.array([3])).tolist() == [2]
 
-    # The first step of a new round resets every chain.
-    stop.begin_round(np.array([1]))
-    _run_step(stop, [0.99], [1], 0)
-    assert stop.alive[0].item() == 1
+    # A dead chain stays dead within a round, and step 0 starts a new chain.
+    stop.update(_logits([0.99]), torch.tensor([3], device="cuda"))
+    assert not stop.alive.item()
+    stop.begin_round(1)
+    _run_step(stop, [0.99], 0)
+    assert stop.alive.item()
 
 
 @requires_cuda
@@ -78,11 +69,11 @@ def test_chain_state_follows_top_probabilities():
 )
 def test_stop_after_first_draft_keeps_it(first_prob, expected):
     stop = DraftConfidenceStop(THRESHOLD, FALLBACK, 4, NUM_STEPS, torch.device("cuda"))
-    stop.begin_round(np.array([0]))
-    _run_step(stop, [first_prob], [0], 0)
+    stop.begin_round(0)
+    _run_step(stop, [first_prob], 0)
     if first_prob >= THRESHOLD:
         assert stop.should_continue()
-        _run_step(stop, [0.1], [0], 1)
+        _run_step(stop, [0.1], 1)
     assert not stop.should_continue()
     assert stop.num_verifiable_drafts(np.array([0])).tolist() == [expected]
 
@@ -91,11 +82,11 @@ def test_stop_after_first_draft_keeps_it(first_prob, expected):
 @pytest.mark.parametrize(("last_prob", "expected"), [(0.9, 4), (0.1, 3)])
 def test_full_round_resolves_last_step_lazily(last_prob, expected):
     stop = DraftConfidenceStop(THRESHOLD, FALLBACK, 4, NUM_STEPS, torch.device("cuda"))
-    stop.begin_round(np.array([2]))
+    stop.begin_round(2)
     for step in range(NUM_STEPS - 1):
-        _run_step(stop, [0.9], [2], step)
+        _run_step(stop, [0.9], step)
         assert stop.should_continue()
-    _run_step(stop, [last_prob], [2], NUM_STEPS - 1)
+    _run_step(stop, [last_prob], NUM_STEPS - 1)
     stop.end_round()
     assert stop.num_verifiable_drafts(np.array([2])).tolist() == [expected]
 
@@ -107,8 +98,8 @@ def test_fixed_round_verifies_its_depth():
     stop.fixed_round(np.array([4, 6]), FALLBACK)
     assert stop.num_verifiable_drafts(np.array([4, 6])).tolist() == [FALLBACK] * 2
     # A later single-request round only updates its own slot.
-    stop.begin_round(np.array([4]))
-    _run_step(stop, [0.1], [4], 0)
+    stop.begin_round(4)
+    _run_step(stop, [0.1], 0)
     assert not stop.should_continue()
     assert stop.num_verifiable_drafts(np.array([4, 6])).tolist() == [1, FALLBACK]
 

@@ -1119,47 +1119,41 @@ class VllmConfig:
 
     def _verify_draft_confidence_threshold(self) -> None:
         spec = self.speculative_config
-        if spec is None:
-            return
-        if spec.draft_confidence_threshold is None:
-            if spec.draft_confidence_fallback_depth is not None:
+        if spec is None or spec.draft_confidence_threshold is None:
+            if spec is not None and spec.draft_confidence_fallback_depth is not None:
                 raise ValueError("draft_confidence_fallback_depth needs a threshold.")
             return
         from vllm.platforms import current_platform
 
-        def reject(reason: str) -> None:
-            raise ValueError(f"draft_confidence_threshold {reason}.")
-
-        if spec.method not in ("mtp", "eagle", "eagle3"):
-            reject(f"requires method 'mtp', 'eagle' or 'eagle3', got {spec.method!r}")
-        if spec.use_multi_module_mtp() or spec.use_gemma4_mtp():
-            reject("does not support multi-module or Gemma 4 MTP drafters")
         fallback = spec.draft_confidence_fallback_depth
-        if fallback is None or not 1 <= fallback < spec.num_speculative_tokens:
-            reject(
-                "needs draft_confidence_fallback_depth between 1 and "
-                "num_speculative_tokens - 1"
+        error = None
+        if spec.method not in ("mtp", "eagle", "eagle3"):
+            error = f"requires method 'mtp', 'eagle' or 'eagle3', got {spec.method!r}"
+        elif spec.use_multi_module_mtp() or spec.use_gemma4_mtp():
+            error = "does not support multi-module or Gemma 4 MTP drafters"
+        elif fallback is None or not 1 <= fallback < spec.num_speculative_tokens:
+            error = (
+                "needs draft_confidence_fallback_depth in [1, num_speculative_tokens)"
             )
-        if not self.use_v2_model_runner:
-            reject("requires Model Runner V2")
-        if self.parallel_config.data_parallel_size > 1:
-            reject("does not support data parallelism")
-        for name, enabled in {
-            "enable_adaptive_verification": spec.enable_adaptive_verification,
-            "num_speculative_tokens_per_batch_size": (
-                spec.uses_dynamic_speculative_decoding()
-            ),
-            "use_local_argmax_reduction": spec.use_local_argmax_reduction,
-            "parallel_drafting": spec.parallel_drafting,
-        }.items():
-            if enabled:
-                reject(f"is not compatible with {name}")
-        # The stop reads the number of live chains back to the CPU after every
-        # draft step, which only pays off where a draft step is long.
-        if not (
+        elif not self.use_v2_model_runner:
+            error = "requires Model Runner V2"
+        elif self.parallel_config.data_parallel_size > 1:
+            error = "does not support data parallelism"
+        elif spec.uses_dynamic_speculative_decoding():
+            error = "is not compatible with num_speculative_tokens_per_batch_size"
+        elif spec.enable_adaptive_verification:
+            error = "is not compatible with enable_adaptive_verification"
+        elif spec.use_local_argmax_reduction:
+            error = "is not compatible with use_local_argmax_reduction"
+        elif spec.parallel_drafting:
+            error = "is not compatible with parallel_drafting"
+        elif not (
             current_platform.is_cuda() and current_platform.is_device_capability(121)
         ):
-            reject("is only supported on SM121 GPUs")
+            # The per-step readback only pays off where a draft step is long.
+            error = "is only supported on SM121 GPUs"
+        if error:
+            raise ValueError(f"draft_confidence_threshold {error}.")
 
     def _normalize_piecewise_cudagraph_mode(
         self, *, breakable_cudagraph_enabled: bool

@@ -294,24 +294,16 @@ class CudaGraphManager:
             )
         elif (
             speculative_config
-            and speculative_config.draft_confidence_threshold is not None
             and speculative_config.draft_confidence_fallback_depth is not None
             and self.decode_query_len > self.vllm_config.num_speculative_tokens
         ):
-            # Past one request the speculator drafts the fallback depth; a
-            # single request may stop after 1..num_speculative_tokens drafts.
-            num_spec = self.vllm_config.num_speculative_tokens
-            fallback_len = (
-                self.decode_query_len
-                - num_spec
-                + speculative_config.draft_confidence_fallback_depth
-            )
-            decode_query_lens = list(
-                range(self.decode_query_len - num_spec + 1, self.decode_query_len + 1)
-            )
+            # One request may stop after 1..K drafts; larger batches verify the
+            # fallback depth.
+            base = self.decode_query_len - self.vllm_config.num_speculative_tokens
+            decode_query_lens = list(range(base + 1, self.decode_query_len + 1))
             single_req_only_lens = set(decode_query_lens) - {
-                fallback_len,
                 self.decode_query_len,
+                base + speculative_config.draft_confidence_fallback_depth,
             }
         else:
             decode_query_lens = [self.decode_query_len]
