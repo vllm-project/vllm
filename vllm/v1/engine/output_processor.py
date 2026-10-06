@@ -737,6 +737,7 @@ class OutputProcessor:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
                 # 2) Detokenize the token ids into text and perform stop checks.
+                num_tokens_before = req_state.detokenizer.num_output_tokens()
                 stop_string = req_state.detokenizer.update(
                     new_token_ids, finish_reason == FinishReason.STOP
                 )
@@ -744,9 +745,8 @@ class OutputProcessor:
                     finish_reason = FinishReason.STOP
                     stop_reason = stop_string
                     # Mirror detokenizer trimming on delta outputs and logprobs.
-                    num_overflow_tokens = req_state.detokenizer.num_stop_overflow_tokens
-                    if num_overflow_tokens:
-                        keep = len(new_token_ids) - num_overflow_tokens
+                    keep = req_state.detokenizer.num_output_tokens() - num_tokens_before
+                    if keep < len(new_token_ids):
                         del new_token_ids[keep:]
                         if engine_core_output.new_logprobs is not None:
                             engine_core_output.new_logprobs = (

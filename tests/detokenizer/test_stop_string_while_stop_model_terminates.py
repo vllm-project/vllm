@@ -102,10 +102,20 @@ def test_stop_string_while_stop_token_terminates(include_stop_str_in_output: boo
     assert detok.get_next_output_text(finished=True, delta=False) == expected_text
 
 
-def test_stop_string_trims_speculative_overflow(include_stop_str_in_output: bool):
-    token_ids = [ord(c) for c in "abcdef"]
+@pytest.mark.parametrize(
+    "decoded_tokens,keep",
+    [
+        (["a", "b", "c", "d", "e", "f"], 4),
+        (["ab", "cdx", "ef"], 2),
+        (["ab", "", "c", "", "d", "", "ef"], 5),
+    ],
+)
+def test_stop_string_trims_speculative_overflow(
+    include_stop_str_in_output: bool, decoded_tokens, keep, monkeypatch
+):
+    token_ids = list(range(len(decoded_tokens)))
     stop_string = "cd"
-    expected_token_ids = [ord(c) for c in "abcd"]
+    expected_token_ids = token_ids[:keep]
 
     req = _make_request(
         stop=[stop_string], include_stop_str_in_output=include_stop_str_in_output
@@ -114,6 +124,7 @@ def test_stop_string_trims_speculative_overflow(include_stop_str_in_output: bool
     assert req.sampling_params is not None
     req.sampling_params.logprobs = 0
     detok = _DummyDetokenizer(req)
+    monkeypatch.setattr(detok, "decode_next", decoded_tokens.__getitem__)
     processor = OutputProcessor(tokenizer=None, log_stats=False)
     processor.add_request(req, prompt=None)
     processor.request_states[req.request_id].detokenizer = detok
@@ -141,7 +152,6 @@ def test_stop_string_trims_speculative_overflow(include_stop_str_in_output: bool
     expected_text = "abcd" if include_stop_str_in_output else "ab"
     assert detok.output_text == expected_text
     assert detok.output_token_ids == expected_token_ids
-    assert detok.num_stop_overflow_tokens == 2
     assert result.token_ids == expected_token_ids
     assert result.logprobs is not None
     assert len(result.logprobs) == len(expected_token_ids)
