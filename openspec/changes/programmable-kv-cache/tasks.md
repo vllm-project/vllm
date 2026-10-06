@@ -66,7 +66,7 @@
 - [ ] 7.8 Add an application-directed rollout controller using supported Retain/Prefetch hints and actual operation results, with no custom hint types or handler plugins.
 - [ ] 7.9 Add and run closed-loop control/recovery examples for duplicate hints, prefetch/resume races, capacity deferral, backend errors, and engine restart.
 - [x] 7.10 Check all rows in coverage.md against concrete examples and tests; distinguish implemented, unsupported backend scope, and unexecuted validation.
-- [ ] 7.11 Run the primary lightweight-orchestrator → envelope → native vLLM semantics → real Mooncake scenario; correlate each action with backend completion and actual reuse.
+- [x] 7.11 Run the primary lightweight-orchestrator → envelope → native vLLM semantics → real Mooncake scenario; correlate each action with backend completion and actual reuse.
 
 ## 8. Complete the reviewable delivery
 
@@ -98,3 +98,12 @@ The October 2 count of 48/52 included unsupported completion claims. Reopened:
 JSONL format and sent only a resume signal; it did not integrate Agent Loop or
 invalidate KV on a weight update. File presence is not coverage evidence; the
 coverage inventory is now audited manually against concrete tests and results.
+
+## 9. RFC #59708 alignment on rfc-hint
+
+- [x] 9.1 Specify primitive payloads, lifecycle phases, ownership, compatibility and the test contract.
+- [x] 9.2 Add one typed dispatcher for public primitives and legacy actions with correlated queued/completion results.
+- [x] 9.3 Integrate copy-scoped revisioned priority into the existing eviction authority and successful request completion.
+- [x] 9.4 Execute COPY/MOVE through existing resource leases and backend adapters, reporting per-target partial outcomes.
+- [x] 9.5 Make optional policies produce the same primitives; preserve legacy directives and opaque backend routing.
+- [x] 9.6 Add and run the request-attached Mooncake reference workflow and request-free/cross-engine extensions, relevant regression/model checks and documentation.

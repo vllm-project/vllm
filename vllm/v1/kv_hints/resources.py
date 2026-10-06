@@ -6,11 +6,14 @@ from collections.abc import Callable
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_priority import KVCachePriority
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
+    get_block_hash,
     make_block_hash_with_group_id,
 )
+from vllm.v1.kv_hints.actions import MoveTo, Primitive, SetPriority
 from vllm.v1.kv_hints.control import (
     ControlError,
     OperationRegistry,
@@ -21,15 +24,19 @@ from vllm.v1.kv_hints.controller import PhysicalPayload
 from vllm.v1.kv_hints.native import (
     NATIVE_ACTION_VERSION,
     ActionCapability,
+    ContentSpan,
     DemotePayload,
     EvictPayload,
     NativePayload,
     PrefetchPayload,
+    RequestTarget,
     SharePayload,
+    StorePayload,
 )
 from vllm.v1.kv_hints.retention import RetentionDeclarations
-from vllm.v1.kv_hints.state import LogicalResolution
+from vllm.v1.kv_hints.state import LogicalResolution, ResolvedPrefix
 from vllm.v1.kv_hints.transfers import KVTransferAdapter, KVTransferOperations
+from vllm.v1.request import Request
 
 
 class KVRetentionPriority:
@@ -37,15 +44,26 @@ class KVRetentionPriority:
 
     def __init__(self, pool: BlockPool, declarations: RetentionDeclarations):
         self.declarations = declarations
+        self.pool = pool
+        self.copies = KVCachePriority()
         self._version: tuple[int, int] | None = None
         self._priorities: dict[BlockHashWithGroupId, int] = {}
         self.synchronize()
-        pool.configure_retention(self.priority, self.synchronize)
+        pool.configure_retention(
+            self.priority,
+            self.synchronize,
+            copy_priority=self.copies.priority,
+            forget_priority=self.copies.forget,
+        )
 
-    def priority(self, key: BlockHashWithGroupId) -> int:
-        return self._priorities.get(key, 0)
+    def priority(self, key: BlockHashWithGroupId) -> int | None:
+        return self._priorities.get(key)
 
     def synchronize(self) -> tuple[BlockHashWithGroupId, ...]:
+        changed_copies = self.copies.take_changes()
+        if self.pool._retention_queue is not None:
+            for block_id in changed_copies:
+                self.pool._retention_queue.cache_changed(self.pool.blocks[block_id])
         version, snapshot = self.declarations.priority_snapshot()
         if version == self._version:
             return ()
@@ -58,7 +76,7 @@ class KVRetentionPriority:
         changed = tuple(
             key
             for key in self._priorities.keys() | updated.keys()
-            if self._priorities.get(key, 0) != updated.get(key, 0)
+            if self._priorities.get(key) != updated.get(key)
         )
         self._priorities = updated
         self._version = version
@@ -167,6 +185,116 @@ class KVResourceController:
                             "Content coordinates disagree with the cached copy",
                         )
 
+    def request_scope(
+        self, request: Request, target: RequestTarget | str
+    ) -> LogicalResolution:
+        if (
+            request.resumable
+            or request.mm_features
+            or request.lora_request is not None
+            or request.prompt_embeds is not None
+        ):
+            raise ControlError(
+                "unsupported", "Primitive request scope requires finite text tokens"
+            )
+        start = target.start_token if isinstance(target, RequestTarget) else 0
+        end = target.end_token if isinstance(target, RequestTarget) else None
+        blocks: set[ContentSpan] = set()
+        partial: set[ContentSpan] = set()
+        for group_id, group in enumerate(
+            self.manager.get_blocks(request.request_id).blocks
+        ):
+            size = self.manager.coordinator.single_type_managers[group_id].block_size
+            for block in group:
+                key, boundary = block.block_hash, block.block_hash_num_tokens
+                if (
+                    block.pool is not self.pool
+                    or block.is_null
+                    or key is None
+                    or boundary is None
+                ):
+                    continue
+                begin = (boundary - 1) // size * size
+                if boundary <= start or (end is not None and begin >= end):
+                    continue
+                span = ContentSpan(get_block_hash(key).hex(), group_id, begin, boundary)
+                (
+                    partial
+                    if begin < start or (end is not None and boundary > end)
+                    else blocks
+                ).add(span)
+        order = lambda b: (b.group_id, b.start_token, b.end_token, b.block_hash)
+        return LogicalResolution(
+            self.declarations.index.namespace,
+            start,
+            end,
+            (
+                ResolvedPrefix(
+                    None,
+                    None,
+                    tuple(sorted(blocks, key=order)),
+                    tuple(sorted(partial, key=order)),
+                ),
+            ),
+        )
+
+    def apply_priority(
+        self,
+        operation: OperationResult,
+        action: SetPriority,
+        scope: LogicalResolution,
+        request: Request | None,
+        owners: tuple[str, ...] = (),
+    ) -> None:
+        self.validate_scope(scope)
+        keys = {
+            make_block_hash_with_group_id(
+                BlockHash(bytes.fromhex(b.block_hash)), b.group_id
+            )
+            for p in scope.prefixes
+            for b in p.blocks
+        }
+        if action.target == "request_cached" and request is not None:
+            blocks = [
+                b
+                for group in self.manager.get_blocks(request.request_id).blocks
+                for b in group
+                if b.pool is self.pool and b.block_hash in keys
+            ]
+        else:
+            blocks = [
+                b
+                for key in keys
+                for b in self.pool.cached_block_hash_to_block.get_blocks(key)
+            ]
+        changed = self.retention_priority.copies.apply(
+            action,
+            blocks,
+            policy_name=operation.origin.policy_name if operation.origin else None,
+            owners=tuple(
+                set(owners)
+                | {p.continuation[0] for p in scope.prefixes if p.continuation}
+            ),
+        )
+        missing = sum(
+            len(p.partial_blocks) + len(p.missing_ranges) for p in scope.prefixes
+        )
+        missing += sum(
+            not self.pool.cached_block_hash_to_block.get_blocks(key) for key in keys
+        )
+        self.registry.update(
+            operation,
+            OperationStatus.PARTIAL if missing else OperationStatus.COMPLETED,
+            affected_blocks=len(changed),
+            missing_targets=missing,
+            completed_steps=(
+                ("priority_applied" if action.value is not None else "priority_cleared")
+                if changed
+                else "priority_unchanged",
+            ),
+            reason="Duplicate/stale claim revision" if not changed else "",
+        )
+
     def submit(
         self,
         operation: OperationResult,
@@ -174,7 +302,9 @@ class KVResourceController:
         target: LogicalResolution,
     ) -> None:
         self.validate_scope(target)
-        if isinstance(payload, (DemotePayload, PrefetchPayload, SharePayload)):
+        if isinstance(
+            payload, (DemotePayload, PrefetchPayload, SharePayload, StorePayload)
+        ):
             if self.transfer_allowed is not None and not self.transfer_allowed():
                 raise ControlError("busy", "Engine is paused or sleeping")
             if self.transfers is None:
@@ -229,6 +359,7 @@ class KVResourceController:
         )
 
     def cancel_owners(self, owners: tuple[str, ...]) -> None:
+        self.retention_priority.copies.finish_owners(owners)
         if self.transfers is not None:
             self.transfers.cancel_owners(owners)
 
@@ -247,11 +378,9 @@ class KVResourceController:
 
     def conflicts_with_explicit(
         self,
-        payload: NativePayload,
+        payload: NativePayload | Primitive,
         scope: LogicalResolution,
     ) -> bool:
-        if self.transfers is None:
-            return False
         keys = {
             make_block_hash_with_group_id(
                 BlockHash(bytes.fromhex(b.block_hash)), b.group_id
@@ -259,4 +388,14 @@ class KVResourceController:
             for prefix in scope.prefixes
             for b in prefix.blocks
         }
-        return self.transfers.conflicts_with_explicit(payload, keys)
+        if isinstance(
+            payload, (DemotePayload, MoveTo, EvictPayload)
+        ) and self.retention_priority.copies.has_explicit(
+            b
+            for key in keys
+            for b in self.pool.cached_block_hash_to_block.get_blocks(key)
+        ):
+            return True
+        return self.transfers is not None and self.transfers.conflicts_with_explicit(
+            payload, keys
+        )

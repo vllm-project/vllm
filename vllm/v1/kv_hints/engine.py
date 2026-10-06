@@ -75,6 +75,7 @@ def create_control_service(
         max_actions=settings.max_actions,
         max_envelope_bytes=settings.max_envelope_bytes,
         max_events=settings.max_events,
+        max_result_targets=settings.max_result_targets,
         result_ttl=settings.result_ttl,
     )
     index = SessionPrefixIndex(

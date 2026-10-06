@@ -255,6 +255,9 @@ class EngineCore:
                 requests=lambda: cast(Any, self.scheduler).requests.values(),
             )
             policies = self.kv_control_service.controller.policies
+            cast(
+                Any, self.scheduler
+            ).kv_hint_dispatcher = self.kv_control_service.controller.dispatcher
             if policies is not None and policies.has_guidance:
                 cast(Any, self.scheduler).kv_policy_runtime = policies
 

@@ -134,3 +134,17 @@ the separate PD connector and existing Store unit suites mock the backend, so
 - Example controllers must check correlated terminal outcomes on nonempty targets.
   Exercise them against the model-free HTTP control fixture for failure/replay;
   label this separately from live transfer and model reuse validation.
+
+## RFC primitive alignment
+
+Actions map typed payloads to queued or approved operations; test wire validation,
+unsupported locations, duplicate IDs and lifecycle timing in the existing control
+and engine suites. Copy priority maps actual cached copies/claims to eviction
+order; extend prefix-cache tests for signed priorities, overlapping independent
+claims, revisions/TTL and reuse/reset, using the real manager and fake clocks.
+Scheduler hooks must run before free and preserve abort/preemption semantics;
+extend sync/async scheduler cases, including source holds acquired at completion.
+Transfers still use the existing queued-adapter fixtures for partial scope,
+capacity, cancellation and all-rank errors. Then run real Mooncake buffers and a
+request-attached R1 MOVE / R2 COPY workflow on GPUs 0/3, followed by model eval.
+No fake inference request may be used to advance a completed request's transfer.

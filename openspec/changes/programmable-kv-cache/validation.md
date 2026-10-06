@@ -754,3 +754,135 @@ new association snapshot. This does not complete the full failure/race matrix.
 The complete responses and final source hashes are in
 `results/qwen3.8-27b-tp2-quality-head-http.json.gz` under the benchmark directory.
 All model servers started for this quality review were stopped after validation.
+
+## RFC #59708 primitives on rfc-hint (2026-10-06)
+
+The user requested `git checkout -b rfc-hint` from `d49807b022`. The branch now
+registers version-1.0 `vllm.set_priority`, `vllm.copy_to` and `vllm.move_to` beside
+the version-1 legacy profile. One dispatcher owns schema and lifecycle dispatch;
+Scheduler calls it before successful request reference release. Backend-selected
+envelopes remain opaque and are not also interpreted by this dispatcher.
+Copy-priority revision/TTL semantics follow #59714 at `7966f717dd4e`, adapted to
+the existing retention queue instead of importing a second eviction heap.
+
+`queued` is nonterminal and owns no transfer reservation. Store-source COPY runs
+at ingress; GPU-source COPY/MOVE and attached priority run at successful completion.
+The registered phase can depend on direction. Requests aborted before that phase
+cancel their pending actions. COPY preserves its source; MOVE distinguishes stored
+content and eligible reclamation. Results carry original action type/version and
+per-target hash/group/range, outcome, stages and transfer ID/generation. Resource
+refusals remain terminal `deferred`. Excessive result scope is refused before
+physical allocation. Optional policies now produce those same primitives.
+
+The first real Qwen request-attached run exposed a hybrid-model scope bug: the
+completion hook used only currently held block tables, missing detached Mamba
+checkpoints. Its MOVE covered one group, and the driver's requirement for real
+COPY transfer IDs rejected the three other groups' already-resident outcomes.
+The fix routes explicit request/range selectors through the shared token-hash
+resolver at completion; `request_cached` retains its narrower held-copy meaning.
+A targeted regression covers detached content and checks that the two selectors
+have different observable results. The corrected real run loads all four groups,
+hits **784 tokens** on R2 and preserves greedy output IDs.
+
+Initial complete control/state/engine/cache/scheduler/HTTP regression: **634 passed**,
+20 warnings, 191.90 seconds. After the scope/priority refinements, the same suites
+passed **638 tests**, 20 warnings, 193.64 seconds. These runs overlap. Focused
+checks cover sync/async completion, abort, TTL start/replay, negative priorities,
+revision tombstones, physical reuse/reset, preserved COPY sources, per-target
+capacity deferral and bounded result admission. A fake-clock regression also guards
+expiry during timer-heap compaction; expired timers must still refresh priority.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  .venv/bin/python -m pytest tests/v1/kv_connector/unit/test_mooncake_store_*.py \
+  tests/v1/kv_connector/mooncake_integration/test_store_buffers.py \
+  tests/v1/kv_offload/tiering/test_kvcr_tier.py -q
+```
+
+**396 passed**, 14 warnings, 125.92 seconds, including the real two-GPU Store
+buffer suite. Only allocated GPUs 0/3 were exposed. A separate isolated development
+Store uses ports 19151/19153; the buffer suite starts and stops its own master.
+Manual mypy 3.12 passed for the changed runtime and targeted tests.
+
+Two Qwen TP=2 instances use identical 4-GiB-per-rank cache layouts, Store TCP,
+ordinary connector lookup disabled and eager execution. Engine A (`primitive-source`,
+port 18083, utilization 0.6) has no local policy. Engine B (`primitive-destination`,
+port 18084, utilization 0.45) has the built-in `tool_wait` policy named `movement`.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python \
+  benchmarks/programmable_kv_cache/primitive_control.py \
+  --base-url http://127.0.0.1:18083 --engine-id primitive-source \
+  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
+  --output /tmp/rfc-hint-attached.json
+
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python \
+  benchmarks/programmable_kv_cache/primitive_control.py \
+  --base-url http://127.0.0.1:18084 --engine-id primitive-destination \
+  --dataset /home/youwei/bzh/dataset/openai/gsm8k --policy \
+  --output /tmp/rfc-hint-policy-attached.json
+```
+
+Both pass the actual R1-completion MOVE / R2-ingress COPY workflow. B additionally
+passes the independent signal→policy→primitive→Mooncake→reuse workflow: derived
+`vllm.move_to` and `vllm.copy_to`, both version 1.0, each complete four targets;
+a subsequent real inference again hits **784 tokens** with the same output.
+Signals originate in the controller; no automatic tool-call detector is claimed.
+The primary G2 native-policy requirement in task 7.11 now has actual execution
+rather than only simulated proposal tests. Broader rollout, fairness and external
+model requirements remain open.
+
+The primitive-profile two-engine run passes with `http_control.py
+--primitive-actions --validate-movement mooncake --destination-url
+http://127.0.0.1:18084`. A's source-preserving COPY stores the prefix, B's independent
+COPY prepares it before first inference, and B hits **784 tokens** with matching
+greedy output. This uses the configured shared Store, not direct GPU P2P.
+
+The 128-question primitive-profile GSM8K run passes: recompute **124/128 (96.875%)**,
+Mooncake preparation **125/128 (97.65625%)**, **zero** truncations and **one** final
+numeric-answer mismatch. Cached tokens are **0 / 100,352**. Driver durations are
+640.38 / 615.28 seconds. CPU suites and the second engine were active during parts
+of this run, so these are correctness runs, not controlled speed or accuracy gains.
+The full rows retain the differing answer; it is not hidden by the aggregate score.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  .venv/bin/python -m pytest tests/v1/kv_offload/cpu/test_manager.py \
+  tests/v1/kv_offload/cpu/test_gpu_worker.py \
+  tests/v1/kv_connector/unit/offloading_connector/ -q -rs
+```
+
+**566 passed, 1 skipped**, 15 warnings, 167.45 seconds. The skip is ROCm-specific.
+The examples exercise Mooncake primitives; CPU execution reuses the same lowering
+and its existing manager/worker paths, with the complete relevant regression above.
+
+The request-attached, optional-policy, two-engine and accuracy JSON reports are
+saved under `benchmarks/programmable_kv_cache/results/rfc59708-*.json.gz`. Engine A
+was started before the final timer-compaction edge-case fix and stricter empty
+request_cached refusal; those refinements are covered by targeted CPU regressions.
+Engine B loaded the subsequent runtime. The demonstrated full-range movement and
+long-TTL positive-priority paths are common to both process snapshots.
+
+Final normal pre-commit hooks and manual mypy 3.12 pass. The strict OpenSpec
+validation is recorded with the phase commit. All model servers and the isolated
+development Store started for this phase were stopped after collecting results.
+
+A final composed-policy regression verifies that SET_PRIORITY waits for compatible
+GPU COPY children of the same signal instead of failing on a cold target. TTL
+starts after publication, and a one-action-per-step budget still starts the COPY
+rather than being consumed by waiting priority proposals. The focused policy suite
+passes 18 tests after this dependency refinement. This supplements, rather than
+relabels, the earlier single-policy real run.
+
+The post-refinement complete prefix-cache and engine-control suites pass **261
+tests**, 14 warnings, 85.86 seconds; these overlap the earlier 638-case run. A fresh
+Qwen TP=2 engine with both `retention` and `tool_wait` policies also passes the
+request-attached workflow and the subsequent cold resume: the COPY child's terminal
+sequence precedes SET_PRIORITY's terminal sequence, both complete, and the final
+request hits **784 tokens** with the same output. Every COPY target carries a real
+transfer ID. Full responses are in `results/rfc59708-composed.json.gz`. This is a
+functional composition check, not the pressure/fairness ablation in task 7.4.
+
+Normal pre-commit, manual mypy 3.12 and `openspec validate programmable-kv-cache
+--strict` pass for this branch. The final composed engine and its temporary Store
+were also stopped after verification.

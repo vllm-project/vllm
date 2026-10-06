@@ -229,9 +229,7 @@ class RetentionDeclarations:
                             priorities[content] = max(
                                 priorities.get(content, 0), declaration.priority
                             )
-            self._projection = MappingProxyType(
-                {key: p for key, p in priorities.items() if p}
-            )
+            self._projection = MappingProxyType(priorities)
             self._projection_version = version
         return version, self._projection
 

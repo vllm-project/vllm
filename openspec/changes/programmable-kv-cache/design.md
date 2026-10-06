@@ -376,3 +376,39 @@ mechanisms, and existing KVCR compatibility checks remain first-release work.
 - Local source: `docs/programmable-kvc/chats.md`, especially sections on
   SessionPrefixIndex, KVEvents, request-independent retention, and envelopes.
 - Local source: `docs/programmable-kvc/notes.md`.
+
+## RFC #59708 alignment, authorized 2026-10-06
+
+The `rfc-hint` branch implements the alignment analysis without removing existing
+first-release requirements. Public actions are `vllm.set_priority`, `vllm.copy_to`
+and `vllm.move_to`, version `1.0`; old action names/version `1` remain an explicit
+compatibility profile. One dispatcher validates both profiles. Whole-envelope
+native/backend ownership remains explicit; mixed ownership is not silently added.
+
+SET_PRIORITY accepts the #59714 request_cached/local_g1 payload (claim ID,
+revision, signed value, required positive finite TTL, null clears) and logical
+selectors as an extension. Attached priority and GPU-source movement queue until
+successful completion, before freeing request references. Abort/error cancel the
+queued action. Cold-source COPY executes at ingress, and the request joins the
+existing load barrier. Independent submission is an extension using the same
+executors. A queued lifecycle action is nonterminal and owns no transfer resources;
+resource DEFERRED remains terminal. Explicit hash/session selectors capture their
+logical scope at submission; request_cached and bound request/range selectors are resolved at successful
+completion. A finite end_token fixes the requested range; hash/session selectors
+retain their submission-time snapshot.
+
+COPY/MOVE payloads contain target, src and dst. Locations carry tier (gpu, cpu,
+mooncake) and optional engine_id (omitted means the explicitly addressed engine).
+Only local G1 <-> configured cold tier is supported; GPU-source COPY preserves
+source, GPU-source MOVE reclaims eligible copies after storage succeeds. Cold-source
+MOVE is unsupported because selective cold deletion is not implemented. Cross-engine
+sharing uses two independent COPYs through the shared Store, each engine approving
+its own buffers. Remote engine mutation is never inferred from a location string.
+
+Copy priority records are keyed internally by physical copy lifetime, with bounded
+per-copy revision tombstones until reuse/reset. They feed the existing retention
+queue together with legacy logical declarations; no second eviction heap is added.
+Public target selectors/results contain content identities, not allocator IDs.
+Per-target outcomes are bounded and identify stored/registered/reclaimed, blocked,
+missing and failed scope. Existing all-rank publication and cancellation holds
+remain authoritative. Optional policies lower to these same primitive contracts.

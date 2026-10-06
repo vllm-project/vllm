@@ -17,6 +17,13 @@ from vllm.config.kv_control import KVControlConfig
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.kv_hints.actions import (
+    PRIMITIVE_VERSION,
+    CopyTo,
+    MoveTo,
+    Primitive,
+    SetPriority,
+)
 from vllm.v1.kv_hints.control import (
     ControlContext,
     ControlError,
@@ -37,7 +44,6 @@ from vllm.v1.kv_hints.native import (
     SessionTarget,
     SharePayload,
     SignalPayload,
-    parse_native_action,
 )
 from vllm.v1.kv_hints.policy import (
     CacheObservation,
@@ -51,6 +57,7 @@ from vllm.v1.kv_hints.policy import (
     RequestGuidance,
     RetentionPolicy,
     ToolWaitPolicy,
+    placement,
 )
 from vllm.v1.kv_hints.protocol import KvHintAction, KvHintsEnvelope
 from vllm.v1.kv_hints.state import LogicalResolution
@@ -67,6 +74,9 @@ _BUILTINS = {
     "quota": QuotaPolicy,
 }
 _ACTIONS = {
+    SetPriority: "vllm.set_priority",
+    CopyTo: "vllm.copy_to",
+    MoveTo: "vllm.move_to",
     RetainPayload: "retain",
     ReleasePayload: "release",
     EvictPayload: "evict",
@@ -82,16 +92,6 @@ def _keys(scope: LogicalResolution | None) -> frozenset[tuple[int, str]]:
         for prefix in (scope.prefixes if scope is not None else ())
         for block in (*prefix.blocks, *prefix.partial_blocks)
     )
-
-
-def _placement(action: NativePayload) -> str:
-    if isinstance(action, (RetainPayload, PrefetchPayload)):
-        return "gpu"
-    if isinstance(action, DemotePayload):
-        return "cold"
-    if isinstance(action, EvictPayload):
-        return "evict"
-    return ""
 
 
 @dataclass
@@ -405,6 +405,13 @@ class KVPolicyRuntime:
                         "Policy declaration owner must match its context",
                     )
                 proposed.append((name, owner, proposal))
+                if (
+                    isinstance(proposal.action, SetPriority)
+                    and proposal.action.claim_id != owner
+                ):
+                    raise ControlError(
+                        "invalid_payload", "Policy claim must match its context"
+                    )
         if not consumed:
             self.controller.registry.update(
                 operation,
@@ -432,7 +439,9 @@ class KVPolicyRuntime:
                 hint = KvHintAction(
                     "action",
                     action_type,
-                    "1",
+                    PRIMITIVE_VERSION
+                    if isinstance(action, (SetPriority, CopyTo, MoveTo))
+                    else "1",
                     msgspec.json.decode(msgspec.json.encode(action)),
                 )
                 origin = OperationOrigin(
@@ -456,8 +465,13 @@ class KVPolicyRuntime:
                 scope = None
                 entries = 0
                 try:
-                    parse_native_action(hint)
+                    self.controller.dispatcher.parse(hint)
                     if not isinstance(action, ReleasePayload):
+                        if isinstance(action.target, str):
+                            raise ControlError(
+                                "unsupported",
+                                "Policy proposals require a logical target",
+                            )
                         target = self.controller._target(action.target, request_id)
                         scope = self.controller.index.resolve(target)
                         action = msgspec.structs.replace(action, target=target)
@@ -601,16 +615,18 @@ class KVPolicyRuntime:
             if work.policy_name == name and work.identity == identity:
                 self._cancel(work, "Newer policy observation")
 
-    def before_explicit(self, payload: NativePayload, scope: LogicalResolution) -> None:
-        placement = _placement(payload)
-        if not placement:
+    def before_explicit(
+        self, payload: NativePayload | Primitive, scope: LogicalResolution
+    ) -> None:
+        destination = placement(payload)
+        if not destination:
             return
         keys = _keys(scope)
         for work in (*self._pending.values(), *self._running.values()):
-            other = _placement(work.proposal.action)
+            other = placement(work.proposal.action)
             if (
                 other
-                and other != placement
+                and other != destination
                 and keys.intersection(work.proposal.content_keys)
             ):
                 self._cancel(work, "Explicit command takes precedence")
@@ -640,16 +656,50 @@ class KVPolicyRuntime:
             if work.generation != self._generation():
                 self._cancel(work, "Cache reset invalidated the policy plan")
         ready = [w for w in self._pending.values() if w.proposal.not_before <= now]
-        for work in ready[: self.settings.max_policy_actions_per_step]:
-            del self._pending[work.operation.operation_id]
+        copies: dict[int, list[_Work]] = {}
+        for candidate in (*self._pending.values(), *self._running.values()):
+            if (
+                isinstance(candidate.proposal.action, CopyTo)
+                and candidate.proposal.action.dst.tier == "gpu"
+                and candidate.operation.origin is not None
+            ):
+                copies.setdefault(candidate.operation.origin.operation_id, []).append(
+                    candidate
+                )
+        executed = 0
+        for work in ready:
+            if executed >= self.settings.max_policy_actions_per_step:
+                break
             action = work.proposal.action
+            if isinstance(action, SetPriority) and action.value is not None:
+                origin = work.operation.origin
+                assert origin is not None
+                waiting_for_copy = any(
+                    (
+                        other.operation.operation_id in self._pending
+                        or other.operation.operation_id in self._running
+                    )
+                    and work.proposal.content_keys.intersection(
+                        other.proposal.content_keys
+                    )
+                    for other in copies.get(origin.operation_id, ())
+                )
+                if waiting_for_copy:
+                    registry.update(
+                        work.operation,
+                        OperationStatus.QUEUED,
+                        reason="Awaiting compatible policy COPY",
+                    )
+                    continue
+            del self._pending[work.operation.operation_id]
+            executed += 1
             conflict = False
             if work.scope is not None:
                 executor = self.controller.executor
                 conflict = executor is not None and executor.conflicts_with_explicit(
                     action, work.scope
                 )
-                if isinstance(action, (DemotePayload, EvictPayload)):
+                if isinstance(action, (DemotePayload, MoveTo, EvictPayload)):
                     for (
                         declaration
                     ) in self.controller.declarations.active_declarations():
@@ -673,7 +723,10 @@ class KVPolicyRuntime:
                 )
             else:
                 self.controller.execute_registered(
-                    work.operation, action, resolution=work.scope
+                    work.operation,
+                    action,
+                    resolution=work.scope,
+                    policy_owners=work.owners,
                 )
             result = registry.get(work.operation.message_id, work.operation.action_id)
             if (

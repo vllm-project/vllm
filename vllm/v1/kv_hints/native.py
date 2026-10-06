@@ -104,6 +104,13 @@ class SharePayload(msgspec.Struct, frozen=True, forbid_unknown_fields=True):  # 
     destination_engine_id: Identifier
 
 
+class StorePayload(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    """Internal lowering of COPY from G1; not a legacy wire action."""
+
+    target: Target
+    destination: Literal["cpu", "mooncake"]
+
+
 class ParentPrefix(msgspec.Struct, frozen=True, forbid_unknown_fields=True):  # type: ignore[call-arg]
     session_id: Identifier
     continuation_id: Identifier
@@ -142,6 +149,7 @@ NativePayload: TypeAlias = (
     | AssociatePayload
     | FinishTaskPayload
     | SignalPayload
+    | StorePayload
 )
 
 # These are built-in semantics, not a user-defined hint-handler registry.
@@ -161,10 +169,11 @@ _PAYLOAD_TYPES: dict[str, type[NativePayload]] = {
 class ActionCapability(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
     action_type: str
     action_version: str
-    targets: tuple[Literal["hashes", "session", "request"], ...]
+    targets: tuple[Literal["hashes", "session", "request", "request_cached"], ...]
     tiers: tuple[Tier, ...]
     request_free: bool
     limitations: tuple[str, ...] = ()
+    directions: tuple[str, ...] = ()
 
 
 class ConsumerCapabilities(msgspec.Struct, frozen=True):  # type: ignore[call-arg]

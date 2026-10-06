@@ -67,7 +67,7 @@ class RequestContinuationObserver:
         finally:
             del self._attached[request.request_id]
 
-    def _request(self, target: RequestTarget, request_id: str | None) -> Request:
+    def request(self, target: RequestTarget, request_id: str | None) -> Request:
         identity = request_id if target.request_id == "$request" else target.request_id
         request = (
             None
@@ -89,11 +89,19 @@ class RequestContinuationObserver:
         return request
 
     def resolve(self, target: RequestTarget, request_id: str | None) -> HashTarget:
-        request = self._request(target, request_id)
+        request = self.request(target, request_id)
+        return self._resolve(request, target)
+
+    def resolve_finished(self, request: Request, target: RequestTarget) -> HashTarget:
+        """Resolve completed token content, including detached cached checkpoints."""
+        if not request.is_finished():
+            raise ControlError(
+                "invalid_payload", "Completion scope requires a finished request"
+            )
         return self._resolve(request, target)
 
     def session_for(self, target: RequestTarget, request_id: str | None) -> str | None:
-        return self._request(target, request_id).session_id
+        return self.request(target, request_id).session_id
 
     def _resolve(self, request: Request, target: RequestTarget) -> HashTarget:
         end = request.num_tokens if target.end_token is None else target.end_token
@@ -157,7 +165,7 @@ class RequestContinuationObserver:
                 parent_prefix=payload.parent_prefix,
             )
             return
-        request = self._request(payload.target, request_id)
+        request = self.request(payload.target, request_id)
         if binding is not None and binding.request is not request:
             raise ControlError(
                 "busy", "Use a new continuation for a concurrent request"

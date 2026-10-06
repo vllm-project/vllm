@@ -6,6 +6,13 @@ import math
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
+from vllm.v1.kv_hints.actions import (
+    CacheLocation,
+    CopyTo,
+    MoveTo,
+    Primitive,
+    SetPriority,
+)
 from vllm.v1.kv_hints.native import (
     DemotePayload,
     EvictPayload,
@@ -26,6 +33,7 @@ PolicyAction: TypeAlias = (
     | DemotePayload
     | PrefetchPayload
     | SharePayload
+    | Primitive
 )
 
 
@@ -116,6 +124,7 @@ class RetentionPolicy(KVPolicy):
         _positive(ttl_seconds, "ttl_seconds")
         self.priority = priority
         self.ttl_seconds = ttl_seconds
+        self._revision = 0
 
     def on_signal(
         self, signal: PolicySignal, view: CacheObservation
@@ -126,15 +135,17 @@ class RetentionPolicy(KVPolicy):
         priority = (
             payload.importance if payload.importance is not None else self.priority
         )
+        self._revision += 1
         return PolicyDecision(
             (
                 PolicyProposal(
-                    RetainPayload(
+                    SetPriority(
                         signal.target,
+                        "local_g1",
                         signal.owner_id,
-                        "retention",
-                        priority=priority,
-                        ttl_seconds=self.ttl_seconds,
+                        self._revision,
+                        priority,
+                        self.ttl_seconds,
                     )
                 ),
             )
@@ -158,11 +169,27 @@ class ToolWaitPolicy(KVPolicy):
         payload = signal.payload
         if payload.signal == "tool_wait":
             return PolicyDecision(
-                (PolicyProposal(DemotePayload(signal.target, self.tier)),)
+                (
+                    PolicyProposal(
+                        MoveTo(
+                            signal.target,
+                            CacheLocation("gpu"),
+                            CacheLocation(self.tier),
+                        )
+                    ),
+                )
             )
         if payload.signal == "resume":
             return PolicyDecision(
-                (PolicyProposal(PrefetchPayload(signal.target, self.tier)),)
+                (
+                    PolicyProposal(
+                        CopyTo(
+                            signal.target,
+                            CacheLocation(self.tier),
+                            CacheLocation("gpu"),
+                        )
+                    ),
+                )
             )
         if (
             payload.signal == "resume_prediction"
@@ -171,7 +198,11 @@ class ToolWaitPolicy(KVPolicy):
             return PolicyDecision(
                 (
                     PolicyProposal(
-                        PrefetchPayload(signal.target, self.tier),
+                        CopyTo(
+                            signal.target,
+                            CacheLocation(self.tier),
+                            CacheLocation("gpu"),
+                        ),
                         view.now
                         + max(0.0, payload.resume_after_seconds - self.lead_seconds),
                     ),
@@ -272,6 +303,18 @@ class QuotaPolicy(KVPolicy):
             self._importance.pop(("session", owner), None)
 
 
+def placement(action: object) -> str:
+    if isinstance(action, (RetainPayload, PrefetchPayload)):
+        return "gpu"
+    if isinstance(action, SetPriority):
+        return "gpu" if action.value is not None else ""
+    if isinstance(action, CopyTo):
+        return "gpu" if action.dst.tier == "gpu" else ""
+    if isinstance(action, (DemotePayload, MoveTo)):
+        return "cold"
+    return "evict" if isinstance(action, EvictPayload) else ""
+
+
 class KVPlanComposer:
     """Compose advisory scores; physical conflicts remain engine-checked."""
 
@@ -284,22 +327,14 @@ class KVPlanComposer:
         for proposal in proposals:
             action = proposal.action
             keys = proposal.content_keys
-            placement = (
-                "gpu"
-                if isinstance(action, (RetainPayload, PrefetchPayload))
-                else "cold"
-                if isinstance(action, DemotePayload)
-                else "evict"
-                if isinstance(action, EvictPayload)
-                else ""
-            )
-            conflict = bool(placement) and any(
-                keys.intersection(previous) and placement != destination
-                for previous, destination in accepted
+            destination = placement(action)
+            conflict = bool(destination) and any(
+                keys.intersection(previous) and destination != previous_destination
+                for previous, previous_destination in accepted
             )
             choices.append(not conflict)
-            if placement and not conflict:
-                accepted.append((keys, placement))
+            if destination and not conflict:
+                accepted.append((keys, destination))
         return tuple(choices)
 
     def combine(

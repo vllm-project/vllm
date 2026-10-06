@@ -34,6 +34,8 @@ class KVControlConfig:
     """Maximum serialized control payload size."""
     max_events: int = Field(default=4096, gt=0)
     """Maximum replayable events per operation or association stream."""
+    max_result_targets: int = Field(default=16384, gt=0)
+    """Maximum per-target outcomes, checked before physical allocation."""
     result_ttl: float = Field(default=300.0, gt=0, allow_inf_nan=False)
     """Minimum terminal-result retention in seconds."""
     max_sessions: int = Field(default=4096, gt=0)

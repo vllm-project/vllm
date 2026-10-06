@@ -265,3 +265,54 @@ records a fresh-server run of the final source and actual restart/epoch checks
 (both filenames carry the `qwen3.8-27b-tp2-` prefix). Process boundaries and exact
 commands are recorded in the OpenSpec validation log. These do not establish
 quota fairness or the complete policy/failure workload matrix.
+
+## RFC #59708 primitive reference workflow
+
+The `rfc-hint` branch adds `primitive_control.py`. Start the existing Qwen TP=2
+Mooncake server above with engine ID `primitive-source`, ordinary lookup disabled
+and no local policies. Use the isolated Store configuration described above.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,3 .venv/bin/python \
+  benchmarks/programmable_kv_cache/primitive_control.py \
+  --base-url http://127.0.0.1:18083 --engine-id primitive-source \
+  --dataset /home/youwei/bzh/dataset/openai/gsm8k \
+  --output /tmp/rfc-hint-attached.json
+```
+
+R1 carries `vllm.move_to` and saves/reclaims the selected prefix at successful
+completion. R2 carries `vllm.copy_to` and waits for Store→GPU loading at admission.
+The driver uses a fresh cache salt, asserts every group was actually transferred
+(with transfer IDs), checks cold/GPU milestones, then verifies cached tokens and
+identical greedy outputs. Its request/range selector includes detached hybrid
+checkpoints. This is a real attached-command workflow, not a request-free hint
+sent after R1. COPY at R2 arrival has zero pre-arrival lead time.
+
+To exercise the optional policy producer, start an engine with:
+
+```json
+{"engine_id":"primitive-destination","policies":[{"name":"movement","implementation":"tool_wait","options":{"tier":"mooncake"}}]}
+```
+
+Run the driver against that engine with `--policy`. After the attached workflow,
+it submits explicit signals, follows each derived primitive result, then verifies
+actual reuse. This does not infer tool calls from output tokens. `client.py`
+provides shared envelope creation and queued-aware polling for both controllers.
+
+The existing direct controller now accepts `--primitive-actions`, translating its
+movement/priority recipes to the public primitive profile while retaining explicit
+state commands as compatibility extensions. Add `--destination-url` for two-engine
+COPY through the shared Store, and `--evaluation-samples 128` for the existing
+seeded GSM8K recomputation/movement comparison. Old command names remain available
+without the flag. New example failures preserve a partial JSON report.
+
+Detailed payloads, copy-versus-logical priority lifetimes, ownership restrictions,
+queued versus deferred status, and partial-scope reporting are documented in
+[`vllm/v1/kv_hints/README.md`](../../vllm/v1/kv_hints/README.md).
+
+The recorded `rfc59708-*.json.gz` results cover request-attached execution, the
+optional movement policy, two-engine COPY and the 128-question accuracy comparison.
+`rfc59708-composed.json.gz` additionally enables both `retention` and `tool_wait`:
+the cold COPY finishes before its companion SET_PRIORITY applies, so TTL begins
+on an actual cached copy. The resumed request again hits 784 tokens. These are
+functional reference examples; broader policy/pressure comparisons remain open.

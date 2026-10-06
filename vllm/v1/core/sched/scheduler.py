@@ -76,6 +76,7 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.v1.kv_hints.dispatch import KvHintDispatcher
     from vllm.v1.kv_hints.policy_runtime import KVPolicyRuntime
 
 
@@ -93,6 +94,7 @@ class Scheduler(SchedulerInterface):
     ) -> None:
         self.vllm_config = vllm_config
         self.kv_policy_runtime: KVPolicyRuntime | None = None
+        self.kv_hint_dispatcher: KvHintDispatcher | None = None
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -2677,6 +2679,9 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
+
+        if self.kv_hint_dispatcher is not None:
+            self.kv_hint_dispatcher.finish(request)
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)

@@ -46,8 +46,8 @@ and compressed artifacts in `benchmarks/programmable_kv_cache/results/`.
 | Demotion lifecycle | `transfers.py` and CPU/Store adapters; queued source-reference tests; recorded real CPU/Store copies | Full failure workload |
 | Proactive preparation | Transfer leases, all-rank publication; Store/CPU scheduler and worker suites; recorded 784-token reuse | Executed closed-loop resume race (7.9) |
 | Cross-engine reuse | `http_control.py --destination-url`; recorded `mooncake-cross-engine.json.gz` | Other models/layouts |
-| Complete native G2 path | Explicit Demote/Prefetch path has real Store and Qwen evidence | Optional native-policy G2 trace and reuse (7.11) |
-| Programmable local policy | `policy.py`, `policy_runtime.py`; derived-operation and invalidation tests in `test_prefix_caching.py` | Real policy movement and performance |
+| Complete native G2 path | Legacy actions and version-1.0 primitives have real Store/Qwen evidence; request-attached and opt-in native-policy G2 traces pass on rfc-hint | Broader workload and external model validation |
+| Programmable local policy | `policy.py`, `policy_runtime.py`; derived primitive tests and real tool-wait/resume Mooncake execution on rfc-hint | Policy performance/pressure comparisons |
 | Multi-policy composition | Composer and common transfer leases; tests for duplicate proposals, finite capacity and independent cancellation | Policy ablations and adverse workloads (7.4) |
 | Request/KV cooperation | Real quota/scheduler tests check priority and maximum waiting; the October 6 Qwen quota-enabled correctness run is recorded separately | Fairness, admission-delay and overhead matrix (7.5) |
 | Logical lifecycle completion | `finish_task` and independent declaration tests in state/control/cache suites | Full runnable workflow (7.7) |
@@ -122,3 +122,9 @@ Payloads, whole-envelope routing, revisions and snapshot/follow-growth scope are
 specified in `implementation.md` and implemented in the native modules. The open
 items are the incomplete acceptance rows above and the task list, including
 residency reporting, real workload integration and live weight invalidation.
+
+The `rfc-hint` implementation adds the public primitive profile and the concrete
+request lifecycle described in `vllm/v1/kv_hints/README.md`. Result scope now includes
+per-target transfer IDs/generations. These additions complete alignment tasks
+9.1–9.6 and the previously unexecuted native-policy G2 acceptance (7.11); they do
+not complete the remaining rollout/RL/residency/fairness requirements.

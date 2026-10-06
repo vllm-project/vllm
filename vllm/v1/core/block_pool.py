@@ -226,11 +226,15 @@ class BlockPool:
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
         self._retention_queue: RetentionFreeBlockQueue | None = None
+        self._forget_priority: Callable[[KVCacheBlock], None] | None = None
 
     def configure_retention(
         self,
-        priority: Callable[[BlockHashWithGroupId], int],
+        priority: Callable[[BlockHashWithGroupId], int | None],
         synchronize: Callable[[], Iterable[BlockHashWithGroupId]],
+        *,
+        copy_priority: Callable[[KVCacheBlock], int | None] | None = None,
+        forget_priority: Callable[[KVCacheBlock], None] | None = None,
     ) -> None:
         """Install engine-owned priority ordering once, before serving requests."""
         from vllm.v1.core.kv_cache_retention import RetentionFreeBlockQueue
@@ -241,10 +245,20 @@ class BlockPool:
             )
 
         def block_priority(block: KVCacheBlock) -> int:
-            result = priority(block.block_hash) if block.block_hash is not None else 0
+            values = []
+            if block.block_hash is not None:
+                value = priority(block.block_hash)
+                if value is not None:
+                    values.append(value)
             for alias in self.cached_block_hashes_by_block.get(block.block_id, ()):
-                result = max(result, priority(alias))
-            return result
+                value = priority(alias)
+                if value is not None:
+                    values.append(value)
+            if copy_priority is not None:
+                value = copy_priority(block)
+                if value is not None:
+                    values.append(value)
+            return max(values, default=0)
 
         def refresh() -> None:
             assert self._retention_queue is not None
@@ -259,6 +273,7 @@ class BlockPool:
             refresh,
         )
         self.free_block_queue = self._retention_queue
+        self._forget_priority = forget_priority
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -659,6 +674,8 @@ class BlockPool:
         self,
         block: KVCacheBlock,
     ) -> list[BlockHashWithGroupId]:
+        if self._forget_priority is not None:
+            self._forget_priority(block)
         block_hashes: list[BlockHashWithGroupId] = []
         if block.block_hash is not None:
             block_hashes.append(block.block_hash)
@@ -989,6 +1006,8 @@ class BlockPool:
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
+            if self._forget_priority is not None:
+                self._forget_priority(block)
             block.reset_hash()
 
         if self._retention_queue is not None:

@@ -6809,6 +6809,9 @@ def test_policy_signal_receipt_and_duplicate_do_not_claim_gpu_readiness():
     assert parent.status == OperationStatus.COMPLETED
     children = derived_results(controller, parent)
     assert [c.status for c in children] == [OperationStatus.RUNNING] * 2
+    assert {(c.action_type, c.action_version) for c in children} == {
+        ("vllm.copy_to", "1.0")
+    }
     assert {c.origin.policy_name for c in children} == {"first", "second"}
     assert len(adapter.jobs) == 1
     assert manager.get_computed_blocks(request)[1] == 0
@@ -7045,3 +7048,239 @@ def test_policy_cancel_preserves_an_explicit_shared_transfer_interest():
     assert manager.get_computed_blocks(request)[1] == 4
     runtime.tick(force=True)
     assert runtime.observation().pending_policy_actions == 0
+
+
+def submit_primitive(controller, message_id, action, payload):
+    registry = controller.registry
+    return controller.submit(
+        KvHintsEnvelope("0.1", message_id, [KvHintAction("a", action, "1.0", payload)]),
+        ControlContext(registry.engine_id, registry.engine_epoch, "native"),
+    ).results[0]
+
+
+def priority_primitive(
+    controller, target, message, claim="claim", revision=1, value=10, ttl=10
+):
+    return submit_primitive(
+        controller,
+        message,
+        "vllm.set_priority",
+        {
+            "target": target,
+            "location": "local_g1",
+            "claim_id": claim,
+            "revision": revision,
+            "value": value,
+            "ttl_seconds": ttl if value is not None else None,
+        },
+    )
+
+
+def test_copy_priority_overlaps_revisions_and_expiry_share_existing_eviction_queue():
+    manager, request, controller, _, target = make_movement_controller()
+    manager.allocate_slots(request, 5)
+    (block,) = manager.get_blocks(request.request_id).blocks[0][:1]
+    manager.free(request)
+    now = [0.0]
+    copies = controller.executor.retention_priority.copies
+    copies.clock = lambda: now[0]
+    assert (
+        priority_primitive(
+            controller, target, "low", claim="low", value=-10, ttl=100
+        ).status
+        == "completed"
+    )
+    assert (
+        priority_primitive(controller, target, "high", value=20).status == "completed"
+    )
+    assert copies.priority(block) == 20
+    conflict = priority_primitive(controller, target, "conflict", value=30)
+    assert conflict.status == "failed"
+    now[0] = 9
+    assert priority_primitive(controller, target, "retry").status == "failed"
+    replay = priority_primitive(controller, target, "replay", value=20)
+    assert replay.affected_blocks == 0
+    now[0] = 10
+    # Expiry reveals the independent negative claim, before any unhashed free block.
+    assert manager.block_pool.get_new_blocks(1) == [block]
+    assert block.ref_cnt == 1
+    assert block.block_hash is None
+
+
+@pytest.mark.parametrize("cleanup", ["reuse", "reset"])
+def test_copy_priority_tombstones_end_with_the_physical_copy(cleanup):
+    manager, request, controller, _, target = make_movement_controller()
+    manager.allocate_slots(request, 5)
+    block = manager.get_blocks(request.request_id).blocks[0][0]
+    key = block.block_hash
+    manager.free(request)
+    priority_primitive(controller, target, "original", revision=5, value=90)
+    priority_primitive(controller, target, "clear", revision=6, value=None)
+    old = priority_primitive(controller, target, "old", revision=5, value=90)
+    assert old.affected_blocks == 0
+    pool = manager.block_pool
+    if cleanup == "reset":
+        assert manager.reset_prefix_cache()
+    held = pool.get_new_blocks(pool.get_num_free_blocks())
+    assert block in held
+    pool.cache_transferred_block(block, key, 4)
+    renewed = priority_primitive(controller, target, "new-copy", revision=1, value=-5)
+    assert renewed.status == "completed" and renewed.affected_blocks == 1
+    pool.free_blocks(held)
+    assert pool.get_new_blocks(1) == [block]
+
+
+def test_primitive_copy_preserves_source_and_move_reports_per_target_reclamation():
+    manager, request, controller, adapter, target = make_movement_controller()
+    manager.allocate_slots(request, 5)
+    manager.free(request)
+    copy = submit_primitive(
+        controller,
+        "copy",
+        "vllm.copy_to",
+        {
+            "target": target,
+            "src": {"tier": "gpu"},
+            "dst": {"tier": "mooncake"},
+        },
+    )
+    assert copy.status == "running"
+    adapter.finish()
+    controller.executor.progress()
+    copy = controller.registry.get("copy", "a")
+    assert copy.status == "completed" and copy.completed_steps == ("cold_copy_stored",)
+    assert manager.get_computed_blocks(request)[1] == 4
+    assert copy.target_outcomes[0].block_hash == target["blocks"][0]["block_hash"]
+    move = submit_primitive(
+        controller,
+        "move",
+        "vllm.move_to",
+        {
+            "target": target,
+            "src": {"tier": "gpu"},
+            "dst": {"tier": "mooncake"},
+        },
+    )
+    assert move.status == "running"
+    adapter.finish()
+    controller.executor.progress()
+    move = controller.registry.get("move", "a")
+    assert move.status == "completed"
+    assert move.target_outcomes[0].completed_steps == (
+        "cold_copy_stored",
+        "gpu_copies_reclaimed",
+    )
+    assert manager.get_computed_blocks(request)[1] == 0
+
+
+def test_copy_target_results_identify_deferred_scope_before_retry():
+    manager, request, controller, adapter, target = make_movement_controller(
+        num_blocks=2
+    )
+    blocks = [
+        *target["blocks"],
+        {
+            "group_id": 0,
+            "block_hash": request.block_hashes[1].hex(),
+            "start_token": 4,
+            "end_token": 8,
+        },
+    ]
+    result = submit_primitive(
+        controller,
+        "partial",
+        "vllm.copy_to",
+        {
+            "target": {**target, "blocks": blocks},
+            "src": {"tier": "mooncake"},
+            "dst": {"tier": "gpu"},
+        },
+    )
+    assert result.status == "running"
+    adapter.finish()
+    controller.executor.progress()
+    result = controller.registry.get("partial", "a")
+    assert result.status == "partial"
+    assert [(r.end_token, r.status) for r in result.target_outcomes] == [
+        (4, "completed"),
+        (8, "deferred"),
+    ]
+    controller.registry.max_result_targets = 1
+    free = manager.block_pool.get_num_free_blocks()
+    result = submit_primitive(
+        controller,
+        "bounded",
+        "vllm.copy_to",
+        {
+            "target": {**target, "blocks": blocks},
+            "src": {"tier": "mooncake"},
+            "dst": {"tier": "gpu"},
+        },
+    )
+    assert result.status == "deferred" and not adapter.jobs
+    assert manager.block_pool.get_num_free_blocks() == free
+
+
+def test_copy_priority_compaction_cannot_drop_an_unprocessed_expiry():
+    manager, request, controller, _, target = make_movement_controller(num_blocks=4)
+    manager.allocate_slots(request, 12)
+    blocks = list(manager.get_blocks(request.request_id).blocks[0])
+    manager.free(request)
+    pool = manager.block_pool
+    first = pool.free_block_queue.get_all_free_blocks()[0]
+    index = blocks.index(first)
+    selected = {
+        **target,
+        "blocks": [
+            {
+                "group_id": 0,
+                "block_hash": request.block_hashes[index].hex(),
+                "start_token": index * 4,
+                "end_token": (index + 1) * 4,
+            }
+        ],
+    }
+    copies = controller.executor.retention_priority.copies
+    copies.clock = lambda: 0.0
+    for revision in range(64):
+        assert (
+            priority_primitive(
+                controller, selected, str(revision), revision=revision, ttl=1
+            ).status
+            == "completed"
+        )
+    copies.clock = iter([0.0, 0.0, 2.0]).__next__
+    assert (
+        priority_primitive(controller, selected, "compact", revision=64, ttl=1).status
+        == "completed"
+    )
+    assert pool.get_new_blocks(1) == [first]
+
+
+def test_composed_retention_waits_for_copy_before_starting_its_ttl():
+    from vllm.v1.kv_hints.policy import RetentionPolicy
+
+    manager, request, controller, adapter, target = make_movement_controller()
+    runtime, now = install_movement_policies(
+        manager, controller, "movement", max_policy_actions_per_step=1
+    )
+    runtime.policies = {"retention": RetentionPolicy(ttl_seconds=5), **runtime.policies}
+    copies = controller.executor.retention_priority.copies
+    copies.clock = lambda: now[0]
+    parent = submit_movement(
+        controller, "resume-retain", "signal", {"target": target, "signal": "resume"}
+    )
+    priority, copy = derived_results(controller, parent)
+    assert priority.action_type == "vllm.set_priority" and priority.status == "queued"
+    assert copy.action_type == "vllm.copy_to" and copy.status == "running"
+    now[0] = 10
+    adapter.finish()
+    controller.executor.progress()
+    runtime.tick(force=True)
+    priority, copy = derived_results(controller, parent)
+    assert priority.status == copy.status == "completed"
+    (block,) = manager.get_computed_blocks(request)[0].blocks[0]
+    assert copies.priority(block) == 50
+    now[0] = 15
+    copies.expire()
+    assert copies.priority(block) is None

@@ -237,3 +237,19 @@ Scheduler guidance refreshes at `policy_interval_seconds`, or after a new signal
 or transfer generation change. Cached guidance remains advisory, with the maximum
 policy waiting time checked against the current clock on every admission. Signal
 observations remain fresh and execution always revalidates physical resources.
+
+## RFC #59708 reference branch
+
+The user authorized `rfc-hint` on 2026-10-06. The primitive contract and exact
+request lifecycle are now documented in `vllm/v1/kv_hints/README.md`. Native
+version 1.0 primitives coexist with the version 1 compatibility actions. QUEUED
+is a nonterminal lifecycle wait, whereas DEFERRED remains terminal. Per-target
+movement outcomes include transfer ID/generation and distinguish actual transfers
+from already-resident data. `request_cached` refers to held copies; explicit
+request/range selectors use logical token hashes and include detached checkpoints.
+
+SET_PRIORITY is copy-scoped with revisions, signed values and mandatory TTL;
+legacy Retain remains content-scoped. These share one eviction queue. Optional
+retention/tool-wait policies emit the primitives. No public Pin, runtime plugin
+replacement, mixed interpreter envelope, remote GPU mutation, or cold deletion
+was added. The broader first-release tasks remain as tracked in tasks.md.

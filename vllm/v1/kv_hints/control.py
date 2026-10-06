@@ -28,6 +28,7 @@ class ControlError(ValueError):
 
 class OperationStatus(str, Enum):
     RECEIVED = "received"
+    QUEUED = "queued"
     ACCEPTED = "accepted"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -43,6 +44,7 @@ class OperationStatus(str, Enum):
     def terminal(self) -> bool:
         return self not in (
             OperationStatus.RECEIVED,
+            OperationStatus.QUEUED,
             OperationStatus.ACCEPTED,
             OperationStatus.RUNNING,
         )
@@ -71,6 +73,19 @@ class ControlContext:
 
 
 @dataclass(frozen=True)
+class TargetOutcome:
+    block_hash: str | None
+    group_id: int | None
+    start_token: int
+    end_token: int
+    status: OperationStatus
+    completed_steps: tuple[str, ...] = ()
+    reason: str = ""
+    transfer_id: int | None = None
+    generation: int | None = None
+
+
+@dataclass(frozen=True)
 class OperationResult:
     engine_id: str
     engine_epoch: str
@@ -90,6 +105,9 @@ class OperationResult:
     displaced_blocks: int = 0
     origin: OperationOrigin | None = None
     derived_operations: tuple[OperationReference, ...] = ()
+    target_outcomes: tuple[TargetOutcome, ...] = ()
+    action_type: str = ""
+    action_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -221,13 +239,20 @@ class OperationRegistry:
         max_actions: int = 128,
         max_envelope_bytes: int = 1 << 20,
         max_events: int = 4096,
+        max_result_targets: int = 16384,
         result_ttl: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
     ):
         _validate_id(engine_id, "engine_id")
         if any(
             type(n) is not int or n < 1
-            for n in (max_records, max_actions, max_envelope_bytes, max_events)
+            for n in (
+                max_records,
+                max_actions,
+                max_envelope_bytes,
+                max_events,
+                max_result_targets,
+            )
         ):
             raise ValueError("Control limits must be positive integers")
         if not math.isfinite(result_ttl) or result_ttl <= 0:
@@ -241,6 +266,7 @@ class OperationRegistry:
         self.max_actions = max_actions
         self.max_envelope_bytes = max_envelope_bytes
         self.result_ttl = result_ttl
+        self.max_result_targets = max_result_targets
         self._clock = clock
         self._messages: dict[str, _Message] = {}
         self._expiry: list[tuple[float, str]] = []
@@ -306,6 +332,8 @@ class OperationRegistry:
                 binding_id=context.binding_id,
                 namespace=context.namespace,
                 origin=context.origin,
+                action_type=action.action_type,
+                action_version=action.action_version,
             )
             results[action.action_id] = result
             self._events.append(result)
@@ -327,6 +355,7 @@ class OperationRegistry:
         missing_targets: int | None = None,
         displaced_blocks: int | None = None,
         derived_operations: tuple[OperationReference, ...] | None = None,
+        target_outcomes: tuple[TargetOutcome, ...] | None = None,
     ) -> OperationResult:
         """Publish progress after the executor has validated the physical outcome."""
         self.validate_context(
@@ -343,6 +372,8 @@ class OperationRegistry:
             or operation.consumer != current.consumer
             or operation.namespace != current.namespace
             or operation.origin != current.origin
+            or operation.action_type != current.action_type
+            or operation.action_version != current.action_version
         ):
             raise ControlError(
                 "stale_operation", "Completion refers to an expired action"
@@ -363,6 +394,15 @@ class OperationRegistry:
         if len(reason) > 4096:
             raise ValueError("Operation reason exceeds 4096 characters")
         steps = current.completed_steps if completed_steps is None else completed_steps
+        outcomes = (
+            current.target_outcomes if target_outcomes is None else target_outcomes
+        )
+        if (
+            not isinstance(outcomes, tuple)
+            or len(outcomes) > self.max_result_targets
+            or any(not isinstance(outcome, TargetOutcome) for outcome in outcomes)
+        ):
+            raise ValueError("Target outcomes exceed the supported bounded scope")
         derived = (
             current.derived_operations
             if derived_operations is None
@@ -399,6 +439,7 @@ class OperationRegistry:
             and reason == current.reason
             and steps == current.completed_steps
             and derived == current.derived_operations
+            and outcomes == current.target_outcomes
             and all(getattr(current, name) == value for name, value in counts.items())
         ):
             return current
@@ -406,9 +447,16 @@ class OperationRegistry:
             raise ControlError("terminal", "An operation outcome is already terminal")
         if status == OperationStatus.RECEIVED or (
             status == OperationStatus.RUNNING
-            and current.status == OperationStatus.RECEIVED
+            and current.status in (OperationStatus.RECEIVED, OperationStatus.QUEUED)
         ):
             raise ControlError("transition", "Operation has not been approved")
+        if (
+            status == OperationStatus.QUEUED
+            and current.status != OperationStatus.RECEIVED
+        ):
+            raise ControlError(
+                "transition", "Only received operations can wait for lifecycle dispatch"
+            )
         if (
             status == OperationStatus.ACCEPTED
             and current.status == OperationStatus.RUNNING
@@ -428,6 +476,7 @@ class OperationRegistry:
             missing_targets=counts["missing_targets"],
             displaced_blocks=counts["displaced_blocks"],
             derived_operations=derived,
+            target_outcomes=outcomes,
         )
         message = self._messages[operation.message_id]
         message.results[operation.action_id] = result

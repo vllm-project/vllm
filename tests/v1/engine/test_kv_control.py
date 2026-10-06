@@ -535,3 +535,256 @@ def test_inproc_control_advances_idle_transfers_without_consuming_inference(
     if inference_active:
         client.get_output()
         assert manager.get_computed_blocks(request)[1] == 4
+
+
+def primitive_envelope(name, kind, payload):
+    return KvHintsEnvelope("0.1", name, [KvHintAction("action", kind, "1.0", payload)])
+
+
+def primitive_scheduler(*, async_scheduling=False):
+    from tests.v1.core.test_prefix_caching import QueuedControlTransfers
+    from tests.v1.core.utils import create_scheduler
+    from vllm.v1.kv_hints.transfers import KVTransferOperations
+
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        num_blocks=9,
+        max_num_seqs=2,
+        max_num_batched_tokens=128,
+        async_scheduling=async_scheduling,
+    )
+    scheduler.vllm_config.kv_control_config = KVControlConfig(engine_id="test")
+    service = create_control_service(
+        scheduler.vllm_config,
+        scheduler.kv_cache_manager,
+        "default",
+        request_lookup=scheduler.requests.get,
+    )
+    controller = service.controller
+    adapter = QueuedControlTransfers()
+    controller.executor.transfers = KVTransferOperations(
+        scheduler.kv_cache_manager,
+        controller.registry,
+        controller.index.namespace,
+        (adapter,),
+    )
+    scheduler.kv_hint_dispatcher = controller.dispatcher
+    engine = object.__new__(EngineCore)
+    engine.scheduler = scheduler
+    engine.vllm_config = scheduler.vllm_config
+    engine.kv_control_service = service
+    return engine, controller, adapter
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("abort", [False, True])
+def test_attached_move_acquires_source_holds_at_successful_completion(
+    async_scheduling, abort
+):
+    from vllm.v1.outputs import ModelRunnerOutput
+
+    engine, controller, adapter = primitive_scheduler(async_scheduling=async_scheduling)
+    request = token_request("producer", [1] * 32)
+    request.sampling_params.max_tokens = request.max_tokens = 1
+    request.kv_hints = primitive_envelope(
+        "move",
+        "vllm.move_to",
+        {
+            "target": "request_cached",
+            "src": {"tier": "gpu"},
+            "dst": {"tier": "mooncake"},
+        },
+    )
+    engine.add_request(request)
+    assert request.kv_hints is None
+    operation = controller.registry.get("move", "action")
+    assert operation.status == "queued" and not operation.status.terminal
+    assert not adapter.jobs
+    scheduled = engine.scheduler.schedule()
+    manager = engine.scheduler.kv_cache_manager
+    blocks = list(manager.get_blocks(request.request_id).blocks[0])
+    if abort:
+        engine.abort_requests([request.request_id])
+    else:
+        engine.scheduler.update_from_output(
+            scheduled,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[0]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+    result = controller.registry.get("move", "action")
+    assert result.status == ("cancelled" if abort else "running")
+    if abort:
+        assert not adapter.jobs
+    else:
+        assert len(adapter.jobs) == 2
+        assert all(block.ref_cnt >= 1 for block in blocks)
+        adapter.finish()
+        controller.executor.progress()
+        result = controller.registry.get("move", "action")
+        assert result.status == "completed"
+        assert result.completed_steps == ("cold_copy_stored", "gpu_copies_reclaimed")
+        assert all(block.ref_cnt == 0 and block.block_hash is None for block in blocks)
+    assert request.is_finished()
+    assert not controller.dispatcher._pending
+
+
+def test_attached_priority_ttl_starts_at_completion_and_duplicate_does_not_renew():
+    from vllm.v1.outputs import ModelRunnerOutput
+
+    engine, controller, _ = primitive_scheduler()
+    now = [0.0]
+    copies = controller.executor.retention_priority.copies
+    copies.clock = lambda: now[0]
+    request = token_request("priority", [1] * 32)
+    request.sampling_params.max_tokens = request.max_tokens = 1
+    hint = primitive_envelope(
+        "retain",
+        "vllm.set_priority",
+        {
+            "target": "request_cached",
+            "location": "local_g1",
+            "claim_id": "router/task",
+            "revision": 1,
+            "value": -10,
+            "ttl_seconds": 5,
+        },
+    )
+    request.kv_hints = hint
+    engine.add_request(request)
+    scheduled = engine.scheduler.schedule()
+    blocks = list(
+        engine.scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[0]
+    )
+    assert all(copies.priority(b) is None for b in blocks)
+    now[0] = 100
+    engine.scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert controller.registry.get("retain", "action").status == "completed"
+    assert all(copies.priority(b) == -10 for b in blocks)
+    now[0] = 104
+    registry = controller.registry
+    replay = controller.submit(
+        hint,
+        ControlContext(registry.engine_id, registry.engine_epoch, "native"),
+        request_id=request.request_id,
+    )
+    assert replay.replayed
+    now[0] = 105
+    copies.expire()
+    assert all(copies.priority(b) is None for b in blocks)
+
+
+def test_primitive_location_cannot_mutate_another_engine():
+    service = make_service()
+    registry = service.controller.registry
+    result = service.controller.submit(
+        primitive_envelope(
+            "remote",
+            "vllm.copy_to",
+            {
+                "target": {
+                    "kind": "hashes",
+                    "namespace": service.controller.index.namespace,
+                    "blocks": [],
+                },
+                "src": {"tier": "mooncake"},
+                "dst": {"tier": "gpu", "engine_id": "another"},
+            },
+        ),
+        ControlContext(registry.engine_id, registry.engine_epoch, "native"),
+    ).results[0]
+    assert result.status == "unsupported" and "Remote engines" in result.reason
+
+
+@pytest.mark.parametrize("logical", [False, True])
+def test_completion_range_resolves_cached_checkpoints_no_longer_held_by_request(
+    logical,
+):
+    from vllm.v1.request import RequestStatus
+
+    engine, controller, adapter = primitive_scheduler()
+    request = token_request("detached", [1] * 33)
+    manager = engine.scheduler.kv_cache_manager
+    manager.allocate_slots(request, 32)
+    manager.free(request)
+    assert not manager.get_blocks(request.request_id).blocks[0]
+    target = (
+        {"kind": "request", "request_id": "$request", "end_token": 32}
+        if logical
+        else "request_cached"
+    )
+    request.kv_hints = primitive_envelope(
+        "detached",
+        "vllm.copy_to",
+        {
+            "target": target,
+            "src": {"tier": "gpu"},
+            "dst": {"tier": "mooncake"},
+        },
+    )
+    engine.add_request(request)
+    engine.scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
+    result = controller.registry.get("detached", "action")
+    assert result.status == ("running" if logical else "missing")
+    assert len(adapter.jobs) == (2 if logical else 0)
+    if logical:
+        adapter.finish()
+        controller.executor.progress()
+        result = controller.registry.get("detached", "action")
+        assert [o.end_token for o in result.target_outcomes] == [16, 32]
+        assert all(o.transfer_id is not None for o in result.target_outcomes)
+
+
+def test_primitive_dispatch_preserves_valid_siblings_and_explicit_backend_ownership():
+    engine, controller, adapter = primitive_scheduler()
+    request = token_request("mixed-validity", [1] * 32)
+    good = primitive_envelope(
+        "siblings",
+        "vllm.set_priority",
+        {
+            "target": "request_cached",
+            "location": "local_g1",
+            "claim_id": "router",
+            "revision": 1,
+            "value": 5,
+            "ttl_seconds": 10,
+        },
+    )
+    request.kv_hints = KvHintsEnvelope(
+        "0.1",
+        "siblings",
+        [
+            KvHintAction("invalid", "vllm.move_to", "future", {}),
+            *good.actions,
+        ],
+    )
+    engine.add_request(request)
+    assert controller.registry.get("siblings", "invalid").status == "unsupported"
+    assert controller.registry.get("siblings", "action").status == "queued"
+    engine.abort_requests([request.request_id])
+    assert controller.registry.get("siblings", "action").status == "cancelled"
+    registry = controller.registry
+    assert (
+        controller.consume_attached(
+            good,
+            ControlContext(registry.engine_id, registry.engine_epoch, "backend"),
+            request_id="opaque",
+        )
+        is None
+    )
+    assert not adapter.jobs

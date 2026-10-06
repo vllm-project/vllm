@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 import msgspec
 
 from vllm.logger import init_logger
+from vllm.v1.kv_hints.actions import CopyTo, MoveTo, Primitive, SetPriority
 from vllm.v1.kv_hints.control import (
     ControlContext,
     ControlError,
@@ -38,8 +39,8 @@ from vllm.v1.kv_hints.native import (
     SessionTarget,
     SharePayload,
     SignalPayload,
+    StorePayload,
     Target,
-    parse_native_action,
 )
 from vllm.v1.kv_hints.protocol import KvHintsEnvelope
 from vllm.v1.kv_hints.retention import RetentionDeclarations
@@ -50,7 +51,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 PhysicalPayload: TypeAlias = (
-    EvictPayload | DemotePayload | PrefetchPayload | SharePayload
+    EvictPayload | DemotePayload | PrefetchPayload | SharePayload | StorePayload
 )
 RequestResolver: TypeAlias = Callable[[RequestTarget, str | None], HashTarget]
 logger = init_logger(__name__)
@@ -60,6 +61,21 @@ class KVOperationExecutor(Protocol):
     """Engine resource authority; adapters cannot replace this approval boundary."""
 
     def capabilities(self) -> tuple[ActionCapability, ...]: ...
+
+    manager: Any
+
+    def request_scope(
+        self, request: "Request", target: RequestTarget | str
+    ) -> LogicalResolution: ...
+
+    def apply_priority(
+        self,
+        operation: OperationResult,
+        action: SetPriority,
+        scope: LogicalResolution,
+        request: "Request | None",
+        owners: tuple[str, ...] = (),
+    ) -> None: ...
 
     def validate_scope(self, target: LogicalResolution) -> None: ...
 
@@ -77,14 +93,19 @@ class KVOperationExecutor(Protocol):
     def cancel_operations(self, operation_ids: set[int], reason: str) -> None: ...
 
     def conflicts_with_explicit(
-        self, payload: NativePayload, scope: LogicalResolution
+        self, payload: NativePayload | Primitive, scope: LogicalResolution
     ) -> bool: ...
 
 
 class KVRequestObserver(Protocol):
+    def request(self, target: RequestTarget, request_id: str | None) -> "Request": ...
     def attach(self, request: "Request") -> AbstractContextManager[None]: ...
 
     def resolve(self, target: RequestTarget, request_id: str | None) -> HashTarget: ...
+
+    def resolve_finished(
+        self, request: "Request", target: RequestTarget
+    ) -> HashTarget: ...
 
     def associate(
         self,
@@ -125,6 +146,9 @@ class NativeKVController:
         self.cache_profile = cache_profile
         self.request_observer = request_observer
         self.policies: KVPolicyRuntime | None = None
+        from vllm.v1.kv_hints.dispatch import KvHintDispatcher
+
+        self.dispatcher = KvHintDispatcher(self)
 
     def submit(
         self,
@@ -168,39 +192,47 @@ class NativeKVController:
             return self._submission(receipt)
 
         # Validate every native payload before executing any of the actions.
-        parsed: list[NativePayload | ControlError] = []
+        parsed: list[NativePayload | Primitive | ControlError] = []
         for action in envelope.actions:
             try:
-                parsed.append(parse_native_action(action))
+                parsed.append(self.dispatcher.parse(action))
             except ControlError as error:
                 parsed.append(error)
         for operation, payload in zip(receipt.results, parsed):
-            self.execute_registered(operation, payload, request_id=request_id)
+            self.execute_registered(
+                operation,
+                payload,
+                request_id=request_id,
+                attached=request_id is not None,
+            )
         return self._submission(receipt)
 
     def execute_registered(
         self,
         operation: OperationResult,
-        payload: NativePayload | ControlError,
+        payload: NativePayload | Primitive | ControlError,
         *,
         request_id: str | None = None,
         resolution: LogicalResolution | None = None,
+        attached: bool = False,
+        policy_owners: tuple[str, ...] = (),
     ) -> None:
         try:
             if isinstance(payload, ControlError):
                 raise payload
-            self._execute(operation, payload, request_id, resolution)
+            if isinstance(payload, (SetPriority, CopyTo, MoveTo)):
+                self.dispatcher.execute(
+                    operation,
+                    payload,
+                    request_id=request_id,
+                    resolution=resolution,
+                    attached=attached,
+                    owners=policy_owners,
+                )
+            else:
+                self._execute(operation, payload, request_id, resolution)
         except ControlError as error:
-            status = {
-                "unsupported": OperationStatus.UNSUPPORTED,
-                "unsupported_action": OperationStatus.UNSUPPORTED,
-                "unsupported_version": OperationStatus.UNSUPPORTED,
-                "missing": OperationStatus.MISSING,
-                "missing_association": OperationStatus.MISSING,
-                "capacity": OperationStatus.DEFERRED,
-                "busy": OperationStatus.DEFERRED,
-            }.get(error.code, OperationStatus.FAILED)
-            self._record_failure(operation, status, f"{error.code}: {error}"[:4096])
+            self.record_error(operation, error)
         except Exception as error:
             logger.exception(
                 "KV control failed for message %r action %r",
@@ -271,6 +303,7 @@ class NativeKVController:
                         targets=tuple(dict.fromkeys((*capability.targets, "request"))),
                     )
                 actions.append(capability)
+        actions.extend(self.dispatcher.capabilities())
         return ConsumerCapabilities(
             self.registry.engine_id,
             self.registry.engine_epoch,
@@ -414,7 +447,14 @@ class NativeKVController:
                 self.policies.cleanup(owners)
         else:
             assert isinstance(
-                payload, (EvictPayload, DemotePayload, PrefetchPayload, SharePayload)
+                payload,
+                (
+                    EvictPayload,
+                    DemotePayload,
+                    PrefetchPayload,
+                    SharePayload,
+                    StorePayload,
+                ),
             )
             if self.executor is None:
                 raise ControlError(
@@ -471,3 +511,15 @@ class NativeKVController:
             if current.completed_steps:
                 status = OperationStatus.PARTIAL
             self.registry.update(operation, status, reason=reason)
+
+    def record_error(self, operation: OperationResult, error: ControlError) -> None:
+        status = {
+            "unsupported": OperationStatus.UNSUPPORTED,
+            "unsupported_action": OperationStatus.UNSUPPORTED,
+            "unsupported_version": OperationStatus.UNSUPPORTED,
+            "missing": OperationStatus.MISSING,
+            "missing_association": OperationStatus.MISSING,
+            "capacity": OperationStatus.DEFERRED,
+            "busy": OperationStatus.DEFERRED,
+        }.get(error.code, OperationStatus.FAILED)
+        self._record_failure(operation, status, f"{error.code}: {error}"[:4096])

@@ -170,8 +170,15 @@ verl 脚本，以及仅检查文件存在的 coverage 脚本已移除。协议�
 - 物理 residency 查询/事件与完整闭环恢复；
 - 多轮共享前缀压力、完整 branch/range/task-tree 示例与应用 rollout 控制器；
 - verl Agent Loop 集成及 live weight-version 下旧 KV 的失效；
-- native policy 到真实 Mooncake 完成/复用的验收；
 - 策略对比、端到端开销、公平性及外部 GPT-OSS/DeepSeek 评测；
 - 成功的 GitHub 查重和满足完整证据要求的 PR 描述。
 
 这些内容保留在 OpenSpec 首版任务中。F1–F8 的后续边界不变。
+
+## rfc-hint 对齐验证（2026-10-06）
+
+已新增 RFC #59708 的公共 primitives、成功完成/入口分阶段调度、copy-lifetime
+priority 和逐目标结果。真实 Mooncake 的 request-attached MOVE/COPY、独立控制、
+双 engine COPY 及原生 tool-wait 策略生成 primitives 后的完成/复用均已有执行
+记录；7.11 据此完成。该验证不代表完整 rollout/RL、residency 或公平性矩阵完成。
+详见 OpenSpec `validation.md` 的 RFC 对齐小节及 `vllm/v1/kv_hints/README.md`。

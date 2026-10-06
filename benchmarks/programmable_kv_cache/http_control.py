@@ -25,8 +25,12 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 if __package__:
+    from .client import ACTIVE, wait_operation
+    from .client import envelope as make_envelope
     from .evaluate import answer_number
 else:
+    from client import ACTIVE, wait_operation
+    from client import envelope as make_envelope
     from evaluate import answer_number
 
 
@@ -39,6 +43,7 @@ def main():
     parser.add_argument("--validate-movement", choices=("cpu", "mooncake"))
     parser.add_argument("--evaluation-samples", type=int, default=0)
     parser.add_argument("--destination-url")
+    parser.add_argument("--primitive-actions", action="store_true")
     args = parser.parse_args()
     if args.evaluation_samples and not args.validate_movement:
         parser.error("Movement evaluation requires --validate-movement")
@@ -63,19 +68,57 @@ def main():
     report["capabilities"] = caps
     invocation = {key: caps[key] for key in ("engine_id", "engine_epoch", "namespace")}
 
+    priority_targets = {}
+    report["action_profile"] = "rfc59708" if args.primitive_actions else "legacy"
+
     def envelope(name, kind, payload, version="1"):
-        return {
-            "protocol_version": "0.1",
-            "message_id": run_id + "-" + name,
-            "actions": [
-                {
-                    "action_id": "action",
-                    "action_type": kind,
-                    "action_version": version,
-                    "payload": payload,
-                }
-            ],
-        }
+        if args.primitive_actions and version == "1":
+            if kind == "retain":
+                key = payload["owner_id"], payload["declaration_id"]
+                priority_targets[key] = payload["target"]
+                kind, version, payload = (
+                    "vllm.set_priority",
+                    "1.0",
+                    {
+                        "target": payload["target"],
+                        "location": "local_g1",
+                        "claim_id": "/".join(key),
+                        "revision": 1,
+                        "value": payload["priority"],
+                        "ttl_seconds": payload["ttl_seconds"],
+                    },
+                )
+            elif kind == "release":
+                key = payload["owner_id"], payload["declaration_id"]
+                kind, version, payload = (
+                    "vllm.set_priority",
+                    "1.0",
+                    {
+                        "target": priority_targets[key],
+                        "location": "local_g1",
+                        "claim_id": "/".join(key),
+                        "revision": 2,
+                        "value": None,
+                    },
+                )
+            elif kind in ("demote", "prefetch", "share"):
+                primitive = "vllm.move_to" if kind == "demote" else "vllm.copy_to"
+                source = payload["source"] if kind == "prefetch" else "gpu"
+                destination = (
+                    "gpu"
+                    if kind == "prefetch"
+                    else payload.get("destination", "mooncake")
+                )
+                kind, version, payload = (
+                    primitive,
+                    "1.0",
+                    {
+                        "target": payload["target"],
+                        "src": {"tier": source},
+                        "dst": {"tier": destination},
+                    },
+                )
+        return make_envelope(run_id + "-" + name, kind, payload, version)
 
     def control(method, payload):
         return post(
@@ -90,7 +133,7 @@ def main():
         initial = result["results"][0]
         assert queried["operation_id"] == initial["operation_id"]
         assert queried["sequence"] >= initial["sequence"]
-        if initial["status"] not in ("received", "accepted", "running"):
+        if initial["status"] not in ACTIVE:
             assert queried == initial
         return result
 
@@ -100,14 +143,9 @@ def main():
         )
 
     def wait_for_operation(name, *, call=control):
-        deadline = time.monotonic() + 120
-        while time.monotonic() < deadline:
-            result = operation(name, call=call)
-            if result["status"] not in ("received", "accepted", "running"):
-                report["actions"][name + "-terminal"] = result
-                return result
-            time.sleep(0.02)
-        raise AssertionError(f"Operation {name} did not finish")
+        result = wait_operation(call, run_id + "-" + name)
+        report["actions"][name + "-terminal"] = result
+        return result
 
     def reclaim_after_demote(name, target, result):
         assert result["status"] in ("completed", "partial"), result
