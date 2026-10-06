@@ -139,8 +139,19 @@ def merge_attn_states(
             return headdim % 4 == 0
         return headdim % 8 == 0
 
+    # On ROCm the native kernel is enabled only where it has been
+    # validated against Triton (gfx942, gfx950).
+    def supported_platform() -> bool:
+        if current_platform.is_cuda():
+            return True
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_mi3xx
+
+            return on_mi3xx()
+        return False
+
     if (
-        current_platform.is_cuda_alike()
+        supported_platform()
         and supported_dtypes(prefix_output)
         and supported_headdim(prefix_output)
     ):
