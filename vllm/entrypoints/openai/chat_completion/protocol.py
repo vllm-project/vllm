@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
@@ -33,6 +33,7 @@ from vllm.entrypoints.generate.base.protocol import (
     StopParam,
     StreamOptions,
     ToolCall,
+    TopLogprobsParam,
     structured_outputs_from_response_format,
     validate_cache_salt,
     validate_structural_tag_response_format,
@@ -52,6 +53,9 @@ from vllm.sampling_params import (
     ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
+
+if TYPE_CHECKING:
+    from vllm.parser.abstract_parser import Parser
 
 logger = init_logger(__name__)
 
@@ -219,7 +223,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     max_tokens: int | None = Field(
         default=None,
         deprecated="max_tokens is deprecated in favor of "
@@ -565,6 +569,25 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
+
+    def resolve_reasoning_ended(
+        self, parser: "Parser | None", prompt_token_ids: list[int]
+    ) -> bool | None:
+        """Resolve the engine's `reasoning_ended` for structured outputs.
+
+        Call after `adjust_request`, which may set `_grammar_from_parser`.
+        `True` constrains from the first generated token; `None` lets the
+        engine check the prompt with its own reasoning parser.
+        """
+        if not self.include_reasoning:
+            return True
+        if self._grammar_from_parser:
+            # The Mistral grammar already includes an optional `think?`
+            # rule that handles both reasoning and non-reasoning outputs.
+            return True
+        if parser is not None and parser.reasoning_parser is not None:
+            return parser.is_reasoning_end(prompt_token_ids)
+        return None
 
     def build_chat_params(
         self,
@@ -1073,7 +1096,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     logprob_token_ids: list[int] | None = Field(
         default=None,
         description=(
