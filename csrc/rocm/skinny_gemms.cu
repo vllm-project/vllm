@@ -335,6 +335,20 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
                  __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));   \
       V0 += (s.x + s.y);                                             \
     }
+#elif defined(__HIP__GFX1X__) && (defined(__gfx1100__) || defined(__gfx1201__))
+// gfx1x: v_dot2_f32_f16 (VOP3-P, dot10-insts, available on gfx11+gfx12).
+// bf16: native v_dot2_f32_bf16 (fp32 accumulate). It exists on all gfx11/gfx12
+// targets, but is only enabled where it measured faster than the unpack + fp32
+// path below; e.g. gfx1151 is slower with it at its tuned tile configs.
+typedef __bf16 wvsplitk_bf16x2_t __attribute__((ext_vector_type(2)));
+  #define DOT2C(V0, V2, V3)                                                \
+    if constexpr (std::is_same_v<scalar_t, half>) {                        \
+      asm("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3));  \
+    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {       \
+      V0 = __builtin_amdgcn_fdot2_f32_bf16(                                \
+          __builtin_bit_cast(wvsplitk_bf16x2_t, V2),                       \
+          __builtin_bit_cast(wvsplitk_bf16x2_t, V3), V0, /*clamp=*/false); \
+    }
 #elif defined(__HIP__GFX1X__)
   // gfx1x: v_dot2_f32_f16 (VOP3-P, dot10-insts, available on gfx11+gfx12)
   #define DOT2C(V0, V2, V3)                                               \
