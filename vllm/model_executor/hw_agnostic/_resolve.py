@@ -39,13 +39,15 @@ def resolve(module: str, name: str) -> Any:
     The Transformers backend builds its layers through this function, so an
     out-of-tree plugin that subclasses the result and registers it with its
     `register_oot` overrides the class that backend builds on either path.
-    Models with a native vLLM implementation always build the in-tree class.
+    Models with a native vLLM implementation always build the in-tree class, and
+    overrides do not yet reach the backend's norms, which are subclasses of
+    `RMSNorm` and `GemmaRMSNorm`.
 
     Example:
-        RMSNorm = hw_agnostic.resolve("layernorm", "RMSNorm")
+        SiluAndMul = hw_agnostic.resolve("activation", "SiluAndMul")
 
-        @RMSNorm.register_oot
-        class MyRMSNorm(RMSNorm): ...
+        @SiluAndMul.register_oot
+        class MySiluAndMul(SiluAndMul): ...
 
     Args:
         module: Module path relative to `vllm.model_executor.layers`, e.g.

@@ -130,49 +130,83 @@ def oot_registries():
 
 
 @pytest.fixture
-def reload_backend_layers(monkeypatch):
-    """Re-import the backend's layers, which resolve at import, under the test's
-    `VLLM_USE_HW_AGNOSTIC`; re-imported under the original env afterwards."""
-    yield lambda: importlib.reload(layers)
-    monkeypatch.undo()
-    importlib.reload(layers)
+def reload_backend():
+    """Re-import the backend modules that resolve layers at import, under the
+    test's `VLLM_USE_HW_AGNOSTIC`. Their original namespaces are restored
+    afterwards, so classes other tests imported stay current."""
+    from vllm.model_executor.models.transformers.fusers import rms_norm
+
+    saved = [(module, dict(vars(module))) for module in (layers, rms_norm)]
+    yield lambda: [importlib.reload(module) for module, _ in saved]
+    for module, namespace in saved:
+        vars(module).clear()
+        vars(module).update(namespace)
 
 
+def _fused_rms_norm(backend, rms_norm, vllm_config):
+    fuser = rms_norm.RMSNormFuser(
+        zero_centered=False, source_cls="LlamaRMSNorm", eps=1e-6
+    )
+    return fuser.fuse(torch.nn.RMSNorm(8), "norm", vllm_config)
+
+
+@pytest.mark.parametrize(
+    "module,name,build",
+    [
+        pytest.param(
+            "layernorm",
+            "RMSNorm",
+            _fused_rms_norm,
+            id="RMSNorm",
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=AssertionError,
+                reason="The fuser builds `TPAwareRMSNorm`, a subclass, and "
+                "overrides are keyed on the exact class name.",
+            ),
+        ),
+        pytest.param(
+            "activation",
+            "SiluAndMul",
+            lambda backend, *_: backend.get_act_and_mul_fn("silu"),
+            id="SiluAndMul",
+        ),
+        pytest.param(
+            "activation",
+            "GeluAndMul",
+            lambda backend, *_: backend.get_act_and_mul_fn("gelu"),
+            id="GeluAndMul",
+        ),
+    ],
+)
 @pytest.mark.parametrize("use_hw_agnostic", ["0", "1"])
 def test_plugin_override_reaches_the_backend(
     monkeypatch,
     oot_registries,
-    reload_backend_layers,
+    reload_backend,
     default_vllm_config,
     use_hw_agnostic,
+    module,
+    name,
+    build,
 ):
     """A plugin that subclasses `resolve`'s result overrides what the backend
     builds, on both paths and for a layer with no hw-agnostic port (GeluAndMul).
     """
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", use_hw_agnostic)
-    backend = reload_backend_layers()
-    layers_to_override = [
-        ("layernorm", "RMSNorm"),
-        ("activation", "SiluAndMul"),
-        ("activation", "GeluAndMul"),
-    ]
+    backend, rms_norm = reload_backend()
     for registry in oot_registries:
-        for _, name in layers_to_override:
-            registry.pop(name, None)  # e.g. already owned by a loaded plugin
+        registry.pop(name, None)  # e.g. already owned by a loaded plugin
     # The in-tree `get_act_and_mul_fn` caches the op it builds first; start empty,
     # as a process does where plugins load before any model is built.
     from vllm.model_executor.layers import activation
 
     monkeypatch.setattr(activation._ACTIVATION_AND_MUL_REGISTRY, "_dict", {})
 
-    overrides = {}
-    for module, name in layers_to_override:
-        base = hw_agnostic.resolve(module, name)
-        overrides[name] = base.register_oot(type(f"Plugin{name}", (base,), {}))
+    base = hw_agnostic.resolve(module, name)
+    override = base.register_oot(type(f"Plugin{name}", (base,), {}))
 
-    assert type(backend.RMSNorm(8)) is overrides["RMSNorm"]
-    assert type(backend.get_act_and_mul_fn("silu")) is overrides["SiluAndMul"]
-    assert type(backend.get_act_and_mul_fn("gelu")) is overrides["GeluAndMul"]
+    assert isinstance(build(backend, rms_norm, default_vllm_config), override)
 
 
 def test_in_tree_override_warns_on_hw_agnostic_path(monkeypatch):

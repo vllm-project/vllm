@@ -326,11 +326,11 @@ To override the class the Transformers backend builds on either path, obtain it 
     ```python
     from vllm.model_executor import hw_agnostic
 
-    RMSNorm = hw_agnostic.resolve("layernorm", "RMSNorm")
+    SiluAndMul = hw_agnostic.resolve("activation", "SiluAndMul")
 
 
-    @RMSNorm.register_oot
-    class CustomRMSNorm(RMSNorm):
+    @SiluAndMul.register_oot
+    class CustomSiluAndMul(SiluAndMul):
 
         def forward_oot(...):
             # Call optimized device-specific kernels.
@@ -340,6 +340,8 @@ To override the class the Transformers backend builds on either path, obtain it 
 `resolve` returns the hw-agnostic class when `VLLM_USE_HW_AGNOSTIC` is set and one exists, and the in-tree class otherwise, so the plugin code is the same for both paths. Do not register through `vllm.model_executor.custom_op.CustomOp.register_oot`, which always writes to the in-tree registry. On the hw-agnostic path, vLLM warns about an override registered only for the in-tree class, and raises if an override does not derive from the class it replaces.
 
 `VLLM_USE_HW_AGNOSTIC` only affects the Transformers backend. Models with a native vLLM implementation build the in-tree class even when it is set, so a plugin that also serves those models registers its override for the in-tree class as well.
+
+The Transformers backend builds its norms as `TPAwareRMSNorm` and `TPAwareGemmaRMSNorm`, subclasses of `RMSNorm` and `GemmaRMSNorm`. Overrides are keyed on the exact class name, so an `RMSNorm` or `GemmaRMSNorm` override does not reach them yet.
 
 Type checkers do not accept a variable as a base class, so plugins that run mypy can import the in-tree class for type checking only:
 
@@ -351,7 +353,7 @@ Type checkers do not accept a variable as a base class, so plugins that run mypy
     from vllm.model_executor import hw_agnostic
 
     if TYPE_CHECKING:
-        from vllm.model_executor.layers.layernorm import RMSNorm
+        from vllm.model_executor.layers.activation import SiluAndMul
     else:
-        RMSNorm = hw_agnostic.resolve("layernorm", "RMSNorm")
+        SiluAndMul = hw_agnostic.resolve("activation", "SiluAndMul")
     ```
