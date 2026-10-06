@@ -1114,16 +1114,27 @@ class SpeculativeConfig:
     @staticmethod
     def _apply_dict_then_arch_override(
         target_hf_overrides: dict[str, Any],
-        hf_config: PretrainedConfig,
-    ) -> PretrainedConfig:
+        hf_config: PreTrainedConfig,
+    ) -> PreTrainedConfig:
         """Apply mapping-style rope overrides, then the draft arch rewrite.
 
         Dict patches run first so nested keys such as
         ``text_config.rope_parameters`` still exist on the original config.
         Architecture mapping may later promote ``text_config`` to the top
         level; applying after that would miss the nested path.
+
+        Nested overrides are only applied when the draft config actually has
+        that sub-config. External drafters (EAGLE, DFlash, ...) often ship a
+        flat config; setting ``text_config`` on them would create a bare dict
+        that ``get_text_config()`` then returns instead of the real config.
         """
-        ModelConfig._apply_dict_overrides(hf_config, target_hf_overrides)
+        overrides = {
+            key: value
+            for key, value in target_hf_overrides.items()
+            if key not in _NESTED_HF_CONFIG_KEYS
+            or getattr(hf_config, key, None) is not None
+        }
+        ModelConfig._apply_dict_overrides(hf_config, overrides)
         return SpeculativeConfig.hf_config_override(hf_config)
 
     @staticmethod

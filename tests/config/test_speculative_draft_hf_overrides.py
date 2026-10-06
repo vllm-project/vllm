@@ -204,6 +204,26 @@ def test_dict_yarn_overrides_ignore_unrelated_keys():
 
 
 @pytest.mark.cpu_test
+def test_nested_overrides_skip_flat_draft_config():
+    """External drafters with a flat config must not get a bare
+    ``text_config`` dict from a nested target override."""
+    overrides = {
+        "max_position_embeddings": 1_000_000,
+        "text_config": {"rope_parameters": _YARN_ROPE_PARAMETERS},
+    }
+    composed = SpeculativeConfig.compose_draft_hf_overrides(overrides)
+    cfg = _make_hf_config(
+        rope_parameters={"rope_type": "default"},
+        max_position_embeddings=262_144,
+    )
+    out = composed(cfg)
+    assert getattr(out, "text_config", None) is None
+    assert out.get_text_config() is out
+    assert out.rope_parameters == {"rope_type": "default"}
+    assert out.max_position_embeddings == 1_000_000
+
+
+@pytest.mark.cpu_test
 def test_top_level_rope_parameters_replace_on_draft():
     """Top-level dict-valued rope_parameters is replaced, matching ModelConfig."""
     yarn = {"rope_type": "yarn", "factor": 2.0}
