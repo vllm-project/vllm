@@ -376,11 +376,18 @@ def _support_torch_compile(
         # we may not have vllm_config so we may need to patch it
         sig = inspect.signature(old_init)
         # Check that any positional arguments match the old_init method signature
-        annotations = [p.annotation for p in sig.parameters.values()]
+        # Skip 'self' parameter since it's not in args
+        annotations = [p.annotation for p in list(sig.parameters.values())[1:]]
         for arg, annotation in zip(args, annotations):
             if annotation is inspect._empty:
                 continue
-            if not isinstance(arg, annotation):
+            # Skip parameterized generics (e.g., Callable[[T], U]) that
+            # isinstance() cannot handle
+            try:
+                is_match = isinstance(arg, annotation)
+            except TypeError:
+                continue
+            if not is_match:
                 init = f"'{type(self).__name__}.__init__'"
                 arg_type = f"'{type(arg).__name__}'"
                 raise TypeError(
