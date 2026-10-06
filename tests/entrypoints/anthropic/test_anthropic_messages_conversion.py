@@ -3,34 +3,58 @@
 """Unit tests for Anthropic-to-OpenAI request conversion.
 
 Tests the image source handling and tool_result content parsing in
-AnthropicServingMessages._convert_anthropic_to_openai_request().
+AnthropicServingMessages.to_chat_completion_request().
 
 Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients, and streaming conversion in
 ``message_stream_converter``.
+
+Also covers cache usage computation in ``_build_anthropic_usage``.
 """
 
 import json
-from unittest.mock import MagicMock
+from argparse import Namespace
+from http import HTTPStatus
+from types import SimpleNamespace
+from typing import Annotated
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from fastapi.testclient import TestClient
+from pydantic import BaseModel, Field, ValidationError
 
+from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
 )
-from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse,
+from vllm.entrypoints.anthropic.serving import (
+    AnthropicServingMessages,
+    _build_anthropic_usage,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
-    UsageInfo,
+    FunctionCall,
+    ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatCompletionResponseStreamChoice,
+    ChatCompletionStreamResponse,
+    ChatMessage,
+)
+from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
+from vllm.entrypoints.serve.exception_handling.handlers.validation import (
+    validation_exception_handler,
+)
+from vllm.exceptions import VLLMValidationError
 
-_convert = AnthropicServingMessages._convert_anthropic_to_openai_request
+_convert = AnthropicServingMessages.to_chat_completion_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
 
 
@@ -162,6 +186,56 @@ class TestImageContentBlocks:
 
 
 # ======================================================================
+# vllm_xargs pass-through
+# ======================================================================
+
+
+class TestVllmXargs:
+    def test_vllm_xargs_passed_through(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            vllm_xargs={
+                "kv_cache_report_mode": "full",
+                "existing_extension": 7,
+            },
+        )
+
+        result = _convert(request)
+
+        assert result.vllm_xargs == {
+            "kv_cache_report_mode": "full",
+            "existing_extension": 7,
+        }
+
+    def test_vllm_xargs_reaches_sampling_params_with_kv_transfer(self):
+        kv_transfer_params = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+        }
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            vllm_xargs={
+                "kv_cache_report_mode": "full",
+                "existing_extension": "kept",
+            },
+            kv_transfer_params=kv_transfer_params,
+        )
+
+        converted = _convert(request)
+        sampling_params = converted.to_sampling_params(
+            max_tokens=converted.max_completion_tokens or 0,
+            default_sampling_params={},
+        )
+
+        assert converted.kv_transfer_params == kv_transfer_params
+        assert sampling_params.extra_args == {
+            "kv_cache_report_mode": "full",
+            "existing_extension": "kept",
+            "kv_transfer_params": kv_transfer_params,
+        }
+
+
+# ======================================================================
 # tool_result content handling
 # ======================================================================
 
@@ -282,9 +356,11 @@ class TestToolResultContent:
             if m["role"] == "user" and isinstance(m.get("content"), list)
         ]
         assert len(follow_up) == 1
-        assert follow_up[0]["content"][0]["image_url"]["url"] == (
-            "data:image/jpeg;base64,QUFB"
-        )
+        content = follow_up[0]["content"]
+        assert isinstance(content, list)
+        image = content[0]
+        assert image["type"] == "image_url"
+        assert image["image_url"]["url"] == "data:image/jpeg;base64,QUFB"
 
     def test_tool_result_with_multiple_images(self):
         request = self._make_tool_result_request(
@@ -314,7 +390,12 @@ class TestToolResultContent:
             if m["role"] == "user" and isinstance(m.get("content"), list)
         ]
         assert len(follow_up) == 1
-        urls = [p["image_url"]["url"] for p in follow_up[0]["content"]]
+        content = follow_up[0]["content"]
+        assert isinstance(content, list)
+        urls = []
+        for part in content:
+            assert part["type"] == "image_url"
+            urls.append(part["image_url"]["url"])
         assert urls == [
             "data:image/png;base64,IMG1",
             "https://example.com/img2.jpg",
@@ -410,7 +491,7 @@ class TestThinkingBlockConversion:
     """
 
     def test_thinking_plus_text_in_assistant_message(self):
-        """thinking + text → reasoning field + plain-string content."""
+        """Thinking + text → reasoning field + plain-string content."""
         request = _make_request(
             [
                 {"role": "user", "content": "Write me some code."},
@@ -472,7 +553,7 @@ class TestThinkingBlockConversion:
         assert asst.get("content") is None
 
     def test_thinking_plus_tool_use_in_assistant_message(self):
-        """thinking + tool_use: reasoning field set, tool_calls populated."""
+        """Thinking + tool_use: reasoning field set, tool_calls populated."""
         request = _make_request(
             [
                 {"role": "user", "content": "What is 2+2?"},
@@ -511,7 +592,8 @@ class TestThinkingBlockConversion:
         asst = asst_msgs[0]
 
         assert asst.get("reasoning") == "I need to call the calculator."
-        tool_calls = list(asst.get("tool_calls", []))
+        tool_calls = asst.get("tool_calls")
+        assert tool_calls is not None
         assert len(tool_calls) == 1
         assert tool_calls[0]["function"]["name"] == "calculator"
         # No text content alongside reasoning + tool_use.
@@ -653,12 +735,77 @@ class TestThinkingBlockConversion:
         assert asst.get("content") == "Hi!"
 
 
+# ======================================================================
+# Cache usage computation
+# ======================================================================
+
+
+class TestBuildAnthropicUsage:
+    """Tests for _build_anthropic_usage helper.
+
+    Anthropic defines: total_input = input_tokens + cache_read + cache_creation
+    vLLM's prompt_tokens is the total.
+    """
+
+    def test_cache_hit(self):
+        """When cache is hit, input_tokens excludes cached tokens."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(
+                cached_tokens=80, created_cache_tokens=10
+            ),
+        )
+        result = _build_anthropic_usage(usage)
+        assert result.input_tokens == 10  # 100 - 80 - 10
+        assert result.output_tokens == 10
+        assert result.cache_read_input_tokens == 80
+        assert result.cache_creation_input_tokens == 10
+
+    def test_zero_cached_tokens(self):
+        """Zero cached tokens should still set cache_creation to 0."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(
+                cached_tokens=0, created_cache_tokens=0
+            ),
+        )
+        result = _build_anthropic_usage(usage)
+        assert result.input_tokens == 100  # 100 - 0 - 0
+        assert result.cache_read_input_tokens == 0
+        assert result.cache_creation_input_tokens == 0
+
+    def test_all_tokens_cached(self):
+        """When all tokens are cached, input_tokens should be 0."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(
+                cached_tokens=100, created_cache_tokens=0
+            ),
+        )
+        result = _build_anthropic_usage(usage)
+        assert result.input_tokens == 0
+        assert result.cache_read_input_tokens == 100
+        assert result.cache_creation_input_tokens == 0
+
+    def test_no_prompt_tokens_details(self):
+        """UsageInfo without prompt_tokens_details returns no cache info."""
+        usage = UsageInfo(prompt_tokens=100, completion_tokens=10)
+        result = _build_anthropic_usage(usage)
+        assert result.input_tokens == 100
+        assert result.cache_read_input_tokens is None
+        assert result.cache_creation_input_tokens is None
+
+
 class TestInlineSystemMessageInMessagesArray:
     """Verify that ``role: system`` messages embedded inside the ``messages``
-    array are accepted and merged with the top-level ``system`` prompt.
+    array are preserved in their original position.
 
-    This handles clients that place system messages inside the messages array
-    instead of the Anthropic-standard top-level ``system`` field.
+    Unlike the previous approach that merged all system messages into a single
+    leading system message (breaking prefix caching), this preserves the
+    conversation structure so KV-cache hits remain intact.
     """
 
     def test_inline_system_merged_with_top_level_system(self):
@@ -706,17 +853,15 @@ class TestInlineSystemMessageInMessagesArray:
 
         result = _convert(request)
 
-        # First message should be the merged system prompt.
+        # First message: top-level system prompt (billing header stripped).
         assert result.messages[0]["role"] == "system"
-        # Billing header stripped, inline system appended.
         assert (
             result.messages[0]["content"]
             == "You are Claude Code, Anthropic's official CLI for Claude."
             "...."
-            "....."
         )
 
-        # Second message should be the user message, content preserved.
+        # Second message: user message, content preserved at original position.
         assert result.messages[1]["role"] == "user"
         user_content = result.messages[1]["content"]
         assert len(user_content) == 2
@@ -729,6 +874,11 @@ class TestInlineSystemMessageInMessagesArray:
             "text": "help?",
         }
 
+        # Third message: inline system stays in original position
+        # (after user, not merged into leading system).
+        assert result.messages[2]["role"] == "system"
+        assert result.messages[2]["content"] == "....."
+
     def test_inline_system_string_only(self):
         """Only an inline system string, no top-level system."""
         request = _make_request(
@@ -739,9 +889,11 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
-        assert result.messages[0]["role"] == "system"
-        assert result.messages[0]["content"] == "Be concise."
-        assert result.messages[1]["role"] == "user"
+        # Inline system stays in its original position.
+        assert result.messages[0]["role"] == "user"
+        assert result.messages[0]["content"] == "Hello"
+        assert result.messages[1]["role"] == "system"
+        assert result.messages[1]["content"] == "Be concise."
 
     def test_inline_system_list_content(self):
         """Inline system with list content blocks."""
@@ -759,11 +911,15 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
-        assert result.messages[0]["role"] == "system"
-        assert result.messages[0]["content"] == "Part one. Part two."
+        # Inline system stays in its original position;
+        # text blocks are concatenated (same as top-level system).
+        assert result.messages[0]["role"] == "user"
+        assert result.messages[0]["content"] == "Hi"
+        assert result.messages[1]["role"] == "system"
+        assert result.messages[1]["content"] == "Part one. Part two."
 
     def test_multiple_inline_system_messages(self):
-        """Multiple inline system messages should all be merged."""
+        """Multiple inline system messages each stay in their position."""
         request = _make_request(
             [
                 {"role": "system", "content": "First system."},
@@ -773,9 +929,13 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
+        # Each system message stays in its original position.
         assert result.messages[0]["role"] == "system"
-        assert result.messages[0]["content"] == "First system.Second system."
+        assert result.messages[0]["content"] == "First system."
         assert result.messages[1]["role"] == "user"
+        assert result.messages[1]["content"] == "Hello"
+        assert result.messages[2]["role"] == "system"
+        assert result.messages[2]["content"] == "Second system."
 
     def test_inline_system_with_top_level_string(self):
         """Top-level system is a string, inline system is also present."""
@@ -788,9 +948,59 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
+        # Top-level system goes first; inline system stays in position.
         assert result.messages[0]["role"] == "system"
-        assert result.messages[0]["content"] == "Top-level prompt.Inline hint."
+        assert result.messages[0]["content"] == "Top-level prompt."
         assert result.messages[1]["role"] == "user"
+        assert result.messages[1]["content"] == "Hello"
+        assert result.messages[2]["role"] == "system"
+        assert result.messages[2]["content"] == "Inline hint."
+
+    def test_inline_system_billing_header_stripped(self):
+        """Inline system that is only a billing header is omitted."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "system",
+                    "content": "x-anthropic-billing-header: cc_version=2.1.160",
+                },
+                {"role": "assistant", "content": "Hi there"},
+            ]
+        )
+        result = _convert(request)
+
+        # Billing-header-only system message should be dropped entirely.
+        assert len(result.messages) == 2
+        assert result.messages[0]["role"] == "user"
+        assert result.messages[1]["role"] == "assistant"
+
+    def test_inline_system_billing_header_mixed_with_content(self):
+        """Inline system with billing header block + real content."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "x-anthropic-billing-header: "
+                            "cc_version=2.1.160.bca; cch=d1d48;",
+                        },
+                        {"type": "text", "text": "Real system content."},
+                    ],
+                },
+            ]
+        )
+        result = _convert(request)
+
+        # Billing header stripped, real content preserved in position.
+        assert len(result.messages) == 2
+        assert result.messages[0]["role"] == "user"
+        assert result.messages[0]["content"] == "Hello"
+        assert result.messages[1]["role"] == "system"
+        assert result.messages[1]["content"] == "Real system content."
 
 
 # ======================================================================
@@ -800,11 +1010,6 @@ class TestInlineSystemMessageInMessagesArray:
 
 def _make_stream_converter():
     obj = MagicMock(spec=AnthropicServingMessages)
-    obj.stop_reason_map = {
-        "stop": "end_turn",
-        "length": "max_tokens",
-        "tool_calls": "tool_use",
-    }
     obj.message_stream_converter = (
         AnthropicServingMessages.message_stream_converter.__get__(obj)
     )
@@ -826,6 +1031,7 @@ def _make_stream_chunk(
     *,
     delta: DeltaMessage | None = None,
     finish_reason: str | None = None,
+    stop_reason: int | str | None = None,
     choices: list[ChatCompletionResponseStreamChoice] | None = None,
     usage: UsageInfo | None = None,
 ) -> str:
@@ -835,6 +1041,7 @@ def _make_stream_chunk(
                 index=0,
                 delta=delta or DeltaMessage(),
                 finish_reason=finish_reason,
+                stop_reason=stop_reason,
             )
         ]
     chunk = ChatCompletionStreamResponse(
@@ -1032,3 +1239,908 @@ class TestMessageStartIncludesTypeAndRole:
         message = events[0][1]["message"]
         assert message["type"] == "message"
         assert message["role"] == "assistant"
+
+
+class TestStreamingCacheUsageSemantics:
+    """Locks in the documented streaming behavior of cache usage fields.
+
+    vLLM's OpenAI chat completion streaming only attaches
+    ``prompt_tokens_details`` to the terminal usage chunk. The Anthropic layer
+    mirrors that contract: cache fields are omitted on ``message_start`` (key
+    absence signals "unknown") and populated on ``message_delta`` (the final
+    cumulative count). This is intentionally consistent with vLLM's OpenAI
+    behavior, even though Anthropic's upstream API populates cache fields on
+    ``message_start``; closing that gap requires plumbing cache info into the
+    first chunk at the OpenAI layer, which is out of scope here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_streaming_cache_fields_absent_then_populated(self):
+        """First chunk lacks prompt_tokens_details (vLLM contract);
+        message_start omits cache fields. The final chunk carries
+        prompt_tokens_details, so message_delta carries resolved values."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant", content="hi"),
+                usage=UsageInfo(prompt_tokens=100, total_tokens=100),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=100,
+                    completion_tokens=5,
+                    total_tokens=105,
+                    prompt_tokens_details=PromptTokenUsageInfo(
+                        cached_tokens=80, created_cache_tokens=10
+                    ),
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        # message_start: cache fields unknown → omitted from JSON entirely.
+        start_usage = events[0][1]["message"]["usage"]
+        assert events[0][0] == "message_start"
+        assert start_usage["input_tokens"] == 100
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+
+        # message_delta: authoritative usage with cache fields populated.
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert delta_usage["input_tokens"] == 10  # 100 - 80 - 10
+        assert delta_usage["cache_read_input_tokens"] == 80
+        assert delta_usage["cache_creation_input_tokens"] == 10
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_cache_hit(self):
+        """When the final chunk reports cached_tokens=0, message_delta carries
+        cache fields = 0 (cache miss); message_start still omits them."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=50, total_tokens=50),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=50,
+                    completion_tokens=5,
+                    total_tokens=55,
+                    prompt_tokens_details=PromptTokenUsageInfo(
+                        cached_tokens=0, created_cache_tokens=0
+                    ),
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        start_usage = events[0][1]["message"]["usage"]
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert start_usage["input_tokens"] == 50
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+        assert delta_usage["input_tokens"] == 50  # 50 - 0 - 0
+        assert delta_usage["cache_read_input_tokens"] == 0
+        assert delta_usage["cache_creation_input_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_prompt_tokens_details_at_all(self):
+        """If --enable-prompt-tokens-details is off, no chunk carries cache
+        info; both message_start and message_delta omit cache fields."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=30, total_tokens=30),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=30, completion_tokens=2, total_tokens=32),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        start_usage = events[0][1]["message"]["usage"]
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+        assert "cache_read_input_tokens" not in delta_usage
+        assert "cache_creation_input_tokens" not in delta_usage
+
+
+# ======================================================================
+# Auto-detection of system-first template requirement
+# ======================================================================
+
+
+Q35_TEMPLATE = (
+    "{%- for message in messages %}"
+    "{%- if message.role == 'system' %}"
+    "{%- if not loop.first %}"
+    "{{- raise_exception('System message must be at the beginning.') }}"
+    "{%- endif %}"
+    "{%- endif %}"
+    "{%- endfor %}"
+)
+
+PERMISSIVE_TEMPLATE = (
+    "{%- for message in messages %}{{- message.role }}: {{ message.content }}\n"
+    "{%- endfor %}"
+)
+
+
+class TestDetectMergeInlineSystem:
+    """Verify _detect_merge_inline_system auto-detection.
+
+    Tests three scenarios:
+    1. Template with system-first guard (e.g. Qwen) → merge needed
+    2. Template without restrictions → no merge, cache-friendly
+    3. No template provided → safe default: merge
+    """
+
+    def test_qwen_template_requires_merge(self):
+        """Template with loop.first guard rejects mid-conversation system."""
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(Q35_TEMPLATE) is True
+        )
+
+    def test_no_restriction_no_merge(self):
+        """Template without restriction accepts mid-conversation system."""
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(PERMISSIVE_TEMPLATE)
+            is False
+        )
+
+    def test_no_template_defaults_merge(self):
+        """No chat_template → conservative default: merge."""
+        assert AnthropicServingMessages._detect_merge_inline_system(None) is True
+
+    @pytest.mark.parametrize(
+        ("resolved", "expected"),
+        [(PERMISSIVE_TEMPLATE, False), (Q35_TEMPLATE, True)],
+    )
+    def test_probes_resolved_template_without_cli_override(
+        self, monkeypatch, resolved, expected
+    ):
+        """Without --chat-template, probe the tokenizer's template (#58727).
+
+        Merging defeats prefix caching, so it is warned about at startup.
+        """
+        import vllm.entrypoints.anthropic.serving as serving_mod
+        from vllm.renderers.hf import HfRenderer
+
+        monkeypatch.setattr(
+            serving_mod, "resolve_chat_template", lambda *a, **kw: resolved
+        )
+        mock_logger = MagicMock()
+        monkeypatch.setattr(serving_mod, "logger", mock_logger)
+        renderer = MagicMock(spec=HfRenderer)
+        renderer.tokenizer = MagicMock()
+        online_renderer = SimpleNamespace(
+            renderer=renderer,
+            chat_template=None,
+            model_config=None,
+        )
+        assert (
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
+            is expected
+        )
+        assert mock_logger.warning_once.called is expected
+
+
+# ======================================================================
+# Full (non-streaming) response conversion: messages_full_converter
+# ======================================================================
+
+
+def _make_full_converter():
+    obj = MagicMock(spec=AnthropicServingMessages)
+    obj.messages_full_converter = (
+        AnthropicServingMessages.messages_full_converter.__get__(obj)
+    )
+    return obj
+
+
+class TestMessagesFullConverter:
+    def test_empty_completion_emits_one_text_block(self):
+        """An empty completion still yields exactly one (empty) text block."""
+        generator = ChatCompletionResponse(
+            id="chatcmpl-empty",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=None),
+                    finish_reason="stop",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=10, completion_tokens=0, total_tokens=10),
+        )
+
+        result = _make_full_converter().messages_full_converter(generator)
+
+        assert len(result.content) == 1
+        assert result.content[0].type == "text"
+        assert result.content[0].text == ""
+
+
+# ======================================================================
+# cache_salt pass-through (Issue #46688)
+# ======================================================================
+
+
+class TestCacheSalt:
+    def test_cache_salt_passed_through(self):
+        """cache_salt on the Anthropic request reaches the converted
+        ChatCompletionRequest so prefix-cache isolation works via /v1/messages."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            cache_salt="tenant-abc-secret-salt",
+        )
+        result = _convert(request)
+        assert result.cache_salt == "tenant-abc-secret-salt"
+
+    def test_cache_salt_defaults_to_none(self):
+        """Omitting cache_salt leaves it unset (unchanged default behavior)."""
+        request = _make_request([{"role": "user", "content": "Hello"}])
+        result = _convert(request)
+        assert result.cache_salt is None
+
+    @staticmethod
+    def _make_api_app():
+        app = FastAPI()
+        attach_router(app)
+        app.state.args = Namespace(log_error_stack=False)
+        app.exception_handler(RequestValidationError)(validation_exception_handler)
+
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = AssertionError(
+            "invalid requests must not reach the serving handler"
+        )
+        app.state.anthropic_serving_messages = handler
+        return app, handler
+
+    def test_cache_salt_openapi_requires_non_empty_string(self):
+        app, _ = self._make_api_app()
+        field_schema = app.openapi()["components"]["schemas"][
+            "AnthropicMessagesRequest"
+        ]["properties"]["cache_salt"]
+        string_schema = next(
+            option for option in field_schema["anyOf"] if option.get("type") == "string"
+        )
+
+        assert string_schema["minLength"] == 1
+
+    def test_empty_cache_salt_returns_bad_request(self):
+        app, handler = self._make_api_app()
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages",
+                json={
+                    "model": "test-model",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "cache_salt": "",
+                },
+            )
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        handler.create_messages.assert_not_awaited()
+
+
+class TestStopSequenceReason:
+    """When generation stops because a configured stop string matched, the
+    Anthropic Messages API must report ``stop_reason="stop_sequence"`` and echo
+    the matched string in ``stop_sequence``. vLLM surfaces the matched string in
+    the OpenAI choice's ``stop_reason`` field (a str) while ``finish_reason``
+    stays ``"stop"``. A natural EOS (stop_reason None) or a stop token id (int)
+    must still map to ``end_turn``.
+    """
+
+    def test_non_streaming_stop_string_maps_to_stop_sequence(self):
+        converter = _make_full_converter()
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hello"),
+                    finish_reason="stop",
+                    stop_reason="</tool>",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = converter.messages_full_converter(response)
+
+        assert result.stop_reason == "stop_sequence"
+        assert result.stop_sequence == "</tool>"
+
+    def test_non_streaming_natural_eos_maps_to_end_turn(self):
+        converter = _make_full_converter()
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hello"),
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = converter.messages_full_converter(response)
+
+        assert result.stop_reason == "end_turn"
+        assert result.stop_sequence is None
+
+    def test_non_streaming_stop_token_id_maps_to_end_turn(self):
+        converter = _make_full_converter()
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="hello"),
+                    finish_reason="stop",
+                    stop_reason=128009,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = converter.messages_full_converter(response)
+
+        assert result.stop_reason == "end_turn"
+        assert result.stop_sequence is None
+
+    @pytest.mark.asyncio
+    async def test_streaming_stop_string_maps_to_stop_sequence(self):
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(content="hi"),
+                usage=UsageInfo(prompt_tokens=5, total_tokens=5, completion_tokens=0),
+            )
+            yield _make_stream_chunk(finish_reason="stop", stop_reason="</tool>")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert msg_deltas[0]["delta"]["stop_reason"] == "stop_sequence"
+        assert msg_deltas[0]["delta"]["stop_sequence"] == "</tool>"
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_stop_string_emits_explicit_null_stop_sequence(self):
+        """exclude_unset=True drops stop_sequence unless it is set explicitly."""
+
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            yield _make_stream_chunk(delta=DeltaMessage(content="hi"))
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert len(msg_deltas) == 1
+        assert msg_deltas[0]["delta"]["stop_reason"] == "end_turn"
+        assert "stop_sequence" in msg_deltas[0]["delta"]
+        assert msg_deltas[0]["delta"]["stop_sequence"] is None
+
+
+class TestToolUseStopReason:
+    """A response carrying a tool_use block reports ``stop_reason="tool_use"``
+    even when the chat layer says ``finish_reason="stop"``, as it does for a
+    forced (named) tool. A call cut short by max_tokens or a stop string does not.
+    """
+
+    @pytest.mark.parametrize(
+        ("finish_reason", "stop_reason", "expected"),
+        [
+            ("stop", None, "tool_use"),
+            ("tool_calls", "</x>", "tool_use"),
+        ],
+    )
+    def test_non_streaming(self, finish_reason, stop_reason, expected):
+        tool_call = ToolCall(
+            function=FunctionCall(name="get_weather", arguments='{"city": "Paris"}')
+        )
+        response = ChatCompletionResponse(
+            id="chatcmpl-test",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", tool_calls=[tool_call]),
+                    finish_reason=finish_reason,
+                    stop_reason=stop_reason,
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+        )
+
+        result = _make_full_converter().messages_full_converter(response)
+
+        assert result.content[0].type == "tool_use"
+        assert result.stop_reason == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("args", "finish_reason", "stop_reason", "expected"),
+        [
+            ('{"city": "Paris"}', "stop", None, "tool_use"),
+            ('{"city": "Pa', "length", None, "max_tokens"),
+            ('{"city": "Paris"}', "tool_calls", "</x>", "tool_use"),
+            ('{"city": "Pa', "tool_calls", "</x>", "stop_sequence"),
+        ],
+    )
+    async def test_streaming(self, args, finish_reason, stop_reason, expected):
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            yield _make_stream_chunk(
+                delta=DeltaMessage(
+                    tool_calls=[_tc(id="call_1", name="get_weather", args=args)]
+                )
+            )
+            yield _make_stream_chunk(
+                finish_reason=finish_reason, stop_reason=stop_reason
+            )
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        events = _parse_sse_events(
+            [e async for e in converter.message_stream_converter(sse_input())]
+        )
+
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert msg_deltas[0]["delta"]["stop_reason"] == expected
+
+
+# ======================================================================
+# Client-caused errors are 4xx, not 500 (Issue #52088)
+# ======================================================================
+
+
+class TestClientErrorResponses:
+    @staticmethod
+    def _make_api_app(handler: MagicMock):
+        app = FastAPI()
+        attach_router(app)
+        app.state.args = Namespace(log_error_stack=False)
+        app.exception_handler(RequestValidationError)(validation_exception_handler)
+        app.state.anthropic_serving_messages = handler
+        return app
+
+    @staticmethod
+    def _request_body() -> dict:
+        return {
+            "model": "test-model",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+    @staticmethod
+    def _conversion_error() -> ValidationError:
+        """A real pydantic ValidationError like the one ChatCompletionRequest
+        construction raises when Anthropic input violates the OpenAI schema."""
+
+        class _StubRequest(BaseModel):
+            stop: Annotated[list[str], Field(max_length=4)] | None = None
+
+        with pytest.raises(ValidationError) as exc_info:
+            _StubRequest(stop=["a"] * 6)
+        return exc_info.value
+
+    def test_validation_error_returns_bad_request(self):
+        """A pydantic ValidationError during Anthropic->OpenAI conversion is
+        surfaced as a 400 BadRequestError, not a 500."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = self._conversion_error()
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/v1/messages", json=self._request_body())
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        body = response.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "BadRequestError"
+        assert "at most 4 items" in body["error"]["message"]
+
+    def test_vllm_client_error_returns_bad_request(self):
+        """VLLMClientError raised by the serving layer maps to 400."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = VLLMValidationError(
+            "Invalid value for stop", parameter="stop"
+        )
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/v1/messages", json=self._request_body())
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        assert response.json()["error"]["type"] == "BadRequestError"
+
+    def test_generic_error_still_returns_internal_server_error(self):
+        """Non-client errors keep the existing 500 behaviour."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = RuntimeError("boom")
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/v1/messages", json=self._request_body())
+
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.json()["error"]["type"] == "InternalServerError"
+
+    def test_count_tokens_validation_error_returns_bad_request(self):
+        """The count_tokens route maps conversion errors to 400 as well."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.count_tokens.side_effect = self._conversion_error()
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages/count_tokens", json=self._request_body()
+            )
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        assert response.json()["error"]["type"] == "BadRequestError"
+
+
+# ======================================================================
+# thinking configuration pass-through
+# ======================================================================
+
+
+class TestThinkingConfig:
+    def test_absent_thinking_leaves_reasoning_untouched(self):
+        """Requests without `thinking` must convert exactly as before."""
+        request = _make_request([{"role": "user", "content": "Hello"}])
+
+        result = _convert(request)
+        assert result.reasoning_effort is None
+        assert result.thinking_token_budget is None
+        assert result.include_reasoning is True
+
+    def test_disabled_clears_reasoning_effort(self):
+        """`disabled` maps to reasoning_effort="none", which is what clears
+        enable_thinking for templates that honor it."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "disabled"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "none"
+
+    def test_disabled_overrides_output_config_effort(self):
+        """`thinking` is applied after output_config so an explicit opt-out wins
+        over an inherited effort ceiling."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            output_config={"effort": "high"},
+            thinking={"type": "disabled"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "none"
+
+    def test_enabled_sets_thinking_token_budget(self):
+        request = AnthropicMessagesRequest(
+            model="test-model",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": "Hello"}],
+            thinking={"type": "enabled", "budget_tokens": 2048},
+        )
+
+        result = _convert(request)
+        assert result.thinking_token_budget == 2048
+        assert result.reasoning_effort is None
+
+    @pytest.mark.parametrize(
+        "thinking",
+        [
+            pytest.param({"budget_tokens": 2048}, id="missing-type"),
+            pytest.param({"type": "enabled"}, id="enabled-missing-budget"),
+            pytest.param(
+                {"type": "enabled", "budget_tokens": 1023}, id="budget-below-1024"
+            ),
+            pytest.param(
+                {"type": "enabled", "budget_tokens": 4096}, id="budget-not-below-max"
+            ),
+            pytest.param({"type": "adaptive", "display": "full"}, id="bad-display"),
+        ],
+    )
+    def test_rejects_invalid_thinking(self, thinking):
+        """Mirror the Anthropic API's BetaThinkingConfigParam constraints."""
+        with pytest.raises(ValidationError):
+            AnthropicMessagesRequest(
+                model="test-model",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": "Hello"}],
+                thinking=thinking,
+            )
+
+    def test_pd_prefill_leg_skips_budget_check(self):
+        """P/D sidecars resend the request to the prefill node with
+        max_tokens=1; the budget is enforced on the decode leg instead."""
+        thinking = {"type": "enabled", "budget_tokens": 1024}
+        request = AnthropicMessagesRequest(
+            model="test-model",
+            max_tokens=1,
+            messages=[{"role": "user", "content": "Hello"}],
+            thinking=thinking,
+            kv_transfer_params={"do_remote_decode": True},
+        )
+
+        assert _convert(request).thinking_token_budget == 1024
+        with pytest.raises(ValidationError):
+            AnthropicMessagesRequest(
+                model="test-model",
+                max_tokens=1,
+                messages=[{"role": "user", "content": "Hello"}],
+                thinking=thinking,
+                kv_transfer_params={"do_remote_decode": False},
+            )
+
+    def test_adaptive_pins_nothing_and_keeps_effort_ceiling(self):
+        """`adaptive` lets the model choose depth, so only the ceiling from
+        output_config.effort should survive."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            output_config={"effort": "low"},
+            thinking={"type": "adaptive"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "low"
+        assert result.thinking_token_budget is None
+
+    def test_disabled_uses_configured_effort(self):
+        """Models that always think (GLM-5.3) or reject "none" (Harmony) are
+        served with a low effort instead."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "disabled"},
+        )
+
+        result = _convert(request, disabled_thinking_effort="low")
+        assert result.reasoning_effort == "low"
+
+    @pytest.mark.parametrize("display", ["omitted", "summarized", "updates"])
+    def test_display_keeps_reasoning_included(self, display):
+        """Suppressing reasoning would mark it ended for structured outputs and
+        drop it from multi-turn history, so `display` is ignored."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            thinking={"type": "adaptive", "display": display},
+        )
+
+        result = _convert(request)
+        assert result.include_reasoning is True
+
+    def test_claude_code_payload(self):
+        """The combination Claude Code sends on every request: an effort ceiling
+        plus adaptive thinking with reasoning display omitted."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            output_config={"effort": "high"},
+            thinking={"type": "adaptive", "display": "omitted"},
+        )
+
+        result = _convert(request)
+        assert result.reasoning_effort == "high"
+        assert result.include_reasoning is True
+        assert result.thinking_token_budget is None
+
+
+class TestProbeDisabledThinkingEffort:
+    """``auto`` falls back to ``low`` when ``none`` cannot turn thinking off."""
+
+    @staticmethod
+    async def _probe(render):
+        obj = MagicMock(spec=AnthropicServingMessages)
+        obj.online_renderer = MagicMock()
+        obj.online_renderer.render_chat = AsyncMock(
+            side_effect=lambda req: ([], [render(req.reasoning_effort)])
+        )
+        obj._extract_prompt_components = lambda engine_input: SimpleNamespace(
+            token_ids=engine_input, text=None
+        )
+        obj._render_probe_prompt = (
+            AnthropicServingMessages._render_probe_prompt.__get__(obj)
+        )
+        return await AnthropicServingMessages._probe_disabled_thinking_effort(obj)
+
+    @staticmethod
+    def _reject_none(effort):
+        """Harmony (gpt-oss) raises on ``none``."""
+        if effort == "none":
+            raise ValueError(f"unsupported {effort=}")
+        return [1]
+
+    @staticmethod
+    def _none_as_max(effort):
+        """GLM-5.3 treats efforts other than low/high as max."""
+        return [1, {"low": 0, "high": 1}.get(effort, 2)]
+
+    @pytest.mark.asyncio
+    async def test_template_honors_none(self):
+        assert await self._probe(lambda effort: [1, int(effort == "none")]) == "none"
+
+    @pytest.mark.asyncio
+    async def test_template_ignores_effort(self):
+        assert await self._probe(lambda effort: [1]) == "low"
+
+    @pytest.mark.asyncio
+    async def test_template_renders_none_as_thinking_effort(self):
+        assert await self._probe(self._none_as_max) == "low"
+
+    @pytest.mark.asyncio
+    async def test_renderer_rejects_none(self):
+        assert await self._probe(self._reject_none) == "low"
+
+
+class TestMidConversationToolChanges:
+    """``tool_addition``/``tool_removal`` blocks decide which tools the chat
+    template is given, since it has no other way to see them."""
+
+    @staticmethod
+    def _convert_tools(*changes: dict) -> dict[str, bool | None]:
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "Tools changed."}, *changes],
+                },
+            ],
+            tools=[
+                {"name": "bash", "input_schema": {}},
+                {"name": "search", "input_schema": {}, "defer_loading": True},
+                {"name": "fetch", "input_schema": {}, "defer_loading": True},
+            ],
+        )
+        result = _convert(request)
+        assert result.messages[-1] == {"role": "system", "content": "Tools changed."}
+        assert result.tools is not None
+        return {t.function.name: t.function.defer_loading for t in result.tools}
+
+    @staticmethod
+    def _change(block_type: str, name: str) -> dict:
+        return {"type": block_type, "tool": {"type": "tool_reference", "name": name}}
+
+    def test_addition_loads_deferred_tool(self):
+        tools = self._convert_tools(self._change("tool_addition", "search"))
+        assert tools == {"bash": None, "search": None, "fetch": True}
+
+    def test_removal_withdraws_tool_until_added_again(self):
+        removal = self._change("tool_removal", "bash")
+        assert "bash" not in self._convert_tools(removal)
+        readded = self._convert_tools(removal, self._change("tool_addition", "bash"))
+        assert list(readded) == ["bash", "search", "fetch"]
+
+    def test_addition_defines_tool_by_value(self):
+        definition = {"name": "db_query", "input_schema": {}}
+        tools = self._convert_tools(
+            {
+                "type": "tool_addition",
+                "tool": {"type": "tool_definition", "definition": definition},
+            }
+        )
+        assert list(tools) == ["bash", "search", "fetch", "db_query"]
+
+    def test_unknown_tool_reference_is_rejected(self):
+        with pytest.raises(ValueError, match="not declared in tools"):
+            self._convert_tools(self._change("tool_addition", "missing"))
+
+    def test_removal_by_value_is_rejected(self):
+        definition = {"name": "bash", "input_schema": {}}
+        with pytest.raises(ValidationError, match="only accepts a tool_reference"):
+            self._convert_tools(
+                {
+                    "type": "tool_removal",
+                    "tool": {"type": "tool_definition", "definition": definition},
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "request_cls", [AnthropicMessagesRequest, AnthropicCountTokensRequest]
+    )
+    @pytest.mark.parametrize("in_top_level_system", [False, True])
+    def test_tool_change_outside_system_message_is_rejected(
+        self, request_cls, in_top_level_system
+    ):
+        change = self._change("tool_addition", "search")
+        if in_top_level_system:
+            fields = {
+                "messages": [{"role": "user", "content": "Hi"}],
+                "system": [change],
+            }
+        else:
+            fields = {"messages": [{"role": "user", "content": [change]}]}
+        with pytest.raises(
+            ValidationError, match='only allowed in messages with role "system"'
+        ):
+            request_cls(model="test-model", max_tokens=128, **fields)
+
+
+class TestWatermarking:
+    def test_defaults_to_unspecified(self):
+        request = _make_request([{"role": "user", "content": "hi"}])
+
+        assert _convert(request).watermarking is None
+
+    def test_forwards_explicit_enable(self):
+        request = _make_request([{"role": "user", "content": "hi"}], watermarking=True)
+
+        assert _convert(request).watermarking is True
+
+    def test_forwards_the_opt_out(self):
+        request = _make_request([{"role": "user", "content": "hi"}], watermarking=False)
+
+        assert _convert(request).watermarking is False
+
+    @pytest.mark.parametrize("watermarking", [None, True, False])
+    def test_reaches_sampling_params(self, watermarking):
+        request = _make_request(
+            [{"role": "user", "content": "hi"}], watermarking=watermarking
+        )
+
+        params = _convert(request).to_sampling_params(16, {})
+
+        assert params.watermarking is watermarking

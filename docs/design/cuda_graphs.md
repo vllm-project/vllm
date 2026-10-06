@@ -161,16 +161,18 @@ class AttentionCGSupport(enum.Enum):
     ALWAYS = 3
     """CUDA Graphs always supported; supports mixed-prefill-decode"""
     UNIFORM_BATCH = 2
-    """CUDA Graphs supported for batches the only contain query lengths that are
+    """CUDA Graphs supported for batches that only contain query lengths that are
     the same, this can be used for spec-decode 
         i.e. "decodes" are 1 + num_speculative_tokens"""
     UNIFORM_SINGLE_TOKEN_DECODE = 1
-    """CUDA Graphs supported for batches the only contain query_len==1 decodes"""
+    """CUDA Graphs supported for batches that only contain query_len==1 decodes"""
     NEVER = 0
     """NO CUDA Graphs support"""
 ```
 
 Suppose we have hybrid attention backends (e.g., in mamba mixer models). In that case, we seek the minimum capability of all backends to determine the final capability of the model, and we might resolve the incompatible CUDA Graphs mode by downgrading the mode to the best fit one. For example, downgrading `FULL` mode to `FULL_AND_PIECEWISE` mode if the minimum capability is `UNIFORM_BATCH`, or `PIECEWISE` mode if the minimum capability is `NEVER` for -O3 compilation mode. For the complete fallback policy, please see the code for [this][vllm.v1.worker.gpu_model_runner.GPUModelRunner._check_and_update_cudagraph_mode].
+
+Variable-length decode batches, where each request carries a different number of query tokens read from the device `query_start_loc` (as in adaptive verification), are declared separately and not ordered against the enum: `AttentionMetadataBuilder.get_varlen_cudagraph_max_query_len()` returns the largest per-request query length a FULL decode graph can replay. It returns `None` for builders reporting `ALWAYS`, which replay any batch, and for builders that cannot replay variable-length batches; FlashInfer returns `1 + num_speculative_tokens` when its TRTLLM-GEN varlen decode path is active. Batches with a prefill never replay these graphs.
 
 The following table lists backends that support full CUDA Graphs at the time of writing.
 

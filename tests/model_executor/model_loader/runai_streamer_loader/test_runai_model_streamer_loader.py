@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import types
 from unittest.mock import patch
 
@@ -78,3 +79,46 @@ def test_runai_passes_revision_by_name():
     mock_idx.assert_called_once()
     assert mock_idx.call_args.kwargs.get("revision") == "myrev"
     assert "myrev" not in mock_idx.call_args.args
+
+
+def _runai_loader(extra):
+    return rsl.RunaiModelStreamerLoader(
+        LoadConfig(load_format="runai_streamer", model_loader_extra_config=extra)
+    )
+
+
+@pytest.mark.parametrize(
+    "extra, match",
+    [
+        ({"typo_key": 1}, "Unexpected extra config"),
+        ({"distributed": "yes"}, "distributed must be a bool"),
+        ({"concurrency": "16"}, "concurrency must be a positive integer"),
+        ({"concurrency": -1}, "concurrency must be a positive integer"),
+    ],
+)
+def test_runai_rejects_invalid_extra_config(extra, match):
+    # The loader used to silently drop unknown keys / wrong types / negatives.
+    with pytest.raises(ValueError, match=match):
+        _runai_loader(extra)
+
+
+def test_runai_accepts_valid_extra_config():
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("RUNAI_STREAMER_CONCURRENCY", None)
+        os.environ.pop("RUNAI_STREAMER_MEMORY_LIMIT", None)
+        loader = _runai_loader(
+            {"distributed": True, "concurrency": 16, "memory_limit": 1024}
+        )
+        assert loader._is_distributed is True
+        assert os.environ["RUNAI_STREAMER_CONCURRENCY"] == "16"
+        assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "1024"
+
+
+def test_runai_invalid_extra_config_leaves_environ_untouched():
+    # A later invalid key must not leave an earlier valid key applied to
+    # os.environ (all values are validated before any global mutation).
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("RUNAI_STREAMER_CONCURRENCY", None)
+        with pytest.raises(ValueError, match="memory_limit must be an integer >= -1"):
+            _runai_loader({"concurrency": 16, "memory_limit": -5})
+        assert "RUNAI_STREAMER_CONCURRENCY" not in os.environ

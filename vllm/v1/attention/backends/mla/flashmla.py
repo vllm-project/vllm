@@ -55,7 +55,7 @@ class FlashMLABackend(MLACommonBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64]
 
     @staticmethod
@@ -158,12 +158,16 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> FlashMLADecodeMetadata:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         # we use the max but all should be the same due to uniform length requirement
         max_query_len = query_lens_cpu.max().item()
-        num_q_tokens_per_head_k = max_query_len * self.num_q_heads // 1
+        num_q_heads = self.num_q_heads
+        if self.dcp_world_size > 1:
+            num_q_heads *= self.dcp_world_size
+        num_q_tokens_per_head_k = max_query_len * num_q_heads // 1
         scheduler_metadata, _ = get_mla_metadata(
             seq_lens_device,
             num_q_tokens_per_head_k,
@@ -204,6 +208,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
 
     def __init__(
         self,
@@ -331,5 +336,17 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             )
 
         o = reshape_attn_output_for_spec_decode(o)
+
+        if self.need_to_return_lse_for_decode:
+            # FlashMLA returns LSE as [batch, heads, seq_len]; the DCP reducer
+            # consumes [tokens, heads]. Flattening matters under spec-decode,
+            # where seq_len > 1. Only DCP consumes lse, so skip the copy
+            # otherwise.
+            num_decodes, q_num_heads, seq_len = lse.shape
+            lse = (
+                lse.permute(0, 2, 1)
+                .reshape(num_decodes * seq_len, q_num_heads)
+                .contiguous()
+            )
 
         return o, lse

@@ -28,12 +28,14 @@ class SpecDecodingStats:
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
+    num_draft_tokens_per_pos: list[int] = field(default_factory=list)
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
         return cls(
             num_spec_tokens=num_spec_tokens,
             num_accepted_tokens_per_pos=[0] * num_spec_tokens,
+            num_draft_tokens_per_pos=[0] * num_spec_tokens,
         )
 
     def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int):
@@ -43,6 +45,8 @@ class SpecDecodingStats:
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
+        for i in range(num_draft_tokens):
+            self.num_draft_tokens_per_pos[i] += 1
 
 
 class SpecDecodingLogging:
@@ -183,12 +187,12 @@ class SpecDecodingProm:
 
       1 + (
       rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
-      rate(vllm:spec_decode_num_drafts[$interval]))
+      rate(vllm:spec_decode_num_drafts_total[$interval]))
 
     A per-position acceptance rate vector can be computed using
 
-      vllm:spec_decode_num_accepted_tokens_per_pos[$interval] /
-      vllm:spec_decode_num_drafts[$interval]
+      vllm:spec_decode_num_accepted_tokens_per_pos_total[$interval] /
+      vllm:spec_decode_num_drafts_total[$interval]
     """
 
     _counter_cls = prometheus_client.Counter

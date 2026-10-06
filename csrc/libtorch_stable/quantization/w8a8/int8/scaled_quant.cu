@@ -5,7 +5,7 @@
 #include "../../../dispatch_utils.h"
 #include "../../../torch_utils.h"
 #include "../../vectorization_utils.cuh"
-#include "../../../../cub_helpers.h"
+#include "../../../cub_helpers.h"
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
 #ifdef USE_ROCM

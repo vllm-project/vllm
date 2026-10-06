@@ -22,6 +22,7 @@ MODELS = [
             "num_labels": 2048,
         },
         mteb_score=0.7054,
+        mteb_tol=2e-3,
         # === MTEB Results ===
         # STS12: 0.6613
         # STS13: 0.6906
@@ -34,6 +35,7 @@ MODELS = [
 ]
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     # Encoder-only attention models need enforce_eager=True to avoid

@@ -1,0 +1,43 @@
+{
+  "tools": [
+    {
+      "function": {
+        "name": "get_weather",
+        "description": "Get weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Check Hangzhou weather."
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "Need current weather.",
+      "tool_calls": [
+        {
+          "id": "call-weather",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"city\":\"Hangzhou\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call-weather",
+      "content": "{\"temperature\":20}"
+    }
+  ]
+}

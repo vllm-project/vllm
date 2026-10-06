@@ -57,8 +57,7 @@ def get_sequence_parallelism_threshold(
     tp_size: int,
     element_size: int,
 ) -> int | None:
-    """
-    Calculate the minimum token threshold for applying sequence parallelism.
+    """Calculate the minimum token threshold for applying sequence parallelism.
 
     Returns None if sequence parallelism should not be applied based on model size.
 
@@ -72,24 +71,27 @@ def get_sequence_parallelism_threshold(
     """
     from vllm.platforms import current_platform
 
-    if not current_platform.is_cuda():
-        return None
+    if current_platform.is_xpu():
+        min_hidden_size = 4096
+        min_per_gpu_size_mb = 8.0
+    elif current_platform.is_cuda():
+        capability = current_platform.get_device_capability()
+        if capability is None:
+            return None
 
-    capability = current_platform.get_device_capability()
-    if capability is None:
-        return None
+        # Collapse Blackwell variants (sm100/sm103/...) into one policy bucket.
+        if current_platform.is_device_capability_family(100):
+            device_capability = 100
+        else:
+            device_capability = capability.to_int()
 
-    # Collapse Blackwell variants (sm100/sm103/...) into one policy bucket.
-    if current_platform.is_device_capability_family(100):
-        device_capability = 100
+        # Check if device has configured thresholds
+        _hidden = SP_MIN_HIDDEN_SIZE.get(device_capability)
+        _gpu_mb = SP_MIN_PER_GPU_SIZE_MB.get(device_capability)
+        if _hidden is None or _gpu_mb is None:
+            return None
+        min_hidden_size, min_per_gpu_size_mb = _hidden, _gpu_mb
     else:
-        device_capability = capability.to_int()
-
-    # Check if device has configured thresholds
-    min_hidden_size = SP_MIN_HIDDEN_SIZE.get(device_capability)
-    min_per_gpu_size_mb = SP_MIN_PER_GPU_SIZE_MB.get(device_capability)
-
-    if min_hidden_size is None or min_per_gpu_size_mb is None:
         return None
 
     # Only apply sequence parallelism for models meeting the size threshold
@@ -493,8 +495,7 @@ class MiddleAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
 
 
 class SequenceParallelismPass(VllmPatternMatcherPass):
-    """
-    This pass enables sequence parallelism for models.
+    """This pass enables sequence parallelism for models.
     It identifies patterns where an AllReduce operation is followed by
     an RMSNorm (or RMSNorm and then Quantization) operation.
     These patterns are replaced with a ReduceScatter operation, followed by
@@ -587,8 +588,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         self.dump_patterns(config, self.patterns)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
-        """
-        Determines if sequence parallelism should be applied for the given
+        """Determines if sequence parallelism should be applied for the given
         compile range.
 
         SP is only beneficial for larger batch sizes where the communication
