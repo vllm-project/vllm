@@ -352,11 +352,14 @@ class MHCPreDelayedOp(CustomOp):
     def enabled(cls) -> bool:
         return True
 
-    def __init__(self) -> None:
+    def __init__(self, gfx942_seam: bool = False) -> None:
         super().__init__()
         # Built here, not lazily: CustomOp resolves dispatch against the
         # current vLLM config, which is only set during model construction.
         self._post = MHCPostOp()
+        # DeepSeek-V4.1 AMD opts in. The ASM kernel was measured on that
+        # model; another caller keeps the seam below.
+        self._gfx942_seam = gfx942_seam
 
     def _maybe_post(
         self,
@@ -431,7 +434,8 @@ class MHCPreDelayedOp(CustomOp):
         # the branches below. Shorter steps stay there too: under 64 tokens the
         # folded post GEMM is faster than this kernel.
         if (
-            _MHC_FUSED_POST_PRE_DELAYED is not None
+            self._gfx942_seam
+            and _MHC_FUSED_POST_PRE_DELAYED is not None
             and sublayer_out is not None
             and post_layer_mix is not None
             and comb_res_mix is not None
