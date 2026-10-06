@@ -20,7 +20,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Lock as LockType
 from threading import Thread
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import cloudpickle
 import torch
@@ -206,8 +206,6 @@ class MultiprocExecutor(Executor):
                 if inherited_fds is not None:
                     inherited_fds.append(unready_worker_handle.death_writer.fileno())
                     inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
-                    if (error_reader := unready_worker_handle.error_reader) is not None:
-                        inherited_fds.append(error_reader.fileno())
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -301,44 +299,29 @@ class MultiprocExecutor(Executor):
         workers = self.workers
         self_ref = weakref.ref(self)
 
-        # Monitors worker process liveness and fatal RPC failure notifications.
-        # If any worker dies unexpectedly or reports a fatal failure, logs an
-        # error, shuts down the executor and invokes the failure callback to
-        # inform the engine.
+        # Monitors worker process liveness. If any die unexpectedly,
+        # logs an error, shuts down the executor and invokes the failure
+        # callback to inform the engine.
         def monitor_workers():
-            sentinels = {h.proc.sentinel: h.proc for h in workers}
-            error_pipes = {
-                h.error_reader: h.proc for h in workers if h.error_reader is not None
-            }
-            ready = multiprocessing.connection.wait([*sentinels, *error_pipes])
+            sentinels = [h.proc.sentinel for h in workers]
+            died = multiprocessing.connection.wait(sentinels)
             _self = self_ref()
             if not _self or getattr(_self, "shutting_down", False):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
-            try:
-                if died := [p for s, p in sentinels.items() if s in ready]:
-                    logger.error(
-                        "Worker proc %s died unexpectedly (exit code: %s), "
-                        "shutting down executor.",
-                        died[0].name,
-                        died[0].exitcode,
-                    )
-                else:
-                    # The error pipe is only a wake-up signal and is never read,
-                    # so teardown can't depend on a (possibly torn) message.
-                    proc = next(p for r, p in error_pipes.items() if r in ready)
-                    logger.error(
-                        "Worker proc %s reported a fatal error, shutting down "
-                        "executor. See the worker's log above for the root cause.",
-                        proc.name,
-                    )
-                _self.shutdown()
-            finally:
-                callback = _self.failure_callback
-                if callback is not None:
-                    _self.failure_callback = None
-                    callback()
+            proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
+            logger.error(
+                "Worker proc %s died unexpectedly (exit code: %s), "
+                "shutting down executor.",
+                proc.name,
+                proc.exitcode,
+            )
+            _self.shutdown()
+            callback = _self.failure_callback
+            if callback is not None:
+                _self.failure_callback = None
+                callback()
 
         if not inline:
             Thread(
@@ -535,9 +518,6 @@ class MultiprocExecutor(Executor):
                     if w.death_writer is not None:
                         w.death_writer.close()
                         w.death_writer = None
-                    if w.error_reader is not None:
-                        w.error_reader.close()
-                        w.error_reader = None
                 self._ensure_worker_termination([w.proc for w in workers])
 
                 for w in workers:
@@ -589,7 +569,6 @@ class UnreadyWorkerProcHandle:
     rank: int
     ready_pipe: Connection
     death_writer: Connection | None = None
-    error_reader: Connection | None = None
 
 
 @dataclass
@@ -603,7 +582,6 @@ class WorkerProcHandle:
     # `peer_worker_response_mqs[i]`
     peer_worker_response_mqs: list[MessageQueue | None]
     death_writer: Connection | None = None
-    error_reader: Connection | None = None
 
     @classmethod
     def from_unready_handle(
@@ -618,7 +596,6 @@ class WorkerProcHandle:
             worker_response_mq=worker_response_mq,
             peer_worker_response_mqs=peer_worker_response_mqs,
             death_writer=unready_handle.death_writer,
-            error_reader=unready_handle.error_reader,
         )
 
 
@@ -627,9 +604,9 @@ class WorkerProc:
 
     READY_STR = "READY"
     # Failures in these RPCs already fail the engine and can leave peer ranks
-    # blocked in collectives, so they are reported to the executor monitor to
-    # fail fast. Failures in other RPCs (e.g. loading an invalid LoRA adapter)
-    # are only returned to the caller.
+    # blocked in collectives, so the worker exits and the executor's worker
+    # monitor shuts down the rest. Failures in other RPCs (e.g. loading an
+    # invalid LoRA adapter) are only returned to the caller.
     FAIL_FAST_RPCS = frozenset(
         {
             "determine_available_memory",
@@ -642,7 +619,7 @@ class WorkerProc:
     )
     rpc_broadcast_mq: MessageQueue | None
     worker_response_mq: MessageQueue | None
-    error_writer: Connection | None = None
+    exit_on_fatal_failure = False
 
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
@@ -688,6 +665,11 @@ class WorkerProc:
         is_driver_worker: bool,
     ):
         self.rank = rank
+        # With fault tolerance, failed steps are recovered in place by the
+        # engine, so they must not take the worker down.
+        self.exit_on_fatal_failure = (
+            not vllm_config.parallel_config.enable_fault_tolerance
+        )
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
@@ -757,17 +739,9 @@ class WorkerProc:
         ready_reader, ready_writer = context.Pipe(duplex=False)
         # Death pipe to let child detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
-        # Error pipe to notify the executor monitor of fatal RPC failures
-        error_reader, error_writer = context.Pipe(duplex=False)
         if inherited_fds is not None:
             inherited_fds = inherited_fds.copy()
-            inherited_fds.extend(
-                (
-                    ready_reader.fileno(),
-                    error_reader.fileno(),
-                    death_writer.fileno(),
-                )
-            )
+            inherited_fds.extend((ready_reader.fileno(), death_writer.fileno()))
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -776,7 +750,6 @@ class WorkerProc:
             "input_shm_handle": input_shm_handle,
             "ready_pipe": ready_writer,
             "death_pipe": death_reader,
-            "error_pipe": error_writer,
             "shared_worker_lock": shared_worker_lock,
             "is_driver_worker": is_driver_worker,
             # Have the worker close parent end of this worker's pipes too
@@ -799,12 +772,9 @@ class WorkerProc:
         # Close child ends of pipes here in the parent
         ready_writer.close()
         death_reader.close()
-        error_writer.close()
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
-        return UnreadyWorkerProcHandle(
-            proc, rank, ready_reader, death_writer, error_reader=error_reader
-        )
+        return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
 
     @staticmethod
     def wait_for_response_handle_ready(
@@ -942,7 +912,6 @@ class WorkerProc:
         worker = None
         ready_writer = kwargs.pop("ready_pipe")
         death_pipe = kwargs.pop("death_pipe", None)
-        error_pipe = kwargs.pop("error_pipe", None)
 
         # Close inherited pipes from parent (incl. other worker pipes)
         # Explicitly passing in existing pipes and closing them makes the pipe
@@ -964,10 +933,6 @@ class WorkerProc:
             )
 
             worker = WorkerProc(*args, **kwargs)
-            # With fault tolerance, failed steps are recovered in place by the
-            # engine, so they must not tear down the executor.
-            if not kwargs["vllm_config"].parallel_config.enable_fault_tolerance:
-                worker.error_writer = error_pipe
             assert worker.worker_response_mq is not None
             if kwargs["vllm_config"].parallel_config.numa_bind:
                 numa_utils.log_current_affinity_state(f"Worker_{worker.rank}")
@@ -1030,8 +995,6 @@ class WorkerProc:
                 ready_writer.close()
             if death_pipe is not None:
                 death_pipe.close()
-            if error_pipe is not None:
-                error_pipe.close()
             # Clean up once worker exits busy loop
             if worker is not None:
                 worker.shutdown()
@@ -1084,6 +1047,10 @@ class WorkerProc:
 
         while True:
             output = self.async_output_queue.get()
+            if isinstance(output, threading.Event):
+                # Flush request from _flush_replies.
+                output.set()
+                continue
             self.enqueue_output(output)
 
     def worker_busy_loop(self):
@@ -1113,21 +1080,37 @@ class WorkerProc:
             if hasattr(e, "add_note"):
                 e.add_note(traceback.format_exc())
             logger.exception("WorkerProc hit an exception.")
-            if method in self.FAIL_FAST_RPCS:
-                self._report_fatal_failure()
             # enqueue_output converts the exception to a FAILURE response
             # containing its string representation before transport.
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(e)
+            if self.exit_on_fatal_failure and method in self.FAIL_FAST_RPCS:
+                self._exit_after_fatal_failure()
 
-    def _report_fatal_failure(self) -> None:
-        """Wake up the executor monitor, at most once. Only a tiny fixed message
-        is sent so the write can neither block nor be torn; the traceback is
-        already in this worker's log."""
-        writer, self.error_writer = self.error_writer, None
-        if writer is not None:
-            with suppress(Exception):
-                writer.send_bytes(b"\x00")
+    def _exit_after_fatal_failure(self) -> NoReturn:
+        """Exit at once so that the executor's worker monitor shuts down the
+        other ranks, which may be blocked in a collective with this one. The
+        normal teardown is skipped since it can block on those ranks."""
+        try:
+            logger.error("Exiting worker after a fatal RPC failure.")
+            self._flush_replies()
+        finally:
+            os._exit(1)
+
+    def _flush_replies(self) -> None:
+        """Send the pending replies, including the FAILURE reply, so that the
+        engine still reports the root cause once this process exits."""
+        if self.use_async_scheduling:
+            flushed = threading.Event()
+            self.async_output_queue.put(flushed)
+            if not flushed.wait(timeout=5):
+                # The output thread is stuck and may still be using the
+                # sockets, so leave them alone.
+                return
+        if (mq := self.worker_response_mq) is not None:
+            # os._exit drops zmq messages that are not sent yet, such as the
+            # wake-up of a reader waiting for the reply.
+            (mq.local_socket or mq.remote_socket).context.destroy(linger=1000)
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
