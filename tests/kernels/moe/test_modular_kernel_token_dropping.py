@@ -461,8 +461,20 @@ def test_workspace_tracking_counts_shared_storage_once(monkeypatch):
 
 @pytest.mark.parametrize("expert_name", ["triton", "deep_gemm", "humming"])
 @pytest.mark.parametrize("packed_ue8m0", [False, True])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="Requires CUDA"
+            ),
+        ),
+    ],
+)
 def test_batched_compaction_handles_fp8_dispatch_scale_layout(
-    expert_name, packed_ue8m0
+    expert_name, packed_ue8m0, device
 ):
     """Quantized dispatch payloads compact values and scales together.
 
@@ -504,19 +516,26 @@ def test_batched_compaction_handles_fp8_dispatch_scale_layout(
         torch.arange(num_experts * full_rows * hidden_dim, dtype=torch.float32)
         .reshape(num_experts, full_rows, hidden_dim)
         .to(torch.float8_e4m3fn)
+        .to(device)
     )
+    if device == "cuda":
+        storage = torch.empty(values.numel() + 1, device=device, dtype=values.dtype)
+        offset_values = storage[1:].view_as(values)
+        offset_values.copy_(values)
+        values = offset_values
     scale_storage = torch.arange(
         num_experts * full_rows * scale_columns, dtype=torch.int32
     )
     scales = scale_storage.as_strided(
         (num_experts, full_rows, scale_columns),
         (full_rows * scale_columns, 1, full_rows),
-    )
+    ).to(device)
 
     compact_values, compact_scales = compaction.compact((values, scales), 0)
 
     assert compact_values.shape == (num_experts, 4, hidden_dim)
     assert compact_values.is_contiguous()
+    torch.testing.assert_close(compact_values, values[:, :4])
     assert compact_scales.shape == (num_experts, 4, scale_columns)
     torch.testing.assert_close(compact_scales, scales[:, :4])
     expected_stride = (
@@ -526,9 +545,10 @@ def test_batched_compaction_handles_fp8_dispatch_scale_layout(
     )
     assert compact_scales.stride() == expected_stride
 
-    restored, receiver = compaction.restore(compact_values, 0)
+    compact_output = compact_values.to(torch.bfloat16)
+    restored, receiver = compaction.restore(compact_output, 0)
     assert restored.shape == values.shape
-    assert torch.equal(restored[:, :4], compact_values)
+    assert torch.equal(restored[:, :4], compact_output)
     receiver()
 
 

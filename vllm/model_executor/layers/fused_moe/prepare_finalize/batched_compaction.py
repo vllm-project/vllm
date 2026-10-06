@@ -7,6 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
@@ -15,6 +16,36 @@ def _maybe_contiguous(x: torch.Tensor) -> torch.Tensor:
     if not x.is_contiguous():
         x = x.contiguous()
     return x
+
+
+@triton.jit
+def _copy_expert_prefix_kernel(
+    src_ptr,
+    dst_ptr,
+    ELEMENTS: tl.constexpr,
+    SRC_EXPERT_STRIDE: tl.constexpr,
+    DST_EXPERT_STRIDE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    expert = tl.program_id(0)
+    offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    values = tl.load(
+        src_ptr + expert * SRC_EXPERT_STRIDE + offsets,
+        mask=offsets < ELEMENTS,
+        other=0.0,
+    )
+    tl.store(
+        dst_ptr + expert * DST_EXPERT_STRIDE + offsets,
+        values,
+        mask=offsets < ELEMENTS,
+    )
+
+
+def _copy_expert_prefix(src: torch.Tensor, dst: torch.Tensor, rows: int) -> None:
+    elements = rows * src.shape[2]
+    _copy_expert_prefix_kernel[(src.shape[0], triton.cdiv(elements, 4096))](
+        src, dst, elements, src.stride(0), dst.stride(0), 4096
+    )
 
 
 class BatchedExpertCompaction:
@@ -67,7 +98,14 @@ class BatchedExpertCompaction:
             if self._compact_tokens < payload_rows:
                 self._restore_shapes[ubatch_id] = tuple(payload.shape)
                 if isinstance(x, torch.Tensor):
-                    x = _maybe_contiguous(payload[:, : self._compact_tokens])
+                    if payload.is_cuda and payload.is_contiguous():
+                        compact = payload.new_empty(
+                            (payload.shape[0], self._compact_tokens, payload.shape[2])
+                        )
+                        _copy_expert_prefix(payload, compact, self._compact_tokens)
+                        x = compact
+                    else:
+                        x = _maybe_contiguous(payload[:, : self._compact_tokens])
                 else:
                     values, scales = x
                     scale_slice = scales[:, : self._compact_tokens]
@@ -80,10 +118,18 @@ class BatchedExpertCompaction:
                             scale_slice, memory_format=torch.preserve_format
                         )
                         compact_scales.copy_(scale_slice, non_blocking=True)
-                    x = (
-                        _maybe_contiguous(values[:, : self._compact_tokens]),
-                        compact_scales,
-                    )
+                    if values.is_cuda and values.is_contiguous():
+                        compact_values = values.new_empty(
+                            (values.shape[0], self._compact_tokens, values.shape[2])
+                        )
+                        _copy_expert_prefix(
+                            values, compact_values, self._compact_tokens
+                        )
+                    else:
+                        compact_values = _maybe_contiguous(
+                            values[:, : self._compact_tokens]
+                        )
+                    x = compact_values, compact_scales
         return x
 
     def restore(
@@ -94,7 +140,10 @@ class BatchedExpertCompaction:
             # Combine only reads live token positions, which all lie in the
             # compacted head, so the tail rows need no zero fill.
             restored = output.new_empty(shape)
-            restored[:, : output.shape[1]].copy_(output, non_blocking=True)
+            if output.is_cuda and output.is_contiguous():
+                _copy_expert_prefix(output, restored, output.shape[1])
+            else:
+                restored[:, : output.shape[1]].copy_(output, non_blocking=True)
             output = restored
 
         def receiver():
