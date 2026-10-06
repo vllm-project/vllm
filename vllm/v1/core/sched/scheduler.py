@@ -914,7 +914,8 @@ class Scheduler(SchedulerInterface):
                     request_queue is self.kv_holding_waiting
                     and not self._holds_kv_blocks(request)
                 ):
-                    # A failed async KV load freed its blocks.
+                    # Its async KV load failed with no valid prefix, so
+                    # _update_waiting_for_remote_kv freed its blocks.
                     self.waiting.prepend_request(request_queue.pop_request())
                     continue
 
