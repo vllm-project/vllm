@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import json
 import logging
 import os
@@ -328,9 +329,24 @@ def test_per_request_spec_decode_metrics_requires_spec_decode():
         ),
     ],
 )
+@pytest.mark.parametrize("connector_name", ["NixlConnector", "NixlPushConnector"])
+@pytest.mark.parametrize("auto_resolve", [False, True])
+@pytest.mark.parametrize("block_sizes", [[16], [16, 24]])
 def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
-    caplog, disable_log_dedup, kv_transfer_config
+    caplog,
+    disable_log_dedup,
+    kv_transfer_config,
+    connector_name,
+    auto_resolve,
+    block_sizes,
 ):
+    kv_transfer_config = copy.deepcopy(kv_transfer_config)
+    if kv_transfer_config.kv_connector == "MultiConnector":
+        kv_transfer_config.kv_connector_extra_config["connectors"][0][
+            "kv_connector"
+        ] = connector_name
+    else:
+        kv_transfer_config.kv_connector = connector_name
     config = VllmConfig(
         cache_config=CacheConfig(block_size=16),
         device_config=DeviceConfig(device="cpu"),
@@ -343,14 +359,34 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
         kv_transfer_config=kv_transfer_config,
     )
 
-    kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
-    )
-    with caplog.at_level(logging.INFO):
+    groups = [
+        SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=size))
+        for size in block_sizes
+    ]
+    kv_cache_config = SimpleNamespace(kv_cache_groups=groups, transfer_groups=groups)
+    config.parallel_config._allow_auto_resolve_cp_interleave_size = auto_resolve
+    backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda: [8, 24])
+    with (
+        caplog.at_level(logging.INFO),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.utils.get_current_attn_backends",
+            return_value=[backend],
+        ),
+    ):
         config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
 
-    assert config.parallel_config.cp_kv_cache_interleave_size == 16
-    assert "automatically adjusted from 3 to block_size 16" in caplog.text
+    expected = 3
+    if auto_resolve:
+        expected = (
+            (8 if len(block_sizes) == 1 else 24)
+            if connector_name == "NixlPushConnector"
+            else 16
+        )
+    assert config.parallel_config.cp_kv_cache_interleave_size == expected
+    if auto_resolve:
+        assert f"automatically adjusted from 3 to block_size {expected}" in caplog.text
+    else:
+        assert "automatically adjusted" not in caplog.text
 
 
 def test_kv_offloading_does_not_adjust_dcp_interleave_size():

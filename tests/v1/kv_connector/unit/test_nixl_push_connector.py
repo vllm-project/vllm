@@ -26,13 +26,17 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import msgspec
 import pytest
 
-from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    EngineTransferInfo,
+    TransferTopology,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
@@ -112,8 +116,20 @@ def _make_request(
 class _BlocksMock:
     """Minimal stand-in for ``KVCacheBlocks`` used in update_state_after_alloc."""
 
-    def __init__(self, block_ids: tuple[list[int], ...]):
+    def __init__(
+        self,
+        block_ids: tuple[list[int], ...],
+        cached_counts: tuple[int, ...] | None = None,
+    ):
         self._block_ids = block_ids
+        cached_counts = cached_counts or (0,) * len(block_ids)
+        self.blocks = tuple(
+            [
+                MagicMock(block_hash=object() if i < cached else None, is_null=False)
+                for i in range(cached + len(group))
+            ]
+            for group, cached in zip(block_ids, cached_counts, strict=True)
+        )
 
     def get_unhashed_block_ids_all_groups(self) -> tuple[list[int], ...]:
         return self._block_ids
@@ -167,6 +183,7 @@ class TestPushScheduler:
         assert reg["decode_host"] == sched.side_channel_host
         assert reg["decode_port"] == sched.side_channel_port
         assert reg["local_block_ids"] == ([10, 11, 12],)
+        assert reg["local_num_computed_blocks"] == (0,)
         assert reg["remote_engine_id"] == "prefill-engine"
 
         # Watchdog deadline set in the future.
@@ -176,6 +193,28 @@ class TestPushScheduler:
         assert request.kv_transfer_params["do_remote_prefill"] is False
         # Tracked as awaiting a recv.
         assert request.request_id in sched._reqs_need_recv
+
+    @pytest.mark.parametrize("dcp_size", [1, 2, 4, 8, 16])
+    def test_d_side_registration_carries_cached_blocks_per_group(self, dcp_size):
+        sched = make_nixl_push_scheduler()
+        sched.vllm_config.parallel_config.decode_context_parallel_size = 1
+        _stub_sw_clipping(sched)
+        request = _make_request(request_id="req-d-cached")
+        producer_blocks = ([30, 31, 32], [40])
+        request.kv_transfer_params.update(
+            dcp_size=dcp_size, remote_block_ids=producer_blocks
+        )
+        blocks = _BlocksMock(([12], [22, 23]), cached_counts=(2, 1))
+
+        sched.update_state_after_alloc(request, blocks, num_external_tokens=48)
+
+        reg = sched._push_pending_registrations[request.request_id]
+        assert reg["local_num_computed_blocks"] == (2, 1)
+        _, _, cached, _ = sched._reqs_need_recv[request.request_id]
+        assert cached == (2, 1)
+        assert request.kv_transfer_params["remote_block_ids"] == (
+            producer_blocks if dcp_size != 1 else ()
+        )
 
     def test_p_side_request_finished_stages_blocks(self):
         """P scheduler pushes blocks into both _finished_request_blocks (lease)
@@ -376,6 +415,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.pcp_rank = 0
         w.pcp_dcp_sharded = False
         w.world_size = 1
+        w.dcp_size = 1
+        w.dcp_rank = 0
         w.pp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
@@ -423,6 +464,7 @@ def _registration_data(
     decode_port: int = 5602,
     decode_tp_size: int = 1,
     local_block_ids=((100, 101, 102),),
+    local_num_computed_blocks=(0,),
     remote_engine_id: str = "prefill-engine",
     remote_host: str = "10.0.0.1",
     remote_port: int = 5601,
@@ -435,6 +477,7 @@ def _registration_data(
         "decode_port": decode_port,
         "decode_tp_size": decode_tp_size,
         "local_block_ids": local_block_ids,
+        "local_num_computed_blocks": local_num_computed_blocks,
         "remote_engine_id": remote_engine_id,
         "remote_host": remote_host,
         "remote_port": remote_port,
@@ -916,6 +959,84 @@ def test_start_load_kv_skips_liveness_for_unconnected_engine():
 
 
 class TestPushWriterNotifs:
+    @pytest.mark.parametrize("dcp_size", [2, 4, 8, 16])
+    @pytest.mark.parametrize(
+        "producer_ppl,decode_ppl", [(1, 1), (2, 4), (4, 2), (14, 112)]
+    )
+    @pytest.mark.parametrize("cached", [0, 1, 3])
+    def test_clipped_fan_in_zeroes_unwritten_tail_with_equal_geometry(
+        self, dcp_size, producer_ppl, decode_ppl, cached
+    ):
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+            NixlBaseConnectorWorker,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+            RemoteMeta,
+            ReqMeta,
+        )
+
+        w = _StubWriterWorker.fresh()
+        request_id = "req-clipped-fan-in"
+        producer_blocks = list(range(5))
+        local_blocks = list(range(12 * decode_ppl))
+        w._physical_blocks_per_logical_kv_block = decode_ppl
+        w._recving_metadata[request_id] = ReqMeta(
+            local_block_ids=(local_blocks,),
+            local_physical_block_ids=(local_blocks,),
+            tp_size=1,
+            dcp_size=dcp_size,
+            local_num_computed_blocks=(cached,),
+            remote=RemoteMeta(
+                block_ids=(producer_blocks,),
+                host="",
+                port=0,
+                engine_id="prefill-engine",
+                request_id="prefill-request",
+            ),
+        )
+        w._recving_transfers[request_id] = []
+        w._replicated_pcp_done_sending = set()
+        w._is_hma_required = False
+        w._invalid_block_ids = queue.Queue()
+        w.use_host_buffer = False
+        w.enable_permute_local_kv = False
+        w.enable_heterogeneous_attn_post_process = False
+        w.use_mla = True
+        w.expected_consumer_notifications_by_req = {}
+        w.xfer_stats = MagicMock()
+        w.nixl_wrapper = MagicMock()
+        w.transfer_topo = MagicMock()
+        w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+            remote_block_size=16,
+            remote_physical_blocks_per_logical=producer_ppl,
+        )
+        w.transfer_topo.block_size_ratio.return_value = 1
+        w.post_process_device_kv_on_receive = MagicMock()
+        w._sync_device_after_direct_recv = MagicMock()
+
+        result = NixlBaseConnectorWorker.get_transfer_results(w)
+
+        # Use the producer's actual mapping as the reference, not the count formula.
+        transferred = sum(
+            len(
+                w._apply_dcp_prefix_caching(
+                    local_ids=local_blocks,
+                    remote_ids=list(range(len(producer_blocks) * producer_ppl)),
+                    remote_rank=rank,
+                    local_dcp_size=1,
+                    local_dcp_rank=0,
+                    remote_dcp_size=dcp_size,
+                    local_num_computed_blocks=cached * decode_ppl,
+                )[0]
+            )
+            for rank in range(dcp_size)
+        )
+
+        assert result.finished_recving == {request_id}
+        w.post_process_device_kv_on_receive.assert_called_once_with(
+            1, [(local_blocks, transferred)], False
+        )
+
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
         on the engine main thread inside ``_get_new_notifs``."""
@@ -923,20 +1044,50 @@ class TestPushWriterNotifs:
         # Pretend the writer thread already forwarded a completion notif
         # for a request whose KV is being received.
         request_id = "req-recv-1"
-        w._recving_metadata[request_id] = MagicMock(pp_size=1)
+        meta = SimpleNamespace(
+            pp_size=1,
+            remote=SimpleNamespace(engine_id="prefill-engine"),
+            local_physical_block_ids=([1, 2],),
+        )
+        w._recving_metadata[request_id] = meta
         # Compose the standard completion notif: req_id:tp_size.
         notif_msg = f"{request_id}:1".encode()
         w._pending_completion_notifs.put(notif_msg)
 
-        # transfer_topo is consulted only for the producer-side path; we
-        # make it a MagicMock because the D-side branch returns early.
         w.transfer_topo = MagicMock()
+        w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+            remote_dcp_size=1, remote_block_size=16
+        )
+        w.transfer_topo.block_size_ratio.return_value = 1
 
         notified = w._get_new_notifs()
 
         # Notif consumed; D-side just touches _recving_transfers.
         assert notified == set()
         assert request_id in w._recving_transfers
+
+    @pytest.mark.parametrize("dcp_size", [2, 4, 8, 16])
+    def test_dcp_fan_in_waits_for_all_pushes(self, dcp_size):
+        w = _StubWriterWorker.fresh()
+        request_id = "req-dcp-fan-in"
+        meta = SimpleNamespace(
+            pp_size=1,
+            remote=SimpleNamespace(engine_id="prefill-engine"),
+            local_physical_block_ids=([1, 2],),
+        )
+        w._recving_metadata[request_id] = meta
+        w.transfer_topo = MagicMock()
+        for index in range(dcp_size):
+            notif = f"{request_id}:{dcp_size}".encode()
+            w._pending_completion_notifs.put(notif)
+            assert w._get_new_notifs() == set()
+            if index < dcp_size - 1:
+                assert request_id not in w._recving_transfers
+                assert w.consumer_notification_counts_by_req[request_id] == index + 1
+
+        assert request_id in w._recving_transfers
+        assert request_id not in w.consumer_notification_counts_by_req
+        assert w._failed_recv_reqs.empty()
 
     def test_get_transfer_results_evicts_completed_state(self):
         """Transfer completion should enqueue evictions and wake the writer."""
@@ -1059,6 +1210,13 @@ class TestPushWriterNotifs:
         w = self._pollable_worker()
         request_id = self._make_sending_req(w)
         w.transfer_topo.block_size_ratio.return_value = 1
+        w.transfer_topo.get_engine_info.return_value = EngineTransferInfo(
+            remote_tp_size=1,
+            remote_block_size=16,
+            remote_block_len=32,
+            remote_physical_blocks_per_logical=1,
+            remote_dcp_size=1,
+        )
         w._apply_prefix_caching = MagicMock(return_value=([[1]], [[1]]))
         w._compute_desc_ids = MagicMock(return_value=[0])
         w.dst_num_blocks = {w.engine_id: 8}
@@ -1081,6 +1239,7 @@ class TestPushWriterNotifs:
             remote_request_id="decode-request",
             local_xfer_side_handle=1,
             remote_xfer_side_handle=2,
+            remote_num_computed_blocks=(),
         )
         assert handle == (101 if release_fails else None)
         w._sending_transfers[request_id] = [102]
@@ -1421,6 +1580,9 @@ class TestPushPipelineParallel:
         collect pp_size notifs before reporting the recv done."""
         w = _StubWriterWorker.fresh()
         w.transfer_topo = MagicMock()
+        w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+            remote_dcp_size=1
+        )
         request_id = "req-pp-2"
         w._recving_metadata[request_id] = MagicMock(pp_size=2)
         notif = f"{request_id}:1".encode()
@@ -1457,17 +1619,61 @@ class TestPushPipelineParallel:
         metadata.add_new_req_to_recv("req-default", ([0],), params)
         assert metadata.reqs_to_recv["req-default"].pp_size == 1
 
-    def test_add_remote_agent_slices_remote_regions_to_local_pp_window(self):
-        """With PP>1 the producer registered regions for the full model, but
-        this worker holds only a contiguous layer slice; add_remote_agent
-        trims the remote region list to [offset : offset + num_local_regions]
-        before building descriptors. We stop right after the slice via a
-        sentinel on the next collaborator call."""
+    @pytest.mark.parametrize(
+        "pp_size,has_mamba,local_names,remote_names,selected",
+        [
+            pytest.param(
+                2,
+                False,
+                ["main.2", "main.3"],
+                ["main.0", "main.1", "main.2", "main.3"],
+                [2, 3],
+                id="pp-window",
+            ),
+            pytest.param(
+                1,
+                True,
+                ["main.0", "shared", "shared", "main.1"],
+                ["draft.0", "shared", "main.1", "main.0", "shared"],
+                [3, 1, 4, 2],
+                id="hybrid-draft-and-segments",
+            ),
+            pytest.param(
+                1,
+                True,
+                ["main.0", "main.1"],
+                ["main.0", "draft.0"],
+                None,
+                id="missing-main-region",
+            ),
+            pytest.param(
+                1,
+                False,
+                ["packed.main"],
+                ["main.0", "main.1"],
+                [0, 1],
+                id="non-hybrid-unchanged",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("already_registered", [False, True])
+    def test_add_remote_agent_slices_remote_regions_to_local_pp_window(
+        self,
+        pp_size,
+        has_mamba,
+        local_names,
+        remote_names,
+        selected,
+        already_registered,
+    ):
+        """Select corresponding regions before registering remote descriptors."""
         block_len = 4096 * 16
-        w = _StubWriterWorker.fresh()  # seeds writer-thread state for teardown
-        w.pp_size = 2
-        w._remote_region_offset = 2  # this worker owns layers [2, 4)
-        w.block_len_per_layer = [block_len, block_len]  # 2 local layers
+        w = _StubWriterWorker.fresh()
+        w.pp_size = pp_size
+        w._has_mamba = has_mamba
+        w.region_names = local_names
+        w._remote_region_offset = 2
+        w.block_len_per_layer = [block_len] * len(local_names)
         w.nixl_wrapper = MagicMock()
 
         class _StopAfterSlice(RuntimeError):
@@ -1476,28 +1682,52 @@ class TestPushPipelineParallel:
         w.transfer_topo = MagicMock()
         w.transfer_topo.register_remote_engine.side_effect = _StopAfterSlice()
 
+        count = len(remote_names)
         meta = NixlAgentMetadata(
             engine_id="p-engine",
             agent_metadata=b"agent",
-            kv_caches_base_addr=[10, 11, 12, 13],  # full 4-layer model
+            kv_caches_base_addr=[10 + i for i in range(count)],
             device_id=0,
             num_blocks=4,
-            block_lens=[block_len] * 4,
-            # Non-interleaved: consecutive blocks abut, so stride == block length.
-            block_strides=[block_len] * 4,
+            block_lens=[block_len + i for i in range(count)],
+            block_strides=[block_len + i for i in range(count)],
             kv_cache_layout="HND",
             block_size=16,
             ssm_sizes=(0, 0),
             attn_backend_name="FLASH_ATTN",
             physical_blocks_per_logical_kv_block=1,
+            region_num_blocks=[100 + i for i in range(count)],
+            region_group_ids=[i for i in range(count)],
+            region_names=remote_names,
+            region_mem_types=["VRAM"] * count,
+            region_members=[[name] for name in remote_names] if has_mamba else [],
         )
 
+        if already_registered:
+            w._remote_agents[meta.engine_id] = {(0, 0): "existing-agent"}
+            original = msgspec.msgpack.encode(meta)
+            assert w.add_remote_agent(meta) == "existing-agent"
+            assert msgspec.msgpack.encode(meta) == original
+            w.transfer_topo.register_remote_engine.assert_not_called()
+            return
+
+        if selected is None:
+            with pytest.raises(ValueError, match="missing producer region 'main.1'"):
+                w.add_remote_agent(meta, remote_tp_rank=0, remote_tp_size=1)
+            w.transfer_topo.register_remote_engine.assert_not_called()
+            return
         with pytest.raises(_StopAfterSlice):
             w.add_remote_agent(meta, remote_tp_rank=0, remote_tp_size=1)
 
-        # Sliced down to this worker's layer window (regions [2:4]).
-        assert meta.kv_caches_base_addr == [12, 13]
-        assert meta.block_lens == [block_len, block_len]
+        assert meta.kv_caches_base_addr == [10 + i for i in selected]
+        assert meta.block_lens == [block_len + i for i in selected]
+        assert meta.block_strides == [block_len + i for i in selected]
+        assert meta.region_num_blocks == [100 + i for i in selected]
+        assert meta.region_group_ids == selected
+        assert meta.region_names == [remote_names[i] for i in selected]
+        assert meta.region_mem_types == ["VRAM"] * len(selected)
+        if has_mamba:
+            assert meta.region_members == [[name] for name in local_names]
 
 
 class TestPushWriterMlaReplication:
@@ -1523,6 +1753,7 @@ class TestPushWriterMlaReplication:
             remote_tp_size=len(d_ranks),
             remote_block_size=16,
             remote_physical_blocks_per_logical=1,
+            remote_dcp_size=1,
         )
         # D_TP > P_TP => negative ratio (one P rank feeds |ratio| D ranks).
         w.transfer_topo.tp_ratio.return_value = -len(d_ranks)
@@ -1606,6 +1837,7 @@ class TestPushWriterMlaReplication:
             remote_tp_size=4,
             remote_block_size=16,
             remote_physical_blocks_per_logical=1,
+            remote_dcp_size=1,
         )
         w.transfer_topo.tp_ratio.return_value = -2
         w.transfer_topo.handshake_target_ranks.return_value = (0, 1)
@@ -1688,6 +1920,7 @@ class TestPushPrefixCaching:
             remote_physical_blocks_per_logical=1,
             remote_block_size=16,
             remote_tp_size=1,
+            remote_dcp_size=1,
         )
         w.transfer_topo.tp_ratio.return_value = 1
         w.transfer_topo.block_size_ratio.return_value = 1
@@ -1727,31 +1960,88 @@ class TestPushPrefixCaching:
         # ("WRITE", local_handle, local_descs, remote_handle, remote_descs)
         return list(args[2]), list(args[4])
 
-    def test_partial_prefix_hit_end_trims_producer_blocks(self):
-        """D registered only its 2 uncomputed suffix blocks; P finished the
-        full 5-block sequence. P must WRITE its LAST 2 blocks into D's slots."""
+    @pytest.mark.parametrize(
+        "dcp_size,dcp_rank,cached,prefill,decode,expected_prefill,expected_decode",
+        [
+            pytest.param(
+                1,
+                0,
+                3,
+                [10, 11, 12, 13, 14],
+                [500, 501],
+                [13, 14],
+                [500, 501],
+                id="symmetric-prefix",
+            ),
+            pytest.param(
+                1,
+                0,
+                0,
+                [10, 11, 12],
+                [500, 501, 502],
+                [10, 11, 12],
+                [500, 501, 502],
+                id="no-prefix",
+            ),
+            pytest.param(
+                8,
+                3,
+                2,
+                [10, 11],
+                list(range(500, 516)),
+                [10, 11],
+                [501, 509],
+                id="dcp-shifted-destination",
+            ),
+            pytest.param(
+                8,
+                0,
+                2,
+                [10, 11, 12],
+                list(range(500, 516)),
+                [11, 12],
+                [506, 514],
+                id="dcp-skip-cached-source",
+            ),
+            *[
+                pytest.param(
+                    size,
+                    0,
+                    2,
+                    [10, 11, 12],
+                    list(range(500, 500 + 2 * size)),
+                    [11, 12],
+                    [500 + size - 2, 500 + 2 * size - 2],
+                    id=f"dcp{size}-skip-cached-source",
+                )
+                for size in (2, 4, 16)
+            ],
+        ],
+    )
+    def test_partial_prefix_hit_end_trims_producer_blocks(
+        self,
+        dcp_size,
+        dcp_rank,
+        cached,
+        prefill,
+        decode,
+        expected_prefill,
+        expected_decode,
+    ):
+        """Only matching uncached positions may be passed to the NIXL WRITE."""
         w, _ = self._worker_driving_xfer()
-        reg = _registration_data("req-pc", local_block_ids=([500, 501],))
-
-        NixlPushConnectorWorker._do_start_push_kv(
-            w, "req-pc", ([10, 11, 12, 13, 14],), reg
+        w.dcp_size = dcp_size
+        w.world_size = dcp_size
+        w.dcp_rank = dcp_rank
+        reg = _registration_data(
+            "req-pc", local_block_ids=(decode,), local_num_computed_blocks=(cached,)
         )
 
-        local, remote = self._written_block_ids(w)
-        # End-trim (suffix), NOT front-trim: [13, 14], not [10, 11].
-        assert local == [13, 14]
-        assert remote == [500, 501]
+        NixlPushConnectorWorker._do_start_push_kv(w, "req-pc", (prefill,), reg)
 
-    def test_no_prefix_hit_leaves_blocks_untrimmed(self):
-        """Equal counts (no prefix cache hit on D): nothing is trimmed."""
-        w, _ = self._worker_driving_xfer()
-        reg = _registration_data("req-full", local_block_ids=([500, 501, 502],))
-
-        NixlPushConnectorWorker._do_start_push_kv(w, "req-full", ([10, 11, 12],), reg)
-
-        local, remote = self._written_block_ids(w)
-        assert local == [10, 11, 12]
-        assert remote == [500, 501, 502]
+        assert self._written_block_ids(w) == (expected_prefill, expected_decode)
+        notif = w.nixl_wrapper.make_prepped_xfer.call_args.kwargs["notif_msg"]
+        assert notif == f"req-pc:{dcp_size}".encode()
 
     @pytest.mark.parametrize("layer_name_routing", [False, True])
     def test_different_region_groups_require_layer_routing(self, layer_name_routing):

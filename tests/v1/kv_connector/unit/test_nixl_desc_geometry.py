@@ -383,6 +383,7 @@ def _register_overlaid_mla_worker(
     worker._has_mamba = False
     worker._is_csa_linear = False
     worker.vllm_config = MagicMock()
+    worker.vllm_config.parallel_config.cp_kv_cache_interleave_size = None
     worker.backend_name = "FLASHMLA"
     worker.num_blocks = num_blocks
     worker.nixl_memory_type = "VRAM"
@@ -415,6 +416,7 @@ def _register_overlaid_mla_worker(
     worker._region_is_mla = []
     worker.block_len_per_layer = []
     worker.block_stride_per_layer = []
+    worker._group_spec_types = [MLAAttentionSpec]
     worker.device_id = 0
     worker.use_host_buffer = False
     worker.host_xfer_buffers = {}

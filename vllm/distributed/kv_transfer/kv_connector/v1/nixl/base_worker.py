@@ -5,7 +5,6 @@
 import contextlib
 import itertools
 import logging
-import math
 import os
 import queue
 import threading
@@ -15,7 +14,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import numpy as np
@@ -60,6 +59,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
     get_representative_spec_type,
+    get_transfer_block_size,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
@@ -87,6 +87,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
@@ -581,16 +582,8 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
-        transfer_block_sizes = [
-            group.kv_cache_spec.block_size
-            for group in kv_cache_config.transfer_groups
-            if get_representative_spec_type(group.kv_cache_spec)
-            not in (MambaSpec, CircularBufferSpec)
-        ]
-        self.block_size = (
-            math.lcm(*transfer_block_sizes)
-            if transfer_block_sizes
-            else cast(int, vllm_config.cache_config.block_size)
+        self.block_size = get_transfer_block_size(
+            kv_cache_config, vllm_config.cache_config.block_size
         )
         # Per-layer specs, unwrapping UniformTypeKVCacheSpecs group wrappers.
         self._layer_specs: dict[str, KVCacheSpec] = {}
@@ -979,6 +972,8 @@ class NixlBaseConnectorWorker:
                 f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
                 f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
             )
+        if local_dcp_size != remote_dcp_size:
+            self._validate_asymmetric_dcp_compatibility(agent_metadata)
 
     def _sync_block_size_with_kernel(self) -> None:
         backends = get_current_attn_backends(self.vllm_config)
@@ -1887,10 +1882,19 @@ class NixlBaseConnectorWorker:
             region_group_ids=self.region_group_ids,
             region_names=self.region_names,
             region_mem_types=self.region_mem_types,
+            tp_size=self.world_size,
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
             region_members=self.region_members,
             packed_member_layouts=packed_member_layouts,
+            pp_size=self.pp_size,
+            cp_kv_cache_interleave_size=(
+                self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+            ),
+            has_transferable_swa=any(
+                issubclass(spec_type, SlidingWindowSpec)
+                for spec_type in self._group_spec_types
+            ),
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -2206,6 +2210,10 @@ class NixlBaseConnectorWorker:
         # NIXL_INIT_AGENT to be used for preparations of local descs.
         return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
 
+    def _prepare_remote_regions(self, metadata: NixlAgentMetadata) -> None:
+        """Prepare remote cache regions before descriptor registration."""
+        pass
+
     def add_remote_agent(
         self,
         nixl_agent_meta: NixlAgentMetadata,
@@ -2265,6 +2273,8 @@ class NixlBaseConnectorWorker:
                 remote_tp_rank,
             )
             return self._remote_agents[engine_id][(0, remote_tp_rank)]
+
+        self._prepare_remote_regions(nixl_agent_meta)
 
         assert self.transfer_topo is not None
         transfer_topo = self.transfer_topo
@@ -2477,6 +2487,18 @@ class NixlBaseConnectorWorker:
 
         return remote_agent_name
 
+    def _validate_asymmetric_dcp_compatibility(
+        self,
+        nixl_agent_meta: NixlAgentMetadata,
+    ) -> None:
+        """Validate the block geometry used by asymmetric DCP."""
+        if self._has_mamba:
+            raise RuntimeError(
+                "Hybrid MLA+Mamba NIXL transfers currently support only "
+                "matching DCP sizes, "
+                f"got local={self.dcp_size}, remote={nixl_agent_meta.dcp_size}."
+            )
+
     def _validate_remote_agent_handshake(
         self,
         nixl_agent_meta: NixlAgentMetadata,
@@ -2492,6 +2514,7 @@ class NixlBaseConnectorWorker:
         remote_info = self.transfer_topo.get_engine_info(remote_engine_id)
         assert remote_info.remote_tp_size == remote_tp_size
         assert remote_info.remote_dcp_size == remote_dcp_size
+        asymmetric_dcp = self.dcp_size != remote_dcp_size
         # DCP sizes must divide one another; this is what keeps the
         # read-slicing math in pull_worker a closed form.
         assert (
@@ -2500,12 +2523,6 @@ class NixlBaseConnectorWorker:
             f"DCP sizes must divide one another: local={self.dcp_size}, "
             f"remote={remote_dcp_size} (engine {remote_engine_id})."
         )
-        if self._has_mamba and self.dcp_size != remote_dcp_size:
-            raise RuntimeError(
-                "Hybrid MLA+Mamba NIXL transfers require matching DCP sizes, "
-                f"got local={self.dcp_size}, remote={remote_dcp_size}."
-            )
-
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         block_size_ratio = self.transfer_topo.block_size_ratio(
             nixl_agent_meta.block_size
@@ -2537,6 +2554,7 @@ class NixlBaseConnectorWorker:
             self._has_mamba
             and remote_physical_per_logical
             != self._physical_blocks_per_logical_kv_block
+            and not asymmetric_dcp
             and self.vllm_config.cache_config.enable_prefix_caching
         ):
             raise RuntimeError(
@@ -3001,7 +3019,13 @@ class NixlBaseConnectorWorker:
                 remote_info.remote_physical_blocks_per_logical
                 != self._physical_blocks_per_logical_kv_block
             )
-            if block_size_ratio > 1 or self.enable_permute_local_kv or hetero_ppl:
+            asymmetric_dcp = meta.dcp_size != self.dcp_size
+            if (
+                block_size_ratio > 1
+                or self.enable_permute_local_kv
+                or hetero_ppl
+                or (self._TRANSFER_MODE == "push" and asymmetric_dcp)
+            ):
                 for g, local_group in enumerate(meta.local_physical_block_ids):
                     if not local_group or _is_ssm_spec(self._group_spec_types[g]):
                         continue
@@ -3009,7 +3033,7 @@ class NixlBaseConnectorWorker:
                     # everything past this was clipped and must be zeroed.
                     covered_sub_blocks = min(
                         len(local_group) * block_size_ratio,
-                        len(meta.remote.block_ids[g]),
+                        self._get_remote_block_count(meta, g),
                     )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (local_group, covered_sub_blocks)
@@ -3046,6 +3070,11 @@ class NixlBaseConnectorWorker:
             finished_recving=done_recving,
             failed_recving=failed_recv_reqs,
         )
+
+    def _get_remote_block_count(self, meta: ReqMeta, group_id: int) -> int:
+        """Return the remote attention-page count for receive postprocessing."""
+        assert meta.remote is not None
+        return len(meta.remote.block_ids[group_id])
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Compatibility wrapper for the legacy completion API."""
@@ -3245,7 +3274,7 @@ class NixlBaseConnectorWorker:
                     hb_info.tp_size,
                     hb_info.dcp_size,
                     hb_info.pp_size,
-                    self._hb_handshake_notif_only and hb_info.pp_size > 1,
+                    self._hb_handshake_notif_only,
                 )
                 is not None
             ):

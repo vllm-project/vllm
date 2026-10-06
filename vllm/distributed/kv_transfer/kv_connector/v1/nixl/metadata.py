@@ -49,8 +49,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
+#  14: Add asymmetric DCP push geometry and model TP metadata
 #
-NIXL_CONNECTOR_VERSION: int = 13
+NIXL_CONNECTOR_VERSION: int = 14
 
 
 @dataclass
@@ -71,12 +72,16 @@ class NixlAgentMetadata:
     region_group_ids: list[int] | None = None
     region_names: list[str] | None = None
     region_mem_types: list[str] | None = None
+    tp_size: int = 1
+    pp_size: int = 1
     dcp_size: int = 1
     pcp_size: int = 1
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    cp_kv_cache_interleave_size: int | None = None
+    has_transferable_swa: bool = False
 
 
 @dataclass

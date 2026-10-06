@@ -171,6 +171,13 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         local_block_ids: BlockIds = blocks.get_unhashed_block_ids_all_groups()
         local_block_ids = self.get_exchange_clipped_blocks(local_block_ids)
 
+        # Blocks already covered by D's local prefix cache. P needs these
+        # per-group positions to align an asymmetric-DCP push with D's suffix.
+        local_num_computed_blocks = tuple(
+            sum(block.block_hash is not None and not block.is_null for block in group)
+            for group in blocks.blocks
+        )
+
         # ``remote_*`` fields are P's coordinates (from D's perspective).
         # ``decode_*`` fields are D's own info that P needs for the
         # reverse handshake before WRITE-ing.
@@ -181,6 +188,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             "decode_port": self.side_channel_port,
             "decode_tp_size": (self.vllm_config.parallel_config.tensor_parallel_size),
             "local_block_ids": local_block_ids,
+            "local_num_computed_blocks": local_num_computed_blocks,
             "remote_engine_id": params["remote_engine_id"],
             "remote_host": params["remote_host"],
             "remote_port": params["remote_port"],
@@ -190,15 +198,23 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self._push_registration_deadlines[request.request_id] = (
             time.perf_counter() + self._push_registration_timeout
         )
-        # In push mode D doesn't know P's blocks; P determines them
-        # from the registration. We still track the request as
-        # needing recv so the engine waits for P's WRITE completion.
-        # ``remote_block_ids`` is also seeded to an empty tuple so the
-        # base scheduler's ``add_new_req_to_recv`` can build the
-        # ReqMeta without a KeyError — the actual remote block IDs are
-        # learned by P over the NIXL handshake at WRITE time.
-        params["remote_block_ids"] = ()
-        self._reqs_need_recv[request.request_id] = (request, local_block_ids, (), False)
+        asymmetric_dcp = params.get("dcp_size", 1) != (
+            self.vllm_config.parallel_config.decode_context_parallel_size
+        )
+        # In push mode P determines the blocks to WRITE from D's registration.
+        # We still track the request as needing recv so the engine waits for
+        # P's WRITE completion. For symmetric DCP, D doesn't need P's block IDs;
+        # seed ``remote_block_ids`` with an empty tuple so the base scheduler's
+        # ``add_new_req_to_recv`` can build ReqMeta without a KeyError.
+        # Asymmetric DCP keeps P's block IDs to identify the received tail.
+        if not asymmetric_dcp:
+            params["remote_block_ids"] = ()
+        self._reqs_need_recv[request.request_id] = (
+            request,
+            local_block_ids,
+            local_num_computed_blocks,
+            False,
+        )
 
         # Mark as processed so a re-entry (e.g. preemption + reschedule)
         # doesn't re-stage the registration.

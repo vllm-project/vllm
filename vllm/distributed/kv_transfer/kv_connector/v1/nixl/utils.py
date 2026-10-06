@@ -3,15 +3,22 @@
 """Shared constants, lazy imports and helpers for the NIXL connector."""
 
 import contextlib
+import math
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 import regex as re
 import zmq
 
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_socket
-from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
@@ -55,6 +62,19 @@ def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
         inner = next(iter(spec.kv_cache_specs.values()))
         return type(inner)
     return type(spec)
+
+
+def get_transfer_block_size(
+    kv_cache_config: KVCacheConfig, default_block_size: int | None
+) -> int:
+    """Return the logical block size used for NIXL attention transfers."""
+    block_sizes = [
+        group.kv_cache_spec.block_size
+        for group in kv_cache_config.transfer_groups
+        if get_representative_spec_type(group.kv_cache_spec)
+        not in (MambaSpec, CircularBufferSpec)
+    ]
+    return math.lcm(*block_sizes) if block_sizes else cast(int, default_block_size)
 
 
 # Trailing 8-hex randomization suffix appended by

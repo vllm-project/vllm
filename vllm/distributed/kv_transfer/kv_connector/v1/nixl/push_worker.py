@@ -34,13 +34,13 @@ the writer drops any leftover ``_push_finished_blocks`` /
 import queue
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineTransferInfo
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
@@ -49,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
+    NixlAgentMetadata,
     NixlConnectorMetadata,
     RemoteMeta,
     ReqId,
@@ -61,6 +62,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
 if TYPE_CHECKING:
     import torch
@@ -85,6 +87,140 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     _supports_pp_hma = True
 
+    def _get_remote_block_count(self, meta: ReqMeta, group_id: int) -> int:
+        """Count attention pages in the producer's uncached DCP suffix."""
+        assert meta.remote is not None
+        asymmetric_dcp = meta.dcp_size != self.dcp_size
+        if not asymmetric_dcp:
+            return super()._get_remote_block_count(meta, group_id)
+        assert self.transfer_topo is not None
+        remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
+        producer_pages = (
+            len(meta.remote.block_ids[group_id])
+            * remote_info.remote_physical_blocks_per_logical
+            * meta.dcp_size
+        )
+        cached_pages = (
+            meta.local_num_computed_blocks[group_id]
+            * self._physical_blocks_per_logical_kv_block
+        )
+        return max(0, producer_pages - cached_pages)
+
+    def _validate_asymmetric_dcp_compatibility(
+        self,
+        metadata: NixlAgentMetadata,
+    ) -> None:
+        """Validate whole-page DCP shards and an unsharded decode worker."""
+        remote_dcp_size = metadata.dcp_size
+        remote_tp_size = metadata.tp_size
+        if min(self.dcp_size, remote_dcp_size) != 1:
+            raise RuntimeError(
+                "Asymmetric NIXL push currently supports only "
+                "DCP prefill to DCP1 decode."
+            )
+        if (self.world_size, remote_tp_size) != (self.dcp_size, remote_dcp_size):
+            raise RuntimeError(
+                "Asymmetric NIXL push currently supports only "
+                "TP=DCP prefill and TP1/DCP1 decode."
+            )
+        if (
+            self.pp_size != 1
+            or metadata.pp_size != 1
+            or self.pcp_size != 1
+            or metadata.pcp_size != 1
+        ):
+            raise RuntimeError(
+                "Asymmetric NIXL push currently supports only "
+                "PP=1 and PCP=1 on both sides."
+            )
+        if metadata.has_transferable_swa or any(
+            issubclass(spec_type, SlidingWindowSpec)
+            for spec_type in self._group_spec_types
+        ):
+            raise RuntimeError(
+                "Asymmetric NIXL push does not support sliding-window attention."
+            )
+        if self.dcp_size > 1:
+            interleave = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+            block_size = self.block_size
+        else:
+            interleave = metadata.cp_kv_cache_interleave_size
+            block_size = metadata.block_size
+        if interleave != block_size:
+            raise RuntimeError(
+                "Asymmetric NIXL push currently supports only "
+                "block-aligned KV interleaving: "
+                f"set --cp-kv-cache-interleave-size to {block_size}, got {interleave}."
+            )
+
+    def _prepare_remote_regions(self, metadata: NixlAgentMetadata) -> None:
+        """Match hybrid regions by name and occurrence, excluding draft KV."""
+        if not self._has_mamba or metadata.region_names is None:
+            return
+        if metadata.region_names == self.region_names:
+            return
+        regions_by_name: dict[str, deque[int]] = defaultdict(deque)
+        for index, name in enumerate(metadata.region_names):
+            regions_by_name[name].append(index)
+        selected = []
+        for name in self.region_names:
+            if not regions_by_name[name]:
+                raise ValueError(
+                    f"NIXL push consumer is missing producer region {name!r}"
+                )
+            selected.append(regions_by_name[name].popleft())
+
+        num_regions = len(metadata.kv_caches_base_addr)
+        for field in (
+            "kv_caches_base_addr",
+            "block_lens",
+            "block_strides",
+            "region_num_blocks",
+            "region_group_ids",
+            "region_names",
+            "region_mem_types",
+            "region_members",
+        ):
+            values = getattr(metadata, field)
+            if values is None or (field == "region_members" and not values):
+                continue
+            if len(values) != num_regions:
+                raise ValueError(f"NIXL {field} length disagrees with region count")
+            setattr(metadata, field, [values[i] for i in selected])
+
+    def _map_dcp_attention_block_ids(
+        self,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+        remote_info: EngineTransferInfo,
+        remote_num_computed_blocks: tuple[int, ...],
+    ) -> tuple[BlockIds, BlockIds]:
+        """Pair the producer's attention shard with the consumer's uncached suffix."""
+        if self.dcp_size == remote_info.remote_dcp_size:
+            return local_block_ids, remote_block_ids
+        if remote_info.remote_dcp_size != 1:
+            raise RuntimeError(
+                "Asymmetric NIXL push currently supports only "
+                "DCP-sharded prefill to DCP1 decode."
+            )
+        local_groups = list(local_block_ids)
+        remote_groups = list(remote_block_ids)
+        for i, group in enumerate(remote_groups):
+            if _is_attention_spec(self._group_spec_types[i]):
+                remote_groups[i], local_groups[i] = self._apply_dcp_prefix_caching(
+                    local_ids=group,
+                    remote_ids=local_groups[i],
+                    remote_rank=self.dcp_rank,
+                    local_dcp_size=1,
+                    local_dcp_rank=0,
+                    remote_dcp_size=self.dcp_size,
+                    local_num_computed_blocks=(
+                        remote_num_computed_blocks[i]
+                        * remote_info.remote_physical_blocks_per_logical
+                    ),
+                )
+        return local_groups, remote_groups
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -93,8 +229,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
 
-        # Heartbeat handshakes to a PP-sharded producer must be notif-only,
-        # like the PUSH_REG path.
+        # Decode only sends notifications to the producer in push mode, so
+        # heartbeat handshakes use the same notification-only path as PUSH_REG.
         self._hb_handshake_notif_only = True
 
         # Push-specific state.
@@ -451,6 +587,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # (D's, from the PUSH_REG notif) are also logical.
         decode_engine_id = registration_data["decode_engine_id"]
         remote_block_ids = registration_data["local_block_ids"]
+        remote_num_computed_blocks = tuple(
+            registration_data.get("local_num_computed_blocks", ())
+        )
         decode_request_id = registration_data["request_id"]
 
         # Runs on the background executor; defer the WRITE until it's ready.
@@ -493,6 +632,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             local_block_ids=logical_local,
             local_physical_block_ids=physical_local,
             tp_size=self.world_size,
+            local_num_computed_blocks=remote_num_computed_blocks,
             remote=RemoteMeta(
                 block_ids=logical_remote,
                 host="",
@@ -617,6 +757,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
+                remote_num_computed_blocks=meta.local_num_computed_blocks,
             )
             if handle is not None:
                 handles.append(handle)
@@ -636,6 +777,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
+        remote_num_computed_blocks: tuple[int, ...],
     ) -> int | None:
         """Post a WRITE point-to-point xfer request.
 
@@ -648,6 +790,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids = read_spec.remote_block_ids
 
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
+        if self.dcp_size != remote_info.remote_dcp_size and len(
+            remote_num_computed_blocks
+        ) != len(remote_block_ids):
+            raise RuntimeError(
+                "Asymmetric-DCP PUSH_REG requires one "
+                "local_num_computed_blocks value per cache group, got "
+                f"{len(remote_num_computed_blocks)} for "
+                f"{len(remote_block_ids)} groups."
+            )
         block_size_ratio = self.transfer_topo.block_size_ratio(
             remote_info.remote_block_size
         )
@@ -659,6 +810,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
 
         notif_id = f"{remote_request_id}:{self.world_size}".encode()
+
+        local_block_ids, remote_block_ids = self._map_dcp_attention_block_ids(
+            local_block_ids,
+            remote_block_ids,
+            remote_info,
+            remote_num_computed_blocks,
+        )
 
         if len(local_block_ids) == 0:
             logger.warning("No blocks to push for request %s", request_id)
