@@ -48,6 +48,9 @@ With `VLLM_SERVER_DEV_MODE=1`, the vLLM HTTP server exposes the same functionali
 !!! note "Data Parallelism"
     When using data parallelism with vLLM's **internal load balancer** (i.e. `data_parallel_backend="ray"`), pause and resume are handled automatically across all DP ranks -- a single call is sufficient. When using an **external load balancer** (i.e. multiple independent vLLM instances behind a proxy), you must send pause and resume requests to **every** engine instance individually before and after the weight update.
 
+!!! note "Prefill/decode disaggregation"
+    Pause and resume every prefill and decode instance. Once in-flight work is done, a pause that clears the cache stops the KV transfers between prefill and decode instances: decode requests whose KV was still arriving recompute it after resume, and prefill instances drop the KV they still hold for decode instances. A pause that keeps the cache leaves those transfers to finish after resume. Releasing that KV needs the multiprocess engine. Set `kv_load_failure_policy="recompute"` so a decode request whose prefill KV was dropped is recomputed instead of failed.
+
 ## Typical Async RL Flow
 
 A typical async RL loop with weight syncing looks like this:
